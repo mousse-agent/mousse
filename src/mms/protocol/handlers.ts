@@ -4720,7 +4720,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return await fileCall(ctx, async () => {
         const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
-        return { path, content: await ctx.mms.fileService.readFile(root, path, guardFor(ctx)) }
+        const includeCanonicalPath = p.includeCanonicalPath === true && isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
+        return { path, ...await ctx.mms.fileService.readFileDetails(root, path, guardFor(ctx), includeCanonicalPath) }
       })
     }
     case 'files.readAsset': {
@@ -4731,8 +4732,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return await fileCall(ctx, async () => {
         const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
-        const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx))
-        return { path, mimeType: piece.mimeType, size: piece.size, mtimeMs: piece.mtimeMs, offset, data: Buffer.from(piece.data).toString('base64') }
+        const includeCanonicalPath = offset === 0 && p.includeCanonicalPath === true && isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
+        const { data, ...piece } = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx), includeCanonicalPath)
+        return { path, ...piece, offset, data: Buffer.from(data).toString('base64') }
       })
     }
     case 'files.writeDirect': {

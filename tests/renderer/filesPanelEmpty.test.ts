@@ -77,6 +77,26 @@ afterEach(() => {
 const flush = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
 const tree = () => host.querySelector<HTMLButtonElement>('.tree-stub')!
 const sidebar = () => host.querySelector('.files-sidebar')!
+const mountFiles = () => act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
+const openLink = (path: string) => act(async () => {
+  window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: { path } }))
+})
+const editor = () => host.querySelector<HTMLTextAreaElement>('.editor-stub')
+const editText = (value: string) => act(async () => {
+  const field = editor()!
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, value)
+  field.dispatchEvent(new Event('input', { bubbles: true }))
+})
+async function restoreFileTabs() {
+  const storageKey = useFileWorkspaceStore.persist.getOptions().name
+  const saved = localStorage.getItem(storageKey)!
+  await act(async () => root.unmount())
+  root = createRoot(host)
+  useFileWorkspaceStore.setState(initialFiles, true)
+  localStorage.setItem(storageKey, saved)
+  await useFileWorkspaceStore.persist.rehydrate()
+  await mountFiles()
+}
 const crumbs = () => [...host.querySelectorAll<HTMLButtonElement>('.files-path-crumb')].map((crumb) => crumb.textContent)
 
 function startedThread(id: string): Thread {
@@ -132,53 +152,134 @@ describe('Files panel without an open file', () => {
     expect(host.querySelector('[aria-label="Close notes.txt"]')).not.toBeNull()
   })
 
-  it('restores a saved tab on a healthy drive when the worktree root lookup fails', async () => {
+  it('restores a browsed file on a healthy drive even while the checkout lookup is pending or fails', async () => {
     const threadId = 'unavailable-worktree'
-    const projectId = 'p1'
-    const path = 'D:/notes/saved.txt'
-    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId, worktreeEnabled: true }] })
-    const scope = fileWorkspaceScope(useAppStore.getState().profileId, threadId, projectId)
-    useFileWorkspaceStore.getState().openFile(scope, path)
-
-    let failRoot!: (error: Error) => void
-    const rootLookup = new Promise<string>((_resolve, reject) => { failRoot = reject })
-    window.mousse.app.getFilesRoot = () => rootLookup
+    threadFolders[threadId] = 'C:\\checkout'
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1', worktreeEnabled: true }] })
     const readFile = vi.fn(async (name: string, _project?: string, _thread?: string | null, folder?: string) => {
       if (folder !== 'D:\\notes' || name !== 'saved.txt') throw new Error('Worktree drive not answering')
       return 'saved notes on D:'
     })
     window.mousse.fs.readFile = readFile
+    await mountFiles()
+    await openLink('D:/notes/saved.txt')
+    expect(editor()?.value).toBe('saved notes on D:')
 
-    await act(async () => root.render(createElement(FilesPanel)))
-    expect(readFile).not.toHaveBeenCalled()
+    let failRoot!: (error: Error) => void
+    const rootLookup = new Promise<string>((_resolve, reject) => { failRoot = reject })
+    window.mousse.app.getFilesRoot = () => rootLookup
+    readFile.mockClear()
+    await restoreFileTabs()
+    expect(readFile).toHaveBeenCalledWith('saved.txt', undefined, threadId, 'D:\\notes')
+    expect(editor()?.value).toBe('saved notes on D:')
     await act(async () => failRoot(new Error('Worktree drive not answering')))
-    expect(host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value).toBe('saved notes on D:')
+    expect(editor()?.value).toBe('saved notes on D:')
   })
 
-  it('opens case-sensitive Windows filenames separately and reuses a tab across separator forms', async () => {
+  it.each(['saved target', 'older path-only snapshot'])('keeps a restored checkout file scoped to the thread (%s)', async (snapshot) => {
+    const threadId = 'recovering-checkout'
+    const projectId = 'p1'
+    const project = 'C:\\checkout'
+    const worktree = 'C:\\worktrees\\notes'
+    const projectFile = win32.join(project, 'notes.txt')
+    const worktreeFile = win32.join(worktree, 'notes.txt')
+    const disk = new Map([[projectFile, 'same bytes'], [worktreeFile, 'same bytes']])
+    threadFolders[threadId] = project
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId, worktreeEnabled: true }] })
+    const target = (path: string, folder?: string) => {
+      const root = folder ?? threadFolders[threadId]!
+      const file = win32.resolve(root, path)
+      if (!file.startsWith(root + '\\')) throw new Error('Path is outside the project root')
+      return file
+    }
+    const readFile = vi.fn(async (path: string, _project?: string, _thread?: string | null, folder?: string) => disk.get(target(path, folder))!)
+    const writeFile = vi.fn(async (path: string, content: string, _project?: string, _thread?: string | null, folder?: string) => {
+      disk.set(target(path, folder), content)
+    })
+    window.mousse.fs.readFile = readFile
+    window.mousse.fs.writeFile = writeFile
+    await mountFiles()
+    if (snapshot === 'older path-only snapshot') {
+      const scope = fileWorkspaceScope(useAppStore.getState().profileId, threadId, projectId)
+      await act(async () => {
+        const storageKey = useFileWorkspaceStore.persist.getOptions().name
+        localStorage.setItem(storageKey, JSON.stringify({ state: { workspaces: { [scope]: {
+          openPaths: [projectFile], activePath: projectFile
+        } } }, version: 0 }))
+      })
+    } else {
+      await act(async () => tree().click())
+      expect(editor()?.value).toBe('same bytes')
+    }
+
+    window.mousse.app.getFilesRoot = async () => { throw new Error('Worktree drive not answering') }
+    readFile.mockClear()
+    await restoreFileTabs()
+    expect(readFile).not.toHaveBeenCalled()
+    expect(editor()).toBeNull()
+
+    window.mousse.app.getFilesRoot = async () => threadFolders[threadId]!
+    await act(async () => headsChanged?.({ threadIds: [threadId] }))
+    expect(readFile.mock.calls.map(([path, project, thread, folder]) => [win32.normalize(path), project, thread, folder]))
+      .toEqual([[projectFile, undefined, threadId, undefined]])
+    expect(editor()?.value).toBe('same bytes')
+    await editText('my project edit')
+
+    threadFolders[threadId] = worktree
+    await act(async () => headsChanged?.({ threadIds: [threadId] }))
+    const reload = vi.fn()
+    await act(async () => { expect(await reloadWindow(reload)).toBe('unsaved') })
+    expect(writeFile).not.toHaveBeenCalled()
+    expect(disk.get(projectFile)).toBe('same bytes')
+    expect(disk.get(worktreeFile)).toBe('same bytes')
+    expect(editor()?.value).toBe('my project edit')
+  })
+
+  it.each([true, false])('opens distinct Windows filenames separately and reuses separator variants (canonical metadata: %s)', async (includeCanonicalPath) => {
     const threadId = 'windows-checkout'
     threadFolders[threadId] = 'C:\\checkout'
     useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
     const disk = new Map([['D:\\notes\\notes.txt', 'lowercase notes'], ['D:\\notes\\Notes.txt', 'uppercase notes']])
-    window.mousse.fs.readFile = async (path, _project, _thread, folder) => {
-      const content = disk.get(win32.join(folder ?? threadFolders[threadId]!, path))
+    window.mousse.fs.readFileDetails = async (path, _project, _thread, folder) => {
+      const canonicalPath = win32.resolve(folder ?? threadFolders[threadId]!, path)
+      const content = disk.get(canonicalPath)
       if (content === undefined) throw new Error('File not found')
-      return content
+      return includeCanonicalPath ? { content, canonicalPath } : { content }
     }
 
-    await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
-    const open = (path: string) => act(async () => {
-      window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: { path } }))
-    })
-    const editor = () => host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value
-    await open('D:\\notes\\notes.txt')
-    expect(editor()).toBe('lowercase notes')
-    await open('D:\\notes\\Notes.txt')
-    expect(editor()).toBe('uppercase notes')
-    await open('d:/notes/notes.txt')
-    expect(editor()).toBe('lowercase notes')
+    await mountFiles()
+    await openLink('D:\\notes\\notes.txt')
+    expect(editor()?.value).toBe('lowercase notes')
+    await openLink('D:\\notes\\Notes.txt')
+    expect(editor()?.value).toBe('uppercase notes')
+    await openLink('d:/notes/notes.txt')
+    expect(editor()?.value).toBe('lowercase notes')
     expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(1)
     expect(host.querySelectorAll('[aria-label="Close Notes.txt"]')).toHaveLength(1)
+  })
+
+  it('reuses the same editor for alternate casing on a case-insensitive Windows volume', async () => {
+    const threadId = 'case-insensitive-checkout'
+    threadFolders[threadId] = 'C:\\checkout'
+    const canonicalPath = 'C:\\checkout\\Notes.txt'
+    const writeFile = vi.fn(async () => undefined)
+    window.mousse.fs.readFile = async () => 'saved notes'
+    window.mousse.fs.writeFile = writeFile
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
+    window.mousse.fs.readFileDetails = async (path, _project, _thread, folder) => {
+      if (win32.resolve(folder ?? threadFolders[threadId]!, path).toLowerCase() !== canonicalPath.toLowerCase()) throw new Error('File not found')
+      return { content: 'saved notes', canonicalPath }
+    }
+
+    await mountFiles()
+    await openLink('C:\\checkout\\Notes.txt')
+    expect(editor()?.value).toBe('saved notes')
+    await editText('edited notes')
+    await openLink('c:/checkout/notes.txt')
+    expect(editor()?.value).toBe('edited notes')
+    expect(writeFile).not.toHaveBeenCalled()
+    expect(host.querySelectorAll('[aria-label="Close Notes.txt"]')).toHaveLength(1)
+    expect(host.querySelector('[aria-label="Close notes.txt"]')).toBeNull()
   })
 
   it('opens a picked file in a sibling tab; returning to Files shows the browser', async () => {
@@ -298,6 +399,10 @@ describe('the folder the Files tree shows', () => {
       return absolute
     }
     window.mousse.fs.readFile = async (path, _project, _thread, root) => disk.get(target(path, root))!
+    window.mousse.fs.readFileDetails = async (path, _project, _thread, root) => {
+      const canonicalPath = target(path, root)
+      return { content: disk.get(canonicalPath)!, canonicalPath }
+    }
     window.mousse.fs.writeFile = async (path, content, _project, _thread, root) => { disk.set(target(path, root), content) }
 
     await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
@@ -328,6 +433,7 @@ describe('the folder the Files tree shows', () => {
 
     const tab = (folder: string) => host.querySelector<HTMLButtonElement>(`.main-view-tab-select[title^="${folder}/notes.txt"]`)!
     expect(tab(worktree).getAttribute('aria-current')).toBe('page')
+    expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(2)
     const projectTab = tab(project)
     await act(async () => projectTab.click())
     expect(host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value).toBe('my project edit')

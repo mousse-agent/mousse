@@ -57,9 +57,14 @@ describe('a folder the Files panel browses outside the thread', () => {
   it('lists, reads, previews and saves there for a window of this computer, with no thread or project', async () => {
     const listed = await call(window(), 'files.list', { root: browsed, path: 'notes' }) as { entries: Array<{ name: string }> }
     expect(listed.entries.map((entry) => entry.name)).toEqual(['todo.md'])
-    expect(await call(window(), 'files.read', { root: browsed, path: 'notes/todo.md' })).toMatchObject({ content: 'buy milk\n' })
+    const path = process.platform === 'win32' ? 'NOTES/TODO.MD' : 'notes/todo.md'
+    expect(await call(window(), 'files.read', { root: browsed, path, includeCanonicalPath: true })).toMatchObject({
+      content: 'buy milk\n', canonicalPath: realpathSync.native(join(browsed, 'notes', 'todo.md'))
+    })
     writeFileSync(join(browsed, 'dot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
-    expect(await call(window(), 'files.readAsset', { root: browsed, path: 'dot.png' })).toMatchObject({ mimeType: 'image/png', size: 4 })
+    expect(await call(window(), 'files.readAsset', { root: browsed, path: 'dot.png', includeCanonicalPath: true })).toMatchObject({
+      mimeType: 'image/png', size: 4, canonicalPath: realpathSync.native(join(browsed, 'dot.png'))
+    })
     await call(window(), 'files.writeDirect', { root: browsed, path: 'notes/todo.md', content: 'buy oat milk\n' })
     expect(readFileSync(join(browsed, 'notes', 'todo.md'), 'utf8')).toBe('buy oat milk\n')
   })

@@ -140,6 +140,7 @@ import type {
   CreateScheduledJobInput,
   FileAsset,
   FileEntry,
+  FileText,
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
@@ -3212,18 +3213,28 @@ export function registerGuiIpc(
     async (_e, dirPath?: string, projectId?: string, threadId?: string | null, root?: string) =>
       (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: dirPath ?? '' })).entries
   )
+  const canonicalFileParams = (include: boolean, threadId?: string | null) =>
+    include && !(threadId && isQualifiedId(threadId)) ? { includeCanonicalPath: true } : {}
+
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) =>
-      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath })).content
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false) => {
+      const reply = await guiMms.request<FileText>('files.read', {
+        ...filesScope(projectId, threadId), ...await browsedRoot(root), ...canonicalFileParams(details, threadId), path: filePath
+      })
+      return details ? reply : reply.content
+    }
   )
   registerHandler(
     'fs:readAsset',
     // The daemon sends a preview in pieces that fit a message; they are joined here.
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> => {
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false): Promise<FileAsset> => {
       const browsed = await browsedRoot(root)
       return readAssetInPieces((offset, length) =>
-        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
+        guiMms.request('files.readAsset', {
+          ...filesScope(projectId, threadId), ...browsed, ...canonicalFileParams(details && offset === 0, threadId),
+          path: filePath, offset, length
+        })
       )
     }
   )

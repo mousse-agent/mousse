@@ -14,7 +14,7 @@ import { useAppStore } from '../stores/appStore'
 import { registerAutosaveFlush } from '../services/reloadWindow'
 import { registerFileLinkOpener } from '../services/fileLinks'
 import { useMonacoCodeFont } from '../lib/monacoCodeFont'
-import { fileWorkspaceScope, useFileWorkspaceStore } from '../stores/filesStore'
+import { fileTabTarget, fileWorkspaceScope, useFileWorkspaceStore, type FileTabTarget } from '../stores/filesStore'
 import { SerializedAutosave, normalizeWorkspacePath, reconcileExternalContent } from '../utils/fileWorkspace'
 import { isAssetView, isBinaryContent, languageForPath, viewKindForPath, type FileViewKind } from '../utils/fileEditor'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
@@ -36,12 +36,11 @@ const REVALIDATE_MS = 2_000
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
 
-type FileTarget = ReturnType<typeof fileLocation>
-
 interface OpenFileState {
   profileId: string
   path: string
-  target: FileTarget
+  target: FileTabTarget
+  canonicalPath?: string
   threadId: string | null
   kind: FileViewKind
   content: string
@@ -83,14 +82,24 @@ function refreshRecovered(file: OpenFileState): Partial<OpenFileState> {
   return file.saveState === 'error' ? { refreshFailed: false } : { refreshFailed: false, error: null }
 }
 
-function readText(target: FileTarget, threadId: string | null): Promise<string> {
+function readText(target: FileTabTarget, threadId: string | null): Promise<string> {
   return window.mousse.fs.readFile(target.path, undefined, threadId, target.root)
 }
-function readAssetAt(target: FileTarget, threadId: string | null) {
-  return window.mousse.fs.readAsset(target.path, undefined, threadId, target.root)
+function readAssetAt(target: FileTabTarget, threadId: string | null, details?: boolean) {
+  return details
+    ? window.mousse.fs.readAsset(target.path, undefined, threadId, target.root, true)
+    : window.mousse.fs.readAsset(target.path, undefined, threadId, target.root)
 }
-function writeText(target: FileTarget, content: string, threadId: string | null): Promise<void> {
+function writeText(target: FileTabTarget, content: string, threadId: string | null): Promise<void> {
   return window.mousse.fs.writeFile(target.path, content, undefined, threadId, target.root)
+}
+
+/** Record the scope when a person picks a file, while the checkout is known. */
+function pickedFileTarget(path: string, checkout: string | null): FileTabTarget | undefined {
+  if (checkout === null) return fileLocation(path)
+  if (!checkout) return undefined
+  if (!isAbsolutePath(path)) return { path: joinFolder(checkout, path) }
+  return pathInside(path, checkout) === null ? fileLocation(path) : { path }
 }
 
 /** Whether a key press belongs to a text field or the code editor, which keep their own Escape and Ctrl+L. */
@@ -255,15 +264,15 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
 
   const fileKey = useCallback((path: string) => `${scope}\0${path}`, [scope])
   const tabPathFor = useCallback((file: string, root: string, targetScope: string, localProject: boolean) => {
-    const path = normalizeWorkspacePath(file, root)
-    if (!localProject || !root) return path
+    if (!localProject || !root) return normalizeWorkspacePath(file, root)
+    const path = normalizeWorkspacePath(file)
     const absolute = isAbsolutePath(path) ? path : joinFolder(root, path)
     if (!isAbsolutePath(path) && pathInside(absolute, root) === null) return path
     const comparable = comparableFilePath(absolute)
     // Older workspaces can still have a relative tab. Reuse it only if it points at this checkout.
-    const paths = useFileWorkspaceStore.getState().workspaces[targetScope]?.openPaths ?? []
-    return paths.find((openPath) => {
-      const target = filesRef.current[`${targetScope}\0${openPath}`]?.target
+    const workspace = useFileWorkspaceStore.getState().workspaces[targetScope]
+    return workspace?.openPaths.find((openPath) => {
+      const target = filesRef.current[`${targetScope}\0${openPath}`]?.target ?? fileTabTarget(workspace, openPath)
       const location = isAbsolutePath(openPath) ? openPath : target?.path ?? joinFolder(root, openPath)
       return comparableFilePath(location) === comparable
     }) ?? absolute
@@ -288,7 +297,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     })
   }, [replaceFiles])
 
-  const ensureQueue = useCallback((key: string, target: FileTarget, threadId: string | null, ownerProfileId = profileId) => {
+  const ensureQueue = useCallback((key: string, target: FileTabTarget, threadId: string | null, ownerProfileId = profileId) => {
     let queue = queues.current.get(key)
     if (queue) return queue
     const isCurrent = () => useAppStore.getState().profileId === ownerProfileId && Boolean(filesRef.current[key])
@@ -332,14 +341,15 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     const key = `${targetScope}\0${path}`
     const existing = filesRef.current[key]
     if (existing?.loading || (existing && !(retryInitial && existing.initialLoadFailed))) return
-    // A local project thread can switch from its project folder to its first worktree. Keep the file's
-    // absolute path within its thread-scoped request so the daemon's existing containment check refuses
-    // a save if the thread now points somewhere else. Explicitly browsed folders keep their own root.
-    const relative = !isAbsolutePath(path)
-    if (!existing && relative && workspaceRoot === '') return
-    const target = existing?.target ?? (workspaceRoot && (relative || pathInside(path, workspaceRoot) !== null)
-      ? { path: relative ? joinFolder(workspaceRoot, path) : path }
+    const workspaceStore = useFileWorkspaceStore.getState()
+    const savedTarget = fileTabTarget(workspaceStore.workspaces[targetScope], path)
+    // A checkout tab keeps its absolute path in a thread-scoped request. An older snapshot with
+    // only a path cannot prove that it was browsed, so keep its access scoped to the thread too.
+    if (workspaceRoot === '' && !savedTarget?.root && !existing) return
+    const target = existing?.target ?? savedTarget ?? (workspaceRoot
+      ? { path: isAbsolutePath(path) ? path : joinFolder(workspaceRoot, path) }
       : fileLocation(path))
+    if (!savedTarget) workspaceStore.rememberTarget(targetScope, path, target)
     const kind = viewKindForPath(path)
     replaceFiles((current) => ({ ...current, [key]: {
       profileId: ownerProfileId, path, target, threadId, kind, content: '', savedContent: '', binary: false,
@@ -347,21 +357,44 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     } }))
     const sequence = (loadSequences.current.get(key) ?? 0) + 1
     loadSequences.current.set(key, sequence)
+    const finish = (canonicalPath: string | undefined, patch: Partial<OpenFileState>) => {
+      if (loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== ownerProfileId) return false
+      const store = useFileWorkspaceStore.getState()
+      const workspace = store.workspaces[targetScope]
+      const alias = canonicalPath && workspace?.openPaths.find((openPath) => {
+        const file = filesRef.current[`${targetScope}\0${openPath}`]
+        return openPath !== path && file?.canonicalPath === canonicalPath && Boolean(file.target.root) === Boolean(target.root)
+      })
+      if (alias) {
+        const aliasKey = `${targetScope}\0${alias}`
+        if (workspace?.activePath === path && pendingPosition.current?.path === path) {
+          const position = { ...pendingPosition.current, path: alias }
+          pendingPosition.current = position
+          setPositions((current) => ({ ...current, [aliasKey]: position }))
+          setPreview((current) => ({ ...current, [aliasKey]: false }))
+        }
+        store.mergeFileAlias(targetScope, path, alias)
+        replaceFiles(({ [key]: _removed, ...rest }) => rest)
+        return false
+      }
+      patchFile(key, { canonicalPath, ...patch })
+      return true
+    }
     try {
       if (isAssetView(kind)) {
-        const asset = await readAssetAt(target, threadId)
-        if (loadSequences.current.get(key) !== sequence) return
+        const asset = await readAssetAt(target, threadId, true)
         const bytes = Uint8Array.from(asset.data)
         const assetUrl = URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType }))
-        if (useAppStore.getState().profileId !== ownerProfileId) { URL.revokeObjectURL(assetUrl); return }
-        patchFile(key, { loading: false, binary: true, assetUrl, assetSignature: assetSignature(asset.data, asset.mimeType), initialLoadFailed: false })
+        if (!finish(asset.canonicalPath, { loading: false, binary: true, assetUrl, assetSignature: assetSignature(asset.data, asset.mimeType), initialLoadFailed: false })) {
+          URL.revokeObjectURL(assetUrl)
+        }
       } else {
-        const content = await readText(target, threadId)
-        if (loadSequences.current.get(key) !== sequence) return
+        const { content, canonicalPath } = typeof window.mousse.fs.readFileDetails === 'function'
+          ? await window.mousse.fs.readFileDetails(target.path, undefined, threadId, target.root)
+          : { content: await readText(target, threadId), canonicalPath: undefined }
         const binary = isBinaryContent(content)
-        if (useAppStore.getState().profileId !== ownerProfileId) return
-        patchFile(key, { loading: false, binary, content: binary ? '' : content, savedContent: binary ? '' : content, initialLoadFailed: false })
-        if (!binary) ensureQueue(key, target, threadId, ownerProfileId)
+        const loaded = finish(canonicalPath, { loading: false, binary, content: binary ? '' : content, savedContent: binary ? '' : content, initialLoadFailed: false })
+        if (loaded && !binary) ensureQueue(key, target, threadId, ownerProfileId)
       }
     } catch (error) {
       if (loadSequences.current.get(key) === sequence && useAppStore.getState().profileId === ownerProfileId) {
@@ -371,15 +404,13 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }, [activeThreadId, ensureQueue, filesRoot, patchFile, profileId, projectId, remote, replaceFiles, scope])
 
   useEffect(() => {
-    // Wait for the checkout so its own files keep thread-scoped targets. If the lookup fails,
-    // loadFile can still resolve absolute tabs through their own folders.
-    if (!remote && projectId && filesRootLoading) return
     for (const path of openPaths) void loadFile(path)
-  }, [filesRootLoading, loadFile, openPaths, projectId, remote])
+  }, [loadFile, openPaths])
 
   const openInPanel = useCallback((file: string) => {
-    const path = tabPathFor(file, filesRoot, scope, !remote && Boolean(projectId))
-    openFile(scope, path)
+    const localProject = !remote && Boolean(projectId)
+    const path = tabPathFor(file, filesRoot, scope, localProject)
+    openFile(scope, path, pickedFileTarget(path, localProject ? filesRoot : null))
     void loadFile(path)
   }, [filesRoot, loadFile, openFile, projectId, remote, scope, tabPathFor])
 
@@ -416,10 +447,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }, [ensureQueue, patchFile])
 
   useEffect(() => {
+    // A file being opened may resolve to the tab that is already active.
+    if (selected?.loading) return
     const previous = previousActiveKey.current
     previousActiveKey.current = selectedKey
     if (previous && previous !== selectedKey) void flushPath(previous)
-  }, [flushPath, selectedKey])
+  }, [flushPath, selected?.loading, selectedKey])
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -505,7 +538,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       const path = tabPathFor(detail.path, targetRoot, targetScope, localProject)
       const currentStore = useAppStore.getState()
       currentStore.openSurfaceKind('files')
-      useFileWorkspaceStore.getState().openFile(targetScope, path)
+      useFileWorkspaceStore.getState().openFile(targetScope, path, pickedFileTarget(path, localProject ? targetRoot : null))
       if (detail.line) {
         const position = { path, line: detail.line, column: detail.column ?? 1 }
         pendingPosition.current = position
@@ -903,6 +936,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
           : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
           : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: false }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: wordWrap ? 'on' : 'off' }} /></div>
+          : !remote && projectId && !filesRoot && !filesRootLoading ? <div className="files-editor-empty">The thread’s folder is unavailable.</div>
           : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}
       </div>}
     </div>

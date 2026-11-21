@@ -32,6 +32,7 @@ import type {
   FileAsset,
   EditorInfo,
   FileEntry,
+  FileText,
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
@@ -545,8 +546,10 @@ const api = {
       ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
     readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
-    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
-      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    readFileDetails: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileText> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root, true),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string, details?: boolean): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root, details),
     /** A preview's size and write time (`mtimeMs` absent from an older daemon), without reading it. */
     assetStamp: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<{ size: number; mtimeMs?: number }> =>
       ipcRenderer.invoke('fs:assetStamp', filePath, projectId, threadId, root),
