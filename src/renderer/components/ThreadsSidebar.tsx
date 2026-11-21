@@ -1297,7 +1297,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const isArchived = Boolean(thread.settledAt)
     // While the thread moves between its list and Archived: the row leaving (not clickable) or the one arriving.
     const archiveMotion = inNeedsMe ? undefined : archiveMotionOfRow(thread)
-    // A pending row whose thread the service has not made yet: it is the open one already, and has nothing to act on.
+    // A pending row whose thread the service has not made or started yet: it has nothing to act on but opening it.
     const unmade = unmadeRows.has(thread.id)
     // A new chat not sent yet, listed by its draft: it opens, and has nothing to rename, pin, archive or move yet.
     const unsentChat = !isThreadStarted(thread) && draftedIds.has(thread.id)
@@ -1423,7 +1423,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         onClick={() => {
 
-          if (!isRenaming && !suppressClick.current && !unmade) void selectThread(thread.id)
+          // A thread a send is starting opens once it exists, before the service lists it started; a row with no thread yet does not.
+          if (!isRenaming && !suppressClick.current && !isPendingRowId(thread.id)) void selectThread(thread.id)
 
         }}
 

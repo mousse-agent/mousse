@@ -8,7 +8,7 @@ import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
-import { afterNextPaint } from './pendingThreadRows'
+import { afterNextPaint, startingThreadIds } from './pendingThreadRows'
 import { runWithToast } from './actionToast'
 import { showProjectInSidebar } from './sidebarReveal'
 import { markPendingArchive } from './archiveMotion'
@@ -83,7 +83,7 @@ export async function createAndSelectNoProjectThread(): Promise<void> {
 
 async function openNoProjectThread(): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
+  const thread = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
 }
@@ -92,7 +92,7 @@ async function openNoProjectThread(): Promise<void> {
 export async function createAndSelectPrivateThread(): Promise<void> {
   const store = useAppStore.getState()
   const thread =
-    findUnstartedThread(visibleThreads(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
+    findUnstartedThread(draftCandidates(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
     await window.mousse.threads.create(undefined, undefined, { localOnly: true })
   store.upsertThread(thread)
   // The command means private, with the private-chat expiry from Settings unless one was picked; a reused draft
@@ -141,6 +141,12 @@ function usableRemembered(remembered: NewThreadChoice | undefined, projectId: st
   return rest
 }
 
+/** The threads New thread may open as an empty draft: not one a send is starting, which is a thread of its own already. */
+function draftCandidates(threads: Thread[]): Thread[] {
+  const starting = startingThreadIds()
+  return visibleThreads(threads).filter((entry) => !starting.has(entry.id))
+}
+
 /**
  * Opens the newest empty draft thread of a project, or creates one there with the project's remembered choices, and
  * selects it. An empty thread is reused only while it matches those choices; otherwise a new one is made with them
@@ -153,7 +159,7 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   store.setLastNewThreadProjectId(projectId)
   // A project just added (Add project) may not be listed in this window yet when the create answers.
   const listedBefore = store.projects.some((project) => project.id === projectId)
-  const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
+  const empty = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly), projectId)
   const remembered = usableRemembered(rememberedChoiceOf(store.projects, projectId), projectId)
   if (empty && matchesRememberedChoices(empty, remembered)) {
     await selectThread(empty.id)
