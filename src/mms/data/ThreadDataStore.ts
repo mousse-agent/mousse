@@ -1330,6 +1330,8 @@ export class ThreadDataStore extends EventEmitter {
       started?: boolean
       /** See `Thread.firstSendPending`: the thread is made for a message a window is about to send. */
       firstSendPending?: boolean
+      /** The inherited transcript of a fork still awaiting acceptance by the run store. */
+      forkMessages?: ChatMessage[]
       worktreeEnabled?: boolean
       lineage?: ThreadLineage
       modelOverride?: ModelOverride
@@ -1368,7 +1370,7 @@ export class ThreadDataStore extends EventEmitter {
       // A project thread's order is taken under the project's list lock, with its first write (below).
       order: projectId ? 0 : this.nextThreadOrder()
     }
-    if (opts?.started === true) meta.startedAt = now
+    if (opts?.started === true || opts?.forkMessages) meta.startedAt = now
     if (opts?.firstSendPending === true) meta.firstSendPending = true
     // `false` is kept: a thread that chose its project's folder never gets a worktree (`WorkspaceResolver`).
     if (typeof opts?.worktreeEnabled === 'boolean') meta.worktreeEnabled = opts.worktreeEnabled
@@ -1397,7 +1399,7 @@ export class ThreadDataStore extends EventEmitter {
       // registration requires an active owner.
       if (opts?.ownerThreadId) this.getThreadDir(opts.ownerThreadId)
       const register = (): void => {
-        this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true })
+        this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true, ...(opts?.forkMessages ? { pendingFork: true } : {}) })
       }
 
       if (projectId) {
@@ -1420,8 +1422,9 @@ export class ThreadDataStore extends EventEmitter {
       }
       if (this.sqliteStoreEnabled()) {
         this.threadDb().client.callSync('create', threadDir)
+        if (opts?.forkMessages) this.threadDb().save(threadDir, { messages: opts.forkMessages })
       } else {
-        this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
+        this.writeJsonAtomic(join(threadDir, 'messages.json'), opts?.forkMessages ?? [])
         this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
         this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
       }
@@ -1435,12 +1438,41 @@ export class ThreadDataStore extends EventEmitter {
       this.invalidateListCache()
       throw error
     }
+    if (opts?.forkMessages) return meta
     this.addToListCaches(meta)
 
     // This is the authoritative creation notification for every producer:
     // GUI/CLI protocol calls, remote sends, and scheduled jobs.
     this.emit('created', meta)
     return meta
+  }
+
+  /** Make the staged fork visible only after its lineage, transfer and receipt commit. */
+  publishPendingFork(id: string): void {
+    if (!this.lifecycleStore.get(id)?.pendingFork) return
+    this.lifecycleStore.update(id, (record) => {
+      this.lifecycleStore.assertTaskIdentity(record.location, id)
+      delete record.pendingFork
+    })
+    this.invalidateListCache()
+    const meta = this.getThread(id)
+    if (meta) this.emit('created', meta)
+  }
+
+  /** Only staged forks can be removed here. Their messages are inherited copies, written before any Send could run. */
+  discardPendingFork(id: string): void {
+    this.withLifecycleGates(['_registry', id], () => {
+      const record = this.lifecycleStore.get(id)
+      if (!record?.pendingFork) return
+      this.lifecycleStore.assertTaskLocation(record.location)
+      if (existsSync(join(record.location, 'meta.json'))) this.lifecycleStore.assertTaskIdentity(record.location, id)
+      this.quiesceThreadStorage(record.location)
+      this.removeFromStandaloneIndex(id)
+      // Keep the durable fence until the files are gone, including when cleanup itself is interrupted.
+      rmSync(record.location, { recursive: true, force: true })
+      this.lifecycleStore.forgetCreatedTask(id, record.parentTaskId ? { ownedBy: record.parentTaskId } : undefined)
+      this.invalidateListCache()
+    })
   }
 
   /**
@@ -1516,7 +1548,7 @@ export class ThreadDataStore extends EventEmitter {
     const discarded: string[] = []
     let indexed: Set<string> | undefined
     for (const record of this.lifecycleStore.list()) {
-      if (!record.parentTaskId || record.state !== 'active') continue
+      if (!record.parentTaskId || record.state !== 'active' || record.pendingFork) continue
       const id = record.taskId
       // Workflow execution threads (v5 ids) are owned too, but their admission retries and keeps them.
       if (!uuidValidate(id) || uuidVersion(id) !== 4) continue
@@ -1719,7 +1751,7 @@ export class ThreadDataStore extends EventEmitter {
       seen.add(current)
       const record = this.lifecycleStore.get(current)
       if (!record) return true
-      if (record.state !== 'active') return false
+      if (record.state !== 'active' || record.pendingFork) return false
       current = record.parentTaskId
     }
     return true

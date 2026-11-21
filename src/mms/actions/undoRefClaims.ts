@@ -45,7 +45,15 @@ export function prepareUndoRefRelease(repository: RepositoryIdentity, receiptId:
 /** Call only after exact Git reads prove both refs absent. A claimant also checks that the refs exist. */
 export function finishUndoRefRelease(repository: RepositoryIdentity, receiptId: string, operationId: string): void {
   if (pendingUndoRefRelease(repository, receiptId)?.operationId !== operationId) throw new Error('Pending Undo ref release ownership changed.')
-  const path = pendingPath(repository, receiptId)
-  unlinkSync(path)
+  removePendingRelease(repository, receiptId)
+}
+
+/** A permanent purge discards the release journal. Cancel its reservation under the lease without altering the refs. */
+export function cancelUndoRefRelease(repository: RepositoryIdentity, receiptId: string, operationId: string): void {
+  if (pendingUndoRefRelease(repository, receiptId)?.operationId === operationId) removePendingRelease(repository, receiptId)
+}
+
+function removePendingRelease(repository: RepositoryIdentity, receiptId: string): void {
+  unlinkSync(pendingPath(repository, receiptId))
   fsyncDirectorySync(join(repository.metadataDir, 'undo-ref-releases'))
 }

@@ -35,7 +35,7 @@ const cancellation = new AsyncLocalStorage<GitCancellation>()
 /**
  * Work whose Git commands (run through {@link runGitProcess}) end with `signal`: a command not yet started then fails
  * at once, and one running is stopped with everything it started. A command that writes a ref is left to finish (it is
- * quick, and a stopped one would leave the ref's lock file behind).
+ * quick, and a stopped one can leave the ref's lock file behind). A recoverable transaction may opt into stopping.
  *
  * A stopped command's run ends once its processes are confirmed gone, or {@link GIT_STOP_TIMING}`.exitWaitMs` after the
  * stop when some are still there (one stuck in the file system can outlive a kill, and one that escaped the kill can
@@ -119,9 +119,10 @@ export const LISTING_MAX_BUFFER = 256 * 1024 * 1024
  * or a run past `timeout` stops Git and is an `ENOBUFS` or `ETIMEDOUT` error, with the output read so far.
  * `inputFile` streams a file to Git's input instead of `input` (a pack for `index-pack --stdin`), however large.
  * `beforeStart` runs synchronously right before Git starts, with nothing awaited in between; what it throws rejects the
- * run, and Git never starts.
+ * run, and Git never starts. `cancelRefWriter` lets the enclosing cancellation scope stop a ref writer and keep the
+ * caller's repository lease until the processes are confirmed gone.
  */
-export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number; beforeStart?: () => void }): Promise<GitProcess> {
+export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number; beforeStart?: () => void; cancelRefWriter?: boolean }): Promise<GitProcess> {
   const limit = options.maxBuffer ?? DEFAULT_MAX_BUFFER
   const scope = cancellation.getStore()
   const signal = scope?.signal
@@ -174,7 +175,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
     }
     let stoppedByCancellation = false
     const onAbort = (): void => {
-      if (settled || error || argv.some((arg) => REF_WRITERS.has(arg))) return
+      if (settled || error || (!options.cancelRefWriter && argv.some((arg) => REF_WRITERS.has(arg)))) return
       error = Object.assign(new Error('spawnSync git ABORT_ERR'), { code: 'ABORT_ERR', syscall: 'spawnSync git' })
       stoppedByCancellation = true
       // From the stop, not from when the output closes: something that escaped the kill may hold it open for good. The

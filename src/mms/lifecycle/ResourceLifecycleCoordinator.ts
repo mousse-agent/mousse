@@ -91,6 +91,7 @@ export class ResourceLifecycleCoordinator {
     let claimed = false
     let terminalReplay = false
     this.store.update(request.taskId, (record) => {
+      if (record.pendingFork) throw new ResourceLifecycleError('unavailable', 'Fork acceptance is pending')
       const old = record.operations.find((item) => item.id === request.operationId)
       if (old) {
         if (old.kind !== kind || (request.expectedGeneration !== undefined && request.expectedGeneration !== old.expectedGeneration)) throw new ResourceLifecycleError('stale', 'Lifecycle operation identity was reused with different input')
@@ -180,7 +181,19 @@ export class ResourceLifecycleCoordinator {
           current.location = active.to
           current.generation = active.expectedGeneration + 1
           active.phase = 'moved'
-        }), kind === 'restore')
+        }), kind === 'restore').catch((error: unknown) => {
+          if (kind === 'restore') this.store.update(request.taskId, (current) => {
+            this.assertRunner(current, token)
+            const active = current.operations.at(-1)!
+            // Repository validation can fail before the rename. The source is still authoritative.
+            if (active.phase !== 'move-prepared' || !existsSync(active.from) || existsSync(active.to)) return
+            active.phase = 'rejected'
+            active.error = (error as Error).message
+            active.completedAt = new Date().toISOString()
+            current.state = 'trashed'
+          })
+          throw error
+        })
         await this.hooks.onPhase?.(record, 'moved')
         operation = record.operations.at(-1)!
       }

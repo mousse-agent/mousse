@@ -2679,6 +2679,7 @@ export class MmsProfileServices {
           console.warn('agent episodes a restart cut short could not be ended', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
         }
       }, stopping), log)
+      if (!stopping()) await startupBackgroundTimed('forkCheckpoints', () => this.orchestrator.recoverForkCreations(stopping), log)
       if (!stopping()) await startupBackgroundTimed('subagentLineage', async () => this.repairSubagentLineage(), log)
     } finally {
       this.finishStartupLifecycle()

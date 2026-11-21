@@ -3040,10 +3040,8 @@ export class OrchestratorService extends EventEmitter {
       deleteThread: (threadId) => this.discardCreatedThread(threadId),
       forkPointSeed: (sourceThreadId, sourceRunId) => this.forkPointSeed(sourceThreadId, sourceRunId),
       pinForkCheckpoint: (threadId, sourceThreadId, sourceRunId) => this.pinForkCheckpoint(threadId, sourceThreadId, sourceRunId),
-      retireForkCheckpoint: async (threadId) => {
-        const threadDir = this.resolveThreadDir(threadId)
-        if (threadDir) await retireForkCheckpoint(threadId, threadDir)
-      },
+      publishFork: (threadId) => this.threadStore?.publishPendingFork(threadId),
+      discardFork: (threadId) => this.discardPendingFork(threadId),
       titleConflicts: (parentThreadId, title) => this.subagentTitleConflicts(parentThreadId, title),
       threadLive: (threadId) => this.titleOf(threadId) !== undefined,
       buildChildTurnPayload: ({ childThreadId, childRunId, prompt, request }): TurnStartPayload => ({
@@ -8089,28 +8087,10 @@ export class OrchestratorService extends EventEmitter {
     const sideChat = creation.sideChat === true
     const sideFolder = sideChat ? this.threadCheckoutOf(sourceThread.id) : undefined
     const title = sideChat ? 'New chat' : creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
-    const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
-      ...(sideFolder || sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
-      ...(sideChat ? {
-        // Started from the first write, so "New chat" never reuses it as an empty draft.
-        started: true,
-        lineage: { parentThreadId: sourceThread.id, rootThreadId: sourceThread.lineage?.rootThreadId ?? sourceThread.id, relationship: 'side' as const },
-        ownerThreadId: sourceThread.id,
-        ...(sideFolder ? { workspaceBinding: { policy: 'shared' as const, sharedPath: sideFolder, access: 'write' as const } } : {})
-      } : {}),
-      // A fork carries the conversation, so a private thread's fork is private too.
-      localOnly: this.isLocalOnly(sourceThread.id)
-    })
     const override = this.harness.instanceMap.migrate(source.modelOverride ?? sourceThread.modelOverride)
-    if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
-    // The fork carries the mode the source may run in now: its own, narrowed by its lineage's ceiling
-    // (a fork starts a lineage of its own, so a stale wider mode on a narrowed subagent must not
-    // come back). A source that never chose a mode and has no ceiling follows the profile default.
+    // A fork carries the source's mode narrowed by its lineage's ceiling. If neither is set it follows the profile default.
     const ceiling = this.permissionCeilingFor(creation.sourceThreadId)
-    if (sourceThread.permissionMode || ceiling !== 'full')
-      this.threadStore.updateThreadMeta(fork.id, { permissionMode: this.requestedPermissionMode(creation.sourceThreadId) })
-    const session = this.getOrCreateSession(fork.id)
-    session.modelOverride = override ? structuredClone(override) : undefined
+    const permissionMode = sourceThread.permissionMode || ceiling !== 'full' ? this.requestedPermissionMode(creation.sourceThreadId) : undefined
     // The fork shows the conversation it carries, then where it starts. Its first turn fills the marker in.
     const inherited = this.forkInheritedMessages(creation.sourceThreadId, creation.sourceRunId)
     const lastModel = [...inherited].reverse().find((message) => message.role === 'user' && message.modelSelection)?.modelSelection
@@ -8124,9 +8104,17 @@ export class OrchestratorService extends EventEmitter {
       // The time of the last message it follows, so the turn it closes keeps the time it took.
       timestamp: inherited.at(-1)?.timestamp ?? new Date().toISOString()
     }
-    this.sessionAls.run(session, () => {
-      session.messages = [...inherited.map(({ modelSelection: _model, ...message }) => message), marker]
-      this.persist(true)
+    const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
+      id: creation.threadId, modelOverride: override, permissionMode,
+      forkMessages: [...inherited.map(({ modelSelection: _model, ...message }) => message), marker],
+      ...(sideFolder || sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      ...(sideChat ? {
+        lineage: { parentThreadId: sourceThread.id, rootThreadId: sourceThread.lineage?.rootThreadId ?? sourceThread.id, relationship: 'side' as const },
+        ownerThreadId: sourceThread.id,
+        ...(sideFolder ? { workspaceBinding: { policy: 'shared' as const, sharedPath: sideFolder, access: 'write' as const } } : {})
+      } : {}),
+      // A fork carries the conversation, so a private thread's fork is private too.
+      localOnly: this.isLocalOnly(sourceThread.id)
     })
     return { threadId: fork.id }
   }
@@ -8340,8 +8328,9 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async pinForkCheckpoint(threadId: string, sourceThreadId: string, sourceRunId: string): Promise<boolean> {
-    if (this.placementOf(threadId) === 'project-folder') return false
-    const threadDir = this.resolveThreadDir(threadId)
+    if (this.placementOf(sourceThreadId) === 'project-folder') return false
+    const pending = this.threadStore?.lifecycleStore.get(threadId)
+    const threadDir = pending?.pendingFork ? pending.location : undefined
     const sourceDir = this.resolveThreadDir(sourceThreadId)
     const workspace = sourceDir ? new ThreadWorkspaceManager(sourceDir).load() : undefined
     const checkpoint = sourceDir ? this.forkCheckpoint(sourceDir, sourceRunId) : undefined
@@ -8351,6 +8340,49 @@ export class OrchestratorService extends EventEmitter {
     const checkoutPath = workspace.integrationTarget?.checkoutPath ?? workspace.worktreePath
     await pinForkCheckpoint(threadId, threadDir, checkoutPath, workspace.repositoryId, { id: checkpoint.id, endSha: checkpoint.endSha, receiptId: checkpoint.receiptId })
     return true
+  }
+
+  private async discardPendingFork(threadId: string): Promise<void> {
+    const store = this.threadStore
+    const record = store?.lifecycleStore.get(threadId)
+    if (!store || !record?.pendingFork) return
+    await retireForkCheckpoint(threadId, record.location)
+    store.discardPendingFork(threadId)
+  }
+
+  /** The run-store transaction decides whether a staged fork is published or discarded after restart. */
+  async recoverForkCreations(stopping = () => false): Promise<void> {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store) return
+    for (const { taskId, pendingFork } of store.lifecycleStore.list()) {
+      if (stopping()) return
+      if (!pendingFork || engine.isCreatingFork(taskId)) continue
+      try {
+        if (engine.delegations.getLineage(taskId)?.relationship === 'fork') store.publishPendingFork(taskId)
+        else await this.discardPendingFork(taskId)
+      } catch (error) {
+        console.warn('Fork acceptance could not be recovered', { threadId: taskId, error })
+      }
+    }
+    for (const transfer of engine.transfers.listForksWithPins()) {
+      if (stopping()) return
+      const threadId = transfer.targetThreadId
+      try {
+        const threadDir = this.resolveThreadDir(threadId)
+        if (!threadDir) continue
+        const pin = readForkCheckpointPin(threadDir)
+        if (!pin) continue
+        if (!transfer.payload.seed && transfer.status === 'pending') {
+          const workspace = new ThreadWorkspaceManager(threadDir).load()
+          if (workspace?.lifecycle !== 'ready' || workspace.snapshotSha !== pin.sha) continue
+          engine.transfers.patchPayload(transfer.transferId, { seed: { kind: 'checkpoint', sha: pin.sha, actionId: pin.actionId } })
+        }
+        await retireForkCheckpoint(threadId, threadDir)
+      } catch (error) {
+        console.warn('Fork checkpoint retirement could not be recovered', { threadId, error })
+      }
+    }
   }
 
   /** Where the thread works (`threadPlacement`): every path here that could make its worktree asks this first. */
@@ -8386,7 +8418,11 @@ export class OrchestratorService extends EventEmitter {
       const existing = manager.load()
       if (pinned) {
         const pin = readForkCheckpointPin(threadDir)
-        if (!pin) throw new Error('The accepted fork checkpoint is no longer available.')
+        if (!pin) {
+          // Startup may have recorded the already provisioned seed and retired the pin since we read the transfer.
+          if (engine.transfers.get(fork.transferId)?.payload.seed) return
+          throw new Error('The accepted fork checkpoint is no longer available.')
+        }
         if (existing?.lifecycle === 'ready') {
           if (existing.snapshotSha !== pin.sha) throw new Error('The existing workspace does not contain the accepted fork checkpoint.')
         } else {

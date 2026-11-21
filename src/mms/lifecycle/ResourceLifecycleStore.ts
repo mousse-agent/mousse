@@ -236,7 +236,7 @@ export class ResourceLifecycleStore {
     return undefined
   }
 
-  registerTask(input: { taskId: string; location: string; parentTaskId?: string; creating?: boolean }): TaskLifecycleRecord {
+  registerTask(input: { taskId: string; location: string; parentTaskId?: string; creating?: boolean; pendingFork?: true }): TaskLifecycleRecord {
     identity(input.taskId)
     if (input.parentTaskId) identity(input.parentTaskId)
     const location = resolve(input.location)
@@ -246,17 +246,17 @@ export class ResourceLifecycleStore {
       return this.withGate(input.taskId, () => {
         const existing = this.get(input.taskId)
         if (existing) {
-          if (existing.state !== 'active' || !pathsEqual(existing.location, location) || existing.parentTaskId !== input.parentTaskId) throw new ResourceLifecycleError('stale', 'Task identity already has a lifecycle location or tombstone')
+          if (existing.state !== 'active' || existing.pendingFork || !pathsEqual(existing.location, location) || existing.parentTaskId !== input.parentTaskId) throw new ResourceLifecycleError('stale', 'Task identity already has a lifecycle location or tombstone')
           return existing
         }
         if (this.findByLocation(location)) throw new ResourceLifecycleError('ambiguous', 'Task location is already owned')
         if (input.parentTaskId) {
           const parent = this.get(input.parentTaskId)
-          if (!parent || parent.state !== 'active' || input.parentTaskId === input.taskId) throw new ResourceLifecycleError('unavailable', 'Invocation parent is unavailable')
+          if (!parent || parent.state !== 'active' || parent.pendingFork || input.parentTaskId === input.taskId) throw new ResourceLifecycleError('unavailable', 'Invocation parent is unavailable')
         }
         if (!input.creating || existsSync(location)) this.assertTaskIdentity(location, input.taskId)
         const now = new Date().toISOString()
-        const record: TaskLifecycleRecord = { schemaVersion: 1, minimumWriterVersion: 1, profileId: this.profileId, taskId: input.taskId, generation: 1, state: 'active', originalLocation: location, location, locations: [location], operations: [], createdAt: now, updatedAt: now, ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}) }
+        const record: TaskLifecycleRecord = { schemaVersion: 1, minimumWriterVersion: 1, profileId: this.profileId, taskId: input.taskId, generation: 1, state: 'active', originalLocation: location, location, locations: [location], operations: [], createdAt: now, updatedAt: now, ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}), ...(input.pendingFork ? { pendingFork: true } : {}) }
         this.writeLocationIndexes(record)
         atomicWriteJsonSync(this.recordPath(input.taskId), record)
         return record
@@ -563,6 +563,7 @@ export class ResourceLifecycleStore {
     if (seen.has(record.taskId)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle ownership graph contains a cycle')
     seen.add(record.taskId)
     if (record.state === 'active') {
+      if (record.pendingFork && kind === 'execution') throw new ResourceLifecycleError('unavailable', 'Fork acceptance is pending')
       if (record.parentTaskId) this.checkAvailable(this.require(record.parentTaskId), kind, seen)
       return
     }
@@ -578,6 +579,7 @@ export class ResourceLifecycleStore {
     if (record.profileId !== this.profileId || record.taskId !== taskId || !Number.isSafeInteger(record.generation) || record.generation < 1 || !Array.isArray(record.locations) || !Array.isArray(record.operations) || !['active', 'draining', 'trash-moving', 'trashed', 'restore-moving', 'blocked', 'purge-started', 'purged'].includes(record.state)) throw new ResourceLifecycleError('ambiguous', 'Invalid task lifecycle owner')
     if (!record.locations.some((path) => pathsEqual(path, record.location))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle location is not registered')
     for (const location of new Set([record.originalLocation, ...record.locations])) this.assertTaskLocation(location)
+    if (record.pendingFork !== undefined && (record.pendingFork !== true || record.state !== 'active' || record.generation !== 1 || record.operations.length || record.locations.length !== 1)) throw new ResourceLifecycleError('ambiguous', 'Invalid pending fork ownership')
     if (record.parentTaskId === taskId) throw new ResourceLifecycleError('ambiguous', 'Task cannot own itself')
     if (record.cleanupOwner && (!Number.isSafeInteger(record.cleanupOwner.pid) || record.cleanupOwner.pid <= 0 || typeof record.cleanupOwner.processInstanceId !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.cleanupOwner.token))) throw new ResourceLifecycleError('ambiguous', 'Invalid cleanup ownership reservation')
     if (record.state === 'purge-started' && !record.purge) throw new ResourceLifecycleError('ambiguous', 'Irreversible purge is missing its recovery ledger')
@@ -600,6 +602,7 @@ export class ResourceLifecycleStore {
         if (item.manifestPath) assertLifecyclePath(this.root, item.manifestPath)
         if (item.kind === 'scheduled-row' && ![join(this.profileHome, 'mousse.conf'), join(this.profileHome, 'scheduled', 'jobs-runtime.json')].includes(item.sourcePath ?? '')) throw new ResourceLifecycleError('ambiguous', 'Purge configuration intent is invalid')
       }
+      if (purge.receiptReleasesSettled !== undefined && purge.receiptReleasesSettled !== true) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reservation progress')
       if (purge.worktreeMoves !== undefined && (!Array.isArray(purge.worktreeMoves) || purge.worktreeMoves.some((id) => !purge.items.some((item) => item.id === id && item.kind === 'worktree' && item.manifestPath)))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge worktree relocation')
       const original = { schemaVersion: purge.schemaVersion, taskId: purge.taskId, generation: purge.generation, digest: '', items: purge.items.map((item) => ({ ...item, status: 'pending', ...(item.discardState ? { discardState: 'pending' } : {}) })), ownedTaskIds: purge.ownedTaskIds, blockers: purge.blockers, retained: purge.retained, exclusiveBytes: purge.exclusiveBytes, ...(purge.keepWork ? { keepWork: true } : {}) }
       if (createHash('sha256').update(JSON.stringify(original)).digest('hex') !== purge.digest) throw new ResourceLifecycleError('ambiguous', 'Purge intent digest does not match its immutable resource plan')

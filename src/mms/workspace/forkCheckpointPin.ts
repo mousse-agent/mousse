@@ -3,7 +3,6 @@ import { isAbsolute, join } from 'node:path'
 import { atomicWriteJsonSync, fsyncDirectorySync } from '../data/AtomicFs'
 import { snapshotOriginAsync } from '../actions/snapshots'
 import { requireLiveUndoRef } from '../actions/undoRefClaims'
-import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { lifecycleGitAsync, readDirectLifecycleRefAsync } from '../lifecycle/lifecycleGit'
@@ -42,15 +41,18 @@ export function readForkCheckpointPin(threadDirectory: string): ForkCheckpointPi
 
 /** Create the fork's own ref before its pending transfer is published. The source receipt can then expire independently. */
 export async function pinForkCheckpoint(threadId: string, threadDirectory: string, checkoutPath: string, repositoryId: string, checkpoint: { id: string; endSha: string; receiptId?: string }): Promise<void> {
-  await withGitMutationLocks(threadDirectory, checkoutPath, 'fork-checkpoint', async (repository) => {
-    if (repository.key !== repositoryId) throw new Error('Fork checkpoint repository changed.')
+  const repository = await resolveRepositoryIdentityAsync(checkoutPath, { requireMutationCapability: true })
+  if (repository.key !== repositoryId) throw new Error('Fork checkpoint repository changed.')
+  // The durable pending fork fence already excludes destination turns. The repository lease serializes the source receipt.
+  const lease = await acquireRepositoryLease(repository, { maxWaitMs: 5_000 })
+  try {
     if (checkpoint.receiptId) await requireLiveUndoRef(repository, checkoutPath, checkpoint.receiptId, 'after', checkpoint.endSha)
     const { head } = await snapshotOriginAsync(checkoutPath, checkpoint.endSha)
     const pin: ForkCheckpointPin = { version: 1, repositoryId, checkoutPath, actionId: checkpoint.id, sha: checkpoint.endSha, head }
     // A crash between writing and creating the ref leaves a record that cleanup can safely retire.
     atomicWriteJsonSync(join(threadDirectory, PIN_FILE), pin)
     await lifecycleGitAsync(checkoutPath, ['update-ref', '--no-deref', pinRef(threadId), pin.sha, '0'.repeat(pin.sha.length)])
-  })
+  } finally { lease.release() }
 }
 
 /** Provisioning checks the fork-owned ref under its own repository lease. */

@@ -88,6 +88,8 @@ export interface TaskLifecycleRecord {
   originalLocation: string
   location: string
   parentTaskId?: string
+  /** Inherited history is staged while the run store still has to accept and publish the fork. */
+  pendingFork?: true
   /** Independent retention severs execution ownership after the original parent is purged. */
   formerParentTaskId?: string
   /** Historical paths remain fenced after moves; IDs are never recycled. */
@@ -202,6 +204,8 @@ export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   discardAuthorized: boolean
   /** Worktree item IDs with a committed intent to move to their manifest's deterministic trash path. */
   worktreeMoves?: string[]
+  /** Repository-wide Undo release reservations were settled before deleting thread data. */
+  receiptReleasesSettled?: true
   /** The thread's expiry deleted it (`Thread.expiresAt`), not a person: it is never listed in Recently deleted. */
   expired?: true
   /**

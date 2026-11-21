@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { onRetiredBareRoute, type ExecutionBinding, type TurnOrigin } from '../../shared/harness/types'
 import { isStricter, type PermissionMode } from '../../shared/permissionMode'
@@ -386,7 +386,7 @@ export function narrowestAccess(tasks: ReadonlyArray<Pick<DelegationRecord, 'acc
 /** A thread the engine asks its host to create: a delegated child or a fork. */
 export type ThreadCreation =
   | { kind: 'delegation'; request: DelegationRequest }
-  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string; sideChat?: boolean }
+  | { kind: 'fork'; threadId: string; sourceThreadId: string; sourceRunId: string; title?: string; sideChat?: boolean }
 
 /** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
 export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -416,7 +416,8 @@ export interface DelegationHost {
   forkPointSeed?(sourceThreadId: string, sourceRunId: string): ForkPointSeed
   /** Pins a selected code checkpoint before the transfer is published. */
   pinForkCheckpoint?(threadId: string, sourceThreadId: string, sourceRunId: string): Promise<boolean>
-  retireForkCheckpoint?(threadId: string): Promise<void>
+  publishFork?(threadId: string): void
+  discardFork?(threadId: string): Promise<void>
   /**
    * The subagents of `parentThreadId` already titled `title` (compared normalized, trashed ones
    * excluded), as child thread ids. Read under the parent's mutex, after the retry replay.
@@ -507,6 +508,7 @@ un_time_limits). */
   /** Fork and merge-back transfers (SPEC §16.2). */
   readonly transfers: ContextTransfers
   private delegationHost: DelegationHost | null = null
+  private readonly creatingForks = new Set<string>()
   /** Aborts the local execution of a claimed effect (the effect worker's `cancelInFlight`). */
   private inFlightCanceller: ((effectId: string) => boolean) | null = null
   private readonly pid: number
@@ -1681,7 +1683,10 @@ un_time_limits). */
   forkThread(input: ForkThreadRequest): Promise<ForkAccepted> {
     return this.mutex.withLock(input.sourceThreadId, async () => {
       const replayed = this.replayFork(input)
-      if (replayed) return replayed
+      if (replayed) {
+        this.delegationHost?.publishFork?.(replayed.threadId)
+        return replayed
+      }
       const host = this.delegationHost
       if (!host) fail('internal', 'No thread host is attached to the run engine.')
       const source = this.forkSourceRun(input.sourceThreadId, input.atRunOrdinal)
@@ -1692,16 +1697,23 @@ un_time_limits). */
           `Run ${source.ordinal} of thread ${input.sourceThreadId} has no code checkpoint to fork from; pass seedFrom 'current_head' to fork from the source's current code.`
         )
       const seedFrom = point === 'missing' ? 'current_head' : point
-      const { threadId } = host.createThread({
-        kind: 'fork',
-        sourceThreadId: input.sourceThreadId,
-        sourceRunId: source.runId,
-        title: input.title,
-        ...(input.sideChat ? { sideChat: true } : {})
-      })
+      const pendingId = randomUUID()
+      let threadId: string = pendingId
+      let created = false
+      this.creatingForks.add(pendingId)
+      let accepted: ForkAccepted
       try {
+        threadId = host.createThread({
+          kind: 'fork',
+          threadId: pendingId,
+          sourceThreadId: input.sourceThreadId,
+          sourceRunId: source.runId,
+          title: input.title,
+          ...(input.sideChat ? { sideChat: true } : {})
+        }).threadId
+        created = true
         const pinned = seedFrom === 'checkpoint' && !input.sideChat && await host.pinForkCheckpoint?.(threadId, input.sourceThreadId, source.runId)
-        return this.store.db.transaction((): ForkAccepted => {
+        accepted = this.store.db.transaction((): ForkAccepted => {
           this.delegations.createLineage({
             threadId,
             parentThreadId: input.sourceThreadId,
@@ -1729,14 +1741,23 @@ un_time_limits). */
         })
       } catch (error) {
         try {
-          await host.retireForkCheckpoint?.(threadId)
-          this.removeThread(host, threadId)
+          if (host.discardFork) await host.discardFork(threadId)
+          else if (created) this.removeThread(host, threadId)
         } catch (cleanupError) {
-          console.warn('A cancelled fork checkpoint could not be retired', { threadId, error: cleanupError })
+          console.warn('An unfinished fork could not be discarded', { threadId, error: cleanupError })
         }
         throw error
+      } finally {
+        this.creatingForks.delete(pendingId)
       }
+      host.publishFork?.(threadId)
+      return accepted
     })
+  }
+
+  /** Startup recovery can overlap a new fork waiting for its repository lease. */
+  isCreatingFork(threadId: string): boolean {
+    return this.creatingForks.has(threadId)
   }
 
   private replayFork(input: ForkThreadRequest): ForkAccepted | null {

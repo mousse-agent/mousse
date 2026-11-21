@@ -1,16 +1,17 @@
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
-import { RepositoryLeaseBusyError } from '../git/RepositoryLease'
+import { acquireRepositoryLease, RepositoryLeaseBusyError } from '../git/RepositoryLease'
 import { buildResourceInventoryFromFacts, rereadRepositoryFacts, type OwnershipFacts } from '../lifecycle/ResourceInventory'
 import { getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver } from '../lifecycle/LifecycleClaims'
 import { discoverOwnershipFacts } from '../lifecycle/ownershipDiscovery'
 import { readDirectLifecycleRefAsync } from '../lifecycle/WorktreeRetirementService'
 import { readDirectRefsAsync } from '../lifecycle/worktreeFacts'
-import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
+import { assertLifecyclePath, type ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
-import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { readThreadWorkspaceRecord, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
@@ -18,7 +19,7 @@ import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { untilAborted } from '../git/gitPolicy'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { settlesItself } from '../../shared/resourceLifecycle'
-import { finishUndoRefRelease, pendingUndoRefRelease, prepareUndoRefRelease } from './undoRefClaims'
+import { cancelUndoRefRelease, finishUndoRefRelease, pendingUndoRefRelease, prepareUndoRefRelease } from './undoRefClaims'
 
 /** The ownership inventory showed a blocker: the whole release stops, as when it shows one before the first receipt. */
 class OwnershipBlocked extends Error {}
@@ -38,6 +39,36 @@ type Candidate = { receipt: ChangeReceipt | undefined; operationId: string; inte
 /** How one hold of the repository lease ended. */
 type HoldEnd = 'finished' | 'yield' | { changed: string }
 type ReleaseHooks = { afterPrepared?: () => void; afterGit?: () => void; afterCheck?: () => void }
+
+/**
+ * Release recovery needs the task's prepared journal. Before purge removes it, clear reservations it owns under
+ * the same repository lease used by release and copy. Any refs left by a stopped transaction stay as they are.
+ */
+export async function cancelPreparedReceiptRefReleases(location: string): Promise<void> {
+  assertLifecyclePath(location, join(location, 'journal'))
+  const journal = new ThreadJournal(location, { readOnly: true })
+  const pending = [...journal.latestByOperation().values()]
+    .filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')
+  if (!pending.length) return
+  for (const name of ['workspace.json', 'project-folder.json']) assertLifecyclePath(location, join(location, name))
+  const workspace = readThreadWorkspaceRecord(location)
+  const paths = new Set([workspace?.integrationTarget?.checkoutPath, workspace?.worktreePath])
+  for (const path of paths) {
+    if (!path) continue
+    const repository = await resolveRepositoryIdentityAsync(path)
+    if (!repository.capability.allowed || repository.key !== workspace?.repositoryId) continue
+    const lease = await acquireRepositoryLease(repository, { maxWaitMs: RELEASE_LEASE_WAIT_MS })
+    try {
+      for (const entry of pending) {
+        const intent = entry.details as ReleaseIntent
+        if (intent?.version !== 1 || intent.repositoryId !== repository.key) throw new Error('Cannot verify a pending Undo release repository for purge.')
+        cancelUndoRefRelease(repository, intent.receiptId, entry.operationId)
+      }
+      return
+    } finally { lease.release() }
+  }
+  throw new Error('Cannot verify the repository of the pending Undo releases for purge.')
+}
 
 /** Phase 3b: only expired, exclusive immutable receipt refs. Never runs Git GC or deletes user refs. */
 export class ReceiptRefReleaseService {
@@ -275,7 +306,7 @@ export class ReceiptRefReleaseService {
       options.afterPrepared?.()
       check()
       if (argv && approved.some(({ present }) => present.length)) {
-        const ran = await runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(approved), timeout: 30_000 })
+        const ran = await runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(approved), cancelRefWriter: true })
         check()
         if (ran.error || ran.status !== 0) {
           if (approved.length > 1) for (const { intent } of approved) isolate.add(intent.receiptId)

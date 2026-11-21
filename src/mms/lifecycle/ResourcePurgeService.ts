@@ -27,6 +27,7 @@ import { BRANCH_RECORD_OPERATIONS, threadBranchRecord, type ThreadBranchRecord }
 import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
+import { cancelPreparedReceiptRefReleases } from '../actions/ReceiptRefReleaseService'
 import { threadRecordName } from '../data/threadRecords'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -830,9 +831,13 @@ export class ResourcePurgeService {
         record = this.store.update(input.taskId, (current) => { keepPendingWork(current) })
       }
       if (!record.purge) throw new Error('Purge recovery ledger is absent')
+      if (!record.purge.receiptReleasesSettled) {
+        for (const id of record.purge.ownedTaskIds) await cancelPreparedReceiptRefReleases(this.store.require(id).location)
+        record = this.store.update(input.taskId, (current) => { current.purge!.receiptReleasesSettled = true })
+      }
       await this.hooks.beforeRemoval?.(record)
       const reservation = record.cleanupOwner!.token
-      for (const item of record.purge.items) {
+      for (const item of record.purge!.items) {
         if (item.status !== 'pending') continue
         // Peer source records are re-read at each step. Partial failure never weakens another owner's claim.
         const target = await this.claimTarget(item)
