@@ -43,6 +43,7 @@
 }
 
 .engine-dialog-home .settings-input {
+  max-width: none;
   height: var(--settings-control-h, 28px);
   padding: 0 var(--space-8);
   border: 1px solid var(--ui-line-strong);
