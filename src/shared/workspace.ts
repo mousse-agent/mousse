@@ -98,7 +98,7 @@ export interface ThreadWorkspaceMetadata {
    * what the first turn is told (see `WorkspaceExecutionContext.startNote`), read when it was made. Removed when the
    * first message claims it.
    */
-  prepared?: { at: string; layout: string; trust: string; folder?: string; disconnectedFolder?: string; readyAt?: string; startNote?: string }
+  prepared?: { at: string; layout: string; trust: string; sourceCheckout?: string; effectiveCheckout?: string; folder?: string; disconnectedFolder?: string; readyAt?: string; startNote?: string }
 }
 
 export interface WorkspaceExecutionContext {

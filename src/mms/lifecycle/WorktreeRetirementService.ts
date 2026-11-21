@@ -1735,6 +1735,7 @@ export class WorktreeRetirementService {
     let baseSha: string | undefined, resultSha: string | undefined
     if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'workspace.json') {
       const row = value as Record<string, unknown>
+      if (row.lifecycle === 'provisioning') throw new Error('The worktree checkout must finish or be recovered before retirement.')
       const journal = new ThreadJournal(task.location, { readOnly: true }).list()
       const provisionFits = (entry: ThreadJournalRecord): boolean => {
         const intent = entry.expectedPreState as { branch?: string; worktreePath?: string } | undefined

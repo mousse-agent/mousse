@@ -306,7 +306,7 @@ import { disconnectedWorktreeFolder, driveNotConnectedText, waitForWorktreeFolde
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
-import { isPreparing, PREPARED_WORKTREE_MAX_AGE_MS, releasePreparedWorkspace, settledPreparation } from '../workspace/workspacePreparation'
+import { isPreparing, PREPARED_WORKTREE_MAX_AGE_MS, prepareThreadWorkspace, releasePreparedWorkspace, settledPreparation } from '../workspace/workspacePreparation'
 import { ensureSnapshotWorkspaceAsync, loadSnapshotWorkspaceMetadataAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -2252,6 +2252,11 @@ export class OrchestratorService extends EventEmitter {
     this.preparationSweep.unref()
   }
 
+  prepareNewThreadWorkspace(input: Parameters<typeof prepareThreadWorkspace>[0]): void {
+    if (this.lifecycle.stopping) return
+    prepareThreadWorkspace(input, this.lifecycle)
+  }
+
   async sweepAbandonedPreparedWorkspaces(now = Date.now()): Promise<void> {
     const store = this.threadStore
     if (!store || this.sweepingPreparations || this.lifecycle.signal.aborted) return
@@ -2259,10 +2264,10 @@ export class OrchestratorService extends EventEmitter {
     try {
       for (const thread of store.listAllThreads()) {
         if (this.lifecycle.signal.aborted) return
-        if (isThreadStarted(thread) || Date.parse(thread.updatedAt) > now - PREPARED_WORKTREE_MAX_AGE_MS) continue
+        if (Date.parse(thread.updatedAt) > now - PREPARED_WORKTREE_MAX_AGE_MS) continue
         const idle = () => {
           const current = store.getThread(thread.id)
-          return Boolean(current && !isThreadStarted(current) && !this.residency.isViewed(thread.id) && !this.isActiveTurnRunning(thread.id))
+          return Boolean(current && Date.parse(current.updatedAt) <= now - PREPARED_WORKTREE_MAX_AGE_MS && !this.residency.isViewed(thread.id) && !this.isActiveTurnRunning(thread.id))
         }
         if (!idle()) continue
         try {

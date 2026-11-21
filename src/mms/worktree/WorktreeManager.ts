@@ -508,7 +508,7 @@ async function keepThenDelete(input: {
  * overrides that switch off hooks, the file system monitor and every configured clean, smudge and process
  * filter; a thread worktree that holds a pull request's commits keeps the same values in its own configuration.
  */
-export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit; safety: string[] }> {
+export async function safeWorktreeGit(repositoryRoot: string, options: { allowPinnedFilters?: boolean } = {}): Promise<{ git: SimpleGit; safety: string[] }> {
   // The unsafe library flags only permit fixed disabling overrides and the process's own environment.
   const git = policedSimpleGit(repositoryRoot, simpleGitWithProgram(({ binary, allowUnsafeCustomBinary }) => simpleGit({
     ...(binary ? { binary } : {}),
@@ -525,7 +525,8 @@ export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: Si
   for (let index = 0; index < entries.length - 1; index += 2) {
     const scope = entries[index]
     const match = /^filter\.(.+)\.(smudge|process|clean|required)\n/i.exec(entries[index + 1])
-    if (match && ['local', 'worktree'].includes(scope) && match[2].toLowerCase() !== 'required') {
+    const pinned = options.allowPinnedFilters && scope === 'worktree' && match?.[0] === entries[index + 1]
+    if (match && !pinned && ['local', 'worktree'].includes(scope) && match[2].toLowerCase() !== 'required') {
       throw new Error('Safe checkout refuses configured external clean, smudge or process filters.')
     }
     if (match) drivers.add(match[1])

@@ -41,7 +41,9 @@ beforeEach(() => {
   writeFile = vi.fn(async () => undefined)
   ;(window as unknown as { mousse: unknown }).mousse = {
     app: { getFilesRoot: async () => '/repo' },
-    fs: { readFile: async () => 'hello', writeFile, readAsset: async () => null },
+    fs: { readFile: async () => 'hello', readFileInWorkspace: async () => ({
+      content: await window.mousse.fs.readFile('note.txt'), workspaceRoot: '/repo'
+    }), writeFile, readAsset: async () => null },
     threads: { select: async () => undefined }
   }
   window.matchMedia = () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList

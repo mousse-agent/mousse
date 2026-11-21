@@ -515,7 +515,7 @@ export function isReservedInRepositoryFolder(name: string): boolean {
 // A worktree's own registration
 
 /** What {@link worktreeRegistrationOf} found: the repository (by key) that registers the worktree, or why none does. */
-export type WorktreeRegistration = { repositoryId: string; commonDir: string } | { problem: string }
+export type WorktreeRegistration = { repositoryId: string; commonDir: string; adminDir: string } | { problem: string }
 
 /**
  * The repository that registers the checkout at `path` as one of its linked worktrees, proven by the round trip alone:
@@ -535,7 +535,7 @@ export async function worktreeRegistrationOf(path: string): Promise<WorktreeRegi
     if (!same(await realpath(back).catch(() => back), await realpath(dotGit))) return { problem: `The repository's record of ${path} names another folder` }
     const common = await realpath(resolve(admin, (await readFile(join(admin, 'commondir'), 'utf8').catch(() => '../..')).trim()))
     if (!same(dirname(admin), join(common, 'worktrees'))) return { problem: `${path} is not a linked worktree of a repository` }
-    return { repositoryId: repositoryKeyOf(common), commonDir: common }
+    return { repositoryId: repositoryKeyOf(common), commonDir: common, adminDir: admin }
   } catch (error) {
     return { problem: `${path} is not a worktree Mousse can check (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})` }
   }
@@ -554,7 +554,7 @@ export function worktreeRegistrationOfSync(path: string): WorktreeRegistration {
     if (!same(existsSync(back) ? realpathSync(back) : back, realpathSync(dotGit))) return { problem: `The repository's record of ${path} names another folder` }
     const common = realpathSync(resolve(admin, existsSync(join(admin, 'commondir')) ? readFileSync(join(admin, 'commondir'), 'utf8').trim() : '../..'))
     if (!same(dirname(admin), join(common, 'worktrees'))) return { problem: `${path} is not a linked worktree of a repository` }
-    return { repositoryId: repositoryKeyOf(common), commonDir: common }
+    return { repositoryId: repositoryKeyOf(common), commonDir: common, adminDir: admin }
   } catch (error) {
     return { problem: `${path} is not a worktree Mousse can check (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})` }
   }

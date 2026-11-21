@@ -46,7 +46,7 @@ beforeEach(() => {
       getActiveProjectPath: async (threadId?: string | null) => (threadId ? threadFolders[threadId] ?? null : null)
     },
     workspace: { getStatus: async () => ({}) },
-    fs: { readFile: async () => 'hello', writeFile: async () => undefined, readAsset: async () => null, listDir, listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] }) },
+    fs: { readFile: async () => 'hello', readFileInWorkspace: async () => ({ content: 'hello', workspaceRoot: '/repo' }), writeFile: async () => undefined, readAsset: async () => null, listDir, listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] }) },
     threads: { select: async () => undefined }
   }
   window.matchMedia = () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList

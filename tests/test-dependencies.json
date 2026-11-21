@@ -22,6 +22,11 @@
       "run": ["tests/run/**/*.test.ts", "tests/harness/boundary.test.ts", "tests/platformMcpLifecycleDrain.test.ts", "tests/platformIntegrationMcpRuntime.test.ts"]
     },
     {
+      "name": "checkout process fixture runs the workspace provision and disk slot code in another process",
+      "when": ["tests/run/checkoutChild.ts", "src/mms/worktree/checkoutSlots.ts", "src/mms/workspace/checkoutProcess.ts"],
+      "run": ["tests/run/earlyCheckoutPreparation.test.ts"]
+    },
+    {
       "name": "network, bridge, bots, spaces and chats reach the bundled net daemons and crash children",
       "when": ["src/mms/net/**", "src/mms/bridge/**", "src/mms/bots/space/**", "src/mms/spaces/**", "src/mms/chats/**", "src/shared/net/**", "src/shared/bridge/**", "src/shared/bots/space/**", "src/shared/spaces/**", "scripts/net/**"],
       "run": ["tests/net/**/*.test.ts"]

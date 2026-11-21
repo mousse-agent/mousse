@@ -2,6 +2,8 @@ import { resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { forgetRepositoryFacts } from '../git/repositoryFacts'
 import { heartbeatExecutionLease, releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
+import type { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
+import { threadScope } from '../execution/workScope'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 
 /**
@@ -43,7 +45,7 @@ export function startNoteWhenReady(read: Promise<string | undefined> | undefined
  * 'made'), or something else holds the thread ('busy'). The caller has decided the thread is an empty one whose new
  * worktree is chosen. Never throws: a preparation that fails leaves the worktree to be made at Send, as before.
  */
-export function prepareThreadWorkspace(input: { threadId: string; threadDirectory: string; projectPath: string; startNote?: () => Promise<string | undefined> }): PreparationStart {
+export function prepareThreadWorkspace(input: { threadId: string; threadDirectory: string; projectPath: string; startNote?: () => Promise<string | undefined> }, lifecycle?: OwnedWorkBarrier): PreparationStart {
   const key = keyOf(input.threadDirectory)
   if (running.has(key)) return 'running'
   const manager = new ThreadWorkspaceManager(input.threadDirectory)
@@ -53,17 +55,18 @@ export function prepareThreadWorkspace(input: { threadId: string; threadDirector
   const lease = tryAcquireExecutionLease(input.threadDirectory, { source: 'workspace-prepare' })
   if (!lease) return 'busy'
   const startedAt = performance.now()
-  const promise = Promise.resolve().then(async () => {
+  const signal = lifecycle?.signal
+  const work = async () => {
     const heartbeat = setInterval(() => heartbeatExecutionLease(lease), 10_000)
     heartbeat.unref()
     try {
       const current = manager.load()
       if (current && !(current.prepared && current.lifecycle === 'provisioning')) return
-      if (current && !await manager.reconcileFailedProvision(input.projectPath) &&
-          !await manager.resumeInterruptedProvision(input.projectPath, lease)) return
+      if (current && !await manager.reconcileFailedProvision(input.projectPath, signal) &&
+          !await manager.resumeInterruptedProvision(input.projectPath, lease, signal)) return
       if (!manager.load()) {
         const startNote = startNoteWhenReady(input.startNote?.())
-        await manager.provision(input.threadId, 'main', input.projectPath, undefined, lease, undefined, { prepared: { startNote } })
+        await manager.provision(input.threadId, 'main', input.projectPath, signal, lease, undefined, { prepared: { startNote } })
       }
       forgetRepositoryFacts()
       console.info('[worktree-prep] ready', { threadId: input.threadId, ms: Math.round(performance.now() - startedAt) })
@@ -74,7 +77,9 @@ export function prepareThreadWorkspace(input: { threadId: string; threadDirector
       releaseExecutionLeaseHandle(lease)
       running.delete(key)
     }
-  })
+  }
+  const start = () => Promise.resolve().then(work)
+  const promise = lifecycle ? lifecycle.run('workspace-prepare', start, threadScope(input.threadId)) : start()
   running.set(key, promise)
   return 'started'
 }

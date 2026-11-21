@@ -42,6 +42,7 @@ interface OpenFileState {
   kind: FileViewKind
   content: string
   savedContent: string
+  workspaceRoot?: string
   binary: boolean
   loading: boolean
   saveState: SaveState
@@ -76,17 +77,18 @@ function refreshRecovered(file: OpenFileState): Partial<OpenFileState> {
 }
 
 // A file opened while the tree shows a folder outside the thread's is named by its absolute path and read from its own folder.
-function readText(path: string, threadId: string | null): Promise<string> {
+async function readText(path: string, threadId: string | null, expectedRoot?: string): Promise<{ content: string; workspaceRoot?: string }> {
   const at = fileLocation(path)
-  return window.mousse.fs.readFile(at.path, undefined, threadId, at.root)
+  if (threadId && !at.root) return window.mousse.fs.readFileInWorkspace(at.path, threadId, expectedRoot)
+  return { content: await window.mousse.fs.readFile(at.path, undefined, threadId, at.root) }
 }
 function readAssetAt(path: string, threadId: string | null) {
   const at = fileLocation(path)
   return window.mousse.fs.readAsset(at.path, undefined, threadId, at.root)
 }
-function writeText(path: string, content: string, threadId: string | null): Promise<void> {
+function writeText(path: string, content: string, threadId: string | null, expectedRoot?: string): Promise<void> {
   const at = fileLocation(path)
-  return window.mousse.fs.writeFile(at.path, content, undefined, threadId, at.root)
+  return window.mousse.fs.writeFile(at.path, content, undefined, threadId, at.root, expectedRoot)
 }
 
 /** Whether a key press belongs to a text field or the code editor, which keep their own Escape and Ctrl+L. */
@@ -294,11 +296,11 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     queue = new SerializedAutosave({
       read: () => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return readText(path, threadId)
+        return readText(path, threadId, filesRef.current[key]?.workspaceRoot).then((file) => file.content)
       },
       write: (content) => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return writeText(path, content, threadId)
+        return writeText(path, content, threadId, filesRef.current[key]?.workspaceRoot)
       },
       onSaved: (savedContent) => {
         if (!isCurrent()) return
@@ -346,11 +348,11 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         if (useAppStore.getState().profileId !== ownerProfileId) { URL.revokeObjectURL(assetUrl); return }
         patchFile(key, { loading: false, binary: true, assetUrl, assetSignature: assetSignature(asset.data, asset.mimeType), initialLoadFailed: false })
       } else {
-        const content = await readText(path, threadId)
+        const { content, workspaceRoot } = await readText(path, threadId)
         if (loadSequences.current.get(key) !== sequence) return
         const binary = isBinaryContent(content)
         if (useAppStore.getState().profileId !== ownerProfileId) return
-        patchFile(key, { loading: false, binary, content: binary ? '' : content, savedContent: binary ? '' : content, initialLoadFailed: false })
+        patchFile(key, { loading: false, binary, workspaceRoot, content: binary ? '' : content, savedContent: binary ? '' : content, initialLoadFailed: false })
         if (!binary) ensureQueue(key, path, threadId, ownerProfileId)
       }
     } catch (error) {
@@ -411,7 +413,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         }
         if (file.binary) continue
         const savedAtReadStart = file.savedContent
-        void readText(path, file.threadId).then((diskContent) => {
+        void readText(path, file.threadId, file.workspaceRoot).then(({ content: diskContent }) => {
           const current = filesRef.current[key]
           // A save completed after this read began; its result is newer than this poll.
           if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId || current.savedContent !== savedAtReadStart || queues.current.get(key)?.isBusy()) return

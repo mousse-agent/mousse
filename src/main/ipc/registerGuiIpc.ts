@@ -3211,8 +3211,15 @@ export function registerGuiIpc(
   )
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) =>
-      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath })).content
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, binding?: { expectedRoot?: string }) => {
+      const file = await guiMms.request<{ content: string; workspaceRoot?: string }>('files.read', {
+        ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath,
+        ...(binding ? { bindRoot: true, expectedRoot: binding.expectedRoot } : {})
+      })
+      if (!binding) return file.content
+      if (!file.workspaceRoot) throw new Error('The workspace for this file could not be verified.')
+      return file
+    }
   )
   registerHandler(
     'fs:readAsset',
@@ -3242,7 +3249,8 @@ export function registerGuiIpc(
       content: string,
       projectId?: string,
       threadId?: string | null,
-      root?: string
+      root?: string,
+      expectedRoot?: string
     ) => {
       // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
       if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
@@ -3251,6 +3259,7 @@ export function registerGuiIpc(
         ...await browsedRoot(root),
         path: filePath,
         content,
+        ...(expectedRoot ? { expectedRoot } : {}),
         expectedProfileId: guiMms.getWindowBinding()?.profileId
       })
     }
