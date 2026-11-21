@@ -42,7 +42,7 @@ const request = vi.fn(async (method: string, params: { threadId: string; hidden:
 function preload(): unknown {
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = (known: Record<string, unknown> = {}) => new Proxy(known, { get: (target, key: string) => target[key] ?? call(key) })
-  return new Proxy({ platformRequest: group({ request }) } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+  return new Proxy({ platformRequest: group({ request }), git: {} } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
 }
 
 const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode'] as const

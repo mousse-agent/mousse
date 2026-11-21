@@ -1,4 +1,5 @@
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs'
+import { lstat, readlink, realpath } from 'fs/promises'
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { ProfileIdentityError, ProfilePathError } from '../../shared/profiles/errors'
 import { canonicalizeProfileId, isProfileId } from '../../shared/profiles/ids'
@@ -52,11 +53,32 @@ function realLocation(absolute: string, hops: number): string {
   return resolve(absolute)
 }
 
-/**
- * Containment checks compare both sides in this form, so a path is judged by
- * where it lands rather than by how its ancestors are spelled.
- */
-export function canonicalizeAbsolutePath(input: string): string {
+/** The same prefix and dangling-link resolution as realLocation, without blocking the event loop. */
+async function realLocationAsync(absolute: string, hops: number): Promise<string> {
+  const { root } = parse(absolute)
+  const parts = absolute.slice(root.length).split(SEPARATORS).filter(Boolean)
+  for (let depth = parts.length; depth >= 0; depth--) {
+    const real = await realpath(root + parts.slice(0, depth).join(sep)).catch(() => undefined)
+    if (!real) continue
+    if (depth === parts.length) return real
+    const next = join(real, parts[depth])
+    const info = await lstat(next).catch(() => undefined)
+    if (!info?.isSymbolicLink()) {
+      const tail = parts.slice(depth)
+      const joined = join(real, ...tail)
+      return tail.includes('..') ? realLocationAsync(joined, hops) : joined
+    }
+    if (hops >= MAX_LINK_HOPS) {
+      throw new ProfilePathError('Path has too many levels of symbolic links', { path: absolute })
+    }
+    const target = await readlink(next)
+    const base = isAbsolute(target) ? target : real + sep + target
+    return realLocationAsync([base, ...parts.slice(depth + 1)].join(sep), hops + 1)
+  }
+  return resolve(absolute)
+}
+
+function absolutePath(input: string): string {
   if (typeof input !== 'string' || input.trim() === '') {
     throw new ProfilePathError('Path must be a non-empty string')
   }
@@ -67,7 +89,15 @@ export function canonicalizeAbsolutePath(input: string): string {
   if (!isAbsolute(absolute)) {
     throw new ProfilePathError('Path must resolve to an absolute location', { path: input })
   }
-  return realLocation(absolute, 0)
+  return absolute
+}
+
+/**
+ * Containment checks compare both sides in this form, so a path is judged by
+ * where it lands rather than by how its ancestors are spelled.
+ */
+export function canonicalizeAbsolutePath(input: string): string {
+  return realLocation(absolutePath(input), 0)
 }
 
 function isContained(rootPath: string, candidatePath: string): boolean {
@@ -76,7 +106,14 @@ function isContained(rootPath: string, candidatePath: string): boolean {
 }
 
 export function pathKey(path: string): string {
-  const canonical = canonicalizeAbsolutePath(path)
+  return caseNormalizedPath(canonicalizeAbsolutePath(path))
+}
+
+export async function pathKeyAsync(path: string): Promise<string> {
+  return caseNormalizedPath(await realLocationAsync(absolutePath(path), 0))
+}
+
+function caseNormalizedPath(canonical: string): string {
   return process.platform === 'win32' ? canonical.toLowerCase() : canonical
 }
 
@@ -117,11 +154,25 @@ export function joinOwnedPath(root: string, ...segments: string[]): string {
 }
 
 export function assertOwnedPath(root: string, candidate: string, label = 'path'): string {
+  assertNoNul(candidate, label)
+  return assertCanonicalOwnership(canonicalizeAbsolutePath(root), canonicalizeAbsolutePath(candidate), candidate, label)
+}
+
+export async function assertOwnedPathAsync(root: string, candidate: string, label = 'path'): Promise<string> {
+  assertNoNul(candidate, label)
+  // Resolve in sequence so callers running under an I/O limit use one slot.
+  const rootPath = await realLocationAsync(absolutePath(root), 0)
+  const real = await realLocationAsync(absolutePath(candidate), 0)
+  return assertCanonicalOwnership(rootPath, real, candidate, label)
+}
+
+function assertNoNul(candidate: string, label: string): void {
   if (candidate.includes('\0')) {
     throw new ProfilePathError(`${label} contains a NUL byte`, { path: candidate })
   }
-  const rootPath = canonicalizeAbsolutePath(root)
-  const real = canonicalizeAbsolutePath(candidate)
+}
+
+function assertCanonicalOwnership(rootPath: string, real: string, candidate: string, label: string): string {
   if (!isContained(rootPath, real)) {
     throw new ProfilePathError(`${label} is outside the owned root`, { root: rootPath, path: candidate, real })
   }

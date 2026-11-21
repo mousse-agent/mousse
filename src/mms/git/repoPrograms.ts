@@ -189,9 +189,31 @@ interface RepoPrograms {
   emptiedFilters: string[]
   /** Hooks named in config (`hook.<name>.*`), turned off by name. */
   hookNames: string[]
+  /** What the same config listing tells the status read (`RepoConfigFacts`). */
+  facts: RepoConfigFacts
 }
 
-const NONE: RepoPrograms = { overrides: [], emptiedFilters: [], hookNames: [] }
+/**
+ * What a repository's config, as Git parses it (includes, every scope), tells the one-process status read: whether it
+ * names a remote, and whether its work tree is set somewhere else (`core.worktree`, `core.bare`), which the read leaves
+ * to Git.
+ */
+export interface RepoConfigFacts {
+  /** A `remote.<name>.*` setting: `git remote` would list it. */
+  remotes: boolean
+  /** `core.worktree` is set, or `core.bare` is true: the folder's work tree is not simply the one holding `.git`. */
+  workTreeSet: boolean
+}
+
+const NONE: RepoPrograms = { overrides: [], emptiedFilters: [], hookNames: [], facts: { remotes: false, workTreeSet: false } }
+
+function configFacts(entries: readonly ConfigEntry[]): RepoConfigFacts {
+  return {
+    remotes: entries.some((entry) => /^remote\..+\.[^.]+$/.test(entry.key)),
+    // A key with no value is true, as Git reads it; `git init` writes `bare = false` in every repository.
+    workTreeSet: entries.some((entry) => entry.key === 'core.worktree' || (entry.key === 'core.bare' && (entry.value === null || /^(true|yes|on|[1-9]\d*)$/i.test(entry.value.trim()))))
+  }
+}
 
 /** Thrown instead of running Git when the repository configures a program that cannot be turned off. */
 export class RepoProgramError extends Error {}
@@ -262,7 +284,7 @@ export function repoProgramOverrides(entries: readonly ConfigEntry[], record: Re
     for (const entry of entries) if (trusted(entry) && CREDENTIAL_HELPER.test(entry.key) && entry.value !== null) overrides.push(setting(entry.key, entry.value))
   }
   // A hook whose name cannot be written as `-c` is still off: every event is turned off by name.
-  return { overrides, emptiedFilters: [...emptiedFilters], hookNames: [...hookNames].filter((name) => !/[=\n\r\0]/.test(name)) }
+  return { overrides, emptiedFilters: [...emptiedFilters], hookNames: [...hookNames].filter((name) => !/[=\n\r\0]/.test(name)), facts: configFacts(entries) }
 }
 
 interface Cached { watched: Array<readonly [string, string]>; programs: RepoPrograms }
@@ -556,11 +578,11 @@ export async function repoProgramSettingsAsync(cwd: string, options: RepoProgram
  * {@link RepoProgramError} a Git command there would. Called before a run of Git commands whose
  * failures the caller turns into defaults, so a refused repository still shows its reason.
  */
-export async function checkRepoPrograms(cwd: string, options: WaitOptions = {}): Promise<void> {
+export async function checkRepoPrograms(cwd: string, options: WaitOptions = {}): Promise<RepoConfigFacts | undefined> {
   await waitForFolderAccess([resolve(cwd)], options)
   // Inside a hidden store's scope, `guardedGit` runs nothing of the folder's config, so there is nothing to refuse.
-  if (activeHiddenStore(cwd)) return
-  await programsForAsync(cwd, options.signal)
+  if (activeHiddenStore(cwd)) return undefined
+  return (await programsForAsync(cwd, options.signal)).facts
 }
 
 /** `-c` arguments that go before the Git subcommand `args`. */

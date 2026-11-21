@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+import { WORKSPACE_CHANGED_MESSAGE } from '../../shared/types'
 import type { ThreadPullRequestLink } from '../../shared/pullRequests'
 import { pullRequestReadThreadId } from '../components/sideCard/gitSectionLogic'
 import { useThreadPullRequest, type ThreadPullRequestView } from '../stores/pullRequestStore'
@@ -34,6 +36,10 @@ export function useActiveThreadPullRequest(threadId: string | null): ActiveThrea
   // A project-less thread has no folder of its own to show Git state for.
   const path = projectId ? location.key : null
   const git = useGitStatus(path, gitScopeFor(location))
+  // A generation refusal can arrive through any surface's status refresh on either computer.
+  const rebuilt = Boolean(git.error?.includes(WORKSPACE_CHANGED_MESSAGE))
+  const resolveAgain = location.retry
+  useEffect(() => { if (rebuilt) resolveAgain?.() }, [rebuilt, resolveAgain])
   // A thread's own conversation drafts and receives its pull request. A new chat that follows the composer's
   // project pick has no thread of its own yet; it asks about the project.
   const threadProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === threadId)?.projectId ?? null)

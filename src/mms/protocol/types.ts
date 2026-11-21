@@ -508,6 +508,7 @@ export const PROTOCOL_METHODS = [
   'files.search',
   'files.grep',
   'git.status',
+  'git.heads',
   'git.diff',
   'review.files',
   'review.file',
@@ -609,6 +610,7 @@ export type ProtocolEventType =
   | 'threads.touched'
   | 'pullRequests.updated'
   | 'git.selectionChanged'
+  | 'git.headsChanged'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
   | 'thread.backgroundWork'

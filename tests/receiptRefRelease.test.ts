@@ -18,6 +18,9 @@ import { unverifiableThread } from './support/unverifiableThread'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import * as gitProcess from '../src/mms/git/runGitProcess'
 
+// The real-Git setup and exact read-back both start processes, which can be slow on Windows.
+vi.setConfig({ testTimeout: 120_000 })
+
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
 afterEach(() => f.dispose())
@@ -63,6 +66,21 @@ it('retries a crash after CAS deletion without recreating either ref', async () 
   expect(recovered.releasedRefs).toEqual(receipt.retainedRefs)
   expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual([])
 })
+
+it('keeps a release prepared when Git omits a dangling symbolic ref from read-back', async () => {
+  const { workspace, receipt, release } = await fixture()
+  const [before] = receipt.retainedRefs
+  let replaced = false
+  try {
+    const result = await release.release(workspace.worktreePath, { afterGit: () => {
+      git(f.repo, 'symbolic-ref', before!, 'refs/heads/this-branch-does-not-exist')
+      replaced = true
+    } })
+    expect(result.releasedRefs).toEqual([])
+    expect(result.retained).toEqual([{ receiptId: receipt.id, reason: expect.stringContaining('Symbolic') }])
+    expect(new ThreadJournal(f.thread).unsettled().some((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')).toBe(true)
+  } finally { if (replaced) git(f.repo, 'symbolic-ref', '--delete', before!) }
+}, 60_000)
 
 it('refuses changed refs, pending integration and shared/unknown source claims', async () => {
   const { workspace, receipt, release } = await fixture()

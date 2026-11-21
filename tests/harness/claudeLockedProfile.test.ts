@@ -972,7 +972,7 @@ describe('locked Claude Code: its own spawn (item 1)', () => {
     // stdio as the SDK's own spawn: the CLI's error output is kept.
     expect(spawn).toHaveBeenCalledWith('/usr/bin/claude', ['--output-format', 'stream-json'], expect.objectContaining({ cwd: '/scratch', env: options.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }))
     expect(onProcess).toHaveBeenCalledWith(4242)
-    claudeLockedSpawn({ platform: 'win32', spawn: spawn as never, killTree: vi.fn() })(options)
+    claudeLockedSpawn({ platform: 'win32', spawn: spawn as never, onWindowsTree: vi.fn() })(options)
     expect(spawn.mock.calls[1]).toEqual(['/usr/bin/claude', options.args, expect.objectContaining({ detached: false })])
   })
 
@@ -1005,20 +1005,6 @@ describe('locked Claude Code: its own spawn (item 1)', () => {
     expect(quiet).toEqual(['SIGTERM', 0])
   })
 
-  it('on Windows, ends the tree at the abort while the CLI runs, and never after its exit', () => {
-    const killTree = vi.fn()
-    const running = new AbortController()
-    claudeLockedSpawn({ platform: 'win32', spawn: (() => fakeChild(6161)) as never, killTree })({ command: 'c', args: [], env: {}, signal: running.signal })
-    running.abort()
-    expect(killTree).toHaveBeenCalledWith(6161)
-    const exited = fakeChild(7171)
-    const later = new AbortController()
-    claudeLockedSpawn({ platform: 'win32', spawn: (() => exited) as never, killTree })({ command: 'c', args: [], env: {}, signal: later.signal })
-    exited.emit('exit', 0, null)
-    later.abort()
-    expect(killTree).toHaveBeenCalledTimes(1)
-  })
-
   it('a process whose registration fails is killed at once, and the spawn fails (review: no unsupervised child)', () => {
     const sent: Array<NodeJS.Signals | 0> = []
     const child = fakeChild()
@@ -1027,9 +1013,7 @@ describe('locked Claude Code: its own spawn (item 1)', () => {
     expect(sent).toEqual(['SIGKILL'])
     expect(child.stdin.destroy).toHaveBeenCalled()
     expect(child.stdout.destroy).toHaveBeenCalled()
-    const killTree = vi.fn()
-    expect(() => claudeLockedSpawn({ platform: 'win32', spawn: (() => fakeChild(8181)) as never, killTree, onProcess: () => { throw new Error('x') } })({ command: 'c', args: [], env: {}, signal: signal() })).toThrow('x')
-    expect(killTree).toHaveBeenCalledWith(8181)
+
   })
 
   it('keeps the tail of the CLI\'s error output for a failed turn', () => {

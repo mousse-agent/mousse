@@ -1,11 +1,18 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
-// Counts the folder listings and file reads in flight; each takes a moment, so a scan without a
-// limit would have them all open at once.
-const reads = vi.hoisted(() => ({ active: 0, max: 0 }))
+// Keep real filesystem calls in flight long enough to observe overlapping scans.
+const reads = vi.hoisted(() => ({ active: 0, max: 0, syncRealpaths: 0, asyncRealpaths: 0 }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const counted = (fn: typeof actual.realpathSync) => (...args: Parameters<typeof fn>) => {
+    reads.syncRealpaths++
+    return fn(...args)
+  }
+  return { ...actual, realpathSync: Object.assign(counted(actual.realpathSync), { native: counted(actual.realpathSync.native) }) }
+})
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>()
   const counted = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) => async (...args: A): Promise<R> => {
@@ -18,11 +25,23 @@ vi.mock('fs/promises', async (importOriginal) => {
       reads.active--
     }
   }
-  return { ...actual, readdir: counted(actual.readdir as never), readFile: counted(actual.readFile as never) }
+  return {
+    ...actual,
+    readdir: counted(actual.readdir as never),
+    readFile: counted(actual.readFile as never),
+    stat: counted(actual.stat as never),
+    lstat: counted(actual.lstat as never),
+    readlink: counted(actual.readlink),
+    realpath: counted((...args: Parameters<typeof actual.realpath>) => {
+      reads.asyncRealpaths++
+      return actual.realpath(...args)
+    })
+  }
 })
 
 const { SKILL_SCAN_CONCURRENCY, SkillsRegistry } = await import('../src/mms/integrations/skills/SkillsRegistry')
 const { createLegacySingleProfileContext } = await import('../src/mms/integrations/profileContext')
+const { getProjectIdentity } = await import('../src/mms/integrations/nativePaths')
 
 let root: string
 const savedEnv = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
@@ -49,19 +68,43 @@ afterAll(async () => {
 })
 
 describe('Skills scan concurrency', () => {
-  it('keeps folder listings and SKILL.md reads in flight at or under the limit', async () => {
+  it('keeps all scan disk operations, including root probes, within the limit', async () => {
     const registry = new SkillsRegistry(createLegacySingleProfileContext({ profileRoot: join(root, 'profile') }))
     reads.max = 0
-    // Two projects discovered together also share the limit.
-    const [first, second] = await Promise.all([
-      registry.discover({ projectPath: join(root, 'p1') }),
-      registry.discover({ projectPath: join(root, 'p2') })
-    ])
+    const snapshots = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+      registry.discover({ projectPath: join(root, `p${index}`) })
+    ))
     expect(reads.max).toBeLessThanOrEqual(SKILL_SCAN_CONCURRENCY)
     // Still read in parallel, not one at a time.
     expect(reads.max).toBeGreaterThan(1)
-    for (const snapshot of [first, second]) {
+    for (const snapshot of snapshots) {
       expect(snapshot.skills.filter((skill) => skill.name.startsWith('skill-'))).toHaveLength(SKILLS)
     }
+  })
+
+  it('resolves project aliases asynchronously and refuses a linked Skills root outside the project', async () => {
+    const project = join(root, 'project')
+    const alias = join(root, 'alias')
+    const local = join(project, '.mousse', 'skills', 'local-skill')
+    await mkdir(local, { recursive: true })
+    await writeFile(join(local, 'SKILL.md'), '---\nname: local-skill\ndescription: A local skill\n---\nBody.\n')
+    await symlink(project, alias, 'junction')
+    const registry = new SkillsRegistry(createLegacySingleProfileContext({ profileRoot: join(root, 'profile') }))
+    const projectId = getProjectIdentity(project)
+    reads.syncRealpaths = 0
+    reads.asyncRealpaths = 0
+    const found = (await registry.discover({ projectPath: alias })).skills.find((skill) => skill.name === 'local-skill')
+    expect(found?.projectId).toBe(projectId)
+    expect(reads.asyncRealpaths).toBeGreaterThan(0)
+    expect(reads.syncRealpaths).toBe(0)
+
+    await rm(join(project, '.mousse'), { recursive: true })
+    for (const target of ['home', 'missing-target']) {
+      const escaped = join(project, '.mousse')
+      await symlink(join(root, target), escaped, 'junction')
+      await expect(registry.refresh({ projectPath: alias })).rejects.toThrow('outside the owned root')
+      await rm(escaped, { recursive: true })
+    }
+    expect(reads.syncRealpaths).toBe(0)
   })
 })

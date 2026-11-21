@@ -27,7 +27,7 @@ import type {
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { McpRelayRuntime } from '../../shared/integrations'
+import type { McpRelayRuntime, SkillsRegistrySnapshot } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
@@ -315,7 +315,7 @@ export interface HarnessGateway {
   /** The same listing from what is known now, without waiting (synchronous readers). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
   /** Stops the instances' runtimes and running operations. */
-  stop(): void
+  stop(): Promise<void>
 }
 
 /** `HarnessGateway.bind`: the turn's mode, effort and origin, and the caller's part of its policy. */
@@ -580,6 +580,7 @@ export interface TurnAppContext {
    * MCP bearer cannot be issued is refused before the runtime starts, never run without them.
    */
   requiredTools?: readonly string[]
+  skillsSnapshot?: SkillsRegistrySnapshot
   /** The session text and turn preamble, given whether the server and the MCP relay were attached. */
   instructions(mcpAttached: boolean, relayAttached?: boolean): { sessionInstructions: string; turnPreamble: string }
   /**
@@ -898,6 +899,8 @@ export class Harness implements HarnessGateway {
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
+  private readonly runtimeStops = new Set<Promise<void>>()
+  private shutdown?: Promise<void>
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
    * belong to the instance, not to a runtime, so a reconfiguration or a runtime that finished its
@@ -2103,6 +2106,7 @@ export class Harness implements HarnessGateway {
         turnToken: app.turnToken,
         sessionInstructions: texts.sessionInstructions,
         turnPreamble: texts.turnPreamble,
+        ...(app.skillsSnapshot ? { skillsSnapshot: app.skillsSnapshot } : {}),
         ...(binding.policy.tools ? { toolPolicy: binding.policy.tools } : {}),
         userMcp: record.driver.userMcp ?? 'native',
         // `never`: nobody answers, so every permission request is denied without asking.
@@ -2311,22 +2315,15 @@ export class Harness implements HarnessGateway {
     for (const record of this.retired) {
       if (record.active > 0) continue
       this.retired.delete(record)
-      let stopped: void | Promise<void> = undefined
-      try {
-        stopped = record.runtime.stop()
-      } catch (error) {
-        console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
-      }
+      const stopped = this.stopRuntime(record)
       // A removed instance's files wait for its processes to exit.
       const removal = this.removals.get(record.instanceId)
       if (stopped && removal) {
         removal.pending += 1
-        void stopped.catch((error) => console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })).finally(() => {
+        void stopped.then(() => {
           removal.pending -= 1
           this.deleteRemoved()
-        })
-      } else if (stopped) {
-        void stopped.catch(() => {})
+        }, () => undefined)
       }
     }
     this.deleteRemoved()
@@ -2940,7 +2937,7 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       if (record) {
         this.records.delete(instanceId)
-        void Promise.resolve(record.runtime.stop()).catch(() => {})
+        void this.stopRuntime(record)
       }
       throw error
     }
@@ -4165,7 +4162,26 @@ export class Harness implements HarnessGateway {
     return this.options.now?.() ?? Date.now()
   }
 
-  stop(): void {
+  private stopRuntime(record: InstanceRecord): Promise<void> | undefined {
+    let stopping: void | Promise<void>
+    try {
+      stopping = record.runtime.stop()
+    } catch (error) {
+      stopping = Promise.reject(error)
+    }
+    if (!stopping) return undefined
+    this.runtimeStops.add(stopping)
+    void stopping.then(
+      () => this.runtimeStops.delete(stopping),
+      (error: unknown) => {
+        console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
+      }
+    )
+    return stopping
+  }
+
+  stop(): Promise<void> {
+    if (this.shutdown) return this.shutdown
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
@@ -4175,16 +4191,16 @@ export class Harness implements HarnessGateway {
     }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
-    for (const record of [...this.records.values(), ...this.retired]) {
-      try {
-        void Promise.resolve(record.runtime.stop()).catch(() => {})
-      } catch {
-        /* stopping is best effort */
-      }
-    }
+    for (const record of new Set([...this.records.values(), ...this.retired])) void this.stopRuntime(record)
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
+    const stops = [...this.runtimeStops, ...[...this.stopBarriers.values()].flatMap((set) => [...set])]
+    this.shutdown = Promise.allSettled(stops).then((results) => {
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Provider runtimes could not be stopped')
+    })
+    return this.shutdown
   }
 }
 

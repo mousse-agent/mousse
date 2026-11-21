@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto'
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, readFileSync } from 'fs'
 import { dirname, join, relative } from 'path'
 import { ThreadStorageLayout } from './ThreadStorageLayout'
+import { withCopiedUndoClaims } from '../lifecycle/threadUndoClaims'
 
 /**
  * Moves a legacy thread directory into the home-scoped layout on first access.
@@ -44,15 +45,16 @@ export class ThreadStorageMigration {
       if (this.directoryHash(legacyDir) !== this.directoryHash(temporaryDir)) {
         throw new Error('Thread migration verification failed')
       }
-      mkdirSync(dirname(targetDir), { recursive: true })
-      renameSync(temporaryDir, targetDir)
+      return withCopiedUndoClaims(temporaryDir, () => {
+        mkdirSync(dirname(targetDir), { recursive: true })
+        renameSync(temporaryDir, targetDir)
 
-      // Keep the source recoverable rather than deleting it. It is intentionally
-      // retained until a future cleanup policy can safely expire migration trash.
-      const trashDir = this.layout.migrationTrashDir(threadId)
-      mkdirSync(dirname(trashDir), { recursive: true })
-      renameSync(legacyDir, trashDir)
-      return targetDir
+        // Keep the source recoverable until a future cleanup policy can safely expire migration trash.
+        const trashDir = this.layout.migrationTrashDir(threadId)
+        mkdirSync(dirname(trashDir), { recursive: true })
+        renameSync(legacyDir, trashDir)
+        return targetDir
+      })
     } catch {
       rmSync(temporaryDir, { recursive: true, force: true })
       return existsSync(targetDir) ? targetDir : legacyDir

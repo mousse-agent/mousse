@@ -703,7 +703,7 @@ export class StorageCleanupService {
     const shared = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
     if (shared) return { keep: shared, remember: false }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use', remember: false }
-    if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready', remember: true, fingerprint }
+    if (workspace.lifecycle !== 'ready' || workspace.rebuilding) return { keep: 'Workspace is not ready', remember: true, fingerprint }
     let facts: Awaited<ReturnType<StorageCleanupService['inspectCheckout']>>
     try { facts = await this.inspectCheckout(record, workspace) } catch (error) { return { keep: (error as Error).message, remember: false } }
     if ('keep' in facts) return { keep: facts.keep, remember: true, fingerprint }
@@ -898,7 +898,7 @@ export class StorageCleanupService {
     const policy = snapshot.policy
     const workspace = readWorkspaceFile(record.location)
     if (!workspace) return undefined
-    if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready' }
+    if (workspace.lifecycle !== 'ready' || workspace.rebuilding) return { keep: 'Workspace is not ready' }
     const path = workspace.worktreePath
     const offline = await disconnectedWorktreeFolder(path)
     if (offline) return { keep: driveNotConnectedText(offline) }

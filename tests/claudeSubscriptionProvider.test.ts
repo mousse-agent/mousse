@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_AUTH_STATUS_TTL_MS, ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { claudeAccountSubject } from '../src/mms/harness/vendors/claude/accountSubject'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../src/mms/run/EffectOutbox'
@@ -55,11 +56,13 @@ function fixture(
   const questions = new UserQuestionService()
   const runAuth = vi.fn(async () => JSON.stringify({ loggedIn, authMethod: loggedIn ? 'claude.ai' : 'none' }))
   let launch: { binaryPath?: string; args?: string[]; env?: Record<string, string> } = { binaryPath: binary }
-  const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, live: false, usageLimitHoldMs, launchConfig: () => launch, modelCatalog: () => NO_CATALOG, ...dependencies })
+  const openService = () => new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, live: false, usageLimitHoldMs, launchConfig: () => launch, modelCatalog: () => NO_CATALOG, ...dependencies })
   return {
     home,
     binary,
-    service,
+    service: openService(),
+    openService,
+    settingsPath: join(directory, 'settings.json'),
     questions,
     runAuth,
     setLaunch: (next: { args?: string[]; env?: Record<string, string> }) => { launch = { binaryPath: binary, ...next } },
@@ -106,7 +109,65 @@ const chatInput = (cwd: string, permissionMode: 'ask' | 'accept_edits' | 'auto' 
   onText: vi.fn()
 })
 
+function managedDropIn() {
+  const folder = join(process.env.CLAUDE_CONFIG_DIR!, 'policy')
+  const dropIns = join(folder, 'managed-settings.d')
+  mkdirSync(dropIns, { recursive: true })
+  return {
+    accountSubject: (env: NodeJS.ProcessEnv) => claudeAccountSubject(env, { managedFiles: [join(folder, 'managed-settings.json')] }),
+    saveKey: (key: string) => writeFileSync(join(dropIns, '10-credentials.json'), JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
+  }
+}
+
 describe('Claude Subscription native provider', () => {
+  it('hands over a legacy session transcript when managed credentials rotate during turn settings', async () => {
+    const { accountSubject, saveKey } = managedDropIn()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const history = 'transcript from the legacy session'
+    const query = vi.fn(({ options }: { options: Options; prompt: unknown }) => fakeQuery([
+      { ...result, session_id: options.resume ?? 'replacement-session' }
+    ]))
+    const f = fixture(query, true, undefined, undefined, {
+      accountSubject,
+      turnSettings: async () => {
+        entered.resolve()
+        await release.promise
+        return {}
+      }
+    })
+    saveKey('original-fixture-key')
+    writeFileSync(f.settingsPath, JSON.stringify({
+      ...f.settings(),
+      sessions: { thread: { sessionId: 'vendor-session', cwd: f.home, historyKey: createHash('sha256').update(history).digest('hex') } }
+    }))
+    const service = f.openService()
+    try {
+      const send = service.chat({ ...chatInput(f.home), history })
+      void send.catch(() => undefined)
+      await entered.promise
+      saveKey('replacement-fixture-key')
+      release.resolve()
+
+      await send
+      expect(query.mock.calls[0][0].options.resume).toBeUndefined()
+      const { prompt } = query.mock.calls[0][0]
+      const transcript: unknown[] = []
+      for await (const message of prompt as AsyncIterable<unknown>) transcript.push(message)
+      expect(JSON.stringify(transcript)).toContain(history)
+      expect(f.settings().sessions.thread).toMatchObject({
+        sessionId: 'replacement-session',
+        credentialIdentity: expect.any(String)
+      })
+      service.commitConversation('thread', history)
+      await service.chat({ ...chatInput(f.home), history })
+      expect(query.mock.calls[1][0].options.resume).toBe('replacement-session')
+    } finally {
+      release.resolve()
+      await service.stop()
+    }
+  })
+
   it('exposes a subscription choice separate from Anthropic API keys', async () => {
     const { service } = fixture(() => fakeQuery())
     expect(service.loginOption()).toMatchObject({
@@ -307,6 +368,49 @@ describe('Claude Subscription native provider', () => {
     await service.chat({ ...chatInput(home), history: 'history' })
     expect(inputs[2].options.resume).toBe('vendor-session')
   })
+  it.each(['bound', 'legacy'])('/compact falls back for a %s session after managed credentials rotate', async (binding) => {
+    const { accountSubject, saveKey } = managedDropIn()
+    const boundary = { type: 'system', subtype: 'compact_boundary', session_id: 'vendor-session', compact_metadata: { trigger: 'manual', pre_tokens: 1000 } }
+    const query = vi.fn(({ prompt }: { options: Options; prompt: unknown }) =>
+      fakeQuery(prompt === '/compact' ? [boundary, result] : [result]))
+    saveKey('original-fixture-key')
+    const f = fixture(query, true, undefined, undefined, { accountSubject })
+    const history = 'history under the original credential'
+    await f.service.chat(chatInput(f.home))
+    f.service.commitConversation('thread', history)
+    await f.service.stop()
+    const state = f.settings()
+    if (binding === 'legacy') {
+      delete state.sessions.thread.credentialIdentity
+      writeFileSync(f.settingsPath, JSON.stringify(state))
+    }
+    const service = f.openService()
+    try {
+      await service.status()
+      saveKey('replacement-fixture-key')
+      expect(await service.compactConversation('thread', history, undefined, undefined, new AbortController().signal)).toBe(false)
+      expect(query.mock.calls.filter(([input]) => input.prompt === '/compact')).toEqual([])
+    } finally {
+      await service.stop()
+    }
+  })
+
+  it('keeps launch arguments from selecting a native session for Send or /compact', async () => {
+    const query = vi.fn((_input: { options: Options }) => fakeQuery([{ ...result, session_id: 'bound-session' }]))
+    const f = fixture(query)
+    f.setLaunch({ args: ['--resume', 'another-session', '--continue', '--from-pr=123', '--session-id', 'another-session', '--verbose'] })
+    const history = 'bound history'
+    await f.service.chat(chatInput(f.home))
+    f.service.commitConversation('thread', history)
+    await f.service.compactConversation('thread', history, undefined, undefined, new AbortController().signal)
+
+    expect(query.mock.calls.map(([input]) => input.options.resume)).toEqual([undefined, 'bound-session'])
+    expect(query.mock.calls.map(([input]) => input.options.extraArgs)).toEqual([
+      { 'thinking-display': 'summarized', verbose: null },
+      { verbose: null }
+    ])
+  })
+
   it('/compact stopped during the sign-in check never runs, and the session stays resumable', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
     const signedIn = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
@@ -429,18 +533,19 @@ describe('Claude Subscription native provider', () => {
     })
     await service.chat({ ...chatInput(home), instanceId: 'claude' })
     expect(settings().sessions.thread).toMatchObject({ sessionId: 'vendor-session', instanceId: 'claude' })
+    const { credentialIdentity } = settings().sessions.thread
     service.commitConversation('thread', 'history')
     // Another instance never resumes this instance's session.
     await service.chat({ ...chatInput(home), instanceId: 'claude-work', history: 'history' })
     expect(inputs[1].options.resume).toBeUndefined()
     expect(settings().sessions.thread.instanceId).toBe('claude-work')
 
-    // A session saved before instances existed belongs to the default instance.
+    // A credential-bound session with no instance field belongs to the default instance.
     const directory = join(home, 'providers', 'claude-subscription')
     const legacy = (session: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
       writeFileSync(join(directory, 'settings.json'), JSON.stringify({ ...settings(), ...extra, sessions: { thread: session } }))
     const key = createHash('sha256').update('history').digest('hex')
-    legacy({ sessionId: 'old-session', cwd: home, model: 'sonnet', historyKey: key })
+    legacy({ sessionId: 'old-session', cwd: home, model: 'sonnet', historyKey: key, credentialIdentity })
     const reloaded = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       launchConfig: () => ({ binaryPath: join(home, 'claude') }),
       live: false,
@@ -451,7 +556,7 @@ describe('Claude Subscription native provider', () => {
     expect(inputs[2].options.resume).toBe('old-session')
 
     // A session from an older separate (profile-private) sign-in is never resumed.
-    legacy({ sessionId: 'isolated-session', cwd: home, model: 'sonnet', historyKey: key, instanceId: 'claude' }, { loginPolicy: 'isolated' })
+    legacy({ sessionId: 'isolated-session', cwd: home, model: 'sonnet', historyKey: key, instanceId: 'claude', credentialIdentity }, { loginPolicy: 'isolated' })
     const switched = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       launchConfig: () => ({ binaryPath: join(home, 'claude') }),
       live: false,
