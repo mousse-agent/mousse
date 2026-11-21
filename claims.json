@@ -75,6 +75,21 @@
       "expiresAt": "2026-11-20T13:20:04.637Z"
     },
     {
+      "task": "faster-thread-titles",
+      "session": "Animatrix-2f9e7a",
+      "machine": "Animatrix",
+      "branch": "faster-thread-titles",
+      "paths": [
+        "src/mms/orchestrator/threadNaming.ts",
+        "src/mms/workspace/branchNaming.ts",
+        "src/mms/harness/vendors/claude/oneShotSpare.ts",
+        "src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService.ts",
+        "src/mms/harness/gateway.ts"
+      ],
+      "claimedAt": "2026-11-21T05:55:00.275Z",
+      "expiresAt": "2026-11-21T07:55:00.275Z"
+    },
+    {
       "task": "fix-acp-out-of-turn-requests",
       "session": "agibook-9bfa6e",
       "machine": "agibook",
