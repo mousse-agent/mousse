@@ -54,8 +54,8 @@ export class ReceiptRefReleaseService {
       // checkouts and project folders they name are read just before, without blocking (`OwnershipFacts`); a record
       // that names one those facts do not cover fails closed.
       let facts = new OwnershipFacts()
-      const readFacts = async (): Promise<void> => {
-        facts = new OwnershipFacts()
+      const readFacts = async (admission = false): Promise<void> => {
+        facts = new OwnershipFacts(admission)
         await buildResourceInventory(this.store, task, {}, facts)
         // Only the facts are wanted here: a refusal is made again, from the records, by `ownership`.
         await getExternalResourceClaims(this.store, new Set([task.taskId]), facts).catch(() => undefined)
@@ -93,7 +93,7 @@ export class ReceiptRefReleaseService {
           const release = `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`
           // Checked (by the central Git check) before ownership is read, so that from there to the start of the transaction nothing waits.
           const argv = present.length ? await withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: release }) : undefined
-          await readFacts()
+          await readFacts(true)
           const { inventory, external } = ownership()
           for (const ref of intent.refs) {
             const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)

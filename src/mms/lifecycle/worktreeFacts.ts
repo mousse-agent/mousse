@@ -81,20 +81,22 @@ const EXTENSION_GIT_MINOR = new Map([['worktreeconfig', 20], ['objectformat', 29
 function repositoryConfig(text: string): { objectFormat: 'sha1' | 'sha256'; extensionGitMinor: number } | undefined {
   const values = plainConfig(text)
   if (!values) return undefined
+  const versions = values.get('core.repositoryformatversion')
+  if (versions && (versions.length !== 1 || !['0', '1'].includes(versions[0]!))) return undefined
   let objectFormat: 'sha1' | 'sha256' = 'sha1'
   let extensionGitMinor = 0
   for (const [key, list] of values) {
     const [section, name] = [key.slice(0, key.lastIndexOf('.')), key.slice(key.lastIndexOf('.') + 1)]
     if (name === 'worktree') return undefined
     if (key === 'core.bare' && !list.every((value) => FALSE_WORDS.has(value.toLowerCase()))) return undefined
-    if (key === 'core.repositoryformatversion' && !list.every((value) => value === '0' || value === '1')) return undefined
     if (section === 'extensions') {
       const minimum = EXTENSION_GIT_MINOR.get(name)
       if (!minimum) return undefined
       extensionGitMinor = Math.max(extensionGitMinor, minimum)
+      if (name !== 'worktreeconfig' && versions?.[0] !== '1') return undefined
       if (name === 'objectformat') {
-        if (list.length !== 1 || !['sha1', 'sha256'].includes(list[0]!.toLowerCase())) return undefined
-        objectFormat = list[0]!.toLowerCase() as 'sha1' | 'sha256'
+        if (list.length !== 1 || !['sha1', 'sha256'].includes(list[0]!)) return undefined
+        objectFormat = list[0]! as 'sha1' | 'sha256'
       } else if (!list.every((value) => BOOLEAN_WORDS.has(value.toLowerCase()))) return undefined
     }
     if (section.startsWith('extensions ')) return undefined
@@ -185,7 +187,7 @@ async function ownedByMeAsync(paths: readonly string[]): Promise<Set<string>> {
   const owned = new Set<string>()
   if (!paths.length) return owned
   if (process.platform !== 'win32') {
-    const uid = process.getuid?.()
+    const uid = process.geteuid?.()
     if (uid === undefined) return owned
     await Promise.all(paths.map(async (path) => { try { if ((await lstat(path)).uid === uid) owned.add(path) } catch { /* unreadable: not proven */ } }))
     return owned
@@ -217,8 +219,12 @@ async function ownedByMeAsync(paths: readonly string[]): Promise<Set<string>> {
 export async function trustedCheckoutsAsync(checkouts: ReadonlyArray<{ path: string; gitDir: string }>): Promise<Set<string>> {
   const trusted = new Set<string>()
   if (!checkouts.length || process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER !== undefined) return trusted
-  const owned = await ownedByMeAsync(checkouts.flatMap(ownedPaths))
-  for (const checkout of checkouts) {
+  // Git for Windows defers trust on UNC paths before checking the owner's SID.
+  const local = process.platform === 'win32'
+    ? checkouts.filter((checkout) => !ownedPaths(checkout).some((path) => /^[\\/]{2}/.test(path)))
+    : checkouts
+  const owned = await ownedByMeAsync(local.flatMap(ownedPaths))
+  for (const checkout of local) {
     if (ownedPaths(checkout).every((path) => owned.has(path))) trusted.add(checkout.path)
   }
   return trusted

@@ -1,5 +1,5 @@
 /**
- * Ownership checks read a worktree's facts without starting Git when the worktree has exactly the layout
+ * Ownership checks read a worktree's layout from its files when the worktree has exactly the layout
  * `git worktree add` writes and its owner is one Git trusts, and read pinned refs per repository instead of per ref.
  * These answers decide whether another thread's worktree is verified (its claims are exact) or unverified (it holds
  * its whole repository), so the file reader may only ever be more careful than Git: whatever Git refuses, or might,
@@ -15,7 +15,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { verifyWorktreeFact } from '../src/mms/lifecycle/ResourceInventory'
 import { getExternalResourceClaims, unverifiedOwnerOver } from '../src/mms/lifecycle/LifecycleClaims'
-import { standardLinkedWorktreeAsync, verifyPinsAsync } from '../src/mms/lifecycle/worktreeFacts'
+import { standardLinkedWorktreeAsync, trustedCheckoutsAsync, verifyPinsAsync } from '../src/mms/lifecycle/worktreeFacts'
 import type { WorktreeReconstructionManifest } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { unverifiableThread } from './support/unverifiableThread'
 import * as gitPrograms from '../src/mms/git/repoPrograms'
@@ -95,6 +95,9 @@ const LAYOUTS: Record<string, (path: string, main: string, root: string) => void
   'core.bare in config.worktree': (path, main) => { git(main, 'config', 'extensions.worktreeConfig', 'true'); writeFileSync(join(gitDirOf(path), 'config.worktree'), '[core]\n\tbare = true\n') },
   'core.worktree in config.worktree': (path, main, root) => { git(main, 'config', 'extensions.worktreeConfig', 'true'); mkdirSync(join(root, 'elsewhere'), { recursive: true }); writeFileSync(join(gitDirOf(path), 'config.worktree'), `[core]\n\tworktree = ${join(root, 'elsewhere').replace(/\\/g, '/')}\n`) },
   'repositoryformatversion 2': (_path, main) => git(main, 'config', 'core.repositoryformatversion', '2'),
+  'uppercase object format': (_path, main) => { git(main, 'config', 'core.repositoryformatversion', '1'); git(main, 'config', 'extensions.objectFormat', 'SHA1') },
+  'version zero with object format': (_path, main) => { git(main, 'config', 'core.repositoryformatversion', '0'); git(main, 'config', 'extensions.objectFormat', 'sha1') },
+  'version zero with relative worktrees': (_path, main) => { git(main, 'config', 'core.repositoryformatversion', '0'); git(main, 'config', 'extensions.relativeWorktrees', 'true') },
   'unknown extension': (_path, main) => { git(main, 'config', 'core.repositoryformatversion', '1'); git(main, 'config', 'extensions.noSuchExtension', 'true') },
   'include in the repository config': (_path, main, root) => { writeFileSync(join(root, 'extra.gitconfig'), '[user]\n\tname = Included\n'); git(main, 'config', 'include.path', join(root, 'extra.gitconfig').replace(/\\/g, '/')) },
   'admin folder is a junction': (path) => { const gitDir = gitDirOf(path); renameSync(gitDir, `${gitDir}-real`); link(`${gitDir}-real`, gitDir) },
@@ -102,7 +105,7 @@ const LAYOUTS: Record<string, (path: string, main: string, root: string) => void
   'repository moved, link left behind': (_path, main) => { renameSync(main, `${main}-moved`); link(`${main}-moved`, main) }
 }
 const gitDirOf = (path: string): string => readFileSync(join(path, '.git'), 'utf8').trim().slice('gitdir: '.length)
-/** Layouts the reader may answer without Git; every other one must go to Git. */
+/** Layouts that can reuse Mousse's repository safety check without asking Git about layout or registration. */
 const READER_ANSWERS = new Set(['plain', 'locked'])
 
 it('gives Git’s answer for every layout, without Git only for the standard one', async () => {
@@ -117,6 +120,7 @@ it('gives Git’s answer for every layout, without Git only for the standard one
     git(repo.main, 'worktree', 'add', '-q', ...(name === 'relative paths' ? ['--relative-paths'] : []), '-b', 'wt', path)
     apply(path, repo.main, root)
     const oracle = gitVerifies(path, id)
+    if (READER_ANSWERS.has(name)) await gitPrograms.checkRepoPrograms(path)
     const { value, starts } = await gitStarts(root, () => verifyWorktreeFact(store, path, undefined, id))
     expect({ name, verified: value === undefined }).toEqual({ name, verified: oracle })
     expect({ name, git: starts > 0 }).toEqual({ name, git: !READER_ANSWERS.has(name) })
@@ -139,7 +143,7 @@ it('the hold at the delete decision is Git’s answer for each layout Git may re
   const home = join(root, 'home')
   const store = new ResourceLifecycleStore({ profileId: '11111111-1111-4111-8111-111111111111', profileHome: home })
   const rows: Array<{ name: string; repositoryId: string; oracle: boolean }> = []
-  for (const name of ['plain', 'malformed HEAD', 'core.bare in config.worktree', 'core.worktree in config.worktree', 'repositoryformatversion 2', 'unknown extension', 'admin folder is a junction']) {
+  for (const name of ['plain', 'malformed HEAD', 'core.bare in config.worktree', 'core.worktree in config.worktree', 'repositoryformatversion 2', 'uppercase object format', 'version zero with object format', 'version zero with relative worktrees', 'unknown extension', 'admin folder is a junction']) {
     const repo = join(root, `repo-${rows.length}`)
     const peer = unverifiableThread(store, { id: `peer-${rows.length}`, name: 'Fix prices', repo, how: 'intact' })
     LAYOUTS[name]!(peer.worktree, repo, root)
@@ -180,6 +184,37 @@ it('Git checks the checkout itself when only safe.directory can trust it', async
   expect(trusted.starts).toBeGreaterThan(0)
   writeFileSync(config, '[safe]\n\tdirectory = *\n\tdirectory =\n')
   expect(await verifyWorktreeFact(store, path, undefined, id)).toBeDefined()
+})
+
+it('holds a repository when a peer has a refused per-worktree Git setting', async () => {
+  const root = tempRoot()
+  const store = new ResourceLifecycleStore({ profileId: '11111111-1111-4111-8111-111111111111', profileHome: join(root, 'home') })
+  const repo = join(root, 'repo')
+  const peer = unverifiableThread(store, { id: 'peer', name: 'Peer', repo, how: 'intact' })
+  await gitPrograms.checkRepoPrograms(peer.worktree)
+  git(repo, 'config', 'extensions.worktreeConfig', 'true')
+  git(peer.worktree, 'config', '--worktree', 'core.gitProxy', 'forbidden-proxy')
+  expect(gitVerifies(peer.worktree, peer.repositoryId)).toBe(true)
+  const claims = await getExternalResourceClaims(store, new Set())
+  expect(unverifiedOwnerOver(claims, { repositoryIds: [peer.repositoryId] })?.taskId).toBe('peer')
+})
+
+it.skipIf(process.platform !== 'win32')('defers trust on a Windows UNC path to Git', async () => {
+  const root = tempRoot()
+  const repo = repository(root, 'repo')
+  const path = join(root, 'linked')
+  git(repo.main, 'worktree', 'add', '-q', '-b', 'linked', path)
+  const unc = '\\\\localhost\\' + path.replace(':', '$')
+  expect(await trustedCheckoutsAsync([{ path: unc, gitDir: gitDirOf(path) }])).toEqual(new Set())
+})
+
+it.skipIf(process.platform === 'win32')('uses the effective owner of a real linked worktree', async () => {
+  const root = tempRoot()
+  const repo = repository(root, 'repo')
+  const path = join(root, 'linked')
+  git(repo.main, 'worktree', 'add', '-q', '-b', 'linked', path)
+  vi.spyOn(process, 'getuid').mockReturnValue(process.geteuid!() + 1)
+  expect(await trustedCheckoutsAsync([{ path, gitDir: gitDirOf(path) }])).toContain(path)
 })
 
 /** A manifest as retirement writes it, with only the fields the pin check reads. */

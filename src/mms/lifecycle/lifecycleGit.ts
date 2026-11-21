@@ -6,13 +6,14 @@ import { gitRunError, runGitProcess } from '../git/runGitProcess'
 /**
  * Git for lifecycle work, without blocking the daemon: it waits until the folder's volume answers, runs the central
  * check, and the command with a 30-second limit. A failure carries Git's `status`, `stdout` and `stderr`.
- * `beforeStart` runs synchronously right before Git starts, after every wait: a check that must hold when a destructive
- * command begins goes there, so nothing is awaited between it and the command.
+ * `beforeStart` runs after Git preparation. It can return a promise for a final synchronous check,
+ * which runs immediately before the command starts.
  */
-export async function lifecycleGitAsync(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv, beforeStart?: () => void): Promise<string> {
+export async function lifecycleGitAsync(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv, beforeStart?: () => void | Promise<() => void>): Promise<string> {
   const argv = await withoutRepoProgramsAsync(cwd, args, { stdin: input, env })
   const runEnv = repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd), ...env })
-  beforeStart?.()
+  const admission = beforeStart?.()
+  if (admission) (await admission)()
   const ran = await runGitProcess(argv, { cwd, input, env: runEnv, timeout: 30_000, maxBuffer })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trimEnd()

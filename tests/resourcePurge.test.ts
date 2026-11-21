@@ -16,6 +16,7 @@ import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
 import { unverifiableThread } from './support/unverifiableThread'
 import { canonicalPathAsync } from '../src/mms/lifecycle/canonicalPath'
+import * as gitPrograms from '../src/mms/git/repoPrograms'
 import { OwnershipFacts } from '../src/mms/lifecycle/ResourceInventory'
 
 const roots: string[] = []
@@ -53,6 +54,38 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
 })
+test.each(['peer HEAD changed', 'sibling lock is a directory'])('keeps the ref when %s during Git preparation', async (failure) => {
+  const f = fixture({ git: true })
+  const peer = unverifiableThread(f.store, { id: 'peer', name: 'Peer', repo: f.repo, how: 'intact' })
+  const sibling = join(f.root, 'unrelated-checkout')
+  git(f.repo, ['worktree', 'add', '-b', 'unrelated', sibling])
+  const adminOf = (path: string) => readFileSync(join(path, '.git'), 'utf8').trim().slice('gitdir: '.length)
+  const retained = 'refs/mousse/threads/task/main'
+  const sha = git(f.repo, ['rev-parse', retained])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.items.some((item) => item.kind === 'ref' && item.identity === retained)).toBe(true)
+  const prepare = gitPrograms.withoutRepoProgramsAsync
+  let changed = false
+  vi.spyOn(gitPrograms, 'withoutRepoProgramsAsync').mockImplementation(async (cwd, args, options) => {
+    const argv = await prepare(cwd, args, options)
+    if (!changed && args[0] === 'update-ref' && options?.stdin?.includes(retained)) {
+      changed = true
+      if (failure === 'peer HEAD changed') {
+        writeFileSync(join(adminOf(peer.worktree), 'HEAD'), 'not a HEAD\n')
+        expect(() => git(peer.worktree, ['rev-parse', '--show-toplevel'])).toThrow()
+      } else {
+        mkdirSync(join(adminOf(sibling), 'locked'))
+        expect(() => git(f.repo, ['worktree', 'list', '--porcelain', '-z'])).toThrow()
+      }
+    }
+    return argv
+  })
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow()
+  expect(changed).toBe(true)
+  expect(git(f.repo, ['rev-parse', retained])).toBe(sha)
+}, 120_000)
+
 /** What a worktree thread's delete must leave: the folder with its files as they are, its branch, and Mousse's refs. */
 function expectWorkKept(f: ReturnType<typeof fixture>) {
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')

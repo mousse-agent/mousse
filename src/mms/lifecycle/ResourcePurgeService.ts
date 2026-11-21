@@ -437,9 +437,8 @@ export class ResourcePurgeService {
    * is awaited between that check and the step it guards. A record naming a checkout not read here fails closed.
    */
   private async peersCheck(ownedIds: Set<string>): Promise<() => ReturnType<typeof getExternalResourceClaimsFromFacts>> {
-    const facts = new OwnershipFacts()
-    // Only the facts are wanted: a refusal is made again, from the records, by the returned check.
-    await getExternalResourceClaims(this.store, ownedIds, facts).catch(() => undefined)
+    const facts = new OwnershipFacts(true)
+    await getExternalResourceClaims(this.store, ownedIds, facts)
     return () => getExternalResourceClaimsFromFacts(this.store, ownedIds, facts)
   }
   /**
@@ -885,19 +884,20 @@ export class ResourcePurgeService {
       })
       return
     }
-    if (item.kind === 'path') {
-      if (!await present(item.identity)) return
-      // Peer claims are read without blocking, then checked again from the records right before each entry is removed.
+    const readUnclaimed = async (): Promise<() => void> => {
       const target = await this.claimTarget(item)
       const claims = await this.peersCheck(ownedIds)
-      const unclaimed = (): void => {
+      return () => {
         assertReservation()
         const current = claims()
-        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
+        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(item.kind === 'path' ? `New shared owner retains ${item.identity}` : 'A new source claim retains the resource')
         const unverified = unverifiedOwnerOver(current, target)
         if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
       }
-      await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge', false, unclaimed)
+    }
+    if (item.kind === 'path') {
+      if (!await present(item.identity)) return
+      await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge', false, readUnclaimed)
       return
     }
     const commonDir = item.commonDir!
@@ -912,33 +912,21 @@ export class ResourcePurgeService {
     const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
     try {
       assertReservation()
-      // Re-checked right before each change below, with nothing awaited in between (`peersCheck`).
-      const target = await this.claimTarget(item)
-      const claims = await this.peersCheck(ownedIds)
-      const unclaimed = (): void => {
-        assertReservation()
-        const current = claims()
-        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error('A new source claim retains the resource')
-        const unverified = unverifiedOwnerOver(current, target)
-        if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
-      }
-      unclaimed()
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
-          await this.removeDiscarded(item, commonDir, unclaimed, onDiscardCleared)
+          await this.removeDiscarded(item, commonDir, readUnclaimed, onDiscardCleared)
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
-        unclaimed()
         // Checked again right before the checkout moves (or Git deletes it from the trash), with nothing awaited in between.
-        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: unclaimed })
+        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: readUnclaimed })
       } else {
         const current = await readDirectLifecycleRefAsync(commonDir, item.identity)
         if (!current) return
         if (current !== item.expectedValue) throw new Error('Owned ref changed after purge preview')
         const input = `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`
         // The central check runs first, then the ownership check right before the transaction starts, with nothing awaited in between.
-        const remove = () => lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
+        const remove = () => lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, readUnclaimed)
         await (item.recordedBranch ? withOwnedBranches([item.identity.slice('refs/heads/'.length)], remove) : remove())
       }
     } finally { lease.release() }
@@ -952,7 +940,7 @@ export class ResourcePurgeService {
    * and the reason names it. Git is run in the folder only while its `.git` leads to this repository's registration of it;
    * without one Git would find the repository of a folder above.
    */
-  private async removeDiscarded(item: LifecyclePurgeItem, commonDir: string, unclaimed: () => void, onDiscardCleared: () => unknown): Promise<void> {
+  private async removeDiscarded(item: LifecyclePurgeItem, commonDir: string, readUnclaimed: () => Promise<() => void>, onDiscardCleared: () => unknown): Promise<void> {
     const folder = item.identity
     const changed = (): Error => purgeStopped(`the worktree at ${folder} changed (its folder, branch or commit) since the delete was reviewed. It was kept.`)
     const lostLink = (): Error => purgeStopped(`the worktree at ${folder} lost its link to its repository (.git) before its files were cleared. It was kept.`)
@@ -977,7 +965,7 @@ export class ResourcePurgeService {
       if (!registration) return
       // Its reviewed files were never cleared: something else moved or deleted the worktree, and Git's record of it stays.
       if (item.discardState === 'pending') throw purgeStopped(`the worktree at ${folder} was moved or deleted by something else, and Git still lists it. It was kept in Git's list of worktrees.`)
-      return await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      return await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
     }
     const dotGit = join(folder, '.git')
     if (!sameRoot(stat)) {
@@ -987,6 +975,7 @@ export class ResourcePurgeService {
       const registration = await registrationOf(commonDir, folder)
       unlocked(registration)
       if ((await filesIn(folder)).length) throw writtenSince()
+      const unclaimed = await readUnclaimed()
       unclaimed()
       unlocked(registration)
       const now = lstatSync(folder)
@@ -995,7 +984,7 @@ export class ResourcePurgeService {
         if (['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw writtenSince()
         throw error
       }
-      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
       return
     }
     const linkInfo = await lstat(dotGit).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
@@ -1007,6 +996,7 @@ export class ResourcePurgeService {
       if (files.length) throw purgeStopped(savedText(files))
       const registration = await registrationOf(commonDir, folder)
       unlocked(registration)
+      const unclaimed = await readUnclaimed()
       unclaimed()
       unlocked(registration)
       if (!sameRoot(lstatSync(folder))) throw changed()
@@ -1014,7 +1004,7 @@ export class ResourcePurgeService {
         if (!['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
         throw kept(await filesIn(folder))
       }
-      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
       return
     }
     if (!linkInfo.isFile() || linkInfo.size > 4096) throw changed()
@@ -1043,12 +1033,13 @@ export class ResourcePurgeService {
         const files = paths.filter(Boolean)
         return files.length ? purgeStopped(savedText(files)) : purgeStopped(`the worktree folder ${folder} changed after the delete began. It was kept.`)
       }
-      await this.removeFrozen(folder, item.content!, folder, undefined, named, true, () => { unclaimed(); unlocked(registration) })
+      await this.removeFrozen(folder, item.content!, folder, undefined, named, true, async () => { const unclaimed = await readUnclaimed(); return () => { unclaimed(); unlocked(registration) } })
       onDiscardCleared()
     }
     // Right after the reviewed files went, the checkout holds only its `.git`: anything else was written since, and is kept.
     const files = await filesIn(folder)
     if (files.length) throw purgeStopped(savedText(files))
+    const unclaimed = await readUnclaimed()
     // From here to the removals nothing is awaited.
     unclaimed()
     unlocked(registration)
@@ -1077,20 +1068,23 @@ export class ResourcePurgeService {
       }
     }
     if (landed) throw kept(await filesIn(folder))
-    await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+    await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
   }
   /** Git unregisters the deleted checkout. A folder at that path again would be someone's new files: it is kept, and so is the registration. */
-  private async unregisterDiscarded(registration: WorktreeRegistration, folder: string, commonDir: string, unclaimed: () => void): Promise<void> {
+  private async unregisterDiscarded(registration: WorktreeRegistration, folder: string, commonDir: string, readUnclaimed: () => Promise<() => void>): Promise<void> {
     const lockedNow = (): void => {
       const locked = lockReasonSync(registration.adminDir)
       if (locked !== undefined) throw purgeStopped(lockedText(locked, folder))
     }
     lockedNow()
     // The path as Git recorded it: Git matches it whatever is on disk, so this works with the folder's parent gone too.
-    await lifecycleGitAsync(commonDir, ['worktree', 'remove', registration.path], undefined, undefined, undefined, () => {
-      unclaimed()
-      lockedNow()
-      if (existsSync(folder)) throw purgeStopped(`files were written at ${folder} after its worktree was deleted. They were kept.`)
+    await lifecycleGitAsync(commonDir, ['worktree', 'remove', registration.path], undefined, undefined, undefined, async () => {
+      const unclaimed = await readUnclaimed()
+      return () => {
+        unclaimed()
+        lockedNow()
+        if (existsSync(folder)) throw purgeStopped(`files were written at ${folder} after its worktree was deleted. They were kept.`)
+      }
     })
     if (await registrationOf(commonDir, folder)) throw new Error('Git still lists the deleted worktree')
   }
@@ -1103,7 +1097,7 @@ export class ResourcePurgeService {
    * write since its bytes were checked refuses it and nothing unreviewed is unlinked. Never follows a link or removes an
    * unreviewed subtree. `rootIdentity`, when given, is checked before every removal too. The entries are under the Mousse home.
    */
-  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string | ((paths: string[]) => Error), skipRootGit = false, beforeEach?: () => void): Promise<void> {
+  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string | ((paths: string[]) => Error), skipRootGit = false, prepareRemoval?: () => Promise<() => void>): Promise<void> {
     if (frozenRoot) {
       await assertLifecyclePathAsync(owner, root)
       if (rootIdentity(await lstat(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced')
@@ -1117,11 +1111,13 @@ export class ResourcePurgeService {
       const files = differ.filter((entry) => entry.kind !== 'directory')
       throw changed((files.length ? files : differ).map((entry) => entry.path))
     }
+    let beforeEach: (() => void) | undefined
     for (const entry of [...current].reverse()) {
       if (skipRootGit && !entry.path) continue
       const path = join(root, entry.path)
       await assertLifecyclePathAsync(owner, dirname(path))
       const proof = await proveFrozenContentEntryAsync(root, entry)
+      if (prepareRemoval && !beforeEach) beforeEach = await prepareRemoval()
       // From here to the removal nothing is awaited.
       beforeEach?.()
       assertLifecyclePath(owner, dirname(path))

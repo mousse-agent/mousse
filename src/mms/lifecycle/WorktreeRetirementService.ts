@@ -526,11 +526,9 @@ export class WorktreeRetirementService {
   async retire(manifestPath: string, options: {
     purging?: boolean
     /**
-     * The caller's own checks, run synchronously right before the worktree moves (or, for a purge of one already in the
-     * trash, right before Git deletes it), after the ownership and claims checks and with nothing awaited in between. It
-     * refuses by throwing; nothing has moved then.
+     * The caller can gather fresh evidence, then return a synchronous admission check to run just before a move or delete.
      */
-    beforeMove?: () => void
+    beforeMove?: () => void | Promise<() => void>
   } = {}): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
     // On a drive that is not connected nothing moves and nothing is taken for gone; it waits for the drive.
@@ -546,9 +544,12 @@ export class WorktreeRetirementService {
       // Ownership is checked again right before each removal starts.
       if (options.purging && manifest.trashPath) {
         const lease = await this.readRepositoryLease()
-        const owned = (): void => {
-          this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
-          options.beforeMove?.()
+        const owned = async (): Promise<() => void> => {
+          const admit = await options.beforeMove?.()
+          return () => {
+            this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
+            admit?.()
+          }
         }
         if (manifest.deleting && await exists(manifest.deleting.path)) await this.removeConfirmed(manifest.deleting.path, owned)
         if (await exists(manifest.trashPath)) await this.removeTrashed(manifest, owned)
@@ -590,10 +591,11 @@ export class WorktreeRetirementService {
     // Right before the move, with nothing awaited between these checks and its start: the checkouts other records name
     // are read again now, then the leases, the reservation, the source and every claim are checked from the records, and
     // last the caller's own checks run. A claim on a checkout not read here fails closed.
-    const facts = new OwnershipFacts()
-    // Only the facts are wanted: a refusal is made again, from the records, by the check below.
-    await getExternalResourceClaims(this.store, excludedNow(), facts).catch(() => undefined)
     const lease = await this.readRepositoryLease()
+    const facts = new OwnershipFacts(true)
+    const prepare = options.beforeMove?.()
+    const admit = prepare ? await prepare : undefined
+    await getExternalResourceClaims(this.store, excludedNow(), facts)
     this.store.withGate(manifest.taskId, () => {
       this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease)
       this.verifySource(manifest, options.purging)
@@ -601,7 +603,7 @@ export class WorktreeRetirementService {
       const late = shares(getExternalResourceClaimsFromFacts(this.store, current, facts), current)
       if (late) throw new Error(late)
     })
-    options.beforeMove?.()
+    admit?.()
     // The destination is fixed by the manifest, so a crash after the move finds the folder there.
     manifest.trashPath = trashPath; save()
     try { await renameFolderAsync(manifest.worktreePath, trashPath) }
@@ -1109,17 +1111,20 @@ export class WorktreeRetirementService {
    * A permanent deletion the person confirmed, only: deletes the folder in the trash through Git, so its registration
    * goes with it. The trash expiry never uses this; it deletes against a proof (`deleteRenamed`).
    */
-  private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void): Promise<void> {
+  private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void | Promise<() => void>): Promise<void> {
     const trashPath = manifest.trashPath!
     await assertLifecyclePathAsync(trashRootOf(trashPath, this.store.profileHome), trashPath)
     // Whether the checks before Git passed: a refusal there deletes nothing, by Git or otherwise.
     let cleared = false
-    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, () => { beforeStart?.(); cleared = true }) }
+    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, async () => {
+      const check = await beforeStart?.()
+      return () => { check?.(); cleared = true }
+    }) }
     catch (error) {
       if (!cleared) throw error
       // Git deleted `.git` and unregistered it, then stopped at a file in use: what is left is no checkout any more.
       if (!await exists(trashPath) || await exists(join(trashPath, '.git')) || await worktreeRegisteredAsync(manifest.commonDir, trashPath)) throw error
-      await this.removeConfirmed(trashPath)
+      await this.removeConfirmed(trashPath, beforeStart)
     }
     if (await exists(trashPath) || await worktreeRegisteredAsync(manifest.commonDir, trashPath)) throw new Error('Git did not remove the worktree from the trash')
   }
@@ -1131,7 +1136,7 @@ export class WorktreeRetirementService {
    * and the system call remains possible in principle). `beforeStart` runs right before the first removal. A file in use
    * stops it; the next pass of the permanent deletion carries on.
    */
-  private async removeConfirmed(root: string, beforeStart?: () => void): Promise<void> {
+  private async removeConfirmed(root: string, beforeStart?: () => void | Promise<() => void>): Promise<void> {
     const trash = trashRootOf(root, this.store.profileHome)
     await assertLifecyclePathAsync(trash, root)
     const folders = new Map<string, string>()
@@ -1154,7 +1159,8 @@ export class WorktreeRetirementService {
       paths.push({ path: dotGit, folder: false, identity: identityOf(gitStat) })
     }
     paths.push({ path: root, folder: true, identity: folders.get(resolve(root))! })
-    beforeStart?.()
+    const admission = beforeStart?.()
+    if (admission) (await admission)()
     for (const entry of paths) {
       try {
         assertFoldersUnchanged(trash, dirname(entry.path), folders)

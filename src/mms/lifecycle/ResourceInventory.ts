@@ -5,7 +5,7 @@ import { access, lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import type { LifecycleResource, ResourceInventorySnapshot, ResourceSource, RetentionClaimKind, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
-import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
+import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { lifecycleReadAsync, WorktreeRetirementService, type WorktreeReconstructionManifest } from './WorktreeRetirementService'
 import { standardLinkedWorktreeAsync, trustedCheckoutsAsync, verifyPinsAsync, worktreeGitVersion, type StandardWorktree } from './worktreeFacts'
@@ -14,6 +14,7 @@ import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
+import { checkRepoPrograms } from '../git/repoPrograms'
 import { findListedWorktreeAsync } from './worktreeRegistry'
 import { readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordFile, threadRecordPath } from '../data/threadRecords'
 import { THREAD_DB_FILE } from '../data/threadDb/threadDbEngine'
@@ -41,6 +42,7 @@ export interface ResourceInventoryOptions {
  * which are Mousse's own files, are then read synchronously and answered from these facts.
  */
 export class OwnershipFacts {
+  constructor(readonly admission = false) {}
   readonly present = new Map<string, boolean>()
   /** The reason a worktree could not be verified, or undefined when it was; keyed by {@link worktreeKey}. */
   readonly worktrees = new Map<string, string | undefined>()
@@ -158,52 +160,21 @@ const realpathLikeSync = promisify(realpathCallback)
 /** How many facts are read at once: a worktree's is a few file reads, or a few Git processes when Git must answer. */
 const FACT_READS_AT_ONCE = 4
 
-/** The reconstruction manifests a profile keeps, by file name (`<hash of the worktree path>.json`), with the tasks keeping each. */
-async function manifestOwnersAsync(store: ResourceLifecycleStore, tasks: readonly TaskLifecycleRecord[]): Promise<Map<string, string[]>> {
-  const owners = new Map<string, string[]>()
-  const root = join(store.root, 'workspaces')
-  let folders: string[]
-  try { folders = await readdir(root) } catch { return owners }
-  const known = new Set(tasks.map((task) => task.taskId))
-  for (const taskId of folders) {
-    if (!known.has(taskId)) continue
-    let names: string[]
-    try { names = await readdir(join(root, taskId)) } catch { continue }
-    for (const name of names) {
-      const list = owners.get(name)
-      if (list) list.push(taskId)
-      else owners.set(name, [taskId])
-    }
-  }
-  return owners
-}
-
-/** What one read of facts reads once per profile: the profile's tasks, and which of them keep which manifests. */
-interface WorktreeFactContext {
-  tasksFor(store: ResourceLifecycleStore): TaskLifecycleRecord[]
-  manifestOwners(store: ResourceLifecycleStore): Promise<Map<string, string[]>>
-  gitVersion(cwd: string): Promise<number>
-}
-
-function worktreeFactContext(): WorktreeFactContext {
+/** Share each profile's task list and the Git version within a read. */
+function worktreeFactContext(admission = false) {
   const tasks = new Map<ResourceLifecycleStore, TaskLifecycleRecord[]>()
-  const manifests = new Map<ResourceLifecycleStore, Promise<Map<string, string[]>>>()
   let gitVersion: Promise<number> | undefined
-  const tasksFor = (store: ResourceLifecycleStore): TaskLifecycleRecord[] => {
-    let list = tasks.get(store)
-    if (!list) { list = store.list(); tasks.set(store, list) }
-    return list
-  }
   return {
-    tasksFor,
-    gitVersion: (cwd) => (gitVersion ??= worktreeGitVersion(cwd)),
-    manifestOwners: (store) => {
-      let owners = manifests.get(store)
-      if (!owners) { owners = manifestOwnersAsync(store, tasksFor(store)); manifests.set(store, owners) }
-      return owners
-    }
+    admission,
+    tasksFor(store: ResourceLifecycleStore): TaskLifecycleRecord[] {
+      let list = tasks.get(store)
+      if (!list) { list = store.list(); tasks.set(store, list) }
+      return list
+    },
+    gitVersion: (cwd: string) => (gitVersion ??= worktreeGitVersion(cwd))
   }
 }
+type WorktreeFactContext = ReturnType<typeof worktreeFactContext>
 
 /** Reads the facts in `needs` into `facts`, without blocking, a few at a time. */
 export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts: OwnershipFacts): Promise<void> {
@@ -214,7 +185,7 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
     if (!unique.has(key)) unique.set(key, need)
   }
   const queue = [...unique.values()]
-  const context = worktreeFactContext()
+  const context = worktreeFactContext(facts.admission)
   // Absent worktrees whose manifest was found: their pins are read afterwards, together per repository (`verifyPinsAsync`).
   const pinned: Array<{ key: string; path: string; manifest: WorktreeReconstructionManifest }> = []
   // Worktrees in the standard layout: whether Git trusts them is read afterwards for all of them at once.
@@ -258,7 +229,7 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
  * Whether `path` is the registered worktree its record says, as the inventory has always checked it: a present one is a
  * regular linked worktree whose repository, top level and registration match; an absent one has exactly one owner's
  * reconstruction manifest whose pins still hold. The reason it is not, or undefined. Reads without blocking, and
- * without Git for a worktree in the layout `git worktree add` writes whose owner Git trusts (`standardLinkedWorktreeAsync`,
+ * using file-derived layout for a worktree in the layout `git worktree add` writes whose owner Git trusts (`standardLinkedWorktreeAsync`,
  * `trustedCheckoutsAsync`); anything else is checked with Git.
  */
 export async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined): Promise<string | undefined> {
@@ -283,18 +254,29 @@ async function inspectWorktreeFact(store: ResourceLifecycleStore, path: string, 
     // Never taken for absent: its thread's claim keeps its repository's resources and nothing else (`LifecycleClaims`).
     const offline = await disconnectedWorktreeFolder(path)
     if (offline) throw new Error(driveNotConnectedText(offline))
-    if (!await access(path).then(() => true, () => false)) {
+    if (!await lstat(path).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error
+      return false
+    })) {
       const retirement = new WorktreeRetirementService(store)
-      // One listing of the profile's manifests per read of facts, instead of a lookup per task for each absent worktree.
-      const known = new Set(context.tasksFor(store).map((task) => task.taskId))
-      const owners = ((await context.manifestOwners(store)).get(basename(retirement.pathFor('', path))) ?? []).filter((taskId) => known.has(taskId))
+      const owners: string[] = []
+      for (const task of context.tasksFor(store)) {
+        const candidate = retirement.pathFor(task.taskId, path)
+        await assertLifecyclePathAsync(store.root, candidate)
+        try {
+          if (!(await lstat(candidate)).isFile()) throw new Error('Reconstruction authority is not a file')
+          owners.push(candidate)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
       if (owners.length !== 1) throw new Error('Absent checkout lacks unique reconstruction authority')
-      const manifest = retirement.load(retirement.pathFor(owners[0]!, path))
+      const manifest = retirement.load(owners[0]!)
       if (expectedBranch && manifest.branch !== expectedBranch || expectedRepository && manifest.repositoryId !== expectedRepository) throw new Error('Reconstruction owner changed')
       return { manifest }
     }
     if ((await lstat(path)).isSymbolicLink() || !(await lstat(join(path, '.git'))).isFile()) throw new Error('Not a regular linked Git worktree')
-    const standard = await standardLinkedWorktreeAsync(path, () => context.gitVersion(path))
+    const standard = !context.admission && await standardLinkedWorktreeAsync(path, () => context.gitVersion(path))
     if (standard) return { standard }
   } catch (error) {
     return `Unverified worktree ${path}: ${(error as Error).message}`
@@ -317,6 +299,7 @@ async function presentWorktreeFact(path: string, expectedRepository: string | un
     const samePath = (entry: string, wanted: string): boolean => resolve(entry).toLowerCase() === resolve(wanted).toLowerCase()
     let listed: boolean
     if (standard) {
+      await checkRepoPrograms(path)
       listed = Boolean(await findListedWorktreeAsync(common, path, samePath))
     } else {
       const top = await realpathLikeSync(await git('rev-parse', '--show-toplevel'))
