@@ -1,8 +1,8 @@
 import { unzipSync } from 'fflate'
-import { existsSync, lstatSync, readFileSync } from 'fs'
-import { readdir, readFile, stat } from 'fs/promises'
+import { lstat, readdir, readFile } from 'fs/promises'
 import { basename, dirname, join, relative } from 'path'
 import { inspectRelativePath, toPosixRelative } from '../pathSafety'
+import { sha256Bytes } from '../revision'
 
 export const MAX_ARCHIVE_COMPRESSED_BYTES = 8 * 1024 * 1024
 export const MAX_ARCHIVE_EXPANDED_BYTES = 32 * 1024 * 1024
@@ -18,7 +18,7 @@ export interface ImportedSkillFile {
 export interface ImportedSkillPackage {
   files: ImportedSkillFile[]
   skillMarkdown: string
-  skillRelativePath: string
+  skillContentHash: string
   expandedBytes: number
 }
 
@@ -110,8 +110,8 @@ export function importSkillZip(bytes: Uint8Array, zipName = 'upload.zip'): Impor
 }
 
 export async function importSkillPath(sourcePath: string): Promise<ImportedSkillPackage> {
-  const sourceStat = await stat(sourcePath)
-  if (lstatSync(sourcePath).isSymbolicLink()) {
+  const sourceStat = await lstat(sourcePath)
+  if (sourceStat.isSymbolicLink()) {
     throw new Error('Symbolic links cannot be imported.')
   }
 
@@ -157,20 +157,21 @@ async function walkDir(
   const entries = await readdir(current, { withFileTypes: true })
   for (const entry of entries) {
     const entryPath = join(current, entry.name)
-    if (entry.isSymbolicLink() || lstatSync(entryPath).isSymbolicLink()) {
+    const details = await lstat(entryPath)
+    if (entry.isSymbolicLink() || details.isSymbolicLink()) {
       throw new Error(`Rejected symbolic link: ${toPosixRelative(relative(root, entryPath))}`)
     }
     const relativePath = toPosixRelative(relative(root, entryPath))
     const unsafe = inspectRelativePath(relativePath)
     if (unsafe) throw new Error(`Rejected path "${relativePath}": ${unsafe.reason}`)
-    if (entry.isDirectory()) {
+    if (details.isDirectory()) {
       await walkDir(root, entryPath, files, onProgress)
       continue
     }
-    if (!entry.isFile()) {
+    if (!details.isFile()) {
       throw new Error(`Rejected special file: ${relativePath}`)
     }
-    const bytes = readFileSync(entryPath)
+    const bytes = await readFile(entryPath)
     if (bytes.byteLength > MAX_SKILL_FILE_BYTES) {
       throw new Error(`Skill file "${relativePath}" exceeds per-file size limit.`)
     }
@@ -202,7 +203,7 @@ function finishPackage(files: ImportedSkillFile[], expandedBytes: number): Impor
   return {
     files: normalized.filter((file) => file.relativePath && !file.relativePath.startsWith('..')),
     skillMarkdown: new TextDecoder().decode(skillEntry.bytes),
-    skillRelativePath: 'SKILL.md',
+    skillContentHash: sha256Bytes(skillEntry.bytes),
     expandedBytes
   }
 }
@@ -221,6 +222,13 @@ function isExecutableName(path: string): boolean {
     if (lower.endsWith(ext)) return true
   }
   return /(^|\/)scripts\//.test(toPosixRelative(path))
+}
+
+export function skillPackageRevision(imported: ImportedSkillPackage): string {
+  const parts = imported.files
+    .map((file) => `${file.relativePath}:${sha256Bytes(file.bytes)}`)
+    .sort()
+  return sha256Bytes(parts.join('\n'))
 }
 
 export function packageHasExecutableAssets(files: ImportedSkillFile[]): boolean {

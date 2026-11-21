@@ -5,6 +5,7 @@ export interface ActiveProjectInput {
   isNewChat: boolean
   /** Project of the composer workspace draft, falling back to the thread's own. */
   draftProjectId: string | undefined
+  draftWorktree?: boolean
   /** Project the selected thread belongs to. */
   threadProjectId: string | null
   projects: ReadonlyArray<{ id: string; path: string }>
@@ -12,8 +13,13 @@ export interface ActiveProjectInput {
   resolved: {
     path: string | null
     loading: boolean
+    provisioning?: boolean
     /** Set when `path` is the thread's own ready worktree rather than the project folder. */
     workspaceThreadId?: string | null
+    /** That worktree's generation. */
+    workspaceGeneration?: number
+    /** Why the thread's own worktree cannot be read now (not on disk, its drive not answering); `path` is then null. */
+    unavailable?: string
   }
 }
 
@@ -25,8 +31,16 @@ export interface ActiveProject {
   key: string | null
   /** The folder is still being looked up, so a null path is not an answer yet. */
   loading: boolean
+  /** The thread is waiting for its checkout to be made. */
+  provisioning?: boolean
   /** The thread whose own worktree `path` is; null when `path` is the project folder. */
   workspaceThreadId: string | null
+  /** That worktree's generation: what is cached of it is cached under it (`folderKey`). */
+  workspaceGeneration?: number
+  /** Why the thread's own worktree cannot be read now; the Git section says so instead of reading anything. */
+  unavailable?: string
+  /** Looks the folder up again (Retry). */
+  retry?: () => void
 }
 
 /**
@@ -36,17 +50,23 @@ export interface ActiveProject {
  */
 export function resolveActiveProject(input: ActiveProjectInput): ActiveProject {
   if (input.isNewChat && input.draftProjectId) {
+    if (input.draftWorktree) return { projectId: input.draftProjectId, path: null, key: null, loading: true, provisioning: true, workspaceThreadId: null }
     const path = input.projects.find((project) => project.id === input.draftProjectId)?.path ?? null
     return { projectId: input.draftProjectId, path, key: path ? folderKey({ projectId: input.draftProjectId, workspaceThreadId: null }) : null, loading: false, workspaceThreadId: null }
   }
   const projectId = input.isNewChat ? null : input.threadProjectId
   const workspaceThreadId = input.isNewChat ? null : input.resolved.workspaceThreadId ?? null
+  const workspaceGeneration = workspaceThreadId ? input.resolved.workspaceGeneration : undefined
+  const unavailable = input.isNewChat ? undefined : input.resolved.unavailable
   return {
     projectId,
     path: input.resolved.path,
-    key: input.resolved.path ? folderKey({ projectId, workspaceThreadId }) : null,
+    key: input.resolved.path ? folderKey({ projectId, workspaceThreadId, ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}) }) : null,
     loading: input.resolved.loading,
-    workspaceThreadId
+    ...(input.resolved.provisioning ? { provisioning: true } : {}),
+    workspaceThreadId,
+    ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}),
+    ...(unavailable ? { unavailable } : {})
   }
 }
 
@@ -73,12 +93,14 @@ export function folderRecheckKey(input: {
  * path is not parsed or compared on this computer. Null when the scope names no folder.
  */
 export function folderKey(scope: GitScope): string | null {
-  if (scope.workspaceThreadId) return `thread:${scope.workspaceThreadId}`
+  // A rebuilt worktree is another folder: nothing read of the one before it shows for it.
+  if (scope.workspaceThreadId) return `thread:${scope.workspaceThreadId}${scope.workspaceGeneration ? `@${scope.workspaceGeneration}` : ''}`
   if (scope.projectId) return `project:${scope.projectId}`
   return null
 }
 
 /** What a Git mutation sends the daemon: the thread when the folder is its own worktree, the project otherwise. */
-export function gitScopeFor(location: Pick<ActiveProject, 'projectId' | 'workspaceThreadId'>): GitScope {
-  return { projectId: location.projectId, workspaceThreadId: location.workspaceThreadId ?? null }
+export function gitScopeFor(location: Pick<ActiveProject, 'projectId' | 'workspaceThreadId'> & { workspaceGeneration?: number }): GitScope {
+  const generation = location.workspaceThreadId ? location.workspaceGeneration : undefined
+  return { projectId: location.projectId, workspaceThreadId: location.workspaceThreadId ?? null, ...(generation !== undefined ? { workspaceGeneration: generation } : {}) }
 }

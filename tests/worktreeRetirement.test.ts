@@ -19,6 +19,7 @@ import * as gitProcess from '../src/mms/git/runGitProcess'
 import { branchReflogIdentity } from '../src/mms/git/branchReflogIdentity'
 import { unverifiableThread } from './support/unverifiableThread'
 import { registerBranchNamer } from '../src/mms/workspace/branchNaming'
+import { verifyWorktreeFact } from '../src/mms/lifecycle/ResourceInventory'
 import { BRANCH_RENAME_OPERATION } from '../src/mms/workspace/threadBranchRecords'
 
 /** Git lists worktrees with forward slashes on every platform; paths are compared in that form, and case-folded on Windows. */
@@ -67,6 +68,23 @@ test.each([false, true])('retire and reconstruct clean checkout including select
   expect(existsSync(join(f.worktree, 'b.txt'))).toBe(!sparse)
   expect(git(f.repo, ['status', '--porcelain'])).toBe('')
 })
+test.skipIf(process.platform !== 'win32')('an uppercase second manifest prevents unique ownership of a retired checkout', async () => {
+  const f = await fixture()
+  const manifest = await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await verifyWorktreeFact(f.store, f.worktree, f.branch, manifest.repositoryId)).toBeUndefined()
+  const other = join(f.home, 'thread-data', 'other')
+  mkdirSync(other)
+  writeFileSync(join(other, 'meta.json'), JSON.stringify({ id: 'other' }))
+  f.store.registerTask({ taskId: 'other', location: other })
+  const candidate = f.service.pathFor('other', f.worktree)
+  mkdirSync(dirname(candidate))
+  const uppercase = join(dirname(candidate), candidate.slice(dirname(candidate).length + 1).toUpperCase())
+  writeFileSync(uppercase, JSON.stringify({ ...manifest, taskId: 'other' }))
+  expect(existsSync(candidate)).toBe(true)
+  expect(await verifyWorktreeFact(f.store, f.worktree, f.branch, manifest.repositoryId)).toMatch(/lacks unique reconstruction authority/)
+})
+
 test('ignored sole copy, hidden index flags and changed content block retirement', async () => {
   const f = await fixture(true)
   writeFileSync(join(f.worktree, '.mousse', 'secret'), 'not captured')

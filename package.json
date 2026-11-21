@@ -215,6 +215,7 @@
     ],
     "asarUnpack": [
       "out/net-native/**",
+      "node_modules/@koromix/**",
       "out/browser-worker/**",
       "out/pi-runtime/**",
       "node_modules/node-pty/build/Release/**",

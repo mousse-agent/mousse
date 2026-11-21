@@ -413,9 +413,10 @@ describe('through the daemon', () => {
     try {
       // A release interrupted after its intent was written, whose receipt is gone, cannot finish.
       new ThreadJournal(d.directory).append({ operationId: 'release-1', operationType: 'undo-ref-release', state: 'prepared', details: { version: 1, receiptId: '00000000-0000-0000-0000-000000000000', repositoryId: 'repo', refs: [] } })
-      expect(await d.recovery()).toMatchObject({ kind: 'paused', operationType: 'undo-ref-release' })
+      expect(await d.recovery()).toBeUndefined()
       const result = await d.call('operations.recover') as Record<string, unknown>
-      expect(result).toMatchObject({ ok: true, settled: false, recovery: { kind: 'paused', operationType: 'undo-ref-release' } })
+      expect(result).toMatchObject({ ok: true, settled: false })
+      expect(result.recovery).toBeUndefined()
       expect(result.stillWaiting).toMatch(/^old Undo history could not be released yet: \S/)
     } finally {
       await d.mms.stop()

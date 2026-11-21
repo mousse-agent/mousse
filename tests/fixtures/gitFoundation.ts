@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative } from 'node:path'
+import { delimiter, isAbsolute, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { committedGitTemplate } from '../support/gitBase'
 
 export function git(cwd: string, ...args: string[]): string {
@@ -53,11 +54,17 @@ export function gitFoundationFixture() {
   }
 }
 
+/** The repository's packages, for a crash-child bundle written outside the repository. */
+const REPOSITORY_PACKAGES = fileURLToPath(new URL('../../node_modules', import.meta.url))
+
 /**
- * Banner for an ESM crash-child bundle: bundled CommonJS dependencies (simple-git's `@kwsites/file-exists`)
- * call `require`, which an ES module does not have.
+ * Banner for an ESM crash-child bundle: bundled CommonJS dependencies call `require`, which an ES module does not have.
+ * The bundle is written outside the repository, so a package it loads when it runs (koffi, for Git on Windows) is
+ * found in the repository's packages.
  */
-export const CRASH_CHILD_REQUIRE = "import { createRequire as crashChildRequire } from 'node:module'; const require = crashChildRequire(import.meta.url);"
+export const CRASH_CHILD_REQUIRE = "import { createRequire as crashChildRequire, Module as CrashChildModule } from 'node:module'; " +
+  "process.env.NODE_PATH = [" + JSON.stringify(REPOSITORY_PACKAGES) + ", process.env.NODE_PATH].filter(Boolean).join(" + JSON.stringify(delimiter) + "); " +
+  "CrashChildModule._initPaths(); const require = crashChildRequire(import.meta.url);"
 
 export const contextBoundary = {
   messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const, safeBoundaryProof: 'fixture'

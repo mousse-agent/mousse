@@ -10,6 +10,7 @@ import {
   branchSearchAria,
   changedFileCount,
   diffStatLabel,
+  gitCanRetry,
   gitCollapsedLabel,
   gitErrorCode,
   gitErrorMessage,
@@ -592,11 +593,19 @@ describe('git section collapsed state', () => {
   it('collapses to one line for each reason there is nothing to manage', () => {
     expect(gitCollapsedLabel({ ...base, hasProject: false })).toBe('No project')
     expect(gitCollapsedLabel({ ...base, pathPending: true })).toBe('Checking…')
-    expect(gitCollapsedLabel({ ...base, pathPending: true, pathSlow: true })).toBe('Unavailable')
+    expect(gitCollapsedLabel({ ...base, pathPending: true, pathSlow: true })).toBe('Not answering')
+    expect(gitCollapsedLabel({ ...base, loaded: false, status: null, pathSlow: true })).toBe('Not answering')
+    expect(gitCollapsedLabel({ ...base, hasPath: false, unavailable: 'The drive at E:\ is not answering.' })).toBe('Not answering')
+    expect(gitCollapsedLabel({ ...base, hasPath: false, unavailable: 'Worktree not on disk' })).toBe('Worktree not on disk')
     expect(gitCollapsedLabel({ ...base, hasPath: false })).toBe('No project folder')
     expect(gitCollapsedLabel({ ...base, loaded: false, status: null })).toBe('Checking…')
     expect(gitCollapsedLabel({ ...base, status: null })).toBe('Unavailable')
     expect(gitCollapsedLabel({ ...base, status: repoStatus({ isRepo: false, branch: null }) })).toBe('Not a repository')
+  })
+
+  it('offers Retry only for a read that did not answer or failed, not for an answer', () => {
+    expect(['Not answering', 'Unavailable'].map(gitCanRetry)).toEqual([true, true])
+    expect(['Checking…', 'Worktree not on disk', 'Not a repository', 'No project', null].map(gitCanRetry)).toEqual([false, false, false, false, false])
   })
 })
 

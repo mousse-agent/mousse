@@ -618,20 +618,19 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
         discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
-        stop: () => {
+        stop: async () => {
           if (!entry || stopped) return
           stopped = true
           const user = entry
           user.users -= 1
           // A config change retires this runtime just before it builds the next one, which takes
           // the service over: it stops only when no runtime took it by then.
-          return Promise.resolve().then(() => {
-            if (user.users > 0) return
-            if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
-            // A sign-in terminal this runtime started ends with the instance, not with a config change.
-            activeRun?.cancel()
-            return user.service.stop()
-          })
+          await Promise.resolve()
+          if (user.users > 0) return
+          if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
+          // A sign-in terminal this runtime started ends with the instance, not with a config change.
+          activeRun?.cancel()
+          await user.service.stop()
         }
       }
       // An API-key entry signs in and out with its key: never `claude auth` (the terminal sign-in above).

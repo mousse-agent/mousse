@@ -1,48 +1,73 @@
 // @vitest-environment jsdom
 /**
- * A thread card's branch survives reads that fail or never answer (a drive asleep, a busy service): it keeps what it
- * showed, reads again later, and a worktree shows the branch Mousse recorded for it until Git answers.
+ * Thread cards name their branch from one `git.heads` call for every card shown, never a Git status read. They read
+ * again together on window focus, for the thread whose run ended (and every project), and for a thread whose branch
+ * Mousse changed (`git.headsChanged`). A read that fails keeps what the cards show, and is read again a while later.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type { WarmStartView } from '../../src/shared/warmStart'
+import type { GitHeadsChangedEvent, GitHeadsRequest, GitHeadsResult } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-
-type Status = { isRepo: boolean; branch: string | null }
-type GitStatus = (scope: { projectId: string; workspaceThreadId: string | null }) => Promise<Status>
 
 let root: Root
 let host: HTMLElement
 let hook: typeof import('../../src/renderer/hooks/useThreadBranch')
+let appStore: typeof import('../../src/renderer/stores/appStore')['useAppStore']
+let calls: GitHeadsRequest[]
+let answer: (request: GitHeadsRequest) => Promise<GitHeadsResult>
+let headsChanged: ((event: GitHeadsChangedEvent) => void) | undefined
 
-function bridge(git: GitStatus, getStatus: (threadId: string) => Promise<unknown>) {
-  ;(window as unknown as { mousse: unknown }).mousse = { git: { status: git }, workspace: { getStatus } }
-}
+const THREADS = [
+  { id: 't1', projectId: 'p1' },
+  { id: 't2', projectId: 'p1' },
+  { id: 't3', projectId: 'p2', worktreeEnabled: false }
+]
+let branches: Record<string, string>
 
-const never = <T,>() => new Promise<T>(() => undefined)
-const notAnswering = () => Promise.reject(new Error('The drive or folder at E: is not answering.'))
-const ready = (branch: string) => async () => ({ metadata: { branch }, execution: { lifecycle: 'ready' } })
-
-async function show(thread: { projectId: string; worktreeEnabled?: boolean }) {
-  const Card = () => {
-    const branch = hook.useThreadBranch(thread, 't1')
-    return createElement('span', null, branch?.branch ?? '')
+function bridge() {
+  const fail = () => { throw new Error('a card must not run a Git status read') }
+  ;(window as unknown as { mousse: unknown }).mousse = {
+    git: {
+      status: fail,
+      heads: vi.fn((request: GitHeadsRequest) => { calls.push(request); return answer(request) }),
+      onHeadsChanged: (cb: (event: GitHeadsChangedEvent) => void) => { headsChanged = cb; return () => { headsChanged = undefined } }
+    },
+    workspace: { getStatus: fail }
   }
-  act(() => root.render(createElement(Card)))
-  await settle()
 }
+
+const fromBranches = async (request: GitHeadsRequest): Promise<GitHeadsResult> => ({
+  projects: Object.fromEntries((request.projectIds ?? []).map((id) => [id, { repo: true, branch: branches[id]! }])),
+  threads: Object.fromEntries((request.threadIds ?? []).map((id) => [id, { own: true, branch: branches[id]! }]))
+})
 
 async function settle() {
-  await act(async () => { for (let pass = 0; pass < 8; pass++) await Promise.resolve() })
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); for (let pass = 0; pass < 8; pass++) await Promise.resolve() })
 }
+
+function showCards() {
+  const Card = ({ thread }: { thread: (typeof THREADS)[number] }) => {
+    const branch = hook.useThreadBranch(thread, thread.id)
+    return createElement('li', { 'data-id': thread.id }, branch?.branch ?? '')
+  }
+  act(() => root.render(createElement('ul', null, ...THREADS.map((thread) => createElement(Card, { key: thread.id, thread })))))
+}
+const shown = () => THREADS.map((thread) => host.querySelector(`[data-id="${thread.id}"]`)?.textContent)
+const sorted = (request: GitHeadsRequest) => ({ threadIds: [...request.threadIds ?? []].sort(), projectIds: [...request.projectIds ?? []].sort() })
 
 beforeEach(async () => {
   vi.useFakeTimers()
   vi.resetModules()
-  const { useAppStore } = await import('../../src/renderer/stores/appStore')
-  useAppStore.setState({ profileReady: true, warmView: null })
+  ;({ useAppStore: appStore } = await import('../../src/renderer/stores/appStore'))
+  appStore.setState({ profileReady: true, warmView: null, turnStates: {} })
   hook = await import('../../src/renderer/hooks/useThreadBranch')
+  calls = []
+  branches = { p1: 'main', p2: 'develop', t1: 'mousse/fix-build', t2: 'mousse/docs' }
+  answer = fromBranches
+  bridge()
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -54,36 +79,104 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-it('a read that fails keeps the branch shown, and a first read that fails is tried again until it answers', async () => {
-  let answer: () => Promise<Status> = notAnswering
-  bridge(() => answer(), never)
-  await show({ projectId: 'p1', worktreeEnabled: false })
-  expect(host.textContent).toBe('')
+it('batches a manual checkout in a worktree and project while the window stays visible', async () => {
+  showCards()
+  await settle()
+  expect(calls.map(sorted)).toEqual([{ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] }])
+  expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'develop'])
+  branches.t1 = 'checked-out-by-hand'
+  branches.p2 = 'release'
+  await act(async () => { await vi.advanceTimersByTimeAsync(hook.HEAD_RECHECK_MS) })
+  await settle()
+  expect(calls.map(sorted)).toEqual(Array(2).fill({ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] }))
+  expect(shown()).toEqual(['checked-out-by-hand', 'mousse/docs', 'release'])
+})
 
-  answer = async () => ({ isRepo: true, branch: 'master' })
-  await act(async () => { await vi.advanceTimersByTimeAsync(hook.BRANCH_RETRY_MS[0]) })
-  expect(host.textContent).toBe('master')
-
-  // Focus reads the project folder again; the drive does not answer this time.
-  answer = notAnswering
+it('focus reads every card again in one call; a call that fails keeps what the cards show', async () => {
+  showCards()
+  await settle()
+  answer = () => Promise.reject(new Error('The drive or folder at E: is not answering.'))
   await act(async () => { window.dispatchEvent(new Event('focus')) })
   await settle()
-  expect(host.textContent).toBe('master')
+  expect(calls).toHaveLength(2)
+  expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'develop'])
+
+  answer = fromBranches
+  branches.p2 = 'release'
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+  await settle()
+  expect(sorted(calls[2]!)).toEqual({ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] })
+  expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'release'])
 })
 
-it('a worktree thread shows its own branch while its project folder does not answer', async () => {
-  bridge((scope) => (scope.workspaceThreadId ? Promise.resolve({ isRepo: true, branch: 'mousse/fix-build' }) : notAnswering()), ready('mousse/fix-build'))
-  await show({ projectId: 'p1' })
-  expect(host.textContent).toBe('mousse/fix-build')
+it('a run that ends reads its thread and the projects; a branch Mousse renamed is read when it says so', async () => {
+  showCards()
+  await settle()
+  const phase = (value: string) => act(() => {
+    appStore.setState({ turnStates: { t1: { threadId: 't1', turnId: 'u1', phase: value, updatedAt: '' } } } as never)
+  })
+  phase('thinking')
+  branches.t1 = 'agent-switched'
+  phase('completed')
+  await settle()
+  expect(sorted(calls.at(-1)!)).toEqual({ threadIds: ['t1'], projectIds: ['p1', 'p2'] })
+  expect(shown()[0]).toBe('agent-switched')
+
+  branches.t2 = 'mousse/named-by-title'
+  await act(async () => { headsChanged?.({ threadIds: ['t2'] }) })
+  await settle()
+  expect(sorted(calls.at(-1)!)).toEqual({ threadIds: ['t2'], projectIds: [] })
+  expect(shown()[1]).toBe('mousse/named-by-title')
 })
 
-it('a worktree whose Git read never answers shows the branch Mousse recorded, and reads again once it is given up on', async () => {
-  let worktree: () => Promise<Status> = never
-  bridge((scope) => (scope.workspaceThreadId ? worktree() : Promise.resolve({ isRepo: true, branch: 'master' })), ready('mousse/recorded'))
-  await show({ projectId: 'p1' })
-  expect(host.textContent).toBe('mousse/recorded')
+it('a thread in its project’s folder names the project’s branch', async () => {
+  answer = async (request) => ({ ...(await fromBranches(request)), threads: Object.fromEntries((request.threadIds ?? []).map((id) => [id, { project: true as const }])) })
+  showCards()
+  await settle()
+  expect(shown()).toEqual(['main', 'main', 'develop'])
+})
 
-  worktree = async () => ({ isRepo: true, branch: 'mousse/renamed' })
-  await act(async () => { await vi.advanceTimersByTimeAsync(hook.BRANCH_READ_TIMEOUT_MS + hook.BRANCH_RETRY_MS[0]) })
-  expect(host.textContent).toBe('mousse/renamed')
+it('a detached HEAD names its commit, and a read that fails for one card keeps what that card named', async () => {
+  showCards()
+  await settle()
+  answer = async (request) => {
+    const result = await fromBranches(request)
+    result.threads.t1 = { own: true, branch: null, detachedAt: 'abc1234', generation: 0, lifecycle: 'ready' }
+    result.threads.t2 = { error: 'The drive at E:\ is not answering.' }
+    return result
+  }
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+  await settle()
+  expect(shown()).toEqual(['detached abc1234', 'mousse/docs', 'develop'])
+})
+
+it('leaves saved branches out of the warm view and reads them when the profile is ready', async () => {
+  appStore.setState({
+    profileReady: false,
+    warmView: {
+      heads: { threads: { t1: { own: true, branch: 'mousse/last-time' } } }
+    } as unknown as WarmStartView
+  })
+  showCards()
+  await settle()
+  expect(shown()).toEqual(['', '', ''])
+  expect(calls).toHaveLength(0)
+  act(() => appStore.setState({ profileReady: true }))
+  await settle()
+  expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'develop'])
+})
+
+it('a card whose read failed is read again a while later, so it never stays without its branch', async () => {
+  answer = async (request) => ({ ...(await fromBranches(request)), legacy: true, threads: { ...(await fromBranches(request)).threads, t1: { error: 'The drive is not answering.' } } })
+  showCards()
+  await settle()
+  expect(shown()).toEqual(['', 'mousse/docs', 'develop'])
+
+  answer = async (request) => ({ ...(await fromBranches(request)), legacy: true })
+  await act(async () => { await vi.advanceTimersByTimeAsync(hook.FAILED_READ_AGAIN_MS) })
+  await settle()
+  expect(sorted(calls.at(-1)!)).toEqual({ threadIds: ['t1'], projectIds: [] })
+  expect(shown()[0]).toBe('mousse/fix-build')
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+  expect(calls).toHaveLength(2)
 })

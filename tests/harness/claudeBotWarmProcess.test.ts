@@ -23,7 +23,9 @@ const temp = (prefix: string) => {
   return dir
 }
 beforeEach(() => {
-  vi.stubEnv('CLAUDE_CONFIG_DIR', temp('claude-warm-user-'))
+  const home = temp('claude-warm-user-')
+  vi.stubEnv('CLAUDE_CONFIG_DIR', home)
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
 })
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -140,18 +142,69 @@ describe("a bot's warm chat process", () => {
     expect(cli.processes).toHaveLength(2)
   })
 
-  it("gives a new process its prompt without waiting for the turn's sign-in reading while the last one said signed in", async () => {
-    let reading = false
-    let read: ((text: string) => void) | undefined
-    const { service, cli, lockedTurn, turn } = fixture(() => reading ? new Promise((resolve) => { read = resolve }) : Promise.resolve(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })))
-    await service.status()
-    reading = true
-    const replied = turn(lockedTurn())
-    for (let i = 0; i < 100 && !cli.processes[0]?.inputs.length; i++) await new Promise((resolve) => setTimeout(resolve, 5))
-    expect(cli.processes[0]!.inputs).toHaveLength(1)
-    expect(read).toBeDefined()
-    read!(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
-    await expect(replied).resolves.toBe('reply to 1')
+  it('an older bot probe cannot use a process after status observes another account', async () => {
+    const signedIn = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
+    let holdNext = false
+    let began!: () => void
+    let finish!: () => void
+    const started = new Promise<void>((resolve) => { began = resolve })
+    const oldReading = new Promise<string>((resolve) => { finish = () => resolve(signedIn) })
+    const { service, cli, lockedTurn, turn } = fixture(() => {
+      if (!holdNext) return Promise.resolve(signedIn)
+      holdNext = false
+      began()
+      return oldReading
+    })
+    await turn(lockedTurn())
+    const old = cli.last
+    holdNext = true
+    const pending = turn(lockedTurn())
+    void pending.catch(() => undefined)
+    await started
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'other' } }))
+    await expect(service.status({ force: true })).resolves.toMatchObject({ state: 'connected' })
+    expect(old.closed).toBe(true)
+    finish()
+    await expect(pending).rejects.toThrow()
+    expect(old.inputs).toHaveLength(1)
+    await expect(turn(lockedTurn())).resolves.toBe('reply to 1')
+  })
+
+  it.each(['credential change', 'unknown subject', 'sign-out'] as const)('the warm bot waits for its own probe (%s)', async (change) => {
+    const signedIn = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
+    let nextProbe: Promise<string> | undefined
+    let probing!: () => void
+    const started = new Promise<void>((resolve) => { probing = resolve })
+    const { cli, lockedTurn, turn } = fixture(() => {
+      if (!nextProbe) return Promise.resolve(signedIn)
+      probing()
+      return nextProbe
+    })
+    await turn(lockedTurn())
+    const old = cli.last
+    let finish!: (result: string) => void
+    nextProbe = new Promise<string>((resolve) => { finish = resolve })
+    if (change === 'unknown subject') rmSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'))
+    const replying = turn(lockedTurn())
+    void replying.catch(() => undefined)
+    await started
+    expect(old.inputs).toHaveLength(1)
+    expect(cli.processes).toHaveLength(1)
+    if (change === 'sign-out') {
+      finish(JSON.stringify({ loggedIn: false }))
+      await expect(replying).rejects.toThrow()
+      expect(cli.processes).toHaveLength(1)
+    } else {
+      finish(change === 'credential change' ? JSON.stringify({ loggedIn: true, authMethod: 'api_key' }) : signedIn)
+      await expect(replying).resolves.toBe('reply to 1')
+      expect(cli.processes).toHaveLength(2)
+      if (change === 'unknown subject') {
+        await expect(turn(lockedTurn())).resolves.toBe('reply to 1')
+        expect(cli.processes).toHaveLength(3)
+      }
+    }
+    expect(old.inputs).toHaveLength(1)
+    expect(old.closed).toBe(true)
   })
 })
 
@@ -218,8 +271,8 @@ describe("a bot chat turn's timing line", () => {
     const turns = await timed(() => { turnTimingBegin('bot-1'); turnTimingBind('bot-1', 'bot-home') })
     expect(turns.map((logged) => logged.threadId)).toEqual(['bot-home', 'bot-home'])
     expect(turns.map((logged) => Object.keys(logged.ms))).toEqual([
-      ['dispatch', 'provider', 'processNew', 'signIn', 'prompt', 'firstFrame', 'firstText'],
-      ['dispatch', 'provider', 'processWarm', 'signIn', 'prompt', 'firstFrame', 'firstText']
+      ['dispatch', 'provider', 'signIn', 'processNew', 'prompt', 'firstFrame', 'firstText'],
+      ['dispatch', 'provider', 'signIn', 'processWarm', 'prompt', 'firstFrame', 'firstText']
     ])
     for (const { ms } of turns) expect(Object.values(ms)).toEqual([...Object.values(ms)].sort((a, b) => a - b))
   })

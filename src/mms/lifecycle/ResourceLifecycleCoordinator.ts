@@ -9,6 +9,7 @@ import { ResourceLifecycleError, ResourceLifecycleStore, validateResourceInvento
 import { buildResourceInventory } from './ResourceInventory'
 import { ResourcePurgeService } from './ResourcePurgeService'
 import { renameFolder } from './renameFolder'
+import { withMovingUndoClaims } from './threadUndoClaims'
 
 /** `keepWork`: a trash that is a step of a delete keeping the thread's work (`LifecycleOperation.keepWork`). */
 export interface LifecycleRequest { taskId: string; operationId: string; expectedGeneration?: number; keepWork?: boolean }
@@ -90,6 +91,7 @@ export class ResourceLifecycleCoordinator {
     let claimed = false
     let terminalReplay = false
     this.store.update(request.taskId, (record) => {
+      if (record.pendingFork) throw new ResourceLifecycleError('unavailable', 'Fork acceptance is pending')
       const old = record.operations.find((item) => item.id === request.operationId)
       if (old) {
         if (old.kind !== kind || (request.expectedGeneration !== undefined && request.expectedGeneration !== old.expectedGeneration)) throw new ResourceLifecycleError('stale', 'Lifecycle operation identity was reused with different input')
@@ -159,25 +161,45 @@ export class ResourceLifecycleCoordinator {
           })
           await this.hooks.onPhase?.(record, 'move-prepared')
         }
-        record = this.store.update(request.taskId, (current) => {
-          this.assertRunner(current, token)
-          const active = current.operations.at(-1)!
-          const source = existsSync(active.from), target = existsSync(active.to)
-          if (source === target) throw new ResourceLifecycleError('ambiguous', 'Lifecycle move has both or neither source and destination')
-          const actual = source ? active.from : active.to
-          this.store.assertTaskIdentity(actual, current.taskId)
-          this.assertMarker(current, active, actual)
-          this.assertNoMovableLocks(actual)
-          if (source) {
-            this.store.assertTaskLocation(active.to)
-            mkdirSync(dirname(active.to), { recursive: true })
-            renameFolder(active.from, active.to)
-            fsyncDirectorySync(dirname(active.from)); fsyncDirectorySync(dirname(active.to))
-          }
-          // This update can be recovered from the exact marker if the process exits after rename.
-          current.location = active.to
-          current.generation = active.expectedGeneration + 1
-          active.phase = 'moved'
+        const moveLocation = existsSync(operation.from) ? operation.from : operation.to
+        let applyingMove = false
+        record = await withMovingUndoClaims(moveLocation, () => {
+          applyingMove = true
+          return this.store.update(request.taskId, (current) => {
+            this.assertRunner(current, token)
+            const active = current.operations.at(-1)!
+            const source = existsSync(active.from), target = existsSync(active.to)
+            if (source === target) throw new ResourceLifecycleError('ambiguous', 'Lifecycle move has both or neither source and destination')
+            const actual = source ? active.from : active.to
+            this.store.assertTaskIdentity(actual, current.taskId)
+            this.assertMarker(current, active, actual)
+            this.assertNoMovableLocks(actual)
+            if (source) this.moveTaskFolder(active.from, active.to)
+            // This update can be recovered from the exact marker if the process exits after rename.
+            current.location = active.to
+            current.generation = active.expectedGeneration + 1
+            active.phase = 'moved'
+          })
+        }, kind === 'restore').catch((error: unknown) => {
+          if (kind === 'restore' && !applyingMove) this.store.update(request.taskId, (current) => {
+            this.assertRunner(current, token)
+            const active = current.operations.at(-1)!
+            if (active.phase !== 'move-prepared') return
+            const source = existsSync(active.from), target = existsSync(active.to)
+            if (source === target) return
+            if (target) {
+              // A previous attempt moved the folder but did not publish it. Revalidate its exact marker before moving it back.
+              this.store.assertTaskIdentity(active.to, current.taskId)
+              this.assertMarker(current, active, active.to)
+              this.assertNoMovableLocks(active.to)
+              this.moveTaskFolder(active.to, active.from)
+            }
+            active.phase = 'rejected'
+            active.error = (error as Error).message
+            active.completedAt = new Date().toISOString()
+            current.state = 'trashed'
+          })
+          throw error
         })
         await this.hooks.onPhase?.(record, 'moved')
         operation = record.operations.at(-1)!
@@ -214,6 +236,14 @@ export class ResourceLifecycleCoordinator {
         if (record.operations.at(-1)?.runner?.token === token) delete record.operations.at(-1)!.runner
       })
     }
+  }
+
+  private moveTaskFolder(from: string, to: string): void {
+    this.store.assertTaskLocation(to)
+    mkdirSync(dirname(to), { recursive: true })
+    renameFolder(from, to)
+    fsyncDirectorySync(dirname(from))
+    fsyncDirectorySync(dirname(to))
   }
 
   private advance(taskId: string, token: string, phase: LifecycleOperationPhase, fn?: (record: TaskLifecycleRecord) => void): TaskLifecycleRecord {

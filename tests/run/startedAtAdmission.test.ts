@@ -167,6 +167,8 @@ describe("a new chat's thread while its first turn is set up", () => {
     const oneShot = vi.fn(() => naming.promise)
     ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
     const snapshot = Promise.withResolvers<void>()
+    // The first turn takes a start snapshot, as it does when the worktree's retained baseline cannot be used (`ownWorktreeStart`).
+    vi.spyOn(w.d.orch as unknown as { ownWorktreeStart: () => Promise<string | undefined> }, 'ownWorktreeStart').mockResolvedValue(undefined)
     const renaming = vi.spyOn(ThreadWorkspaceManager.prototype, 'renameOwnBranch')
     const recordOutsideChanges = ThreadActionService.prototype.recordOutsideChanges
     const checkpoint = vi.spyOn(ThreadActionService.prototype, 'recordOutsideChanges').mockImplementation(async function (this: ThreadActionService, options) {

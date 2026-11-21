@@ -1,16 +1,16 @@
 import { access } from 'node:fs/promises'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { resolve } from 'node:path'
-import type { SimpleGit } from 'simple-git'
-import { checkRepoPrograms, guardedSimpleGit } from '../git/repoPrograms'
+import type { RepositoryGit } from '../git/repoPrograms'
+import { checkRepoPrograms, guardedGit } from '../git/repoPrograms'
 
 /** A verified, explicit Git repository root. Never falls back to process.cwd(). */
 export class RepositoryContext {
   private constructor(readonly root: string) {}
 
   /** Git for the root; no program the repository configures runs, as its config is when called. */
-  get git(): SimpleGit {
-    return guardedSimpleGit(this.root)
+  get git(): RepositoryGit {
+    return guardedGit(this.root)
   }
 
   static async open(repositoryPath: string): Promise<RepositoryContext> {
@@ -25,11 +25,11 @@ export class RepositoryContext {
 
     // A repository whose programs cannot be turned off is refused with its reason, not taken for "not a repository".
     await checkRepoPrograms(requestedPath)
-    const git = guardedSimpleGit(requestedPath)
+    const git = guardedGit(requestedPath)
     if (!await git.checkIsRepo().catch(() => false)) {
       throw new Error(`Not a Git repository: ${requestedPath}`)
     }
-    const root = resolve((await git.revparse(['--show-toplevel'])).trim())
+    const root = resolve((await git.raw(['rev-parse', '--show-toplevel'])).trim())
     return new RepositoryContext(root)
   }
 }

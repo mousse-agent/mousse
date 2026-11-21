@@ -9,6 +9,7 @@ import { getWorkspaceIndexRegistry, type WorkspaceIndexLookup } from './Workspac
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { spawnGit as spawnGitOffLoop } from '../git/gitSpawn'
 
 export interface GrepWorkspaceOptions {
   /** Regular expressions run in `git grep` only; elsewhere the query is searched literally. */
@@ -279,7 +280,7 @@ async function grepWithGit(
   route: Extract<GitRoute, { ok: true }>
 ): Promise<Omit<FileGrepResponse, 'root' | 'source' | 'elapsedMs'>> {
   const { root, query, now, deadline, signal } = context
-  const spawnGit = context.deps.spawn ?? nodeSpawn
+  const spawnGit = context.deps.spawn ?? (spawnGitOffLoop as unknown as typeof nodeSpawn)
   const supportsMaxCount =
     route.version[0] > MAX_COUNT_GIT_VERSION[0] ||
     (route.version[0] === MAX_COUNT_GIT_VERSION[0] && route.version[1] >= MAX_COUNT_GIT_VERSION[1])

@@ -235,7 +235,7 @@ describe('in the sidebar', () => {
   beforeEach(() => {
     const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
     const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32' } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32', git: {} } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
     usePendingThreadRows.setState({ rows: [], rowKeys: new Map() })
     useAppStore.setState({ profileId: 'default', projects: [project('p1', 'Mousse')], threads: [...listed, draft('d1')], threadActivity: {}, activeThreadId: 'd1', threadsSidebarView: 'projects', sidebarMode: 'projects', threadFeedOrder: [] })
     host = document.createElement('div')

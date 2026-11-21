@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { repositoryKeyOf, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { canonicalPathAsync, comparablePath, gitCommonDirAsync } from './canonicalPath'
 import { mainWorktreePathAsync, WorktreeListPass } from './worktreeRegistry'
 import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
@@ -25,10 +25,13 @@ import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { BRANCH_RECORD_OPERATIONS, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
+import { forkCheckpointRef, readForkCheckpointPin } from '../workspace/forkCheckpointPin'
 import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
+import { cancelPreparedReceiptRefReleases, checkPreparedReceiptRefReleases } from '../actions/ReceiptRefReleaseService'
 import { threadRecordName } from '../data/threadRecords'
+import { inBackgroundGitLane } from '../git/gitSpawn'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
@@ -218,7 +221,7 @@ export class ResourcePurgeService {
   start(): void {
     if (this.timer) return
     this.stopping = false
-    this.timer = setInterval(() => { void this.requestSweep().catch(() => { /* Invalid policy/source remains visible through inventory; no cleanup occurred. */ }) }, 60_000)
+    this.timer = setInterval(() => { void inBackgroundGitLane(() => this.requestSweep()).catch(() => { /* Invalid policy/source remains visible through inventory; no cleanup occurred. */ }) }, 60_000)
     this.timer.unref()
   }
   async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; await this.sweepPromise?.catch(() => undefined) }
@@ -438,15 +441,14 @@ export class ResourcePurgeService {
    * is awaited between that check and the step it guards. A record naming a checkout not read here fails closed.
    */
   private async peersCheck(ownedIds: Set<string>): Promise<() => ReturnType<typeof getExternalResourceClaimsFromFacts>> {
-    const facts = new OwnershipFacts()
-    // Only the facts are wanted: a refusal is made again, from the records, by the returned check.
-    await getExternalResourceClaims(this.store, ownedIds, facts).catch(() => undefined)
+    const facts = new OwnershipFacts(true)
+    await getExternalResourceClaims(this.store, ownedIds, facts)
     return () => getExternalResourceClaimsFromFacts(this.store, ownedIds, facts)
   }
   /**
    * `keepWork`: the preview of a delete that leaves the thread's worktrees (with their branches and uncommitted files)
-   * and its Git refs where they are. They are not read, pinned or listed, so nothing about them can block the delete;
-   * only the thread's own data, scratch folders and scheduled rows are items.
+   * and its Git refs where they are. Only the thread's own data, scratch folders and scheduled rows are items.
+   * A prepared Undo release still needs its repository to clear the reservation before the journal can be removed.
    */
   async preview(taskId: string, options: { keepWork?: boolean } = {}): Promise<LifecyclePurgePreview> {
     return this.withOwnership(taskId, () => this.previewOwned(taskId, false, options.keepWork === true))
@@ -489,6 +491,10 @@ export class ResourcePurgeService {
     const tasks = this.owned(taskId), ownedIds = new Set(tasks.map((task) => task.taskId))
     // The mode is signed with the rest: a preview that keeps the work authorizes only a purge that keeps it.
     const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0, ...(keepWork ? { keepWork: true as const } : {}) }
+    for (const task of tasks) {
+      try { await checkPreparedReceiptRefReleases(task.location) }
+      catch (error) { preview.blockers.push((error as Error).message) }
+    }
     let peers: Awaited<ReturnType<ResourcePurgeService['peers']>>
     try { peers = await this.peers(ownedIds) } catch (error) { preview.blockers.push((error as Error).message); return this.sign(preview) }
     // Worktrees a delete keeps are not verified, so one that can't be checked blocks nothing; what is removed still is.
@@ -629,6 +635,24 @@ export class ResourcePurgeService {
         for (const { ref, sha, discardReason } of kept?.refs ?? []) folderRefs.push({ id: `snapshot-kept-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: kept!.gitDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
       } catch (error) { preview.blockers.push(`Files kept in the snapshot store of ${task.taskId}: ${(error as Error).message}`) }
     }
+    // A fork can still depend on a checkpoint before its own checkout exists. Review its ref in the repository named
+    // by the pin, so an unavailable repository blocks before the thread crosses the irreversible boundary.
+    for (const task of keepWork ? [] : tasks) {
+      try {
+        const pin = readForkCheckpointPin(task.location)
+        if (!pin) continue
+        const ref = forkCheckpointRef(task.taskId)
+        if (shared(ref, pin.repositoryId, undefined)) { preview.retained.push({ identity: ref, reason: 'Another owner retains this resource' }); continue }
+        const commonDir = await gitCommonDirAsync(pin.checkoutPath)
+        if (!commonDir) throw new Error('Fork checkpoint repository is unavailable.')
+        if (repositoryKeyOf(commonDir) !== pin.repositoryId) throw new Error('Fork checkpoint repository changed.')
+        if (keptBack(ref, { ...await repositoryTarget(commonDir, pin.repositoryId), ref })) continue
+        const sha = await readDirectLifecycleRefAsync(commonDir, ref)
+        if (!sha) continue
+        if (sha !== pin.sha) throw new Error('Fork checkpoint ref changed.')
+        folderRefs.push({ id: digest(['fork-checkpoint', task.taskId]), kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir, expectedValue: sha, status: 'pending' })
+      } catch (error) { preview.blockers.push((error as Error).message) }
+    }
     preview.items.push(...folderRefs)
     const plannedRefs = new Set(folderRefs.map((item) => item.identity))
     // Preparation adds explicit reconstruction pins. Refresh rather than omitting their cleanup.
@@ -716,10 +740,10 @@ export class ResourcePurgeService {
   }
 
   /** What an unverified thread's scope is matched against for `item` (`unverifiedOwnerOver`). */
-  private async claimTarget(item: LifecyclePurgeItem): Promise<ClaimTarget> {
+  private async claimTarget(item: LifecyclePurgeItem, path = item.identity): Promise<ClaimTarget> {
     const repository = await repositoryTargetAsync(item.kind === 'ref' || item.kind === 'worktree' ? item.commonDir : undefined)
     if (item.kind === 'ref') return { ...repository, ref: item.identity }
-    return { ...repository, ...(isAbsolute(item.identity) ? { path: await canonicalPathAsync(item.identity) } : {}) }
+    return { ...repository, ...(isAbsolute(path) ? { path: await canonicalPathAsync(path) } : {}) }
   }
   /**
    * When `ref` is the branch the owner thread's workspace.json names for its worktree: that record and the thread's
@@ -835,11 +859,13 @@ export class ResourcePurgeService {
         const items = expiry
           ? preview.items.map((item) => (item.kind === 'ref' && item.identity.startsWith('refs/heads/') ? { ...item, status: 'retained' as const } : item))
           : preview.items
+        // The journals still exist and Restore is still available if a repository cannot settle its reservation.
+        for (const id of preview.ownedTaskIds) await cancelPreparedReceiptRefReleases(this.store.require(id).location)
         this.store.enableCleanupWriter()
         record = this.store.update(input.taskId, (current) => {
           if (current.state !== 'trashed' || current.generation !== preview.generation) throw new Error('Task changed before purge boundary')
           current.state = 'purge-started'; current.generation++
-          current.purge = { ...preview, items, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized, ...(expiry ? { expired: true } : {}), ...(keepWork ? { keptWork: true } : {}) }
+          current.purge = { ...preview, items, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized, receiptReleasesSettled: true, ...(expiry ? { expired: true } : {}), ...(keepWork ? { keptWork: true } : {}) }
         })
         await this.hooks.onBoundary?.(record)
       } else if (input.keepWork === true && record.purge && !record.purge.expired && !record.purge.keptWork) {
@@ -848,9 +874,14 @@ export class ResourcePurgeService {
         record = this.store.update(input.taskId, (current) => { keepPendingWork(current) })
       }
       if (!record.purge) throw new Error('Purge recovery ledger is absent')
+      // Older, interrupted purges may still have prepared reservations to settle.
+      if (!record.purge.receiptReleasesSettled) {
+        for (const id of record.purge.ownedTaskIds) await cancelPreparedReceiptRefReleases(this.store.require(id).location)
+        record = this.store.update(input.taskId, (current) => { current.purge!.receiptReleasesSettled = true })
+      }
       await this.hooks.beforeRemoval?.(record)
       const reservation = record.cleanupOwner!.token
-      for (const item of record.purge.items) {
+      for (const item of record.purge!.items) {
         if (item.status !== 'pending') continue
         const retain = (reason: string): void => {
           record = this.store.update(input.taskId, (current) => {
@@ -870,7 +901,17 @@ export class ResourcePurgeService {
         if (peers.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
         const unverified = unverifiedOwnerOver(peers, target)
         if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
-        const retained = await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
+        const progress = {
+          onDiscardCleared: () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }),
+          relocation: {
+            started: record.purge!.worktreeMoves?.includes(item.id) === true,
+            record: () => this.store.update(input.taskId, (current) => {
+              const moves = current.purge!.worktreeMoves ??= []
+              if (!moves.includes(item.id)) moves.push(item.id)
+            })
+          }
+        }
+        const retained = await this.remove(item, new Set(record.purge!.ownedTaskIds), progress, () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
         if (retained) retain(retained)
         else record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
         await this.hooks.onBoundary?.(record)
@@ -897,7 +938,7 @@ export class ResourcePurgeService {
       throw descriptor
     } finally { active.delete(key) }
   }
-  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<string | void> {
+  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, progress: { onDiscardCleared: () => unknown; relocation: { started: boolean; record: () => void } }, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<string | void> {
     assertReservation()
     if (item.kind === 'scheduled-row') {
       const path = item.sourcePath!
@@ -915,19 +956,30 @@ export class ResourcePurgeService {
       })
       return
     }
-    if (item.kind === 'path') {
-      if (!await present(item.identity)) return
-      // Peer claims are read without blocking, then checked again from the records right before each entry is removed.
-      const target = await this.claimTarget(item)
+    const readUnclaimed = async (path = item.identity): Promise<() => void> => {
+      const target = await this.claimTarget(item, path)
+      // Bracket peer verification with Git's view of the target repository. The first listing gives verification
+      // a chance to see changes during Git startup. The second catches checkouts (including unmanaged siblings)
+      // that switched while peers were being read, and invalidates the check if any listed worktree changed.
+      const listWorktrees = async (): Promise<string> => {
+        const listing = await lifecycleReadAsync(item.commonDir!, ['worktree', 'list', '--porcelain', '-z'])
+        if (listing.split('\0').includes('branch ' + item.identity)) throw purgeStopped('the branch is checked out. It was kept.')
+        return listing
+      }
+      const listing = item.kind === 'ref' ? await listWorktrees() : undefined
       const claims = await this.peersCheck(ownedIds)
-      const unclaimed = (): void => {
+      if (listing !== undefined && await listWorktrees() !== listing) throw purgeStopped('the repository worktrees changed. The ref was kept.')
+      return () => {
         assertReservation()
         const current = claims()
-        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
+        if (current.some((peer) => peer.identity === path || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(item.kind === 'path' ? `New shared owner retains ${item.identity}` : 'A new source claim retains the resource')
         const unverified = unverifiedOwnerOver(current, target)
         if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
       }
-      await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge', false, unclaimed)
+    }
+    if (item.kind === 'path') {
+      if (!await present(item.identity)) return
+      await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge', false, readUnclaimed)
       return
     }
     const commonDir = item.commonDir!
@@ -942,26 +994,14 @@ export class ResourcePurgeService {
     const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
     try {
       assertReservation()
-      // Re-checked right before each change below, with nothing awaited in between (`peersCheck`).
-      const target = await this.claimTarget(item)
-      const claims = await this.peersCheck(ownedIds)
-      const unclaimed = (): void => {
-        assertReservation()
-        const current = claims()
-        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error('A new source claim retains the resource')
-        const unverified = unverifiedOwnerOver(current, target)
-        if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
-      }
-      unclaimed()
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
-          await this.removeDiscarded(item, commonDir, unclaimed, onDiscardCleared)
+          await this.removeDiscarded(item, commonDir, readUnclaimed, progress.onDiscardCleared)
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
-        unclaimed()
         // Checked again right before the checkout moves (or Git deletes it from the trash), with nothing awaited in between.
-        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: unclaimed })
+        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: readUnclaimed, purgeRelocation: progress.relocation })
       } else {
         const current = await readDirectLifecycleRefAsync(commonDir, item.identity)
         if (!current) return
@@ -977,6 +1017,8 @@ export class ResourcePurgeService {
               reason = 'This branch is checked out; the branch stays'
               return false
             }
+            // The ownership check runs after its reads, with nothing awaited between it and the commit of the transaction.
+            const unclaimed = await readUnclaimed()
             unclaimed()
             const record = this.readThreadBranchRecord(item.ownerTaskId, proof.worktreePath)
             const retained = this.threadBranchRetention(record, name)
@@ -990,7 +1032,8 @@ export class ResourcePurgeService {
           return
         }
         const input = `start\ndelete ${item.identity} ${current}\nprepare\ncommit\n`
-        await lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
+        // The central check runs first, then the ownership check right before the transaction starts, with nothing awaited in between.
+        await lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, readUnclaimed)
       }
     } finally { lease.release() }
   }
@@ -1003,7 +1046,7 @@ export class ResourcePurgeService {
    * and the reason names it. Git is run in the folder only while its `.git` leads to this repository's registration of it;
    * without one Git would find the repository of a folder above.
    */
-  private async removeDiscarded(item: LifecyclePurgeItem, commonDir: string, unclaimed: () => void, onDiscardCleared: () => unknown): Promise<void> {
+  private async removeDiscarded(item: LifecyclePurgeItem, commonDir: string, readUnclaimed: () => Promise<() => void>, onDiscardCleared: () => unknown): Promise<void> {
     const folder = item.identity
     const changed = (): Error => purgeStopped(`the worktree at ${folder} changed (its folder, branch or commit) since the delete was reviewed. It was kept.`)
     const lostLink = (): Error => purgeStopped(`the worktree at ${folder} lost its link to its repository (.git) before its files were cleared. It was kept.`)
@@ -1028,7 +1071,7 @@ export class ResourcePurgeService {
       if (!registration) return
       // Its reviewed files were never cleared: something else moved or deleted the worktree, and Git's record of it stays.
       if (item.discardState === 'pending') throw purgeStopped(`the worktree at ${folder} was moved or deleted by something else, and Git still lists it. It was kept in Git's list of worktrees.`)
-      return await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      return await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
     }
     const dotGit = join(folder, '.git')
     if (!sameRoot(stat)) {
@@ -1038,6 +1081,7 @@ export class ResourcePurgeService {
       const registration = await registrationOf(commonDir, folder)
       unlocked(registration)
       if ((await filesIn(folder)).length) throw writtenSince()
+      const unclaimed = await readUnclaimed()
       unclaimed()
       unlocked(registration)
       const now = lstatSync(folder)
@@ -1046,7 +1090,7 @@ export class ResourcePurgeService {
         if (['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw writtenSince()
         throw error
       }
-      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
       return
     }
     const linkInfo = await lstat(dotGit).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
@@ -1058,6 +1102,7 @@ export class ResourcePurgeService {
       if (files.length) throw purgeStopped(savedText(files))
       const registration = await registrationOf(commonDir, folder)
       unlocked(registration)
+      const unclaimed = await readUnclaimed()
       unclaimed()
       unlocked(registration)
       if (!sameRoot(lstatSync(folder))) throw changed()
@@ -1065,7 +1110,7 @@ export class ResourcePurgeService {
         if (!['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
         throw kept(await filesIn(folder))
       }
-      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
       return
     }
     if (!linkInfo.isFile() || linkInfo.size > 4096) throw changed()
@@ -1094,12 +1139,13 @@ export class ResourcePurgeService {
         const files = paths.filter(Boolean)
         return files.length ? purgeStopped(savedText(files)) : purgeStopped(`the worktree folder ${folder} changed after the delete began. It was kept.`)
       }
-      await this.removeFrozen(folder, item.content!, folder, undefined, named, true, () => { unclaimed(); unlocked(registration) })
+      await this.removeFrozen(folder, item.content!, folder, undefined, named, true, async () => { const unclaimed = await readUnclaimed(); return () => { unclaimed(); unlocked(registration) } })
       onDiscardCleared()
     }
     // Right after the reviewed files went, the checkout holds only its `.git`: anything else was written since, and is kept.
     const files = await filesIn(folder)
     if (files.length) throw purgeStopped(savedText(files))
+    const unclaimed = await readUnclaimed()
     // From here to the removals nothing is awaited.
     unclaimed()
     unlocked(registration)
@@ -1128,20 +1174,23 @@ export class ResourcePurgeService {
       }
     }
     if (landed) throw kept(await filesIn(folder))
-    await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+    await this.unregisterDiscarded(registration, folder, commonDir, readUnclaimed)
   }
   /** Git unregisters the deleted checkout. A folder at that path again would be someone's new files: it is kept, and so is the registration. */
-  private async unregisterDiscarded(registration: WorktreeRegistration, folder: string, commonDir: string, unclaimed: () => void): Promise<void> {
+  private async unregisterDiscarded(registration: WorktreeRegistration, folder: string, commonDir: string, readUnclaimed: () => Promise<() => void>): Promise<void> {
     const lockedNow = (): void => {
       const locked = lockReasonSync(registration.adminDir)
       if (locked !== undefined) throw purgeStopped(lockedText(locked, folder))
     }
     lockedNow()
     // The path as Git recorded it: Git matches it whatever is on disk, so this works with the folder's parent gone too.
-    await lifecycleGitAsync(commonDir, ['worktree', 'remove', registration.path], undefined, undefined, undefined, () => {
-      unclaimed()
-      lockedNow()
-      if (existsSync(folder)) throw purgeStopped(`files were written at ${folder} after its worktree was deleted. They were kept.`)
+    await lifecycleGitAsync(commonDir, ['worktree', 'remove', registration.path], undefined, undefined, undefined, async () => {
+      const unclaimed = await readUnclaimed()
+      return () => {
+        unclaimed()
+        lockedNow()
+        if (existsSync(folder)) throw purgeStopped(`files were written at ${folder} after its worktree was deleted. They were kept.`)
+      }
     })
     if (await registrationOf(commonDir, folder)) throw new Error('Git still lists the deleted worktree')
   }
@@ -1154,7 +1203,7 @@ export class ResourcePurgeService {
    * write since its bytes were checked refuses it and nothing unreviewed is unlinked. Never follows a link or removes an
    * unreviewed subtree. `rootIdentity`, when given, is checked before every removal too. The entries are under the Mousse home.
    */
-  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string | ((paths: string[]) => Error), skipRootGit = false, beforeEach?: () => void): Promise<void> {
+  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string | ((paths: string[]) => Error), skipRootGit = false, prepareRemoval?: () => Promise<() => void>): Promise<void> {
     if (frozenRoot) {
       await assertLifecyclePathAsync(owner, root)
       if (rootIdentity(await lstat(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced')
@@ -1173,6 +1222,7 @@ export class ResourcePurgeService {
       const path = join(root, entry.path)
       await assertLifecyclePathAsync(owner, dirname(path))
       const proof = await proveFrozenContentEntryAsync(root, entry)
+      const beforeEach = prepareRemoval && await prepareRemoval()
       // From here to the removal nothing is awaited.
       beforeEach?.()
       assertLifecyclePath(owner, dirname(path))

@@ -15,6 +15,7 @@ import { UndoService } from '../src/mms/actions/UndoService'
 import { resolveReviewScope } from '../src/mms/actions/reviewRange'
 import { configureSnapshotLimits, isUnsafeSnapshotRootAsync, SnapshotRefusedError, takeSnapshotAsync } from '../src/mms/actions/snapshots'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
+import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { inHiddenStore } from '../src/mms/git/hiddenStore'
 import { isGitRepository, listChangedFiles, readFileVersions } from '../src/mms/git/reviewDiff'
@@ -68,6 +69,28 @@ async function thread(name: string, work: string, projectId?: string) {
   const store = (...args: string[]) => git(space.store.gitDir, ...args)
   return { directory, space, actions, turn, undo, store, work: space.record.workTree }
 }
+
+it.each(['save a checkpoint', 'fork a historical conversation'] as const)('can %s using the receipt refs in a hidden snapshot store', async (operation) => {
+  const work = folder('without-git')
+  write(work, 'file.txt', 'before\n')
+  const t = await thread('snapshot-thread', work)
+  const { action } = await t.turn('turn', () => write(work, 'file.txt', 'after\n'))
+  const receipt = new ChangeReceiptService(t.directory).list().find(({ id }) => id === action.receiptId)!
+  expect(t.store('rev-parse', receipt.retainedRefs[0]!)).toBe(receipt.beforeSha)
+  expect(t.store('rev-parse', receipt.retainedRefs[1]!)).toBe(receipt.afterSha)
+  expect(existsSync(join(work, '.git'))).toBe(false)
+
+  if (operation === 'save a checkpoint') {
+    const retention = new UndoRetentionService(t.directory)
+    await retention.pin(work, action.id, true, true)
+    expect(retention.eligibility(action)).toMatchObject({ state: 'pinned' })
+  } else {
+    const branch = await new ConversationBranchService(t.directory).fork(work, 'main', action.id, 'Historical')
+    expect(t.store('rev-parse', branch.retainedRef!)).toBe(receipt.afterSha)
+    expect(t.store('show', receipt.afterSha + ':file.txt')).toBe('after')
+  }
+  expect(readFileSync(join(work, 'file.txt'), 'utf8')).toBe('after\n')
+})
 
 /** What an abort of an older version kept in the thread's store, recorded as it recorded it. */
 async function keepByAbort(t: Awaited<ReturnType<typeof thread>>, operationId: string): Promise<string> {

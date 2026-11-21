@@ -1,6 +1,6 @@
-import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { win32 } from 'node:path'
+import { execFileGit } from './gitSpawn'
 
 /**
  * The Git program Mousse starts, and the environment it starts it with.
@@ -97,7 +97,7 @@ function isDirectory(path: string): boolean {
 
 function runExecPath(file: string): Promise<string | undefined> {
   return new Promise((settle) => {
-    execFile(file, ['--exec-path'], { windowsHide: true, encoding: 'utf8', timeout: 15_000, cwd: win32.dirname(file) }, (error, stdout) => settle(error ? undefined : stdout.trim()))
+    execFileGit(file, ['--exec-path'], { windowsHide: true, encoding: 'utf8', timeout: 15_000, cwd: win32.dirname(file) }, (error, stdout) => settle(error ? undefined : stdout.trim()))
   })
 }
 
@@ -180,25 +180,4 @@ export function gitFile(): string {
 export function gitEnvFor<T extends NodeJS.ProcessEnv | undefined>(env: T): T | NodeJS.ProcessEnv {
   const resolved = current()
   return resolved.root ? withLauncherEnvironment(env ?? process.env, resolved.root) : env
-}
-
-/** simple-git's own check of a custom binary: a path outside these characters is "unsafe" to it, and warns on each use. */
-const SIMPLE_GIT_SAFE_BINARY = /^([a-z]:)?([a-z0-9/.\\_~-]+)$/i
-
-/**
- * A simple-git instance made by `make` with the options that run {@link gitFile}; give it an environment through
- * {@link gitEnvFor} in the same synchronous step. A path simple-git calls unsafe (one with a
- * space, as under Program Files) is one Mousse resolved itself, so it is allowed, and the warning simple-git prints for
- * it on every instance is kept out of the log.
- */
-export function simpleGitWithProgram<T>(make: (options: { binary?: string; allowUnsafeCustomBinary?: boolean }) => T): T {
-  const file = gitFile()
-  if (file === 'git') return make({})
-  if (SIMPLE_GIT_SAFE_BINARY.test(file)) return make({ binary: file })
-  const warn = console.warn
-  console.warn = (...values: unknown[]) => {
-    if (typeof values[0] === 'string' && values[0].startsWith('Invalid value supplied for custom binary')) return
-    warn.apply(console, values)
-  }
-  try { return make({ binary: file, allowUnsafeCustomBinary: true }) } finally { console.warn = warn }
 }

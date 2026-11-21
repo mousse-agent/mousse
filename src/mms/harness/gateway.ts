@@ -27,7 +27,7 @@ import type {
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { McpRelayRuntime } from '../../shared/integrations'
+import type { McpRelayRuntime, SkillsRegistrySnapshot } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
@@ -581,6 +581,7 @@ export interface TurnAppContext {
    * MCP bearer cannot be issued is refused before the runtime starts, never run without them.
    */
   requiredTools?: readonly string[]
+  skillsSnapshot?: SkillsRegistrySnapshot
   /** The session text and turn preamble, given whether the server and the MCP relay were attached. */
   instructions(mcpAttached: boolean, relayAttached?: boolean): { sessionInstructions: string; turnPreamble: string }
   /**
@@ -2107,6 +2108,7 @@ export class Harness implements HarnessGateway {
         turnToken: app.turnToken,
         sessionInstructions: texts.sessionInstructions,
         turnPreamble: texts.turnPreamble,
+        ...(app.skillsSnapshot ? { skillsSnapshot: app.skillsSnapshot } : {}),
         ...(binding.policy.tools ? { toolPolicy: binding.policy.tools } : {}),
         userMcp: record.driver.userMcp ?? 'native',
         // `never`: nobody answers, so every permission request is denied without asking.
@@ -2316,7 +2318,7 @@ export class Harness implements HarnessGateway {
       if (record.active > 0) continue
       this.retired.delete(record)
       const stopped = this.stopRuntime(record)
-      // A removed instance's files wait until its processes have exited.
+      // A removed instance's files wait for its processes to exit.
       const removal = this.removals.get(record.instanceId)
       if (stopped && removal) {
         removal.pending += 1
@@ -2938,7 +2940,7 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       if (record) {
         this.records.delete(instanceId)
-        this.stopRuntime(record)
+        void this.stopRuntime(record)
       }
       throw error
     }
@@ -4206,11 +4208,12 @@ export class Harness implements HarnessGateway {
         records.add(record)
       }
     }
-    for (const record of records) this.stopRuntime(record)
+    for (const record of records) void this.stopRuntime(record)
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
-    this.shutdown = Promise.allSettled([...this.runtimeStops.values()].map((stop) => stop.promise)).then((results) => {
+    const stops = [...[...this.runtimeStops.values()].map((stop) => stop.promise), ...[...this.stopBarriers.values()].flatMap((set) => [...set])]
+    this.shutdown = Promise.allSettled(stops).then((results) => {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Provider runtimes could not be stopped')
     })

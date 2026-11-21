@@ -3,7 +3,7 @@
  * window keeps the branch it showed instead of hearing there is none.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -34,9 +34,21 @@ it('answers a folder outside Git as not a repository, and a detached HEAD as no 
   await expect(service.getStatus(repository)).resolves.toMatchObject({ isRepo: true, branch: null, tracking: 'detached' })
 })
 
-it('throws when Git cannot tell whether the folder is a repository, instead of answering that it is not', async () => {
+it('throws when Git fails to read the status, instead of answering that the folder is not a repository or has no branch', async () => {
+  const repository = folder()
+  git(repository, 'init', '-q', '-b', 'main')
+  const service = new GitService()
+  const failed = { ok: false, code: null, stalled: false, cancelled: false, exited: false, stdout: '', truncated: false, output: 'spawn git EAGAIN' }
+  vi.spyOn(service as unknown as { runGit(...args: unknown[]): unknown }, 'runGit').mockResolvedValue(failed)
+  await expect(service.getStatus(repository)).rejects.toThrow('EAGAIN')
+})
+
+it('throws when Git cannot tell whether a folder the files do not answer for is a repository', async () => {
   const service = new GitService()
   const failing = { checkIsRepo: () => Promise.reject(new Error('spawn git EAGAIN')) }
   vi.spyOn(service as unknown as { gitFor(cwd: string): unknown }, 'gitFor').mockReturnValue(failing)
-  await expect(service.getStatus(folder())).rejects.toThrow('EAGAIN')
+  // A `.git` file that names no Git folder: a layout Git's files do not tell, so Git is asked.
+  const odd = folder()
+  writeFileSync(join(odd, '.git'), 'not a gitdir line')
+  await expect(service.getStatus(odd)).rejects.toThrow('EAGAIN')
 })

@@ -37,6 +37,7 @@ import { withDrivers } from '../git/gitEnv'
 import { restoreCommands, restoreShell, type RestoreKind, type RestoreShell } from '../actions/restoreCommands'
 import { retentionWindowText } from '../../shared/undoRetention'
 import { branchCheckedOutAsync, createLoggedBranchAsync, deleteVerifiedBranchAsync, gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { verifyPinsAsync } from './worktreeFacts'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type DeletePlace, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
 import { readThreadRecordSync, threadRecordFile, threadRecordFolder, threadRecordName } from '../data/threadRecords'
 
@@ -432,7 +433,10 @@ export class WorktreeRetirementService {
   }
   load(path: string): WorktreeReconstructionManifest {
     assertLifecyclePath(this.store.root, path)
-    const value = JSON.parse(readFileSync(path, 'utf8')) as WorktreeReconstructionManifest
+    return this.parseManifest(path, readFileSync(path, 'utf8'))
+  }
+  private parseManifest(path: string, text: string): WorktreeReconstructionManifest {
+    const value = JSON.parse(text) as WorktreeReconstructionManifest
     if (value.schemaVersion !== 1 || value.profileId !== this.store.profileId || !samePath(path, this.pathFor(value.taskId, value.worktreePath)) || !isValidBranchName(value.branch)) throw new Error('Invalid workspace reconstruction authority')
     const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${value.taskId}/${hash(value.worktreePath).slice(0, 32)}`
     if (value.snapshotSha !== undefined && (value.snapshotRef !== `${prefix}/snapshot` || ![value.snapshotSha, value.snapshotTree].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace reconstruction manifest')
@@ -526,18 +530,26 @@ export class WorktreeRetirementService {
   async retire(manifestPath: string, options: {
     purging?: boolean
     /**
-     * The caller's own checks, run synchronously right before the worktree moves (or, for a purge of one already in the
-     * trash, right before Git deletes it), after the ownership and claims checks and with nothing awaited in between. It
-     * refuses by throwing; nothing has moved then.
+     * The caller can gather fresh evidence, then return a synchronous admission check to run just before a move or delete.
      */
-    beforeMove?: () => void
+    beforeMove?: (path: string) => void | Promise<() => void>
+    purgeRelocation?: { started: boolean; record: () => void }
   } = {}): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
+    if (options.purgeRelocation?.started) manifest.trashPath ??= this.trashPathFor(manifest)
     // On a drive that is not connected nothing moves and nothing is taken for gone; it waits for the drive.
     await assertWorktreeFolderConnected(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     await this.verifyPins(manifest)
     const save = (): void => { if (!options.purging) atomicWriteJsonSync(manifestPath, manifest) }
+    const admitRemoval = (path: string) => async (): Promise<() => void> => {
+      const lease = await this.readRepositoryLease()
+      const admit = await options.beforeMove?.(path)
+      return () => {
+        this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
+        admit?.()
+      }
+    }
     await this.settleTrashRegistration(manifest)
     if (!await exists(manifest.worktreePath)) {
       if (await this.registered(manifest)) throw new Error('Missing worktree remains registered; recovery is required')
@@ -545,14 +557,20 @@ export class WorktreeRetirementService {
       // Permanent deletion: what waits in the trash goes too, and what is left of a delete the trash expiry started.
       // Ownership is checked again right before each removal starts.
       if (options.purging && manifest.trashPath) {
-        const lease = await this.readRepositoryLease()
-        const owned = (): void => {
-          this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
-          options.beforeMove?.()
+        if (manifest.deleting && await exists(manifest.deleting.path))
+          await this.removeConfirmed(manifest.deleting.path, admitRemoval(manifest.deleting.path))
+        const trashPath = manifest.trashPath
+        if (await exists(trashPath)) await this.removeTrashed(manifest, admitRemoval(trashPath))
+        else if (await worktreeRegisteredAsync(manifest.commonDir, trashPath)) {
+          await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', trashPath], undefined, undefined, undefined, async () => {
+            const admit = await admitRemoval(trashPath)()
+            return () => {
+              admit()
+              // This removal only unregisters a missing checkout. Even an ignored file in a replacement is kept.
+              if (lstatSync(trashPath, { throwIfNoEntry: false })) throw new Error('The worktree trash path reappeared; its files are kept')
+            }
+          })
         }
-        if (manifest.deleting && await exists(manifest.deleting.path)) await this.removeConfirmed(manifest.deleting.path, owned)
-        if (await exists(manifest.trashPath)) await this.removeTrashed(manifest, owned)
-        else if (await worktreeRegisteredAsync(manifest.commonDir, manifest.trashPath)) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', manifest.trashPath], undefined, undefined, undefined, owned)
         delete manifest.deleting
       }
       manifest.state = manifest.trashPath && await exists(manifest.trashPath) ? 'trashed' : 'retired'; save(); return manifest
@@ -590,10 +608,11 @@ export class WorktreeRetirementService {
     // Right before the move, with nothing awaited between these checks and its start: the checkouts other records name
     // are read again now, then the leases, the reservation, the source and every claim are checked from the records, and
     // last the caller's own checks run. A claim on a checkout not read here fails closed.
-    const facts = new OwnershipFacts()
-    // Only the facts are wanted: a refusal is made again, from the records, by the check below.
-    await getExternalResourceClaims(this.store, excludedNow(), facts).catch(() => undefined)
     const lease = await this.readRepositoryLease()
+    const facts = new OwnershipFacts(true)
+    const prepare = options.beforeMove?.(manifest.worktreePath)
+    const admit = prepare ? await prepare : undefined
+    await getExternalResourceClaims(this.store, excludedNow(), facts)
     this.store.withGate(manifest.taskId, () => {
       this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease)
       this.verifySource(manifest, options.purging)
@@ -601,14 +620,16 @@ export class WorktreeRetirementService {
       const late = shares(getExternalResourceClaimsFromFacts(this.store, current, facts), current)
       if (late) throw new Error(late)
     })
-    options.beforeMove?.()
+    admit?.()
     // The destination is fixed by the manifest, so a crash after the move finds the folder there.
-    manifest.trashPath = trashPath; save()
+    manifest.trashPath = trashPath
+    if (options.purging) options.purgeRelocation?.record()
+    else save()
     try { await renameFolderAsync(manifest.worktreePath, trashPath) }
     catch (error) { throw new Error(`The worktree could not be moved to the trash; files in it may be in use (${(error as Error).message.split(/\r?\n/)[0]})`) }
     await this.settleTrashRegistration(manifest)
     if (await this.registered(manifest)) throw new Error('Git still registers the worktree at its old path')
-    if (options.purging) { await this.removeTrashed(manifest); manifest.state = 'retired'; return manifest }
+    if (options.purging) { await this.removeTrashed(manifest, admitRemoval(trashPath)); manifest.state = 'retired'; return manifest }
     manifest.state = 'trashed'; manifest.trashedAt = new Date().toISOString(); save()
     await this.releaseBranches(manifest); save()
     return manifest
@@ -1109,17 +1130,28 @@ export class WorktreeRetirementService {
    * A permanent deletion the person confirmed, only: deletes the folder in the trash through Git, so its registration
    * goes with it. The trash expiry never uses this; it deletes against a proof (`deleteRenamed`).
    */
-  private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void): Promise<void> {
+  private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void | Promise<() => void>): Promise<void> {
     const trashPath = manifest.trashPath!
     await assertLifecyclePathAsync(trashRootOf(trashPath, this.store.profileHome), trashPath)
     // Whether the checks before Git passed: a refusal there deletes nothing, by Git or otherwise.
     let cleared = false
-    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, () => { beforeStart?.(); cleared = true }) }
+    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, async () => {
+      const check = await beforeStart?.()
+      return () => {
+        check?.()
+        const root = lstatSync(trashPath)
+        const original = manifest.rootIdentity
+        if (!root.isDirectory() || root.dev !== original.dev || root.ino !== original.ino || root.birthtimeMs !== original.birthtimeMs) {
+          throw new Error('The worktree in the trash was replaced; its files are kept')
+        }
+        cleared = true
+      }
+    }) }
     catch (error) {
       if (!cleared) throw error
       // Git deleted `.git` and unregistered it, then stopped at a file in use: what is left is no checkout any more.
       if (!await exists(trashPath) || await exists(join(trashPath, '.git')) || await worktreeRegisteredAsync(manifest.commonDir, trashPath)) throw error
-      await this.removeConfirmed(trashPath)
+      await this.removeConfirmed(trashPath, beforeStart)
     }
     if (await exists(trashPath) || await worktreeRegisteredAsync(manifest.commonDir, trashPath)) throw new Error('Git did not remove the worktree from the trash')
   }
@@ -1128,10 +1160,10 @@ export class WorktreeRetirementService {
    * never followed, a worktree's `.git` file last. Every entry and every folder from the trash down is identified when
    * the folder is walked; right before each removal, each folder down to it must be the very one walked, and no link, and
    * the entry the very one walked, or nothing more is removed (as in `deleteRenamed`, a deliberate swap between that check
-   * and the system call remains possible in principle). `beforeStart` runs right before the first removal. A file in use
+   * and the system call remains possible in principle). `beforeStart` refreshes admission before each removal. A file in use
    * stops it; the next pass of the permanent deletion carries on.
    */
-  private async removeConfirmed(root: string, beforeStart?: () => void): Promise<void> {
+  private async removeConfirmed(root: string, beforeStart?: () => void | Promise<() => void>): Promise<void> {
     const trash = trashRootOf(root, this.store.profileHome)
     await assertLifecyclePathAsync(trash, root)
     const folders = new Map<string, string>()
@@ -1154,8 +1186,9 @@ export class WorktreeRetirementService {
       paths.push({ path: dotGit, folder: false, identity: identityOf(gitStat) })
     }
     paths.push({ path: root, folder: true, identity: folders.get(resolve(root))! })
-    beforeStart?.()
     for (const entry of paths) {
+      const admission = beforeStart?.()
+      if (admission) (await admission)()
       try {
         assertFoldersUnchanged(trash, dirname(entry.path), folders)
         const stat = lstatSync(entry.path)
@@ -1698,15 +1731,19 @@ export class WorktreeRetirementService {
     if (!existsSync(path)) return false
     try { return this.load(path).rebuilding !== undefined } catch { return false }
   }
+  /** The same check for passive reads that must leave the event loop free while the drive answers. */
+  async rebuildUnfinishedAsync(taskId: string, worktreePath: string): Promise<boolean> {
+    const path = this.pathFor(taskId, worktreePath)
+    try {
+      await access(path)
+      await assertLifecyclePathAsync(this.store.root, path)
+      return this.parseManifest(path, await readFile(path, 'utf8')).rebuilding !== undefined
+    } catch { return false }
+  }
+  /** Throws unless the manifest's pins still hold (`verifyPinsAsync`: one ref listing and one object read, not Git per ref). */
   async verifyPins(manifest: WorktreeReconstructionManifest): Promise<void> {
-    await assertLifecyclePathAsync(dirname(manifest.commonDir), manifest.commonDir)
-    if (hash((await realpathLikeSync(manifest.commonDir)).toLowerCase()).slice(0, 32) !== manifest.repositoryId) throw new Error('Repository identity is unavailable or changed')
-    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : []), ...(manifest.adminRef ? [[manifest.adminRef, manifest.adminCommit!]] : [])]) if (await readDirectLifecycleRefAsync(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
-    if (manifest.adminCommit && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.adminCommit}^{tree}`]) !== manifest.adminTree) throw new Error('Retained Git data of the worktree changed')
-    const prefix = manifest.resultRef.slice(0, -'/result'.length)
-    for (const layer of manifest.keptFiles ?? []) if (layer.sha && await readDirectLifecycleRefAsync(manifest.commonDir, `${prefix}/kept/${layer.sha}`) !== layer.sha) throw new Error('A pin of the kept files changed or is unavailable')
-    if (await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
-    if (manifest.snapshotSha && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
+    const error = (await verifyPinsAsync([manifest])).get(manifest)
+    if (error) throw error
   }
   /**
    * The commit a branch points at, never following a symbolic ref: a branch that is a symbolic ref (or unreadable) is
