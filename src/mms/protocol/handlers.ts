@@ -2715,9 +2715,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const window = ctx.connection?.clientType === 'gui'
           ? (ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older')
           : ctx.connection?.clientType === 'bridge' ? routedWindow : undefined
-        if (window === 'binds')
+        // A Stop before the first prompt leaves binding pending. A matching Steer receipt can still replay through
+        // the engine, which checks the prompt against the receipt before answering.
+        const receipt = window && steerRunId && clientRequestId ? ctx.mms.runEngine.store.getReceipt(clientRequestId) : undefined
+        const replaysSteer = receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted' &&
+          (receipt.result as { steerRunId?: string } | null)?.steerRunId === steerRunId
+        if (!replaysSteer && window === 'binds')
           throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
-        if (window === 'older')
+        if (!replaysSteer && window === 'older')
           throw new DomainRpcError('first_send_unbound', 'Update Mousse to send the first message in this chat.', { threadId, update: true })
       }
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)

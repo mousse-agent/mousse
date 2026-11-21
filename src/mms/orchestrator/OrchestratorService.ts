@@ -11106,9 +11106,10 @@ export class OrchestratorService extends EventEmitter {
       const pending = listPendingQueue(items).filter((entry) => !entry.internal)
       const item = pending.find((entry) => entry.id === itemId)
       if (!item || item.state !== 'pending') throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
-      const first = new Set(pending.filter((entry) => !entry.heldAfterStop && (runId
+      // A message already targeted at this run keeps its place while it waits for the Stop hold to lift.
+      const first = new Set(pending.filter((entry) => runId
         ? entry.steerOnStart?.runId === runId
-        : session.steerOnStart.includes(entry.id))).map((entry) => entry.id))
+        : session.steerOnStart.includes(entry.id)).map((entry) => entry.id))
       if (first.has(itemId)) return items
       first.add(itemId)
       // Saved with the item: the run it joins. Another run that meets it never takes it as a steer.
@@ -11278,7 +11279,14 @@ export class OrchestratorService extends EventEmitter {
     // a running turn. They wait first in the queue, in the order they were sent, until the person sends again.
     if (session.activeTurn?.abort.signal.aborted || session.abortRequested || session.stopping) return
     const runId = session.activeTurn?.runId
-    const items = this.threadStore ? readDurableQueue(this.threadStore, session.threadId) : session.queue
+    let items: QueuedMessage[]
+    try {
+      items = this.threadStore ? readDurableQueue(this.threadStore, session.threadId) : session.queue
+    } catch (error) {
+      // The queue drains after the original turn, including Steers that could not join it.
+      logDebug('OrchestratorService', 'could not read Steer messages at turn start', error, { threadId: session.threadId })
+      return
+    }
     const pending = items.filter((item) => item.state === 'pending' && !item.heldAfterStop && (item.steerOnStart
       ? item.steerOnStart.runId === runId
       : legacyIds.includes(item.id)))
