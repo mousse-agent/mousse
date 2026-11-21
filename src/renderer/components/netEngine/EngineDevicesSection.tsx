@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { AlertTriangle, Laptop, Network, Plus } from '../../lib/icons'
+import { AlertTriangle, Laptop, Network, Plus, X } from '../../lib/icons'
 import type { NetEngineDevice, NetEngineStatus } from '../../../shared/netEngine/local'
+import { routeText } from '../../../shared/netEngine/routes'
 import type { PlatformRequestMethod } from '../../../shared/platform'
 import { refreshComputers, useComputers } from '../../lib/computers'
 import { useAppStore } from '../../stores/appStore'
 import { DevicePresetRow } from '../devices/DevicePresetRow'
+import { WorkHereRow } from '../devices/WorkHereRow'
 import { errorText } from '../devices/useDaemonCall'
 import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { Modal } from '../ui/Modal'
 import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
 import { engineRow, engineWhere, SHARED_ACCOUNT_DETAIL, SHARED_ACCOUNT_LINE } from './engineRows'
+import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
+import { CodeEntry } from './SendLinkParts'
+import { ReachSection } from './ReachSection'
 import './engine.css'
 
 /** Reads `netEngine.status` for this window's profile, again whenever the daemon says it changed. */
@@ -65,6 +70,14 @@ export function EngineDevicesSection() {
   const [selected, setSelected] = useState<string>()
   const [addressFor, setAddressFor] = useState<NetEngineDevice>()
   const [removing, setRemoving] = useState<NetEngineDevice>()
+  // A `mousse://pair` link that opened Mousse opens Enter link with it.
+  const offered = useOfferedPairLink()
+  const [linkToEnter, setLinkToEnter] = useState<string>()
+  useEffect(() => {
+    if (!offered || !status) return
+    const link = takeOfferedPairLink()
+    if (link) setLinkToEnter(link)
+  }, [offered, status])
 
   const action = async (method: PlatformRequestMethod, params: unknown): Promise<boolean> => {
     setBusy(true)
@@ -140,11 +153,7 @@ export function EngineDevicesSection() {
               {view.line}
             </span>
             {' · '}
-            <span
-              title={device.addresses
-                ?.map((address) => address.replace(/^tcp:\/\//, ''))
-                .join(', ')}
-            >
+            <span title={device.addresses?.map(routeText).join(', ')}>
               {engineWhere(device)}
             </span>
           </span>
@@ -155,6 +164,28 @@ export function EngineDevicesSection() {
           ) : undefined
         }
       />,
+      !!device.offered?.length && (
+        <SettingsRow
+          key={`${device.node}-offered`}
+          indent
+          title={`Addresses ${device.name} offered`}
+          description={
+            <span title="Not dialled until you tap Use.">
+              {device.offered.map(routeText).join(', ')}
+            </span>
+          }
+          control={
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              onClick={() => void action('netEngine.address.use', { node: device.node })}
+            >
+              Use
+            </button>
+          }
+        />
+      ),
       open && node && (
         <DevicePresetRow
           key={`${device.node}-access`}
@@ -206,6 +237,39 @@ export function EngineDevicesSection() {
             {line}
           </p>
         )}
+        {status.enabled && status.loginStart === 'ask' && (
+          <SettingsRow
+            title="Start Mousse at login so your other computers can reach this one?"
+            control={
+              <span className="engine-group-actions">
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={busy}
+                  onClick={() => void action('netEngine.loginStart', { start: false })}
+                >
+                  Not now
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn primary"
+                  disabled={busy}
+                  onClick={() => void action('netEngine.loginStart', { start: true })}
+                >
+                  Start at login
+                </button>
+              </span>
+            }
+          />
+        )}
+        {/* v1's Devices group has this switch while v1 is on; while it is off, this group does. */}
+        {status.workOnThreads !== undefined && (
+          <WorkHereRow
+            on={status.workOnThreads}
+            busy={busy}
+            onChange={(next) => void action('netEngine.workOnThreads', { enabled: next })}
+          />
+        )}
         {status.on && status.devices.flatMap(row)}
         {status.on && !status.devices.length && (
           <p className="settings-muted devices-note">No computers yet.</p>
@@ -217,12 +281,38 @@ export function EngineDevicesSection() {
         )}
       </SettingsGroup>
 
+      {status.on && status.reach && <ReachSection status={status} onChanged={read} />}
+
       {adding && <AddEngineDeviceDialog status={status} onClose={() => setAdding(false)} />}
+
+      {linkToEnter && !adding && (
+        <AddEngineDeviceDialog
+          status={status}
+          initial="enter"
+          initialLink={linkToEnter}
+          onClose={() => setLinkToEnter(undefined)}
+        />
+      )}
+
+      {/* A Send link join repeated by Retry or after a restart asks for the code here. */}
+      {!adding &&
+        !linkToEnter &&
+        (() => {
+          const waiting = status.joins?.find((join) => join.needsCode && join.node)
+          if (!waiting) return null
+          const device = status.devices.find((item) => item.node === waiting.node)
+          return (
+            <Modal open title={device ? `Pair with ${device.name}` : 'Enter link'} onClose={() => undefined}>
+              <CodeEntry join={waiting} />
+            </Modal>
+          )
+        })()}
 
       {addressFor && (
         <AddAddressDialog
-          device={addressFor}
+          device={status.devices.find((device) => device.node === addressFor.node) ?? addressFor}
           ownRoutes={status.routes ?? []}
+          anyKind={!!status.reach}
           onClose={() => setAddressFor(undefined)}
           onAdded={read}
         />
@@ -264,43 +354,67 @@ export function EngineDevicesSection() {
 function AddAddressDialog({
   device,
   ownRoutes,
+  anyKind,
   onClose,
   onAdded
 }: {
   device: NetEngineDevice
   ownRoutes: string[]
+  /** The helper takes every owner kind (protocol 1.1): tailnet, internet, a name, a tunnel URL. */
+  anyKind: boolean
   onClose: () => void
   onAdded: () => void
 }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const own = ownRoutes.map((route) => route.replace(/^tcp:\/\//, '')).join(', ')
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
+  const own = ownRoutes.map(routeText).join(', ')
+  const run = async (method: PlatformRequestMethod, params: unknown): Promise<boolean> => {
     setBusy(true)
     setError('')
     try {
-      await window.mousse.platformRequest.request('netEngine.address.add', {
-        node: device.node,
-        address: text
-      })
+      await window.mousse.platformRequest.request(method, params)
       onAdded()
-      onClose()
+      return true
     } catch (cause) {
       setError(errorText(cause))
+      return false
     } finally {
       setBusy(false)
     }
   }
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (await run('netEngine.address.add', { node: device.node, address: text })) onClose()
+  }
   return (
     <Modal open title={`Add address for ${device.name}`} onClose={onClose}>
       <form className="devices-dialog" onSubmit={(event) => void submit(event)}>
+        {!!device.addresses?.length && (
+          <ul className="engine-address-list" aria-label="Addresses">
+            {device.addresses.map((address) => (
+              <li key={address}>
+                <span title={address}>{routeText(address)}</span>
+                <button
+                  type="button"
+                  className="settings-icon-btn"
+                  aria-label={`Remove ${routeText(address)}`}
+                  disabled={busy}
+                  onClick={() =>
+                    void run('netEngine.address.remove', { node: device.node, address })
+                  }
+                >
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <input
           className="settings-input"
           value={text}
           autoFocus
-          placeholder="192.168.1.20:47100"
+          placeholder={anyKind ? '100.101.7.2:47100 or https://…' : '192.168.1.20:47100'}
           aria-label="Address and port"
           title={own ? `This computer's own address: ${own}` : undefined}
           onChange={(event) => setText(event.target.value)}

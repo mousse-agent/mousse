@@ -33,6 +33,9 @@ describe('a device row (§5.2)', () => {
     ['this computer cannot reach it', { unreachable: 'out', online: false }, "This computer can't reach Studio", ['retry', 'remove']],
     ['it no longer accepts this one', { notAccepted: true, online: false }, 'Studio no longer accepts this computer', ['remove']],
     ['certificate outside its window', { certificateWindow: true, online: false }, CLOCK_MESSAGE, ['retry', 'remove']],
+    ['SSH sign-in refused (parked)', { sshParked: 'auth_denied', state: 'offline', online: false }, 'SSH sign-in to Studio was refused', ['retry', 'remove']],
+    ['SSH key changed (parked)', { sshParked: 'host_key_changed', state: 'offline', online: false }, "Studio's SSH key changed", ['retry', 'remove']],
+    ['SSH key not checked (parked)', { sshParked: 'host_key_unknown', state: 'connecting', online: false }, "Check Studio's SSH key", ['retry', 'remove']],
     ['removing', { state: 'removing', online: false }, 'Removing…', []],
     ['offline', { state: 'offline', online: false }, 'Offline', ['access', 'address', 'retry', 'remove']],
     ['one direction up, within the bound', { state: 'connecting' }, 'Connecting…', ['access', 'address', 'retry', 'remove']],
@@ -51,7 +54,10 @@ describe('a device row (§5.2)', () => {
 })
 
 /** The daemon behind the section: a status, and every call it was asked. */
-function daemon(initial: Partial<NetEngineStatus> = {}) {
+function daemon(
+  initial: Partial<NetEngineStatus> = {},
+  answers: Record<string, (params: any) => unknown> = {}
+) {
   const state: { status: NetEngineStatus } = {
     status: {
       enabled: true,
@@ -66,6 +72,7 @@ function daemon(initial: Partial<NetEngineStatus> = {}) {
   const changed = new Set<(change: { profileId?: string }) => void>()
   const request = vi.fn(async (method: string, params: any) => {
     calls.push([method, params])
+    if (answers[method]) return answers[method]!(params)
     switch (method) {
       case 'netEngine.status':
         return state.status
@@ -176,6 +183,41 @@ describe('Settings → Devices, new networking', () => {
     expect(d.called('netEngine.enable')).toHaveLength(1)
   })
 
+  it.each([
+    ['Start at login', true],
+    ['Not now', false]
+  ])('asks once about starting at login, and "%s" answers it', async (name, start) => {
+    const question = 'Start Mousse at login so your other computers can reach this one?'
+    const d = daemon({ loginStart: 'ask' })
+    await mount()
+    expect(host.textContent).toContain(question)
+    expect(button('Start at login')).toBeTruthy()
+    expect(button('Not now')).toBeTruthy()
+    await click(button(name))
+    expect(d.called('netEngine.loginStart')).toEqual([{ start }])
+    await d.change({ loginStart: undefined })
+    expect(host.textContent).not.toContain(question)
+  })
+
+  it('shows "Let my other devices work here" while v1 is off, and turning it off goes to the daemon', async () => {
+    const label = "Let my other devices work on this device's threads"
+    const toggle = () => host.querySelector<HTMLElement>(`[role="switch"][aria-label="${label}"]`)
+    // v1 on: its own Devices group has the switch, so this one does not.
+    daemon({})
+    await mount()
+    expect(toggle()).toBeNull()
+    act(() => root.unmount())
+    root = createRoot(host)
+    const d = daemon({ workOnThreads: true })
+    await mount()
+    expect(toggle()?.getAttribute('aria-checked')).toBe('true')
+    await click(toggle()!)
+    expect(d.called('netEngine.workOnThreads')).toEqual([{ enabled: false }])
+    await d.change({ workOnThreads: false })
+    expect(toggle()?.getAttribute('aria-checked')).toBe('false')
+    expect(host.textContent).toContain('no other device can open or change this device’s threads')
+  })
+
   it('shows nothing in a build without the helper while the switch is off', async () => {
     daemon({ enabled: false, on: false, helper: { state: 'not_in_build' } })
     await mount()
@@ -284,5 +326,153 @@ describe('Add device', () => {
     } finally {
       vi.restoreAllMocks()
     }
+  })
+})
+
+describe('routes (1b §1.3, §1.5)', () => {
+  const tailnet = (host: string) => ({ route: `tcp://${host}:47100`, label: `${host}:47100`, cls: 'tailnet' as const })
+
+  it('lists the ticket destinations with their class, and shares only the routes ticked', async () => {
+    const d = daemon({}, {
+      'netEngine.join.preview': () => ({
+        kind: 1,
+        destinations: [{ ...tailnet('100.101.7.2'), automatic: false }],
+        shareable: [tailnet('100.101.7.9')]
+      })
+    })
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
+    const link = 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA'
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, link)
+    await click(button('Continue'))
+    expect(document.body.textContent).toContain('100.101.7.2:47100 (Tailnet)')
+    const box = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(box.checked).toBe(false)
+    expect(box.closest('label')?.textContent).toBe('Tailnet 100.101.7.9:47100')
+
+    await click(button('Connect'))
+    expect(d.called('netEngine.join').at(-1)).toEqual({ ticket: link })
+  })
+
+  it('sends a ticked route in the join', async () => {
+    const d = daemon({}, {
+      'netEngine.join.preview': () => ({ kind: 1, destinations: [], shareable: [tailnet('100.101.7.9')] }),
+      'netEngine.join': () => {
+        throw new Error('stop here')
+      }
+    })
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA')
+    await click(button('Continue'))
+    await click(document.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    await click(button('Connect'))
+    expect(d.called('netEngine.join').at(-1)).toMatchObject({ share: ['tcp://100.101.7.9:47100'] })
+  })
+
+  it('names the class a device is connected on, and offers its offered addresses with Use', async () => {
+    const d = daemon({
+      devices: [device({ node: 'n1', route: 'tailnet', offered: ['wss://x.example/mousse-net/1'] })]
+    })
+    await mount()
+    expect(rowText('n1')).toContain('a1b2c3d4 · Connected · Tailnet')
+    expect(host.textContent).toContain('Addresses Studio offered')
+    expect(host.textContent).toContain('x.example')
+    await click(button('Use'))
+    expect(d.called('netEngine.address.use')).toEqual([{ node: 'n1' }])
+  })
+
+  it('saves Reach through the daemon, tests a route, and says a failed test may be the network', async () => {
+    const d = daemon(
+      {
+        routes: ['tcp://192.168.1.20:47100', 'wss://x.example/mousse-net/1'],
+        reach: { lan: true, tailnet: false, public: [], tunnels: ['wss://x.example/mousse-net/1'], port: 47100, wsPort: 47101 }
+      },
+      {
+        'netEngine.routes.test': () => ({ ok: false, reason: 'unreachable' }),
+        'netEngine.routes.config': () => ({ restarted: true })
+      }
+    )
+    await mount()
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Tunnel URL"]')!.value).toBe('https://x.example')
+    expect(host.textContent).toContain('cloudflared tunnel --url http://127.0.0.1:47101')
+    await click(host.querySelector<HTMLElement>('[role="switch"][aria-label="Tailnet"]') ?? undefined)
+    expect(d.called('netEngine.routes.config')).toEqual([{ tailnet: true }])
+
+    const tests = [...document.querySelectorAll<HTMLButtonElement>('button')].filter((item) => item.textContent === 'Test')
+    await click(tests.at(-1))
+    expect(d.called('netEngine.routes.test')).toEqual([{ route: 'wss://x.example/mousse-net/1' }])
+    const failed = [...host.querySelectorAll<HTMLElement>('[role="status"]')].find((item) => item.textContent === "Couldn't confirm from this network")
+    expect(failed?.title).toMatch(/Saving still works/)
+  })
+})
+
+describe('Add over SSH (1b §3.4)', () => {
+  const resolved = { routeId: 'r1', user: 'me', hostname: 'box.example', port: 22, pinned: false }
+
+  it('trusts the host key shown, lists every profile with New profile, and connects the one picked', async () => {
+    const d = daemon(
+      { reach: { lan: true, tailnet: false, public: [], tunnels: [] } },
+      {
+        'netEngine.ssh.resolve': () => resolved,
+        'netEngine.ssh.probe': () => ({ keyType: 'ssh-ed25519', sha256: 'SHA256:abc', inUserKnownHosts: true }),
+        'netEngine.ssh.trust': () => ({}),
+        'netEngine.ssh.profiles': () => ({
+          computer: 'Box',
+          os: 'macos',
+          profiles: [
+            { selector: 'a'.repeat(26), label: 'Main', networking: true },
+            { selector: 'b'.repeat(26), label: 'Work', networking: true, identity: 'ff' }
+          ]
+        }),
+        'netEngine.ssh.connect': () => ({ node: 'n9' })
+      }
+    )
+    const onClose = vi.fn()
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose }))
+    await click(button('Over SSH'))
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="SSH address"]')!, 'me@box.example')
+    await click(button('Continue'))
+    expect(document.body.textContent).toContain('ssh-ed25519 SHA256:abc')
+    expect(d.called('netEngine.ssh.profiles')).toEqual([])
+    await click(button('Trust'))
+    expect(d.called('netEngine.ssh.trust')).toEqual([{ routeId: 'r1', sha256: 'SHA256:abc', host: 'box.example' }])
+    const labels = [...document.querySelectorAll('label')].map((item) => item.textContent)
+    expect(labels).toEqual(['Main', 'Work', 'New profile'])
+    await click([...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')][1])
+    await click(button('Connect'))
+    expect(d.called('netEngine.ssh.connect')).toEqual([
+      { routeId: 'r1', target: 'me@box.example', host: 'box.example', user: 'me', selector: 'b'.repeat(26) }
+    ])
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('keeps a failed Connect’s error shown and signs in to list profiles only once', async () => {
+    const d = daemon(
+      { reach: { lan: true, tailnet: false, public: [], tunnels: [] } },
+      {
+        'netEngine.ssh.resolve': () => ({ ...resolved, pinned: true }),
+        'netEngine.ssh.profiles': () => ({
+          computer: 'Box',
+          os: 'macos',
+          profiles: [{ selector: 'a'.repeat(26), label: 'Main', networking: true }]
+        }),
+        'netEngine.ssh.connect': () => {
+          throw new Error('Mousse isn’t running for me on box.example.')
+        }
+      }
+    )
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined }))
+    await click(button('Over SSH'))
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="SSH address"]')!, 'me@box.example')
+    await click(button('Continue'))
+    await click(button('Connect'))
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('isn’t running')
+    expect(button('Connect')).toBeDefined()
+    expect(d.called('netEngine.ssh.profiles')).toHaveLength(1)
+  })
+
+  it('offers Over SSH only when the helper speaks protocol 1.1', async () => {
+    const d = daemon()
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined }))
+    expect(button('Over SSH')).toBeUndefined()
   })
 })

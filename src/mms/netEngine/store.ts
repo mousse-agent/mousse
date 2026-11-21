@@ -3,9 +3,49 @@ import { newId, type NodeId, type StreamId } from '../../shared/net'
 import { parsePrivateKey } from '../bridge/remote/privateStreams'
 import type { NetDatabase } from '../net/store/database'
 
-/** Where a pairing is in its life. Only the serving states may call, be served or be read from disk. */
+/**
+ * Where a pairing is in its life. Only the serving states may call, be served or be read from disk. The `ssh_*`
+ * states belong to rows with `source: "ssh"` (Phase 1b §3.6), which 1a's ceremony never touches.
+ */
 export type EnginePeerState =
-  'consented' | 'joined' | 'granted' | 'awaiting_pairback' | 'connected' | 'removing' | 'removed'
+  | 'consented'
+  | 'joined'
+  | 'granted'
+  | 'awaiting_pairback'
+  | 'connected'
+  | 'ssh_requested'
+  | 'ssh_granting'
+  | 'ssh_granted'
+  | 'removing'
+  | 'removed'
+
+/**
+ * An SSH add's journal on a row (§3.4). On A (`ssh_requested` → `ssh_granted` → `connected`): the request it sent
+ * and the route it used. On B (`ssh_granting` → `ssh_granted` → `connected`): the request that wrote the row.
+ */
+export interface EngineSshJournal {
+  /** 16 random bytes in hex, so it also parses as a grant receipt. */
+  requestId: string
+  /** When A issued the request, in seconds since 1970 (A's clock). */
+  issuedAt?: number
+  /** A: the SSH route the request went over. */
+  routeId?: string
+  /** A: the profile on B, by its selector, or the label of the profile B makes. */
+  selector?: string
+  newLabel?: string
+  /** A: the SSH target as the owner typed it, and the host and user `ssh -G` resolved, for the row's messages. */
+  target?: string
+  host?: string
+  user?: string
+  /** A: the remote shell form (`sh`). */
+  shell?: string
+  /** A: the row has been `connected`; after that, `prepare` is never repeated (§3.4 retry safety). */
+  everConnected?: boolean
+  /** A: B removed this computer (`removed`), so A stops repeating. */
+  removed?: boolean
+  /** A: whether Mousse on B starts at login, from B's reply. */
+  startsAtLogin?: boolean
+}
 
 export interface EnginePeerRow {
   /** This computer's own id for the pairing (`newId('node')`); a re-pair after Remove gets a new one. */
@@ -22,17 +62,56 @@ export interface EnginePeerRow {
   invitation?: string
   /** The ticket this computer consented to join: kept until `joined`, so a join cut short is repeated with it. */
   ticket?: string
-  /** Addresses the user added for the other computer (Add address), as routes (`tcp://host:port`). */
+  /** Addresses the owner added for the other computer (Add address), as routes (every §1.3 owner kind but `ssh`). */
   addresses?: string[]
+  /** `ssh`: added over SSH (§3.4); 1a's pairback and recovery skip the row (§3.6). */
+  source?: 'ssh'
+  /** Joiner: the ticket's non-automatic hints the owner approved at Connect, reused by a repeated join (§1.3). */
+  approved?: string[]
+  /** Joiner: this computer's routes ticked under "Also share", sent in pairback beside its LAN ones (§1.3). */
+  share?: string[]
+  /** Host: routes the other computer offered in pairback outside the automatic rule, dialled only after Use. */
+  offered?: string[]
+  /** The SSH add's journal (§3.4), on rows with `source: "ssh"`. */
+  ssh?: EngineSshJournal
+  /** The Send link this computer consented to join (1b §5.3), while its outcome is open and until pairback. */
+  link?: EngineLink
 }
 
-/** What a pairing's row may change after it is saved; `ticket: null` deletes the stored ticket. */
+/**
+ * A Send link joined from this computer (kind 2): its ticket, and what Connect approved and shares back, kept so a
+ * join repeated after a restart sends the same lists. `pending` until the ticket's `PAIRED`: on a row added another
+ * way (over SSH) it is a pending link beside the row, whose own columns change only on that `PAIRED` (§3.6).
+ */
+export interface EngineLink {
+  ticket: string
+  /** The ticket hash (hex): `join.status` and `join.ack` name the flow by it. */
+  ticketHash: string
+  invitation: string
+  /** The ticket's hints Connect approved (`join {approved}`). */
+  approved: string[]
+  /** This computer's routes ticked under "Also share"; the row's `share` once paired. */
+  share: string[]
+  /** When the ticket's invitation ends, in seconds since 1970. */
+  expiresAt?: number
+  pending: boolean
+}
+
+/** What a pairing's row may change after it is saved; `null` deletes a stored value. */
 export type EnginePeerChange = Partial<
   Pick<
     EnginePeerRow,
     'endpoint' | 'fingerprint' | 'grant' | 'name' | 'state' | 'receipt' | 'invitation'
   >
-> & { ticket?: string | null }
+> & {
+  ticket?: string | null
+  source?: 'ssh' | null
+  approved?: string[] | null
+  share?: string[] | null
+  offered?: string[] | null
+  ssh?: EngineSshJournal | null
+  link?: EngineLink | null
+}
 
 const COLUMNS: Record<keyof EnginePeerChange, string> = {
   endpoint: 'endpoint',
@@ -42,8 +121,37 @@ const COLUMNS: Record<keyof EnginePeerChange, string> = {
   state: 'state',
   receipt: 'receipt',
   invitation: 'invitation',
-  ticket: 'ticket'
+  ticket: 'ticket',
+  source: 'source',
+  approved: 'approved',
+  share: 'share',
+  offered: 'offered',
+  ssh: 'ssh',
+  link: 'link'
 }
+
+/** Columns kept as JSON text; an empty list is stored as NULL. */
+const JSON_COLUMNS = new Set<keyof EnginePeerChange>(['approved', 'share', 'offered', 'ssh', 'link'])
+
+/** A change's value as its column stores it. */
+function columnValue(key: keyof EnginePeerChange, value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  if (JSON_COLUMNS.has(key)) return Array.isArray(value) && !value.length ? null : JSON.stringify(value)
+  return String(value)
+}
+
+/** Columns a table from an earlier slice may lack, added when the store opens. */
+const ADDED_COLUMNS = [
+  'invitation',
+  'ticket',
+  'addresses',
+  'source',
+  'approved',
+  'share',
+  'offered',
+  'ssh',
+  'link'
+]
 
 export const isServingState = (state: EnginePeerState): boolean =>
   state !== 'removing' && state !== 'removed'
@@ -63,7 +171,7 @@ export class EnginePeerStore {
   constructor(private readonly db: NetDatabase) {
     db.transaction(() => {
       db.database.exec(
-        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
+        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT,source TEXT,approved TEXT,share TEXT,offered TEXT,ssh TEXT,link TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
       )
       // A table from before the journal or address columns gets them.
       const columns = new Set(
@@ -72,7 +180,7 @@ export class EnginePeerStore {
           .all()
           .map((row) => String(row.name))
       )
-      for (const column of ['invitation', 'ticket', 'addresses'])
+      for (const column of ADDED_COLUMNS)
         if (!columns.has(column))
           db.database.exec(`ALTER TABLE net_engine_peers ADD COLUMN ${column} TEXT`)
     })
@@ -85,7 +193,7 @@ export class EnginePeerStore {
       this.db.charge(1)
       this.db.database
         .prepare(
-          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket) VALUES(?,?,?,?,?,?,?,?,?,?)'
+          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,addresses,source,approved,share,offered,ssh,link) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
         )
         .run(
           saved.localId,
@@ -97,7 +205,14 @@ export class EnginePeerStore {
           saved.receipt ?? null,
           saved.pairedAt,
           saved.invitation ?? null,
-          saved.ticket ?? null
+          saved.ticket ?? null,
+          saved.addresses?.length ? JSON.stringify(saved.addresses) : null,
+          saved.source ?? null,
+          columnValue('approved', saved.approved),
+          columnValue('share', saved.share),
+          columnValue('offered', saved.offered),
+          columnValue('ssh', saved.ssh),
+          columnValue('link', saved.link)
         )
     })
     return saved
@@ -154,7 +269,7 @@ export class EnginePeerStore {
           .prepare(
             `UPDATE net_engine_peers SET ${keys.map((key) => `${COLUMNS[key]}=?`).join(',')} WHERE local_id=?`
           )
-          .run(...keys.map((key) => change[key] ?? null), localId)
+          .run(...keys.map((key) => columnValue(key, change[key])), localId)
       })
     return this.get(localId)
   }
@@ -179,9 +294,19 @@ export class EnginePeerStore {
           .prepare(
             `UPDATE net_engine_peers SET ${keys.map((key) => `${COLUMNS[key]}=?`).join(',')} WHERE local_id=? AND state IN (${from.map(() => '?').join(',')})`
           )
-          .run(...keys.map((key) => change[key] ?? null), localId, ...from).changes > 0
+          .run(...keys.map((key) => columnValue(key, change[key])), localId, ...from).changes > 0
     })
     return changed ? this.get(localId) : undefined
+  }
+
+  /** Deletes a row that never served (a consented link whose join ended without pairing): nothing else holds it. */
+  forgetUnpaired(localId: NodeId): void {
+    this.db.transaction(() => {
+      this.db.charge(1)
+      this.db.database
+        .prepare("DELETE FROM net_engine_peers WHERE local_id=? AND state='consented' AND grant=''")
+        .run(localId)
+    })
   }
 
   /** Every row in `state`, oldest first. */
@@ -206,7 +331,7 @@ export class EnginePeerStore {
       this.db.charge(16)
       this.dropRows(localId)
       this.db.database
-        .prepare("UPDATE net_engine_peers SET state='removed',ticket=NULL WHERE local_id=?")
+        .prepare("UPDATE net_engine_peers SET state='removed',ticket=NULL,link=NULL WHERE local_id=?")
         .run(localId)
     })
   }
@@ -310,7 +435,12 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
   const receipt = text(row.receipt),
     invitation = text(row.invitation),
     ticket = text(row.ticket),
-    addresses = readAddresses(row.addresses)
+    addresses = readAddresses(row.addresses),
+    approved = readAddresses(row.approved),
+    share = readAddresses(row.share),
+    offered = readAddresses(row.offered),
+    ssh = readJournal(row.ssh),
+    link = readLink(row.link)
   return {
     localId: row.local_id as NodeId,
     endpoint: String(row.endpoint),
@@ -322,7 +452,44 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     pairedAt: Number(row.paired_at),
     ...(invitation === undefined ? {} : { invitation }),
     ...(ticket === undefined ? {} : { ticket }),
-    ...(addresses.length ? { addresses } : {})
+    ...(addresses.length ? { addresses } : {}),
+    ...(row.source === 'ssh' ? { source: 'ssh' as const } : {}),
+    ...(approved.length ? { approved } : {}),
+    ...(share.length ? { share } : {}),
+    ...(offered.length ? { offered } : {}),
+    ...(ssh ? { ssh } : {}),
+    ...(link ? { link } : {})
+  }
+}
+
+function readLink(value: unknown): EngineLink | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const link = JSON.parse(value) as Partial<EngineLink>
+    if (typeof link?.ticket !== 'string' || typeof link.ticketHash !== 'string') return undefined
+    const strings = (list: unknown): string[] =>
+      Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : []
+    return {
+      ticket: link.ticket,
+      ticketHash: link.ticketHash,
+      invitation: typeof link.invitation === 'string' ? link.invitation : '',
+      approved: strings(link.approved),
+      share: strings(link.share),
+      ...(typeof link.expiresAt === 'number' ? { expiresAt: link.expiresAt } : {}),
+      pending: link.pending === true
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function readJournal(value: unknown): EngineSshJournal | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const journal = JSON.parse(value) as EngineSshJournal
+    return journal && typeof journal.requestId === 'string' ? journal : undefined
+  } catch {
+    return undefined
   }
 }
 

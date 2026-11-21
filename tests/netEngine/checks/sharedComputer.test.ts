@@ -19,6 +19,7 @@ import {
   deviceState,
   eventually,
   Fabric,
+  ONE_WAY,
   REAL_HELPER,
   recordedReason,
   refused,
@@ -51,6 +52,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 describe('phase1a.shared-computer', () => {
   const fabric = new Fabric()
   afterAll(() => fabric.close(), 120_000)
+  /** The host's profiles, when they run in this process. */
+  let localHosts: Map<string, Computer> | undefined
 
   /** The Mac's two profiles; a second that cannot start, or shares the first one's endpoint, is the failure. */
   async function hostComputers(): Promise<{ computers: Map<string, Computer>; failed?: string }> {
@@ -87,6 +90,7 @@ describe('phase1a.shared-computer', () => {
       if (ROLE === 'caller') link = await step(undefined, () => dialLink())
       else {
         const { computers, failed } = await hostComputers()
+        localHosts = computers
         link = localLink(hostSide(fabric, computers, false, failed))
       }
       try {
@@ -100,6 +104,12 @@ describe('phase1a.shared-computer', () => {
 
   /** `computer` joins the host's profile `name`; both rows read Connected. Answers the host profile's id here. */
   async function pairWith(link: Link, computer: Computer, name: string): Promise<NodeId> {
+    // Over ssh with the real helper (one computer), the pairing is Add over SSH to that profile, one way (1b §3.6).
+    const host = ONE_WAY ? localHosts?.get(name) : undefined
+    if (host) {
+      const { ownerOnCaller } = await step('not_paired', () => fabric.pair(host, computer))
+      return ownerOnCaller
+    }
     const ticket = await step(undefined, () => link.ask('invite', { name }))
     const joined = await step('not_paired', () =>
       computer.dispatch('netEngine.join', { ticket }, true)

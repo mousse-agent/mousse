@@ -5,6 +5,7 @@ import { engineLimits } from '../limits'
 import {
   ENGINE_LABELS,
   type EngineConnection,
+  type EngineRoute,
   type EngineLabel,
   type EngineStream
 } from '../session/transport'
@@ -176,7 +177,9 @@ export class HelperConnection implements EngineConnection {
     readonly grant?: string,
     readonly endpoint?: string,
     /** The role this computer holds at the peer, on an outbound connection (`conn.up` says, when it knows). */
-    readonly role?: string
+    readonly role?: string,
+    /** The route it runs over (`conn.up.route`, protocol 1.1). */
+    readonly route?: EngineRoute
   ) {
     this.id = String(conn)
   }
@@ -306,11 +309,14 @@ export class EngineHelper {
     })
   }
 
-  /** The helper's `hello` (protocol 1.0) with this computer's name and profile; answers what it said of itself. */
+  /**
+   * The helper's `hello` with this computer's name and profile; answers what it said of itself. The app offers
+   * protocol 1.1 (Phase 1b §7); a 1.0 helper answers `[1, 0]` and serves 1a's messages only.
+   */
   async hello(): Promise<Record<string, unknown>> {
     const profile = this.options.profile?.()
     const answer = await this.channel.request('hello', {
-      proto: [1, 0],
+      proto: [1, 1],
       name: this.options.name(),
       ...(profile ? { profile } : {})
     })
@@ -345,6 +351,17 @@ export class EngineHelper {
       this.connections.delete(conn)
       this.up(event)
     }
+  }
+
+  /** Whether the helper speaks protocol 1.`minor` or later (its `hello` answer). */
+  speaks(minor: number): boolean {
+    const proto = this.info.proto
+    return Array.isArray(proto) && proto[0] === 1 && typeof proto[1] === 'number' && proto[1] >= minor
+  }
+
+  /** The route of the connection the helper holds up as `conn`, when its `conn.up` named one. */
+  routeOf(conn: number): EngineRoute | undefined {
+    return readRoute(this.ups.get(conn)?.route)
   }
 
   /** Whether the helper holds a connection up with `identity` in that direction. */
@@ -420,7 +437,8 @@ export class EngineHelper {
       direction,
       grant,
       peer.endpoint,
-      role
+      role,
+      readRoute(event.route)
     )
     this.connections.set(conn, connection)
     void this.options.attach(connection).catch(() => connection.close('refused'))
@@ -479,4 +497,16 @@ export class EngineHelper {
       )
     }
   }
+}
+
+const ROUTE_KINDS = new Set(['tcp', 'ws', 'ssh'])
+const ROUTE_CLASSES = new Set(['lan', 'tailnet', 'public', 'tunnel', 'ssh'])
+
+/** `conn.up.route` as the app keeps it; anything else is no route. */
+function readRoute(value: unknown): EngineRoute | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const { kind, class: cls } = value as { kind?: unknown; class?: unknown }
+  return typeof kind === 'string' && ROUTE_KINDS.has(kind) && typeof cls === 'string' && ROUTE_CLASSES.has(cls)
+    ? { kind: kind as EngineRoute['kind'], class: cls as EngineRoute['class'] }
+    : undefined
 }

@@ -29,6 +29,11 @@ export interface EngineLimits {
   appendDeadlineMs: number
   /** The least time a result lookup is given, however little of the call's own deadline is left. */
   resultWaitFloorMs: number
+  /**
+   * How long the Hub waits for an engine pairing to open a thread's private stream (`bridge.hub.attach`), and for
+   * each page of a large answer it fetches.
+   */
+  hubRoutedDeadlineMs: number
   /** How often this profile's own delegation is checked for renewal while the engine is on. */
   renewIntervalMs: number
   /** The own delegation is renewed once it is due within this long. */
@@ -70,6 +75,11 @@ export interface EngineLimits {
   helperShutdownGraceMs: number
   /** How much of what the helper (or its first-run `init`) wrote on stderr is kept, from the end, for the status. */
   helperStderrMaxBytes: number
+  /**
+   * After the helper exits, how long its stderr may stay open: a process it started (an ssh client) can hold it past
+   * its exit, and the stop must not wait on that.
+   */
+  helperStderrDrainMs: number
   /** How often Add device reads a camera frame for a pairing code. */
   scanIntervalMs: number
   /** How long a start keeps trying while another helper still holds the endpoint. */
@@ -96,6 +106,37 @@ export interface EngineLimits {
   rowStuckMs: number
   /** Most addresses the user may add for one paired computer (Add address). */
   maxManualAddresses: number
+  /** How long Test on one of this computer's routes waits for its helper to reach itself (`routes.test`). */
+  routeTestDeadlineMs: number
+  /** The deadline for each ssh.* request and one SSH add try (1b §13.3): 1000 to 600000. */
+  sshRequestDeadlineMs: number
+  /** How long A may repeat one request id, and B refuses older unknown ones (seconds; 60 to 86400, tighten only). */
+  sshRequestMaxAgeSecs: number
+  /** How long B keeps request records (seconds; at least twice the maximum age). */
+  sshRequestKeepSecs: number
+  /** How often B drops request records past their keep time. */
+  sshRequestPruneMs: number
+  /**
+   * Largest request `mousse-cli net-engine ssh` reads from stdin, the line another computer sent over SSH.
+   * Security-bound: it can only be lowered.
+   */
+  sshRemoteRequestMaxBytes: number
+  /** How long `mousse-cli net-engine ssh` waits for that line. Security-bound: it can only be lowered. */
+  sshRemoteReadMs: number
+  /** How often a waiting `mousse-cli net-engine invite` or `join` reads the status again when no change was announced. */
+  cliStatusReadMs: number
+  /**
+   * How long the other computer has to end a tunnel's stream after this one let the tunnel go (a close, a refusal, both
+   * ends): past it the stream is reset, so it frees its slot on the connection. Peer-bound: it can only be lowered.
+   */
+  tunnelCloseLingerMs: number
+  /** How long `mousse-cli net-engine join` waits for the other computer to let it in (its owner taps Yes there). */
+  cliJoinWaitMs: number
+  /**
+   * Longest `mousse://pair` link main takes from the OS (argv, `open-url`); a ticket is a few hundred bytes. Anyone can
+   * hand the app a link, so it can only be lowered.
+   */
+  pairLinkMaxChars: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -113,6 +154,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   blobDeadlineMs: 120_000,
   appendDeadlineMs: 60_000,
   resultWaitFloorMs: 15_000,
+  hubRoutedDeadlineMs: 30_000,
   renewIntervalMs: 60 * 60_000,
   renewDueWithinMs: 24 * 60 * 60_000,
   clockSkewMs: 600_000,
@@ -132,6 +174,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   helperFastExits: 3,
   helperShutdownGraceMs: 3_000,
   helperStderrMaxBytes: 4096,
+  helperStderrDrainMs: 500,
   scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS,
   helperLockWaitMs: 5_000,
   helperInitDeadlineMs: 60_000,
@@ -141,7 +184,18 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   pathSwitchDeadlineMs: 30_000,
   pathDrainMs: 25 * 60_000,
   rowStuckMs: 2 * 60_000,
-  maxManualAddresses: 8
+  maxManualAddresses: 8,
+  routeTestDeadlineMs: 20_000,
+  sshRequestDeadlineMs: 120_000,
+  sshRequestMaxAgeSecs: 86_400,
+  sshRequestKeepSecs: 604_800,
+  sshRequestPruneMs: 60 * 60_000,
+  sshRemoteRequestMaxBytes: 64 * 1024,
+  sshRemoteReadMs: 30_000,
+  cliStatusReadMs: 2_000,
+  tunnelCloseLingerMs: 5_000,
+  cliJoinWaitMs: 16 * 60_000,
+  pairLinkMaxChars: 4096
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -156,6 +210,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   blobDeadlineMs: 'MOUSSE_NET_ENGINE_BLOB_DEADLINE_MS',
   appendDeadlineMs: 'MOUSSE_NET_ENGINE_APPEND_DEADLINE_MS',
   resultWaitFloorMs: 'MOUSSE_NET_ENGINE_RESULT_WAIT_FLOOR_MS',
+  hubRoutedDeadlineMs: 'MOUSSE_NET_ENGINE_HUB_ROUTED_DEADLINE_MS',
   renewIntervalMs: 'MOUSSE_NET_ENGINE_RENEW_INTERVAL_MS',
   renewDueWithinMs: 'MOUSSE_NET_ENGINE_RENEW_DUE_WITHIN_MS',
   clockSkewMs: 'MOUSSE_NET_ENGINE_CLOCK_SKEW_MS',
@@ -175,6 +230,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   helperFastExits: 'MOUSSE_NET_ENGINE_HELPER_FAST_EXITS',
   helperShutdownGraceMs: 'MOUSSE_NET_ENGINE_HELPER_SHUTDOWN_GRACE_MS',
   helperStderrMaxBytes: 'MOUSSE_NET_ENGINE_HELPER_STDERR_MAX_BYTES',
+  helperStderrDrainMs: 'MOUSSE_NET_ENGINE_HELPER_STDERR_DRAIN_MS',
   scanIntervalMs: 'MOUSSE_NET_ENGINE_SCAN_INTERVAL_MS',
   helperLockWaitMs: 'MOUSSE_NET_ENGINE_HELPER_LOCK_WAIT_MS',
   helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS',
@@ -184,8 +240,27 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   pathSwitchDeadlineMs: 'MOUSSE_NET_ENGINE_PATH_SWITCH_DEADLINE_MS',
   pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
   rowStuckMs: 'MOUSSE_NET_ENGINE_ROW_STUCK_MS',
-  maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES'
+  maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES',
+  routeTestDeadlineMs: 'MOUSSE_NET_ENGINE_ROUTE_TEST_DEADLINE_MS',
+  sshRequestDeadlineMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_DEADLINE_MS',
+  sshRequestMaxAgeSecs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_MAX_AGE_SECS',
+  sshRequestKeepSecs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_KEEP_SECS',
+  sshRequestPruneMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_PRUNE_MS',
+  sshRemoteRequestMaxBytes: 'MOUSSE_NET_ENGINE_SSH_REMOTE_REQUEST_MAX_BYTES',
+  sshRemoteReadMs: 'MOUSSE_NET_ENGINE_SSH_REMOTE_READ_MS',
+  cliStatusReadMs: 'MOUSSE_NET_ENGINE_CLI_STATUS_READ_MS',
+  tunnelCloseLingerMs: 'MOUSSE_NET_ENGINE_TUNNEL_CLOSE_LINGER_MS',
+  cliJoinWaitMs: 'MOUSSE_NET_ENGINE_CLI_JOIN_WAIT_MS',
+  pairLinkMaxChars: 'MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS'
 })
+
+/** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */
+const TIGHTEN_ONLY: ReadonlySet<keyof EngineLimits> = new Set([
+  'sshRemoteRequestMaxBytes',
+  'sshRemoteReadMs',
+  'tunnelCloseLingerMs',
+  'pairLinkMaxChars'
+])
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
 export function readEngineLimits(env: NodeJS.ProcessEnv): {
@@ -207,6 +282,8 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
     // Skew alone may be none.
     if (!Number.isSafeInteger(value) || value < 0 || (value === 0 && key !== 'clockSkewMs'))
       keep(key, 'is not a positive whole number')
+    else if (TIGHTEN_ONLY.has(key) && value > ENGINE_LIMIT_DEFAULTS[key])
+      keep(key, 'can only be lowered')
     else limits[key] = value
   }
   // A message must hold its header and a whole blob chunk; when it cannot, the three sizes keep their defaults,
@@ -238,6 +315,17 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
   if (limits.helperRestartFirstMs > limits.helperRestartMaxMs)
     for (const key of ['helperRestartFirstMs', 'helperRestartMaxMs'] as const)
       keep(key, 'makes the first restart wait longer than the longest')
+  // 1b §13.3 bounds: the request deadline within 1 s to 10 min; the maximum age only tightens; records are kept
+  // at least twice the maximum age, so a request id is never seen as new a second time.
+  if (limits.sshRequestDeadlineMs < 1000 || limits.sshRequestDeadlineMs > 600_000)
+    keep('sshRequestDeadlineMs', 'is outside 1000 to 600000')
+  if (
+    limits.sshRequestMaxAgeSecs < 60 ||
+    limits.sshRequestMaxAgeSecs > ENGINE_LIMIT_DEFAULTS.sshRequestMaxAgeSecs
+  )
+    keep('sshRequestMaxAgeSecs', 'is outside 60 to 86400 (it may only be lowered)')
+  if (limits.sshRequestKeepSecs < 2 * limits.sshRequestMaxAgeSecs)
+    keep('sshRequestKeepSecs', 'is less than twice the maximum request age')
   return { limits, problems }
 }
 
@@ -273,7 +361,34 @@ export const ENGINE_CONTROLS = [
   'keep-engine-work',
   'teardown-on-event-only',
   // phase1a.path-switch
-  'abort-on-path-replaced'
+  'abort-on-path-replaced',
+  // phase1b.link-app
+  'link-pinned-journal',
+  'already-grants-back',
+  'pin-promotes-kind2',
+  'link-approvals-lost',
+  'link-scheme-registered',
+  // phase1b.routes-app (and phase1b.ssh-add-app)
+  'plus-probe',
+  'egress-probe',
+  'lan-only-candidates',
+  'route-leak',
+  // phase1b.ssh-add-app
+  'refuse-if-paired',
+  'ssh-row-pairback',
+  'profile-before-journal',
+  'grant-id-not-checked',
+  'retry-after-connected',
+  'overwrite-1a-row',
+  'own-row-not-resumed',
+  'existing-reply-not-kept',
+  'removal-skips-unsaved-grant',
+  'ssh-row-not-converted',
+  'remote-autostart',
+  // phase1b.editor-app, phase1b.no-rpc-without-grant: the engine editor refusal skips the editor switch
+  'tunnel-ignores-editor',
+  // phase1b.editor-app: engine rights changes do not run reconcile
+  'no-reconcile'
 ] as const
 export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 
