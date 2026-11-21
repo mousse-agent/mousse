@@ -5,13 +5,12 @@ import { access, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promis
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
-import { execFileSync } from 'node:child_process'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { repositoryFacts } from './repositoryFacts'
 import { gitEnvFor, gitFile } from './gitExecutable'
-import { execFileGit } from './gitSpawn'
+import { execFileGitSync, execFileGit } from './gitSpawn'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -46,7 +45,7 @@ export interface ResolveRepositoryIdentityOptions {
 
 function git(cwd: string, ...args: string[]): string | null {
   try {
-    return timeGitSync(() => execFileSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
+    return timeGitSync(() => execFileGitSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
   } catch { return null }
 }
 function canonical(path: string): string { try { return realpathSync(path) } catch { return resolve(path) } }

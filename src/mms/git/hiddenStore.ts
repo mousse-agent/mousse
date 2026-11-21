@@ -200,7 +200,7 @@ function storeCommandRequest(store: HiddenStore, cwd: string, args: readonly str
 
 
 
-/** The whole environment for a caller that cannot pass options (simple-git): the store, its folder and the isolation. */
+/** The whole environment for a command started with an explicit environment: the store, its folder and the isolation. */
 export function hiddenStoreEnv(store: HiddenStore, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return { ...isolatedEnv(store, base), ...location(store, true) }
 }

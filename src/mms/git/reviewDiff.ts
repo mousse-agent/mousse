@@ -2,7 +2,7 @@ import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import { leavesFolder } from '../files/pathGuard'
-import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS } from './repoPrograms'
+import { checkRepoPrograms, guardedGit, NO_DIFF_PROGRAMS } from './repoPrograms'
 import { execFileGit } from './gitSpawn'
 import {
   EMPTY_TREE_SHA,
@@ -128,7 +128,7 @@ function hashEmptyTree(cwd: string): Promise<string> {
 export async function emptyTreeSha(cwd: string): Promise<string> {
   // A refused repository says why, rather than falling back below.
   await checkRepoPrograms(cwd)
-  const format = await guardedSimpleGit(cwd).raw(['rev-parse', '--show-object-format']).then((value) => value.trim()).catch(() => 'sha1')
+  const format = await guardedGit(cwd).raw(['rev-parse', '--show-object-format']).then((value) => value.trim()).catch(() => 'sha1')
   return format === 'sha256' ? hashEmptyTree(cwd) : EMPTY_TREE_SHA
 }
 
@@ -145,14 +145,14 @@ export async function commitExistsAsync(cwd: string, sha: string): Promise<boole
 /** The range for the working tree: HEAD to index when staged, index to working tree otherwise. */
 export async function worktreeRange(cwd: string, staged: boolean): Promise<ReviewRange> {
   await checkRepoPrograms(cwd)
-  const head = await guardedSimpleGit(cwd).raw(['rev-parse', '--verify', 'HEAD']).then((value) => value.trim()).catch(() => '')
+  const head = await guardedGit(cwd).raw(['rev-parse', '--verify', 'HEAD']).then((value) => value.trim()).catch(() => '')
   const headSide: ReviewSide | null = head ? { kind: 'commit', sha: head } : null
   return staged ? { from: headSide, to: { kind: 'index' } } : { from: { kind: 'index' }, to: { kind: 'worktree' } }
 }
 
 export async function isGitRepository(cwd: string): Promise<boolean> {
   await checkRepoPrograms(cwd)
-  return guardedSimpleGit(cwd).checkIsRepo().catch(() => false)
+  return guardedGit(cwd).checkIsRepo().catch(() => false)
 }
 
 /** Git revision arguments for a range, or null when the range is known to be empty without asking Git. */
@@ -232,7 +232,7 @@ export function listChangedFiles(cwd: string, range: ReviewRange, options: ListC
 async function listChangedFilesIn(cwd: string, range: ReviewRange, options: ListChangedFilesOptions): Promise<ChangedFiles> {
   const revision = await revisionArgs(cwd, range)
   if (revision === null) return { files: [], truncated: false, mergeCommits: 0 }
-  const git = guardedSimpleGit(cwd)
+  const git = guardedGit(cwd)
   const base = ['diff', ...NO_DIFF_PROGRAMS, '--no-color', '--relative', '-M', '-z']
   const includeUntracked = range.to.kind === 'worktree'
   const [nameStatus, numstat, untracked, raw] = await Promise.all([
@@ -303,7 +303,7 @@ function classify(content: string, size: number, symlink?: true): ReviewFileSide
 
 /** Mode and object of a path in a commit or the index, or null when nothing is there. */
 async function lookupEntry(cwd: string, side: { kind: 'commit'; sha: string } | { kind: 'index' }, path: string): Promise<{ mode: string; sha: string } | null> {
-  const git = guardedSimpleGit(cwd)
+  const git = guardedGit(cwd)
   // Paths in both listings are relative to `cwd`. Absence is an empty listing, so a real Git
   // failure (a bad object, a lock, a spawn error) surfaces as an error instead of "no file".
   if (side.kind === 'commit') {
@@ -326,7 +326,7 @@ async function readGitObject(cwd: string, side: { kind: 'commit'; sha: string } 
   const entry = await lookupEntry(cwd, side, path)
   // A directory (040000) or a submodule (160000) has no file text; only blobs and links do.
   if (!entry || entry.mode === '040000' || entry.mode === '160000') return null
-  const git = guardedSimpleGit(cwd)
+  const git = guardedGit(cwd)
   const size = Number((await git.raw(['cat-file', '-s', entry.sha])).trim())
   if (size > REVIEW_MAX_FILE_BYTES) return { tooLarge: true, size, reason: 'bytes' }
   const content = await git.raw(['show', entry.sha])

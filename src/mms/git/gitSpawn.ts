@@ -1,11 +1,12 @@
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks'
-import { execFile, spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createReadStream, statSync } from 'node:fs'
 import { createRequire as createGitWorkerRequire } from 'node:module'
 import { resolve, win32 } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
+import { readProcessEntries } from './stoppedGitTree'
 import { windowsGitRuntime } from './windowsGitProcess'
 
 /**
@@ -41,6 +42,7 @@ import { windowsGitRuntime } from './windowsGitProcess'
 export type GitLane = 'interactive' | 'background'
 
 const lanes = new AsyncLocalStorage<GitLane>()
+const admittedDisk = new AsyncLocalStorage<string>()
 
 /** Runs `work` with its Git processes started on the background lane: maintenance that no person is waiting for. */
 export function inBackgroundGitLane<T>(work: () => T): T {
@@ -95,7 +97,16 @@ function spawnHere(file: string, args: readonly string[], options: GitSpawnOptio
   if (process.platform === 'win32') child = spawnWindowsHere(file, args, { ...spawnOptions, beforeStart }, signal, killSignal)
   else {
     beforeStart?.()
-    child = spawn(file, [...args], { ...spawnOptions, signal, killSignal })
+    child = spawn(file, [...args], { ...spawnOptions, detached: true, signal, killSignal })
+    let ending: Promise<void> | undefined
+    const stop = () => ending ??= reapPosixGroup(child.pid)
+    trackDirect(child, stop)
+    const emit = child.emit.bind(child)
+    child.emit = (event: string | symbol, ...values: unknown[]) => {
+      if (event !== 'close') return emit(event, ...values)
+      void stop().then(() => emit(event, ...values))
+      return true
+    }
   }
   if (inputFile !== undefined && child.stdin) {
     const stdin = child.stdin
@@ -117,12 +128,55 @@ const requireHere = createGitWorkerRequire(import.meta.url)
 let windows: ReturnType<typeof windowsGitRuntime> | undefined
 const windowsRuntime = () => windows ??= windowsGitRuntime(requireHere, requireHere.resolve('koffi'))
 const windowsJobs = new Set<WindowsGitJob>()
-const directChildren = new Set<Promise<void>>()
+const directChildren = new Map<Promise<void>, () => Promise<void>>()
 const childJobs = new WeakMap<ChildProcess | WorkerGitChild, WindowsGitJob>()
 let draining: Promise<void> | undefined
 
+interface SyncGitOptions {
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+  encoding: 'utf8'
+  stdio?: [Pipe, Pipe, Pipe]
+  input?: string
+  timeout?: number
+  maxBuffer?: number
+  windowsHide?: boolean
+}
+
+/** The few synchronous Git checks use the same Windows job assignment and finish before returning. */
+export function spawnGitSync(file: string, args: readonly string[], options: SyncGitOptions) {
+  if (draining) return { status: null, stdout: '', stderr: '', error: workerError('The daemon is shutting down') }
+  if (process.platform !== 'win32') return spawnSync(file, args, options)
+  return windowsRuntime().spawnSync(file, args, { ...options, windowsHide: options.windowsHide ?? true })
+}
+
+export function execFileGitSync(file: string, args: readonly string[], options: SyncGitOptions): string {
+  const result = spawnGitSync(file, args, options)
+  if (!result.error && result.status === 0) return result.stdout
+  throw Object.assign(result.error ?? new Error('Command failed: git ' + args.join(' ') + (result.stderr ? '\n' + result.stderr : '')), result)
+}
+
 function workerError(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: 'EGITWORKER' })
+}
+
+function trackDirect(child: ChildProcess, stop: () => Promise<void>): void {
+  const ended = new Promise<void>((done) => child.once('close', done))
+  directChildren.set(ended, stop)
+  void ended.then(() => directChildren.delete(ended))
+}
+
+/** Reap a detached POSIX group, including a hook that outlived the Git root. Zombies cannot touch the repository. */
+async function reapPosixGroup(pgid: number | undefined): Promise<void> {
+  if (pgid === undefined) return
+  for (;;) {
+    try { process.kill(-pgid, 'SIGKILL') } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return
+    }
+    const entries = await readProcessEntries()
+    if (entries && !entries.some((entry) => entry.pgid === pgid && !entry.zombie)) return
+    await delay(10)
+  }
 }
 
 /** The daemon keeps the handle across helper loss. Reap only after this job cannot admit another root. */
@@ -130,9 +184,15 @@ class WindowsGitJob {
   private readonly runtime = windowsRuntime()
   private readonly job = this.runtime.job()
   private ending?: Promise<void>
+  private closed = false
 
   constructor() { windowsJobs.add(this) }
   get name(): string { return this.job.name }
+
+  empty(): boolean {
+    if (this.closed) return true
+    try { return this.runtime.active(this.job.owned) === 0 } catch { return false }
+  }
 
   finish(): Promise<void> {
     return this.ending ??= this.reap()
@@ -147,9 +207,15 @@ class WindowsGitJob {
       } catch { /* A failed query cannot let a mutation release the repository. Retry until the job is empty. */ }
       await delay(10)
     }
+    this.closed = true
     this.runtime.close(this.job.owned)
     windowsJobs.delete(this)
   }
+}
+
+/** True when Git started and the job emptied, even if its exit notification is still in flight. */
+export function windowsGitAlreadyExited(child: ChildProcess | WorkerGitChild): boolean {
+  return child.pid !== undefined && childJobs.get(child)?.empty() === true
 }
 
 export function stopWindowsGit(child: ChildProcess): Promise<void> {
@@ -177,9 +243,7 @@ function spawnWindowsHere(file: string, args: readonly string[], options: GitSpa
   childJobs.set(child, job)
   let abortError: Error | undefined
   let closed = false
-  const ended = new Promise<void>((done) => child.once('close', done))
-  directChildren.add(ended)
-  void ended.then(() => directChildren.delete(ended))
+  trackDirect(child, () => job.finish())
   const emit = child.emit.bind(child)
   child.emit = (event: string | symbol, ...values: unknown[]) => {
     if (event !== 'close') return emit(event, ...values)
@@ -192,15 +256,15 @@ function spawnWindowsHere(file: string, args: readonly string[], options: GitSpa
   }
   const killRoot = child.kill.bind(child)
   child.kill = (requested) => {
-    if (closed) return false
+    if (closed || windowsGitAlreadyExited(child)) return false
     killRoot(requested)
     void job.finish()
     Object.assign(child, { killed: true })
     return true
   }
   const abort = (): void => {
+    if (!child.kill(killSignal)) return
     abortError = Object.assign(new Error('The operation was aborted', { cause: signal?.reason }), { name: 'AbortError', code: 'ABORT_ERR' })
-    child.kill(killSignal)
   }
   if (signal?.aborted) process.nextTick(abort)
   else if (signal) {
@@ -225,9 +289,29 @@ export function gitChildStartedAt(child: ChildProcess, fallback: number): number
 
 const HELPER_SOURCE = `
 const { spawn } = require('node:child_process')
-const { createReadStream } = require('node:fs')
+const { accessSync, constants, createReadStream, statSync } = require('node:fs')
+const { constants: { errno } } = require('node:os')
+const { resolve } = require('node:path')
 const windows = process.platform === 'win32' ? (${windowsGitRuntime.toString()})(require, process.argv[1]) : undefined
 const children = new Map()
+const gates = new Map()
+const executable = ({ file, args, options }) => {
+  const paths = file.includes('/') ? [''] : (options.env.PATH ?? '/usr/bin:/bin').split(':')
+  let code = 'ENOENT'
+  for (const dir of paths) {
+    const candidate = resolve(options.cwd, dir, file)
+    try {
+      accessSync(candidate, constants.X_OK)
+      if (statSync(candidate).isFile()) return
+      code = 'EACCES'
+    } catch (error) {
+      if (error.code === 'EACCES') code = 'EACCES'
+    }
+  }
+  const syscall = 'spawn ' + file
+  throw Object.assign(new Error(syscall + ' ' + code), { code, errno: -errno[code], syscall, path: file, spawnargs: args })
+}
+const stopGroup = (pid) => { try { process.kill(-pid, 'SIGKILL') } catch {} }
 const plain = (e) => ({ message: String(e && e.message || e), name: e && e.name, code: e && e.code, errno: e && e.errno, syscall: e && e.syscall, path: e && e.path, spawnargs: e && e.spawnargs })
 const send = (message, done) => process.connected && process.send(message, done)
 const pipe = (stream, fd, post) => {
@@ -237,7 +321,10 @@ const pipe = (stream, fd, post) => {
     if (!sent) stream.pause()
   })
 }
-process.on('disconnect', () => process.exit(0))
+process.on('disconnect', () => {
+  if (!windows) for (const child of children.values()) if (child.pid) stopGroup(child.pid)
+  process.exit(0)
+})
 process.on('message', (m) => {
   if (m.t === 'disks') {
     require('node:child_process').execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Partition | Where-Object DriveLetter | ForEach-Object { "{0}={1}" -f $_.DriveLetter, $_.DiskNumber }'], { windowsHide: true, timeout: 30000 }, (error, stdout) => send({ id: 0, t: 'disks', text: error ? '' : String(stdout) }))
@@ -247,15 +334,36 @@ process.on('message', (m) => {
     const post = (message, done) => send(Object.assign({ id: m.id }, message), done)
     const at = Date.now()
     let child
-    try { child = windows ? windows.spawn(m.file, m.args, m.options, m.job) : spawn(m.file, m.args, m.options) }
-    catch (error) { post({ t: 'throw', error: plain(error) }); return }
+    try {
+      if (windows) child = windows.spawn(m.file, m.args, m.options, m.job)
+      else {
+        // Git cannot run until the daemon knows its group. If the helper dies before that, fd 3 closes and the shell
+        // exits without executing Git. exec keeps Git in the group it already leads.
+        executable(m)
+        child = spawn('/bin/sh', ['-c', 'IFS= read -r start <&3 && exec 3<&- && exec "$@"', 'git-start', m.file, ...m.args], {
+          ...m.options, detached: true, stdio: [...m.options.stdio, 'pipe']
+        })
+      }
+    } catch (error) { post({ t: 'throw', error: plain(error) }); return }
     children.set(m.id, child)
-    child.once('spawn', () => post({ t: 'spawn', pid: child.pid, at }))
+    child.once('spawn', () => {
+      if (windows) post({ t: 'spawn', pid: child.pid, at })
+      else {
+        const gate = child.stdio[3]
+        gate.on('error', () => {})
+        gates.set(m.id, () => {
+          post({ t: 'spawn', pid: child.pid, at: Date.now() })
+          gate.end('start\\n')
+        })
+        post({ t: 'group', pid: child.pid })
+      }
+    })
     child.on('error', (error) => post({ t: 'error', error: plain(error) }))
     child.on('exit', (code, signal) => post({ t: 'exit', code, signal }))
     let source
     child.on('close', (code, signal) => {
       children.delete(m.id)
+      gates.delete(m.id)
       const closed = () => post({ t: 'close', code, signal })
       if (!source || source.closed) closed()
       else { source.once('close', closed); source.destroy() }
@@ -274,7 +382,8 @@ process.on('message', (m) => {
   }
   const child = children.get(m.id)
   if (!child) return
-  if (m.t === 'write') child.stdin && child.stdin.write(Buffer.from(m.data.buffer, m.data.byteOffset, m.data.byteLength))
+  if (m.t === 'admit') { gates.get(m.id)?.(); gates.delete(m.id) }
+  else if (m.t === 'write') child.stdin && child.stdin.write(Buffer.from(m.data.buffer, m.data.byteOffset, m.data.byteLength))
   else if (m.t === 'end') child.stdin && child.stdin.end()
   else if (m.t === 'destroyStdin') child.stdin && child.stdin.destroy()
   else if (m.t === 'kill') { try { child.kill(m.signal) } catch {} }
@@ -284,6 +393,7 @@ process.on('message', (m) => {
 interface PlainError { message: string; name?: string; code?: string | number; errno?: number; syscall?: string; path?: string; spawnargs?: string[] }
 
 type FromWorker =
+  | { id: number; t: 'group'; pid: number }
   | { id: number; t: 'spawn'; pid: number; at: number }
   | { id: number; t: 'data'; fd: 1 | 2; data: Uint8Array }
   | { id: number; t: 'exit'; code: number | null; signal: NodeJS.Signals | null }
@@ -353,6 +463,8 @@ class Lane {
       diskGate.interactiveStarted(disk)
       child.onDone(() => diskGate.interactiveEnded(disk))
       launch()
+    } else if (admittedDisk.getStore() === disk) {
+      launch()
     } else {
       const cancel = diskGate.background(disk, launch)
       child.queued(cancel)
@@ -389,7 +501,7 @@ class Lane {
     this.idle.unref()
   }
 
-  /** Stops admission, all helpers (including idle ones still exiting), and their Windows process trees. */
+  /** Stops admission, all helpers (including idle ones still exiting), and their Git process trees. */
   async terminate(): Promise<void> {
     this.closing = true
     const closed = [...this.children.values()].map((child) => new Promise<void>((done) => child.once('close', done)))
@@ -452,12 +564,15 @@ function lane(name: GitLane): Lane {
   return laneWorkers[name]
 }
 
-/** Permanently stop admission and wait for both lanes and direct Windows commands during daemon teardown. */
+/** Permanently stop admission and wait for both lanes and direct Git commands during daemon teardown. */
 export function drainGitSpawnWorkers(): Promise<void> {
   return draining ??= Promise.resolve().then(async () => {
-    await Promise.all([laneWorkers.background.terminate(), laneWorkers.interactive.terminate()])
+    const direct = [...directChildren]
+    await Promise.all([
+      laneWorkers.background.terminate(), laneWorkers.interactive.terminate(),
+      ...direct.map(async ([closed, stop]) => { await stop(); await closed })
+    ])
     await Promise.all([...windowsJobs].map((job) => job.finish()))
-    await Promise.all(directChildren)
   })
 }
 
@@ -583,6 +698,34 @@ export class DiskGate {
 
 export const diskGate = new DiskGate(physicalDisk)
 
+/** Admit the check and its command together. Git probes in the check use the same slot. */
+export async function withGitDiskAdmission<T>(cwd: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted()
+  if (lanes.getStore() !== 'background' || !workerEnabled()) return work()
+  const disk = diskOf(cwd)
+  if (admittedDisk.getStore() === disk) return work()
+  await new Promise<void>((done, reject) => {
+    let admitted = false
+    function abort(): void { if (cancel()) reject(signal?.reason) }
+    const cancel = diskGate.background(disk, () => {
+      admitted = true
+      signal?.removeEventListener('abort', abort)
+      done()
+    })
+    if (!admitted) {
+      if (signal?.aborted) abort()
+      else signal?.addEventListener('abort', abort, { once: true })
+    }
+  })
+  try {
+    signal?.throwIfAborted()
+    if (draining) throw workerError('The daemon is shutting down')
+    return await admittedDisk.run(disk, work)
+  } finally {
+    diskGate.backgroundEnded(disk)
+  }
+}
+
 /** What `spawnGit` returns when the worker starts the process: a `ChildProcess` as its callers use one. */
 class WorkerGitChild extends EventEmitter {
   pid: number | undefined
@@ -607,6 +750,7 @@ class WorkerGitChild extends EventEmitter {
   isLaunched = false
   worker: ChildProcess | undefined
   private finishing = false
+  private posixGroup?: number
   private readonly unsent: Record<string, unknown>[] = []
   private cancelWaiting: (() => boolean) | undefined
   private readonly doneHooks: (() => void)[] = []
@@ -687,7 +831,7 @@ class WorkerGitChild extends EventEmitter {
   }
 
   kill(signal?: NodeJS.Signals | number): boolean {
-    if (this.done || this.finishing || (!childJobs.has(this) && (this.exitCode !== null || this.signalCode !== null))) return false
+    if (this.done || this.finishing || windowsGitAlreadyExited(this) || (!childJobs.has(this) && (this.exitCode !== null || this.signalCode !== null))) return false
     this.killed = true
     if (!this.isLaunched && this.cancelWaiting?.()) {
       // Killed while waiting for its disk: it never starts, and ends as a process killed at once would.
@@ -724,6 +868,10 @@ class WorkerGitChild extends EventEmitter {
 
   private handleMessage(message: FromWorker): void {
     switch (message.t) {
+      case 'group':
+        this.posixGroup = message.pid
+        this.toWorker({ t: 'admit', id: this.id })
+        return
       case 'spawn':
         this.pid = message.pid
         this.startedAt = message.at
@@ -770,7 +918,9 @@ class WorkerGitChild extends EventEmitter {
   private async finish(code: number | null, signal: NodeJS.Signals | null, error?: Error): Promise<void> {
     if (this.done || this.finishing) return
     this.finishing = true
-    await childJobs.get(this)?.finish()
+    const job = childJobs.get(this)
+    if (job) await job.finish()
+    else await reapPosixGroup(this.posixGroup)
     this.asyncScope.runInAsyncScope(() => {
       const failure = error ?? this.abortError
       if (failure) this.emit('error', failure)
@@ -832,8 +982,6 @@ type ExecGitCallback<T> = (error: ExecGitError | null, stdout: T, stderr: T) => 
 export function execFileGit(file: string, args: readonly string[], options: ExecGitOptions & { encoding: 'buffer' | null }, callback: ExecGitCallback<Buffer>): ChildProcess
 export function execFileGit(file: string, args: readonly string[], options: ExecGitOptions, callback: ExecGitCallback<string>): ChildProcess
 export function execFileGit(file: string, args: readonly string[], options: ExecGitOptions, callback: ExecGitCallback<string> | ExecGitCallback<Buffer>): ChildProcess {
-  // With the helper off, Node's own `execFile`, as before.
-  if (!workerEnabled() && process.platform !== 'win32' && !draining) return execFile(file, [...args], options as Parameters<typeof execFile>[2], callback as Parameters<typeof execFile>[3])
   const maxBuffer = options.maxBuffer ?? 1024 * 1024
   const killSignal = options.killSignal ?? 'SIGTERM'
   const encoding = options.encoding === 'buffer' || options.encoding === null ? undefined : options.encoding ?? 'utf8'

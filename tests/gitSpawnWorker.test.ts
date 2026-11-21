@@ -6,7 +6,7 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
 import childProcess, { execFile, execFileSync, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,6 +20,9 @@ import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator
 import { GitService } from '../src/mms/git/GitService'
 import { userAction } from '../src/mms/git/gitPolicy'
 import { runGit } from '../src/mms/git/gitProcess'
+import { readProcessEntries } from '../src/mms/git/stoppedGitTree'
+import { gitsFormsAsync } from '../src/mms/actions/heldBytes'
+import { repoProgramSettingsAsync } from '../src/mms/git/repoPrograms'
 import * as gitSpawn from '../src/mms/git/gitSpawn'
 import { inTurnBoundary } from '../src/mms/diagnostics/turnBoundary'
 import { requestDaemonShutdown } from '../src/cli/daemonShutdown'
@@ -176,8 +179,7 @@ describe('Git started by the helper', () => {
     })
     await stopGitSpawnWorkers()
     expect(await ended).toEqual({ error: 'EGITWORKER', closed: true })
-    if (process.platform === 'win32') expect(alive(child.pid!)).toBe(false)
-    else try { process.kill(child.pid!) } catch { /* already gone */ }
+    expect(await living([child.pid!])).toEqual([])
     expect((await runGitProcess(['rev-parse', 'HEAD'], { cwd, env: process.env })).status).toBe(0)
   })
 
@@ -276,10 +278,52 @@ describe('background Git on a disk where interactive Git runs', () => {
     await new Promise((settle) => holder.once('close', settle))
     expect(diskGate.load(disk)).toEqual({ running: 0, waiting: 0, interactive: 0 })
   })
+
+  it('checks a repository filter added while a background conversion waits for its disk', async () => {
+    const attrs = join(cwd, '.gitattributes')
+    const marker = join(dir, 'queued-smudge-ran')
+    const filter = 'printf filter-ran > "' + marker.replace(/\\/g, '/') + '"; cat'
+    writeFileSync(attrs, 'README filter=queued-smudge\n')
+    const blob = execFileSync('git', ['rev-parse', 'HEAD:README'], { cwd, encoding: 'utf8' }).trim()
+    await repoProgramSettingsAsync(cwd)
+    const disk = diskOf(cwd)
+    const interactive = spawnGit(gitFile(), ['cat-file', '--batch'], { cwd })
+    const holder = inBackgroundGitLane(() => spawnGit(gitFile(), ['cat-file', '--batch'], { cwd }))
+    const closed = [interactive, holder].map((child) => new Promise((done) => child.once('close', done)))
+    const conversion = inBackgroundGitLane(() => gitsFormsAsync(cwd, [{ path: 'README', blob }], { keepBytes: 64 }))
+    try {
+      const expired = inBackgroundGitLane(() => gitsFormsAsync(cwd, [{ path: 'README', blob }], { deadline: Date.now() + 100 }))
+      expect(await expired).toEqual(new Map())
+      await vi.waitFor(() => expect(diskGate.load(disk).waiting).toBe(1), { timeout: 5_000 })
+      execFileSync('git', ['config', '--local', 'filter.queued-smudge.smudge', filter], { cwd })
+      holder.stdin.end()
+      const forms = await conversion
+      expect(forms.get('README')?.head?.toString()).toBe('hello\n')
+      expect(existsSync(marker)).toBe(false)
+
+      // Without Mousse's program check, the same conversion really does run the newly added driver.
+      execFileSync('git', ['cat-file', '--filters', '--path=README', blob], { cwd })
+      expect(readFileSync(marker, 'utf8')).toBe('filter-ran')
+    } finally {
+      interactive.stdin.end()
+      holder.stdin.end()
+      await Promise.all(closed)
+      await conversion.catch(() => undefined)
+      execFileSync('git', ['config', '--local', '--remove-section', 'filter.queued-smudge'], { cwd, stdio: 'ignore' })
+      rmSync(attrs, { force: true })
+    }
+  })
 })
 
 const alive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true } catch { return false }
+}
+
+async function living(pids: number[]): Promise<number[]> {
+  if (process.platform === 'win32') return pids.filter(alive)
+  const table = await readProcessEntries()
+  expect(table).toBeDefined()
+  return pids.filter((pid) => table!.some((entry) => entry.pid === pid && !entry.zombie))
 }
 
 function gitTree(label: string, exitRoot: boolean, indexLock?: string) {
@@ -287,7 +331,7 @@ function gitTree(label: string, exitRoot: boolean, indexLock?: string) {
   const marker = join(dir, label + '.pids')
   writeFileSync(script, [
     "const fs = require('node:fs'); const { spawn } = require('node:child_process')",
-    "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: ['ignore', 1, 2], windowsHide: true })",
+    "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: process.platform === 'win32', stdio: ['ignore', 1, 2], windowsHide: true })",
     "child.once('spawn', () => {",
     ...(indexLock ? ['fs.writeFileSync(' + JSON.stringify(indexLock) + ', "")'] : []),
     'fs.writeFileSync(' + JSON.stringify(marker + '.tmp') + ', JSON.stringify([process.pid, child.pid]))',
@@ -298,8 +342,8 @@ function gitTree(label: string, exitRoot: boolean, indexLock?: string) {
   return {
     script,
     args: ['-c', 'alias.job-tree=!node "' + script.replace(/\\/g, '/') + '"', 'job-tree'],
-    pids: async (): Promise<number[]> => {
-      await vi.waitFor(() => expect(existsSync(marker)).toBe(true), { timeout: 10_000 })
+    pids: async (timeout = 10_000): Promise<number[]> => {
+      await vi.waitFor(() => expect(existsSync(marker)).toBe(true), { timeout })
       return JSON.parse(readFileSync(marker, 'utf8')) as number[]
     }
   }
@@ -325,9 +369,66 @@ function killSurvivors(pids: number[]): void {
   for (const pid of pids) if (alive(pid)) try { process.kill(pid, 'SIGKILL') } catch { /* exited */ }
 }
 
+  it('keeps the repository leased until the process tree of a crashed helper is dead', async () => {
+    await gitProgramSettled()
+    await stopGitSpawnWorkers()
+    const tracked = captureHelpers()
+    const tree = gitTree('helper-crash', false)
+    const identity = await resolveRepositoryIdentityAsync(cwd)
+    await stopGitSpawnWorkers()
+    tracked.helpers.length = 0
+    const hook = join(cwd, '.git', 'hooks', 'pre-commit')
+    writeFileSync(hook, '#!/bin/sh\nexec node "' + tree.script.replace(/\\/g, '/') + '"\n')
+    chmodSync(hook, 0o755)
+    const owner = join(dir, 'mutation-owner')
+    mkdirSync(owner)
+    let pids: number[] = []
+    let root: number | undefined
+    const originalSpawn = gitSpawn.spawnGit
+    const observe = vi.spyOn(gitSpawn, 'spawnGit').mockImplementation((file, args, options) => {
+      const child = originalSpawn(file, args, options)
+      if (args[0] === 'commit') child.once('spawn', () => { root = child.pid })
+      return child
+    })
+    const running = withGitMutationLocks(owner, cwd, 'test-helper-crash', () => {
+      return runGitProcess(['commit', '--allow-empty', '--no-gpg-sign', '-m', 'should not commit'], { cwd, env: process.env })
+    })
+    try {
+      pids = await tree.pids()
+      expect(root).toBeDefined()
+      pids.push(root!)
+      expect(await living(pids)).toEqual(pids)
+      await expect(acquireRepositoryLease(identity, { retryDelayMs: 10, maxWaitMs: 200 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
+      expect(tracked.helpers).toHaveLength(1)
+      const handoff = acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 10_000 }).then(async (lease) => {
+        try { return await living(pids) } finally { lease.release() }
+      })
+      tracked.helpers[0]!.kill('SIGKILL')
+      expect((await running).error?.code).toBe('EGITWORKER')
+      expect(await living(pids)).toEqual([])
+      expect(await handoff).toEqual([])
+      expect((await runGitProcess(['rev-parse', 'HEAD'], { cwd, env: process.env })).status).toBe(0)
+    } finally {
+      tracked.restore()
+      observe.mockRestore()
+      rmSync(hook, { force: true })
+      await running.catch(() => undefined)
+    }
+  }, 30_000)
+
 describe.skipIf(process.platform !== 'win32')('Windows Git job ownership', () => {
   it.each(['graceful shutdown', 'forced exit'])('reaps both Git helpers and detached trees on daemon %s', async (mode) => {
     const trees = [gitTree(mode + '-interactive', false), gitTree(mode + '-background', false)]
+    const repository = join(dir, mode + '-repo')
+    execFileSync('git', ['clone', '-q', cwd, repository])
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repository, encoding: 'utf8' }).trim()
+    git('config', 'user.name', 'Shutdown test')
+    git('config', 'user.email', 'shutdown@example.test')
+    git('config', 'commit.gpgsign', 'false')
+    const before = git('rev-parse', 'HEAD')
+    writeFileSync(join(repository, 'staged.txt'), 'pending commit\n')
+    git('add', 'staged.txt')
+    writeFileSync(join(repository, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexec node "' + trees[0]!.script.replace(/\\/g, '/') + '"\n')
     const entry = await crashChild('tests/fixtures/windowsGitShutdownDaemon.ts', {
       format: 'esm', packages: 'external', banner: {
         js: 'import { createRequire as fixtureRequire } from "node:module"; const require = fixtureRequire(import.meta.url); const __dirname = import.meta.dirname; const __filename = import.meta.filename;'
@@ -337,15 +438,17 @@ describe.skipIf(process.platform !== 'win32')('Windows Git job ownership', () =>
     let descendants: number[] = []
     try {
       daemon = await startDaemon({
-        entry, home: join(dir, mode), args: ['service', 'run', cwd, ...trees.map((tree) => tree.script)],
+        entry, home: join(dir, mode), args: ['service', 'run', repository, trees[1]!.script],
         onStart: (started) => { daemon = started }
       })
-      descendants = (await Promise.all(trees.map((tree) => tree.pids().catch((error: unknown) => {
+      descendants = (await Promise.all(trees.map((tree) => tree.pids(35_000).catch((error: unknown) => {
         throw new Error(daemon!.output, { cause: error })
       })))).flat()
       const byLabel = (label: string) => [...daemon!.output.matchAll(new RegExp('Git ' + label + ' PID (\\d+)', 'g'))].map((match) => Number(match[1]))
       expect(byLabel('helper')).toHaveLength(2)
-      expect(byLabel('root')).toHaveLength(2)
+      expect(byLabel('root')).toHaveLength(1)
+      expect(daemon.output).toContain('Git launched the agent base-ref write')
+      expect(git('rev-parse', 'refs/mousse/agents/shutdown-agent/base')).toBe(before)
       const observed = [...descendants, ...byLabel('helper'), ...byLabel('root')]
       expect(observed.every(alive)).toBe(true)
       if (mode === 'graceful shutdown') {
@@ -358,46 +461,47 @@ describe.skipIf(process.platform !== 'win32')('Windows Git job ownership', () =>
         await vi.waitFor(() => expect(observed.filter(alive)).toEqual([]), { timeout: 5_000 })
       }
       expect(observed.filter(alive)).toEqual([])
+      expect(git('rev-parse', 'HEAD')).toBe(before)
+      expect(git('diff', '--cached', '--name-only')).toBe('staged.txt')
     } finally {
       await daemon?.kill()
       killSurvivors(descendants)
     }
   }, 60_000)
 
-  it('keeps the repository leased until the process tree of a crashed helper is dead', async () => {
-    await gitProgramSettled()
-    await stopGitSpawnWorkers()
-    const tracked = captureHelpers()
-    const tree = gitTree('helper-crash', false)
-    const identity = resolveRepositoryIdentity(cwd)
-    const hook = join(cwd, '.git', 'hooks', 'pre-commit')
-    writeFileSync(hook, '#!/bin/sh\nexec node "' + tree.script.replace(/\\/g, '/') + '"\n')
-    const owner = join(dir, 'mutation-owner')
-    mkdirSync(owner)
-    let pids: number[] = []
-    const running = withGitMutationLocks(owner, cwd, 'test-helper-crash', () => {
-      return runGitProcess(['commit', '--allow-empty', '--no-gpg-sign', '-m', 'should not commit'], { cwd, env: process.env })
+  it('reaps descendants before a synchronous Git caller returns', async () => {
+    const tree = gitTree('synchronous-job', true)
+    const ran = gitSpawn.spawnGitSync(gitFile(), tree.args, { cwd, encoding: 'utf8', timeout: 10_000 })
+    const descendants = await tree.pids()
+    try {
+      expect(ran).toMatchObject({ status: 0, error: undefined })
+      expect(descendants.filter(alive)).toEqual([])
+    } finally {
+      killSurvivors(descendants)
+    }
+  })
+
+  it.each(['helper', 'direct'])('keeps a successful Git result when Stop arrives between exit and close (%s)', async (mode) => {
+    if (mode === 'direct') process.env.MOUSSE_GIT_SPAWN_WORKER = '0'
+    const controller = new AbortController()
+    const realSpawn = gitSpawn.spawnGit
+    const observe = vi.spyOn(gitSpawn, 'spawnGit').mockImplementation((file, args, options) => {
+      const child = realSpawn(file, args, options)
+      child.once('exit', (code) => {
+        if (code === 0) controller.abort()
+      })
+      return child
     })
     try {
-      pids = await tree.pids()
-      expect(pids.every(alive)).toBe(true)
-      await expect(acquireRepositoryLease(identity, { retryDelayMs: 10, maxWaitMs: 200 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
-      expect(tracked.helpers).toHaveLength(1)
-      const handoff = acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 10_000 }).then((lease) => {
-        try { return pids.filter(alive) } finally { lease.release() }
-      })
-      tracked.helpers[0]!.kill('SIGKILL')
-      expect((await running).error?.code).toBe('EGITWORKER')
-      expect(pids.filter(alive)).toEqual([])
-      expect(await handoff).toEqual([])
-      expect((await runGitProcess(['rev-parse', 'HEAD'], { cwd, env: process.env })).status).toBe(0)
+      await expect(runGit(cwd, ['update-ref', 'refs/mousse/late-stop', 'HEAD'], { signal: controller.signal }))
+        .resolves.toMatchObject({ ok: true, code: 0, cancelled: false })
+      expect(controller.signal.aborted).toBe(true)
+      expect(execFileSync('git', ['rev-parse', 'refs/mousse/late-stop'], { cwd, encoding: 'utf8' }).trim())
+        .toBe(execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim())
     } finally {
-      tracked.restore()
-      killSurvivors(pids)
-      rmSync(hook, { force: true })
-      await running.catch(() => undefined)
+      observe.mockRestore()
     }
-  }, 30_000)
+  })
 
   it.each(['abort', 'timeout', 'runGit abort'] as const)('waits after the Git root exits on %s', async (mode) => {
     const index = join(dir, 'private-' + mode)

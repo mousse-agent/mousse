@@ -9,7 +9,8 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
   const { ChildProcess } = load('node:child_process') as typeof import('node:child_process')
   const { Socket } = load('node:net') as typeof import('node:net')
   const { randomUUID } = load('node:crypto') as typeof import('node:crypto')
-  const { closeSync, statSync } = load('node:fs') as typeof import('node:fs')
+  const { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmSync, statSync, writeFileSync } = load('node:fs') as typeof import('node:fs')
+  const { tmpdir } = load('node:os') as typeof import('node:os')
   const { win32: path } = load('node:path') as typeof import('node:path')
   const { getSystemErrorName } = load('node:util') as typeof import('node:util')
   const kernel = ffi.load('kernel32.dll')
@@ -126,7 +127,9 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
     }
   }
 
-  function spawn(file: string, args: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: readonly string[]; windowsHide?: boolean; detached?: boolean }, name: string, beforeStart?: () => void): ChildProcess {
+  type Options = { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: readonly string[]; windowsHide?: boolean; detached?: boolean }
+
+  function launch(file: string, args: readonly string[], options: Options, name: string, handles: readonly Handle[], beforeStart?: () => void) {
     const cwd = path.resolve(options.cwd ?? process.cwd())
     const environment = new Map<string, [string, string]>()
     const env = options.env ?? process.env
@@ -161,20 +164,17 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
     // resuming Git. If the daemon went away during creation, this last close kills the still-suspended command.
     const membership = openJob(1, 0, name) // JOB_OBJECT_ASSIGN_PROCESS
     if (!membership) throw failure('OpenJobObjectW')
-    const pipes: ReturnType<typeof pipe>[] = []
     const size = [0]
     initAttributes(null, 2, 0, size)
     const attributes = Buffer.alloc(size[0]!)
     let initialized = false
     const info: { process: Handle; thread: Handle; pid: number } = { process: null, thread: null, pid: 0 }
-    let started = false
     try {
-      for (let fd = 0; fd < 3; fd++) pipes.push(pipe(fd === 0, options.stdio?.[fd] === 'ignore'))
       if (!initAttributes(attributes, 2, 0, size)) throw failure('InitializeProcThreadAttributeList')
       initialized = true
       const inherited = Buffer.alloc(pointerSize * 3)
       const jobs = Buffer.alloc(pointerSize)
-      ffi.encode(inherited, handle, pipes.map((item) => item.child), 3)
+      ffi.encode(inherited, handle, handles, 3)
       ffi.encode(jobs, handle, membership)
       // PROC_THREAD_ATTRIBUTE_HANDLE_LIST and PROC_THREAD_ATTRIBUTE_JOB_LIST.
       if (!updateAttribute(attributes, 0, 0x20002, inherited, inherited.length, null, null) ||
@@ -184,10 +184,10 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
       const command = Buffer.from([file, ...args].map(quote).join(' ') + '\0', 'utf16le')
       const environmentBlock = Buffer.from(block, 'utf16le')
       beforeStart?.()
-      for (const item of pipes) if (!setHandle(item.child, 1, 1)) throw failure('SetHandleInformation')
+      for (const item of handles) if (!setHandle(item, 1, 1)) throw failure('SetHandleInformation')
       if (!createProcess(application, command, null, null, 1, flags, environmentBlock, cwd, {
         cb: ffi.sizeof(startup), flags: options.windowsHide ? 0x101 : 0x100,
-        stdin: pipes[0]!.child, stdout: pipes[1]!.child, stderr: pipes[2]!.child, attributes
+        stdin: handles[0], stdout: handles[1], stderr: handles[2], attributes
       }, info)) {
         const code = lastError()
         if ([2, 3, 267].includes(code)) throw spawnError('ENOENT')
@@ -195,13 +195,9 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
         if (code === 193) throw spawnError(getSystemErrorName(errno), errno)
         throw failure('CreateProcessW', code)
       }
-      started = true
     } finally {
       if (initialized) deleteAttributes(attributes)
-      for (const item of pipes) {
-        item.closeChild()
-        if (!started) item.stream?.destroy()
-      }
+      for (const item of handles) setHandle(item, 1, 0)
       close(membership)
     }
 
@@ -211,12 +207,27 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
     if (resumeError) {
       terminateProcess(info.process, 1)
       close(info.process)
-      for (const item of pipes) item.stream?.destroy()
       throw resumeError
     }
+    return info
+  }
+
+  function spawn(file: string, args: readonly string[], options: Options, name: string, beforeStart?: () => void): ChildProcess {
+    const pipes: ReturnType<typeof pipe>[] = []
+    let info: ReturnType<typeof launch> | undefined
+    try {
+      for (let fd = 0; fd < 3; fd++) pipes.push(pipe(fd === 0, options.stdio?.[fd] === 'ignore'))
+      info = launch(file, args, options, name, pipes.map((item) => item.child), beforeStart)
+    } finally {
+      for (const item of pipes) {
+        item.closeChild()
+        if (!info) item.stream?.destroy()
+      }
+    }
+    const { process: processHandle, pid } = info!
     const child = new ChildProcess()
     const [stdin, stdout, stderr] = pipes.map((item) => item.stream)
-    Object.assign(child, { stdin, stdout, stderr, stdio: [stdin, stdout, stderr], pid: info.pid, spawnfile: file, spawnargs: [file, ...args] })
+    Object.assign(child, { stdin, stdout, stderr, stdio: [stdin, stdout, stderr], pid, spawnfile: file, spawnargs: [file, ...args] })
     let exited = false
     let referenced = true
     let timer: NodeJS.Timeout | undefined
@@ -226,10 +237,10 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
     const maybeClose = (): void => { if (exited && pending === 0) child.emit('close', child.exitCode, child.signalCode) }
     for (const stream of outputs) stream.once('close', () => { pending -= 1; maybeClose() })
     const readExit = (): void => {
-      if (wait(info.process, 0) === 0) {
+      if (wait(processHandle, 0) === 0) {
         const code = [1]
-        exitCode(info.process, code)
-        close(info.process)
+        exitCode(processHandle, code)
+        close(processHandle)
         exited = true
         stdin?.destroy()
         Object.assign(child, { exitCode: signal ? null : code[0]!, signalCode: signal })
@@ -244,7 +255,7 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
     child.ref = () => { referenced = true; timer?.ref() }
     child.unref = () => { referenced = false; timer?.unref() }
     child.kill = (requested = 'SIGTERM') => {
-      if (exited || !terminateProcess(info.process, 1)) return false
+      if (exited || !terminateProcess(processHandle, 1)) return false
       signal = typeof requested === 'string' ? requested : 'SIGTERM'
       Object.assign(child, { killed: true })
       return true
@@ -253,5 +264,96 @@ export function windowsGitRuntime(load: NodeJS.Require, koffiPath: string) {
     return child
   }
 
-  return { job, active, terminate, close, spawn }
+  /**
+   * Final checks that must stay synchronous (for example an index read at mutation admission) cannot drain Node
+   * streams while Git runs. Give them file-backed stdio and use the same job assignment as asynchronous Git.
+   */
+  function spawnSync(file: string, args: readonly string[], options: Options & { input?: string | Buffer; timeout?: number; maxBuffer?: number }) {
+    const maxBuffer = options.maxBuffer ?? 1024 * 1024
+    const dir = mkdtempSync(path.join(tmpdir(), 'mousse-git-stdio-'))
+    const fds: number[] = []
+    const ignored: ReturnType<typeof pipe>[] = []
+    const opened = (name: string, flags: string): number => {
+      const fd = openSync(path.join(dir, name), flags)
+      fds.push(fd)
+      return fd
+    }
+    let owned: Handle | undefined
+    let root: Handle | undefined
+    let status: number | null = null
+    let error: NodeJS.ErrnoException | undefined
+    let reaped = false
+    let stdout = ''
+    let stderr = ''
+    try {
+      const input = options.input !== undefined && options.stdio?.[0] !== 'ignore'
+      if (input) writeFileSync(path.join(dir, 'in'), options.input!)
+      const out = options.stdio?.[1] === 'ignore' ? undefined : opened('out', 'w+')
+      const err = options.stdio?.[2] === 'ignore' ? undefined : opened('err', 'w+')
+      const handles = [input ? opened('in', 'r') : undefined, out, err].map((fd, index) => {
+        if (fd !== undefined) return ffi.call(osHandleAddress, osHandleType, fd) as Handle
+        const nul = pipe(index === 0, true)
+        ignored.push(nul)
+        return nul.child
+      })
+      const group = job()
+      owned = group.owned
+      const info = launch(file, args, options, group.name, handles)
+      root = info.process
+      const deadline = options.timeout ? Date.now() + options.timeout : Infinity
+      for (;;) {
+        const waited = wait(root, Math.min(20, Math.max(0, deadline - Date.now())))
+        if ((out !== undefined && fstatSync(out).size > maxBuffer) || (err !== undefined && fstatSync(err).size > maxBuffer)) {
+          error = syncError('ENOBUFS')
+          break
+        }
+        if (waited === 0) break
+        if (waited !== 258) throw failure('WaitForSingleObject')
+        if (Date.now() >= deadline) { error = syncError('ETIMEDOUT'); break }
+      }
+      finishSync(owned)
+      reaped = true
+      if (!error) {
+        const value = [1]
+        if (!exitCode(root, value)) throw failure('GetExitCodeProcess')
+        status = value[0]!
+      }
+      const read = (fd: number) => {
+        const result = Buffer.alloc(Math.min(maxBuffer, fstatSync(fd).size))
+        return result.subarray(0, readSync(fd, result, { position: 0 })).toString('utf8')
+      }
+      if (out !== undefined) stdout = read(out)
+      if (err !== undefined) stderr = read(err)
+    } catch (cause) {
+      error ??= cause as NodeJS.ErrnoException
+    } finally {
+      if (owned) {
+        if (!reaped) finishSync(owned)
+        close(owned)
+      }
+      if (root) close(root)
+      for (const nul of ignored) nul.closeChild()
+      for (const fd of fds) closeSync(fd)
+      rmSync(dir, { recursive: true, force: true })
+    }
+    return { status, stdout, stderr, error }
+  }
+
+  function syncError(code: string): NodeJS.ErrnoException {
+    return Object.assign(new Error('spawnSync git ' + code), { code, syscall: 'spawnSync git' })
+  }
+
+  function finishSync(owned: Handle): void {
+    const pause = new Int32Array(new SharedArrayBuffer(4))
+    let terminated = false
+    for (;;) {
+      try {
+        if (active(owned) === 0) return
+        if (!terminated) { terminate(owned); terminated = true }
+      } catch { /* Keep the repository occupied until the job is empty. */ }
+      Atomics.wait(pause, 0, 0, 10)
+    }
+  }
+
+  return { job, active, terminate, close, spawn, spawnSync }
 }

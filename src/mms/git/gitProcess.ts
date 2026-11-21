@@ -1,5 +1,5 @@
 import { StringDecoder } from 'node:string_decoder'
-import { cancelQueuedGit, gitChildSpawned, spawnGit, stopWindowsGit } from './gitSpawn'
+import { cancelQueuedGit, gitChildSpawned, spawnGit, stopWindowsGit, windowsGitAlreadyExited } from './gitSpawn'
 import { mousseGitEnv } from './gitEnv'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
@@ -223,7 +223,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       })
     }
     const stop = (): void => {
-      if (stopping) return
+      if (stopping || windowsGitAlreadyExited(child)) return
       stopping = true
       if (silence) clearTimeout(silence)
       if (cancelQueuedGit(child)) return

@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
@@ -10,7 +9,7 @@ import { isGitDirectory, isGitDirectoryAsync, stripInheritedGitEnv, withGitConfi
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
-import { spawnGit } from './gitSpawn'
+import { spawnGitSync, spawnGit } from './gitSpawn'
 
 /**
  * The central check for the Git (and `gh`) commands Mousse itself runs. It never applies to commands an
@@ -151,7 +150,7 @@ const SYNC_READS: CheckReads = {
   },
   isGitDirectory,
   git(cwd, args, gitDir) {
-    const result = timeGitSync(() => spawnSync(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: gitEnvFor(readGitEnv(gitDir)) }))
+    const result = timeGitSync(() => spawnGitSync(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: gitEnvFor(readGitEnv(gitDir)) }))
     return result.error ? null : { status: result.status, stdout: result.stdout }
   },
   gitFolder(cwd, gitDir, routing) {
