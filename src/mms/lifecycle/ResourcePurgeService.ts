@@ -896,12 +896,13 @@ export class ResourcePurgeService {
     }
     const readUnclaimed = async (path = item.identity): Promise<() => void> => {
       const target = await this.claimTarget(item, path)
-      const claims = await this.peersCheck(ownedIds)
       if (item.kind === 'ref') {
         // A repository can contain worktrees that no Mousse task names. Git must still be able to list them.
         const listing = await lifecycleReadAsync(item.commonDir!, ['worktree', 'list', '--porcelain', '-z'])
         if (listing.split('\0').includes(`branch ${item.identity}`)) throw new Error('The branch is checked out and is kept')
       }
+      // Listing the target can take time. Read peer worktree facts after it returns.
+      const claims = await this.peersCheck(ownedIds)
       return () => {
         assertReservation()
         const current = claims()

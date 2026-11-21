@@ -555,9 +555,18 @@ export class WorktreeRetirementService {
       if (options.purging && manifest.trashPath) {
         if (manifest.deleting && await exists(manifest.deleting.path))
           await this.removeConfirmed(manifest.deleting.path, admitRemoval(manifest.deleting.path))
-        if (await exists(manifest.trashPath)) await this.removeTrashed(manifest, admitRemoval(manifest.trashPath))
-        else if (await worktreeRegisteredAsync(manifest.commonDir, manifest.trashPath))
-          await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', manifest.trashPath], undefined, undefined, undefined, admitRemoval(manifest.trashPath))
+        const trashPath = manifest.trashPath
+        if (await exists(trashPath)) await this.removeTrashed(manifest, admitRemoval(trashPath))
+        else if (await worktreeRegisteredAsync(manifest.commonDir, trashPath)) {
+          await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', trashPath], undefined, undefined, undefined, async () => {
+            const admit = await admitRemoval(trashPath)()
+            return () => {
+              admit()
+              // This removal only unregisters a missing checkout. Even an ignored file in a replacement is kept.
+              if (lstatSync(trashPath, { throwIfNoEntry: false })) throw new Error('The worktree trash path reappeared; its files are kept')
+            }
+          })
+        }
         delete manifest.deleting
       }
       manifest.state = manifest.trashPath && await exists(manifest.trashPath) ? 'trashed' : 'retired'; save(); return manifest
