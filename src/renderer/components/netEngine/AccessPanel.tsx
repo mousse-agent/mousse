@@ -50,8 +50,8 @@ export function AccessPanel({
           !device || !connected
             ? `Not connected to this computer`
             : how
-              ? `This computer · ${how}`
-              : 'This computer'
+              ? `To this computer, ${how}`
+              : 'To this computer'
         }
       />
       {grant}

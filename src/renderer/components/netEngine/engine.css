@@ -56,9 +56,20 @@
 }
 
 .engine-more-ways > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
   cursor: pointer;
   color: var(--text-muted);
-  margin-bottom: var(--space-8);
+  list-style: none;
+}
+
+.engine-more-ways > summary::-webkit-details-marker {
+  display: none;
+}
+
+.engine-more-ways[open] > summary .settings-advanced-chevron {
+  transform: rotate(90deg);
 }
 
 .engine-more-ways > .engine-choice + .engine-choice {

@@ -5,6 +5,7 @@ import {
   type NetEngineJoinPreview,
   type NetEngineStatus
 } from '../../../shared/netEngine/local'
+import { ChevronRight } from '../../lib/icons'
 import { qrSvgPath } from '../../lib/plusQr'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
@@ -176,7 +177,10 @@ export function AddEngineDeviceDialog({
             )}
             {((status?.on && status.reach) || onAddPhone) && (
               <details className="engine-more-ways">
-                <summary>More ways</summary>
+                <summary>
+                  <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
+                  More ways
+                </summary>
                 {status?.on && status.reach && (
                   <Choice
                     label="Over SSH"
@@ -321,7 +325,7 @@ const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text
 function Choice({ label, hint, onClick }: { label: string; hint: string; onClick: () => void }) {
   return (
     <div className="engine-choice">
-      <button type="button" className="settings-btn" onClick={onClick}>
+      <button type="button" className="settings-btn devices-dialog-btn" onClick={onClick}>
         {label}
       </button>
       <span className="engine-choice-hint">{hint}</span>
