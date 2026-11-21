@@ -99,12 +99,11 @@
       "branch": "git-spawn-off-daemon-loop",
       "paths": [
         "src/mms/git",
-        "src/cli/daemonShutdown.ts",
-        "src/mms/actions/ReceiptRefReleaseService.ts",
-        "src/mms/diagnostics/turnBoundary.ts"
+        "src/mms/worktree",
+        "src/mms/actions/heldBytes.ts"
       ],
       "claimedAt": "2026-11-21T05:08:34.813Z",
-      "expiresAt": "2026-11-21T16:15:47.330Z"
+      "expiresAt": "2026-11-21T18:56:54.704Z"
     },
     {
       "task": "provider-idle-window",
