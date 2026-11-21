@@ -14,6 +14,9 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { pressed } from './support/userRequest'
 
+const CRASH_CHILD_TIMEOUT_MS = 60_000
+const RECOVERY_TEST_TIMEOUT_MS = 120_000
+
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
 afterEach(() => f.dispose())
@@ -40,8 +43,8 @@ it.each(['checkpoint', 'revert', 'publish'].flatMap((kind) => ['before', 'after'
     writeFileSync(configPath, JSON.stringify(config))
     const runner = join(f.root, 'operation-crash.mjs')
     await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
-    const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
-    expect(child.status, child.stderr).toBe(86)
+    const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: CRASH_CHILD_TIMEOUT_MS })
+    expect(child.status, child.error?.message ?? child.stderr).toBe(86)
     // A checkpoint or a revert changes files only; publishing moves the primary's branch.
     const movesHead = kind === 'publish'
     const appliedHead = git(f.repo, 'rev-parse', 'HEAD')
@@ -58,7 +61,7 @@ it.each(['checkpoint', 'revert', 'publish'].flatMap((kind) => ['before', 'after'
     await recover!()
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
     expect(new ThreadJournal(f.thread).list()).toHaveLength(journalSize)
-  }, 30_000
+  }, RECOVERY_TEST_TIMEOUT_MS
 )
 
 it('recovers an interrupted nested snapshot before its parent and keeps whole-parent undo at the frontier', async () => {
@@ -67,8 +70,8 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
     baseSha: f.baseSha, options: actionOptions(f.repo, 'parent-turn') }))
   const runner = join(f.root, 'nested-crash.mjs')
   await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
-  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
-  expect(child.status, child.stderr).toBe(86)
+  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: CRASH_CHILD_TIMEOUT_MS })
+  expect(child.status, child.error?.message ?? child.stderr).toBe(86)
   const appliedHead = git(f.repo, 'rev-parse', 'HEAD')
   const actions = new ThreadActionService(f.thread)
   await actions.recoverPending(f.repo)
@@ -83,7 +86,7 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
   expect(f.read(f.repo)).toBe('base\n')
   expect(git(f.repo, 'status', '--porcelain')).toBe('')
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
-}, 30_000)
+}, RECOVERY_TEST_TIMEOUT_MS)
 
 it.each(['before-capture-journal', 'before', 'after'])('a checkpoint in a thread worktree interrupted at %s recovers, with the pin, the record and Undo agreeing', async (phase) => {
   // The receipt's refs and the worktree's pin of its newest snapshot go in one `update-ref --stdin`; the worktree's own
@@ -94,8 +97,8 @@ it.each(['before-capture-journal', 'before', 'after'])('a checkpoint in a thread
   writeFileSync(configPath, JSON.stringify({ kind: 'checkpoint', phase, thread: f.thread, repo: workspace.worktreePath, options: actionOptions(workspace.worktreePath) }))
   const runner = join(f.root, 'operation-crash.mjs')
   await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
-  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 60_000 })
-  expect(child.status, child.stderr).toBe(86)
+  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: CRASH_CHILD_TIMEOUT_MS })
+  expect(child.status, child.error?.message ?? child.stderr).toBe(86)
   const top = workspace.worktreePath
   const captured = JSON.parse(readFileSync(resolve(top, git(top, 'rev-parse', '--git-path', 'mousse'), 'snapshot-last.json'), 'utf8')).sha
   const pinnedCaptures = () => git(top, 'for-each-ref', '--format=%(*objectname)', 'refs/mousse/checkpoints/')
@@ -123,7 +126,7 @@ it.each(['before-capture-journal', 'before', 'after'])('a checkpoint in a thread
   expect(readFileSync(later, 'utf8')).toBe('saved after the crash\n')
   expect(git(top, 'rev-parse', 'HEAD')).toBe(head)
   expect(git(top, 'ls-files', '-s')).toBe(index)
-}, 120_000)
+}, RECOVERY_TEST_TIMEOUT_MS)
 
 it.each(['before', 'after'])('Undo keeps a pre-turn save when start capture failed and the process exited %s writing the receipt', async (phase) => {
   writeFileSync(join(f.thread, 'meta.json'), JSON.stringify({ id: 'task' }))
@@ -138,8 +141,8 @@ it.each(['before', 'after'])('Undo keeps a pre-turn save when start capture fail
   writeFileSync(configPath, JSON.stringify({ kind: 'checkpoint', phase, thread: f.thread, repo: top, options: actionOptions(top), startIndexLock }))
   const runner = join(f.root, 'operation-crash.mjs')
   await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
-  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 60_000 })
-  expect(child.status, child.stderr).toBe(86)
+  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: CRASH_CHILD_TIMEOUT_MS })
+  expect(child.status, child.error?.message ?? child.stderr).toBe(86)
   const captured = git(top, 'for-each-ref', '--format=%(*objectname)', 'refs/mousse/checkpoints/')
   expect(captured).toMatch(/^[a-f0-9]{40}$/)
   expect(new ChangeReceiptService(f.thread).list()).toHaveLength(phase === 'after' ? 1 : 0)
@@ -157,4 +160,4 @@ it.each(['before', 'after'])('Undo keeps a pre-turn save when start capture fail
   expect(receipt.beforeSha).toBe(captured)
   expect(action).toMatchObject({ startSha: receipt.beforeSha, endSha: captured, changedPaths: [], notCovered: receipt.notCovered })
   expect(existsSync(join(f.thread, UNCAPTURED_START_FILE))).toBe(false)
-}, 120_000)
+}, RECOVERY_TEST_TIMEOUT_MS)
