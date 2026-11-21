@@ -111,15 +111,14 @@
       "machine": "Animatrix",
       "branch": "provider-idle-window",
       "paths": [
-        "src/mms/harness/vendors/claude/accountSubject.ts",
         "src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService.ts",
         "src/mms/harness/vendors/codex/CodexProviderService.ts",
-        "tests/harness/claudeLockedProcess.test.ts",
-        "tests/codexProvider.test.ts",
-        "tests/claudeLiveSessions.test.ts"
+        "tests/claudeLiveSessions.test.ts",
+        "tests/claudeSubscriptionProvider.test.ts",
+        "tests/codexProvider.test.ts"
       ],
       "claimedAt": "2026-11-21T10:20:49.161Z",
-      "expiresAt": "2026-11-21T17:14:16.556Z"
+      "expiresAt": "2026-11-21T19:07:55.290Z"
     },
     {
       "task": "receipt-release-outside-lease",
