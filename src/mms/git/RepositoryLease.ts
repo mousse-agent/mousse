@@ -526,6 +526,14 @@ function busyError(key: string, leasePath: string): RepositoryLeaseBusyError {
 }
 
 /** Acquire in FIFO order within this process and retry asynchronously across processes. */
+/**
+ * Whether anyone in this process is waiting for the repository's lease, so background work holding it (a cleanup
+ * batch) can let go between its steps and take it again after them.
+ */
+export function repositoryLeaseWanted(key: string): boolean {
+  return (queues.get(key)?.length ?? 0) > 0
+}
+
 export function acquireRepositoryLease(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOptions = {}): Promise<RepositoryLeaseHandle> {
   requireRepositoryMutationCapability(identity)
   if (opts.signal?.aborted) return Promise.reject(new RepositoryLeaseAbortedError())

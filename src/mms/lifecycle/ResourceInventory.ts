@@ -13,7 +13,7 @@ import { expiredReceiptIdsFromJournal } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { settlesItself } from '../../shared/resourceLifecycle'
-import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
+import { canonicalPathAsync, comparablePath, gitCommonDirAsync } from './canonicalPath'
 import { checkRepoPrograms } from '../git/repoPrograms'
 import { findListedWorktreeAsync } from './worktreeRegistry'
 import { readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordFile, threadRecordPath } from '../data/threadRecords'
@@ -51,6 +51,23 @@ export class OwnershipFacts {
   readonly canonical = new Map<string, string>()
   /** The real Git common directory a checkout points at now (`gitCommonDirAsync`), or null when it can't be told. */
   readonly commonDirs = new Map<string, string | null>()
+  /** Each fact read, by its key, so the facts of one repository can be read again (`rereadRepositoryFacts`). */
+  readonly read = new Map<string, OwnershipNeed>()
+  /** Which discovery read them (`discoverOwnershipFacts`); 0 for facts read on their own. */
+  generation = 0
+
+  /** A copy whose facts can be read again or added to without changing these. */
+  copy(): OwnershipFacts {
+    const copy = new OwnershipFacts()
+    for (const [key, value] of this.present) copy.present.set(key, value)
+    for (const [key, value] of this.worktrees) copy.worktrees.set(key, value)
+    for (const [key, value] of this.legacy) copy.legacy.set(key, value)
+    for (const [key, value] of this.canonical) copy.canonical.set(key, value)
+    for (const [key, value] of this.commonDirs) copy.commonDirs.set(key, value)
+    for (const [key, value] of this.read) copy.read.set(key, value)
+    copy.generation = this.generation
+    return copy
+  }
 }
 
 /** What scanning an old `.mousse/.data` folder inside a project found, in the order the scan met it. */
@@ -126,10 +143,13 @@ export function collectingReads(facts: OwnershipFacts, needs: OwnershipNeed[]): 
   }
 }
 
-/** Answers from `facts` only. A fact that is missing (the records changed since the facts were read) fails closed. */
-export function finalReads(facts: OwnershipFacts): OwnershipReads {
+/**
+ * Answers from `facts` only. A fact that is missing (the records changed since the facts were read) fails closed;
+ * `missed` hears of each, so a caller can read the facts again and retry instead of keeping on the stand-in.
+ */
+export function finalReads(facts: OwnershipFacts, missed?: (what: string) => void): OwnershipReads {
   const missing: string[] = []
-  const changed = (what: string) => `Ownership of ${what} changed while it was being read; try again`
+  const changed = (what: string, reported = what) => { missed?.(reported); return `Ownership of ${what} changed while it was being read; try again` }
   return {
     missing,
     present: (path) => {
@@ -140,7 +160,7 @@ export function finalReads(facts: OwnershipFacts): OwnershipReads {
     worktree: (store, path, branch, repository) => {
       const key = worktreeKey(store, path, branch, repository)
       if (facts.worktrees.has(key)) return facts.worktrees.get(key)
-      return `Unverified worktree ${path}: ${changed('it')}`
+      return `Unverified worktree ${path}: ${changed('it', path)}`
     },
     legacy: (root) => {
       if (facts.legacy.has(root)) return facts.legacy.get(root)!
@@ -176,13 +196,16 @@ function worktreeFactContext(admission = false) {
 }
 type WorktreeFactContext = ReturnType<typeof worktreeFactContext>
 
+const needKey = (need: OwnershipNeed): string => need.kind === 'worktree' ? `worktree\0${worktreeKey(need.store, need.path, need.branch, need.repository)}` : need.kind === 'legacy' ? `legacy\0${need.root}` : `${need.kind}\0${need.path}`
+
 /** Reads the facts in `needs` into `facts`, without blocking, a few at a time. */
 export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts: OwnershipFacts): Promise<void> {
   // Each fact once, though several records may name it.
   const unique = new Map<string, OwnershipNeed>()
   for (const need of needs) {
-    const key = need.kind === 'worktree' ? `worktree\0${worktreeKey(need.store, need.path, need.branch, need.repository)}` : need.kind === 'legacy' ? `legacy\0${need.root}` : `${need.kind}\0${need.path}`
+    const key = needKey(need)
     if (!unique.has(key)) unique.set(key, need)
+    facts.read.set(key, need)
   }
   const queue = [...unique.values()]
   const context = worktreeFactContext(facts.admission)
@@ -223,6 +246,37 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
     const error = verdicts.get(manifest)
     facts.worktrees.set(key, error ? `Unverified worktree ${path}: ${error.message}` : undefined)
   }
+}
+
+/**
+ * Reads again, into `facts`, what they say about the repository a change is about to be made in, for the check under
+ * its lease: every real path (a link or junction above a path can be retargeted while every file below it stays the
+ * same), every checkout's repository, whether each checkout is there, and the worktree facts of this repository's
+ * worktrees (by recorded repository, or by being one it registers). Only the last may start Git, and only for a
+ * worktree of this repository that Git must answer for. Facts about other repositories stay as discovered: this lease
+ * never kept those from changing.
+ */
+export async function rereadRepositoryFacts(facts: OwnershipFacts, repository: { repositoryIds: Array<string | undefined>; registeredWorktrees: string[] }): Promise<void> {
+  const aliases = [...facts.read.entries()].filter(([, need]) => need.kind === 'canonical' || need.kind === 'common-dir' || need.kind === 'present')
+  for (const [key, need] of aliases) {
+    facts.read.delete(key)
+    if (need.kind === 'canonical') facts.canonical.delete(need.path)
+    else if (need.kind === 'common-dir') facts.commonDirs.delete(need.path)
+    else if (need.kind === 'present') facts.present.delete(need.path)
+  }
+  await readOwnershipFacts(aliases.map(([, need]) => need), facts)
+  const ids = new Set(repository.repositoryIds.filter((id): id is string => Boolean(id)))
+  const registered = new Set(repository.registeredWorktrees.map(comparablePath))
+  const worktrees: OwnershipNeed[] = []
+  for (const [key, need] of [...facts.read]) {
+    if (need.kind !== 'worktree') continue
+    const real = facts.canonical.get(need.path) ?? await canonicalPathAsync(need.path)
+    if (!(need.repository && ids.has(need.repository)) && !registered.has(comparablePath(real))) continue
+    facts.read.delete(key)
+    facts.worktrees.delete(worktreeKey(need.store, need.path, need.branch, need.repository))
+    worktrees.push(need)
+  }
+  await readOwnershipFacts(worktrees, facts)
 }
 
 /**
@@ -375,8 +429,8 @@ export async function buildResourceInventory(store: ResourceLifecycleStore, reco
  * {@link buildResourceInventory} from facts already read, synchronously: the records are read now, with nothing awaited,
  * and a checkout the facts do not cover is a blocker. For a caller that must act on the answer before anything else runs.
  */
-export function buildResourceInventoryFromFacts(store: ResourceLifecycleStore, record: TaskLifecycleRecord, facts: OwnershipFacts, options: ResourceInventoryOptions = {}): ResourceInventorySnapshot {
-  return inventoryFrom(store, record, options, finalReads(facts))
+export function buildResourceInventoryFromFacts(store: ResourceLifecycleStore, record: TaskLifecycleRecord, facts: OwnershipFacts, options: ResourceInventoryOptions = {}, missed?: (what: string) => void): ResourceInventorySnapshot {
+  return inventoryFrom(store, record, options, finalReads(facts, missed))
 }
 
 type SharedFileRead = { source: ResourceSource; data: unknown } | { source: ResourceSource; reason: string } | null
