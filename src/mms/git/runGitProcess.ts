@@ -3,8 +3,9 @@ import { spawn } from 'node:child_process'
 import { createReadStream, existsSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { StoppedGitTree } from './stoppedGitTree'
-import { timeGitChild } from '../diagnostics/turnBoundary'
+import { timeGitChild, timeGitRun } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
+import { activeCheckoutSlot } from '../worktree/checkoutSlotProcess'
 export { gitStopProbe, StoppedGitTree } from './stoppedGitTree'
 
 /** What a Git process left: as `spawnSync` reports it. */
@@ -126,10 +127,27 @@ export interface GitProcessObserver {
  * `beforeStart` runs synchronously right before Git starts, with nothing awaited in between; what it throws rejects the
  * run, and Git never starts.
  */
-export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number; beforeStart?: () => void; observer?: GitProcessObserver }): Promise<GitProcess> {
+export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number; beforeStart?: () => void; observer?: GitProcessObserver; preserveIndexLock?: boolean }): Promise<GitProcess> {
   const limit = options.maxBuffer ?? DEFAULT_MAX_BUFFER
   const scope = cancellation.getStore()
   const signal = scope?.signal
+  const slot = activeCheckoutSlot(options.cwd, argv)
+  if (slot) {
+    return Promise.resolve().then(async () => {
+      options.beforeStart?.()
+      signal?.throwIfAborted()
+      options.observer?.beforeSpawn()
+      // Record the slot owner before it can start Git. It stays alive through the writer's exit.
+      options.observer?.spawned(slot.pid, slot.startedAt)
+      const file = gitFile()
+      const { status, stdoutBytes, stderr, failure } = await timeGitRun(() => slot.run({
+        file, argv, cwd: options.cwd, env: gitEnvFor(options.env), input: options.input, limit
+      }))
+      signal?.throwIfAborted()
+      const error = failure && Object.assign(new Error(failure.message), { code: failure.code })
+      return { status, stdoutBytes, stdout: stdoutBytes.toString('utf8'), stderr, ...(error ? { error } : {}) }
+    })
+  }
   return new Promise((settle) => {
     options.beforeStart?.()
     if (signal?.aborted) {
@@ -141,7 +159,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
     // The lock of the private index the command works on, and whether it was already there before the command started:
     // only a lock that was not, and was made since, can be the stopped command's.
     const startedAt = Date.now()
-    const indexLock = signal && options.env.GIT_INDEX_FILE ? `${resolve(options.cwd, options.env.GIT_INDEX_FILE)}.lock` : undefined
+    const indexLock = signal && !options.preserveIndexLock && options.env.GIT_INDEX_FILE ? `${resolve(options.cwd, options.env.GIT_INDEX_FILE)}.lock` : undefined
     const lockedBefore = indexLock !== undefined && existsSync(indexLock)
     // When the command was started: its creation time must match this, so a pid reused later is never taken for it.
     options.observer?.beforeSpawn()

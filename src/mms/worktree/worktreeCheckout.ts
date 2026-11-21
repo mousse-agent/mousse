@@ -47,7 +47,9 @@ async function checkoutConfig(cwd: string, run: WorktreeGit, args: string[]): Pr
   try {
     return String(await run(cwd, args))
   } catch (error) {
-    if ((error as { status?: unknown }).status !== 1) throw error
+    const { status } = error as { status?: unknown }
+    // Older Git documents unknown `git var` names as usage errors.
+    if (status !== 1 && !(args[0] === 'var' && status === 129)) throw error
     return ''
   }
 }
@@ -67,6 +69,7 @@ export async function checkoutInputsKey(cwd: string): Promise<string> {
   files.push(global.trimEnd() || configured.trimEnd() || resolve(process.env.XDG_CONFIG_HOME || resolve(home, '.config'), 'git', 'attributes'))
   if (system.trimEnd()) files.push(system.trimEnd())
   const contents = await Promise.all(files.map(async (path) => {
+    if (path === '/dev/null' || process.platform === 'win32' && /^nul:?$/i.test(path)) return [path, null]
     try {
       const file = resolve(cwd, path)
       if (!(await stat(file)).isFile()) throw new Error('The Git checkout settings refer to a non-file: ' + file)

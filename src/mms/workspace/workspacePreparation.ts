@@ -112,15 +112,16 @@ export async function settledPreparation(threadDirectory: string, signal?: Abort
  * Removes the thread's prepared worktree that no message claimed, when it is untouched (`releasePrepared`), after any
  * preparation of it ends. 'busy' when something else holds the thread.
  */
-export async function releasePreparedWorkspace(threadDirectory: string, eligible: () => boolean = () => true): Promise<'released' | 'kept' | 'none' | 'busy'> {
-  await settledPreparation(threadDirectory)
+export async function releasePreparedWorkspace(threadDirectory: string, eligible: () => boolean = () => true, signal?: AbortSignal): Promise<'released' | 'kept' | 'none' | 'busy'> {
+  await settledPreparation(threadDirectory, signal)
+  if (signal?.aborted) return 'busy'
   const manager = new ThreadWorkspaceManager(threadDirectory)
   if (!manager.load()?.prepared) return 'none'
   const lease = tryAcquireExecutionLease(threadDirectory, { source: 'workspace-prepare' })
   if (!lease) return 'busy'
   try {
     if (!eligible()) return 'busy'
-    return await manager.releasePrepared(lease, eligible)
+    return await manager.releasePrepared(lease, eligible, signal)
   } catch (error) {
     console.warn('[worktree-prep] a prepared worktree could not be removed', { threadDirectory, error: error instanceof Error ? error.message.split('\n')[0] : String(error) })
     return 'kept'

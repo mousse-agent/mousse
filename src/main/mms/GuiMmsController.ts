@@ -1,7 +1,7 @@
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
-import { connectGuiClient } from './guiDaemonCompatibility'
+import { connectGuiClient, readThreadEditorFile, writeThreadEditorFile } from './guiDaemonCompatibility'
 /**
  * Production Electron-side MMS client lifecycle.
  * Discovers/spawns the standalone daemon, connects via LocalMmsClient, reconnects
@@ -554,6 +554,14 @@ export class GuiMmsController extends EventEmitter {
   setAttachedBrowserHost(host: GuiAttachedBrowserHost): void {
     if (this.windowSessions.size || this.windowSessionOpenings.size) throw new Error('Install browser host before opening window sessions')
     this.attachedBrowserHost = host
+  }
+
+  async readThreadEditorFile(params: Record<string, unknown>, expectedRoot?: string): Promise<{ content: string; workspaceRoot?: string }> {
+    return readThreadEditorFile(await this.clientForCurrentSender(), params, expectedRoot)
+  }
+
+  async writeThreadEditorFile(params: Record<string, unknown>, expectedRoot?: string): Promise<void> {
+    return writeThreadEditorFile(await this.clientForCurrentSender(), params, expectedRoot)
   }
 
   /** `timeoutMs` overrides the client's per-method default for this call. */

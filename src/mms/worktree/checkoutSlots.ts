@@ -3,12 +3,11 @@ import { createHash } from 'node:crypto'
 import { mkdir, realpath, stat } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
-import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { sqliteFilePath } from '../data/sqliteFilePath'
 import { untilAborted } from '../git/gitPolicy'
 import { volumeKey } from '../files/folderAccess'
+import { runInCheckoutSlot } from './checkoutSlotProcess'
 
 export const CHECKOUTS_PER_DISK_DEFAULT = 1
 const run = promisify(execFile)
@@ -67,23 +66,6 @@ async function physicalDisk(path: string): Promise<string> {
   return 'unknown'
 }
 
-function tryLock(db: DatabaseSync, exclusive: boolean): boolean {
-  try {
-    db.exec(exclusive ? 'BEGIN EXCLUSIVE' : 'BEGIN')
-    if (!exclusive) {
-      // SQLite defers a read transaction's shared lock until the first read.
-      try { db.exec('SELECT name FROM sqlite_master LIMIT 1') } catch (error) {
-        db.exec('ROLLBACK')
-        throw error
-      }
-    }
-    return true
-  } catch (error) {
-    if (((error as { errcode?: number }).errcode ?? 0) % 256 !== 5) throw error
-    return false
-  }
-}
-
 /**
  * The operating system shares the SQLite locks across profiles and processes. An unresolved device takes the
  * installation-wide lock exclusively because it may be any known device. Known devices share that lock and
@@ -96,28 +78,7 @@ export async function withCheckoutSlot<T>(path: string, work: () => Promise<T>, 
   const directory = join(tmpdir(), 'mousse-checkout-slots-' + owner)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const key = createHash('sha256').update(disk).digest('hex').slice(0, 16)
-  const count = checkoutsPerDisk()
-  const unknown = disk === 'unknown'
-  const gate = new DatabaseSync(sqliteFilePath(join(directory, 'devices.sqlite')), { timeout: 0 })
-  const slots: DatabaseSync[] = []
-  try {
-    for (;;) {
-      signal?.throwIfAborted()
-      if (tryLock(gate, unknown)) {
-        try {
-          if (unknown) return await work()
-          for (let i = 0; i < count; i++) {
-            const slot = slots[i] ??= new DatabaseSync(sqliteFilePath(join(directory, key + '-' + i + '.sqlite')), { timeout: 0 })
-            if (tryLock(slot, true)) return await work()
-          }
-        } finally {
-          gate.exec('ROLLBACK')
-        }
-      }
-      await delay(25, undefined, { signal })
-    }
-  } finally {
-    for (const slot of slots) slot.close()
-    gate.close()
-  }
+  const gate = sqliteFilePath(join(directory, 'devices.sqlite'))
+  const slots = disk === 'unknown' ? [] : Array.from({ length: checkoutsPerDisk() }, (_, i) => sqliteFilePath(join(directory, key + '-' + i + '.sqlite')))
+  return runInCheckoutSlot(path, [gate, ...slots], work, signal)
 }

@@ -2262,22 +2262,24 @@ export class OrchestratorService extends EventEmitter {
     if (!store || this.sweepingPreparations || this.lifecycle.signal.aborted) return
     this.sweepingPreparations = true
     try {
-      for (const thread of store.listAllThreads()) {
-        if (this.lifecycle.signal.aborted) return
-        if (Date.parse(thread.updatedAt) > now - PREPARED_WORKTREE_MAX_AGE_MS) continue
-        const idle = () => {
-          const current = store.getThread(thread.id)
-          return Boolean(current && Date.parse(current.updatedAt) <= now - PREPARED_WORKTREE_MAX_AGE_MS && !this.residency.isViewed(thread.id) && !this.isActiveTurnRunning(thread.id))
+      await this.lifecycle.run('workspace-expiry', async () => {
+        for (const thread of store.listAllThreads()) {
+          if (this.lifecycle.signal.aborted) return
+          if (Date.parse(thread.updatedAt) > now - PREPARED_WORKTREE_MAX_AGE_MS) continue
+          const idle = () => {
+            const current = store.getThread(thread.id)
+            return Boolean(current && !this.lifecycle.signal.aborted && Date.parse(current.updatedAt) <= now - PREPARED_WORKTREE_MAX_AGE_MS && !this.residency.isViewed(thread.id) && !this.isActiveTurnRunning(thread.id))
+          }
+          if (!idle()) continue
+          try {
+            const directory = store.getThreadDir(thread.id)
+            const prepared = new ThreadWorkspaceManager(directory).load()?.prepared
+            if (prepared && Date.parse(prepared.at) <= now - PREPARED_WORKTREE_MAX_AGE_MS) await releasePreparedWorkspace(directory, idle, this.lifecycle.signal)
+          } catch (error) {
+            console.warn('[worktree-prep] abandoned draft could not be checked', { threadId: thread.id, error })
+          }
         }
-        if (!idle()) continue
-        try {
-          const directory = store.getThreadDir(thread.id)
-          const prepared = new ThreadWorkspaceManager(directory).load()?.prepared
-          if (prepared && Date.parse(prepared.at) <= now - PREPARED_WORKTREE_MAX_AGE_MS) await releasePreparedWorkspace(directory, idle)
-        } catch (error) {
-          console.warn('[worktree-prep] abandoned draft could not be checked', { threadId: thread.id, error })
-        }
-      }
+      }, null)
     } finally {
       this.sweepingPreparations = false
     }

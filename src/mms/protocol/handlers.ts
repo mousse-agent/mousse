@@ -2679,6 +2679,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           if (workspace && !workspace.prepared && (workspace.lifecycle === 'ready' || workspace.lifecycle === 'provisioning')) {
             throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
           }
+          if (enabled && workspace?.prepared) await manager.separateRenamedPreparation(lease)
+          if (!latest()) return ctx.mms.threads.getThread(threadId)!
           const updated = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
           if (picked) rememberPick(ctx, threadId, { worktreeEnabled: enabled })
           if (!enabled && workspace?.prepared) {
@@ -4779,10 +4781,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const content = p.content
       return await fileCall(ctx, async () => {
         const browsed = browsedFilesRoot(ctx, p)
+        const expectedRoot = asOptionalString(p.expectedRoot, 4096)
+        const threadId = asOptionalString(p.threadId, 256)
+        if (!browsed && threadId && expectedRoot === undefined) {
+          if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+          throw new DomainRpcError('workspace_binding_required', 'Reopen this file in a current Mousse window before saving.')
+        }
         // The file was read from the thread's worktree, so a retired one comes back before it is written.
         if (!browsed) await materializeRequestedWorkspace(ctx, p)
         const root = browsed ?? await localFilesRoot(ctx, p)
-        const expectedRoot = asOptionalString(p.expectedRoot, 4096)
         const workspaceRoot = expectedRoot === undefined ? undefined : await realpathNative(root)
         assertFileWorkspace(expectedRoot, workspaceRoot)
         const path = requiredContainedPath(ctx, workspaceRoot ?? root, p.path)

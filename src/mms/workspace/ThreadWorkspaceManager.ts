@@ -17,6 +17,7 @@ import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { movedFilesNotice, moveFilesToSnapshotAsync, snapshotOriginAsync } from '../actions/snapshots'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { runIsolatedCheckout } from './isolatedCheckout'
 import { addWorktree, checkoutInputsKey, checkoutLayoutKey, populateWorktree, registerWorktree, worktreeCheckoutPlan, worktreeGit, type WorktreeCheckoutPlan, type WorktreeGit } from '../worktree/worktreeCheckout'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -47,7 +48,7 @@ import { timeGitSync } from '../diagnostics/turnBoundary'
 import { branchOfHeadRef, forgetRepositoryFacts, repositoryFacts } from '../git/repositoryFacts'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
 import { readRepoTrustAtAsync, repoTrustPathAsync } from '../git/repoTrust'
-import { checkoutRegistrationIdentity, checkoutWriterGone, readCheckoutProcess, recoverCheckoutIndex, saveCheckoutProcess, trackCheckoutGit, type CheckoutProcessRecord } from './checkoutProcess'
+import { checkoutProcessRecordAbsent, checkoutRegistrationIdentity, checkoutWriterGone, readCheckoutProcess, recoverCheckoutIndex, saveCheckoutProcess, trackCheckoutGit, type CheckoutProcessRecord } from './checkoutProcess'
 
 /** A worktree prepared for a new thread and never claimed was removed (`ThreadWorkspaceManager.releasePrepared`). */
 export const PREPARED_RELEASE_OPERATION = 'workspace-prepared-release'
@@ -237,10 +238,15 @@ async function untrustedWorktreeGit(primaryCheckoutPath: string, worktreePath: s
     if (linked) await pinUntrustedWorktree(cwd, current)
     const argv = [...current, ...LONG_PATHS, ...args]
     await assertGitAllowedAsync({ cwd, args: argv, ...(input === undefined ? {} : { stdin: input }) })
-    const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }), observer, ...(input === undefined ? {} : { input }) })
-    if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+    const env = repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' })
+    if (linked) {
+      await runIsolatedCheckout(cwd, args, input, env, observer)
+    } else {
+      const ran = await runGitProcess(argv, { cwd, env, observer, ...(input === undefined ? {} : { input }) })
+      if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+    }
   }
-  return { run: runUntrustedCheckoutGit, verifyPinned: async () => pinUntrustedWorktree(worktreePath, await untrustedSafety(worktreePath, true), true) }
+  return { run: runUntrustedCheckoutGit, verifyPinned: async () => pinUntrustedWorktree(worktreePath, await untrustedSafety(worktreePath, true)) }
 }
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}. */
@@ -513,8 +519,10 @@ export class ThreadWorkspaceManager {
       })
       const worktreePath = placement.path
       repositoryLease = await acquireWorkspaceRepositoryLease(identity, signal)
-      // Git reserves the path by registering it. Refuse pre-existing folders, even empty ones, and never pass --force.
-      if (await pathExists(worktreePath)) throw new Error('The folder for the new worktree already exists.')
+      const occupied = await pathExists(worktreePath)
+      const occupiedError = 'The folder for the new worktree already exists.'
+      // A background draft or abandoned PR start must never claim an existing folder.
+      if (occupied && (options.prepared || options.untrusted)) throw new Error(occupiedError)
       const branch = await this.freeTemporaryBranch(repository.primaryCheckoutPath)
       this.placementNote = placement.notConnected ? notConnectedPlacementNote(placement.notConnected) : undefined
       const intent = this.journal.append({
@@ -556,6 +564,8 @@ export class ThreadWorkspaceManager {
       // Git's record of the worktree are made under the lease; the files are written after it is let go.
       const processRecord: CheckoutProcessRecord = { operationId }
       saveCheckoutProcess(this.threadDirectory, processRecord)
+      // Record a failed Send for Retry while leaving the occupied path untouched.
+      if (occupied) throw new Error(occupiedError)
       const untrusted = options.untrusted
         ? await untrustedWorktreeGit(repository.primaryCheckoutPath, worktreePath, options.enableWorktreeConfig, options.userRequested)
         : undefined
@@ -650,7 +660,8 @@ export class ThreadWorkspaceManager {
     const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string; head?: string } | undefined
     if (!expected?.worktreePath || !samePath(expected.worktreePath, metadata.worktreePath) || expected.branch !== metadata.branch) return false
     const processRecord = await readCheckoutProcess(this.threadDirectory, last.operationId)
-    if (!processRecord || !await checkoutWriterGone(processRecord) || await pathExists(metadata.worktreePath)) return false
+    if (processRecord ? !await checkoutWriterGone(processRecord) : !await checkoutProcessRecordAbsent(this.threadDirectory)) return false
+    if (await pathExists(metadata.worktreePath)) return false
     const repository = await this.resolveRepositoryAsync(projectPath)
     if (repository.repositoryId !== metadata.repositoryId) return false
     const repositoryLease = await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), signal)
@@ -771,17 +782,34 @@ export class ThreadWorkspaceManager {
   }
 
   /**
+   * Once the original path is gone, a stopped cleanup owns the renamed folder and its proof. It can
+   * still be resumed separately. A new choice must not use that folder as the thread's workspace.
+   */
+  async separateRenamedPreparation(heldThreadLease: ThreadLeaseHandle): Promise<boolean> {
+    assertHeldThreadLease(this.threadDirectory, heldThreadLease)
+    const metadata = this.load()
+    const pending = metadata?.prepared && this.preparedReleasePending(metadata)
+    if (!metadata || !pending) return false
+    const record = await findCleanupRecord(getMousseHomeDir(), metadata.worktreePath)
+    if (!record || !samePath(record.owner, this.threadDirectory) || record.branch !== metadata.branch ||
+        !await pathExists(record.deletingPath) || await pathExists(metadata.worktreePath)) return false
+    await rm(this.workspacePath, { force: true })
+    this.journal.append({ operationId: pending.operationId, operationType: PREPARED_RELEASE_OPERATION, state: 'cancelled', details: { branch: metadata.branch, cleanupId: record.id } })
+    return true
+  }
+
+  /**
    * Releases an unclaimed worktree under the thread's lease. Git removes clean worktrees without force.
    * The durable release intent also lets a restart finish dropping the branch and pin after Git removed the files.
    */
-  async releasePrepared(heldThreadLease: ThreadLeaseHandle, eligible: () => boolean = () => true): Promise<'released' | 'kept' | 'none'> {
+  async releasePrepared(heldThreadLease: ThreadLeaseHandle, eligible: () => boolean = () => true, signal?: AbortSignal): Promise<'released' | 'kept' | 'none'> {
     assertHeldThreadLease(this.threadDirectory, heldThreadLease)
     let metadata = this.load()
     if (!metadata?.prepared || isProjectFolderWorkspace(metadata) || metadata.untrusted) return 'none'
     const checkoutPath = metadata.integrationTarget?.checkoutPath
     if (!checkoutPath || !eligible()) return 'kept'
     if (metadata.lifecycle === 'provisioning') {
-      if (!await this.reconcileFailedProvision(checkoutPath) && !await this.resumeInterruptedProvision(checkoutPath, heldThreadLease)) return 'kept'
+      if (!await this.reconcileFailedProvision(checkoutPath, signal) && !await this.resumeInterruptedProvision(checkoutPath, heldThreadLease, signal)) return 'kept'
       metadata = this.load()
       if (!metadata) return 'released'
     }
@@ -803,8 +831,10 @@ export class ThreadWorkspaceManager {
     const operationId = previousRelease?.operationId ?? randomUUID()
     if (!previousRelease) this.journal.append({ operationId, operationType: PREPARED_RELEASE_OPERATION, state: 'planned', details: { branch: metadata.branch } })
     const stillEligible = (): void => { if (!eligible()) throw new Error('The draft is in use.') }
+    // Renaming the folder commits this cleanup. Complete it under the same thread lease even if the
+    // selection changes, so the next selection can provision at a fresh path.
     const cleanup = unfinished
-      ? await resumeCleanupAsync({ home, id: unfinished.id, owner: this.threadDirectory, heldThreadLease, beforeRemove: stillEligible })
+      ? await resumeCleanupAsync({ home, id: unfinished.id, owner: this.threadDirectory, heldThreadLease })
       : pathPresent
         ? await verifiedCleanupAsync({
           home, worktreePath: metadata.worktreePath, branch: metadata.branch, repositoryRoot: repository.primaryCheckoutPath,
@@ -812,7 +842,7 @@ export class ThreadWorkspaceManager {
             owner: this.threadDirectory,
             record: (step) => { if (step.phase === 'deleting') stillEligible() }
           },
-          git: (args) => git(metadata!.worktreePath, args), ignored: [], filters: true, heldThreadLease, beforeRemove: stillEligible
+          git: (args) => git(metadata!.worktreePath, args), ignored: [], filters: true, heldThreadLease
         })
         : 'gone'
     if (typeof cleanup !== 'string' && 'kept' in cleanup && await pathExists(metadata.worktreePath) && !await findCleanupRecord(home, metadata.worktreePath)) {
@@ -827,7 +857,6 @@ export class ThreadWorkspaceManager {
       if (listed.includes(`branch ${ref}`) ||
           listed.some((line) => line.startsWith('worktree ') && samePath(line.slice('worktree '.length), metadata!.worktreePath))) return 'kept'
       const tip = await readDirectLifecycleRefAsync(repository.primaryCheckoutPath, ref)
-      if (!eligible()) return 'kept'
       if (tip && this.branchRecord(metadata).owned.has(metadata.branch)) {
         this.journal.append({ operationId: randomUUID(), operationType: BRANCH_RELEASE_OPERATION, state: 'completed', details: { branch: metadata.branch, sha: tip, worktreePath: metadata.worktreePath } })
         if (tip === metadata.baseSha && (pathPresent || previousRelease)) {

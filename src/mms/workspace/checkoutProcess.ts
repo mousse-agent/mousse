@@ -1,5 +1,5 @@
 import { lstatSync } from 'node:fs'
-import { lstat, readFile, rm } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { gitCancellationScope, type GitProcessObserver } from '../git/runGitProcess'
@@ -15,13 +15,21 @@ export interface CheckoutProcessRecord {
   writer?: CheckoutWriter
 }
 
+function checkoutProcessPath(directory: string): string {
+  return join(directory, 'workspace-checkout.json')
+}
+
+export async function checkoutProcessRecordAbsent(directory: string): Promise<boolean> {
+  return lstat(checkoutProcessPath(directory)).then(() => false, (error: NodeJS.ErrnoException) => error.code === 'ENOENT')
+}
+
 export function saveCheckoutProcess(directory: string, record: CheckoutProcessRecord): void {
-  atomicWriteJsonSync(join(directory, 'workspace-checkout.json'), record)
+  atomicWriteJsonSync(checkoutProcessPath(directory), record)
 }
 
 export async function readCheckoutProcess(directory: string, operationId: string): Promise<CheckoutProcessRecord | undefined> {
   try {
-    const record = JSON.parse(await readFile(join(directory, 'workspace-checkout.json'), 'utf8')) as CheckoutProcessRecord
+    const record = JSON.parse(await readFile(checkoutProcessPath(directory), 'utf8')) as CheckoutProcessRecord
     if (record.operationId !== operationId) return undefined
     const writer = record.writer
     if (writer && writer.kind !== 'starting' && !(Number.isFinite(writer.at) &&
@@ -51,16 +59,8 @@ export async function checkoutWriterGone(record: CheckoutProcessRecord): Promise
 
 export async function recoverCheckoutIndex(adminDir: string, record: CheckoutProcessRecord): Promise<boolean> {
   if (record.registration?.identity !== await checkoutRegistrationIdentity(adminDir) || !await checkoutWriterGone(record)) return false
-  const lock = join(adminDir, 'index.lock')
-  const existing = await lstat(lock).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== 'ENOENT') throw error
-    return undefined
-  })
-  if (!existing) return true
-  const writer = record.writer
-  if (!writer || writer.kind === 'starting' || !existing.isFile() || existing.birthtimeMs < writer.at - 2000) return false
-  await rm(lock)
-  return true
+  // Git owns this lock namespace. The current lock can belong to a different process, regardless of its age.
+  return lstat(join(adminDir, 'index.lock')).then(() => false, (error: NodeJS.ErrnoException) => error.code === 'ENOENT')
 }
 
 /** Record each command before spawn and keep the writer fenced until its process tree has settled. */

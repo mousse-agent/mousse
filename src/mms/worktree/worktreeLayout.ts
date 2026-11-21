@@ -406,8 +406,11 @@ export async function placeThreadWorktree(input: { home: string; folder?: string
     }
   }
   const path = defaultThreadWorktreePath(input.home, input.repositoryId, input.threadId, input.conversationBranchId)
-  await mkdir(dirname(path), { recursive: true })
-  return { path, ...(input.folder ? { notConnected: input.folder } : {}) }
+  const parent = dirname(path)
+  await mkdir(parent, { recursive: true })
+  // A cleanup can still own this registration after moving its folder aside.
+  const available = await input.taken?.(path) ? await freeName(parent, basename(path), input.taken) : path
+  return { path: available, ...(input.folder ? { notConnected: input.folder } : {}) }
 }
 
 /** The folder a new agent worktree goes in: `<folder>/<project>-<short key>/agents` in a chosen folder that is connected, Mousse's own otherwise. Made when missing. */
@@ -462,12 +465,16 @@ export function chosenFolderHolding(path: string): string | undefined {
 
 /**
  * Whether `path` is a place this thread's worktree of the repository is made: in Mousse's own folder, exactly
- * `threads/<thread>/<conversation branch>` (or any conversation branch's when none is given); in a chosen folder, a
- * folder directly in the repository's verified folder named for this thread (`<slug>-<tag>`).
+ * `threads/<thread>/<conversation branch>` or its numbered alternative, for any conversation branch when none is given.
+ * In a chosen folder, a folder directly in the repository's verified folder named for this thread (`<slug>-<tag>`).
  */
 export function isThreadWorktreePlace(path: string, input: { home: string; repositoryId: string; threadId: string; conversationBranchId?: string }): boolean {
   const own = join(defaultWorktreeBase(input.home, input.repositoryId), 'threads', input.threadId)
-  if (input.conversationBranchId !== undefined) { if (same(path, join(own, input.conversationBranchId))) return true }
+  if (input.conversationBranchId !== undefined) {
+    const expected = join(own, input.conversationBranchId)
+    const suffix = /-(?:[2-9]|[1-9]\d{1,2})$/.exec(basename(path))?.[0]
+    if (same(path, expected) || suffix && same(path, expected + suffix)) return true
+  }
   else { const parts = below(own, path); if (parts?.length === 1 && SLUG.test(parts[0]!)) return true }
   const placed = chosenFolderPlace(path)
   return Boolean(placed && placed.repositoryId === input.repositoryId && placed.rest.length === 1 && isThreadFolderName(placed.rest[0]!, input.threadId))

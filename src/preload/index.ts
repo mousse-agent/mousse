@@ -542,7 +542,7 @@ const api = {
       ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
     readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
-    readFileInWorkspace: (filePath: string, threadId: string, expectedRoot?: string): Promise<{ content: string; workspaceRoot: string }> =>
+    readFileInWorkspace: (filePath: string, threadId: string, expectedRoot?: string): Promise<{ content: string; workspaceRoot?: string }> =>
       ipcRenderer.invoke('fs:readFile', filePath, undefined, threadId, undefined, { expectedRoot }),
     readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
       ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),

@@ -63,6 +63,10 @@ interface OpenFileDetail {
   projectId?: string
 }
 
+function lacksWorkspaceBinding(file: OpenFileState): boolean {
+  return Boolean(file.threadId && !file.workspaceRoot && !fileLocation(file.path).root)
+}
+
 function basename(path: string): string {
   return path.replace(/\\/g, '/').split('/').pop() || path
 }
@@ -562,7 +566,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const updateContent = useCallback((value: string) => {
     if (!selectedKey) return
     const current = filesRef.current[selectedKey]
-    if (!current || current.loading || current.initialLoadFailed || current.profileId !== useAppStore.getState().profileId) return
+    if (!current || current.loading || current.initialLoadFailed || lacksWorkspaceBinding(current) || current.profileId !== useAppStore.getState().profileId) return
     const conflicted = current.saveState === 'conflict'
     patchFile(selectedKey, conflicted
       ? { content: value }
@@ -724,6 +728,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   // A saved file says nothing; only a state that needs attention or is in progress shows.
   const saveLabel = useMemo(() => {
     if (!selected || selected.loading) return ''
+    if (!selected.binary && !selected.initialLoadFailed && lacksWorkspaceBinding(selected)) return 'Read-only until the service is updated'
     if (selected.saveState === 'saving') return 'Saving…'
     if (selected.saveState === 'dirty') return 'Autosave pending'
     if (selected.saveState === 'conflict') return 'Conflict'
@@ -862,9 +867,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
           </div>
           : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview"><video src={selected.assetUrl} controls /></div>
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
-          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
+          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} readOnly={lacksWorkspaceBinding(selected)} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
-          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: false }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: wordWrap ? 'on' : 'off' }} /></div>
+          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ readOnly: lacksWorkspaceBinding(selected), automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: false }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: wordWrap ? 'on' : 'off' }} /></div>
           : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}
       </div>}
     </div>

@@ -379,7 +379,10 @@ async function validateThreadWorkspaceMetadata(
   const inChosenFolder = Boolean(chosenFolderPlace(metadata.worktreePath)) && isThreadWorktreePlace(metadata.worktreePath, { home: getMousseHomeDir(), repositoryId: repository.repositoryId, threadId })
   const ownedPath = inChosenFolder || (activated
     ? await pathInside(dirname(expectedPath), metadata.worktreePath)
-    : await pathsEqual(metadata.worktreePath, expectedPath))
+    : await pathsEqual(metadata.worktreePath, expectedPath) ||
+      isThreadWorktreePlace(await canonicalPath(metadata.worktreePath), {
+        home: await canonicalPath(getMousseHomeDir()), repositoryId: repository.repositoryId, threadId, conversationBranchId: branchId
+      }))
   if (
     metadata.threadId !== threadId ||
     metadata.repositoryId !== repository.repositoryId ||
