@@ -510,7 +510,11 @@ export class ThreadWorkspaceManager {
           if (snapshot.exactTree && !snapshot.coverageGaps?.length) baseline = snapshot
         } catch { /* The first turn reads the files if the baseline could not be captured. */ }
       }
-      const snapshotSha = baseline?.sha ?? options.snapshot
+      // A fork's record names the accepted checkpoint, which its seeding verifies (`forkCheckpoint`). Its baseline only
+      // confirms the checkout holds exactly that checkpoint's files; otherwise its first turn reads them.
+      if (options.forkCheckpoint && options.snapshot && baseline
+        && await git(worktreePath, ['rev-parse', `${baseline.sha}^{tree}`]) !== await git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`])) baseline = undefined
+      const snapshotSha = options.forkCheckpoint && options.snapshot ? options.snapshot : baseline?.sha ?? options.snapshot
       await git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, snapshotSha ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
@@ -533,7 +537,7 @@ export class ThreadWorkspaceManager {
         ...(options.untrusted ? { untrusted: true as const } : {})
       }
       atomicWriteJsonSync(this.workspacePath, metadata)
-      if (baseline) await recordCheckoutIdentity(this.threadDirectory, worktreePath, baseline.sha)
+      if (baseline) await recordCheckoutIdentity(this.threadDirectory, worktreePath, snapshotSha!)
       this.journal.append({
         operationId,
         operationType: 'workspace-provision',
