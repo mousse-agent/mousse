@@ -44,7 +44,7 @@
         "tests/pullRequestUntrustedCheckout.test.ts"
       ],
       "claimedAt": "2026-11-21T10:14:56.694Z",
-      "expiresAt": "2026-11-21T17:56:13.289Z"
+      "expiresAt": "2026-11-21T19:49:37.586Z"
     },
     {
       "task": "faster-thread-titles",
