@@ -3,7 +3,7 @@
  * fork's first message resolving it — portable `full_summary` with the fork's own worktree seeded
  * from the source's checkpoint, and a native-capable adapter whose `forkSession` stub falls back.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -252,6 +252,66 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(transfer).toMatchObject({ status: 'consumed', payload: { forkStrategy: 'portable', strategy: 'full_summary', seed: { kind: 'checkpoint' } } })
     expect(d.engine.handoffs.listForThread(forked.threadId)).toMatchObject([{ strategy: 'full_summary', status: 'delivered', coveredFromOrdinal: 1, coveredToOrdinal: 1 }])
     expect(d.orch.getMessages(forked.threadId).find((message) => message.kind === 'context_handoff')?.contextHandoff).toMatchObject({ transfer: 'fork', strategy: 'full_summary' })
+  }, 150_000)
+
+  it.each([
+    { availability: 'online', keepWork: true },
+    { availability: 'offline', keepWork: true },
+    { availability: 'online', keepWork: false },
+    { availability: 'offline', keepWork: false }
+  ] as const)('deletes a fork with keepWork=$keepWork when its checkpoint repository is $availability', async ({ availability, keepWork }) => {
+    const f = (foundation = gitFoundationFixture())
+    const pi = piAdapter((input) => {
+      writeFileSync(join(input.cwd!, 'value.txt'), 'fork checkpoint\n')
+      return 'done'
+    })
+    const service = await MousseMainService.create({ homeDir: f.home, headless: true, ownerKind: 'daemon', requireOwnership: false })
+    try {
+      service.orchestrator.setHarness(testHarness({ adapters: [pi], profileHome: service.threads.lifecycleStore.profileHome }))
+      await service.start()
+      service.afterReady()
+      await service.untilStartupLifecycleDone()
+
+      const project = service.projects.openProject(f.repo)
+      const source = service.threads.createThread('Source', project.id)
+      service.orchestrator.setThreadModelOverride(source.id, PI)
+      await service.orchestrator.send({ content: 'Make a checkpoint', mode: 'agent' }, false, { threadId: source.id, clientRequestId: 'delete-fork-source' })
+      const { threadId } = await service.runEngine.forkThread({ sourceThreadId: source.id, clientRequestId: 'delete-fork' })
+      const ref = 'refs/mousse/threads/' + threadId + '/fork-checkpoint'
+      const sha = git(f.repo, 'rev-parse', ref)
+      const trashed = await service.trashThread(threadId, 'trash-fork', undefined, keepWork)
+      const cleanup = service.lifecycle.cleanup
+      const online = await cleanup.preview(threadId, { keepWork })
+      expect(online.blockers).toEqual([])
+      const request = { taskId: threadId, operationId: 'purge-fork', expectedGeneration: online.generation, previewDigest: online.digest, keepWork }
+      const parked = join(f.root, 'offline-repository')
+      if (availability === 'offline') renameSync(f.repo, parked)
+      try {
+        if (availability === 'offline' && !keepWork) {
+          const offline = await cleanup.preview(threadId, { keepWork })
+          expect(offline.blockers).toContainEqual(expect.stringMatching(/fork checkpoint.*repository/i))
+          await expect(service.lifecycle.purge(request)).rejects.toThrow()
+          expect(service.threads.lifecycleStore.require(threadId)).toMatchObject({ state: 'trashed', location: trashed.location })
+        } else {
+          const preview = await cleanup.preview(threadId, { keepWork })
+          expect(preview.blockers).toEqual([])
+          const purged = await service.lifecycle.purge({ ...request, previewDigest: preview.digest })
+          expect(purged.state).toBe('purged')
+          if (keepWork) expect(purged.purge?.keptWork).toBe(true)
+        }
+      } finally {
+        if (availability === 'offline') renameSync(parked, f.repo)
+      }
+      if (availability === 'offline' && !keepWork) {
+        await expect(service.restoreThread(threadId, 'restore-fork')).resolves.toMatchObject({ state: 'active' })
+      }
+      if (keepWork || availability === 'offline') expect(git(f.repo, 'rev-parse', ref)).toBe(sha)
+      else expect(git(f.repo, 'for-each-ref', '--format=%(refname)', ref)).toBe('')
+    } finally {
+      await service.stop()
+      await service.threads.flushSearchIndex()
+      await closeSharedThreadDbClient()
+    }
   }, 150_000)
 
   it('daemon startup discards unaccepted forks, publishes accepted forks, and retires provisioned pins', async () => {

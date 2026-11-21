@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { repositoryKeyOf, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { canonicalPathAsync, comparablePath, gitCommonDirAsync } from './canonicalPath'
 import { mainWorktreePathAsync, WorktreeListPass } from './worktreeRegistry'
 import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
@@ -24,6 +24,7 @@ import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { BRANCH_RECORD_OPERATIONS, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
+import { forkCheckpointRef, readForkCheckpointPin } from '../workspace/forkCheckpointPin'
 import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
@@ -631,6 +632,24 @@ export class ResourcePurgeService {
         const kept = await threadStoreKeptFilesAsync(task.location)
         for (const { ref, sha, discardReason } of kept?.refs ?? []) folderRefs.push({ id: `snapshot-kept-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: kept!.gitDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
       } catch (error) { preview.blockers.push(`Files kept in the snapshot store of ${task.taskId}: ${(error as Error).message}`) }
+    }
+    // A fork can still depend on a checkpoint before its own checkout exists. Review its ref in the repository named
+    // by the pin, so an unavailable repository blocks before the thread crosses the irreversible boundary.
+    for (const task of keepWork ? [] : tasks) {
+      try {
+        const pin = readForkCheckpointPin(task.location)
+        if (!pin) continue
+        const ref = forkCheckpointRef(task.taskId)
+        if (shared(ref, pin.repositoryId, undefined)) { preview.retained.push({ identity: ref, reason: 'Another owner retains this resource' }); continue }
+        const commonDir = await gitCommonDirAsync(pin.checkoutPath)
+        if (!commonDir) throw new Error('Fork checkpoint repository is unavailable.')
+        if (repositoryKeyOf(commonDir) !== pin.repositoryId) throw new Error('Fork checkpoint repository changed.')
+        if (keptBack(ref, { ...await repositoryTarget(commonDir, pin.repositoryId), ref })) continue
+        const sha = await readDirectLifecycleRefAsync(commonDir, ref)
+        if (!sha) continue
+        if (sha !== pin.sha) throw new Error('Fork checkpoint ref changed.')
+        folderRefs.push({ id: digest(['fork-checkpoint', task.taskId]), kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir, expectedValue: sha, status: 'pending' })
+      } catch (error) { preview.blockers.push((error as Error).message) }
     }
     preview.items.push(...folderRefs)
     const plannedRefs = new Set(folderRefs.map((item) => item.identity))

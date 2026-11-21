@@ -10,7 +10,7 @@ import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
 
 const PIN_FILE = 'fork-checkpoint.json'
 
-function pinRef(threadId: string): string {
+export function forkCheckpointRef(threadId: string): string {
   if (!/^[a-z0-9_-]+$/i.test(threadId)) throw new Error('Invalid fork checkpoint owner.')
   return 'refs/mousse/threads/' + threadId + '/fork-checkpoint'
 }
@@ -51,13 +51,13 @@ export async function pinForkCheckpoint(threadId: string, threadDirectory: strin
     const pin: ForkCheckpointPin = { version: 1, repositoryId, checkoutPath, actionId: checkpoint.id, sha: checkpoint.endSha, head }
     // A crash between writing and creating the ref leaves a record that cleanup can safely retire.
     atomicWriteJsonSync(join(threadDirectory, PIN_FILE), pin)
-    await lifecycleGitAsync(checkoutPath, ['update-ref', '--no-deref', pinRef(threadId), pin.sha, '0'.repeat(pin.sha.length)])
+    await lifecycleGitAsync(checkoutPath, ['update-ref', '--no-deref', forkCheckpointRef(threadId), pin.sha, '0'.repeat(pin.sha.length)])
   } finally { lease.release() }
 }
 
 /** Provisioning checks the fork-owned ref under its own repository lease. */
 export async function requireForkCheckpoint(threadId: string, checkoutPath: string, repositoryId: string, pin: ForkCheckpointPin): Promise<void> {
-  if (pin.repositoryId !== repositoryId || await readDirectLifecycleRefAsync(checkoutPath, pinRef(threadId)) !== pin.sha) throw new Error('The accepted fork checkpoint is no longer available.')
+  if (pin.repositoryId !== repositoryId || await readDirectLifecycleRefAsync(checkoutPath, forkCheckpointRef(threadId)) !== pin.sha) throw new Error('The accepted fork checkpoint is no longer available.')
 }
 
 /** Idempotent after provisioning or permanent cancellation. Keep evidence if a ref was replaced. */
@@ -68,7 +68,7 @@ export async function retireForkCheckpoint(threadId: string, threadDirectory: st
   if (repository.key !== pin.repositoryId) throw new Error('Fork checkpoint repository changed.')
   const lease = await acquireRepositoryLease(repository, { maxWaitMs: 5_000 })
   try {
-    const ref = pinRef(threadId)
+    const ref = forkCheckpointRef(threadId)
     const current = await readDirectLifecycleRefAsync(pin.checkoutPath, ref)
     if (current !== undefined) {
       if (current !== pin.sha) throw new Error('Fork checkpoint ref changed.')

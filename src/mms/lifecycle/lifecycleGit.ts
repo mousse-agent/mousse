@@ -1,5 +1,6 @@
 import { gitDirectoryEnvAsync } from '../git/gitEnv'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
+import { activeHiddenStore, checkStoreCommandAsync, hiddenStoreEnv } from '../git/hiddenStore'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 
@@ -24,10 +25,18 @@ export function lifecycleReadAsync(cwd: string, args: string[], input?: string, 
 }
 /** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
 export async function readDirectLifecycleRefAsync(cwd: string, ref: string): Promise<string | undefined> {
-  try { await lifecycleGitAsync(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
-  catch (error) { if ((error as { status?: number }).status !== 1) throw error }
-  const args = ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]
-  const listing = await runGitProcess(await withoutRepoProgramsAsync(cwd, args), { cwd, env: repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd), ...READ_ONLY_GIT_ENV }), timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+  const store = activeHiddenStore(cwd)
+  const run = async (args: string[]) => {
+    const argv = store ? ['--no-optional-locks', ...args] : await withoutRepoProgramsAsync(cwd, args)
+    if (store) await checkStoreCommandAsync(store, cwd, argv)
+    const env = repoProgramEnv({ ...process.env, ...(store ? {} : await gitDirectoryEnvAsync(cwd)), ...READ_ONLY_GIT_ENV })
+    const result = await runGitProcess(argv, { cwd, env: store ? hiddenStoreEnv(store, env) : env, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+    return { argv, result }
+  }
+  const { argv, result: symbolic } = await run(['symbolic-ref', '-q', ref])
+  if (symbolic.status === 0 && !symbolic.error) throw new Error('Symbolic resource reference is not cleanup authority: ' + ref)
+  if (symbolic.status !== 1 || symbolic.error) throw gitRunError(argv, symbolic)
+  const { result: listing } = await run(['for-each-ref', '--format=%(refname)%00%(objectname)', ref])
   // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
   if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
   const row = listing.stdout.split(/\r?\n/).find((entry) => entry.split('\0')[0] === ref)
