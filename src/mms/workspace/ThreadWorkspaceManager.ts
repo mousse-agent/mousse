@@ -15,6 +15,7 @@ import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { movedFilesNotice, moveFilesToSnapshotAsync, snapshotOriginAsync } from '../actions/snapshots'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { addWorktree, worktreeCheckoutPlan, type WorktreeCheckoutPlan, type WorktreeGit } from '../worktree/worktreeCheckout'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
@@ -176,18 +177,20 @@ async function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: s
  * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed;
  * `userRequested` is the user's Start thread from pull request, which that change to the repository's config needs.
  */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, enableWorktreeConfig?: () => void, userRequested?: UserAction): Promise<void> {
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, plan: WorktreeCheckoutPlan, enableWorktreeConfig?: () => void, userRequested?: UserAction): Promise<void> {
   // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
   const safety = await untrustedSafety(primaryCheckoutPath)
   if (enableWorktreeConfig && await enablePerWorktreeConfig(primaryCheckoutPath, userRequested)) enableWorktreeConfig()
   // Refused before anything is checked out, not after: the worktree must never exist without its safety settings.
   await assertPerWorktreeConfig(primaryCheckoutPath)
-  const argv = [...safety, ...LONG_PATHS, 'worktree', 'add', ...addArguments]
-  await waitForFolderAccess([resolve(primaryCheckoutPath)])
-  await assertGitAllowedAsync({ cwd: primaryCheckoutPath, args: argv })
-  const ran = await runGitProcess(argv, { cwd: primaryCheckoutPath, env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }) })
-  if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
-  await pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety)
+  const run: WorktreeGit = async (cwd, argv, input) => {
+    await waitForFolderAccess([resolve(cwd)])
+    await assertGitAllowedAsync({ cwd, args: argv, ...(input === undefined ? {} : { stdin: input }) })
+    const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }), ...(input === undefined ? {} : { input }) })
+    if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+  }
+  // In a sparse checkout the safety is pinned before any file is written.
+  await addWorktree({ cwd: primaryCheckoutPath, worktreePath, add: addArguments, plan, prefix: [...safety, ...LONG_PATHS], run, afterAdd: () => pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety) })
 }
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}. */
@@ -421,7 +424,9 @@ export class ThreadWorkspaceManager {
       const provisioned = this.load()
       if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
       if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
-      const primaryHead = await git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
+      // How the files are written (`worktreeCheckout.ts`), read with HEAD: a missing sparse-checkout pattern file refuses
+      // the worktree here, before anything is made.
+      const [primaryHead, checkoutPlan] = await Promise.all([git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD']), worktreeCheckoutPlan(repository.gitTopLevel)])
       // Without a start from the caller, the branch picked for the thread when it was created (`Thread.worktreeStartSha`).
       startSha ??= threadFolderWorktreeStart(this.threadDirectory)
       const head = startSha ? await git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
@@ -471,8 +476,8 @@ export class ThreadWorkspaceManager {
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
       // Mousse makes this branch (`-b` fails when the name is taken), whatever prefix the person chose.
-      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested))
-      else await withOwnedBranches([branch], () => git(repository.primaryCheckoutPath, [...LONG_PATHS, 'worktree', 'add', '-b', branch, worktreePath, head]))
+      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, checkoutPlan, options.enableWorktreeConfig, options.userRequested))
+      else await withOwnedBranches([branch], () => addWorktree({ cwd: repository.primaryCheckoutPath, worktreePath, add: ['-b', branch, worktreePath, head], plan: checkoutPlan, prefix: LONG_PATHS }))
       if (options.snapshot) {
         // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
         const moved = await moveFilesToSnapshotAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), options.snapshot, { owner: this.threadDirectory, action: 'Starting the worktree' })
@@ -842,10 +847,12 @@ export class ThreadWorkspaceManager {
       const tip = async (branch: string): Promise<string | undefined> => (await tryGit(repository.gitTopLevel, ['rev-parse', '--verify', '-q', `refs/heads/${branch}^{commit}`])).stdout || undefined
       let branch: string | undefined
       for (const name of [origin.branch, metadata.branch]) if (name && await tip(name) === head) { branch = name; break }
+      // A restore is never refused for the pattern file: without it, the worktree comes back whole.
+      const checkoutPlan = await worktreeCheckoutPlan(repository.gitTopLevel).catch(() => worktreeCheckoutPlan(repository.gitTopLevel, undefined, { sparse: false }))
       await mkdir(dirname(metadata.worktreePath), { recursive: true })
       const add = async (target: string[]): Promise<void> => {
-        if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, target, metadata.worktreePath)
-        else await git(repository.gitTopLevel, [...LONG_PATHS, 'worktree', 'add', ...target])
+        if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, target, metadata.worktreePath, checkoutPlan)
+        else await addWorktree({ cwd: repository.gitTopLevel, worktreePath: metadata.worktreePath, add: target, plan: checkoutPlan, prefix: LONG_PATHS })
       }
       // A branch that another worktree has checked out cannot be added again; the commit can.
       if (branch) { try { await add([metadata.worktreePath, branch]) } catch { await add(['--detach', metadata.worktreePath, head]) } }

@@ -40,6 +40,7 @@ import { WorkspaceResolver } from './WorkspaceResolver'
 import { PROJECT_FOLDER_WORKFLOW_REASON, threadPlacement } from './threadPlacement'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { addWorktree, worktreeCheckoutPlan } from '../worktree/worktreeCheckout'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 import { timeGitSync } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
@@ -803,7 +804,7 @@ async function createAgentWorktree(input: {
     if (branchExists) {
       throw new DomainRpcError('unknown_effect', 'Workflow agent branch exists without its owned record')
     } else {
-      await git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await addWorktree({ cwd: input.thread.workspacePath, worktreePath: identity.path, add: ['-b', identity.branch, identity.path, baseSha], plan: await worktreeCheckoutPlan(input.thread.gitTopLevel) })
       // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
       const moved = await moveFilesToSnapshotAsync(identity.path, await git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.sha, { owner: input.thread.threadDirectory, action: 'Starting the agent worktree' })
       const notice = movedFilesNotice(moved)
