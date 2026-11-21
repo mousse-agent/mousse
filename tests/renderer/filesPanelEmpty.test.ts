@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
-import { posix } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reloadWindow } from '../../src/renderer/services/reloadWindow'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import { useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
+import { fileWorkspaceScope, useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
 import type { GitThreadHead, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -130,6 +130,55 @@ describe('Files panel without an open file', () => {
     await act(async () => useAppStore.setState({ activeThreadId: 't1' }))
     await flush()
     expect(host.querySelector('[aria-label="Close notes.txt"]')).not.toBeNull()
+  })
+
+  it('restores a saved tab on a healthy drive when the worktree root lookup fails', async () => {
+    const threadId = 'unavailable-worktree'
+    const projectId = 'p1'
+    const path = 'D:/notes/saved.txt'
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId, worktreeEnabled: true }] })
+    const scope = fileWorkspaceScope(useAppStore.getState().profileId, threadId, projectId)
+    useFileWorkspaceStore.getState().openFile(scope, path)
+
+    let failRoot!: (error: Error) => void
+    const rootLookup = new Promise<string>((_resolve, reject) => { failRoot = reject })
+    window.mousse.app.getFilesRoot = () => rootLookup
+    const readFile = vi.fn(async (name: string, _project?: string, _thread?: string | null, folder?: string) => {
+      if (folder !== 'D:\\notes' || name !== 'saved.txt') throw new Error('Worktree drive not answering')
+      return 'saved notes on D:'
+    })
+    window.mousse.fs.readFile = readFile
+
+    await act(async () => root.render(createElement(FilesPanel)))
+    expect(readFile).not.toHaveBeenCalled()
+    await act(async () => failRoot(new Error('Worktree drive not answering')))
+    expect(host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value).toBe('saved notes on D:')
+  })
+
+  it('opens case-sensitive Windows filenames separately and reuses a tab across separator forms', async () => {
+    const threadId = 'windows-checkout'
+    threadFolders[threadId] = 'C:\\checkout'
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
+    const disk = new Map([['D:\\notes\\notes.txt', 'lowercase notes'], ['D:\\notes\\Notes.txt', 'uppercase notes']])
+    window.mousse.fs.readFile = async (path, _project, _thread, folder) => {
+      const content = disk.get(win32.join(folder ?? threadFolders[threadId]!, path))
+      if (content === undefined) throw new Error('File not found')
+      return content
+    }
+
+    await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
+    const open = (path: string) => act(async () => {
+      window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: { path } }))
+    })
+    const editor = () => host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value
+    await open('D:\\notes\\notes.txt')
+    expect(editor()).toBe('lowercase notes')
+    await open('D:\\notes\\Notes.txt')
+    expect(editor()).toBe('uppercase notes')
+    await open('d:/notes/notes.txt')
+    expect(editor()).toBe('lowercase notes')
+    expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(1)
+    expect(host.querySelectorAll('[aria-label="Close Notes.txt"]')).toHaveLength(1)
   })
 
   it('opens a picked file in a sibling tab; returning to Files shows the browser', async () => {

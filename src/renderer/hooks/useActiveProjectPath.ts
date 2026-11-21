@@ -194,7 +194,7 @@ export function useActiveProjectPath(): string | null {
   return useActiveProjectLocation().path
 }
 
-export function useFilesRoot(): { root: string; label: string } {
+export function useFilesRoot(): { root: string; label: string; loading: boolean } {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
@@ -213,6 +213,7 @@ export function useFilesRoot(): { root: string; label: string } {
     return () => { cancelled = true }
   }, [activeThreadId, scope, changed, turnPhase])
 
-  const root = resolved?.scope === scope ? resolved.root : ''
-  return { root, label: root || '~' }
+  const loading = resolved?.scope !== scope
+  const root = loading ? '' : resolved.root
+  return { root, label: root || '~', loading }
 }

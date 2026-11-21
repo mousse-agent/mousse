@@ -70,6 +70,10 @@ function basename(path: string): string {
   return path.replace(/\\/g, '/').split('/').pop() || path
 }
 
+function comparableFilePath(path: string): string {
+  return normalizeFolderPath(path).replace(/\\/g, '/')
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -162,7 +166,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const deactivateFile = useFileWorkspaceStore((s) => s.deactivateFile)
   const openPaths = workspace?.openPaths ?? []
   const selectedPath = workspace?.activePath ?? null
-  const { root: filesRoot } = useFilesRoot()
+  const { root: filesRoot, loading: filesRootLoading } = useFilesRoot()
   // A thread of another computer shows its own folder; so does an app whose main process cannot browse others yet.
   const remote = Boolean(thread?.node) || typeof window.mousse.fs.listDrives !== 'function'
   // Where the person went in this panel, per thread; a thread they never moved in follows its own folder.
@@ -255,12 +259,13 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     if (!localProject || !root) return path
     const absolute = isAbsolutePath(path) ? path : joinFolder(root, path)
     if (!isAbsolutePath(path) && pathInside(absolute, root) === null) return path
+    const comparable = comparableFilePath(absolute)
     // Older workspaces can still have a relative tab. Reuse it only if it points at this checkout.
     const paths = useFileWorkspaceStore.getState().workspaces[targetScope]?.openPaths ?? []
     return paths.find((openPath) => {
       const target = filesRef.current[`${targetScope}\0${openPath}`]?.target
       const location = isAbsolutePath(openPath) ? openPath : target?.path ?? joinFolder(root, openPath)
-      return samePath(location, absolute)
+      return comparableFilePath(location) === comparable
     }) ?? absolute
   }, [])
   const selectedKey = selectedPath ? fileKey(selectedPath) : null
@@ -366,9 +371,11 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }, [activeThreadId, ensureQueue, filesRoot, patchFile, profileId, projectId, remote, replaceFiles, scope])
 
   useEffect(() => {
-    if (!remote && projectId && !filesRoot) return
+    // Wait for the checkout so its own files keep thread-scoped targets. If the lookup fails,
+    // loadFile can still resolve absolute tabs through their own folders.
+    if (!remote && projectId && filesRootLoading) return
     for (const path of openPaths) void loadFile(path)
-  }, [filesRoot, loadFile, openPaths, projectId, remote])
+  }, [filesRootLoading, loadFile, openPaths, projectId, remote])
 
   const openInPanel = useCallback((file: string) => {
     const path = tabPathFor(file, filesRoot, scope, !remote && Boolean(projectId))
