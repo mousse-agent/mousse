@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from 'node:child_process'
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,6 +7,7 @@ import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_AUTH_STATUS_TTL_MS, ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { ONE_SHOT_SPARE_SYSTEM } from '../src/mms/harness/vendors/claude/oneShotSpare'
+const nodeExecutable = process.execPath
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../src/mms/run/EffectOutbox'
@@ -425,43 +427,50 @@ describe('Claude Subscription native provider', () => {
   describe('titles and branch names run on a Claude Code process started ahead', () => {
     /**
      * Claude Code as the SDK starts it: a string prompt is read at once; a streamed one (a process started ahead) when its
-     * message comes. `silent` processes end without saying anything (one that died while it waited).
+     * message comes. How process `index` behaves: it answers (the default); it ends without a word (`silent`); it waits
+     * until it is stopped (`hang`); or it answers once `release` is called, whatever stops it meanwhile (`late`). With
+     * `child`, its process is a real one (a node process that never exits on its own), as the SDK's handle shows it.
      */
-    const processes = (silent: (index: number) => boolean = () => false) => {
+    type Behaviour = 'answer' | 'silent' | 'hang' | 'late'
+    const processes = (behaviour: (index: number) => Behaviour = () => 'answer', child?: (index: number) => ChildProcess | undefined) => {
       const started: Array<{ options: Options; streamed: boolean; close: ReturnType<typeof vi.fn> }> = []
+      let release!: () => void
+      const released = new Promise<void>((resolve) => { release = resolve })
       const query = ({ options, prompt }: { options: Options; prompt: unknown }) => {
         const index = started.length
         const close = vi.fn()
         started.push({ options, streamed: typeof prompt !== 'string', close })
+        const kind = behaviour(index)
+        const stopped = new Promise<void>((resolve) => options.abortController?.signal.addEventListener('abort', () => resolve(), { once: true }))
         const generator = (async function* () {
-          if (silent(index)) return
+          if (kind === 'silent') return
           let text = typeof prompt === 'string' ? prompt : ''
           if (typeof prompt !== 'string') for await (const message of prompt as AsyncIterable<{ message: { content: string } }>) { text = message.message.content; break }
+          if (kind === 'hang') { await stopped; throw new Error('aborted') }
+          if (kind === 'late') await released
           yield { type: 'stream_event', event: {} }
           yield { ...result, result: `answer from ${index}: ${text.split('\n').pop()}` }
         })()
-        return Object.assign(generator, { close }) as unknown as Query
+        const process = child?.(index)
+        return Object.assign(generator, { close, ...(process ? { transport: { process } } : {}) }) as unknown as Query
       }
-      return { started, query }
+      return { started, query, release: () => release() }
     }
     const ask = (service: ClaudeSubscriptionProviderService, task: 'title' | 'branch_name' | 'pull_request', prompt: string, model = 'haiku') =>
       service.oneShot({ model, task, system: `Instructions for ${task}.`, prompt, onActivity: () => {} }, new AbortController().signal)
 
-    it('a request takes the process started ahead and starts none of its own; the next one is started once it answered', async () => {
+    it('once a title answered, the next request takes the process started ahead and starts none of its own', async () => {
       const { started, query } = processes()
       const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku', efforts: ['low', 'high'] }])
       await service.status()
-      service.prewarmOneShot({ model: 'haiku', task: 'title' })
-      expect(started).toHaveLength(1)
-      expect(started[0]).toMatchObject({ streamed: true, options: { model: 'haiku', effort: 'low', systemPrompt: ONE_SHOT_SPARE_SYSTEM, tools: [], maxTurns: 1, persistSession: false, settingSources: [] } })
-      // A second warm-up for the same launch starts nothing.
-      service.prewarmOneShot({ model: 'haiku', task: 'branch_name' })
-      expect(started).toHaveLength(1)
-
+      // The first request after start starts its own: nothing was started ahead of it.
       expect(await ask(service, 'title', 'Request: fix the login redirect')).toEqual({ text: 'answer from 0: Request: fix the login redirect' })
-      expect(started[0]!.close).toHaveBeenCalled()
+      expect(started[0]).toMatchObject({ streamed: false, options: { model: 'haiku', effort: 'low', systemPrompt: ONE_SHOT_SPARE_SYSTEM, tools: [], maxTurns: 1, persistSession: false, settingSources: [] } })
       expect(started).toHaveLength(2)
+      expect(started[1]).toMatchObject({ streamed: true, options: { model: 'haiku', effort: 'low', systemPrompt: ONE_SHOT_SPARE_SYSTEM } })
+
       expect(await ask(service, 'branch_name', 'The task: fix the login redirect')).toEqual({ text: 'answer from 1: The task: fix the login redirect' })
+      expect(started[1]!.close).toHaveBeenCalled()
       expect(started).toHaveLength(3)
 
       // Any other one-shot starts its own process, with its own instructions as the system prompt.
@@ -474,30 +483,84 @@ describe('Claude Subscription native provider', () => {
       const { started, query } = processes()
       const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }, { id: 'sonnet', label: 'Sonnet' }])
       await service.status()
-      service.prewarmOneShot({ model: 'haiku', task: 'title' })
-      expect(await ask(service, 'title', 'Request: x', 'sonnet')).toEqual({ text: 'answer from 1: Request: x' })
-      expect(started[0]!.close).toHaveBeenCalled()
-      expect(started[1]).toMatchObject({ streamed: false, options: { model: 'sonnet' } })
-      // The next one is started ahead on the launch the request used.
-      expect(started[2]).toMatchObject({ streamed: true, options: { model: 'sonnet' } })
+      await ask(service, 'title', 'Request: x')
+      expect(await ask(service, 'title', 'Request: y', 'sonnet')).toEqual({ text: 'answer from 2: Request: y' })
+      expect(started[1]!.close).toHaveBeenCalled()
+      expect(started[2]).toMatchObject({ streamed: false, options: { model: 'sonnet' } })
+      expect(started[3]).toMatchObject({ streamed: true, options: { model: 'sonnet' } })
     })
 
     it('a process started ahead that ended before it said anything is not a request: the request starts its own', async () => {
-      const { started, query } = processes((index) => index === 0)
+      const { started, query } = processes((index) => (index === 1 ? 'silent' : 'answer'))
       const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
       await service.status()
-      service.prewarmOneShot({ model: 'haiku', task: 'title' })
-      expect(await ask(service, 'title', 'Request: y')).toEqual({ text: 'answer from 1: Request: y' })
-      expect(started[1]).toMatchObject({ streamed: false })
+      await ask(service, 'title', 'Request: x')
+      expect(await ask(service, 'title', 'Request: y')).toEqual({ text: 'answer from 2: Request: y' })
+      expect(started[2]).toMatchObject({ streamed: false })
     })
 
-    it('stopping the provider closes the process waiting ahead', async () => {
-      const { started, query } = processes()
+    it('a sign-out while a request waits on the process started ahead ends it, and nothing is started or sent again', async () => {
+      const { started, query } = processes((index) => (index === 1 ? 'hang' : 'answer'))
       const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
       await service.status()
-      service.prewarmOneShot({ model: 'haiku', task: 'title' })
-      service.stop()
-      await vi.waitFor(() => expect(started[0]!.close).toHaveBeenCalled())
+      await ask(service, 'title', 'Request: x')
+      const pending = ask(service, 'title', 'Request: y')
+      await vi.waitFor(() => expect(started).toHaveLength(2))
+      await service.logout()
+      await expect(pending).rejects.toThrow()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(started).toHaveLength(2)
+      expect(started[1]!.close).toHaveBeenCalled()
+    })
+
+    it('a request that answers after a sign-out starts no process ahead for the next one', async () => {
+      const { started, query, release } = processes((index) => (index === 0 ? 'late' : 'answer'))
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      await service.status()
+      const pending = ask(service, 'title', 'Request: x')
+      await vi.waitFor(() => expect(started).toHaveLength(1))
+      await service.reconnect().catch(() => undefined)
+      release()
+      await pending.catch(() => undefined)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(started).toHaveLength(1)
+    })
+
+    it('stopping the provider ends the waiting process with its process tree', async () => {
+      const children: ChildProcess[] = []
+      const realChild = (index: number) => {
+        if (index !== 1) return undefined
+        const process = spawn(nodeExecutable, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+        children.push(process)
+        return process
+      }
+      const { started, query } = processes(() => 'answer', realChild)
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      try {
+        await service.status()
+        await ask(service, 'title', 'Request: x')
+        await vi.waitFor(() => expect(started).toHaveLength(2))
+        const exited = new Promise<number | null>((resolve) => children[0]!.once('exit', (code) => resolve(code)))
+        service.stop()
+        // The query's own close is a stand-in that ends nothing: the process tree reaper ends the real process.
+        await expect(exited).resolves.not.toBe(undefined)
+        expect(children[0]!.exitCode !== null || children[0]!.signalCode !== null).toBe(true)
+      } finally {
+        for (const process of children) if (process.exitCode === null && process.signalCode === null) process.kill('SIGKILL')
+      }
+    }, 30_000)
+
+    it.each([
+      ['offers low', [{ id: 'haiku', label: 'Haiku', efforts: ['low', 'medium'] }], 'haiku', 'low'],
+      ['does not offer low', [{ id: 'haiku', label: 'Haiku', efforts: ['medium', 'high'] }], 'haiku', undefined],
+      ['lists no levels', [{ id: 'haiku', label: 'Haiku' }], 'haiku', undefined],
+      ['was chosen with a level', [{ id: 'haiku', label: 'Haiku', efforts: ['low', 'high'] }], 'haiku:high', 'high']
+    ] as const)('a title on a model that %s runs at the right level', async (_case, models, model, effort) => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [...models])
+      await service.status()
+      await ask(service, 'title', 'Request: x', model)
+      expect(started[0]!.options.effort).toBe(effort)
     })
   })
   it('resumes a saved session only on the instance that created it', async () => {

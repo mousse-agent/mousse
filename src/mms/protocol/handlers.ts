@@ -2219,9 +2219,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const remembered = rememberedChoiceFor(ctx.connection, projectId ? ctx.mms.projects.getProject(projectId) : undefined, askedForRemembered, (model) => usableProjectModel(ctx, model, projectId!))
       let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled: worktreeEnabled ?? remembered.worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(started ? { started, firstSendPending: true } : {}), ...(worktreeStart ? { worktreeStart } : {}) })
       if (expiresAt) ctx.mms.threadExpiry?.reschedule()
-      // A new thread's title model gets ready for the request its first send makes (`prewarmThreadNaming`): while the
-      // person writes it, or, for a thread made to send one now, while the send is admitted.
-      if (!localOnly) ctx.mms.orchestrator.prewarmThreadNaming(thread.id)
       // A remembered model that can no longer be used falls back to the profile's default, unless that one can't be used
       // either: then the thread has no model of its own, and the composer offers the first ready one.
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))

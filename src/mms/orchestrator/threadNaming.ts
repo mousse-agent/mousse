@@ -32,13 +32,19 @@ export interface ThreadNaming {
   branch?: string
 }
 
+/** A line's label (`Title:`, `**Branch:**`), with the markdown a model may put around it; the value follows it. */
+const LABEL = /^[*_`\s]*(title|branch(?: name)?)[*_`\s]*:[*\s]*/i
+
 /**
- * The answer's title and branch lines. A line labelled `Branch:` is the branch; the title is the line labelled `Title:`,
- * or else the first other line, so an answer that gives only a title still names the thread.
+ * The answer's title and branch lines. A line labelled `Branch:` is the branch: what follows the label, exactly as the
+ * model wrote it, for `branchNameFromModel` to check (underscores, slashes and case are its to judge). The title is the
+ * line labelled `Title:`, or else the first other line, so an answer that gives only a title still names the thread.
  */
 export function parseThreadNaming(text: string): ThreadNaming {
-  const lines = text.split(/\r?\n/).map((line) => line.replace(/[*_`]/g, '').trim()).filter(Boolean)
-  const branch = lines.find((line) => /^branch(?: name)?\s*:/i.test(line))
-  const title = lines.find((line) => /^title\s*:/i.test(line)) ?? lines.find((line) => line !== branch)
-  return { title: title ? normalizeTitle(title) : null, ...(branch ? { branch } : {}) }
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const label = (line: string) => LABEL.exec(line)?.[1]?.toLowerCase()
+  const branchLine = lines.find((line) => label(line)?.startsWith('branch'))
+  const titleLine = lines.find((line) => label(line) === 'title') ?? lines.find((line) => line !== branchLine)
+  const branch = branchLine?.replace(LABEL, '').trim()
+  return { title: titleLine ? normalizeTitle(titleLine.replace(LABEL, '')) : null, ...(branch ? { branch } : {}) }
 }

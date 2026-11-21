@@ -613,7 +613,6 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal, { cacheCold: request.cacheCold === true }),
         oneShot: (spec, signal) => service.oneShot(spec, signal),
-        prewarmOneShot: (spec) => service.prewarmOneShot(spec),
         setLiveHost: (host) => service.setLiveHost(host),
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),

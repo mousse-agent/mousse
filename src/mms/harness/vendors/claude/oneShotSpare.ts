@@ -66,6 +66,8 @@ export class OneShotInput implements AsyncIterable<SDKUserMessage> {
 
 export interface OneShotSpare {
   key: string
+  /** The account and launch it was started under (`ClaudeSubscriptionProviderService.oneShotGeneration`). */
+  generation: number
   input: OneShotInput
   controller: AbortController
   /** The query, once the SDK started it; rejects when it could not be. */

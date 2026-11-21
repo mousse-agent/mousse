@@ -150,11 +150,6 @@ export interface HarnessGateway {
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
-  /**
-   * Gets the instance the selection resolves to ready for a one-shot of `task` soon (`DriverRuntime.prewarmOneShot`):
-   * Claude Code starts a process ahead. Does nothing for a runtime that has no way to, or a selection that cannot run.
-   */
-  prewarmOneShot?(request: Pick<OneShotRequest, 'selection' | 'scope' | 'purpose' | 'task'>): void
   /** The driver's runtime masks secret values in its tool results before keeping them (`HarnessDriver.masksToolResults`). */
   masksToolResults(driver: HarnessDriverKind | undefined): boolean
   /**
@@ -1660,19 +1655,6 @@ export class Harness implements HarnessGateway {
       throw error
     } finally {
       if (timer) clearTimeout(timer)
-    }
-  }
-
-  prewarmOneShot(request: Pick<OneShotRequest, 'selection' | 'scope' | 'purpose' | 'task'>): void {
-    try {
-      const resolved = this.resolveStored(request.selection, { purpose: request.purpose, ...(request.scope ? { scope: request.scope } : {}) })
-      const record = this.record(resolved.instanceId)
-      if (!record.runtime.prewarmOneShot || record.stopped) return
-      this.admissionGate(record)
-      const customModel = this.catalog.customModel(record.instanceId, resolved.model)
-      record.runtime.prewarmOneShot({ model: agentModelId(resolved.model, resolved.effort), ...(customModel ? { customModel } : {}), ...(request.task ? { task: request.task } : {}) })
-    } catch {
-      // Nothing is started ahead; the request itself still runs (or is refused) as it would have.
     }
   }
 

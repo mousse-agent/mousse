@@ -4,8 +4,8 @@
  * still waits for its worktree. Before, it stayed an unstarted draft for that whole wait: its row did not open, and
  * New thread opened it again instead of a fresh one. Real orchestrator, Run Engine and Git; the test holds the
  * project's repository, as another operation would, so the worktree step lasts as long as the test wants.
- * Rows: one empty thread sent (listed, and named from its message); two sent one after the other (their order, during
- * the setup and after it).
+ * Rows: one empty thread sent (listed, and named from its message); one whose title model never answers (its agent still
+ * gets the turn); two sent one after the other (their order, during the setup and after it).
  */
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -101,6 +101,20 @@ describe("a new chat's thread while its first turn is set up", () => {
     w.freeRepository()
     await waitFor(() => w.pi.turns.length === 1 && w.idle(draft.id), 'the turn to finish', 40_000)
     expect(w.d.store.getThread(draft.id)!.name).toBe('Plan the release for Friday')
+  })
+
+  it('gives the agent its turn while the title model has not answered', async () => {
+    const w = world()
+    w.d.settings.title = { ...w.d.settings.title, ...PI }
+    // The naming request never answers.
+    const oneShot = vi.fn(() => new Promise<never>(() => undefined))
+    ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
+    const draft = w.emptyThread()
+    await w.d.orch.send('Please plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => w.pi.turns.length === 1, 'the agent to get the turn', 40_000)
+    expect(w.pi.turns[0]!.prompt).toMatch(/Please plan the release for Friday$/)
+    expect(oneShot).toHaveBeenCalledTimes(1)
+    expect(w.d.store.getThread(draft.id)).toMatchObject({ name: 'Plan the release for Friday', titleSource: 'provisional' })
   })
 
   it('keeps two threads started one after the other in the order they were sent, during their setup and after it', async () => {
