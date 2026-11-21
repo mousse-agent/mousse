@@ -311,12 +311,16 @@ async function presentWorktreeFact(path: string, expectedRepository: string | un
     if (expectedRepository && repositoryId !== expectedRepository) throw new Error('Repository common-directory identity changed')
     // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
     // In the standard layout the top level is the folder holding the `.git` file, `path` itself.
-    if (!standard) {
+    const samePath = (entry: string, wanted: string): boolean => resolve(entry).toLowerCase() === resolve(wanted).toLowerCase()
+    let listed: boolean
+    if (standard) {
+      listed = Boolean(await findListedWorktreeAsync(common, path, samePath))
+    } else {
       const top = await realpathLikeSync(await git('rev-parse', '--show-toplevel'))
       if (top.toLowerCase() !== (await realpathLikeSync(path)).toLowerCase()) throw new Error('Source path is not the registered worktree root')
+      listed = (await git('worktree', 'list', '--porcelain', '-z')).split('\0')
+        .some((entry) => entry.startsWith('worktree ') && samePath(entry.slice('worktree '.length), path))
     }
-    // Its own registration, read without listing every worktree of the repository (`worktreeRegistry`).
-    const listed = Boolean(await findListedWorktreeAsync(common, path, (entry, wanted) => resolve(entry).toLowerCase() === resolve(wanted).toLowerCase()))
     if (!listed) throw new Error('Git does not register the worktree')
     return undefined
   } catch (error) {

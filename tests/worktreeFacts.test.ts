@@ -142,7 +142,7 @@ it('the hold at the delete decision is Git’s answer for each layout Git may re
   expect(rows.find((row) => row.name === 'plain')!.oracle).toBe(true)
 })
 
-it('a checkout whose owner Git may not trust goes to Git, unless safe.directory trusts every folder', async () => {
+it('Git checks the checkout itself when only safe.directory can trust it', async () => {
   const root = tempRoot()
   const store = new ResourceLifecycleStore({ profileId: '11111111-1111-4111-8111-111111111111', profileHome: join(root, 'home') })
   const repo = repository(root, 'repo')
@@ -154,12 +154,16 @@ it('a checkout whose owner Git may not trust goes to Git, unless safe.directory 
   const config = join(root, 'global.gitconfig')
   writeFileSync(config, '')
   process.env.GIT_CONFIG_GLOBAL = config
-  expect((await gitStarts(root, () => verifyWorktreeFact(store, path, undefined, id))).starts).toBeGreaterThan(0)
-  writeFileSync(config, '[safe]\n\tdirectory = *\n')
+  writeFileSync(config, `[safe]\n\tdirectory = ${repo.main.replace(/\\/g, '/')}\n`)
+  const untrusted = await gitStarts(root, () => verifyWorktreeFact(store, path, undefined, id))
+  expect(untrusted.value).toMatch(/dubious ownership|not a git repository/i)
+  expect(untrusted.starts).toBeGreaterThan(0)
+  writeFileSync(config, `[safe]\n\tdirectory = ${path.replace(/\\/g, '/')}\n`)
   const trusted = await gitStarts(root, () => verifyWorktreeFact(store, path, undefined, id))
   expect(trusted.value).toBeUndefined()
-  // Reading safe.directory is one Git process; the worktree itself is not opened with Git.
-  expect(trusted.starts).toBe(1)
+  expect(trusted.starts).toBeGreaterThan(0)
+  writeFileSync(config, '[safe]\n\tdirectory = *\n\tdirectory =\n')
+  expect(await verifyWorktreeFact(store, path, undefined, id)).toBeDefined()
 })
 
 /** A manifest as retirement writes it, with only the fields the pin check reads. */

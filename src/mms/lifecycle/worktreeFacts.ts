@@ -42,12 +42,13 @@ type ConfigValues = Map<string, string[]>
 function plainConfig(text: string): ConfigValues | undefined {
   const values: ConfigValues = new Map()
   let section = ''
+  if (/[^\x09\x0a\x0d\x20-\x7e]|\r(?!\n)/.test(text)) return undefined
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim()
     if (!line || line.startsWith('#') || line.startsWith(';')) continue
     if (line.endsWith('\\')) return undefined
     if (line.startsWith('[')) {
-      const header = /^\[\s*([A-Za-z0-9.-]+)(\s+"[^"\\]*")?\s*\]\s*([#;].*)?$/.exec(line)
+      const header = /^\[([A-Za-z0-9-]+)([ \t]+"[^"\\]*")?\][ \t]*([#;].*)?$/.exec(line)
       if (!header) return undefined
       section = header[2] ? `${header[1]!.toLowerCase()} "sub"` : header[1]!.toLowerCase()
       if (header[1]!.toLowerCase() === 'include' || header[1]!.toLowerCase() === 'includeif') return undefined
@@ -148,15 +149,16 @@ export async function standardLinkedWorktreeAsync(path: string): Promise<Standar
   if (basename(dirname(gitDir)) !== 'worktrees') return undefined
   const folders = await Promise.all([gitDir, dirname(gitDir), common].map(plainFolder))
   if (!folders.every(Boolean)) return undefined
-  const [head, commondir, back, worktreeConfig, config] = await Promise.all([
+  const [head, commondir, back, worktreeConfig, config, mainHead] = await Promise.all([
     smallText(join(gitDir, 'HEAD'), 4096),
     smallText(join(gitDir, 'commondir'), 4096),
     smallText(join(gitDir, 'gitdir'), 4096),
     lstat(join(gitDir, 'config.worktree')).then(() => smallText(join(gitDir, 'config.worktree')).then((text) => text ?? null), (error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? undefined : null),
-    smallText(join(common, 'config'))
+    smallText(join(common, 'config')),
+    smallText(join(common, 'HEAD'), 4096)
   ])
   const repository = config === undefined ? undefined : repositoryConfig(config)
-  if (!repository || head === undefined || !validHead(head, repository.objectFormat)) return undefined
+  if (!repository || head === undefined || mainHead === undefined || !validHead(head, repository.objectFormat) || !validHead(mainHead, repository.objectFormat)) return undefined
   if (commondir?.replace(/\r?\n$/, '') !== '../..') return undefined
   const backPath = back?.replace(/\s+$/, '')
   if (!backPath || !isAbsolute(backPath) || comparablePath(resolve(backPath)) !== comparablePath(resolve(path, '.git'))) return undefined
@@ -196,51 +198,16 @@ async function ownedByMeAsync(paths: readonly string[]): Promise<Set<string>> {
 }
 
 /**
- * The `safe.directory` entries Git honours (system, global and command-line config only), in order, an empty value
- * clearing those before it. Read with one Git process; undefined when they can't be read.
- */
-async function safeDirectoriesAsync(cwd: string): Promise<string[] | undefined> {
-  try {
-    const args = ['config', '--show-scope', '-z', '--get-all', 'safe.directory']
-    const ran = await runGitProcess(await withoutRepoProgramsAsync(cwd, args), { cwd, env: repoProgramEnv({ ...process.env, ...READ_ONLY_GIT_ENV }), timeout: 30_000 })
-    if (ran.error || ran.status !== 0 && ran.status !== 1) return undefined
-    const fields = ran.stdout.split('\0')
-    let entries: string[] = []
-    for (let index = 0; index + 1 < fields.length; index += 2) {
-      if (!['system', 'global', 'command'].includes(fields[index]!)) continue
-      const value = fields[index + 1]!
-      entries = value === '' ? [] : [...entries, value]
-    }
-    return entries
-  } catch { return undefined }
-}
-
-/** A path as Git spells it for `safe.directory`: forward slashes, no trailing slash. */
-const gitSpelling = (path: string): string => path.replace(/\\/g, '/').replace(/\/+$/, '')
-
-/**
  * Which checkouts Git would trust, proven without opening each with Git: the worktree folder, its `.git` file and its
- * Git folder are all owned by the user Mousse runs as (as Git requires), or `safe.directory` is `*` or names the
- * worktree's real path exactly. A checkout not proven trusted here is checked with Git. `GIT_TEST_ASSUME_DIFFERENT_OWNER`,
- * Git's own switch for treating every owner as different, is honoured the same way.
+ * Git folder are all owned by the user Mousse runs as. Git checks every other checkout itself, including its
+ * protected `safe.directory` configuration and its owner-testing override.
  */
 export async function trustedCheckoutsAsync(checkouts: ReadonlyArray<{ path: string; gitDir: string }>): Promise<Set<string>> {
   const trusted = new Set<string>()
-  if (!checkouts.length) return trusted
-  const assumeOther = /^(1|true|yes|on)$/i.test(process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER ?? '')
-  const owned = assumeOther ? new Set<string>() : await ownedByMeAsync(checkouts.flatMap(ownedPaths))
-  const rest: Array<{ path: string; gitDir: string }> = []
+  if (!checkouts.length || process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER !== undefined) return trusted
+  const owned = await ownedByMeAsync(checkouts.flatMap(ownedPaths))
   for (const checkout of checkouts) {
     if (ownedPaths(checkout).every((path) => owned.has(path))) trusted.add(checkout.path)
-    else rest.push(checkout)
-  }
-  if (!rest.length) return trusted
-  const entries = await safeDirectoriesAsync(rest[0]!.path)
-  if (!entries) return trusted
-  for (const checkout of rest) {
-    let real: string
-    try { real = gitSpelling(await realpathLike(checkout.path)) } catch { continue }
-    if (entries.some((entry) => entry === '*' || !entry.includes('*') && !entry.startsWith('%(') && !entry.startsWith('~') && gitSpelling(entry) === real)) trusted.add(checkout.path)
   }
   return trusted
 }
