@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import type { BigIntStats } from 'node:fs'
 import { lstat, readFile, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
@@ -38,65 +40,119 @@ async function readPathPointer(path: string, prefix = ''): Promise<string | unde
   return pointer && pointer === pointer.trim() && !/[\r\n\0]/.test(pointer) ? pointer : undefined
 }
 
+function refName(ref: string): boolean {
+  return ref.startsWith('refs/') && !ref.endsWith('.') && !ref.includes('..') && !ref.includes('@{') &&
+    !/[ ~^:?*\[\\\x00-\x1f\x7f\uFFFD]/.test(ref) &&
+    ref.split('/').every((part) => part && !part.startsWith('.') && !part.endsWith('.lock'))
+}
+
+/** Git writes one LF after a loose ref or HEAD. Extra bytes are left for Git to interpret. */
+function gitLine(value: string | undefined): string | undefined {
+  if (!value?.endsWith('\n')) return undefined
+  const line = value.slice(0, -1)
+  return /[\r\n]/.test(line) ? undefined : line
+}
+
 /** The value of `ref` as Git keeps it: its loose file, else its line in `packed-refs`; null when there is none. */
 async function refValue(gitDir: string, common: string, ref: string): Promise<string | null | undefined> {
-  if (!ref.startsWith('refs/') || ref.includes('..') || /[\\:\x00-\x20]/.test(ref)) return undefined
+  if (!refName(ref)) return undefined
   try {
-    const value = (await readFile(join(PER_WORKTREE.test(ref) ? gitDir : common, ...ref.split('/')), 'utf8')).trim()
+    const loose = join(PER_WORKTREE.test(ref) ? gitDir : common, ...ref.split('/'))
+    if (!(await lstat(loose)).isFile()) return undefined
+    const value = gitLine(await readFile(loose, 'utf8'))
     // A symbolic ref or anything unexpected is left to Git.
-    return SHA.test(value) ? value : undefined
+    return value && SHA.test(value) ? value : undefined
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined
   }
   let packed: string
   try {
-    packed = await readFile(join(common, 'packed-refs'), 'utf8')
+    const path = join(common, 'packed-refs')
+    if (!(await lstat(path)).isFile()) return undefined
+    packed = await readFile(path, 'utf8')
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined
   }
-  for (const line of packed.split(/\r?\n/)) {
-    if (!line || line.startsWith('#') || line.startsWith('^')) continue
+  const lines = packed.split('\n')
+  if (lines.pop() !== '') return undefined
+  if (lines[0]?.startsWith('# pack-refs with: ')) lines.shift()
+  let value: string | null = null
+  let canPeel = false
+  for (const line of lines) {
+    if (canPeel && line.startsWith('^') && SHA.test(line.slice(1))) {
+      canPeel = false
+      continue
+    }
     const space = line.indexOf(' ')
-    if (line.slice(space + 1) !== ref) continue
-    const value = line.slice(0, space)
-    return SHA.test(value) ? value : undefined
+    const oid = line.slice(0, space)
+    const name = line.slice(space + 1)
+    if (space < 0 || !SHA.test(oid) || !refName(name)) return undefined
+    canPeel = true
+    if (name !== ref) continue
+    if (value !== null) return undefined
+    value = oid
   }
-  return null
+  return value
 }
 
 /** Read only ordinary files-based repositories. Git validates more formats and extensions than this reader handles. */
-async function supportedConfig(gitDir: string, common: string): Promise<boolean> {
+async function configFingerprint(gitDir: string, common: string): Promise<string | undefined> {
   const overrides = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS']
-  if (overrides.some((key) => process.env[key]) || Number(process.env.GIT_CONFIG_COUNT || 0) !== 0) return false
-  if (await present(join(gitDir, 'config.worktree'))) return false
-  const config = await text(join(common, 'config'))
-  if (config === undefined || /\0|\\\r?\n/.test(config)) return false
+  if (overrides.some((key) => process.env[key]) || Number(process.env.GIT_CONFIG_COUNT || 0) !== 0) return undefined
+  if (await present(join(gitDir, 'config.worktree'))) return undefined
+  const bytes = await readFile(join(common, 'config')).catch(() => undefined)
+  if (!bytes) return undefined
+  const config = bytes.toString('utf8')
+  if (/\0|\\\r?\n/.test(config)) return undefined
   let section: string | undefined
   for (const raw of config.split(/\r?\n/)) {
     let line = raw.replace(/^[\t ]+|[\t ]+$/g, '')
     if (line.startsWith('[')) {
       const header = /^\[([a-z][a-z0-9-]*)(?:\.[a-z0-9.-]+|[\t ]+"(?:[^"\\]|\\["\\])*")?[\t ]*\]/i.exec(line)
-      if (!header) return false
+      if (!header) return undefined
       section = header[1]!.toLowerCase()
-      if (['extensions', 'include', 'includeif'].includes(section)) return false
+      if (['extensions', 'include', 'includeif'].includes(section)) return undefined
       line = line.slice(header[0].length).replace(/^[\t ]+/, '')
     }
     if (!line || /^[#;]/.test(line)) continue
     const entry = /^([a-z][a-z0-9-]*)[\t ]*(?:=((?:"(?:[^"\\]|\\[ntb"\\])*"|\\[ntb"\\]|[^"\\#;])*))?(?:[#;].*)?$/i.exec(line)
-    if (!section || !entry) return false
+    if (!section || !entry) return undefined
     if (section !== 'core') continue
     const key = entry[1]!.toLowerCase()
     const value = entry[2]?.replace(/^[\t ]+|[\t ]+$/g, '')
-    if (key === 'worktree' || (key === 'bare' && value !== 'false')) return false
-    if (key === 'repositoryformatversion' && value !== '0' && value !== '1') return false
+    if (key === 'worktree' || (key === 'bare' && value !== 'false')) return undefined
+    if (key === 'repositoryformatversion' && value !== '0' && value !== '1') return undefined
   }
-  return true
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function fileIdentity(entry: BigIntStats): string {
+  return `${entry.dev}:${entry.ino}:${entry.birthtimeNs}`
+}
+
+/** Loose-object directories can be added by every snapshot. Replacing the store or changing its packs requires Git. */
+async function objectStoreFingerprint(common: string): Promise<string | undefined> {
+  const objects = join(common, 'objects')
+  if (await present(join(objects, 'info', 'alternates'))) return undefined
+  try {
+    const [store, pack] = await Promise.all([
+      lstat(objects, { bigint: true }),
+      lstat(join(objects, 'pack'), { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+        return undefined
+      })
+    ])
+    if (!store.isDirectory() || !store.ino || (pack && (!pack.isDirectory() || !pack.ino))) return undefined
+    return pack ? `${fileIdentity(store)}:${fileIdentity(pack)}:${pack.mtimeNs}:${pack.ctimeNs}` : fileIdentity(store)
+  } catch {
+    return undefined
+  }
 }
 
 /** Unreadable state is left to Git too. */
 async function present(path: string): Promise<boolean> {
   try {
-    await stat(path)
+    await lstat(path)
     return true
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ENOENT'
@@ -118,8 +174,8 @@ export async function readWorktreeHead(top: string, options: { linkedOnly?: bool
 }
 
 /**
- * The real paths and file identities of the checkout and both Git directories. Recreating any of the directories can
- * change which checkout is at the same path.
+ * The checkout and Git directory identities, with the repository config and object storage fingerprints.
+ * These must still match when a turn starts without asking Git.
  */
 export interface CheckoutIdentity {
   realPath: string
@@ -128,6 +184,8 @@ export interface CheckoutIdentity {
   worktreeId: string
   commonDir: string
   commonDirId: string
+  configHash: string
+  objectStoreId: string
 }
 
 /**
@@ -152,9 +210,8 @@ export async function readLinkedCheckout(top: string, refs: readonly string[] = 
       head: read.head, refs: values,
       identity: {
         realPath, gitDir: read.gitDir, commonDir: read.common,
-        gitDirId: `${gitDirectory.dev}:${gitDirectory.ino}:${gitDirectory.birthtimeNs}`,
-        worktreeId: `${worktree.dev}:${worktree.ino}:${worktree.birthtimeNs}`,
-        commonDirId: `${commonDirectory.dev}:${commonDirectory.ino}:${commonDirectory.birthtimeNs}`
+        gitDirId: fileIdentity(gitDirectory), worktreeId: fileIdentity(worktree), commonDirId: fileIdentity(commonDirectory),
+        configHash: read.configHash, objectStoreId: read.objectStoreId
       }
     }
   } catch {
@@ -162,7 +219,7 @@ export async function readLinkedCheckout(top: string, refs: readonly string[] = 
   }
 }
 
-async function readCheckout(top: string, options: { linkedOnly?: boolean }): Promise<{ head: WorktreeHead; gitDir: string; common: string } | undefined> {
+async function readCheckout(top: string, options: { linkedOnly?: boolean }): Promise<{ head: WorktreeHead; gitDir: string; common: string; configHash: string; objectStoreId: string } | undefined> {
   let gitDir: string, common: string
   try {
     const dotGit = join(top, '.git')
@@ -191,16 +248,19 @@ async function readCheckout(top: string, options: { linkedOnly?: boolean }): Pro
     return undefined
   }
   // The reftable format keeps refs in a binary table: only Git reads it.
-  const [objects, refs, reftable, supported] = await Promise.all([
-    isDirectory(join(common, 'objects')), isDirectory(join(common, 'refs')), present(join(common, 'reftable')), supportedConfig(gitDir, common)
+  const [objectStoreId, refs, reftable, configHash] = await Promise.all([
+    objectStoreFingerprint(common), isDirectory(join(common, 'refs')), present(join(common, 'reftable')), configFingerprint(gitDir, common)
   ])
-  if (!objects || !refs || reftable || !supported) return undefined
-  const head = (await text(join(gitDir, 'HEAD')))?.trim()
+  if (!objectStoreId || !refs || reftable || !configHash) return undefined
+  const layout = { gitDir, common, configHash, objectStoreId }
+  const headPath = join(gitDir, 'HEAD')
+  if (!(await lstat(headPath).catch(() => undefined))?.isFile()) return undefined
+  const head = gitLine(await text(headPath))
   if (!head) return undefined
-  if (SHA.test(head)) return { head: { head }, gitDir, common }
-  const ref = head.match(/^ref: (refs\/\S+)$/)?.[1]
-  if (!ref) return undefined
+  if (SHA.test(head)) return { ...layout, head: { head } }
+  if (!head.startsWith('ref: ')) return undefined
+  const ref = head.slice('ref: '.length)
   const value = await refValue(gitDir, common, ref)
   if (value === undefined) return undefined
-  return { head: value === null ? { headRef: ref } : { head: value, headRef: ref }, gitDir, common }
+  return { ...layout, head: value === null ? { headRef: ref } : { head: value, headRef: ref } }
 }

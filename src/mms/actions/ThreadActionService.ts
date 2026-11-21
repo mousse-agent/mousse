@@ -449,11 +449,17 @@ export class ThreadActionService {
     )
   }
 
-  /** The snapshot an explicit human action starts from: the files as they are, which the action then covers. */
-  private uncapturedStart(): UncapturedStart | undefined {
-    try { return JSON.parse(readFileSync(join(this.threadDirectory, UNCAPTURED_START_FILE), 'utf8')) as UncapturedStart } catch { return undefined }
+  private uncapturedStart(action: ThreadAction): UncapturedStart | undefined {
+    if (action.actor?.kind === 'user') return undefined
+    try {
+      const start = JSON.parse(readFileSync(join(this.threadDirectory, UNCAPTURED_START_FILE), 'utf8')) as UncapturedStart
+      return start.startSha === action.startSha ? start : undefined
+    } catch {
+      return undefined
+    }
   }
 
+  /** The snapshot an explicit human action starts from: the files as they are, which the action then covers. */
   private async startFromFiles(options: RunThreadActionOptions): Promise<string> {
     let snapshot: Snapshot
     try { snapshot = await takeSnapshotAsync(options.workspacePath, { reason: 'before the action', threadId: options.threadId }) }
@@ -482,11 +488,14 @@ export class ThreadActionService {
         if (receipt) {
           // The snapshot was already taken and recorded; only the action's own record is finished. Files are not touched.
           await receipts.replay(workspacePath, receipt)
+          if (this.uncapturedStart(action)) rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
           await releaseCheckpointSnapshotAsync(workspacePath, entry.operationId)
-          action.receiptId = receipt.id; action.endSha = receipt.afterSha; action.commits = receipt.introducedCommits
+          action.receiptId = receipt.id; action.startSha = receipt.beforeSha; action.endSha = receipt.afterSha
+          action.commits = receipt.introducedCommits
           action.changedPaths = await changedPathsAsync(workspacePath, action.startSha, action.endSha)
           action.externalEffects = receipt.externalEffects
           if (receipt.git) action.git = receipt.git
+          if (receipt.notCovered) action.notCovered = receipt.notCovered
           action.state = state; action.completedAt = receipt.createdAt
         } else {
           // A completed capture belongs to this operation, even if the person saved other files before recovery.
@@ -555,11 +564,10 @@ export class ThreadActionService {
     })
     // The turn's start could not be captured: the placeholder start is not used. The turn is recorded from its end, so no
     // file is attributed to it and code Undo restores nothing (the conversation still rewinds), and the gap says why.
-    const uncaptured = this.uncapturedStart()
-    if (uncaptured?.startSha === action.startSha && action.actor?.kind !== 'user') {
+    const uncaptured = this.uncapturedStart(action)
+    if (uncaptured) {
       action.startSha = snapshot.sha
       snapshot = { ...snapshot, coverageGaps: [{ path: '.', reason: `start of turn not captured: ${uncaptured.error}` }, ...(snapshot.coverageGaps ?? [])] }
-      rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
     }
     // What the start did not cover is the turn's too: a file left out at the start and recorded at the end was not made
     // by the turn, and a file whose exact bytes the start could not hold comes back from it in Git's form only. The
@@ -599,6 +607,8 @@ export class ThreadActionService {
       contributions: integrations.map((item) => ({ receiptId: item.id, baseSha: item.beforeSha, resultSha: item.afterSha })),
       externalEffects: action.externalEffects, git: record
     })
+    // Before the receipt is durable, replay still needs the original marker to ignore the placeholder start.
+    if (uncaptured) rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
     if (captured || taken) await releaseCheckpointSnapshotAsync(workspacePath, action.id)
     action.receiptId = receipt.id
   }

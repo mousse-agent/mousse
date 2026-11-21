@@ -215,6 +215,53 @@ describe('HEAD read from Git\'s files', () => {
     expect(await readWorktreeHead(worktree, { linkedOnly: true })).toBeUndefined()
   })
 
+  it.each([
+    ['a leading space in detached HEAD', (admin: string, sha: string) => writeFileSync(join(admin, 'HEAD'), ` ${sha}\n`)],
+    ['trailing junk in detached HEAD', (admin: string, sha: string) => writeFileSync(join(admin, 'HEAD'), `${sha} junk\n`)],
+    ['a malformed symbolic HEAD', (admin: string) => writeFileSync(join(admin, 'HEAD'), 'ref: refs/heads/.invalid\n')],
+    ['trailing whitespace in a loose ref', (admin: string, sha: string, common: string) => {
+      writeFileSync(join(admin, 'HEAD'), 'ref: refs/heads/test-loose\n')
+      writeFileSync(join(common, 'refs/heads/test-loose'), `${sha} \n`)
+    }]
+  ] as const)('leaves %s to Git', async (name, change) => {
+    const repo = repository()
+    const worktree = join(repo, '..', 'wt'); git(repo, 'worktree', 'add', '-q', '--detach', worktree)
+    const head = git(worktree, 'rev-parse', '--verify', 'HEAD^{commit}')
+    expect((await readLinkedCheckout(worktree))?.head.head).toBe(head)
+    change(git(worktree, 'rev-parse', '--absolute-git-dir'), head, join(repo, '.git'))
+    if (name === 'a leading space in detached HEAD') expect(tryGit(worktree, 'rev-parse', '--verify', 'HEAD^{commit}')).toBeUndefined()
+    expect(await readLinkedCheckout(worktree)).toBeUndefined()
+  })
+
+  it.each([
+    ['invalid core.filemode', (repo: string) => git(repo, 'config', 'core.filemode', 'invalid'), false],
+    ['a valid shared config edit', (repo: string) => git(repo, 'config', 'core.autocrlf', 'true'), true],
+    ['a repack', (repo: string) => git(repo, 'repack', '-ad'), true],
+    ['a replaced object directory', (repo: string) => {
+      const objects = join(repo, '.git', 'objects')
+      renameSync(objects, join(repo, '.git', 'original-objects'))
+      mkdirSync(objects)
+    }, false]
+  ] as const)('requires Git to revalidate after %s', async (_name, change, valid) => {
+    const repo = repository()
+    const worktree = join(repo, '..', 'wt'); git(repo, 'worktree', 'add', '-q', '--detach', worktree)
+    const thread = join(repo, '..', 'thread')
+    const sha = git(worktree, 'rev-parse', '--verify', 'HEAD^{commit}')
+    const pin = 'refs/mousse/retained'
+    git(repo, 'update-ref', pin, sha)
+    const hasRecordedCheckout = async () => {
+      const read = await readLinkedCheckout(worktree, [pin])
+      return !!read && read.head.head === sha && read.refs.get(pin) === sha && await sameCheckout(thread, worktree, read.identity)
+    }
+    await recordCheckoutIdentity(thread, worktree)
+    expect(await hasRecordedCheckout()).toBe(true)
+    change(repo)
+    expect(tryGit(worktree, 'rev-parse', '--verify', `${pin}^{commit}`)).toBe(valid ? sha : undefined)
+    expect(await hasRecordedCheckout()).toBe(false)
+    await recordCheckoutIdentity(thread, worktree)
+    expect(await hasRecordedCheckout()).toBe(valid)
+  })
+
   it('names the physical checkout: a worktree removed and added again at the same path is another one', async () => {
     const repo = repository()
     const worktree = join(repo, '..', 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'thread/again', worktree)

@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ThreadJournal } from '../../src/mms/data/ThreadJournal'
-import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
+import { ThreadActionService, UNCAPTURED_START_FILE } from '../../src/mms/actions/ThreadActionService'
 import { CodeRevertService } from '../../src/mms/actions/CodeRevertService'
 import { PublishService } from '../../src/mms/actions/PublishService'
 import { waitAcquireExecutionLease } from '../../src/mms/queue/ThreadExecutionLease'
@@ -27,7 +27,13 @@ switch (config.kind) {
     break
   }
   case 'checkpoint':
-    await new ThreadActionService(config.thread).runCheckpointedAction(config.options, () => writeFileSync(join(config.repo, 'value.txt'), 'checkpoint result\n'))
+    await new ThreadActionService(config.thread).runCheckpointedAction(config.options, () => {
+      if (config.startIndexLock) {
+        if (!existsSync(join(config.thread, UNCAPTURED_START_FILE))) throw new Error('Start capture unexpectedly succeeded')
+        rmdirSync(config.startIndexLock)
+      }
+      writeFileSync(join(config.repo, 'value.txt'), 'checkpoint result\n')
+    })
     break
   case 'revert': await pressed('Revert', () => new CodeRevertService(config.thread).revertCode(config.actionId, config.repo)); break
   case 'publish': await pressed('Publish', () => new PublishService(config.thread).publish(config.source, config.repo, config.target, undefined, config.options)); break

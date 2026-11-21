@@ -18,7 +18,7 @@ import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { addWorktree, worktreeCheckoutPlan, type WorktreeCheckoutPlan, type WorktreeGit } from '../worktree/worktreeCheckout'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import { recordCheckoutIdentity } from './checkoutIdentity'
+import { readRecordedCheckoutHead, recordCheckoutIdentity } from './checkoutIdentity'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
 import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
@@ -44,7 +44,6 @@ import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { timeGitSync } from '../diagnostics/turnBoundary'
 import { branchOfHeadRef, forgetRepositoryFacts, repositoryFacts } from '../git/repositoryFacts'
-import { readWorktreeHead } from '../git/worktreeHeadFiles'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
 
 /** True for a pending journal record that a live writer is still finishing (`liveCheckpointTest`), so it waits on nothing yet. */
@@ -1029,7 +1028,7 @@ export class ThreadWorkspaceManager {
       // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.
       // A worktree of the thread's own is read from Git's files (`worktreeHeadFiles.ts`), so its turn starts with no Git;
       // otherwise a turn's start asks once for all its callers (`repositoryFacts.ts`), Git's answer being the checkout there.
-      const files = isProjectFolderWorkspace(metadata) ? undefined : await readWorktreeHead(metadata.worktreePath, { linkedOnly: true })
+      const files = isProjectFolderWorkspace(metadata) ? undefined : await readRecordedCheckoutHead(this.threadDirectory, metadata.worktreePath)
       const facts = files ? undefined : await repositoryFacts(metadata.worktreePath)
       if (!files && !facts) await git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
       if (this.hasPendingOperation(options.inFlight)) throw new Error('A Mousse operation is waiting for recovery.')
@@ -1059,7 +1058,7 @@ export class ThreadWorkspaceManager {
    */
   private async currentBranch(metadata: ThreadWorkspaceMetadata): Promise<string | undefined> {
     if (!await pathExists(metadata.worktreePath)) return metadata.branch
-    const files = isProjectFolderWorkspace(metadata) ? undefined : await readWorktreeHead(metadata.worktreePath, { linkedOnly: true })
+    const files = isProjectFolderWorkspace(metadata) ? undefined : await readRecordedCheckoutHead(this.threadDirectory, metadata.worktreePath)
     if (files) return branchOfHeadRef(files.headRef)
     const facts = await repositoryFacts(metadata.worktreePath)
     if (facts) return branchOfHeadRef(await facts.headRef())
