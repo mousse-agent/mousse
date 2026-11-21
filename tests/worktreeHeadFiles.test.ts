@@ -10,11 +10,12 @@
  * a worktree removed and added again at the same path is another checkout (`readLinkedCheckout`'s identity).
  */
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { readLinkedCheckout, readWorktreeHead } from '../src/mms/git/worktreeHeadFiles'
+import { recordCheckoutIdentity, sameCheckout } from '../src/mms/workspace/checkoutIdentity'
 
 const roots: string[] = []
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }) })
@@ -137,6 +138,61 @@ describe('HEAD read from Git\'s files', () => {
     const worktree = join(repo, '..', 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'thread/gone', worktree)
     rmSync(join(repo, '.git', 'worktrees'), { recursive: true, force: true })
     expect(await readWorktreeHead(worktree)).toBeUndefined()
+  })
+
+  it('leaves a worktree with a re-pointed commondir to Git even when its refs match', async () => {
+    const repo = repository()
+    const worktree = join(repo, '..', 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'thread/redirected', worktree)
+    const pin = 'refs/mousse/retained'
+    const head = git(worktree, 'rev-parse', 'HEAD')
+    git(worktree, 'update-ref', pin, head)
+    expect((await readLinkedCheckout(worktree, [pin]))?.refs.get(pin)).toBe(head)
+    const other = repository()
+    // Only the original repository has this worktree's commit, even if the two fixture commits match.
+    writeFileSync(join(worktree, 'a.txt'), 'only here\n')
+    git(worktree, 'commit', '-qam', 'only here')
+    const newHead = git(worktree, 'rev-parse', 'HEAD')
+    git(worktree, 'update-ref', pin, newHead)
+    for (const ref of ['refs/heads/thread/redirected', pin]) {
+      const file = join(other, '.git', ref)
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, newHead + '\n')
+    }
+    const admin = git(worktree, 'rev-parse', '--absolute-git-dir')
+    writeFileSync(join(admin, 'commondir'), join(other, '.git').replace(/\\/g, '/') + '\n')
+    expect(tryGit(worktree, 'rev-parse', '--verify', 'HEAD^{commit}')).toBeUndefined()
+    expect(await readLinkedCheckout(worktree, [pin])).toBeUndefined()
+  })
+
+  it('leaves a repository with an unsupported extension to Git', async () => {
+    const repo = repository()
+    const worktree = join(repo, '..', 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'thread/extension', worktree)
+    expect((await readLinkedCheckout(worktree))?.head).toEqual(gitHead(worktree))
+    git(repo, 'config', 'core.repositoryformatversion', '1')
+    git(repo, 'config', 'extensions.mousseUnknown', 'true')
+    expect(() => git(worktree, 'rev-parse', '--verify', 'HEAD^{commit}')).toThrow(/unknown repository extension/i)
+    expect(await readLinkedCheckout(worktree)).toBeUndefined()
+  })
+
+  it('rejects a replaced common directory at the same path, even with the original worktree admin directory', async () => {
+    const repo = repository()
+    const worktree = join(repo, '..', 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'thread/replaced-common', worktree)
+    const thread = join(repo, '..', 'thread')
+    const before = (await readLinkedCheckout(worktree))!
+    await recordCheckoutIdentity(thread, worktree)
+    expect(await sameCheckout(thread, worktree, before.identity)).toBe(true)
+
+    const common = before.identity.commonDir
+    const moved = join(dirname(common), 'original-git-dir')
+    renameSync(common, moved)
+    cpSync(moved, common, { recursive: true, filter: (from) => from !== join(moved, 'worktrees') })
+    renameSync(join(moved, 'worktrees'), join(common, 'worktrees'))
+
+    const after = (await readLinkedCheckout(worktree))!
+    expect(after.head).toEqual(before.head)
+    expect(after.identity.commonDir).toBe(common)
+    expect(after.identity.gitDirId).toBe(before.identity.gitDirId)
+    expect(await sameCheckout(thread, worktree, after.identity)).toBe(false)
   })
   it.each([
     ['core.worktree in the worktree\'s own config.worktree', (repo: string, worktree: string) => {

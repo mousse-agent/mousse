@@ -1,5 +1,5 @@
-import { readFile, realpath, stat } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { lstat, readFile, realpath, stat } from 'node:fs/promises'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 
 /**
@@ -31,13 +31,11 @@ async function isDirectory(path: string): Promise<boolean> {
   try { return (await stat(path)).isDirectory() } catch { return false }
 }
 
-/** The checkout's Git folder: the `.git` folder, or the one a linked worktree's `.git` file names. */
-async function gitDirOf(top: string): Promise<string | undefined> {
-  const dotGit = join(top, '.git')
-  if (await isDirectory(dotGit)) return dotGit
-  const pointer = (await text(dotGit))?.trimEnd().match(/^gitdir: (.+)$/)?.[1]
-  if (!pointer) return undefined
-  return isAbsolute(pointer) ? pointer : resolve(top, pointer)
+async function readPathPointer(path: string, prefix = ''): Promise<string | undefined> {
+  const line = (await text(path))?.replace(/[\r\n]+$/, '')
+  if (!line?.startsWith(prefix)) return undefined
+  const pointer = line.slice(prefix.length)
+  return pointer && pointer === pointer.trim() && !/[\r\n\0]/.test(pointer) ? pointer : undefined
 }
 
 /** The value of `ref` as Git keeps it: its loose file, else its line in `packed-refs`; null when there is none. */
@@ -66,20 +64,33 @@ async function refValue(gitDir: string, common: string, ref: string): Promise<st
   return null
 }
 
-/**
- * Whether configuration Git would read can put the checkout somewhere other than the folder: `core.worktree` in the
- * worktree's own `config.worktree` (any such file at all is left to Git) or in the shared `config`, an `include` there
- * that could set it, or `GIT_DIR` / `GIT_WORK_TREE` in Mousse's own environment.
- */
-async function mayRedirect(gitDir: string, common: string): Promise<boolean> {
-  if (process.env.GIT_DIR || process.env.GIT_WORK_TREE || process.env.GIT_COMMON_DIR) return true
-  for (let index = 0; index < Number(process.env.GIT_CONFIG_COUNT || 0); index++) {
-    const key = process.env['GIT_CONFIG_KEY_' + index]?.toLowerCase()
-    if (key === 'core.worktree' || key === 'core.bare' || key === 'extensions.refstorage' || key?.startsWith('include')) return true
-  }
-  if (await present(join(gitDir, 'config.worktree'))) return true
+/** Read only ordinary files-based repositories. Git validates more formats and extensions than this reader handles. */
+async function supportedConfig(gitDir: string, common: string): Promise<boolean> {
+  const overrides = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS']
+  if (overrides.some((key) => process.env[key]) || Number(process.env.GIT_CONFIG_COUNT || 0) !== 0) return false
+  if (await present(join(gitDir, 'config.worktree'))) return false
   const config = await text(join(common, 'config'))
-  return config === undefined || /(?:^|\])[\t ]*worktree[\t ]*(?:=|[;#]|$)/im.test(config) || /^\s*\[\s*include/im.test(config)
+  if (config === undefined || /\0|\\\r?\n/.test(config)) return false
+  let section: string | undefined
+  for (const raw of config.split(/\r?\n/)) {
+    let line = raw.replace(/^[\t ]+|[\t ]+$/g, '')
+    if (line.startsWith('[')) {
+      const header = /^\[([a-z][a-z0-9-]*)(?:\.[a-z0-9.-]+|[\t ]+"(?:[^"\\]|\\["\\])*")?[\t ]*\]/i.exec(line)
+      if (!header) return false
+      section = header[1]!.toLowerCase()
+      if (['extensions', 'include', 'includeif'].includes(section)) return false
+      line = line.slice(header[0].length).replace(/^[\t ]+/, '')
+    }
+    if (!line || /^[#;]/.test(line)) continue
+    const entry = /^([a-z][a-z0-9-]*)[\t ]*(?:=((?:"(?:[^"\\]|\\[ntb"\\])*"|\\[ntb"\\]|[^"\\#;])*))?(?:[#;].*)?$/i.exec(line)
+    if (!section || !entry) return false
+    if (section !== 'core') continue
+    const key = entry[1]!.toLowerCase()
+    const value = entry[2]?.replace(/^[\t ]+|[\t ]+$/g, '')
+    if (key === 'worktree' || (key === 'bare' && value !== 'false')) return false
+    if (key === 'repositoryformatversion' && value !== '0' && value !== '1') return false
+  }
+  return true
 }
 
 /** Unreadable state is left to Git too. */
@@ -107,14 +118,16 @@ export async function readWorktreeHead(top: string, options: { linkedOnly?: bool
 }
 
 /**
- * The real paths and file identities of the checkout and its Git directory. Recreating either folder can change which
- * checkout is at the same path.
+ * The real paths and file identities of the checkout and both Git directories. Recreating any of the directories can
+ * change which checkout is at the same path.
  */
 export interface CheckoutIdentity {
   realPath: string
   gitDir: string
   gitDirId: string
   worktreeId: string
+  commonDir: string
+  commonDirId: string
 }
 
 /**
@@ -131,16 +144,17 @@ export async function readLinkedCheckout(top: string, refs: readonly string[] = 
     values.set(ref, value)
   }
   try {
-    const [worktree, gitDirectory, realPath, gitDir] = await Promise.all([
-      stat(top, { bigint: true }), stat(read.gitDir, { bigint: true }), realpath(top), realpath(read.gitDir)
+    const [worktree, gitDirectory, commonDirectory, realPath] = await Promise.all([
+      stat(top, { bigint: true }), stat(read.gitDir, { bigint: true }), stat(read.common, { bigint: true }), realpath(top)
     ])
-    if (!worktree.ino || !gitDirectory.ino) return undefined
+    if (!worktree.ino || !gitDirectory.ino || !commonDirectory.ino) return undefined
     return {
       head: read.head, refs: values,
       identity: {
-        realPath, gitDir,
+        realPath, gitDir: read.gitDir, commonDir: read.common,
         gitDirId: `${gitDirectory.dev}:${gitDirectory.ino}:${gitDirectory.birthtimeNs}`,
-        worktreeId: `${worktree.dev}:${worktree.ino}:${worktree.birthtimeNs}`
+        worktreeId: `${worktree.dev}:${worktree.ino}:${worktree.birthtimeNs}`,
+        commonDirId: `${commonDirectory.dev}:${commonDirectory.ino}:${commonDirectory.birthtimeNs}`
       }
     }
   } catch {
@@ -149,18 +163,38 @@ export async function readLinkedCheckout(top: string, refs: readonly string[] = 
 }
 
 async function readCheckout(top: string, options: { linkedOnly?: boolean }): Promise<{ head: WorktreeHead; gitDir: string; common: string } | undefined> {
-  if (options.linkedOnly && await isDirectory(join(top, '.git'))) return undefined
-  const gitDir = await gitDirOf(top)
-  if (!gitDir) return undefined
-  if (options.linkedOnly) {
-    const back = (await text(join(gitDir, 'gitdir')))?.trim()
-    if (!back || !samePath(isAbsolute(back) ? back : resolve(gitDir, back), join(top, '.git'))) return undefined
+  let gitDir: string, common: string
+  try {
+    const dotGit = join(top, '.git')
+    const entry = await lstat(dotGit)
+    if (entry.isDirectory() && !options.linkedOnly) {
+      gitDir = common = await realpath(dotGit)
+      if (await present(join(gitDir, 'commondir'))) return undefined
+    } else if (entry.isFile()) {
+      const pointer = await readPathPointer(dotGit, 'gitdir: ')
+      if (!pointer) return undefined
+      gitDir = await realpath(isAbsolute(pointer) ? pointer : resolve(top, pointer))
+      const commonFile = join(gitDir, 'commondir')
+      const backFile = join(gitDir, 'gitdir')
+      if (!(await lstat(commonFile)).isFile() || !(await lstat(backFile)).isFile()) return undefined
+      const commonPointer = await readPathPointer(commonFile)
+      const back = await readPathPointer(backFile)
+      if (!commonPointer || !back) return undefined
+      common = await realpath(isAbsolute(commonPointer) ? commonPointer : resolve(gitDir, commonPointer))
+      if (!samePath(dirname(gitDir), join(common, 'worktrees'))) return undefined
+      const backlink = await realpath(isAbsolute(back) ? back : resolve(gitDir, back))
+      if (!samePath(backlink, await realpath(dotGit))) return undefined
+    } else {
+      return undefined
+    }
+  } catch {
+    return undefined
   }
-  const commonPointer = (await text(join(gitDir, 'commondir')))?.trim()
-  const common = commonPointer ? (isAbsolute(commonPointer) ? commonPointer : resolve(gitDir, commonPointer)) : gitDir
   // The reftable format keeps refs in a binary table: only Git reads it.
-  if (await isDirectory(join(common, 'reftable'))) return undefined
-  if (await mayRedirect(gitDir, common)) return undefined
+  const [objects, refs, reftable, supported] = await Promise.all([
+    isDirectory(join(common, 'objects')), isDirectory(join(common, 'refs')), present(join(common, 'reftable')), supportedConfig(gitDir, common)
+  ])
+  if (!objects || !refs || reftable || !supported) return undefined
   const head = (await text(join(gitDir, 'HEAD')))?.trim()
   if (!head) return undefined
   if (SHA.test(head)) return { head: { head }, gitDir, common }

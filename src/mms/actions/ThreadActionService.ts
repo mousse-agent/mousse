@@ -16,7 +16,7 @@ import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoord
 import { gitWorkCancelled } from '../git/runGitProcess'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
-import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, describeGitAsync, namedGapsAsync, readCheckpointSnapshotAsync, releaseCheckpointSnapshotAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeCheckpointSnapshotAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { turnBoundaryStep } from '../diagnostics/turnBoundary'
@@ -482,6 +482,7 @@ export class ThreadActionService {
         if (receipt) {
           // The snapshot was already taken and recorded; only the action's own record is finished. Files are not touched.
           await receipts.replay(workspacePath, receipt)
+          await releaseCheckpointSnapshotAsync(workspacePath, entry.operationId)
           action.receiptId = receipt.id; action.endSha = receipt.afterSha; action.commits = receipt.introducedCommits
           action.changedPaths = await changedPathsAsync(workspacePath, action.startSha, action.endSha)
           action.externalEffects = receipt.externalEffects
@@ -489,8 +490,8 @@ export class ThreadActionService {
           action.state = state; action.completedAt = receipt.createdAt
         } else {
           // A completed capture belongs to this operation, even if the person saved other files before recovery.
-          const captured = details.find((item) => item?.captured)?.captured
           try {
+            const captured = await readCheckpointSnapshotAsync(workspacePath, entry.operationId) ?? details.find((item) => item?.captured)?.captured
             if (captured && !(await tryGitAsync(workspacePath, ['cat-file', '-e', `${captured.sha}^{commit}`])).ok) {
               throw new Error('The interrupted checkpoint snapshot is missing.')
             }
@@ -528,7 +529,7 @@ export class ThreadActionService {
     let snapshot: Snapshot
     let captured = false
     try {
-      snapshot = taken ?? await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
+      snapshot = taken ?? await takeCheckpointSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
       captured = !taken
     } catch (error) {
       // A checkpoint that was stopped is not a snapshot that cannot be taken: it fails, and recovery takes it again.
@@ -598,6 +599,7 @@ export class ThreadActionService {
       contributions: integrations.map((item) => ({ receiptId: item.id, baseSha: item.beforeSha, resultSha: item.afterSha })),
       externalEffects: action.externalEffects, git: record
     })
+    if (captured || taken) await releaseCheckpointSnapshotAsync(workspacePath, action.id)
     action.receiptId = receipt.id
   }
 

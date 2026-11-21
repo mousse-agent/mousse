@@ -14,24 +14,28 @@ export const CHECKOUT_IDENTITY_FILE = 'checkout-identity.json'
 
 interface RecordedIdentity extends CheckoutIdentity {
   worktreePath: string
+  /** The exact baseline captured when this checkout was populated, before any turn ran. */
+  initialSnapshotSha?: string
 }
 
 /** Records the current checkout, clearing a stale identity if Git's files cannot describe it. */
-export async function recordCheckoutIdentity(threadDir: string, worktreePath: string): Promise<void> {
+export async function recordCheckoutIdentity(threadDir: string, worktreePath: string, initialSnapshotSha?: string): Promise<void> {
   try {
     const read = await readLinkedCheckout(worktreePath)
     const path = join(threadDir, CHECKOUT_IDENTITY_FILE)
-    if (read) atomicWriteJsonSync(path, { worktreePath, ...read.identity } satisfies RecordedIdentity)
+    if (read) atomicWriteJsonSync(path, { worktreePath, ...read.identity, initialSnapshotSha } satisfies RecordedIdentity)
     else rmSync(path, { force: true })
   } catch (error) {
     console.warn('the worktree\'s checkout could not be recorded; its next turn reads its files first', { worktreePath, error: error instanceof Error ? error.message : String(error) })
   }
 }
 
-/** Whether `identity`, read now at `worktreePath`, is the checkout recorded for the thread. */
-export async function sameCheckout(threadDir: string, worktreePath: string, identity: CheckoutIdentity): Promise<boolean> {
+/** Whether this is the recorded checkout, and if supplied, the snapshot captured when it was populated. */
+export async function sameCheckout(threadDir: string, worktreePath: string, identity: CheckoutIdentity, initialSnapshotSha?: string): Promise<boolean> {
   let recorded: Partial<RecordedIdentity> | null
   try { recorded = JSON.parse(await readFile(join(threadDir, CHECKOUT_IDENTITY_FILE), 'utf8')) as Partial<RecordedIdentity> | null } catch { return false }
   return recorded?.worktreePath === worktreePath && recorded.realPath === identity.realPath && recorded.gitDir === identity.gitDir &&
-    recorded.gitDirId === identity.gitDirId && recorded.worktreeId === identity.worktreeId
+    recorded.gitDirId === identity.gitDirId && recorded.worktreeId === identity.worktreeId &&
+    recorded.commonDir === identity.commonDir && recorded.commonDirId === identity.commonDirId &&
+    (initialSnapshotSha === undefined || recorded.initialSnapshotSha === initialSnapshotSha)
 }

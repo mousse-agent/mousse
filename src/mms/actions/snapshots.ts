@@ -25,6 +25,7 @@ import { timeGitSync } from '../diagnostics/turnBoundary'
 import { turnBoundaryStep } from '../diagnostics/turnBoundary'
 import { branchOfHeadRef, repositoryFactsStep, type RepositoryFacts } from '../git/repositoryFacts'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { MOUSSE_COMMIT_EMAIL, MOUSSE_COMMIT_NAME } from '../git/mousseCommitIdentity'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
@@ -1108,7 +1109,7 @@ function* readLast(path: string): Steps<LastSnapshot | undefined> {
  * it works while a merge or rebase is in progress (the snapshot says so). When the files and HEAD are what the
  * previous snapshot had, that snapshot is returned. The caller holds the mutation locks.
  */
-export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Snapshot> {
+export function* takeSnapshotSteps(cwd: string, input: SnapshotInput, checkpointOperationId?: string): Steps<Snapshot> {
   // A turn's start or end asks once for all its callers (`repositoryFacts.ts`); otherwise each is asked here.
   const facts = yield* repositoryFactsStep(cwd)
   const top = facts?.top ?? (yield* gitStep(cwd, ['rev-parse', '--show-toplevel']))
@@ -1137,23 +1138,64 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const uncovered = record.value
   const previous = yield* readLast(files.last)
   // Reused only when what it left out, and its exact bytes, are the same too: a restore reads both from the snapshot.
-  if (previous && previous.tree === tree && previous.exact === exactTree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok) return { sha: previous.sha, ...state }
+  const reused = previous && previous.tree === tree && previous.exact === exactTree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok
   const trailers = [
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
     head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
     record.any ? `${UNCOVERED_LINE}${uncovered}` : ''
   ]
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
-  const sha = yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
-  yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exactTree ? { exact: exactTree } : {}) } satisfies LastSnapshot))
-  turnBoundaryStep('snapshotCommit')
-  return { sha, ...state }
+  const sha = reused ? previous.sha : yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
+  const snapshot = { sha, ...state }
+  // Publish the recovery record before updating the cache or returning the captured end to the caller.
+  if (checkpointOperationId) yield* pinCheckpointSnapshot(top, checkpointOperationId, snapshot)
+  if (!reused) {
+    try {
+      yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exactTree ? { exact: exactTree } : {}) } satisfies LastSnapshot))
+    } catch (error) {
+      // The checkpoint is already recoverable. A cache write failure must not turn it into an uncaptured end.
+      if (!checkpointOperationId) throw error
+    }
+  }
+  if (!reused || checkpointOperationId) turnBoundaryStep('snapshotCommit')
+  return snapshot
 }
 
 
 /** Records the worktree's files as a snapshot (see `takeSnapshotSteps`), without blocking the daemon. */
 export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Snapshot> {
   return runAsync(takeSnapshotSteps(cwd, input))
+}
+
+export function takeCheckpointSnapshotAsync(cwd: string, input: SnapshotInput & { operationId: string }): Promise<Snapshot> {
+  return runAsync(takeSnapshotSteps(cwd, input, input.operationId))
+}
+
+const checkpointRef = (operationId: string): string => `refs/mousse/checkpoints/${operationId}`
+
+/** The annotated tag records the capture and keeps the snapshot reachable in a single ref update. */
+function* pinCheckpointSnapshot(top: string, operationId: string, snapshot: Snapshot): Steps<void> {
+  const tag = yield* gitStep(top, ['mktag'], undefined, [
+    `object ${snapshot.sha}`, 'type commit', `tag ${operationId}`,
+    `tagger ${MOUSSE_COMMIT_NAME} <${MOUSSE_COMMIT_EMAIL}> ${Math.floor(Date.now() / 1_000)} +0000`, '', JSON.stringify(snapshot), ''
+  ].join('\n'))
+  yield* gitStep(top, ['update-ref', '--no-deref', checkpointRef(operationId), tag, '0'.repeat(tag.length)])
+}
+
+export async function readCheckpointSnapshotAsync(cwd: string, operationId: string): Promise<Snapshot | undefined> {
+  const ref = checkpointRef(operationId)
+  const record = await gitAsync(cwd, ['for-each-ref', '--format=%(refname)%00%(objecttype)%00%(*objectname)%00%(contents)', ref], undefined, undefined, LISTING)
+  if (!record) return undefined
+  const [name, type, target, json] = record.split('\0')
+  if (name !== ref || type !== 'tag' || !json) throw new Error('The interrupted checkpoint capture record is invalid.')
+  const snapshot = JSON.parse(json) as Snapshot
+  if (snapshot.sha !== target) throw new Error('The interrupted checkpoint capture does not match its pin.')
+  return snapshot
+}
+
+/** Release the temporary pin only after the receipt has retained the capture. */
+export async function releaseCheckpointSnapshotAsync(cwd: string, operationId: string): Promise<void> {
+  await gitAsync(cwd, ['update-ref', '--no-deref', '-d', checkpointRef(operationId)])
 }
 
 /**
@@ -1497,7 +1539,7 @@ function* entriesAt(top: string, tree: string, paths: Iterable<string>): Steps<M
 }
 
 /**
- * A plain creation commit holds Git's canonical blobs. For Undo, derive the bytes checkout writes from its own
+ * An older first turn can start from a plain creation commit. For that Undo, derive checkout bytes from its own
  * attributes, using a private index and a separate directory. Filtered and oversized files keep the regular Git
  * restore path, which is also how snapshots restore files without exact bytes.
  */
@@ -1568,7 +1610,7 @@ function* exactTargetSteps(top: string, input: RestoreChangeInput, ours: string,
   const oursExact = yield* exactTreeOfSteps(top, input.ours)
   if (!oursExact) return undefined
   const theirs = yield* treeOfSteps(top, input.theirs)
-  // A start that is a plain commit (the commit a worktree was made from) holds what its checkout wrote, converted.
+  // Older turns can have only a plain creation commit for their start.
   const theirsExact = (yield* exactTreeOfSteps(top, input.theirs)) ?? (yield* checkoutExactTreeSteps(top, input.theirs, theirs))
   // Both sides' exact trees are their Git forms: no path's bytes on disk differed from Git's form. Then no change of
   // exact bytes alone can be restored, and `theirs`' exact entries are its own.

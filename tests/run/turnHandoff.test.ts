@@ -25,6 +25,7 @@ import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, T
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { ChangeReceiptService } from '../../src/mms/actions/ChangeReceiptService'
 import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
+import { recordExactTrees } from '../../src/mms/actions/snapshots'
 import { UndoService } from '../../src/mms/actions/UndoService'
 import { EffectWorker, type EffectExecutor } from '../../src/mms/run/EffectWorker'
 import { Reconciler } from '../../src/mms/run/Reconciler'
@@ -347,6 +348,29 @@ describe('a turn in the thread\'s own worktree', () => {
     expect(readFileSync(join(worktree, 'README.md'), 'utf8')).toBe('hello\n')
     await undo()
     expect(readFileSync(join(worktree, 'README.md'), 'utf8')).toBe('hello\r\n')
+  })
+
+  it.each([true, false])('Undo restores the original checkout bytes after autocrlf changes (provisioning captured exact bytes: %s)', async (hasBaseline) => {
+    const { thread, threadDir, projectDir, worktreeOf, turn, undo, starts } = await setup({ autocrlf: true })
+    recordExactTrees(hasBaseline)
+    try { await new ThreadWorkspaceManager(threadDir).provision(thread.id, 'main', projectDir) }
+    finally { recordExactTrees(true) }
+    const worktree = worktreeOf()
+    const file = join(worktree, 'README.md')
+    const original = Buffer.from('hello\r\n')
+    expect(readFileSync(file)).toEqual(original)
+    git(projectDir, 'config', 'core.autocrlf', 'false')
+    const first = await turn('lf README.md')
+    const phases = starts.find((line) => line.runId === first)!.phases
+    expect(Boolean(phases.ownWorktree)).toBe(hasBaseline)
+    expect(Boolean(phases.snapshotIndex)).toBe(!hasBaseline)
+    expect(readFileSync(file)).toEqual(Buffer.from('hello\n'))
+    const head = git(worktree, 'rev-parse', 'HEAD')
+    const index = git(worktree, 'ls-files', '-s')
+    await undo()
+    expect(readFileSync(file)).toEqual(original)
+    expect(git(worktree, 'rev-parse', 'HEAD')).toBe(head)
+    expect(git(worktree, 'ls-files', '-s')).toBe(index)
   })
 
   it('Undo after a Stop, after a failure, and after a restore puts back the bytes the turn started from', async () => {

@@ -13916,11 +13916,11 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Where a turn in the thread's own worktree starts, or undefined when it must read the files first. A worktree Mousse
    * made for the thread (or a subagent) belongs to its agent, so the turn starts from the last state Mousse recorded
-   * there (the baseline): the end of the last turn, Undo or restore (the record's snapshot), or the commit the worktree
-   * was made from. Nothing in Git runs for it, and an edit made there between turns counts as this turn's. Every start
+   * there (the baseline): the snapshot from provisioning, the end of the last turn, Undo or restore. Nothing in Git
+   * runs for it, and an edit made there between turns counts as this turn's. Every start
    * after the first, a queued message's and a wake's included, is checked here the same way, from Git's files:
    * - the retained ref still exists and points at the baseline;
-   * - the folder is still the checkout Mousse recorded (`checkoutIdentity.ts`): the same real path, Git folder and file id;
+   * - the folder and both Git directories are still the ones Mousse recorded (`checkoutIdentity.ts`);
    * - HEAD is where the baseline left it: the same commit, on the same branch or detached as it was.
    * A thread working in the person's own checkout (the project folder) never starts this way, nor does a record that is
    * not ready, is on another conversation branch, or whose start or end could not be recorded; any mismatch reads the
@@ -13937,7 +13937,7 @@ export class OrchestratorService extends EventEmitter {
     if (existsSync(join(threadDir, UNRECORDED_END_FILE)) || existsSync(join(threadDir, UNCAPTURED_START_FILE))) return undefined
     // Where HEAD was at the baseline: as the action that recorded it found it, or, before any action, as the worktree was made.
     const latest = new ThreadActionService(threadDir).latest(conversationBranchId)
-    const baseline = record.snapshotSha ?? (latest ? undefined : record.headSha)
+    const baseline = record.snapshotSha
     if (!baseline) return undefined
     let expected: { head: string; branch: string | undefined }
     if (latest) {
@@ -13951,7 +13951,7 @@ export class OrchestratorService extends EventEmitter {
     const branch = checkout.head.headRef?.startsWith('refs/heads/') ? checkout.head.headRef.slice('refs/heads/'.length) : undefined
     if (checkout.head.headRef && !branch) return undefined
     if (checkout.head.head !== expected.head || branch !== expected.branch) return undefined
-    if (!await sameCheckout(threadDir, record.worktreePath, checkout.identity)) return undefined
+    if (!await sameCheckout(threadDir, record.worktreePath, checkout.identity, latest ? undefined : baseline)) return undefined
     // A Mousse operation waiting for recovery stops the turn before its message is accepted, as the start check would.
     new ChangeReceiptService(threadDir).assertNoPendingOperation()
     return baseline
@@ -14541,7 +14541,7 @@ export class OrchestratorService extends EventEmitter {
           recordedStartCheck = recorded.startCheck
           // The files were read with Git in this checkout: it is the one the next start compares against (`ownWorktreeStart`).
           const ready = session.workspace
-          if (ready?.lifecycle === 'ready' && ready.placement !== 'project-folder' && ready.workspacePath) await recordCheckoutIdentity(directory, ready.workspacePath)
+          if (recorded.startCheck && ready?.lifecycle === 'ready' && ready.placement !== 'project-folder' && ready.workspacePath) await recordCheckoutIdentity(directory, ready.workspacePath)
         } catch (error) {
           // A worktree folder given a new repository (Initialize Git) has no commit to snapshot yet: the turn runs with
           // its conversation recorded alone, and Undo says why. Anything else still fails the turn.

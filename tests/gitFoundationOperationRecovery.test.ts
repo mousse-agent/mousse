@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { build } from 'esbuild'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
@@ -85,7 +85,7 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
 }, 30_000)
 
-it.each(['before', 'after'])('a checkpoint in a thread worktree that stops %s its journal write recovers, with the pin, the record and Undo agreeing', async (phase) => {
+it.each(['before-capture-journal', 'before', 'after'])('a checkpoint in a thread worktree interrupted at %s recovers, with the pin, the record and Undo agreeing', async (phase) => {
   // The receipt's refs and the worktree's pin of its newest snapshot go in one `update-ref --stdin`; the worktree's own
   // record (`workspace.json`) is written only after the journal. A stop between the two must still recover.
   writeFileSync(join(f.thread, 'meta.json'), JSON.stringify({ id: 'task' }))
@@ -96,8 +96,20 @@ it.each(['before', 'after'])('a checkpoint in a thread worktree that stops %s it
   await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
   const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 60_000 })
   expect(child.status, child.stderr).toBe(86)
+  const top = workspace.worktreePath
+  const captured = JSON.parse(readFileSync(resolve(top, git(top, 'rev-parse', '--git-path', 'mousse'), 'snapshot-last.json'), 'utf8')).sha
+  const pinnedCaptures = () => git(top, 'for-each-ref', '--format=%(*objectname)', 'refs/mousse/checkpoints/')
+  expect(pinnedCaptures()).toBe(captured)
+  const head = git(top, 'rev-parse', 'HEAD')
+  const index = git(top, 'ls-files', '-s')
+  const later = join(top, 'later.txt')
+  writeFileSync(later, 'saved after the crash\n')
   await new ThreadActionService(f.thread).recoverPending(workspace.worktreePath)
   const latest = new ThreadActionService(f.thread).latest('main')!
+  expect(latest.endSha).toBe(captured)
+  expect(pinnedCaptures()).toBe('')
+  expect(latest.changedPaths.map((change) => change.path)).toEqual(['value.txt'])
+  expect(readFileSync(later, 'utf8')).toBe('saved after the crash\n')
   expect(new ChangeReceiptService(f.thread).list().filter((receipt) => receipt.kind === 'checkpoint')).toHaveLength(1)
   expect([...new ThreadJournal(f.thread).latestByOperation().values()].filter((entry) => ['prepared', 'git_applied', 'running', 'recovery_required'].includes(entry.state))).toEqual([])
   const record = new ThreadWorkspaceManager(f.thread).load()!
@@ -108,4 +120,7 @@ it.each(['before', 'after'])('a checkpoint in a thread worktree that stops %s it
   expect(f.read(workspace.worktreePath)).toBe('checkpoint result\n')
   await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', workspace.worktreePath))
   expect(f.read(workspace.worktreePath)).toBe('base\n')
+  expect(readFileSync(later, 'utf8')).toBe('saved after the crash\n')
+  expect(git(top, 'rev-parse', 'HEAD')).toBe(head)
+  expect(git(top, 'ls-files', '-s')).toBe(index)
 }, 120_000)

@@ -10,6 +10,7 @@ import { pressed } from '../support/userRequest'
 const config = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 const append = ThreadJournal.prototype.append
 ThreadJournal.prototype.append = function (record) {
+  if (config.phase === 'before-capture-journal' && record.operationType === 'action-checkpoint' && record.state === 'git_applied') process.exit(86)
   const target = record.operationType === `change-${config.kind === 'nested-checkpoint' ? 'checkpoint' : config.kind}` && record.state === 'git_applied'
   if (target && config.phase === 'before') process.exit(86)
   const result = append.call(this, record)
