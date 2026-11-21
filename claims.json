@@ -137,7 +137,7 @@
         "tests/claudeLiveSessions.test.ts"
       ],
       "claimedAt": "2026-11-21T10:20:49.161Z",
-      "expiresAt": "2026-11-21T16:20:26.847Z"
+      "expiresAt": "2026-11-21T17:14:16.556Z"
     },
     {
       "task": "receipt-release-outside-lease",
