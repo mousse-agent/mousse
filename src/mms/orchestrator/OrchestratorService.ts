@@ -10737,16 +10737,17 @@ export class OrchestratorService extends EventEmitter {
   private withQueueWait(threadId: string, items: QueuedMessage[]): QueuedMessage[] {
     const session = this.loadedSession(threadId)
     const wait = this.queueWaitOf(session)
-    // Steered while the turn was set up: it joins that turn as it runs ("Sends next"). One whose turn ended first is an
-    // ordinary queued message again, and says so.
+    // A Steer targeting this turn shows "Sends next" even before the turn lifts the Stop hold. One whose turn ended
+    // first is an ordinary queued message again, and says so.
     const startingRunId = session && !session.activeTurn && session.turnAdmitted && !session.abortRequested && !session.stopping
       ? session.admissionRunId ?? this.turnStates.get(threadId)?.turnId
       : undefined
+    const targetRunId = session?.takesSteer() && !session.stopping ? session.activeTurn?.runId : startingRunId
     return items.map((item) => {
       const pending = item.state === 'pending'
-      const next = pending && !item.heldAfterStop && (item.steerOnStart
-        ? Boolean(startingRunId && item.steerOnStart.runId === startingRunId)
-        : Boolean(session?.steerOnStart.includes(item.id)))
+      const next = pending && (item.steerOnStart
+        ? item.steerOnStart.runId === targetRunId
+        : !item.heldAfterStop && Boolean(session?.steerOnStart.includes(item.id)))
       const sendsNext = next ? true : undefined
       const steerMissed = pending && !next && item.steerOnStart ? true : undefined
       const waitsFor = pending && item.intent === 'normal' && !item.heldAfterStop && !next ? wait : undefined

@@ -795,12 +795,12 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       }
     })
 
-    it('replays an admitted GUI Steer after Stop before the first prompt is saved', async () => {
+    it.each(['explicit', 'inferred'] as const)('replays an admitted GUI Steer with an %s target after Stop before the first prompt is saved', async (target) => {
       const w = world(false, true)
       const { first, runId, release } = await settingUp(w, 'first', () => fromWindow(w, {
         content: 'first', clientRequestId: 'first', expect: { permissionMode: w.d.settings.permissions.defaultMode }
       }))
-      const request = { content: 'S', clientRequestId: 'steer-s', steer: true, steerRunId: runId }
+      const request = { content: 'S', clientRequestId: 'steer-s', steer: true, ...(target === 'explicit' ? { steerRunId: runId } : {}) }
       let admitted: Awaited<ReturnType<typeof fromWindow>>
       try {
         admitted = await fromWindow(w, request)
@@ -843,6 +843,10 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       try {
         expect(w.d.orch.promoteQueueItem(w.thread.id, a.id)).toEqual({ ok: true })
         expect(w.d.orch.promoteQueueItem(w.thread.id, b.id)).toEqual({ ok: true })
+        expect(w.d.orch.queueSnapshot(w.thread.id).items.map((item) => [item.content, item.heldAfterStop, item.sendsNext, item.steerMissed])).toEqual([
+          ['A', true, true, undefined],
+          ['B', true, true, undefined]
+        ])
         next.release()
         await waitFor(() => w.adapter.steers.length > 0, 'both held messages reached the provider')
         expect(w.adapter.steers).toEqual(['A' + NL + 'B'])

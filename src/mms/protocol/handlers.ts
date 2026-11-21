@@ -2676,7 +2676,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
       // A person's Steer (a window here, or the CLI): it joins the busy thread's turn instead of waiting for it.
       const steer = asOptionalBoolean(p.steer, 'steer') === true && (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli')
-      const steerRunId = steer ? asOptionalString(p.steerRunId, 256) : undefined
+      let steerRunId = steer ? asOptionalString(p.steerRunId, 256) : undefined
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
@@ -2717,9 +2717,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           : ctx.connection?.clientType === 'bridge' ? routedWindow : undefined
         // A Stop before the first prompt leaves binding pending. A matching Steer receipt can still replay through
         // the engine, which checks the prompt against the receipt before answering.
-        const receipt = window && steerRunId && clientRequestId ? ctx.mms.runEngine.store.getReceipt(clientRequestId) : undefined
-        const replaysSteer = receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted' &&
-          (receipt.result as { steerRunId?: string } | null)?.steerRunId === steerRunId
+        const receipt = window && steer && clientRequestId ? ctx.mms.runEngine.store.getReceipt(clientRequestId) : undefined
+        const receiptRunId = receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted'
+          ? (receipt.result as { steerRunId?: string } | null)?.steerRunId
+          : undefined
+        const replaysSteer = receiptRunId && (steerRunId === undefined || receiptRunId === steerRunId)
+        if (replaysSteer) steerRunId = receiptRunId
         if (!replaysSteer && window === 'binds')
           throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
         if (!replaysSteer && window === 'older')
