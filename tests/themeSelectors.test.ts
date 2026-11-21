@@ -106,7 +106,6 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
   'src/renderer/components/OrchestratorChat.tsx': 'the handler, no control',
   'src/renderer/components/sideChats/SideChatsPanel.tsx': 'a side chat\'s handler, no control; the menu is ComposerPermissionPicker',
   'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, guarded with the page',
-  'src/renderer/components/NetDevicesSection.tsx': 'Settings → Devices, guarded with the page; names a device’s highest mode, no control',
   'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, guarded with it',
   'src/renderer/components/automations/inbox/EditDetailsPane.tsx': 'only on the Automations page, guarded with it'
 }

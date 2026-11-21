@@ -11,6 +11,7 @@ import { samePath } from '../lifecycle/verifiedDelete'
 import { agentWorktreeBases, chosenFolderPlace, defaultAgentWorktreeBase, isAgentWorktreePlace, placeAgentWorktreeBase } from './worktreeLayout'
 import { cleanupRecordFor, DELETING_NAME, findCleanupRecord, resumeCleanupAsync, verifiedCleanupAsync } from './verifiedCleanup'
 import { gitEnvFor, simpleGitWithProgram } from '../git/gitExecutable'
+import { addWorktree, worktreeCheckoutPlan } from './worktreeCheckout'
 
 
 /** `existsSync` without blocking the daemon. */
@@ -180,8 +181,10 @@ export class WorktreeManager {
         ? await safeWorktreeGit(repository.root)
         : { git: repository.git, safety: [] }
       baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
+      // The plan's pattern file is read before anything is made (`worktreeCheckout.ts`); a missing one refuses the worktree.
+      const plan = await worktreeCheckoutPlan(repository.root)
       beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
-      await checkoutGit.raw([...safety, 'worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await addWorktree({ cwd: repository.root, worktreePath: identity.path, add: ['-b', identity.branch, identity.path, baseSha], plan, prefix: safety })
       await checkoutGit.raw([...safety, 'update-ref', '--no-deref', `refs/mousse/agents/${agentId}/base`, baseSha])
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)

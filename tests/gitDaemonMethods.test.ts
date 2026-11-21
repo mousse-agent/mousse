@@ -37,6 +37,9 @@ describe('requestTimeoutFor', () => {
     expect(requestTimeoutFor('mcp.authenticate')).toBe(MMS_PROTOCOL_LOGIN_TIMEOUT_MS)
     // Provider sign-ins return an operation id at once (`providers.instances.signIn`).
     expect(requestTimeoutFor('providers.instances.signIn')).toBe(MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
+    // A pairing join waits for a person (the other computer's Yes, or a typed code) past the default.
+    for (const method of ['netEngine.join', 'netEngine.retry'])
+      expect(requestTimeoutFor(method), method).toBeGreaterThan(10 * 60_000)
   })
 })
 

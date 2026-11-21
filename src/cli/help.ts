@@ -1,5 +1,6 @@
 import { RELAY_HELP } from './commands/relay'
 import { NET_HELP, BRIDGE_HELP } from './commands/net'
+import { NET_ENGINE_HELP } from './commands/netEngine'
 import { BRIDGE_HUB_HELP } from './commands/bridge'
 import { SPACES_HELP } from './commands/spaces'
 import { BOTS_HELP } from './commands/bots'
@@ -25,6 +26,7 @@ Usage:
   mousse-cli diagnostics memory [report]     The service's memory log, and a prefilled issue
   mousse-cli relay serve                    Run a self-hosted relay in the foreground
   mousse-cli net <subcommand>               Network identity, transports and recovery
+  mousse-cli net-engine <subcommand>        Devices, pairing and routes of the new networking
   mousse-cli bridge <subcommand>            Link and control my devices
   mousse-cli spaces <subcommand>            Shared channels, membership and durable posts
   mousse-cli bots <subcommand>              Owner-local bot configuration and controls
@@ -277,6 +279,8 @@ export function commandHelp(command: string): string | null {
       return RELAY_HELP
     case 'net':
       return NET_HELP
+    case 'net-engine':
+      return NET_ENGINE_HELP
     case 'bridge':
       return BRIDGE_HELP + '\n' + BRIDGE_HUB_HELP
     case 'spaces':

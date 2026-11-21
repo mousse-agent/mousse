@@ -3173,7 +3173,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         inbox: engine.inbox,
         store: engine.store,
         thread: (id: string) => ctx.mms.threads.getThread(id),
-        hasPendingQuestion: (id: string) => ctx.mms.questions.listPendingForThread(id).length > 0
+        hasPendingQuestion: (id: string) => ctx.mms.questions.listPendingForThread(id).length > 0,
+        // A remote subagent's computer, and what it does there: a question waiting there reads as needing input, not queued.
+        remote: (id: string) => ctx.mms.orchestrator.remoteSubagentOverlay(id)
       }
       // Subagents whose thread is gone come apart from `subagents`, so a client that does not know them lists only
       // live ones; the transcript still draws their cards from them.

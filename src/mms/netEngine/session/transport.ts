@@ -8,7 +8,9 @@ export const ENGINE_LABELS = [
   'mousse.rpc',
   'mousse.sub',
   'mousse.blob',
-  'mousse.put'
+  'mousse.put',
+  // Phase 1b: one editor tunnel per stream, opened by the caller (§9.2).
+  'mousse.tunnel'
 ] as const
 export type EngineLabel = (typeof ENGINE_LABELS)[number]
 
@@ -37,6 +39,17 @@ export interface EngineStream {
  * One connection with one pairing. Inbound connections carry its calls to this computer (serving); outbound ones
  * carry this computer's calls to it (client). `peer` is this computer's local id for the pairing.
  */
+/**
+ * A connection's route (Phase 1b §7): its pipe kind and the class of the address it reached. A relay connection
+ * (Phase 3) has kind `relay`, class `relay` or `relay_bulk`, and the relay's `relay://host:port`.
+ */
+export interface EngineRoute {
+  kind: 'tcp' | 'ws' | 'ssh' | 'relay'
+  class: 'lan' | 'tailnet' | 'public' | 'tunnel' | 'ssh' | 'relay' | 'relay_bulk'
+  /** A relay connection's destination, `relay://host:port`. */
+  destination?: string
+}
+
 export interface EngineConnection {
   readonly id: string
   readonly peer: NodeId
@@ -45,6 +58,14 @@ export interface EngineConnection {
   readonly grant?: string
   /** On an inbound connection, the endpoint of the caller. */
   readonly endpoint?: string
+  /** The route the connection runs over (protocol 1.1 `conn.up.route`), when the helper said. */
+  readonly route?: EngineRoute
+  /**
+   * The other way of a connection that carries calls both ways (wire minor 3): `outbound`, this computer's calls on
+   * a connection the other computer dialled; `inbound`, its calls on one this computer dialled. The helper's path
+   * is the dialler's, so the path switch never names it.
+   */
+  readonly reversed?: boolean
   /** Opens a stream; `method` names the call a `mousse.rpc` stream carries, which decides its class. */
   open(label: EngineLabel, method?: string): EngineStream
   onStream(listener: (stream: EngineStream) => void): void
