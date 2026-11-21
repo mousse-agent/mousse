@@ -7,6 +7,7 @@ import { IMAGE_MAX_DATA_CHARS, MESSAGE_IMAGES_MAX_DATA_CHARS, MESSAGE_MAX_IMAGES
  */
 
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
+import type { Thread, ThreadListVersion } from '../../shared/types'
 
 export const MMS_PROTOCOL_CHUNK_CAPABILITY = 'envelope-chunks.v1'
 /**
@@ -172,6 +173,23 @@ export const GIT_OPERATIONS_CAPABILITY = 'git.operations.v1'
  * window's as one it cannot make ("update Mousse").
  */
 export const FIRST_SEND_BINDING_CAPABILITY = 'threads.firstSendBinding.v1'
+
+/**
+ * Asked for by a window that applies `threads.row`: a change to one thread is sent as that thread's row (or its
+ * removal), with the list version it belongs to, instead of the whole list. A session without it is sent the whole
+ * list (`threads.updated`) for every such change, as before.
+ */
+export const THREAD_ROWS_CAPABILITY = 'threads.rows.v1'
+
+/**
+ * `threads.row`'s data: the changed thread's row as the list has it now, or `removed` when it left the list (or became
+ * a personal bot's), and the version of the list snapshot it was read from (`ThreadListVersion`).
+ */
+export interface ThreadRowEventData {
+  thread?: Thread
+  removed?: string
+  version: ThreadListVersion
+}
 
 /** One authenticated socket's live display lane. Never sequenced or replayed. */
 export interface ProtocolConnectionEvent {
@@ -587,6 +605,7 @@ export type ProtocolEventType =
   | 'run.interrupted-on-boot'
   | 'projects.updated'
   | 'threads.updated'
+  | 'threads.row'
   | 'threads.touched'
   | 'pullRequests.updated'
   | 'git.selectionChanged'

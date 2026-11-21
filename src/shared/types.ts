@@ -1605,6 +1605,25 @@ export function isOlderThreadList(next: ThreadListVersion | undefined, held: Thr
   return next.epoch === held.epoch && next.seq < held.seq
 }
 
+/** One thread's change as windows are sent it (`threads.row`): its row, or the id of a thread that left the list. */
+export interface ThreadRowPayload {
+  thread?: Thread
+  removed?: string
+  version: ThreadListVersion
+}
+
+/**
+ * What a window does with a row of list version `row` while it holds a list of version `held`: `apply` it to that
+ * list; `drop` it, since the list already has it (taken at or after the row); or `refresh`, reading the whole list
+ * again, when there is no versioned list to put it in or it comes from another store (a restarted service).
+ */
+export function threadRowAction(row: ThreadListVersion, held: ThreadListVersion | undefined): 'apply' | 'drop' | 'refresh' {
+  if (!held) return 'refresh'
+  if (isOlderThreadList(row, held)) return 'drop'
+  if (row.epoch !== held.epoch) return 'refresh'
+  return row.seq <= held.seq ? 'drop' : 'apply'
+}
+
 export interface Thread {
   id: string
   name: string

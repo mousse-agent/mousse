@@ -14,6 +14,7 @@ import type {
   Task,
   Thread,
   ThreadActivitySnapshot,
+  ThreadRowPayload,
   TurnState,
   TurnStateSnapshot,
   BrowserElementAttachment,
@@ -209,6 +210,22 @@ export function withNewerTimes(incoming: Thread[], held: readonly Thread[]): Thr
     out[index] = { ...entry, updatedAt: heldAt }
   })
   return out ?? incoming
+}
+
+/**
+ * The list with one thread's row put in (`threads.row`): replacing the row of the same id, or added; or without the
+ * thread when it left the list. The sidebar sorts rows itself, so where a new row goes does not matter.
+ */
+export function withThreadRow(threads: readonly Thread[], row: Pick<ThreadRowPayload, 'thread' | 'removed'>): Thread[] {
+  if (row.thread) {
+    const thread = row.thread
+    const index = threads.findIndex((entry) => entry.id === thread.id)
+    if (index < 0) return [...threads, thread]
+    const next = threads.slice()
+    next[index] = thread
+    return next
+  }
+  return row.removed ? threads.filter((entry) => entry.id !== row.removed) : threads.slice()
 }
 
 /** Whether two rows count the same pull requests, each in the same state. */
