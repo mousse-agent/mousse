@@ -1,5 +1,6 @@
 import { lstat, readFile, stat } from 'node:fs/promises'
-import { dirname, join, resolve, sep } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
+import { physicalPath } from './gitDirFiles'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { runGitProcess } from './runGitProcess'
 import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
@@ -15,6 +16,9 @@ import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
  * (`ref: refs/heads/<name>`) or a commit (detached). Layouts the reader does not know are left to Git: a `.git` that is
  * a link or names a missing folder, a `HEAD` naming anything else (a reftable repository's placeholder, for one), or a
  * folder inside a Git folder. Those answer `undefined`, and the caller asks Git.
+ *
+ * The walk starts from the folder's physical path: a link or junction into a repository's subfolder is in that
+ * repository, as Git finds it.
  */
 export type FolderHead =
   | { repo: false }
@@ -67,7 +71,10 @@ async function findLayout(folder: string): Promise<Layout | false | undefined> {
         if (!named) return undefined
         gitDir = resolve(dir, named[1]!)
       }
-      const common = await readFile(join(gitDir, 'commondir'), 'utf8').then((text) => text.trim(), () => '')
+      const common = await readFile(join(gitDir, 'commondir'), 'utf8').then((text) => text.trim(), (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return ''
+        throw error
+      })
       return { top: dir, gitDir, commonDir: common ? resolve(gitDir, common) : gitDir }
     }
     const parent = dirname(dir)
@@ -99,7 +106,7 @@ export let headFileReads = 0
  * A `HEAD` read before is read again only when its signature changed. A folder that cannot be read throws.
  */
 export async function readFolderHead(folder: string): Promise<FolderHead | undefined> {
-  const key = resolve(folder)
+  const key = await physicalPath(folder)
   const layout = await findLayout(key)
   if (layout === false) return { repo: false }
   if (!layout) return undefined
@@ -133,9 +140,18 @@ export function clearFolderHeadCache(): void {
  * Whether `folder` is in a repository and the branch it is on: from Git's files, or for a layout they cannot tell, from
  * one `git symbolic-ref`. A folder Git says is not in a repository answers `repo: false`; any other failure throws.
  */
-export async function folderBranch(folder: string): Promise<{ repo: boolean; branch: string | null; detachedAt?: string }> {
+export async function folderBranch(folder: string, options: { requireRoot?: boolean } = {}): Promise<{ repo: boolean; branch: string | null; detachedAt?: string }> {
   const head = await readFolderHead(folder)
-  if (head) return !head.repo ? { repo: false, branch: null } : head.commit ? { repo: true, branch: null, detachedAt: head.commit.slice(0, 7) } : { repo: true, branch: head.branch }
+  if (head) {
+    if (!head.repo || (options.requireRoot && relative(head.top, await physicalPath(folder)) !== '')) return { repo: false, branch: null }
+    return head.commit ? { repo: true, branch: null, detachedAt: head.commit.slice(0, 7) } : { repo: true, branch: head.branch }
+  }
+  if (options.requireRoot) {
+    const argv = await withoutRepoProgramsAsync(folder, ['rev-parse', '--show-toplevel'])
+    const top = await runGitProcess(argv, { cwd: folder, env: repoProgramEnv() })
+    if (top.error) throw top.error
+    if (top.status !== 0 || relative(await physicalPath(top.stdout.trim()), await physicalPath(folder)) !== '') return { repo: false, branch: null }
+  }
   const argv = await withoutRepoProgramsAsync(folder, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
   const ran = await runGitProcess(argv, { cwd: folder, env: repoProgramEnv() })
   if (ran.error) throw ran.error
@@ -150,15 +166,4 @@ export async function folderBranch(folder: string): Promise<{ repo: boolean; bra
 export async function inProgressMarkers(gitDir: string): Promise<Set<(typeof IN_PROGRESS_GIT_MARKERS)[number]>> {
   const found = await Promise.all(IN_PROGRESS_GIT_MARKERS.map((marker) => lstat(join(gitDir, marker)).then(() => marker, () => null)))
   return new Set(found.filter((marker) => marker !== null))
-}
-
-/**
- * Whether the repository's own config names a remote, or undefined when the config includes other files (or a worktree
- * has its own config): Git is asked then.
- */
-export async function configNamesRemote(commonDir: string, gitDir: string): Promise<boolean | undefined> {
-  const text = await readFile(join(commonDir, 'config'), 'utf8').catch(() => undefined)
-  if (text === undefined || /^\s*\[\s*include/im.test(text)) return undefined
-  if (gitDir !== commonDir && await lstat(join(gitDir, 'config.worktree')).then(() => true, () => false)) return undefined
-  return /^\s*\[\s*remote\s+"/im.test(text)
 }

@@ -8,7 +8,7 @@
  */
 import * as childProcess from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
@@ -61,6 +61,11 @@ const STATES: Array<[string, (cwd: string) => string | undefined | void]> = [
     try { git(cwd, 'merge', 'other') } catch { /* stops on the conflict */ }
   }],
   ['detached', (cwd) => git(cwd, 'checkout', '-q', '--detach')],
+  ['remote in Git’s dotted config syntax', (cwd) => {
+    const file = join(cwd, '.git', 'config')
+    appendFileSync(file, '\n[remote.origin]\n\turl = ../origin.git\n')
+    expect(git(cwd, 'remote')).toBe('origin')
+  }],
   ['ahead of and behind its upstream', (cwd) => {
     const remote = join(root, 'remote.git')
     execFileSync('git', ['init', '-q', '-b', 'main', '--bare', remote])
@@ -131,4 +136,14 @@ it('callers asking together share one read', async () => {
   // A read after they answered is a new read.
   writeFileSync(join(cwd, 'a.txt'), 'after\n')
   expect((await service.getStatus(cwd)).changes).toHaveLength(1)
+})
+
+it('uses Git’s checkout location when core.worktree points outside the .git parent', async () => {
+  const parent = repository()
+  const checkout = join(root, 'separate-worktree')
+  mkdirSync(checkout)
+  git(parent, 'config', 'core.worktree', checkout.replace(/\\/g, '/'))
+  expect(git(parent, 'rev-parse', '--is-inside-work-tree')).toBe('false')
+  const service = new GitService()
+  expect(await service.getStatus(parent)).toMatchObject({ isRepo: false })
 })

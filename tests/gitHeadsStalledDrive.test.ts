@@ -13,17 +13,29 @@ vi.mock('../src/mms/files/folderAccess', () => ({
   }
 }))
 
-const { folderHead, HEAD_ANSWER_MS } = await import('../src/mms/workspace/threadHeads')
+let api: typeof import('../src/mms/workspace/threadHeads')
 
-beforeEach(() => {
+beforeEach(async () => {
+  vi.resetModules()
+  api = await import('../src/mms/workspace/threadHeads')
   vi.useFakeTimers()
   waits.started = 0
   waits.hang = true
 })
 afterEach(() => vi.useRealTimers())
 
+it('bounds a thread lookup before it reaches the worktree', async () => {
+  const { threadHead, HEAD_ANSWER_MS } = api
+  const answer = threadHead('R:/profile', () => new Promise(() => undefined))
+  await vi.advanceTimersByTimeAsync(HEAD_ANSWER_MS)
+  expect(await answer).toMatchObject({ error: expect.stringMatching(/not answering/) })
+  expect(waits.started).toBe(0)
+  expect(await threadHead('R:/profile', async () => undefined, true)).toEqual({ error: 'Thread not found' })
+})
+
 it('answers every folder on a stalled drive within the bound, with two reads on the drive at most', async () => {
-  const folders = Array.from({ length: 50 }, (_, index) => `Q:\stalled\repo-${index}`)
+  const { folderHead, HEAD_ANSWER_MS } = api
+  const folders = Array.from({ length: 50 }, (_, index) => `Q:/stalled/repo-${index}`)
   const answers = Promise.all(folders.map((folder) => folderHead(folder)))
   await vi.advanceTimersByTimeAsync(0)
   expect(waits.started).toBe(2)
@@ -34,7 +46,7 @@ it('answers every folder on a stalled drive within the bound, with two reads on 
   expect(waits.started).toBe(2)
 
   // Asked again while the drive is still stalled: answered at once, and nothing more waits on it.
-  const again = folderHead('Q:\stalled\repo-0')
+  const again = folderHead('Q:/stalled/repo-0')
   await vi.advanceTimersByTimeAsync(0)
   expect(await again).toMatchObject({ error: expect.stringMatching(/not answering/) })
   expect(waits.started).toBe(2)

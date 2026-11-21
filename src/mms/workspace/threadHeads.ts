@@ -1,8 +1,8 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { join, parse, resolve } from 'node:path'
 import type { GitFolderHead, GitThreadHead } from '../../shared/types'
 import { waitForFolderAccess } from '../files/folderAccess'
-import { folderBranch, readFolderHead } from '../git/gitHead'
+import { folderBranch } from '../git/gitHead'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 
 /**
@@ -48,13 +48,13 @@ const notAnswering = (path: string): string => `The drive at ${parse(resolve(pat
  * Runs `work`, which reads files on `path`'s drive, at most {@link PER_DRIVE} at a time per drive, and answers
  * `stalled` when it has not finished within {@link HEAD_ANSWER_MS} or the drive did not answer a moment ago.
  */
-async function onDrive<T>(path: string, work: () => Promise<T>, stalled: (reason: string) => T): Promise<T> {
+async function onDrive<T>(path: string, work: () => Promise<T>, stalled: (reason: string) => T, deadline = Date.now() + HEAD_ANSWER_MS, fresh = false): Promise<T> {
   const key = driveOf(path)
   let drive = drives.get(key)
   if (!drive) drives.set(key, drive = { running: 0, queue: [], stalledUntil: 0 })
   const d = drive
-  // A drive that did not answer a moment ago is not asked again yet, nor waited for.
-  if (Date.now() < d.stalledUntil) return stalled(notAnswering(path))
+  // A retry can use a free slot even if another read on this drive stalled.
+  if (Date.now() >= deadline || (!fresh && Date.now() < d.stalledUntil)) return stalled(notAnswering(path))
   const release = () => {
     d.running--
     d.queue.shift()?.()
@@ -71,13 +71,13 @@ async function onDrive<T>(path: string, work: () => Promise<T>, stalled: (reason
     else d.queue.push(go)
   })
   let timer: ReturnType<typeof setTimeout> | undefined
-  const late = new Promise<'late'>((done) => { timer = setTimeout(() => done('late'), HEAD_ANSWER_MS) })
+  const late = new Promise<'late'>((done) => { timer = setTimeout(() => done('late'), Math.max(0, deadline - Date.now())) })
   try {
     if (await Promise.race([turn.then(() => 'turn' as const), late]) === 'late') {
       gaveUp = true
       return stalled(notAnswering(path))
     }
-    if (Date.now() < d.stalledUntil) {
+    if (!fresh && Date.now() < d.stalledUntil) {
       release()
       return stalled(notAnswering(path))
     }
@@ -102,58 +102,74 @@ export async function folderHead(path: string): Promise<GitFolderHead> {
   }, (reason) => ({ error: reason }))
 }
 
-/** The thread's workspace record, read without blocking; undefined when it has none or it cannot be read. */
-async function readRecord(threadDirectory: string): Promise<ThreadWorkspaceMetadata | undefined> {
-  // The project folder's record wins, as `ThreadWorkspaceManager.workspacePath` has it.
+const missingFile = (error: NodeJS.ErrnoException): undefined => {
+  if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+  throw error
+}
+
+/** The project-folder record takes precedence, as in `ThreadWorkspaceManager.workspacePath`. */
+export async function readWorkspaceRecord(threadDirectory: string): Promise<ThreadWorkspaceMetadata | undefined> {
   for (const name of ['project-folder.json', 'workspace.json']) {
-    const text = await readFile(join(threadDirectory, name), 'utf8').catch(() => undefined)
+    const text = await readFile(join(threadDirectory, name), 'utf8').catch(missingFile)
     if (text === undefined) continue
-    try {
-      const value = JSON.parse(text) as ThreadWorkspaceMetadata
-      return value && typeof value.worktreePath === 'string' ? value : undefined
-    } catch {
-      return undefined
-    }
+    const record = JSON.parse(text) as ThreadWorkspaceMetadata
+    if (!record || typeof record.worktreePath !== 'string') throw new Error('The thread’s workspace record is unreadable.')
+    return record
   }
   return undefined
 }
 
-const sameFolder = (a: string, b: string): boolean =>
-  process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+async function readPlacement(threadDirectory: string): Promise<'worktree' | 'project-folder'> {
+  const text = await readFile(join(threadDirectory, 'meta.json'), 'utf8').catch(missingFile)
+  return text !== undefined && (JSON.parse(text) as { worktreeEnabled?: unknown }).worktreeEnabled === false ? 'project-folder' : 'worktree'
+}
+
+const WORKTREE_NOT_A_CHECKOUT = 'The worktree folder is not a Git checkout.'
+
+type ThreadLocation = { directory: string; placement?: 'worktree' | 'project-folder' }
 
 /**
- * What a thread's card names: its project's branch (`project`) when it works in its project's folder; else its own
- * worktree's branch, with the folder it works in when the worktree is on disk and ready. A worktree thread names no
- * branch until Mousse records its worktree (`unprovisioned`), then the branch it records for it while it is made.
- * Reads files only: it never sets a worktree up or brings one back.
+ * Looks up the thread, reads its workspace record, then reads its actual branch. The same deadline covers all three
+ * phases, with each occupying a slot on its own drive. No reads create, register, or restore a worktree.
  */
-export async function threadHead(threadDirectory: string, placement: 'worktree' | 'project-folder' = 'worktree'): Promise<GitThreadHead> {
-  const record = await readRecord(threadDirectory)
-  if (record?.kind === 'project-folder' || (!record && placement === 'project-folder')) return { project: true }
-  // A thread that gets its own worktree, before it is made: no branch of its own yet, and never its project's.
-  if (!record) return { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' }
-  const recorded = { own: true as const, branch: record.branch || null, generation: record.generation ?? 0, lifecycle: record.lifecycle }
-  if (record.lifecycle !== 'ready') return recorded
-  // A drive that does not answer: the branch Mousse recorded, and no folder to work in for now.
-  return onDrive(record.worktreePath, async (): Promise<GitThreadHead> => {
-    try {
+export async function threadHead(profileHome: string, locate: () => Promise<ThreadLocation | undefined>, fresh = false): Promise<GitThreadHead> {
+  const deadline = Date.now() + HEAD_ANSWER_MS
+  const error = (reason: string) => ({ error: reason })
+  try {
+    const known = await onDrive<ThreadLocation | ReturnType<typeof error> | undefined>(profileHome, locate, error, deadline, fresh)
+    if (!known) return { error: 'Thread not found' }
+    if ('error' in known) return known
+
+    const state = await onDrive<{ record?: ThreadWorkspaceMetadata; project: boolean } | ReturnType<typeof error>>(known.directory, async () => {
+      const record = await readWorkspaceRecord(known.directory)
+      const project = record ? record.kind === 'project-folder' : (known.placement ?? await readPlacement(known.directory)) === 'project-folder'
+      return { record, project }
+    }, error, deadline, fresh)
+    if ('error' in state) return state
+    if (state.project) return { project: true }
+    const { record } = state
+    if (!record) return { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' }
+    const recorded = { own: true as const, branch: record.branch || null, generation: record.generation ?? 0, lifecycle: record.lifecycle }
+    if (record.lifecycle !== 'ready') return recorded
+
+    const unavailable = (reason: string) => ({ ...recorded, unavailable: reason })
+    return await onDrive<GitThreadHead>(record.worktreePath, async () => {
       try {
         await waitForFolderAccess([resolve(record.worktreePath)], { whenNotAnswering: 'fail' })
-      } catch (error) {
-        return { ...recorded, unavailable: errorText(error) }
+        const info = await stat(record.worktreePath).catch(missingFile)
+        if (!info) return { ...recorded, missing: true }
+        if (!info.isDirectory()) return unavailable(WORKTREE_NOT_A_CHECKOUT)
+
+        const checked = await folderBranch(record.worktreePath, { requireRoot: true })
+        if (!checked.repo) return unavailable(WORKTREE_NOT_A_CHECKOUT)
+        const sub = record.projectRelativeSubdirectory
+        const folder = !sub || sub === '.' ? record.worktreePath : join(record.worktreePath, sub)
+        return { ...recorded, branch: checked.branch, ...(checked.detachedAt !== undefined ? { detachedAt: checked.detachedAt } : {}), folder }
+      } catch (failure) {
+        return unavailable(errorText(failure))
       }
-      const head = await readFolderHead(record.worktreePath)
-      // Not on disk (retired, or its `.git` gone, so a folder above answers): the branch Mousse made for it.
-      if (!head?.repo || !sameFolder(head.top, record.worktreePath)) return recorded
-      const sub = record.projectRelativeSubdirectory
-      return {
-        ...recorded,
-        branch: head.branch,
-        ...(head.commit ? { detachedAt: head.commit.slice(0, 7) } : {}),
-        folder: !sub || sub === '.' ? record.worktreePath : join(record.worktreePath, sub)
-      }
-    } catch {
-      return recorded
-    }
-  }, (reason) => ({ ...recorded, unavailable: reason }))
+    }, unavailable, deadline, fresh)
+  } catch (failure) {
+    return error(errorText(failure))
+  }
 }

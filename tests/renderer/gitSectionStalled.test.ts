@@ -14,7 +14,7 @@ import { GitSection } from '../../src/renderer/components/sideCard/GitSection'
 import { GIT_LOOKUP_BUDGET_MS } from '../../src/renderer/components/sideCard/useStillPending'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useGitStatusStore } from '../../src/renderer/stores/gitStatusStore'
-import type { GitHeadsResult, GitStatusSnapshot, GitThreadHead, Thread } from '../../src/shared/types'
+import type { GitHeadsChangedEvent, GitHeadsResult, GitScope, GitStatusSnapshot, GitThreadHead, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -28,7 +28,8 @@ const initialStore = useAppStore.getState()
 let host: HTMLDivElement
 let root: Root
 let heads: () => Promise<GitHeadsResult>
-let status: () => Promise<GitStatusSnapshot>
+let status: (scope: GitScope) => Promise<GitStatusSnapshot>
+let changed: ((event: GitHeadsChangedEvent) => void) | undefined
 const calls = { getFilesRoot: 0, getStatus: 0, status: 0 }
 
 const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms) }) }
@@ -47,7 +48,8 @@ beforeEach(() => {
     workspace: { getStatus: async () => { calls.getStatus++; return { retiredByCleanup: { at: '2026-11-20T10:00:00.000Z', rule: 'worktree-inactive' } } } },
     git: {
       heads: () => heads(),
-      status: () => { calls.status++; return status() },
+      status: (scope: GitScope) => { calls.status++; return status(scope) },
+      onHeadsChanged: (listener: typeof changed) => { changed = listener; return () => { changed = undefined } },
       log: async () => [],
       branches: async () => ({ current: repository.branch, branches: [repository.branch] }),
       diffStats: async () => ({ additions: 0, deletions: 0, filesChanged: 0 })
@@ -101,11 +103,36 @@ it.each<[string, () => void]>([
 })
 
 it('names a worktree a storage rule retired, with its note, and never brings it back', async () => {
-  heads = async () => ({ projects: {}, threads: { t1: { ...ready, folder: undefined } } })
+  heads = async () => ({ projects: {}, threads: { t1: { ...ready, folder: undefined, missing: true } } })
   await open()
   expect(host.textContent).toContain('Worktree not on disk')
   expect(retryButton()).toBeNull()
   expect(calls.getFilesRoot).toBe(0)
   expect(calls.status).toBe(0)
   expect(calls.getStatus).toBeGreaterThan(0)
+})
+
+it('a rebuild at the same path blanks the previous branch and displays status for the new generation', async () => {
+  await open()
+  expect(branchButton()?.textContent).toContain('mousse/fix-login')
+
+  let finish!: (value: GitStatusSnapshot) => void
+  status = (scope) => {
+    expect(scope).toMatchObject({ workspaceThreadId: 't1', workspaceGeneration: 1 })
+    return new Promise((resolve) => { finish = resolve })
+  }
+  heads = async () => ({ projects: {}, threads: { t1: { ...ready, generation: 1 } } })
+  act(() => changed?.({ threadIds: ['t1'] }))
+  await advance(100)
+  expect(host.textContent).not.toContain('mousse/fix-login')
+  await act(async () => finish({ ...repository, branch: 'mousse/rebuilt' }))
+  expect(branchButton()?.textContent).toContain('mousse/rebuilt')
+})
+
+it('shows a checkout that cannot be read as unavailable and offers Retry', async () => {
+  heads = async () => ({ projects: {}, threads: { t1: { ...ready, folder: undefined, unavailable: 'The worktree folder is not a Git checkout.' } } })
+  await open()
+  expect(host.textContent).toContain('The worktree folder is not a Git checkout.')
+  expect(host.textContent).not.toContain('Worktree not on disk')
+  expect(retryButton()).not.toBeNull()
 })

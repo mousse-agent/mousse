@@ -1,8 +1,8 @@
 import { promises as fsp } from 'node:fs'
 import type { ProfilePublicDto } from '../shared/profiles/types'
 import type { ProjectIconImage } from '../shared/projectIcon'
-import type { GitHeadsResult, ThreadActivitySnapshot, ThreadActivityState } from '../shared/types'
-import type { WarmStartAppInfo, WarmStartHeads, WarmStartView } from '../shared/warmStart'
+import type { ThreadActivitySnapshot, ThreadActivityState } from '../shared/types'
+import type { WarmStartAppInfo, WarmStartView } from '../shared/warmStart'
 
 /**
  * The warm start: what each profile's window last showed (its thread list, projects, the open thread and that thread's
@@ -42,11 +42,7 @@ interface ProfileEntry {
   activity?: ThreadActivitySnapshot
   projectIcons?: Record<string, ProjectIconImage | null>
   appInfo?: WarmStartAppInfo
-  heads?: WarmStartHeads
 }
-
-/** Branches kept per profile for thread cards, threads and projects together; the most recently read are kept. */
-const MAX_HEADS = 500
 
 interface WarmStartFile {
   version: number
@@ -172,8 +168,7 @@ export class WarmStartCache {
       messages: transcript as WarmStartView['messages'],
       ...(isRecord(entry.activity) ? { activity: entry.activity } : {}),
       ...(isRecord(entry.projectIcons) ? { projectIcons: entry.projectIcons } : {}),
-      ...(isRecord(entry.appInfo) ? { appInfo: entry.appInfo } : {}),
-      ...(isRecord(entry.heads) && isRecord(entry.heads.threads) && isRecord(entry.heads.projects) ? { heads: entry.heads } : {})
+      ...(isRecord(entry.appInfo) ? { appInfo: entry.appInfo } : {})
     }
   }
 
@@ -189,35 +184,6 @@ export class WarmStartCache {
     // The most recently read are kept.
     if (ids.length > MAX_ICONS) for (const id of ids.slice(0, ids.length - MAX_ICONS)) delete icons[id]
     entry.projectIcons = icons
-    this.schedule()
-  }
-
-  /**
-   * What `git.heads` answered a window bound to `profileId`: the branches its thread cards named. Failed reads are not
-   * kept (the card keeps what it named before), nor the folders a thread works in.
-   */
-  noteHeads(profileId: string | undefined, result: GitHeadsResult): void {
-    if (!profileId || this.forgotten.has(profileId) || !isRecord(result)) return
-    const entry = this.entry(profileId)
-    const threads = { ...entry.heads?.threads }
-    const projects = { ...entry.heads?.projects }
-    for (const [id, head] of Object.entries(result.threads ?? {})) {
-      if (!isRecord(head) || 'error' in head) continue
-      delete threads[id]
-      threads[id] = 'own' in head ? { own: true, branch: head.branch, generation: head.generation, lifecycle: head.lifecycle, ...(head.detachedAt !== undefined ? { detachedAt: head.detachedAt } : {}) } : { project: true }
-    }
-    for (const [id, head] of Object.entries(result.projects ?? {})) {
-      if (!isRecord(head) || 'error' in head) continue
-      delete projects[id]
-      projects[id] = head
-    }
-    const trim = (record: Record<string, unknown>, max: number) => {
-      const ids = Object.keys(record)
-      for (const id of ids.slice(0, Math.max(0, ids.length - max))) delete record[id]
-    }
-    trim(threads, MAX_HEADS)
-    trim(projects, MAX_HEADS)
-    entry.heads = { threads, projects }
     this.schedule()
   }
 

@@ -25,7 +25,7 @@ const HEADS: Record<string, GitThreadHead> = {
   a: own('a'),
   b: own('b'),
   folder: { project: true },
-  retired: { own: true, branch: 'mousse/retired', generation: 0, lifecycle: 'ready' }
+  retired: { own: true, branch: 'mousse/retired', generation: 0, lifecycle: 'ready', missing: true }
 }
 
 const initialStore = useAppStore.getState()

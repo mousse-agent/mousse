@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChevronDown,
   CircleCheck,
@@ -22,7 +22,7 @@ import { useRetiredWorktreeNote } from './useRetiredWorktreeNote'
 import { GIT_LOOKUP_BUDGET_MS, useStillPending } from './useStillPending'
 import { WORKTREE_NOT_ON_DISK } from '../../hooks/useActiveProjectPath'
 import { gitScopeFor } from '../../lib/activeProject'
-import type { GitInProgress, GitPullRequestLookup, GitPullStrategy, GitUpstreamCheck } from '../../../shared/types'
+import { WORKSPACE_CHANGED_MESSAGE, type GitInProgress, type GitPullRequestLookup, type GitPullStrategy, type GitUpstreamCheck } from '../../../shared/types'
 import { useGitActionRunner } from '../git/useGitActionRunner'
 import { BranchPicker } from './BranchPicker'
 import { NextStepButton, type NextStepChoice } from './NextStepButton'
@@ -490,7 +490,7 @@ function nothingShown(source: ActiveThreadPullRequest): ActiveThreadPullRequest 
   return {
     ...source,
     location: { ...source.location, path: null, key: null, loading: true, workspaceThreadId: null, workspaceGeneration: undefined, unavailable: undefined },
-    git: { status: null, commits: [], branches: null, diffStats: null, loading: true, loaded: false, error: null, refresh: source.git.refresh },
+    git: { status: null, commits: [], branches: null, diffStats: null, loading: true, loaded: false, error: null, refresh: source.git.refresh, retry: source.git.retry },
     path: null,
     ownThreadId: null,
     folderThreadId: null,
@@ -526,13 +526,18 @@ export function GitSection({ threadId }: SideCardSectionContext) {
     status: git.status
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
-  const retry = gitCanRetry(collapsedLabel)
+  const retry = gitCanRetry(collapsedLabel) || (location.unavailable && location.unavailable !== WORKTREE_NOT_ON_DISK)
     ? () => {
       setAttempt((count) => count + 1)
       location.retry?.()
-      void git.refresh()
+      void git.retry()
     }
     : undefined
+  // The service refused the read: the thread's worktree was rebuilt since it was looked up. Look it up again (the new
+  // generation is another folder key, so nothing of the old worktree shows for it).
+  const rebuilt = Boolean(git.error?.includes(WORKSPACE_CHANGED_MESSAGE))
+  const lookAgain = location.retry
+  useEffect(() => { if (rebuilt) lookAgain?.() }, [rebuilt, lookAgain])
   // Only for a worktree that is not on disk: the note's read is not on the way to the status.
   const retiredNote = useRetiredWorktreeNote(location.unavailable === WORKTREE_NOT_ON_DISK ? ownThreadId : null, !loading)
   const upstreamCheck = useUpstreamCheck(path, gitScopeFor({ projectId, workspaceThreadId: location.workspaceThreadId }), git.status?.tracking === 'tracked')

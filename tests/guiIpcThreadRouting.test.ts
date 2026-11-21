@@ -21,7 +21,9 @@ vi.mock('electron', () => ({
 
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../src/main/mms/PresentationState'
-import { MmsProtocolError } from '../src/mms/protocol/client'
+import { MmsProtocolError, type LocalMmsClient } from '../src/mms/protocol/client'
+import { GUI_REQUIRED_METHODS, connectGuiClient, daemonSupports } from '../src/main/mms/guiDaemonCompatibility'
+import { MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
 import { isQualifiedId, qualifyId } from '../src/shared/threadRef'
 
 const NODE = 'nod_0123456789abcdefghjkmnpqrs'
@@ -34,6 +36,9 @@ const request = vi.fn(async (method: string, params?: unknown): Promise<unknown>
   if (method === 'orchestrator.answerQuestions' || method === 'orchestrator.dismissQuestions') return { ok: true }
   if (method === 'pty.isAlive') return { alive: true }
   if (method === 'git.cancelOperation') return { cancelled: true }
+  if (method === 'files.root') return { root: '/remote/worktree' }
+  if (method === 'workspace.getStatus') return { metadata: { branch: 'recorded', lifecycle: 'ready' }, execution: { projectPath: '/remote/worktree', branch: 'live-branch', lifecycle: 'ready' } }
+  if (method === 'git.status') return { status: { isRepo: true, branch: 'project-main' } }
   return {}
 })
 const snapshotThread = vi.fn(async (threadId: string) => {
@@ -43,8 +48,10 @@ const snapshotThread = vi.fn(async (threadId: string) => {
 const presentation = new PresentationState()
 /** Services the handlers under test do not use: every method does nothing. */
 const inert = (base: object = {}): object => new Proxy(base, { get: (target, key) => key in target ? (target as Record<PropertyKey, unknown>)[key] : () => undefined })
+let legacyClient: LocalMmsClient | undefined
 const guiMms = {
   request,
+  supports: async (method: string) => legacyClient ? daemonSupports(legacyClient, method) : true,
   snapshotThread,
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => null,
@@ -64,7 +71,7 @@ beforeAll(() => {
   registerGuiIpc({ guiMms: inert(guiMms), presentation, settings: inert(), browserView: inert(), repoRoot: '' } as unknown as GuiIpcServices, () => null)
 })
 beforeEach(() => { calls.length = 0; windows.length = 0; presentation.setActiveThreadId(null) })
-afterEach(() => { vi.restoreAllMocks() })
+afterEach(() => { legacyClient = undefined; vi.restoreAllMocks() })
 
 describe('calls about a request name the thread for the router', () => {
   it('forwards the thread id given by the window', async () => {
@@ -550,4 +557,37 @@ describe('a window leaving a deleted thread', () => {
     expect(second).toBe(first)
     expect(made).toBe(1)
   })
+})
+
+it('connects to a service without git.heads and uses its existing workspace and Git reads', async () => {
+  request.mockReset()
+  const hello = { protocolVersion: MMS_PROTOCOL_VERSION }
+  legacyClient = {
+    connect: async () => hello,
+    request: async () => ({ ...hello, methods: GUI_REQUIRED_METHODS.filter((method) => String(method) !== 'git.heads') })
+  } as unknown as LocalMmsClient
+  await connectGuiClient(legacyClient, '/isolated')
+  expect(await invoke('git:heads', { threadIds: ['t1'], projectIds: ['p1'], attempt: 4 })).toMatchObject({
+    legacy: true,
+    projects: { p1: { branch: 'project-main' } },
+    threads: { t1: { branch: 'live-branch', folder: '/remote/worktree' } }
+  })
+  await invoke('git:status', { projectId: 'p1', workspaceThreadId: 't1', workspaceGeneration: 2, attempt: 5 })
+  expect(calls).toEqual([
+    { method: 'git.status', params: { projectId: 'p1' } },
+    { method: 'workspace.getStatus', params: { threadId: 't1' } },
+    { method: 'git.status', params: { threadId: 't1' } }
+  ])
+})
+
+it('routes a remote workspace and a Git read to the same qualified thread', async () => {
+  request.mockReset()
+  expect(await invoke('app:getFilesRoot', REMOTE)).toBe('/remote/worktree')
+  await invoke('workspace:getStatus', REMOTE)
+  await invoke('git:status', { projectId: qualifyId(NODE, 'project'), workspaceThreadId: REMOTE, workspaceGeneration: 2, attempt: 5 })
+  expect(calls).toEqual([
+    { method: 'files.root', params: { threadId: REMOTE } },
+    { method: 'workspace.getStatus', params: { threadId: REMOTE } },
+    { method: 'git.status', params: { threadId: REMOTE } }
+  ])
 })

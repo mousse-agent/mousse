@@ -1,7 +1,6 @@
 import type { WarmStartView } from '../../shared/warmStart'
 import { useAppStore } from '../stores/appStore'
 import { releaseProjectIconReads, seedProjectIcons } from './projectIcons'
-import { seedBranchReads } from '../hooks/useThreadBranch'
 
 /**
  * The warm start (`showWarmView`) and its handover to the live window: what the warm view leaves for the real chat to
@@ -25,8 +24,6 @@ export function showSavedView(): void {
   if (!shown.warmView || shown.profileReady) return
   // The projects' icons as they were; none is read until the window's profile is known.
   seedProjectIcons(shown.projects, view.projectIcons && typeof view.projectIcons === 'object' ? view.projectIcons : undefined)
-  // The branches the cards named, so each card names its branch before the service answers.
-  if (view.heads && typeof view.heads === 'object') seedBranchReads(view.heads, Object.fromEntries(shown.threads.flatMap((thread) => (thread.projectId ? [[thread.id, thread.projectId]] : []))))
   const unsubscribe = useAppStore.subscribe((state) => {
     if (!state.profileReady) return
     unsubscribe()

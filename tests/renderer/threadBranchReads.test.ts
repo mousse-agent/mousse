@@ -7,6 +7,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type { WarmStartView } from '../../src/shared/warmStart'
 import type { GitHeadsChangedEvent, GitHeadsRequest, GitHeadsResult } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -78,13 +79,17 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-it('every card shown is read in one call, and nothing reads again until something happens', async () => {
+it('batches a manual checkout in a worktree and project while the window stays visible', async () => {
   showCards()
   await settle()
   expect(calls.map(sorted)).toEqual([{ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] }])
   expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'develop'])
-  await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
-  expect(calls).toHaveLength(1)
+  branches.t1 = 'checked-out-by-hand'
+  branches.p2 = 'release'
+  await act(async () => { await vi.advanceTimersByTimeAsync(hook.HEAD_RECHECK_MS) })
+  await settle()
+  expect(calls.map(sorted)).toEqual(Array(2).fill({ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] }))
+  expect(shown()).toEqual(['checked-out-by-hand', 'mousse/docs', 'release'])
 })
 
 it('focus reads every card again in one call; a call that fails keeps what the cards show', async () => {
@@ -145,24 +150,29 @@ it('a detached HEAD names its commit, and a read that fails for one card keeps w
   expect(shown()).toEqual(['detached abc1234', 'mousse/docs', 'develop'])
 })
 
-it('a card that first shows names what it named at the last launch, then what is read now', async () => {
-  hook.seedBranchReads({ threads: { t1: { own: true, branch: 'mousse/last-time', generation: 0, lifecycle: 'ready' } }, projects: { p2: { repo: true, branch: 'develop' } } }, { t1: 'p1', t2: 'p1' })
+it('leaves saved branches out of the warm view and reads them when the profile is ready', async () => {
+  appStore.setState({
+    profileReady: false,
+    warmView: {
+      heads: { threads: { t1: { own: true, branch: 'mousse/last-time' } } }
+    } as unknown as WarmStartView
+  })
   showCards()
-  // Before any read has answered.
-  expect(shown()[0]).toBe('mousse/last-time')
-  expect(shown()[2]).toBe('develop')
   await settle()
-  expect(sorted(calls[0]!)).toEqual({ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] })
+  expect(shown()).toEqual(['', '', ''])
+  expect(calls).toHaveLength(0)
+  act(() => appStore.setState({ profileReady: true }))
+  await settle()
   expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'develop'])
 })
 
 it('a card whose read failed is read again a while later, so it never stays without its branch', async () => {
-  answer = async (request) => ({ ...(await fromBranches(request)), threads: { ...(await fromBranches(request)).threads, t1: { error: 'The drive at E:\ is not answering.' } } })
+  answer = async (request) => ({ ...(await fromBranches(request)), legacy: true, threads: { ...(await fromBranches(request)).threads, t1: { error: 'The drive is not answering.' } } })
   showCards()
   await settle()
   expect(shown()).toEqual(['', 'mousse/docs', 'develop'])
 
-  answer = fromBranches
+  answer = async (request) => ({ ...(await fromBranches(request)), legacy: true })
   await act(async () => { await vi.advanceTimersByTimeAsync(hook.FAILED_READ_AGAIN_MS) })
   await settle()
   expect(sorted(calls.at(-1)!)).toEqual({ threadIds: ['t1'], projectIds: [] })

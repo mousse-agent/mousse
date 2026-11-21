@@ -8,7 +8,7 @@ import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
-import { folderHead, threadHead } from '../workspace/threadHeads'
+import { folderHead, readWorkspaceRecord, threadHead } from '../workspace/threadHeads'
 import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
 import { WALLPAPER_PIECE_MAX_BYTES, WallpaperRefused } from '../appearance/WallpaperStore'
 import { isWallpaperBucket, WALLPAPER_MAX_BYTES, WALLPAPER_UPLOAD_MAX_BASE64, WALLPAPER_UPLOAD_MAX_BYTES } from '../../shared/themes/wallpaperImage'
@@ -50,6 +50,7 @@ import { PullRequestThreadError, PullRequestThreadService } from '../git/PullReq
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
 import { lifecycleForReply } from '../../shared/resourceLifecycle'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitHeadsResult, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import { WORKSPACE_CHANGED_MESSAGE } from '../../shared/types'
 import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
@@ -1119,6 +1120,65 @@ const restoresInFlight = new Map<string, Promise<void>>()
 /** The most threads, and the most projects, one `git.heads` call names: more than a sidebar shows. */
 const GIT_HEADS_MAX = 2_000
 
+/** What names the folder of a Git panel read: its thread or project, the worktree generation it expects, a Retry's number. */
+const GIT_READ_SCOPE = ['threadId', 'projectId', 'workspaceGeneration', 'attempt'] as const
+/** The Git reads whose parameters are checked before their folder is waited for or looked at, and the keys each takes. */
+const GIT_READ_KEYS: Record<string, readonly string[]> = {
+  'git.heads': ['threadIds', 'projectIds', 'attempt'],
+  'git.status': GIT_READ_SCOPE,
+  'git.diff': [...GIT_READ_SCOPE, 'path', 'staged'],
+  'git.log': [...GIT_READ_SCOPE, 'limit'],
+  'git.branches': GIT_READ_SCOPE,
+  'git.diffStats': GIT_READ_SCOPE
+}
+
+/** Refuses a malformed Git read before anything touches a folder: no drive is waited for on its account. */
+function checkGitReadParams(method: string, params: unknown): void {
+  if (!Object.hasOwn(GIT_READ_KEYS, method)) return
+  const keys = GIT_READ_KEYS[method]!
+  if (params !== undefined && !isObject(params)) throw new DomainRpcError('invalid_params', `${method} expects an object`)
+  const p = isObject(params) ? params : {}
+  rejectUnknownKeys(p, keys)
+  asOptionalBoundedInt(p.attempt, 'attempt', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  if (method === 'git.heads') {
+    for (const field of ['threadIds', 'projectIds']) if (p[field] !== undefined) asStringArray(p[field], field, { unique: true, maxItems: GIT_HEADS_MAX, maxItemLen: 256 })
+    return
+  }
+  const threadId = asOptionalString(p.threadId, 256)
+  const projectId = asOptionalString(p.projectId, 256)
+  if (Boolean(threadId) === Boolean(projectId)) throw new DomainRpcError('invalid_params', 'Specify either threadId or projectId')
+  const generation = asOptionalBoundedInt(p.workspaceGeneration, 'workspaceGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  if (generation !== undefined && !threadId) throw new DomainRpcError('invalid_params', 'workspaceGeneration names a thread worktree: give threadId')
+  if (method === 'git.log') asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 })
+  if (method === 'git.diff') {
+    asString(p.path, 'path', 4096)
+    asOptionalBoolean(p.staged, 'staged')
+  }
+}
+
+/**
+ * Reads through the named workspace. Check its generation before and after the Git read, so a rebuild at the same
+ * path cannot answer with a previous checkout's status. Older windows omit the generation.
+ */
+async function readGit<T>(ctx: HandlerContext, p: Record<string, unknown>, read: (root: string, shareKey?: string) => Promise<T>): Promise<T> {
+  if (typeof p.workspaceGeneration !== 'number' || typeof p.threadId !== 'string') return read(projectRootContext(ctx, p))
+  const threadId = p.threadId
+  const known = await ctx.mms.threads.peekThreadLocation(threadId)
+  const check = async () => {
+    const workspace = known && await readWorkspaceRecord(known.directory)
+    const generation = workspace?.generation ?? 0
+    if (!workspace || isProjectFolderWorkspace(workspace) || workspace.lifecycle !== 'ready' || generation !== p.workspaceGeneration) {
+      throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation })
+    }
+    return workspace
+  }
+  const workspace = await check()
+  const root = new ThreadWorkspaceManager(known!.directory).workingFolder(workspace.worktreePath, workspace)
+  const result = await read(root, `${threadId}:${p.workspaceGeneration}`)
+  await check()
+  return result
+}
+
 /** `ensureWorkspaceMaterialized` for a request that names a thread; an unknown thread fails later with its usual error. */
 async function materializeRequestedWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   const threadId = asOptionalString(params.threadId, 256)
@@ -1889,7 +1949,7 @@ const FOLDER_METHODS = new Set([
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
 ])
 /** Methods under those prefixes that only signal work already in memory. */
-const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
+const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'git.heads', 'pullRequests.watchStatus'])
 
 /** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
 const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup'])
@@ -1905,7 +1965,7 @@ function readsFolder(method: string): boolean {
  */
 async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
   if (!readsFolder(method)) return
-  const folders = requestFolders(ctx, params)
+  const folders = requestFolders(ctx, params, !Object.hasOwn(GIT_READ_KEYS, method))
   if (folders.length === 0) return
   const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
   const shutdown = ctx.mms.requestShutdownSignal
@@ -1931,7 +1991,7 @@ async function waitForRequestFolders(ctx: HandlerContext, method: string, params
 const FOLDER_PARAMS = ['path', 'cwd', 'root', 'projectPath', 'workspacePath', 'folder', 'directory'] as const
 
 /** The project folders a request names: its thread's project, its project, or a folder path. */
-function requestFolders(ctx: HandlerContext, params: unknown): string[] {
+function requestFolders(ctx: HandlerContext, params: unknown, allowPath: boolean): string[] {
   if (!isObject(params)) return []
   const folders: string[] = []
   try {
@@ -1946,7 +2006,8 @@ function requestFolders(ctx: HandlerContext, params: unknown): string[] {
   } catch {
     // An unknown thread or project is the handler's to report.
   }
-  for (const key of FOLDER_PARAMS) {
+  // Scoped Git reads may inspect a path only after it passes containment checks in the named folder.
+  for (const key of allowPath ? FOLDER_PARAMS : []) {
     const value = params[key]
     if (typeof value === 'string' && isAbsolute(value)) folders.push(value)
   }
@@ -1960,6 +2021,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     const routed = await ctx.mms.threadRouter.dispatch(ctx, method, params)
     if (routed) return routed.result
   }
+  checkGitReadParams(method, params)
   if (isObject(params) && typeof params.threadId === 'string' &&
       !['threads.delete', 'threads.inventory', 'threads.focus',
         // Answers "not found" for a thread being deleted, so a window that shows it knows to leave it.
@@ -4785,19 +4847,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.heads': {
       // The branches the sidebar's thread cards name, from Git's files: no Git process, no worktree set up or brought
       // back, nothing waited for but each folder's own drive. One folder that cannot be read answers why; the rest answer.
+      // Checked before anything else (`checkGitReadParams`). `attempt` only makes a Retry's request its own.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadIds', 'projectIds'])
       const ids = (field: string) => p[field] === undefined ? [] : asStringArray(p[field], field, { unique: true, maxItems: GIT_HEADS_MAX, maxItemLen: 256 })
-      const projects: GitHeadsResult['projects'] = {}
-      const threads: GitHeadsResult['threads'] = {}
+      const projects: GitHeadsResult['projects'] = Object.create(null)
+      const threads: GitHeadsResult['threads'] = Object.create(null)
       await Promise.all([
         ...ids('projectIds').map(async (projectId) => {
           const project = ctx.mms.projects.getProject(projectId)
           projects[projectId] = project ? await folderHead(project.path) : { error: 'Project not found' }
         }),
         ...ids('threadIds').map(async (threadId) => {
-          if (!ctx.mms.threads.getThread(threadId)) { threads[threadId] = { error: 'Thread not found' }; return }
-          threads[threadId] = await threadHead(ctx.mms.threads.getThreadDir(threadId), threadPlacement(ctx.mms.threads.getThread(threadId)))
+          threads[threadId] = await threadHead(ctx.mms.getProfileHomeDir(), async () => {
+            const known = await ctx.mms.threads.peekThreadLocation(threadId)
+            return known && { directory: known.directory, placement: known.thread ? threadPlacement(known.thread) : undefined }
+          }, typeof p.attempt === 'number')
         })
       ])
       return { projects, threads } satisfies GitHeadsResult
@@ -4805,29 +4869,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     // The Git panel's reads never set a worktree up or bring a retired one back: a folder not on disk reads as missing.
     case 'git.status': {
       const p = isObject(params) ? params : {}
-      const root = projectRootContext(ctx, p)
-      const status = await ctx.mms.gitService.getStatus(root)
+      const status = await readGit(ctx, p, (root, shareKey) => ctx.mms.gitService.getStatus(root, { shareKey, fresh: typeof p.attempt === 'number' }))
       // How long a Discard here keeps its copy, for the confirmation to say: the owner's Undo window.
       const owner = discardOwnerFor(ctx, p)
       return { status: owner ? { ...status, discardKeptForMs: keptCopyWindowMs(owner) } : status }
     }
     case 'git.diff': {
       const p = isObject(params) ? params : {}
-      const root = projectRootContext(ctx, p)
-      return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), asOptionalBoolean(p.staged, 'staged') === true) }
+      return { diff: await readGit(ctx, p, (root) => ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), p.staged === true)) }
     }
     case 'git.log': {
       const p = isObject(params) ? params : {}
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 }) ?? 30
-      return { commits: await ctx.mms.gitService.getLog(projectRootContext(ctx, p), limit) }
+      return { commits: await readGit(ctx, p, (root) => ctx.mms.gitService.getLog(root, limit)) }
     }
     case 'git.branches': {
       const p = isObject(params) ? params : {}
-      return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
+      return { branches: await readGit(ctx, p, (root) => ctx.mms.gitService.getBranches(root)) }
     }
     case 'git.diffStats': {
       const p = isObject(params) ? params : {}
-      return { stats: await ctx.mms.gitService.getDiffStats(projectRootContext(ctx, p)) }
+      return { stats: await readGit(ctx, p, (root) => ctx.mms.gitService.getDiffStats(root)) }
     }
     case 'git.checkUpstream': {
       const p = isObject(params) ? params : {}

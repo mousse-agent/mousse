@@ -80,7 +80,12 @@ export interface GitRefreshOptions {
   quiet?: boolean
   /** Which folder the daemon reads: the thread's own worktree, else the project's folder. */
   scope: GitScope
+  /** Retry: never joins a read in flight, here or in the service, whose request carries its own number (`GitScope.attempt`). */
+  fresh?: boolean
 }
+
+/** Numbers each Retry's reads. */
+let retries = 0
 
 interface Flight {
   promise: Promise<void>
@@ -130,6 +135,7 @@ async function fetchInto(key: string, scope: GitScope, current: () => boolean = 
   } finally {
     clearTimeout(slow)
   }
+  if (!current()) return
   const previous = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
   if (!status.isRepo) {
     patch({
@@ -163,14 +169,14 @@ async function fetchInto(key: string, scope: GitScope, current: () => boolean = 
  */
 export function refreshGitStatus(key: string, options: GitRefreshOptions): Promise<void> {
   const flight = flights.get(key)
-  // Retry past a read that hung does not wait for it.
-  if (flight && !(options.force && Date.now() - flight.startedAt >= GIT_STALE_FLIGHT_MS)) {
+  // Retry, and a forced read past a read that hung, do not wait for it.
+  if (flight && !options.fresh && !(options.force && Date.now() - flight.startedAt >= GIT_STALE_FLIGHT_MS)) {
     if (options.force) flight.rerun = true
     return flight.promise
   }
 
   const entry = useGitStatusStore.getState().entries[key]
-  if (!options.force && entry?.loaded && Date.now() - entry.fetchedAt < GIT_STATUS_MAX_AGE_MS) {
+  if (!options.force && !options.fresh && entry?.loaded && Date.now() - entry.fetchedAt < GIT_STATUS_MAX_AGE_MS) {
     return Promise.resolve()
   }
 
@@ -182,7 +188,7 @@ export function refreshGitStatus(key: string, options: GitRefreshOptions): Promi
     try {
       do {
         next.rerun = false
-        await fetchInto(key, options.scope, () => flights.get(key) === next)
+        await fetchInto(key, options.fresh ? { ...options.scope, attempt: ++retries } : options.scope, () => flights.get(key) === next)
       } while (next.rerun && flights.get(key) === next)
     } finally {
       if (flights.get(key) === next) {
@@ -523,14 +529,20 @@ export function retainGitPath(key: string, scope: GitScope): () => void {
 export interface GitStatusView extends Omit<GitStatusEntry, 'fetchedAt'> {
   /** Force a fresh fetch and wait for it. */
   refresh: () => Promise<void>
+  /** Retry: read again for real, never answered by a read already in flight (`GitRefreshOptions.fresh`). */
+  retry: () => Promise<void>
 }
 
 /** Shared Git state for a folder; a null key means there is nothing to read. */
 export function useGitStatus(key: string | null, scope: GitScope): GitStatusView {
   const entry = useGitStatusStore((state) => (key ? state.entries[key] : undefined)) ?? EMPTY_GIT_ENTRY
   // The ids, not the object: a caller that builds its scope on every render must not refetch on every render.
-  const { projectId, workspaceThreadId } = scope
-  const readScope = useMemo<GitScope>(() => ({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
+  // The worktree's generation goes with each read: the service refuses one whose worktree was rebuilt since.
+  const { projectId, workspaceThreadId, workspaceGeneration } = scope
+  const readScope = useMemo<GitScope>(
+    () => ({ projectId, workspaceThreadId, ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}) }),
+    [projectId, workspaceThreadId, workspaceGeneration]
+  )
 
   useEffect(() => {
     if (!key) return
@@ -543,6 +555,10 @@ export function useGitStatus(key: string | null, scope: GitScope): GitStatusView
     () => (key ? refreshGitStatus(key, { force: true, scope: readScope }) : Promise.resolve()),
     [key, readScope]
   )
+  const retry = useCallback(
+    () => (key ? refreshGitStatus(key, { force: true, fresh: true, scope: readScope }) : Promise.resolve()),
+    [key, readScope]
+  )
 
   return {
     status: entry.status,
@@ -552,6 +568,7 @@ export function useGitStatus(key: string | null, scope: GitScope): GitStatusView
     loading: key ? !entry.loaded || entry.loading : false,
     loaded: entry.loaded,
     error: entry.error,
-    refresh
+    refresh,
+    retry
   }
 }

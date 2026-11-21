@@ -7,9 +7,9 @@
  * a `.git` that is a link (left to Git), a reftable repository's placeholder HEAD (left to Git).
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { commonDirFromFiles } from '../src/mms/git/gitDirFiles'
 import { branchOfHeadFile, clearFolderHeadCache, folderBranch, headFileReads, readFolderHead } from '../src/mms/git/gitHead'
@@ -55,6 +55,29 @@ describe('a folder read from Git files', () => {
     expect(await readFolderHead(inner)).toMatchObject({ top: main })
   })
 
+  it('finds the checkout through a junction into a subdirectory', async () => {
+    const main = repository()
+    const inside = join(main, 'src', 'deep')
+    mkdirSync(inside, { recursive: true })
+    const junction = join(root, 'junction')
+    symlinkSync(inside, junction, 'junction')
+    expect(await folderBranch(junction)).toMatchObject({ repo: true, branch: gitBranch(junction) })
+    expect(await commonDirFromFiles(junction)).toBe(join(git(junction, 'rev-parse', '--path-format=absolute', '--git-common-dir')))
+  })
+
+  it('reads a relative gitdir and packed branch refs', async () => {
+    const main = repository()
+    const worktree = join(root, 'linked')
+    git(main, 'worktree', 'add', '-qb', 'packed-branch', worktree)
+    const directory = git(worktree, 'rev-parse', '--absolute-git-dir')
+    const dotGit = join(worktree, '.git')
+    renameSync(dotGit, `${dotGit}-original`)
+    writeFileSync(dotGit, `gitdir: ${relative(worktree, directory).replaceAll('\\', '/')}\n`)
+    git(main, 'pack-refs', '--all')
+    expect(await folderBranch(worktree)).toMatchObject({ repo: true, branch: gitBranch(worktree) })
+    expect(await commonDirFromFiles(worktree)).toBe(dirname(dirname(join(directory))))
+  })
+
   it('a branch with no commit yet names that branch', async () => {
     const cwd = join(root, 'empty')
     mkdirSync(cwd)
@@ -80,13 +103,13 @@ describe('a folder read from Git files', () => {
     expect(await readFolderHead(join(main, '.git', 'refs'))).toBeUndefined()
   })
 
-  it('asks Git once for a .git that is a link, and gets Git’s branch', async () => {
+  it('uses Git to confirm an existing checkout and branch when its .git is a link', async () => {
     const main = repository()
     const linked = join(root, 'linked')
     mkdirSync(linked)
     symlinkSync(join(main, '.git'), join(linked, '.git'), 'junction')
     expect(await readFolderHead(linked)).toBeUndefined()
-    expect(await folderBranch(linked)).toEqual({ repo: true, branch: 'main' })
+    expect(await folderBranch(linked, { requireRoot: true })).toEqual({ repo: true, branch: 'main' })
   })
 
   it('reads HEAD again only when it changed', async () => {

@@ -7,6 +7,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { cleanupMarkerPath } from '../src/mms/lifecycle/StorageCleanupService'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
+import type { GitHeadsResult } from '../src/shared/types'
 import type { StorageCleanupReport, StoragePolicy } from '../src/shared/storage'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { archived } from './support/archived'
@@ -57,18 +58,18 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     const project = mms.projects.openProject(f.repo)
     const threadId = options.reuse && shared ? shared : mms.threads.createThread(`Retired ${Math.random().toString(16).slice(2, 8)}`, project.id).id
     if (options.reuse) shared = threadId
-    const { metadata } = await gui.request<{ metadata: { worktreePath: string } }>('workspace.restore', { threadId })
+    const { metadata } = await gui.request<{ metadata: { worktreePath: string; generation: number } }>('workspace.restore', { threadId })
     expect(existsSync(metadata.worktreePath)).toBe(true)
     const report = (await gui.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})).report
     expect(report.items.find((entry) => entry.threadId === threadId)).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' })
     expect(existsSync(metadata.worktreePath)).toBe(false)
     if (!options.reuse) restored.push(metadata.worktreePath)
-    return { threadId, worktreePath: metadata.worktreePath }
+    return { threadId, worktreePath: metadata.worktreePath, generation: metadata.generation }
   }
   const marker = (threadId: string) => cleanupMarkerPath(mms.threads.lifecycleStore, threadId)
 
   it('reports the retirement from workspace.getStatus without restoring, and the Git panel status read leaves it retired', async () => {
-    const { threadId, worktreePath } = await retiredThread()
+    const { threadId, worktreePath, generation } = await retiredThread()
     for (let call = 0; call < 2; call++) {
       const status = await gui.request<{ metadata: { lifecycle: string }; retiredByCleanup?: { at: string; rule: string } }>('workspace.getStatus', { threadId })
       expect(status.retiredByCleanup).toMatchObject({ rule: 'worktree-inactive', at: expect.any(String) })
@@ -82,6 +83,10 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     // Opening its files does.
     await gui.request('files.root', { threadId })
     expect(existsSync(worktreePath)).toBe(true)
+    const heads = await gui.request<GitHeadsResult>('git.heads', { threadIds: [threadId] })
+    expect(heads.threads[threadId]).toMatchObject({ generation: generation + 1, folder: worktreePath })
+    await expect(gui.request('git.status', { threadId, workspaceGeneration: generation })).rejects.toMatchObject({ code: 'workspace_changed' })
+    expect(await gui.request('git.status', { threadId, workspaceGeneration: generation + 1 })).toMatchObject({ status: { isRepo: true } })
     const after = await gui.request<{ metadata: { lifecycle: string }; retiredByCleanup?: unknown }>('workspace.getStatus', { threadId })
     expect(after.retiredByCleanup).toBeUndefined(); expect(after.metadata.lifecycle).toBe('ready'); expect(existsSync(marker(threadId))).toBe(false)
     expect(readFileSync(join(worktreePath, 'value.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('base\n')

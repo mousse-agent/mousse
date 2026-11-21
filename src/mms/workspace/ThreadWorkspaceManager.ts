@@ -835,9 +835,10 @@ export class ThreadWorkspaceManager {
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
         const rebuilt = await retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
-        const restored = await this.verify(metadata)
+        const restored = await this.verify({ ...metadata, generation: (metadata.generation ?? 0) + 1 })
         if (restored.lifecycle !== 'ready') throw new Error('Reconstructed task workspace failed verification')
         atomicWriteJsonSync(this.workspacePath, restored)
+        noteThreadBranchChanged(restored.threadId)
         const notice = retirement.keptAsideNotice(rebuilt)
         if (notice) {
           // The copies are kept and listed in the thread's journal either way; only the line in the thread is missing then.
@@ -868,9 +869,10 @@ export class ThreadWorkspaceManager {
       if (movedNotice) {
         try { await onNotice?.({ id: `worktree-restore-${randomUUID()}`, text: movedNotice }) } catch (error) { console.warn('restore notice could not be delivered', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) }) }
       }
-      const restored = await this.verify(metadata)
+      const restored = await this.verify({ ...metadata, generation: (metadata.generation ?? 0) + 1 })
       atomicWriteJsonSync(this.workspacePath, restored)
       this.finishProvisionRecovery(restored)
+      noteThreadBranchChanged(restored.threadId)
       return restored
     } finally {
       repositoryLease?.release()

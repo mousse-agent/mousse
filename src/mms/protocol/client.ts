@@ -520,9 +520,10 @@ export class LocalMmsClient implements MmsClient {
   async request<T = unknown>(
     method: string,
     params?: unknown,
-    timeoutMs?: number
+    timeoutMs?: number,
+    options: { fresh?: boolean } = {}
   ): Promise<T> {
-    const key = this.opts.shareIdenticalReads ? sharedReadKey(method, params, timeoutMs) : null
+    const key = this.opts.shareIdenticalReads && !options.fresh ? sharedReadKey(method, params, timeoutMs) : null
     if (key === null) {
       // Any other call may change state (a profile binding changes what every read returns): a read
       // asked after it is sent must not take the answer of one asked before it.

@@ -942,7 +942,7 @@ const api = {
     resetWorktreeFolder: (): Promise<{ status: import('../shared/storage').WorktreeFolderStatus }> => storageInvoke('storage:resetWorktreeFolder')
   },
   workspace: {
-    getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
+    getStatus: (threadId: string, fresh?: boolean): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId, fresh),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
     /**
@@ -1455,8 +1455,8 @@ const api = {
     },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
-    getFilesRoot: (threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('app:getFilesRoot', threadId),
+    getFilesRoot: (threadId?: string | null, fresh?: boolean): Promise<string> =>
+      ipcRenderer.invoke('app:getFilesRoot', threadId, fresh),
     restart: (): Promise<void> => ipcRenderer.invoke('app:restart'),
     navigateMainView: (view: MainView): Promise<void> =>
       ipcRenderer.invoke('app:navigateMainView', view),

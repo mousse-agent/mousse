@@ -9,10 +9,11 @@ import { useGitStatusStore } from '../stores/gitStatusStore'
 /**
  * The branch a thread's card names: the branch of the thread's own worktree, else of its project's folder. The daemon
  * reads it from Git's files (`git.heads`), never with a Git process, and the cards shown are read together in one call:
- * when they first show, on window focus, when a run ends (every project, and the thread whose run it was), and when
- * Mousse changes a thread's branch (`git.headsChanged`: its worktree is made, its branch renamed). The daemon reads a
- * `HEAD` file again only when it changed. A newer read of a project's folder by the Git panel wins. A read that fails
- * changes nothing shown; the next of those moments reads again.
+ * when they first show, on window focus, when a run ends (every project, and the thread whose run it was), when
+ * Mousse changes a thread's branch (`git.headsChanged`: its worktree is planned or made, its branch renamed), and every
+ * few seconds while the window is visible, so a checkout, detach or rebase made by hand shows soon. The daemon reads a
+ * `HEAD` file again only when it changed; otherwise a read costs a few file system calls. A newer read of a project's
+ * folder by the Git panel wins. A read that fails changes nothing shown, and is read once more a moment later.
  *
  * A worktree that is not on disk (being set up, retired by a storage rule) names the branch Mousse recorded for it:
  * nothing here sets a worktree up or brings one back.
@@ -33,8 +34,6 @@ interface BranchRead {
   /** The thread has no worktree of its own (only on a thread's read). */
   project?: boolean
   readAt: number
-  /** Kept from the last launch (`seedBranchReads`): shown at once, and read again when its card first shows. */
-  seeded?: boolean
 }
 
 const useBranchReads = create<Record<string, BranchRead>>(() => ({}))
@@ -54,14 +53,21 @@ const threadKey = (threadId: string, projectId: string) => JSON.stringify(['thre
 const pending = new Set<string>()
 let flushing: ReturnType<typeof setTimeout> | undefined
 let readCount = 0
+/** Older services answer with Git reads. Refresh those cards on explicit triggers only. */
+let legacy = false
 /** The number of the read whose answer each key shows: an older read's late answer never replaces a newer one's. */
 const shownRead = new Map<string, number>()
+/** Keys whose next read is the one read again after a failure: if it fails too, the regular reads carry on. */
+const recovering = new Set<string>()
 
 /** The window shows its warm start and does not know its profile yet: nothing is read for its threads until it does. */
 const warmOnly = (state: ReturnType<typeof useAppStore.getState>): boolean => !state.profileReady && state.warmView !== null
 
-function request(keys: Iterable<string>) {
-  for (const key of keys) pending.add(key)
+function request(keys: Iterable<string>, recovery = false) {
+  for (const key of keys) {
+    pending.add(key)
+    if (recovery) recovering.add(key)
+  }
   if (flushing === undefined && pending.size) flushing = setTimeout(flush, 0)
 }
 
@@ -72,31 +78,14 @@ function fromProject(head: GitFolderHead | undefined): Omit<BranchRead, 'readAt'
 }
 
 function fromThread(head: GitThreadHead | undefined): Omit<BranchRead, 'readAt'> | undefined {
-  if (!head || 'error' in head) return undefined
+  if (!head || 'error' in head || ('own' in head && head.unavailable)) return undefined
   return 'project' in head ? { branch: null, project: true } : { branch: head.branch, own: true, ...(head.detachedAt !== undefined ? { detachedAt: head.detachedAt } : {}) }
 }
 
-/**
- * Shows what the cards named when the window last closed, before anything is read (`app.warmStartView`): a card that
- * first shows names its branch at once, and the read that follows replaces it. Never replaces a read of this window.
- */
-export function seedBranchReads(heads: { threads?: Record<string, GitThreadHead>; projects?: Record<string, GitFolderHead> } | undefined, threadProjects: Record<string, string>): void {
-  if (!heads) return
-  const current = useBranchReads.getState()
-  const seeds: Record<string, BranchRead> = {}
-  for (const [projectId, head] of Object.entries(heads.projects ?? {})) {
-    const read = fromProject(head)
-    const key = projectKey(projectId)
-    if (read && !current[key]) seeds[key] = { ...read, readAt: 0, seeded: true }
-  }
-  for (const [threadId, head] of Object.entries(heads.threads ?? {})) {
-    const read = fromThread(head)
-    const projectId = threadProjects[threadId]
-    const key = projectId ? threadKey(threadId, projectId) : null
-    if (read && key && !current[key]) seeds[key] = { ...read, readAt: 0, seeded: true }
-  }
-  if (Object.keys(seeds).length) useBranchReads.setState(seeds)
-}
+/** Whether a read names what the card already shows. */
+const sameRead = (read: Omit<BranchRead, 'readAt'>, shown: BranchRead | undefined): shown is BranchRead =>
+  shown !== undefined && read.branch === shown.branch && read.detachedAt === shown.detachedAt && read.repo === shown.repo &&
+  read.own === shown.own && read.project === shown.project
 
 function flush() {
   flushing = undefined
@@ -108,6 +97,8 @@ function flush() {
     return entry ? [{ key, ...entry.target }] : []
   })
   pending.clear()
+  const recovery = new Set(reads.filter(({ key }) => recovering.delete(key)).map(({ key }) => key))
+  recovering.clear()
   if (!reads.length) return
   const count = ++readCount
   const threadIds = new Set<string>()
@@ -116,8 +107,11 @@ function flush() {
     if (threadId) threadIds.add(threadId)
     else projectIds.add(projectId)
   }
+  const failedOnce = (keys: string[]) => readOnceMore(keys.filter((key) => !recovery.has(key)))
   void api.heads({ threadIds: [...threadIds], projectIds: [...projectIds] }).then((result) => {
+    legacy = result.legacy === true
     const now = Date.now()
+    const shown = useBranchReads.getState()
     const changes: Record<string, BranchRead> = {}
     const failed: string[] = []
     for (const { key, threadId, projectId } of reads) {
@@ -125,32 +119,44 @@ function flush() {
       const read = threadId ? fromThread(result.threads[threadId]) : fromProject(result.projects[projectId])
       if (!read) { failed.push(key); continue }
       shownRead.set(key, count)
+      // A read that finds nothing changed leaves the card alone (no re-render), unless the Git panel read the project's
+      // folder since: then this newer read is dated now, so the panel's older answer does not win over it.
+      const panelAt = threadId ? 0 : useGitStatusStore.getState().entries[folderKey({ projectId, workspaceThreadId: null })!]?.fetchedAt ?? 0
+      const known = shown[key]
+      if (sameRead(read, known) && panelAt <= known.readAt) continue
       changes[key] = { ...read, readAt: now }
     }
     if (Object.keys(changes).length) useBranchReads.setState(changes)
-    readAgainLater(failed)
-  }, () => readAgainLater(reads.map(({ key }) => key)))
+    failedOnce(failed)
+  }, () => failedOnce(reads.map(({ key }) => key)))
 }
 
-/** How long after a read that failed (a drive that did not answer, a service restarting) its cards are read again. */
-export const FAILED_READ_AGAIN_MS = 15_000
+/** How long after a read that failed (a drive that did not answer, a service restarting) its cards are read once more. */
+export const FAILED_READ_AGAIN_MS = 5_000
 let again: ReturnType<typeof setTimeout> | undefined
 const againKeys = new Set<string>()
 
 /**
- * Reads the cards whose read failed again a while later, while they still show: a card never stays without its branch
- * until the next focus. Git's files only, and a drive that is not answering answers at once, so this costs nothing.
+ * Reads the cards whose read failed once more a moment later, while they still show, so a card never stays blank or
+ * stale until something unrelated happens. One read per failure: if it fails too, the regular reads carry on.
  */
-function readAgainLater(keys: readonly string[]) {
+function readOnceMore(keys: readonly string[]) {
   for (const key of keys) againKeys.add(key)
   if (again !== undefined || !againKeys.size) return
   again = setTimeout(() => {
     again = undefined
     const due = [...againKeys].filter((key) => watched.has(key))
     againKeys.clear()
-    request(due)
+    request(due, true)
   }, FAILED_READ_AGAIN_MS)
 }
+
+/**
+ * How often the cards shown are read again while the window is visible: a checkout, detach or rebase made by hand in a
+ * worktree or a project folder shows within this. Each read costs the daemon a few file system calls per card (a `HEAD`
+ * file is read only when it changed) and no Git process; a card whose branch did not change does not re-render.
+ */
+export const HEAD_RECHECK_MS = 4_000
 
 function attach() {
   if (detach) return
@@ -176,19 +182,22 @@ function attach() {
     const threads = new Set(event?.threadIds ?? [])
     request([...watched].filter(([, { target }]) => target.threadId && threads.has(target.threadId)).map(([key]) => key))
   })
+  const recheck = setInterval(() => {
+    if (!legacy && document.visibilityState === 'visible') readAll()
+  }, HEAD_RECHECK_MS)
   detach = () => {
     window.removeEventListener('focus', readAll)
     unsubscribe()
     stopHeads?.()
+    clearInterval(recheck)
   }
 }
 
 function watch(key: string, target: Target): () => void {
   watched.set(key, { count: (watched.get(key)?.count ?? 0) + 1, target })
   attach()
-  // Read once (a card seeded from the last launch is read too); after that, only the moments above read it again.
-  const known = useBranchReads.getState()[key]
-  if (!known || known.seeded) request([key])
+  // Read once; after that, only the moments above read it again.
+  if (!useBranchReads.getState()[key]) request([key])
   return () => {
     const entry = watched.get(key)
     if (entry && entry.count > 1) watched.set(key, { ...entry, count: entry.count - 1 })
@@ -211,7 +220,7 @@ function useProjectFolderBranch(projectId: string | null): { repo: boolean; bran
   useEffect(() => (key && projectId ? watch(key, { projectId }) : undefined), [key, projectId])
 
   if (!key) return undefined
-  if (sharedStatus && sharedAt >= (own?.readAt ?? 0)) {
+  if (sharedStatus && (!own || sharedAt > own.readAt)) {
     const detached = sharedStatus.isRepo && sharedStatus.tracking === 'detached'
     return { repo: sharedStatus.isRepo, branch: sharedStatus.isRepo ? sharedStatus.branch : null, ...(detached ? { detachedAt: '' } : {}) }
   }
@@ -250,7 +259,7 @@ export function useThreadBranch(thread: Pick<Thread, 'projectId' | 'node' | 'wor
 
   const projectBranch = folder?.repo ? named(folder, false) : undefined
   if (!key) return projectBranch
-  // Until the worktree is read (or seeded), nothing: the project's branch could be the wrong one.
+  // Until the worktree is read, nothing: the project's branch could be the wrong one.
   if (!own) return undefined
   if (own.project) return projectBranch
   return named(own, true)

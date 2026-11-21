@@ -109,8 +109,11 @@ it('names every card’s branch without a Git process, and pushes a change when 
   git(workspace.worktreePath, 'checkout', '-q', '-b', 'agent-branch')
   git(repo, 'checkout', '-q', '-b', 'person-branch')
   started = 0
+  const normalLookup = vi.spyOn(main.threads, 'getThread')
   const answer = await heads({ threadIds: [own.id, folder.id, fresh.id, 'no-such-thread'], projectIds: [projectId, 'no-such-project'] })
   expect(started).toBe(0)
+  expect(normalLookup).not.toHaveBeenCalled()
+  normalLookup.mockRestore()
   expect(answer.projects[projectId]).toEqual({ repo: true, branch: 'person-branch' })
   expect(answer.projects['no-such-project']).toEqual({ error: 'Project not found' })
   expect(answer.threads[own.id]).toEqual({ own: true, branch: 'agent-branch', folder: workspace.worktreePath, generation: workspace.generation ?? 0, lifecycle: 'ready' })
@@ -120,7 +123,7 @@ it('names every card’s branch without a Git process, and pushes a change when 
 
   // Not on disk (a storage rule retired it): the branch Mousse recorded, and no folder to work in.
   renameSync(workspace.worktreePath, `${workspace.worktreePath}-away`)
-  expect((await heads({ threadIds: [own.id] })).threads[own.id]).toEqual({ own: true, branch: 'mousse/named-by-title', generation: workspace.generation ?? 0, lifecycle: 'ready' })
+  expect((await heads({ threadIds: [own.id] })).threads[own.id]).toMatchObject({ own: true, branch: 'mousse/named-by-title', generation: workspace.generation ?? 0, lifecycle: 'ready', missing: true })
   // The Git panel's status read of it does not bring it back either.
   const status = await dispatchMethod({ mms: main, globalSequence: () => 0 }, 'git.status', { threadId: own.id }) as { status: { missing?: boolean } }
   expect(status.status.missing).toBe(true)
@@ -132,4 +135,21 @@ it('names every card’s branch without a Git process, and pushes a change when 
   git(workspace.worktreePath, 'checkout', '-q', '--detach')
   const commit = git(workspace.worktreePath, 'rev-parse', '--short=7', 'HEAD')
   expect((await heads({ threadIds: [own.id] })).threads[own.id]).toMatchObject({ own: true, branch: null, detachedAt: commit })
+
+  // The directory is still there, but its .git entry is unreadable or gone.
+  const dotGit = join(workspace.worktreePath, '.git')
+  renameSync(dotGit, `${dotGit}-saved`)
+  expect((await heads({ threadIds: [own.id] })).threads[own.id]).toMatchObject({
+    own: true,
+    unavailable: 'The worktree folder is not a Git checkout.'
+  })
+})
+
+it('rejects malformed Git scopes before asking for access to a folder', async () => {
+  const wait = vi.spyOn(main.orchestrator, 'waitForThreadFolders')
+  const path = join(home, 'must-not-probe')
+  await expect(heads({ projectIds: [projectId], path })).rejects.toThrow(/path/)
+  await expect(dispatchMethod({ mms: main, globalSequence: () => 0 }, 'git.status', { projectId, cwd: path })).rejects.toThrow(/cwd/)
+  await expect(dispatchMethod({ mms: main, globalSequence: () => 0 }, 'git.log', { projectId, limit: -1 })).rejects.toThrow(/limit/)
+  expect(wait).not.toHaveBeenCalled()
 })
