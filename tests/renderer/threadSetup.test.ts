@@ -184,3 +184,28 @@ describe('New thread opens in the project last picked for a new thread', () => {
     expect(create).toHaveBeenLastCalledWith()
   })
 })
+
+describe("the sidebar's New thread in a project of another computer", () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('opens a draft here whose composer runs on that computer, in that project', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { createAndSelectProjectThread } = await import('../../src/renderer/lib/threadActions')
+    const draft = { id: 'draft', name: 'New Chat', createdAt: '', updatedAt: '', order: 0 } as never
+    useAppStore.setState({
+      profileId: 'default',
+      threads: [],
+      activeThreadId: null,
+      composerWorkspaceDrafts: {},
+      projects: [{ id: 'mac:p', name: 'mac-proj', path: '/Users/me/mac-proj', createdAt: '', order: 0, node: 'mac' }]
+    })
+    const create = vi.fn(async () => draft)
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) } } })
+    await createAndSelectProjectThread('mac:p')
+    // This computer is never asked to make a thread in that computer's project; the send makes it there.
+    expect(create).toHaveBeenCalledWith()
+    const state = useAppStore.getState()
+    expect(state.activeThreadId).toBe('draft')
+    expect(state.composerWorkspaceDrafts.draft).toMatchObject({ projectId: 'mac:p', node: 'mac' })
+  })
+})
