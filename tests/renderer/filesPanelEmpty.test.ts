@@ -8,7 +8,10 @@ import type { Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-vi.mock('@monaco-editor/react', () => ({ default: () => createElement('div', { className: 'editor-stub' }) }))
+vi.mock('@monaco-editor/react', () => ({
+  default: ({ value, options }: { value: string; options: { readOnly?: boolean; ariaLabel?: string } }) =>
+    createElement('textarea', { value, readOnly: options.readOnly, onChange: () => undefined, 'aria-label': options.ariaLabel })
+}))
 vi.mock('../../src/renderer/components/editors/MarkdownDocumentEditor', () => ({ MarkdownDocumentEditor: () => null }))
 // The tree stub offers one file to open and shows which folder it lists.
 vi.mock('../../src/renderer/components/FileTree', () => ({
@@ -46,7 +49,7 @@ beforeEach(() => {
       getActiveProjectPath: async (threadId?: string | null) => (threadId ? threadFolders[threadId] ?? null : null)
     },
     workspace: { getStatus: async () => ({}) },
-    fs: { readFile: async () => 'hello', writeFile: async () => undefined, readAsset: async () => null, listDir, listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] }) },
+    fs: { readFile: async () => 'hello', readFileInWorkspace: async () => ({ content: 'hello', workspaceRoot: '/repo' }), writeFile: async () => undefined, readAsset: async () => null, listDir, listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] }) },
     threads: { select: async () => undefined }
   }
   window.matchMedia = () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList
@@ -116,6 +119,19 @@ describe('Files panel without an open file', () => {
     await act(async () => useAppStore.setState({ activeThreadId: 't1' }))
     await flush()
     expect(host.querySelector('[aria-label="Close notes.txt"]')).not.toBeNull()
+  })
+
+  it('shows the contents of a thread file from a legacy service in a read-only editor', async () => {
+    useAppStore.setState({ activeThreadId: 't1', threads: [startedThread('t1')] })
+    window.mousse.fs.readFileInWorkspace = async () => ({ content: 'legacy file contents' })
+    await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
+    await flush()
+    await act(async () => tree().click())
+    await flush()
+    const editor = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="notes.txt"]')
+    expect(editor?.value).toBe('legacy file contents')
+    expect(editor?.readOnly).toBe(true)
+    expect(host.textContent).toContain('Read-only until the service is updated')
   })
 
   it('opens a picked file in a sibling tab; returning to Files shows the browser', async () => {

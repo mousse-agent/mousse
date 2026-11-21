@@ -72,7 +72,7 @@ export async function resolveEditorFolder(input: EditorFolderInput): Promise<Edi
   const stored = manager.load()
   let kind: EditorFolderKind = 'project'
   let path = projectPath
-  if (stored) {
+  if (stored && !stored.prepared) {
     const verified = await manager.verify(stored)
     if (verified.lifecycle !== 'ready')
       throw new DomainRpcError(

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { connectCliClient } from '../src/cli/daemonClient'
-import { connectGuiClient } from '../src/main/mms/guiDaemonCompatibility'
+import { connectGuiClient, GUI_REQUIRED_METHODS, readThreadEditorFile, writeThreadEditorFile } from '../src/main/mms/guiDaemonCompatibility'
 import { isProtocolVersionMismatch, LocalMmsClient, ProtocolHelloError } from '../src/mms/protocol/client'
 import { resolveLocalEndpoint } from '../src/mms/protocol/endpoint'
 import { encodeFrame, FrameDecoder } from '../src/mms/protocol/framing'
@@ -51,6 +51,41 @@ async function versionOneService(): Promise<{ home: string; endpoint: string; he
 }
 
 describe('daemon protocol version skew', () => {
+  it('lets this app open text from a service that supports files.read without workspace binding', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-version-skew-'))
+    homes.push(home)
+    const endpoint = resolveLocalEndpoint(home).path
+    const editorRequests: Array<{ method: string; params: unknown }> = []
+    const server = createServer((socket) => {
+      const decoder = new FrameDecoder()
+      socket.on('data', (chunk) => {
+        decoder.push(chunk)
+        for (const frame of decoder.shiftAll()) {
+          const envelope = parseEnvelope(frame)
+          if (envelope?.kind === 'hello') {
+            socket.write(encodeFrame({ kind: 'hello_ok', protocolVersion: MMS_PROTOCOL_VERSION, instanceId: 'older-daemon', capabilities: [], globalSequence: 0 }))
+          } else if (envelope?.kind === 'req') {
+            if (envelope.method !== 'capabilities') editorRequests.push({ method: envelope.method, params: envelope.params })
+            const result = envelope.method === 'capabilities' ? { protocolVersion: MMS_PROTOCOL_VERSION, methods: GUI_REQUIRED_METHODS } : { content: 'project text' }
+            socket.write(encodeFrame({ kind: 'res', id: envelope.id, ok: true, result }))
+          }
+        }
+      })
+    })
+    servers.push(server)
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve))
+    const client = new LocalMmsClient({ homeDir: home, endpoint, ownerToken: 'fixture-token', clientType: 'gui' })
+    const params = { threadId: 'draft', path: 'notes.txt' }
+    try {
+      await connectGuiClient(client, home)
+      await expect(readThreadEditorFile(client, params)).resolves.toEqual({ content: 'project text' })
+      await expect(writeThreadEditorFile(client, { ...params, content: 'changed' }, home)).rejects.toThrow(/workspace/)
+      expect(editorRequests).toEqual([{ method: 'files.read', params }])
+    } finally {
+      await client.close()
+    }
+  })
+
   it('a version-1 hello is refused by this service before any method runs', () => {
     const refused = validateHello({ kind: 'hello', protocolVersion: 1, ownerToken: 'fixture-token', clientType: 'gui' })
     expect(refused).toMatchObject({ ok: false, code: 'protocol_version' })

@@ -25,7 +25,7 @@ import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName, isValidBranchName } from '../../shared/mousseBranches'
-import { withOwnedBranches } from '../git/gitPolicy'
+import { assertGitAllowedAsync, withOwnedBranches } from '../git/gitPolicy'
 import { BRANCH_RECORD_OPERATIONS, BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { randomUUID } from 'node:crypto'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
@@ -38,6 +38,7 @@ import { retentionWindowText } from '../../shared/undoRetention'
 import { gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type DeletePlace, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
 import { readThreadRecordSync, threadRecordFile, threadRecordFolder, threadRecordName } from '../data/threadRecords'
+import { runIsolatedCheckout } from '../workspace/isolatedCheckout'
 
 /** The lifecycle Git helpers, also reachable from here for existing callers. */
 export { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
@@ -1338,8 +1339,17 @@ export class WorktreeRetirementService {
       await this.restoreAdmin(manifest)
       await untrusted?.prepare(manifest.worktreePath)
       if (await this.checkoutFingerprint(manifest.worktreePath) !== manifest.checkoutFingerprint) throw new Error('Checkout conversion policy changed; reconstruction requires recovery')
-      if (manifest.sparse) await lifecycleGitAsync(manifest.worktreePath, ['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
-      await lifecycleGitAsync(manifest.worktreePath, ['checkout', 'HEAD'], undefined, undefined, untrusted?.env)
+      const checkout = async (args: string[], input?: string): Promise<void> => {
+        const cwd = manifest.worktreePath
+        if (untrusted) {
+          await assertGitAllowedAsync({ cwd, args, ...(input === undefined ? {} : { stdin: input }) })
+          await runIsolatedCheckout(cwd, args, input, repoProgramEnv({ ...process.env, ...untrusted.env }), { timeout: 30_000 })
+        } else {
+          await lifecycleGitAsync(cwd, args, input)
+        }
+      }
+      if (manifest.sparse) await checkout(['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
+      await checkout(['checkout', 'HEAD'])
       for (const auxiliary of manifest.auxiliary) {
         const target = join(manifest.worktreePath, auxiliary.path)
         await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(dirname(target), { recursive: true })
@@ -1735,6 +1745,7 @@ export class WorktreeRetirementService {
     let baseSha: string | undefined, resultSha: string | undefined
     if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'workspace.json') {
       const row = value as Record<string, unknown>
+      if (row.lifecycle === 'provisioning') throw new Error('The worktree checkout must finish or be recovered before retirement.')
       const journal = new ThreadJournal(task.location, { readOnly: true }).list()
       const provisionFits = (entry: ThreadJournalRecord): boolean => {
         const intent = entry.expectedPreState as { branch?: string; worktreePath?: string } | undefined

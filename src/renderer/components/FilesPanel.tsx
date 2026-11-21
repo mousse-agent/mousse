@@ -42,6 +42,7 @@ interface OpenFileState {
   kind: FileViewKind
   content: string
   savedContent: string
+  workspaceRoot?: string
   binary: boolean
   loading: boolean
   saveState: SaveState
@@ -62,6 +63,10 @@ interface OpenFileDetail {
   projectId?: string
 }
 
+function lacksWorkspaceBinding(file: OpenFileState): boolean {
+  return Boolean(file.threadId && !file.workspaceRoot && !fileLocation(file.path).root)
+}
+
 function basename(path: string): string {
   return path.replace(/\\/g, '/').split('/').pop() || path
 }
@@ -76,17 +81,18 @@ function refreshRecovered(file: OpenFileState): Partial<OpenFileState> {
 }
 
 // A file opened while the tree shows a folder outside the thread's is named by its absolute path and read from its own folder.
-function readText(path: string, threadId: string | null): Promise<string> {
+async function readText(path: string, threadId: string | null, expectedRoot?: string): Promise<{ content: string; workspaceRoot?: string }> {
   const at = fileLocation(path)
-  return window.mousse.fs.readFile(at.path, undefined, threadId, at.root)
+  if (threadId && !at.root) return window.mousse.fs.readFileInWorkspace(at.path, threadId, expectedRoot)
+  return { content: await window.mousse.fs.readFile(at.path, undefined, threadId, at.root) }
 }
 function readAssetAt(path: string, threadId: string | null) {
   const at = fileLocation(path)
   return window.mousse.fs.readAsset(at.path, undefined, threadId, at.root)
 }
-function writeText(path: string, content: string, threadId: string | null): Promise<void> {
+function writeText(path: string, content: string, threadId: string | null, expectedRoot?: string): Promise<void> {
   const at = fileLocation(path)
-  return window.mousse.fs.writeFile(at.path, content, undefined, threadId, at.root)
+  return window.mousse.fs.writeFile(at.path, content, undefined, threadId, at.root, expectedRoot)
 }
 
 /** Whether a key press belongs to a text field or the code editor, which keep their own Escape and Ctrl+L. */
@@ -294,11 +300,11 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     queue = new SerializedAutosave({
       read: () => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return readText(path, threadId)
+        return readText(path, threadId, filesRef.current[key]?.workspaceRoot).then((file) => file.content)
       },
       write: (content) => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return writeText(path, content, threadId)
+        return writeText(path, content, threadId, filesRef.current[key]?.workspaceRoot)
       },
       onSaved: (savedContent) => {
         if (!isCurrent()) return
@@ -346,11 +352,11 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         if (useAppStore.getState().profileId !== ownerProfileId) { URL.revokeObjectURL(assetUrl); return }
         patchFile(key, { loading: false, binary: true, assetUrl, assetSignature: assetSignature(asset.data, asset.mimeType), initialLoadFailed: false })
       } else {
-        const content = await readText(path, threadId)
+        const { content, workspaceRoot } = await readText(path, threadId)
         if (loadSequences.current.get(key) !== sequence) return
         const binary = isBinaryContent(content)
         if (useAppStore.getState().profileId !== ownerProfileId) return
-        patchFile(key, { loading: false, binary, content: binary ? '' : content, savedContent: binary ? '' : content, initialLoadFailed: false })
+        patchFile(key, { loading: false, binary, workspaceRoot, content: binary ? '' : content, savedContent: binary ? '' : content, initialLoadFailed: false })
         if (!binary) ensureQueue(key, path, threadId, ownerProfileId)
       }
     } catch (error) {
@@ -411,7 +417,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         }
         if (file.binary) continue
         const savedAtReadStart = file.savedContent
-        void readText(path, file.threadId).then((diskContent) => {
+        void readText(path, file.threadId, file.workspaceRoot).then(({ content: diskContent }) => {
           const current = filesRef.current[key]
           // A save completed after this read began; its result is newer than this poll.
           if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId || current.savedContent !== savedAtReadStart || queues.current.get(key)?.isBusy()) return
@@ -560,7 +566,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const updateContent = useCallback((value: string) => {
     if (!selectedKey) return
     const current = filesRef.current[selectedKey]
-    if (!current || current.loading || current.initialLoadFailed || current.profileId !== useAppStore.getState().profileId) return
+    if (!current || current.loading || current.initialLoadFailed || lacksWorkspaceBinding(current) || current.profileId !== useAppStore.getState().profileId) return
     const conflicted = current.saveState === 'conflict'
     patchFile(selectedKey, conflicted
       ? { content: value }
@@ -722,6 +728,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   // A saved file says nothing; only a state that needs attention or is in progress shows.
   const saveLabel = useMemo(() => {
     if (!selected || selected.loading) return ''
+    if (!selected.binary && !selected.initialLoadFailed && lacksWorkspaceBinding(selected)) return 'Read-only until the service is updated'
     if (selected.saveState === 'saving') return 'Saving…'
     if (selected.saveState === 'dirty') return 'Autosave pending'
     if (selected.saveState === 'conflict') return 'Conflict'
@@ -860,9 +867,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
           </div>
           : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview"><video src={selected.assetUrl} controls /></div>
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
-          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
+          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} readOnly={lacksWorkspaceBinding(selected)} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
-          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: false }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: wordWrap ? 'on' : 'off' }} /></div>
+          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ readOnly: lacksWorkspaceBinding(selected), automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: false }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: wordWrap ? 'on' : 'off' }} /></div>
           : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}
       </div>}
     </div>

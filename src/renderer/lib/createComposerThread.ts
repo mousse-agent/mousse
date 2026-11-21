@@ -100,8 +100,9 @@ export async function prepareComposerThread(deps: {
         })
     })
   }
-  // An unset choice is recorded too, so the thread keeps the one it was sent with.
-  if (thread.worktreeEnabled !== enabled) {
+  // An unset choice is recorded too, so the thread keeps the one it was sent with. A pick is sent even when the composer
+  // already gave it to the thread (to prepare its worktree), so the project remembers it.
+  if (thread.worktreeEnabled !== enabled || workspace.worktreePicked) {
     const updated = workspace.worktreePicked ? await deps.setWorktreeEnabled(thread.id, enabled, true) : await deps.setWorktreeEnabled(thread.id, enabled)
     if (!deps.stillVisible()) return null
     deps.update(updated)

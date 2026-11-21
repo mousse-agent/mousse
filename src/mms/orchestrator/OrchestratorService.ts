@@ -1,3 +1,4 @@
+import { isThreadStarted } from '../../shared/threadTitle'
 import { profilerService } from '../diagnostics/profilerService'
 import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
@@ -305,6 +306,7 @@ import { disconnectedWorktreeFolder, driveNotConnectedText, waitForWorktreeFolde
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
+import { isPreparing, PREPARED_WORKTREE_MAX_AGE_MS, prepareThreadWorkspace, releasePreparedWorkspace, settledPreparation } from '../workspace/workspacePreparation'
 import { ensureSnapshotWorkspaceAsync, loadSnapshotWorkspaceMetadataAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -1287,6 +1289,8 @@ export class OrchestratorService extends EventEmitter {
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
     this.residency.stop()
+    clearInterval(this.preparationSweep)
+    this.preparationSweep = undefined
     for (const threadId of [...this.leaseWaits.keys()]) this.endLeaseWait(threadId)
     this.leaseWaitsOfDeleted.clear()
     this.stopLeaseReleaseWatch?.()
@@ -2237,6 +2241,49 @@ export class OrchestratorService extends EventEmitter {
     releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) },
     releaseIdleRuntimes: (idleMs, now) => { this.runtimeManager?.releaseIdleRuntimes(idleMs, now, (threadId) => this.runtimeKeepReason(threadId)) }
   })
+
+  private preparationSweep: ReturnType<typeof setInterval> | undefined
+  private sweepingPreparations = false
+
+  /** A low-priority sweep also picks up abandoned drafts left by a previous process. */
+  startPreparedWorkspaceCleanup(): void {
+    if (this.preparationSweep) return
+    this.preparationSweep = setInterval(() => void this.sweepAbandonedPreparedWorkspaces().catch((error) => console.warn('[worktree-prep] draft cleanup failed', error)), 15 * 60_000)
+    this.preparationSweep.unref()
+  }
+
+  prepareNewThreadWorkspace(input: Parameters<typeof prepareThreadWorkspace>[0]): void {
+    if (this.lifecycle.stopping) return
+    prepareThreadWorkspace(input, this.lifecycle)
+  }
+
+  async sweepAbandonedPreparedWorkspaces(now = Date.now()): Promise<void> {
+    const store = this.threadStore
+    if (!store || this.sweepingPreparations || this.lifecycle.signal.aborted) return
+    this.sweepingPreparations = true
+    try {
+      await this.lifecycle.run('workspace-expiry', async () => {
+        for (const thread of store.listAllThreads()) {
+          if (this.lifecycle.signal.aborted) return
+          if (Date.parse(thread.updatedAt) > now - PREPARED_WORKTREE_MAX_AGE_MS) continue
+          const idle = () => {
+            const current = store.getThread(thread.id)
+            return Boolean(current && !this.lifecycle.signal.aborted && Date.parse(current.updatedAt) <= now - PREPARED_WORKTREE_MAX_AGE_MS && !this.residency.isViewed(thread.id) && !this.isActiveTurnRunning(thread.id))
+          }
+          if (!idle()) continue
+          try {
+            const directory = store.getThreadDir(thread.id)
+            const prepared = new ThreadWorkspaceManager(directory).load()?.prepared
+            if (prepared && Date.parse(prepared.at) <= now - PREPARED_WORKTREE_MAX_AGE_MS) await releasePreparedWorkspace(directory, idle, this.lifecycle.signal)
+          } catch (error) {
+            console.warn('[worktree-prep] abandoned draft could not be checked', { threadId: thread.id, error })
+          }
+        }
+      }, null)
+    } finally {
+      this.sweepingPreparations = false
+    }
+  }
 
   /** What the orchestrator alone knows keeps a thread's runtime: a window shows it, or a reload is reading it. */
   private runtimeKeepReason(threadId: string): string | undefined {
@@ -14344,6 +14391,18 @@ export class OrchestratorService extends EventEmitter {
     // Load recovery identity before acquiring the writer. Reconcile interrupted
     // operations below under that lease, before workspace verification/dispatch.
     const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
+    // The new thread's worktree being prepared while its first message was typed holds the thread's lease: the turn waits
+    // for what is left of it here, then claims it (`WorkspaceResolver`), instead of queueing behind the lease.
+    if (recoveryDirectory && !session.executionLease && isPreparing(recoveryDirectory)) {
+      setupStep('worktree')
+      const preparation = await settledPreparation(recoveryDirectory, setupSignal)
+      turnTimingMark(session.threadId, 'prepared')
+      if (preparation) console.info('[worktree-prep] waited at Send', { threadId: session.threadId, ...preparation })
+      if (setupSignal.aborted) {
+        if (this.lifecycle.signal.aborted || this.isShutdownAbort(opts?.externalSignal?.reason)) return requeueUnstarted()
+        return this.endTurnBeforeStart(session, opts?.runId, queueItemId, claimOwnerToken)
+      }
+    }
     const recoveryManager = recoveryDirectory ? new ThreadWorkspaceManager(recoveryDirectory) : undefined
     // A thread recording into a hidden store is looked up without blocking; only then does this wait before the lease.
     const recoveryWorkspace = recoveryManager ? recoveryManager.load() ?? await loadSnapshotWorkspaceMetadataAsync(recoveryDirectory!) : undefined
@@ -14389,7 +14448,7 @@ export class OrchestratorService extends EventEmitter {
     }
     turnTimingMark(session.threadId, 'recoveryConversation')
 
-    if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
+    if (recoveryDirectory && recoveryWorkspace && !recoveryWorkspace.prepared && session.executionLease) {
       const heldLease = session.executionLease
       // Finishing what an earlier turn left unfinished in the worktree may wait for other work on its repository.
       setupStep('check')

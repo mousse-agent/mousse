@@ -1,5 +1,5 @@
 import { createErrorProvider } from '../../shared/errors'
-import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { releaseExecutionLeaseHandle, waitAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { ChatMode, TurnSetupStep } from '../../shared/types'
 import type { WorkspaceExecutionContext, WorkspaceLifecycle } from '../../shared/workspace'
 import { inspectPendingChangesAsync } from '../actions/git'
@@ -8,6 +8,7 @@ import { isProjectFolderWorkspace, ThreadWorkspaceManager } from './ThreadWorksp
 import { startedInSnapshotStore } from './SnapshotWorkspace'
 import { assertWorktreeFolderConnected } from '../worktree/worktreeLayout'
 import { forgetRepositoryFacts } from '../git/repositoryFacts'
+import { isPreparing, notePreparationClaim, settledPreparation, startNoteWhenReady } from './workspacePreparation'
 
 /** A thread that records its turns in its folder's hidden store, whatever the folder has become since (`unavailableReason`). */
 export const SNAPSHOT_STORE_REASON = 'snapshot-store'
@@ -96,9 +97,43 @@ export class WorkspaceResolver {
   ): Promise<WorkspaceExecutionContext> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const mutating = modeMutatesFiles(mode)
+    // Callers resolving a workspace outside turn setup also wait before taking the draft's lease.
+    if (!heldThreadLease && isPreparing(this.threadDirectory)) {
+      onStep?.('worktree')
+      await settledPreparation(this.threadDirectory, signal)
+      signal?.throwIfAborted()
+    }
     let existing = manager.load()
-    // A worktree add that failed and made nothing (`reconcileFailedProvision`): this message makes the worktree again.
-    if (existing?.lifecycle === 'provisioning' && await manager.reconcileFailedProvision(this.projectPath, signal)) existing = manager.load()
+    if (!heldThreadLease && (existing?.prepared || existing?.lifecycle === 'provisioning')) {
+      const lease = await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-claim', signal })
+      try {
+        return await this.resolve(mode, conversationBranchId, signal, lease, nameFrom, onStep)
+      } finally {
+        releaseExecutionLeaseHandle(lease)
+      }
+    }
+    if (existing?.prepared && !mutating) {
+      const repository = await manager.resolveRepositoryAsync(this.projectPath)
+      return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Read-only turn uses the primary checkout')
+    }
+    if (heldThreadLease && existing?.prepared && this.placement === 'project-folder') {
+      if (await manager.releasePrepared(heldThreadLease, undefined, signal) === 'kept') {
+        await manager.separateRenamedPreparation(heldThreadLease)
+      }
+      signal?.throwIfAborted()
+      existing = undefined
+    }
+    if (heldThreadLease && existing?.lifecycle === 'provisioning' &&
+      (await manager.reconcileFailedProvision(this.projectPath, signal) || await manager.resumeInterruptedProvision(this.projectPath, heldThreadLease, signal))) existing = manager.load()
+    let claimNote: string | undefined
+    if (heldThreadLease && existing?.prepared && existing.lifecycle === 'ready') {
+      const prepared = existing.prepared
+      existing = await manager.claimPrepared(this.projectPath, conversationBranchId, heldThreadLease, nameFrom)
+      if (existing) {
+        notePreparationClaim(this.threadId, prepared)
+        claimNote = prepared.startNote
+      }
+    }
     if (existing) {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
       onStep?.('check')
@@ -127,7 +162,8 @@ export class WorkspaceResolver {
         const context = unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, WORKTREE_GONE_REASON)
         return isProjectFolderWorkspace(existing) ? context : { ...context, workspaceNote: worktreeGoneNote(existing.worktreePath, verified.lifecycle, this.projectPath) }
       }
-      return manager.executionContext(this.projectPath, verified)
+      const context = await manager.executionContext(this.projectPath, verified)
+      return claimNote ? { ...context, startNote: claimNote } : context
     }
     if (!mutating) {
       const repository = await manager.resolveRepositoryAsync(this.projectPath)
@@ -153,18 +189,11 @@ export class WorkspaceResolver {
       return { threadId: this.threadId, workspacePath: this.projectPath, projectPath: this.projectPath, primaryPath: this.projectPath, lifecycle: 'unprovisioned', capability: repository.capability }
     }
     onStep?.('worktree')
-    // What the project folder holds that the new worktree, cut from HEAD, will not. Read beside the worktree's making, not
-    // before it: the worktree is a folder of its own, so the read sees the same either way, and the files wait on nothing.
-    const startNoteRead = uncommittedLeftBehindNote(this.projectPath)
-    try {
-      await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
-    } catch (error) {
-      await startNoteRead
-      throw error
-    }
-    const startNote = await startNoteRead
+    // Read the project folder alongside provisioning. A slow status scan can omit the note and leave provider startup free.
+    const startNote = startNoteWhenReady(uncommittedLeftBehindNote(this.projectPath))
+    await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
     forgetRepositoryFacts()
-    const note = [startNote, manager.placementNote].filter(Boolean).join(' ')
+    const note = [startNote(), manager.placementNote].filter(Boolean).join(' ')
     return { ...await manager.executionContext(this.projectPath), ...(note ? { startNote: note } : {}) }
   }
 }

@@ -51,7 +51,7 @@ beforeEach(() => {
     app: { getFilesRoot: async () => filesRoot, getActiveProjectPath: async () => projectFolder },
     workspace: { getStatus: async () => ({}) },
     fs: {
-      listDir, search, readFile: async () => 'hello', writeFile: async () => undefined, readAsset: async () => null,
+      listDir, search, readFile: async () => 'hello', readFileInWorkspace: async () => ({ content: 'hello', workspaceRoot: '/repo' }), writeFile: async () => undefined, readAsset: async () => null,
       listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] })
     },
     threads: { select: async () => undefined }

@@ -290,6 +290,35 @@ async function mountComposer(): Promise<void> {
 }
 
 describe('the first send of a new chat runs with what the composer shows', () => {
+  it('starts the selected worktree for the current draft before Send', async () => {
+    await listModels(['worktree-pick'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [project('worktree-pick')],
+      threads: [threadRow('draft', { projectId: 'worktree-pick', worktreeEnabled: false, modelOverride: OPUS })],
+      activeThreadId: 'draft',
+      messages: [],
+      composerWorkspaceDrafts: {}
+    })
+    const setWorktreeEnabled = vi.fn(async () => threadRow('draft', { worktreeEnabled: true }))
+    bridge.threads = { setWorktreeEnabled }
+    bridge.git = {
+      status: async () => ({ isRepo: true, branch: 'master' }),
+      branches: async () => ({ current: 'master', branches: ['master'] }),
+      log: async () => [],
+      diffStats: async () => ({ additions: 0, deletions: 0, filesChanged: 0 })
+    }
+    stubBridge()
+    await mountComposer()
+
+    await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label^="Where to work:"]')!.click() })
+    const worktree = [...document.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((button) => button.textContent?.trim() === 'New worktree')
+    expect(worktree).toBeDefined()
+    await act(async () => { worktree!.click() })
+    expect(setWorktreeEnabled).toHaveBeenCalledWith('draft', true)
+    expect(useAppStore.getState().messages).toEqual([])
+  })
+
   it('a worktree from another branch makes a new thread, so an older empty Ask thread shows and runs in the project mode', async () => {
     // Another thread in the project remembered Full access; this older empty thread was set to Ask.
     await listModels(['remembers'])

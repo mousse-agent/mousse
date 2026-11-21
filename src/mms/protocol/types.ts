@@ -174,6 +174,9 @@ export const GIT_OPERATIONS_CAPABILITY = 'git.operations.v1'
  */
 export const FIRST_SEND_BINDING_CAPABILITY = 'threads.firstSendBinding.v1'
 
+/** A local editor can bind reads and saves to the resolved thread workspace. */
+export const FILE_WORKSPACE_BINDING_CAPABILITY = 'files.workspaceBinding.v1'
+
 /**
  * Asked for by a window that applies `threads.row`: a change to one thread is sent as that thread's row (or its
  * removal), with the list version it belongs to, instead of the whole list. A session without it is sent the whole
@@ -568,6 +571,7 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
+  FILE_WORKSPACE_BINDING_CAPABILITY,
   KEEP_AWAKE_CAPABILITY,
   BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,

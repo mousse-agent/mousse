@@ -92,6 +92,13 @@ export interface ThreadWorkspaceMetadata {
    * thread with no project). Only the Undo, review and retention code sees this; it is never written to `workspace.json`.
    */
   snapshotOnly?: true
+  /**
+   * The worktree was made for a new thread before its first message was sent, and no message has claimed it yet. `at`:
+   * when it was started; `readyAt`: when its files were all written (absent while it is `provisioning`); `startNote`:
+   * what the first turn is told (see `WorkspaceExecutionContext.startNote`), read when it was made. Removed when the
+   * first message claims it.
+   */
+  prepared?: { at: string; layout: string; trust: string; sourceCheckout?: string; effectiveCheckout?: string; folder?: string; disconnectedFolder?: string; readyAt?: string; startNote?: string }
 }
 
 export interface WorkspaceExecutionContext {

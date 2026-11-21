@@ -1,5 +1,5 @@
 import { isProtocolVersionMismatch, type LocalMmsClient } from '../../mms/protocol/client'
-import { MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
+import { FILE_WORKSPACE_BINDING_CAPABILITY, MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
 import { AUTOMATIONS_METHODS } from '../../shared/automations'
 
@@ -71,4 +71,28 @@ export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: P
   const methods = new Set(result.methods)
   const missing = GUI_REQUIRED_METHODS.filter(method => !methods.has(method))
   if (missing.length) throw new Error(`${recovery} Missing APIs: ${missing.join(', ')}.`)
+}
+
+function supportsFileWorkspaceBinding(hello: ProtocolHelloOk | null): boolean {
+  return hello?.capabilities.includes(FILE_WORKSPACE_BINDING_CAPABILITY) === true
+}
+
+type EditorClient = Pick<LocalMmsClient, 'hello' | 'request'>
+
+export async function readThreadEditorFile(client: EditorClient, params: Record<string, unknown>, expectedRoot?: string): Promise<{ content: string; workspaceRoot?: string }> {
+  const bindRoot = supportsFileWorkspaceBinding(client.hello)
+  if (expectedRoot && !bindRoot) throw new Error('The workspace for this file could not be verified.')
+  const file = await client.request<{ content: string; workspaceRoot?: string }>('files.read', {
+    ...params, ...(bindRoot ? { bindRoot: true, expectedRoot } : {})
+  })
+  if (!bindRoot) return { content: file.content }
+  if (!file.workspaceRoot) throw new Error('The workspace for this file could not be verified.')
+  return file
+}
+
+export async function writeThreadEditorFile(client: EditorClient, params: Record<string, unknown>, expectedRoot?: string): Promise<void> {
+  if (!expectedRoot || !supportsFileWorkspaceBinding(client.hello)) {
+    throw new Error('This service cannot verify the workspace for this file. Reopen it after updating Mousse.')
+  }
+  await client.request('files.writeDirect', { ...params, expectedRoot })
 }

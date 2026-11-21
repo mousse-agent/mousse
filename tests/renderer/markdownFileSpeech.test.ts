@@ -29,7 +29,7 @@ beforeEach(() => {
   ;(window as unknown as { mousse: unknown }).mousse = {
     app: { getFilesRoot: async () => '/home/me', getActiveProjectPath: async () => null },
     workspace: { getStatus: async () => ({}) },
-    fs: { readFile: async () => '# Notes\nRead this paragraph.', writeFile: async () => {}, listDir: async () => [], listDrives: async () => ({ home: '/home/me', drives: [] }) }
+    fs: { readFile: async () => '# Notes\nRead this paragraph.', readFileInWorkspace: async () => ({ content: '# Notes\nRead this paragraph.', workspaceRoot: '/repo' }), writeFile: async () => {}, listDir: async () => [], listDrives: async () => ({ home: '/home/me', drives: [] }) }
   }
   useAppStore.setState({ profileId: 'default', activeThreadId: null, threads: [], projects: [], mainView: 'files', openedSurfaceKinds: ['files'], browserTabs: [], projectTerminalTabs: [], documentTabs: [] })
   useFileWorkspaceStore.setState({ workspaces: {} })

@@ -3211,8 +3211,11 @@ export function registerGuiIpc(
   )
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) =>
-      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath })).content
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, binding?: { expectedRoot?: string }) => {
+      const params = { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath }
+      if (binding) return guiMms.readThreadEditorFile(params, binding.expectedRoot)
+      return (await guiMms.request<{ content: string }>('files.read', params)).content
+    }
   )
   registerHandler(
     'fs:readAsset',
@@ -3242,17 +3245,20 @@ export function registerGuiIpc(
       content: string,
       projectId?: string,
       threadId?: string | null,
-      root?: string
+      root?: string,
+      expectedRoot?: string
     ) => {
       // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
       if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
-      await guiMms.request('files.writeDirect', {
+      const params = {
         ...filesScope(projectId, threadId),
         ...await browsedRoot(root),
         path: filePath,
         content,
         expectedProfileId: guiMms.getWindowBinding()?.profileId
-      })
+      }
+      if (threadId && !root) await guiMms.writeThreadEditorFile(params, expectedRoot)
+      else await guiMms.request('files.writeDirect', params)
     }
   )
 

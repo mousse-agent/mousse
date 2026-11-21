@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
+import { FILE_WORKSPACE_BINDING_CAPABILITY } from '../src/mms/protocol/types'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, SAVE_TOO_LARGE_MESSAGE } from '../src/shared/fileAssets'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
@@ -122,14 +123,16 @@ describe('files and Git reads by thread, through the daemon', () => {
     it('lists, reads and saves in that folder, and keeps a path inside it', async () => {
       const p = project()
       const t = await threadWorktree(p.id)
-      await window.request('files.writeDirect', { threadId: t.threadId, path: 'inside.txt', content: 'one\ntwo\n' })
+      expect(window.hello?.capabilities).toContain(FILE_WORKSPACE_BINDING_CAPABILITY)
+      const read = await window.request<{ workspaceRoot: string }>('files.read', { threadId: t.threadId, path: 'value.txt', bindRoot: true })
+      await window.request('files.writeDirect', { threadId: t.threadId, path: 'inside.txt', expectedRoot: read.workspaceRoot, content: 'one\ntwo\n' })
       expect(readFileSync(join(t.path, 'inside.txt'), 'utf8')).toBe('one\ntwo\n')
       expect(existsSync(join(f.repo, 'inside.txt'))).toBe(false)
       const listed = await window.request<{ entries: Array<{ name: string }> }>('files.list', { threadId: t.threadId, path: '' })
       expect(listed.entries.map((entry) => entry.name)).toEqual(expect.arrayContaining(['inside.txt', 'value.txt']))
       expect((await window.request<{ content: string }>('files.read', { threadId: t.threadId, path: 'inside.txt' })).content).toBe('one\ntwo\n')
       await expect(window.request('files.read', { threadId: t.threadId, path: '../outside.txt' })).rejects.toThrow(/outside|escape/i)
-      await expect(window.request('files.writeDirect', { threadId: t.threadId, path: '../outside.txt', content: 'x' })).rejects.toThrow()
+      await expect(window.request('files.writeDirect', { threadId: t.threadId, path: '../outside.txt', expectedRoot: read.workspaceRoot, content: 'x' })).rejects.toThrow()
       expect(existsSync(join(t.path, '..', 'outside.txt'))).toBe(false)
     })
 
@@ -152,12 +155,23 @@ describe('files and Git reads by thread, through the daemon', () => {
   })
 
   describe('a save from the editor', () => {
+    it('lets an older window read thread files and refuses its unbound save', async () => {
+      const t = await threadWorktree(project().id)
+      const params = { threadId: t.threadId, path: 'value.txt' }
+      const opened = await window.request<{ content: string; workspaceRoot?: string }>('files.read', params)
+      expect(opened.workspaceRoot).toBeUndefined()
+      await expect(window.request('files.writeDirect', { ...params, content: 'legacy edit' }))
+        .rejects.toMatchObject({ code: 'workspace_binding_required' })
+      expect(readFileSync(join(t.path, params.path), 'utf8')).toBe(opened.content)
+    })
+
     it('writes what it is given, however long, with nothing to Undo', async () => {
       const p = project()
       const t = await threadWorktree(p.id)
       const big = 'line\n'.repeat(200_000)
       expect(big.length).toBeGreaterThan(512 * 1024)
-      await window.request('files.writeDirect', { threadId: t.threadId, path: 'big.txt', content: big })
+      const { workspaceRoot } = await window.request<{ workspaceRoot: string }>('files.read', { threadId: t.threadId, path: 'value.txt', bindRoot: true })
+      await window.request('files.writeDirect', { threadId: t.threadId, path: 'big.txt', expectedRoot: workspaceRoot, content: big })
       expect(readFileSync(join(t.path, 'big.txt'), 'utf8')).toBe(big)
       // The checkpointed `files.write` still keeps its own limit.
       await expect(window.request('files.write', { threadId: t.threadId, path: 'big2.txt', content: big })).rejects.toThrow(/max length/)
