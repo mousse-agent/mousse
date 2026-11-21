@@ -558,10 +558,19 @@ export class ThreadWorkspaceManager {
       const listed = (await tryGit(repository.primaryCheckoutPath, ['worktree', 'list', '--porcelain'])).stdout.split(/\r?\n/)
       if (listed.some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(metadata.worktreePath))) return false
       const ref = `refs/heads/${metadata.branch}`
-      const tip = (await tryGit(repository.primaryCheckoutPath, ['rev-parse', '--verify', '--quiet', ref])).stdout
-      if (tip && expected.head && tip === expected.head && !listed.includes(`branch ${ref}`)) {
-        // Left behind is harmless (the next worktree takes another name), so a refusal here changes nothing.
-        try { await withOwnedBranches([metadata.branch], () => git(repository.primaryCheckoutPath, ['update-ref', '-d', ref, tip])) } catch { /* The branch stays. */ }
+      // Only delete a branch Mousse's records prove it owns, matched by exact case and with no case-only sibling on
+      // case-insensitive disks (Windows, macOS), so recovery never deletes someone else's branch.
+      if (expected.head && this.branchRecord(metadata).owned.has(metadata.branch)) {
+        const refs = await this.headRefs(repository.primaryCheckoutPath)
+        const tip = refs.get(ref)
+        const foldRef = (name: string): string => (process.platform === 'win32' || process.platform === 'darwin' ? name.toLowerCase() : name)
+        const caseCollision = (process.platform === 'win32' || process.platform === 'darwin')
+          && [...refs.keys()].some((name) => name !== ref && name.toLowerCase() === ref.toLowerCase())
+        const checkedOut = listed.some((line) => line.startsWith('branch ') && foldRef(line.slice('branch '.length)) === foldRef(ref))
+        if (tip && tip === expected.head && !caseCollision && !checkedOut) {
+          // Left behind is harmless (the next worktree takes another name), so a refusal here changes nothing.
+          try { await withOwnedBranches([metadata.branch], () => git(repository.primaryCheckoutPath, ['update-ref', '-d', ref, tip])) } catch { /* The branch stays. */ }
+        }
       }
       await rm(this.workspacePath, { force: true })
       this.journal.append({ operationId: last.operationId, operationType: 'workspace-provision', state: 'cancelled', details: { reconciled: 'worktree add failed; nothing was made' } })
@@ -587,14 +596,42 @@ export class ThreadWorkspaceManager {
     throw new Error('Mousse could not find a free branch name for the worktree.')
   }
 
-  /** Whether a branch of this name is there, or branches under it. */
+  /** Every local branch ref in the repository (`refs/heads/... -> commit sha`), exact case as Git stores it. */
+  private async headRefs(checkoutPath: string): Promise<Map<string, string>> {
+    const out = (await tryGit(checkoutPath, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads'])).stdout
+    const refs = new Map<string, string>()
+    for (const line of out.split(/\r?\n/)) {
+      const space = line.lastIndexOf(' ')
+      if (space > 0) refs.set(line.slice(0, space), line.slice(space + 1))
+    }
+    return refs
+  }
+
+  /** Whether a branch of this name is there, or branches under it (case-insensitively on Windows and macOS). */
   private async branchNameTaken(checkoutPath: string, name: string): Promise<boolean> {
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      const target = `refs/heads/${name}`.toLowerCase()
+      const prefix = `${target}/`
+      for (const ref of (await this.headRefs(checkoutPath)).keys()) {
+        const lower = ref.toLowerCase()
+        if (lower === target || lower.startsWith(prefix)) return true
+      }
+      return false
+    }
     return (await tryGit(checkoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== ''
   }
 
   /** Whether `prefix` or one of its parent folders is a branch, so no branch can be made under it. */
   private async folderOfNameTaken(checkoutPath: string, prefix: string): Promise<boolean> {
     const parts = prefix ? prefix.split('/') : []
+    if (!parts.length) return false
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      const refs = new Set([...(await this.headRefs(checkoutPath)).keys()].map((ref) => ref.toLowerCase()))
+      for (let index = 1; index <= parts.length; index++) {
+        if (refs.has(`refs/heads/${parts.slice(0, index).join('/')}`.toLowerCase())) return true
+      }
+      return false
+    }
     for (let index = 1; index <= parts.length; index++) {
       if ((await tryGit(checkoutPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${parts.slice(0, index).join('/')}`])).ok) return true
     }
@@ -723,8 +760,9 @@ export class ThreadWorkspaceManager {
 
   private async settlePendingRename(primary: string, worktreePath: string, pending: { from: string; to: string; operationId: string; fromSha?: string }): Promise<'renamed' | 'not-renamed' | 'unknown'> {
     const { from, to, operationId, fromSha } = pending
-    const tipOf = async (name: string): Promise<string> => (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}^{commit}`])).stdout
-    const [fromTip, toTip] = [await tipOf(from), await tipOf(to)]
+    // Exact-case ref lookup so a case-only sibling on Windows/macOS is never mistaken for `to` or `from`.
+    const refs = await this.headRefs(primary)
+    const [fromTip, toTip] = [refs.get(`refs/heads/${from}`) ?? '', refs.get(`refs/heads/${to}`) ?? '']
     const [hasFrom, hasTo] = [Boolean(fromTip), Boolean(toTip)]
     const there = await pathExists(worktreePath)
     const head = there ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''

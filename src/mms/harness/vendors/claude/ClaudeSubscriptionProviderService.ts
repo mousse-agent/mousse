@@ -1017,6 +1017,8 @@ export class ClaudeSubscriptionProviderService {
   private oneShotSpare: OneShotSpare | undefined
   /** The account and launch one-shots run under: a sign-out, a reconnect or a stop starts a new one (`oneShot`). */
   private oneShotGeneration = 0
+  /** Title/branch one-shot process trees being ended (`reapOneShot`); `logout` waits for them. */
+  private readonly oneShotReaping = new Set<Promise<void>>()
   /** Live queries by thread: the Claude processes that outlive a turn. Null disables them (one query per turn). */
   private readonly live = new Map<string, LiveSession<TurnContext>>()
   private readonly liveConfig: LiveTimings | null
@@ -1300,16 +1302,19 @@ export class ClaudeSubscriptionProviderService {
     signal.throwIfAborted()
     if (this.checkDue()) await this.status()
     signal.throwIfAborted()
-    if (!this.configured())
+    if (!this.configured()) {
+      this.dropOneShotSpare()
       throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+    }
     const generation = this.oneShotGeneration
+    const account = this.account()?.subject ?? null
     const { model, effort } = this.oneShotModel(spec)
     const spared = oneShotUsesSpare(spec.task)
     const controller = new AbortController()
     const options: Options = { ...this.oneShotOptions(controller), model, ...(effort ? { effort } : {}), systemPrompt: spared ? ONE_SHOT_SPARE_SYSTEM : spec.system }
     if (!spared) return this.runOneShot(spec.prompt, options, controller, spec, signal)
     const message = oneShotSpareMessage(spec.system, spec.prompt)
-    const key = oneShotLaunchKey(options)
+    const key = oneShotLaunchKey(options, account)
     const spare = this.takeOneShotSpare(key)
     let answer = spare ? await this.answerOnSpare(spare, message, spec, signal) : undefined
     if (!answer) {
@@ -1347,7 +1352,10 @@ export class ClaudeSubscriptionProviderService {
       query = await this.createQuery(prompt, options)
       return await this.readOneShot(query, spec, signal)
     } finally {
-      query?.close()
+      if (query) {
+        if (controller.signal.aborted) this.reapOneShot(query)
+        else query.close()
+      }
       signal.removeEventListener('abort', abort)
       this.controllers.delete(controller)
     }
@@ -1377,6 +1385,7 @@ export class ClaudeSubscriptionProviderService {
     let heard = false
     try {
       query = await spare.query
+      if (spare.controller.signal.aborted || signal.aborted) return undefined
       spare.input.push(message)
       return await this.readOneShot(query, spec, signal, () => { heard = true })
     } catch (error) {
@@ -1438,10 +1447,11 @@ export class ClaudeSubscriptionProviderService {
     query.close()
     if (!target) return
     const reap = this.dependencies.reap ?? ((at: number, known?: SpawnedRoot) => reapProcessTree(at, { graceMs: CLAUDE_STOP_GRACE_MS, ...(known ? { root: known } : {}) }))
-    void reap(target.pid, target.root).then(
+    const reaping: Promise<void> = reap(target.pid, target.root).then(
       (outcome) => { if (outcome === 'killed' || outcome === 'survived') console.warn('[claude-subscription] a title process did not exit when closed', { pid: target.pid, outcome }) },
       (error: unknown) => console.warn('[claude-subscription] a title process could not be ended', { pid: target.pid, error: error instanceof Error ? error.message : String(error) })
-    )
+    ).finally(() => this.oneShotReaping.delete(reaping))
+    this.oneShotReaping.add(reaping)
   }
   /**
    * The options of a one-shot. Claude Code loads no settings files (`settingSources: []`), so no hook,
@@ -1726,7 +1736,9 @@ export class ClaudeSubscriptionProviderService {
     if (!this.binary()) return false
     const result = await this.probe(env, signal)
     signal?.throwIfAborted()
+    const previousAccount = this.account()?.subject ?? null
     this.cliProbe = { at: Date.now(), result }
+    if (result.kind !== 'signed_in' || (this.account()?.subject ?? null) !== previousAccount) this.dropOneShotSpare()
     return result.kind === 'signed_in'
   }
   /** A live check is due: the last terminal sign-in result is missing or stale. */
@@ -1739,7 +1751,9 @@ export class ClaudeSubscriptionProviderService {
     if (!this.binary() || this.stopped) return
     const result = await this.probe(this.environment())
     if (this.stopped) return
+    const previousAccount = this.account()?.subject ?? null
     this.cliProbe = { at: Date.now(), result }
+    if (result.kind !== 'signed_in' || (this.account()?.subject ?? null) !== previousAccount) this.dropOneShotSpare()
     if (result.kind === 'signed_in' && !this.listedByClaude() && !this.modelDiscoveryStarted) {
       this.modelDiscoveryStarted = true
       void this.refreshModels(this.dir).catch(
@@ -4080,6 +4094,7 @@ export class ClaudeSubscriptionProviderService {
     // Everything running stops first, whatever saving does next: a turn, a warm process and its
     // helpers, a sign-in. A failed save is reported after.
     this.abortInFlight()
+    await Promise.all([...this.oneShotReaping])
     this.save()
   }
   /**

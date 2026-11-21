@@ -526,6 +526,44 @@ describe('Claude Subscription native provider', () => {
       expect(started).toHaveLength(1)
     })
 
+    it('switching to another Claude account drops the waiting process and starts a new one', async () => {
+      let email = 'alice@example.com'
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }], {
+        runAuth: async () => JSON.stringify({ loggedIn: true, email, orgId: 'org-1', authMethod: 'claude.ai' })
+      })
+      await service.status()
+      await ask(service, 'title', 'Request: first')
+      expect(started).toHaveLength(2)
+      // Account changes in the terminal and status rechecks: the old account's spare is closed.
+      email = 'bob@example.com'
+      await service.status({ force: true })
+      expect(started[1]!.close).toHaveBeenCalled()
+      expect(await ask(service, 'title', 'Request: second')).toEqual({ text: 'answer from 2: Request: second' })
+      expect(started[2]).toMatchObject({ streamed: false })
+      expect(started[3]).toMatchObject({ streamed: true })
+    })
+
+    it('signing out waits until the waiting process tree has exited', async () => {
+      let releaseReap!: () => void
+      const reapDone = new Promise<void>((resolve) => { releaseReap = resolve })
+      const reap = vi.fn(async () => { await reapDone; return 'exited' as const })
+      const fakeProc = { pid: 99999 } as unknown as ChildProcess
+      const { started, query } = processes(() => 'answer', (index) => (index === 1 ? fakeProc : undefined))
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }], { reap })
+      await service.status()
+      await ask(service, 'title', 'Request: x')
+      await vi.waitFor(() => expect(started).toHaveLength(2))
+      let loggedOut = false
+      const loggingOut = service.logout().then(() => { loggedOut = true })
+      await vi.waitFor(() => expect(reap).toHaveBeenCalledWith(99999, expect.anything()))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(loggedOut).toBe(false)
+      releaseReap()
+      await loggingOut
+      expect(loggedOut).toBe(true)
+    })
+
     it('stopping the provider ends the waiting process with its process tree', async () => {
       const children: ChildProcess[] = []
       const realChild = (index: number) => {

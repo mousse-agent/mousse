@@ -30,13 +30,14 @@ export function oneShotSpareMessage(system: string, prompt: string): string {
 }
 
 /**
- * What a one-shot's process is started with, as one digest: model, effort, folder, environment (the sign-in included)
+ * What a one-shot's process is started with, as one digest: model, effort, folder, environment, account (`account`)
  * and every other option a process cannot change once started. A process started ahead answers only a request whose
- * launch has the same digest; anything else changed (the title model, the sign-in, the launch settings) starts anew.
+ * launch and account have the same digest; anything else changed (the title model, the account, the launch settings)
+ * starts anew.
  */
-export function oneShotLaunchKey(options: Options): string {
+export function oneShotLaunchKey(options: Options, account: string | null = null): string {
   const { abortController: _abort, canUseTool: _tools, stderr: _stderr, ...rest } = options
-  return createHash('sha256').update(JSON.stringify(rest)).digest('hex')
+  return createHash('sha256').update(JSON.stringify({ ...rest, account })).digest('hex')
 }
 
 /** The input of a process started ahead: it waits for the request's one message, then stays open until `end`. */

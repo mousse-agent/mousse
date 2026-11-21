@@ -142,6 +142,46 @@ describe('a thread worktree starts on a temporary branch and is named in the bac
   })
 })
 
+describe('recovering a failed worktree provision only deletes proven Mousse-owned branches', () => {
+  function writeFailedProvision(dir: string, branch: string, head: string): ThreadWorkspaceManager {
+    const manager = new ThreadWorkspaceManager(dir)
+    const worktreePath = join(dir, 'missing-worktree')
+    manager.journal.append({ operationId: 'prov-1', operationType: 'workspace-provision', state: 'planned', expectedPreState: { head, branch, retainedRef: 'refs/mousse/threads/thread-one/main', worktreePath } })
+    manager.journal.append({ operationId: 'prov-1', operationType: 'workspace-provision', state: 'failed', details: { error: 'worktree add failed' } })
+    writeFileSync(join(dir, 'workspace.json'), JSON.stringify({
+      schemaVersion: 1,
+      threadId: 'thread-one',
+      workspaceId: 'repo:thread-one',
+      generation: 0,
+      provenance: { ownerThreadId: 'thread-one' },
+      repositoryId: 'repo',
+      conversationBranchId: 'main',
+      branch,
+      retainedRef: 'refs/mousse/threads/thread-one/main',
+      worktreePath,
+      baseSha: head,
+      headSha: head,
+      lifecycle: 'provisioning',
+      lastVerifiedAt: new Date().toISOString()
+    }))
+    return manager
+  }
+
+  it.each([
+    ['a proven mousse/ temporary branch at the start commit', 'mousse/a1b2c3d4', 'mousse/a1b2c3d4', true],
+    ['an unproven non-mousse/ branch whose provision never completed', 'feat/a1b2c3d4', 'feat/a1b2c3d4', false],
+    ['someone else\'s branch that differs only in case', 'mousse/a1b2c3d4', 'mousse/A1B2C3D4', false]
+  ] as const)('%s', async (_case, plannedBranch, existingBranch, shouldDelete) => {
+    const head = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'branch', existingBranch, head)
+    const manager = writeFailedProvision(threadDir('one'), plannedBranch, head)
+    expect(await manager.reconcileFailedProvision(repo)).toBe(true)
+    expect(manager.load()).toBeUndefined()
+    const remaining = branches(repo)
+    expect(remaining.includes(existingBranch)).toBe(!shouldDelete)
+  })
+})
+
 describe('the person\'s naming settings', () => {
   it.each([
     ['team/alex', /^team\/alex\/[0-9a-f]{8}$/],
