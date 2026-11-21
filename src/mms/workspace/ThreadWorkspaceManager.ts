@@ -40,7 +40,7 @@ import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
 import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
 import type { NamingOrigin } from '../harness/driver'
-import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type PendingBranchRename, type ThreadBranchRecord } from './threadBranchRecords'
+import { BRANCH_CREATE_OPERATION, BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type PendingBranchRename, type ThreadBranchRecord } from './threadBranchRecords'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { timeGitSync } from '../diagnostics/turnBoundary'
@@ -179,7 +179,7 @@ async function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: s
  * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed;
  * `userRequested` is the user's Start thread from pull request, which that change to the repository's config needs.
  */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, plan: WorktreeCheckoutPlan, enableWorktreeConfig?: () => void, userRequested?: UserAction): Promise<void> {
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, plan: WorktreeCheckoutPlan, enableWorktreeConfig?: () => void, userRequested?: UserAction, onAdded?: () => void): Promise<void> {
   // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
   const safety = await untrustedSafety(primaryCheckoutPath)
   if (enableWorktreeConfig && await enablePerWorktreeConfig(primaryCheckoutPath, userRequested)) enableWorktreeConfig()
@@ -192,7 +192,10 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
     if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   }
   // In a sparse checkout the safety is pinned before any file is written.
-  await addWorktree({ cwd: primaryCheckoutPath, worktreePath, add: addArguments, plan, prefix: [...safety, ...LONG_PATHS], run, afterAdd: () => pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety) })
+  await addWorktree({ cwd: primaryCheckoutPath, worktreePath, add: addArguments, plan, prefix: [...safety, ...LONG_PATHS], run, afterAdd: () => {
+    onAdded?.()
+    return pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety)
+  } })
 }
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}. */
@@ -477,9 +480,14 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      // Mousse makes this branch (`-b` fails when the name is taken), whatever prefix the person chose.
-      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, checkoutPlan, options.enableWorktreeConfig, options.userRequested))
-      else await withOwnedBranches([branch], () => addWorktree({ cwd: repository.primaryCheckoutPath, worktreePath, add: ['-b', branch, worktreePath, head], plan: checkoutPlan, prefix: LONG_PATHS }))
+      // Record the branch made by Git before checkout setup can hand control to the caller.
+      const recordBranchCreation = (): void => {
+        const reflogId = branchReflogIdentity(repository.gitCommonDirectory, `refs/heads/${branch}`)?.id
+        if (reflogId) this.journal.append({ operationId: randomUUID(), operationType: BRANCH_CREATE_OPERATION, state: 'completed', details: { provisionId: operationId, reflogId } })
+      }
+      const add = ['-b', branch, worktreePath, head]
+      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, add, worktreePath, checkoutPlan, options.enableWorktreeConfig, options.userRequested, recordBranchCreation))
+      else await withOwnedBranches([branch], () => addWorktree({ cwd: repository.primaryCheckoutPath, worktreePath, add, plan: checkoutPlan, prefix: LONG_PATHS, afterAdd: recordBranchCreation }))
       if (options.snapshot) {
         // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
         const moved = await moveFilesToSnapshotAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), options.snapshot, { owner: this.threadDirectory, action: 'Starting the worktree' })
@@ -668,6 +676,7 @@ export class ThreadWorkspaceManager {
     const record = this.branchRecord(metadata)
     if (record.pending) return 'another rename is not settled'
     if (!record.owned.has(from)) return 'Mousse did not make this branch'
+    if (!record.reflogIds.has(from)) return 'Mousse has no recorded branch identity'
     return undefined
   }
 
@@ -713,7 +722,7 @@ export class ThreadWorkspaceManager {
       if (signal?.aborted) return 'naming was cancelled'
       const commonDir = repository.gitCommonDirectory
       const original = branchReflogIdentity(commonDir, fromRef)
-      if (!original) return 'the branch has no verifiable reflog'
+      if (!original || original.id !== this.branchRecord(current).reflogIds.get(from)) return 'the branch no longer matches its recorded identity'
       const operationId = randomUUID()
       const plan = { from, to, worktreePath: current.worktreePath, fromReflogId: original.id }
       const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: plan })
@@ -772,8 +781,10 @@ export class ThreadWorkspaceManager {
     const toRef = `refs/heads/${to}`
     const fromTip = refs.get(fromRef)
     const toTip = refs.get(toRef)
-    const renamed = gitApplied && !fromTip && toTip && branchReflogIdentity(commonDir, toRef)?.id === fromReflogId
-    const unchanged = !gitApplied && fromTip && !toTip && fromReflogId && branchReflogIdentity(commonDir, fromRef)?.id === fromReflogId
+    const recordedId = this.branchRecord().reflogIds.get(from)
+    const proven = recordedId !== undefined && recordedId === fromReflogId
+    const renamed = proven && gitApplied && !fromTip && toTip && branchReflogIdentity(commonDir, toRef)?.id === recordedId
+    const unchanged = proven && !gitApplied && fromTip && !toTip && branchReflogIdentity(commonDir, fromRef)?.id === recordedId
     const outcome = renamed ? 'renamed' : unchanged ? 'not-renamed' : 'unknown'
     const head = outcome === 'renamed' && await pathExists(worktreePath)
       ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''

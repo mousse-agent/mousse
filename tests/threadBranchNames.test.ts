@@ -239,6 +239,28 @@ describe('what Undo says about Git work after the branch was renamed', () => {
   })
 })
 
+it('keeps a user-recreated source branch at the same commit checked out under its original name', async () => {
+  const manager = new ThreadWorkspaceManager(threadDir('replacement'))
+  const made = await manager.provision('replacement', 'main', repo, undefined, undefined, undefined, {
+    onWorktreeMade: (path) => {
+      // User Git replaces the ref after worktree creation and before provision records completion.
+      const branch = git(path, 'branch', '--show-current')
+      const head = git(path, 'rev-parse', 'HEAD')
+      git(path, 'switch', '--detach')
+      git(repo, 'branch', '-D', branch)
+      git(repo, 'branch', branch, head)
+      git(path, 'switch', branch)
+    }
+  })
+  const ref = `refs/heads/${made.branch}`
+
+  await manager.renameOwnBranch(made.branch, 'fix/login-button')
+  expect(branches(repo)).toContain(made.branch)
+  expect(branches(repo)).not.toContain('fix/login-button')
+  expect(git(made.worktreePath, 'symbolic-ref', 'HEAD')).toBe(ref)
+  expect(git(repo, 'rev-parse', ref)).toBe(made.headSha)
+})
+
 describe('a rename a stop interrupted is settled from the repository', () => {
   /** A ready worktree on a temporary branch, and a planned rename to `fix/login-button` as the journal records it first. */
   async function interrupted(at: 'planned' | 'git_applied' | 'completed' = 'planned') {

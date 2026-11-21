@@ -900,6 +900,7 @@ export class Harness implements HarnessGateway {
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
   private readonly runtimeStops = new Set<Promise<void>>()
+  private shutdown?: Promise<void>
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
    * belong to the instance, not to a runtime, so a reconfiguration or a runtime that finished its
@@ -2314,26 +2315,15 @@ export class Harness implements HarnessGateway {
     for (const record of this.retired) {
       if (record.active > 0) continue
       this.retired.delete(record)
-      let stopped: void | Promise<void> = undefined
-      try {
-        stopped = record.runtime.stop()
-      } catch (error) {
-        console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
-      }
-      if (stopped) {
-        // A removed instance's files, and profile shutdown, wait for its processes to exit.
-        const removal = this.removals.get(record.instanceId)
-        if (removal) removal.pending += 1
-        const pending = stopped.catch((error) => {
-          console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
-        }).finally(() => {
-          this.runtimeStops.delete(pending)
-          if (removal) {
-            removal.pending -= 1
-            this.deleteRemoved()
-          }
-        })
-        this.runtimeStops.add(pending)
+      const stopped = this.stopRuntime(record)
+      // A removed instance's files wait until its processes have exited.
+      const removal = this.removals.get(record.instanceId)
+      if (stopped && removal) {
+        removal.pending += 1
+        void stopped.then(() => {
+          removal.pending -= 1
+          this.deleteRemoved()
+        }, () => undefined)
       }
     }
     this.deleteRemoved()
@@ -2947,7 +2937,7 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       if (record) {
         this.records.delete(instanceId)
-        void Promise.resolve(record.runtime.stop()).catch(() => {})
+        this.stopRuntime(record)
       }
       throw error
     }
@@ -4172,7 +4162,27 @@ export class Harness implements HarnessGateway {
     return this.options.now?.() ?? Date.now()
   }
 
-  async stop(): Promise<void> {
+  private stopRuntime(record: InstanceRecord): Promise<void> | undefined {
+    let stopping: void | Promise<void>
+    try {
+      stopping = record.runtime.stop()
+    } catch (error) {
+      stopping = Promise.reject(error)
+    }
+    if (!stopping) return undefined
+    // Keep failures from earlier runtime retirements available for profile shutdown.
+    this.runtimeStops.add(stopping)
+    void stopping.then(
+      () => this.runtimeStops.delete(stopping),
+      (error: unknown) => {
+        console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
+      }
+    )
+    return stopping
+  }
+
+  stop(): Promise<void> {
+    if (this.shutdown) return this.shutdown
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
@@ -4182,11 +4192,15 @@ export class Harness implements HarnessGateway {
     }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
-    const stopped = [...this.records.values(), ...this.retired].map(async (record) => record.runtime.stop())
+    for (const record of new Set([...this.records.values(), ...this.retired])) this.stopRuntime(record)
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
-    await Promise.allSettled([...this.runtimeStops, ...stopped])
+    this.shutdown = Promise.allSettled(this.runtimeStops).then((results) => {
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Provider runtimes could not be stopped')
+    })
+    return this.shutdown
   }
 }
 

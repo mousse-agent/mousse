@@ -656,9 +656,10 @@ export class ResourcePurgeService {
             if ('retained' in verdict) { preview.retained.push({ identity: resource.identity, reason: verdict.retained }); continue }
             if ('blocker' in verdict) throw new Error(verdict.blocker)
             if (!verdict.expectedValue || !commonDir) continue
-            const reflogVersion = branchReflogIdentity(commonDir, resource.identity)?.version
-            if (!reflogVersion) { preview.retained.push({ identity: resource.identity, reason: 'Mousse cannot verify the branch reflog; the branch stays' }); continue }
-            const branchProvenance = { worktreePath: thread.workspace.worktreePath, reflogVersion }
+            const reflog = branchReflogIdentity(commonDir, resource.identity)
+            const name = resource.identity.slice('refs/heads/'.length)
+            if (!reflog || reflog.id !== thread.record?.reflogIds.get(name)) { preview.retained.push({ identity: resource.identity, reason: 'The branch no longer matches its recorded identity; the branch stays' }); continue }
+            const branchProvenance = { worktreePath: thread.workspace.worktreePath, reflogVersion: reflog.version }
             preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, branchProvenance, status: 'pending' })
             continue
           }
@@ -792,7 +793,7 @@ export class ResourcePurgeService {
   private threadBranchRetention(record: ThreadBranchRecord | undefined, name: string): string | undefined {
     if (!record) return "The thread's branch records cannot be read; the branch stays"
     if (record.pending && (record.pending.from === name || record.pending.to === name)) return 'A rename of this branch is not settled; the branch stays'
-    if (!record.owned.has(name)) return 'Mousse has no proof it owns this branch name; the branch stays'
+    if (!record.owned.has(name) || !record.reflogIds.has(name)) return 'Mousse has no proof it owns this branch; the branch stays'
   }
 
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
@@ -970,13 +971,19 @@ export class ResourcePurgeService {
           const proof = item.branchProvenance
           if (!proof) return 'The purge recorded no proof of branch ownership; the branch stays'
           let reason = 'The branch reflog changed since the purge preview; the branch stays'
-          const listing = await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])
-          if (listing.split(/\r?\n/).includes(`branch ${item.identity}`)) return 'This branch is checked out; the branch stays'
-          const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, () => {
+          const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, async () => {
+            // Git can switch another worktree onto the branch even while this transaction holds the ref lock.
+            const listing = await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain', '-z'])
+            if (listing.split('\0').includes(`branch ${item.identity}`)) {
+              reason = 'This branch is checked out; the branch stays'
+              return false
+            }
             unclaimed()
-            const retained = this.threadBranchRetention(this.readThreadBranchRecord(item.ownerTaskId, proof.worktreePath), name)
+            const record = this.readThreadBranchRecord(item.ownerTaskId, proof.worktreePath)
+            const retained = this.threadBranchRetention(record, name)
             if (retained) { reason = retained; return false }
-            return branchReflogIdentity(commonDir, item.identity)?.version === proof.reflogVersion
+            const reflog = branchReflogIdentity(commonDir, item.identity)
+            return reflog !== undefined && reflog.id === record?.reflogIds.get(name) && reflog.version === proof.reflogVersion
           }))
           if (!deleted) return reason
           return

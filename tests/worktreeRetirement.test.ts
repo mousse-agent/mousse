@@ -15,6 +15,7 @@ import { retentionWindowText } from '../src/shared/undoRetention'
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { branchReflogIdentity } from '../src/mms/git/branchReflogIdentity'
 import { unverifiableThread } from './support/unverifiableThread'
 import { registerBranchNamer } from '../src/mms/workspace/branchNaming'
 import { BRANCH_RENAME_OPERATION } from '../src/mms/workspace/threadBranchRecords'
@@ -456,6 +457,8 @@ async function threadFixture(kind: 'named' | 'renamed' | 'id-named') {
 
 test.each(['named', 'renamed', 'id-named'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
   const f = await threadFixture(kind)
+  const manager = new ThreadWorkspaceManager(f.task)
+  const originalId = manager.branchRecord().reflogIds.get(f.branch)
   expect(f.branch).toMatch(kind === 'named' ? /^mousse\/[0-9a-f]{8}$/ : kind === 'renamed' ? /^fix\/login-button$/ : /^mousse\/thread\/task\/main$/)
   await f.service.prepare(f.input)
   const trashed = await f.service.retire(f.path)
@@ -464,6 +467,10 @@ test.each(['named', 'renamed', 'id-named'] as const)('a thread worktree whose br
   expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
   await f.service.reconstruct(f.path)
   expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+  const restoredId = branchReflogIdentity(join(f.repo, '.git'), 'refs/heads/' + f.branch)?.id
+  expect(restoredId).toBeDefined()
+  expect(restoredId).not.toBe(originalId)
+  expect(manager.branchRecord().reflogIds.get(f.branch)).toBe(restoredId)
 })
 
 test('a thread\'s agent-made branches are never touched, a mousse/ one included, unless it is an id-named one of Mousse\'s', async () => {

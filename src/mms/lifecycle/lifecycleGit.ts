@@ -22,7 +22,7 @@ export async function lifecycleGitAsync(cwd: string, args: string[], input?: str
   return ran.stdout.trimEnd()
 }
 /** Deletes a branch only if its provenance still holds after Git locks the ref and verifies the old tip. */
-export async function deleteVerifiedBranchAsync(cwd: string, ref: string, sha: string, verify: () => boolean): Promise<boolean> {
+export async function deleteVerifiedBranchAsync(cwd: string, ref: string, sha: string, verify: () => boolean | Promise<boolean>): Promise<boolean> {
   const prepare = `start\ndelete ${ref} ${sha}\nprepare\n`
   const args = await withoutRepoProgramsAsync(cwd, ['update-ref', '--no-deref', '--stdin'], { stdin: prepare + 'commit\n' })
   const env = gitEnvFor(repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd) }))
@@ -48,8 +48,15 @@ export async function deleteVerifiedBranchAsync(cwd: string, ref: string, sha: s
     })
     lines.on('line', (line) => {
       if (line !== 'prepare: ok' || failure) return
-      try { verified = verify() } catch (error) { failure = error }
-      child.stdin.end(verified ? 'commit\n' : 'abort\n')
+      void Promise.resolve().then(verify).then((result) => {
+        if (failure) return
+        verified = result
+        child.stdin.end(verified ? 'commit\n' : 'abort\n')
+      }, (error) => {
+        if (failure) return
+        failure = error
+        child.stdin.end('abort\n')
+      })
     })
     child.stdin.write(prepare)
   })

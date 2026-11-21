@@ -26,6 +26,7 @@ import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitPro
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName, isValidBranchName } from '../../shared/mousseBranches'
 import { withOwnedBranches } from '../git/gitPolicy'
+import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { BRANCH_RECORD_OPERATIONS, BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { randomUUID } from 'node:crypto'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
@@ -1216,7 +1217,7 @@ export class WorktreeRetirementService {
     }
   }
   /** Journals a release or restore of the thread's branch; false when the journal cannot be written (the thread is trashed). */
-  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string }): boolean {
+  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string; reflogId?: string }): boolean {
     if (!location) return false
     try {
       new ThreadJournal(location).append({ operationId: randomUUID(), operationType, state: 'completed', details })
@@ -1236,8 +1237,12 @@ export class WorktreeRetirementService {
       if (await this.branchTaken(manifest, entry.name)) continue
       // A commit that is no longer in the repository cannot be a branch again; it is reported, never a reason to fail.
       if (!await gitSucceeds(manifest.commonDir, ['cat-file', '-e', `${entry.sha}^{commit}`])) { missing.push(entry); continue }
-      await withOwnedBranches([entry.name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)]))
-      if (thread && entry.name === manifest.branch) this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath })
+      const ref = `refs/heads/${entry.name}`
+      await withOwnedBranches([entry.name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', ref, entry.sha, '0'.repeat(entry.sha.length)]))
+      if (thread && entry.name === manifest.branch) {
+        const reflogId = branchReflogIdentity(manifest.commonDir, ref)?.id
+        this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath, reflogId })
+      }
     }
     delete manifest.deletedBranches
     if (missing.length) manifest.branchesNotRestored = missing

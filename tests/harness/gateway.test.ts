@@ -71,6 +71,21 @@ const full = (source = instances(), extra: { models?: Partial<Record<ProviderDri
   return { harness, adapters }
 }
 
+it.each(['active', 'retired'])('reports a failing %s provider runtime stop during shutdown', async (state) => {
+  const failure = new Error('Windows Job accounting failed')
+  const stop = vi.fn<() => Promise<void>>().mockRejectedValueOnce(failure).mockResolvedValue(undefined)
+  const claude = adapterDriver(fake('claude'), { runtime: { stop } })
+  const harness = testHarness({ drivers: [claude], instances: instances(), profileHome: home() })
+  harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+  if (state === 'retired') {
+    await harness.instances.configure('claude', { env: { CHANGED: '1' } })
+    expect(stop).toHaveBeenCalled()
+  }
+
+  await expect(harness.stop()).rejects.toMatchObject({ errors: [failure] })
+  await expect(harness.stop()).rejects.toMatchObject({ errors: [failure] })
+})
+
 describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
   it('resolves each seeded instance to its driver', () => {
     const { harness } = full(instances(undefined, ['openai']))

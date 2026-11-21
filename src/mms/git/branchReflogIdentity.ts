@@ -13,7 +13,7 @@ export function branchReflogIdentity(commonDir: string, ref: string): { id: stri
   if (!ref.startsWith('refs/heads/') || /[\\:]/.test(ref) || ref.split('/').some((part) => !part || part === '..')) return undefined
   try {
     const info = lstatSync(join(commonDir, 'logs', ref), { bigint: true })
-    if (!info.isFile() || !info.ino || !info.size) return undefined
+    if (!info.isFile() || !info.ino || !info.birthtimeNs || !info.size) return undefined
     const identity = [info.dev, info.ino, info.birthtimeNs]
     return { id: digest(identity), version: digest([...identity, info.size, info.mtimeNs, info.ctimeNs]) }
   } catch {

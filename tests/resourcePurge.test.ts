@@ -7,10 +7,12 @@ import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifec
 import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import { branchReflogIdentity } from '../src/mms/git/branchReflogIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { createHash } from 'node:crypto'
 import { legacyAbortRefAsync } from './support/legacyAbortRef'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { BRANCH_CREATE_OPERATION } from '../src/mms/workspace/threadBranchRecords'
 import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver } from '../src/mms/lifecycle/LifecycleClaims'
 import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
@@ -21,7 +23,7 @@ import { OwnershipFacts } from '../src/mms/lifecycle/ResourceInventory'
 const roots: string[] = []
 const owned: Array<() => void> = []
 afterEach(() => { vi.restoreAllMocks(); for (const undo of owned.splice(0)) undo(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
-function fixture(options: { git?: boolean } = {}) {
+function fixture(options: { git?: boolean; legacyBranch?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
   const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
@@ -32,11 +34,18 @@ function fixture(options: { git?: boolean } = {}) {
     mkdirSync(repo); git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
     writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'base'])
     worktree = join(home, 'repositories', resolveRepositoryIdentity(repo).key, 'worktrees', 'threads', 'task', 'main'); mkdirSync(join(worktree, '..'), { recursive: true })
-    const branch = 'mousse/thread/task/main'; git(repo, ['worktree', 'add', '-b', branch, worktree])
+    const branch = 'mousse/thread/task/main'
+    const journal = new ThreadJournal(location)
+    const provision = { operationId: 'provision', operationType: 'workspace-provision' }
+    journal.append({ ...provision, state: 'planned', expectedPreState: { branch, worktreePath: worktree } })
+    git(repo, ['worktree', 'add', '-b', branch, worktree])
+    if (!options.legacyBranch) {
+      const reflogId = branchReflogIdentity(join(repo, '.git'), 'refs/heads/' + branch)?.id
+      journal.append({ operationId: 'branch-creation', operationType: BRANCH_CREATE_OPERATION, state: 'completed', details: { provisionId: provision.operationId, reflogId } })
+    }
     const sha = git(repo, ['rev-parse', 'HEAD']), retainedRef = 'refs/mousse/threads/task/main'; git(repo, ['update-ref', retainedRef, sha])
     writeFileSync(join(location, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: 'task', worktreePath: worktree, branch, repositoryId: resolveRepositoryIdentity(repo).key, retainedRef, baseSha: sha, headSha: sha, integrationTarget: { baseSha: sha, checkoutPath: repo }, lifecycle: 'ready' }))
-    mkdirSync(join(location, 'journal')); writeFileSync(join(location, 'journal', '0000000000000001.json'), JSON.stringify({ schemaVersion: 1, sequence: 1, operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } }))
-    writeFileSync(join(location, 'journal', '0000000000000002.json'), JSON.stringify({ schemaVersion: 1, sequence: 2, operationId: 'provision', operationType: 'workspace-provision', state: 'completed' }))
+    journal.append({ ...provision, state: 'completed' })
   }
   const projected: string[] = []
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: (record) => { projected.push(record.taskId) } })
@@ -53,6 +62,18 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
 })
+test('purge keeps a legacy branch whose provision recorded no reflog identity', async () => {
+  const f = fixture({ git: true, legacyBranch: true })
+  const ref = 'refs/heads/mousse/thread/task/main'
+  const tip = git(f.repo, ['rev-parse', ref])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  const record = await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+  expect(record.state).toBe('purged')
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(git(f.repo, ['rev-parse', ref])).toBe(tip)
+})
+
 /** What a worktree thread's delete must leave: the folder with its files as they are, its branch, and Mousse's refs. */
 function expectWorkKept(f: ReturnType<typeof fixture>) {
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')
