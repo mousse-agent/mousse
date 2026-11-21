@@ -592,6 +592,7 @@ describe('git section collapsed state', () => {
   it('collapses to one line for each reason there is nothing to manage', () => {
     expect(gitCollapsedLabel({ ...base, hasProject: false })).toBe('No project')
     expect(gitCollapsedLabel({ ...base, pathPending: true })).toBe('Checking…')
+    expect(gitCollapsedLabel({ ...base, pathPending: true, pathSlow: true })).toBe('Unavailable')
     expect(gitCollapsedLabel({ ...base, hasPath: false })).toBe('No project folder')
     expect(gitCollapsedLabel({ ...base, loaded: false, status: null })).toBe('Checking…')
     expect(gitCollapsedLabel({ ...base, status: null })).toBe('Unavailable')
