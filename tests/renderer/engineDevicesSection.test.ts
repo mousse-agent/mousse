@@ -408,6 +408,31 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect(d.called('netEngine.address.use')).toEqual([{ node: 'n1' }])
   })
 
+  it('waits for the Cloudflare route to be verified before creating a pairing link', async () => {
+    const d = daemon({ sendLink: true, cloudflare: { state: 'off' } }, {
+      'netEngine.invite': ({ kind }) => ({
+        invitation: kind === 'link' ? 'cloudflare-link' : 'qr',
+        uri: 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA',
+        ...(kind === 'link' ? { code: '123456', attemptsLeft: 3 } : {})
+      })
+    })
+    await mount()
+    await click(button('Add device'))
+    await click(button(/^Over the internet/))
+    expect(document.body.textContent).toContain('domain on your Cloudflare account')
+    await click(button('Connect Cloudflare'))
+    expect(d.called('netEngine.cloudflare.connect')).toEqual([{}])
+
+    for (const state of ['preparing', 'sign_in', 'connecting'] as const) {
+      await d.change({ cloudflare: { state } })
+      expect(d.called('netEngine.invite')).not.toContainEqual({ kind: 'link' })
+    }
+
+    await d.change({ cloudflare: { state: 'connected', hostname: 'mousse.example.net' } })
+    expect(d.called('netEngine.invite')).toContainEqual({ kind: 'link' })
+    expect(document.body.textContent).toContain('123 456')
+  })
+
   it('copies the local tunnel origin before saving a URL and sends a pairing link after setup', async () => {
     const reach = { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 }
     const d = daemon({ reach, sendLink: true })

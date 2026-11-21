@@ -33,6 +33,8 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.join.preview',
   'netEngine.routes.config',
   'netEngine.routes.test',
+  'netEngine.cloudflare.connect',
+  'netEngine.cloudflare.stop',
   // Phase 1b: Add over SSH (§3.4)
   'netEngine.ssh.resolve',
   'netEngine.ssh.probe',
@@ -337,6 +339,13 @@ export interface NetEngineJoinPreview {
   shareable: Array<{ route: string; label: string; cls: RouteClass }>
 }
 
+export interface NetEngineCloudflare {
+  state: 'off' | 'preparing' | 'sign_in' | 'connecting' | 'connected' | 'failed'
+  hostname?: string
+  loginUrl?: string
+  message?: string
+}
+
 export interface NetEngineStatus {
   /** The switch, as saved for this profile. */
   enabled: boolean
@@ -374,6 +383,7 @@ export interface NetEngineStatus {
   workOnThreads?: boolean
   /** This computer's own routes, when its helper speaks protocol 1.1. */
   reach?: NetEngineReach
+  cloudflare?: NetEngineCloudflare
   /** The helper speaks protocol 1.1, so Send link and Enter link work. */
   sendLink?: boolean
   /** Send links this computer shows. */

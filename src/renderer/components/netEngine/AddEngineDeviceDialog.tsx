@@ -12,6 +12,7 @@ import { Modal } from '../ui/Modal'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
 import { EnterLinkPanel, JoinedLine, JoinRoutes, SendLinkPanel } from './SendLinkParts'
+import { CloudflareSetup } from './CloudflareSetup'
 import { SshAddSteps } from './SshAddSteps'
 
 type Step =
@@ -21,6 +22,7 @@ type Step =
   | { kind: 'confirm'; ticket: string; host: string }
   | { kind: 'joining'; host: string }
   | { kind: 'link' }
+  | { kind: 'cloudflare' }
   | { kind: 'enter'; link?: string }
 
 /** The other computer, before it says its own name. */
@@ -43,7 +45,7 @@ export function AddEngineDeviceDialog({
 }: {
   status: NetEngineStatus | undefined
   onClose: () => void
-  initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter' | 'ssh'
+  initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter' | 'ssh' | 'cloudflare'
   /** A `mousse://pair` link that opened Mousse: Enter link reads it at once. */
   initialLink?: string
   /** Opens Add a phone (the old networking's phones, Mousse ID builds); absent where phones can't be added. */
@@ -61,6 +63,11 @@ export function AddEngineDeviceDialog({
   // A build without the helper offers only what the old networking still does (Add a phone).
   const engine = status && status.helper.state !== 'not_in_build' ? status : undefined
   const hasEngine = !!engine
+
+  useEffect(() => {
+    if (step.kind === 'cloudflare' && status?.cloudflare?.state === 'connected')
+      setStep({ kind: 'link' })
+  }, [step.kind, status?.cloudflare?.state])
 
   // The code shows at once, one invitation at a time; when it runs out a new one takes its place.
   useEffect(() => {
@@ -162,7 +169,9 @@ export function AddEngineDeviceDialog({
   }
 
   const title =
-    step.kind === 'scan'
+    step.kind === 'cloudflare'
+      ? 'Cloudflare Tunnel'
+      : step.kind === 'scan'
       ? 'Scan their code'
       : step.kind === 'enter'
         ? 'Paste their link'
@@ -234,6 +243,13 @@ export function AddEngineDeviceDialog({
                 !error && <p className="settings-muted">Making a code…</p>
               ))}
             {engine && !approval && !approved && <PasteField onText={read} />}
+            {engine?.cloudflare && !approval && !approved && (
+              <Choice
+                label="Over the internet"
+                hint="Connect Cloudflare Tunnel"
+                onClick={() => setStep({ kind: 'cloudflare' })}
+              />
+            )}
             {(engine || onAddPhone) && (
               <details className="engine-more-ways">
                 <summary>
@@ -268,6 +284,8 @@ export function AddEngineDeviceDialog({
             )}
           </div>
         )}
+
+        {step.kind === 'cloudflare' && <CloudflareSetup connection={status?.cloudflare} />}
 
         {step.kind === 'link' && (
           <SendLinkPanel

@@ -227,6 +227,12 @@ export function registerNetEngineMethods(
             }
             case 'netEngine.routes.test':
               return engine.testRoute(p.route)
+            case 'netEngine.cloudflare.connect':
+              engine.cloudflare.start()
+              return engine.status()
+            case 'netEngine.cloudflare.stop':
+              await engine.cloudflare.stop()
+              return engine.status()
             case 'netEngine.ssh.resolve':
               return engine.sshAdd().resolve(p.target)
             case 'netEngine.ssh.probe':

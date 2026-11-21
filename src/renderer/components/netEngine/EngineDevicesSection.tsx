@@ -152,7 +152,7 @@ export function EngineDevicesSection() {
   const { devices: nodes } = useComputers(!!status?.on || v1Ready)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [adding, setAdding] = useState<'choose' | 'link'>()
+  const [adding, setAdding] = useState<'choose' | 'link' | 'cloudflare'>()
   const [addingPhone, setAddingPhone] = useState(false)
   const [selected, setSelected] = useState<string>()
   const [picked, setPicked] = useState<string>()
@@ -864,6 +864,7 @@ export function EngineDevicesSection() {
           status={status}
           onChanged={read}
           onSendLink={() => setAdding('link')}
+          onCloudflareSetup={() => setAdding('cloudflare')}
           moreWays={
             oldWays ? (
               <>

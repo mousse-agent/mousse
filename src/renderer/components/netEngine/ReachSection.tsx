@@ -13,6 +13,7 @@ import { classifyIp, parseRoute, routeText } from '../../../shared/netEngine/rou
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { CopyButton } from '../settings/IconButtons'
+import { CloudflareReachRow } from './CloudflareSetup'
 
 /** What Test says when the helper could not reach its own route (1b §1.5). */
 export const TEST_FAILED = "Couldn't confirm from this network"
@@ -41,12 +42,14 @@ export function ReachSection({
   status,
   onChanged,
   onSendLink,
+  onCloudflareSetup,
   moreWays,
   trailing
 }: {
   status: NetEngineStatus
   onChanged: () => void
   onSendLink: () => void
+  onCloudflareSetup: () => void
   moreWays?: ReactNode
   trailing?: ReactNode
 }) {
@@ -77,6 +80,9 @@ export function ReachSection({
         />
       ) : (
         moreWays && <SettingsAdvanced label="More ways">{moreWays}</SettingsAdvanced>
+      )}
+      {status.on && status.cloudflare && (
+        <CloudflareReachRow connection={status.cloudflare} onSetup={onCloudflareSetup} />
       )}
       {relays && <OwnRelayRows relays={relays} onChanged={onChanged} />}
       {trailing}
