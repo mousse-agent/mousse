@@ -182,19 +182,6 @@
       "expiresAt": "2026-11-21T01:26:45.041Z"
     },
     {
-      "task": "issue-1506-faster-worktree-checkout",
-      "session": "Animatrix-2f5268",
-      "machine": "Animatrix",
-      "branch": "issue-1506-faster-worktree-checkout",
-      "paths": [
-        "src/mms/worktree/WorktreeManager.ts",
-        "src/mms/workspace/ThreadWorkspaceManager.ts",
-        "src/mms/workspace/WorkspaceResolver.ts"
-      ],
-      "claimedAt": "2026-11-20T19:52:24.757Z",
-      "expiresAt": "2026-11-21T05:38:40.058Z"
-    },
-    {
       "task": "mousse-id-one-devices-list",
       "session": "agibook-4b4072",
       "machine": "agibook",
