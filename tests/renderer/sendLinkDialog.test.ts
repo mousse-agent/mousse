@@ -200,7 +200,7 @@ describe('Send link (§5.1)', () => {
   it('shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
     const d = daemon()
     const update = await dialog(d)
-    await click(button('Send link'))
+    await click(button('Send a link'))
     expect(d.called('netEngine.invite')).toEqual([{ kind: 'link' }])
     expect(field('Link').value).toBe(LINK)
     expect(button('Copy link')).toBeTruthy()
@@ -223,26 +223,26 @@ describe('Send link (§5.1)', () => {
 
   it('is offered only when the helper speaks Send link', async () => {
     await dialog(daemon({ sendLink: undefined }))
-    expect(button('Show QR')).toBeTruthy()
-    expect(button('Send link')).toBeUndefined()
+    expect(button('Show a code')).toBeTruthy()
+    expect(button('Send a link')).toBeUndefined()
     expect(button('Enter link')).toBeUndefined()
   })
 })
 
-describe('Enter link (§5.3)', () => {
-  it('asks consent with the destinations, shares nothing unticked, then asks for the code', async () => {
+describe('Scan or paste a sent link (§5.3)', () => {
+  it('takes a sent link in the one paste field, asks consent with the destinations, shares nothing unticked, then asks for the code', async () => {
     const d = daemon(
       {},
       { shareable: [{ route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' }] }
     )
     const update = await dialog(d)
-    await click(button('Enter link'))
-    await type(field('Link'), LINK)
-    await submit(field('Link'))
+    await click(button('Scan or paste'))
+    await type(field('Pairing link'), LINK)
+    await submit(field('Pairing link'))
     expect(text()).toContain(
       'Connect to the computer in this link? It will also be able to use this computer.'
     )
-    expect(text()).toContain('192.168.1.20:7443 (LAN), 100.101.7.2:7443 (Tailnet)')
+    expect(text()).toContain('192.168.1.20:7443 (Same network), 100.101.7.2:7443 (Tailscale)')
     const share = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
     expect(share.checked).toBe(false)
     expect(share.parentElement!.textContent).toContain('Internet 203.0.113.7:7443')
@@ -332,7 +332,7 @@ describe('a mousse:// link that opened Mousse (§5.2)', () => {
   const both = () =>
     createElement(Fragment, null, createElement(PairLinkHost), createElement(EngineDevicesSection))
 
-  it('opens Enter link with it in Settings → Devices', async () => {
+  it('opens Scan or paste with it in Settings → Devices', async () => {
     const d = daemon()
     d.state.profiles = [{ id: 'p1', displayName: 'Work', networked: true }]
     useAppStore.setState({ profileId: 'p1' })

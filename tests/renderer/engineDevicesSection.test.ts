@@ -13,7 +13,7 @@ import type { NetEngineDevice, NetEngineStatus } from '../../src/shared/netEngin
 
 const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 const { AddEngineDeviceDialog } = await import('../../src/renderer/components/netEngine/AddEngineDeviceDialog')
-const { engineRow, CLOCK_MESSAGE, SHARED_ACCOUNT_LINE } = await import('../../src/renderer/components/netEngine/engineRows')
+const { engineRow, clockMessage, SHARED_ACCOUNT_LINE } = await import('../../src/renderer/components/netEngine/engineRows')
 
 const device = (fields: Partial<NetEngineDevice> & { node: string }): NetEngineDevice => ({
   name: 'Studio',
@@ -32,12 +32,12 @@ describe('a device row (§5.2)', () => {
     ['it cannot reach this computer', { unreachable: 'in' }, "Studio can't reach this computer", ['retry', 'remove']],
     ['this computer cannot reach it', { unreachable: 'out', online: false }, "This computer can't reach Studio", ['retry', 'remove']],
     ['it no longer accepts this one', { notAccepted: true, online: false }, 'Studio no longer accepts this computer', ['remove']],
-    ['certificate outside its window', { certificateWindow: true, online: false }, CLOCK_MESSAGE, ['retry', 'remove']],
+    ['certificate outside its window', { certificateWindow: true, online: false }, clockMessage('Studio'), ['retry', 'remove']],
     ['SSH sign-in refused (parked)', { sshParked: 'auth_denied', state: 'offline', online: false }, 'SSH sign-in to Studio was refused', ['retry', 'remove']],
     ['SSH key changed (parked)', { sshParked: 'host_key_changed', state: 'offline', online: false }, "Studio's SSH key changed", ['retry', 'remove']],
     ['SSH key not checked (parked)', { sshParked: 'host_key_unknown', state: 'connecting', online: false }, "Check Studio's SSH key", ['retry', 'remove']],
     ['removing', { state: 'removing', online: false }, 'Removing…', []],
-    ['offline', { state: 'offline', online: false }, 'Offline', ['access', 'address', 'retry', 'remove']],
+    ['offline', { state: 'offline', online: false }, "Can't reach it · open Mousse on Studio", ['access', 'address', 'retry', 'remove']],
     ['one direction up, within the bound', { state: 'connecting' }, 'Connecting…', ['access', 'address', 'retry', 'remove']],
     ['one direction up, past the bound', { state: 'connecting', unreachable: 'in' }, "Studio can't reach this computer", ['retry', 'remove']]
   ]
@@ -86,9 +86,10 @@ function daemon(
               name: 'Studio',
               self: false,
               revoked: false,
-              caps: ['read'],
+              caps: ['read', 'chat', 'write', 'terminal', 'settings'],
               kind: 'computer',
               state: 'open',
+              source: 'engine',
               routes: [],
               policy: { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, agentReach: false, work: false }
             }
@@ -96,6 +97,8 @@ function daemon(
         }
       case 'net.status':
         return { enabled: false }
+      case 'bridge.activity':
+        return { entries: [], rules: [], counts: [], uncertain: 0, refused: 0, reads: { calls: 0, bytes: 0, hours: [] } }
       default:
         return state.status
     }
@@ -218,13 +221,14 @@ describe('Settings → Devices, new networking', () => {
     expect(host.textContent).toContain('no other device can open or change this device’s threads')
   })
 
-  it('shows nothing in a build without the helper while the switch is off', async () => {
+  it('says networking is not in a build without the helper, with no switch', async () => {
     daemon({ enabled: false, on: false, helper: { state: 'not_in_build' } })
     await mount()
-    expect(host.textContent).toBe('')
+    expect(host.textContent).toContain("Networking isn't in this build.")
+    expect(host.querySelector('[role="switch"][aria-label="Networking"]')).toBeNull()
   })
 
-  it('shows each row with its id, state and where it is found, and the actions its state allows', async () => {
+  it('shows each row with its state and how it is connected, its id only as a tooltip, and the actions its state allows', async () => {
     daemon({
       devices: [
         device({ node: 'n1', addresses: ['tcp://192.168.1.20:47100'] }),
@@ -232,15 +236,17 @@ describe('Settings → Devices, new networking', () => {
       ]
     })
     await mount()
-    expect(rowText('n1')).toContain('a1b2c3d4 · Connected · 192.168.1.20:47100')
-    expect(rowText('n2')).toContain("ffee0011 · This computer can't reach Laptop · LAN")
+    expect(rowText('n1')).toContain('Connected · same network')
+    expect(rowText('n1')).not.toContain('a1b2c3d4')
+    expect(rowOf('n1')!.querySelector('[title="Id a1b2c3d4"]')).toBeTruthy()
+    expect(rowText('n2')).toContain("This computer can't reach Laptop")
     expect(await menuItems('Laptop')).toEqual(['Retry', 'Remove…'])
   })
 
   it('opens Access under the row, marking the row, from the row menu', async () => {
     daemon({ devices: [device({ node: 'n1' })] })
     await mount()
-    expect(await menuItems('Studio')).toEqual(['Access', 'Add address…', 'Remove…'])
+    expect(await menuItems('Studio')).toEqual(['Access', 'Addresses…', 'Remove…'])
     await click(button('Access'))
     expect(rowOf('n1')!.classList.contains('engine-row-selected')).toBe(true)
     expect(host.textContent).toContain('Access from this device')
@@ -250,7 +256,7 @@ describe('Settings → Devices, new networking', () => {
     const d = daemon({ devices: [device({ node: 'n1' })] })
     await mount()
     await menuItems('Studio')
-    await click(button('Add address…'))
+    await click(button('Addresses…'))
     await type(document.querySelector<HTMLInputElement>('input[aria-label="Address and port"]')!, '192.168.1.20:47100')
     await click(button('Add'))
     expect(d.called('netEngine.address.add')).toEqual([{ node: 'n1', address: '192.168.1.20:47100' }])
@@ -276,7 +282,7 @@ describe('Add device', () => {
     const d = daemon()
     await mount()
     await click(button('Add device'))
-    await click(button('Show QR'))
+    await click(button('Show a code'))
     expect(d.called('netEngine.invite')).toHaveLength(1)
     expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
 
@@ -293,7 +299,7 @@ describe('Add device', () => {
     const d = daemon()
     await mount()
     await click(button('Add device'))
-    await click(button('Show QR'))
+    await click(button('Show a code'))
     await click(button('Close'))
     expect(d.called('netEngine.invite.cancel')).toEqual([{ invitation: 'inv1' }])
   })
@@ -344,10 +350,10 @@ describe('routes (1b §1.3, §1.5)', () => {
     const link = 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA'
     await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, link)
     await click(button('Continue'))
-    expect(document.body.textContent).toContain('100.101.7.2:47100 (Tailnet)')
+    expect(document.body.textContent).toContain('100.101.7.2:47100 (Tailscale)')
     const box = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
     expect(box.checked).toBe(false)
-    expect(box.closest('label')?.textContent).toBe('Tailnet 100.101.7.9:47100')
+    expect(box.closest('label')?.textContent).toBe('Tailscale 100.101.7.9:47100')
 
     await click(button('Connect'))
     expect(d.called('netEngine.join').at(-1)).toEqual({ ticket: link })
@@ -373,9 +379,9 @@ describe('routes (1b §1.3, §1.5)', () => {
       devices: [device({ node: 'n1', route: 'tailnet', offered: ['wss://x.example/mousse-net/1'] })]
     })
     await mount()
-    expect(rowText('n1')).toContain('a1b2c3d4 · Connected · Tailnet')
-    expect(host.textContent).toContain('Addresses Studio offered')
-    expect(host.textContent).toContain('x.example')
+    expect(rowText('n1')).toContain('Connected · via Tailscale')
+    expect(host.textContent).toContain('Studio offered new ways to reach it')
+    expect([...host.querySelectorAll<HTMLElement>('[title]')].some((item) => item.title.includes('x.example'))).toBe(true)
     await click(button('Use'))
     expect(d.called('netEngine.address.use')).toEqual([{ node: 'n1' }])
   })
@@ -392,9 +398,11 @@ describe('routes (1b §1.3, §1.5)', () => {
       }
     )
     await mount()
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="Tunnel URL"]')!.value).toBe('https://x.example')
-    expect(host.textContent).toContain('cloudflared tunnel --url http://127.0.0.1:47101')
-    await click(host.querySelector<HTMLElement>('[role="switch"][aria-label="Tailnet"]') ?? undefined)
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Tunnel address"]')!.value).toBe('https://x.example')
+    // Port forward and the tunnel sit under More ways; nothing asks for a command.
+    expect(host.querySelector('details.settings-advanced input[aria-label="Tunnel address"]')).toBeTruthy()
+    expect(host.textContent).not.toMatch(/cloudflared|tailscale funnel/)
+    await click(host.querySelector<HTMLElement>('[role="switch"][aria-label="Tailscale"]') ?? undefined)
     expect(d.called('netEngine.routes.config')).toEqual([{ tailnet: true }])
 
     const tests = [...document.querySelectorAll<HTMLButtonElement>('button')].filter((item) => item.textContent === 'Test')

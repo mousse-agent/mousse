@@ -320,10 +320,12 @@ const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text
 /** One way to add a device: its name, and a one-line hint under it. */
 function Choice({ label, hint, onClick }: { label: string; hint: string; onClick: () => void }) {
   return (
-    <button type="button" className="settings-btn engine-choice" onClick={onClick}>
-      <span className="engine-choice-label">{label}</span>
+    <div className="engine-choice">
+      <button type="button" className="settings-btn" onClick={onClick}>
+        {label}
+      </button>
       <span className="engine-choice-hint">{hint}</span>
-    </button>
+    </div>
   )
 }
 
