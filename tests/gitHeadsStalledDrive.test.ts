@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
-import { folderHead, HEAD_ANSWER_MS } from '../src/mms/workspace/threadHeads'
+import { folderHead, HEAD_ANSWER_MS, pendingHeadReads } from '../src/mms/workspace/threadHeads'
 import type { GitHeadsResult } from '../src/shared/types'
 
 const waits = vi.hoisted(() => ({ started: 0, hang: (_path: string) => true }))
@@ -86,4 +86,31 @@ it('answers the healthy volume while two admitted reads on another volume are he
   expect((await independent).projects.healthy).toMatchObject({ repo: true })
   await vi.advanceTimersByTimeAsync(HEAD_ANSWER_MS)
   expect((await blocked).projects.one).toMatchObject({ error: expect.stringMatching(/not answering/) })
+})
+
+it('removes expired waiters across batches while both drive slots stay held', async () => {
+  const stalled = onVolume('queue-stalled', 'T')
+  const mms = {
+    runOwnedRequest: owned,
+    projects: { getProject: (id: string) => ({ path: `${stalled}/${id}` }) },
+    getProfileHomeDir: () => stalled,
+    threads: { peekThreadLocation: vi.fn() }
+  }
+  const blocked = batch(mms, { projectIds: ['one', 'two'] })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(waits.started).toBe(2)
+  await vi.advanceTimersByTimeAsync(HEAD_ANSWER_MS)
+  await blocked
+
+  const threadIds = ['three', 'four', 'five']
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const queued = batch(mms, { threadIds, attempt })
+    await vi.advanceTimersByTimeAsync(0)
+    expect.soft(pendingHeadReads(stalled)).toBe(threadIds.length)
+    await vi.advanceTimersByTimeAsync(HEAD_ANSWER_MS)
+    expect((await queued).threads.three).toMatchObject({ error: expect.stringMatching(/not answering/) })
+    expect.soft(pendingHeadReads(stalled)).toBe(0)
+    expect(waits.started).toBe(2)
+  }
+  expect(mms.threads.peekThreadLocation).not.toHaveBeenCalled()
 })

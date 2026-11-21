@@ -1085,7 +1085,7 @@ export class ThreadWorkspaceManager {
       workspacePath: metadata.worktreePath,
       projectPath: relativeProject,
       primaryPath: projectPath,
-      branch: await this.currentBranch(metadata),
+      branch: metadata.lifecycle === 'provisioning' ? metadata.branch : await this.currentBranch(metadata),
       workspaceId: metadata.workspaceId ?? `${metadata.repositoryId}:${metadata.threadId}`,
       generation: metadata.generation ?? 0,
       baseSha: metadata.baseSha,

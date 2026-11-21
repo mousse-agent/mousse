@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
-import type { Thread } from '../../src/shared/types'
+import type { GitThreadHead, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -26,10 +26,11 @@ const { FilesPanel } = await import('../../src/renderer/components/FilesPanel')
 let root: Root
 let host: HTMLElement
 let listDir: ReturnType<typeof vi.fn>
+let headsChanged: ((event: { threadIds: string[] }) => void) | undefined
 const initialApp = useAppStore.getState()
 const initialFiles = useFileWorkspaceStore.getState()
-/** The working folder each thread resolves to; the daemon gives every thread the home folder. */
 const threadFolders: Record<string, string | null> = {}
+const threadHeads: Record<string, GitThreadHead> = {}
 
 beforeEach(() => {
   useAppStore.setState({ openedSurfaceKinds: ['files'], mainView: 'files' })
@@ -42,8 +43,15 @@ beforeEach(() => {
   })
   ;(window as unknown as { mousse: unknown }).mousse = {
     app: {
-      getFilesRoot: async () => '/home/me',
+      getFilesRoot: async (threadId?: string | null) => (threadId ? threadFolders[threadId] ?? '/home/me' : '/home/me'),
       getActiveProjectPath: async (threadId?: string | null) => (threadId ? threadFolders[threadId] ?? null : null)
+    },
+    git: {
+      heads: async ({ threadIds }: { threadIds: string[] }) => ({ threads: Object.fromEntries(threadIds.map((id) => [id, threadHeads[id] ?? { project: true }])) }),
+      onHeadsChanged: (listener: typeof headsChanged) => {
+        headsChanged = listener
+        return () => { headsChanged = undefined }
+      }
     },
     workspace: { getStatus: async () => ({}) },
     fs: { readFile: async () => 'hello', writeFile: async () => undefined, readAsset: async () => null, listDir, listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] }) },
@@ -58,6 +66,7 @@ afterEach(() => {
   useAppStore.setState(initialApp, true)
   useFileWorkspaceStore.setState(initialFiles, true)
   for (const key of Object.keys(threadFolders)) delete threadFolders[key]
+  for (const key of Object.keys(threadHeads)) delete threadHeads[key]
 })
 
 const flush = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
@@ -145,13 +154,13 @@ describe('Files panel without an open file', () => {
 })
 
 describe('the folder the Files tree shows', () => {
-  it('is the thread’s working folder, named to the daemon, rather than the home folder', async () => {
+  it('is the thread’s working folder, which the daemon uses for relative paths', async () => {
     threadFolders.t1 = '/home/me/work/app'
     useAppStore.setState({ activeThreadId: 't1', threads: [startedThread('t1')] })
     await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
     await flush()
     expect(tree().dataset.root).toBe('/home/me/work/app')
-    expect(tree().dataset.listRoot).toBe('/home/me/work/app')
+    expect(tree().dataset.listRoot).toBe('')
     expect(crumbs()).toEqual(['/', 'home', 'me', 'work', 'app'])
   })
 
@@ -161,6 +170,54 @@ describe('the folder the Files tree shows', () => {
     await flush()
     expect(tree().dataset.root).toBe('/home/me')
     // The daemon's own folder for the thread is listed by the thread, with no folder named.
+    expect(tree().dataset.listRoot).toBe('')
+  })
+
+  it.each([
+    { kind: 'standalone', projectId: undefined, folder: '/home/me' },
+    { kind: 'non-Git project', projectId: 'p1', folder: '/home/me/work/notes' }
+  ])('browses a started $kind thread whose Git checkout is unprovisioned', async ({ projectId, folder }) => {
+    threadFolders.t1 = folder
+    threadHeads.t1 = { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' }
+    useAppStore.setState({
+      activeThreadId: 't1',
+      threads: [{ ...startedThread('t1'), projectId }],
+      projects: projectId ? [{ id: projectId, name: 'Notes', path: folder }] as never : []
+    })
+    await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
+    await flush()
+    expect(crumbs().at(-1)).toBe(folder.split('/').at(-1))
+    expect(tree().dataset.root).toBe(folder)
+    expect(tree().dataset.listRoot).toBe('')
+    await act(async () => tree().click())
+    expect(host.querySelector('[role="region"][aria-label="notes.txt"]')).not.toBeNull()
+  })
+
+  it('names the folder picked in the composer for an empty chat to the daemon', async () => {
+    useAppStore.setState({
+      composerWorkspaceDrafts: { __blank__: { projectId: 'p1', worktreeEnabled: false } },
+      projects: [{ id: 'p1', name: 'Notes', path: '/home/me/work/notes' }] as never
+    })
+    await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
+    await flush()
+    expect(tree().dataset.root).toBe('/home/me/work/notes')
+    expect(tree().dataset.listRoot).toBe('/home/me/work/notes')
+  })
+
+  it('follows the daemon’s working folder when the first worktree is ready', async () => {
+    const threadId = 'new-worktree'
+    threadFolders[threadId] = '/home/me/work/notes'
+    useAppStore.setState({
+      activeThreadId: threadId,
+      threads: [{ ...startedThread(threadId), projectId: 'p1' }]
+    })
+    await act(async () => root.render(createElement(FilesPanel)))
+    await flush()
+    expect(tree().dataset.root).toBe('/home/me/work/notes')
+
+    threadFolders[threadId] = '/worktrees/notes'
+    await act(async () => headsChanged?.({ threadIds: [threadId] }))
+    expect(tree().dataset.root).toBe('/worktrees/notes')
     expect(tree().dataset.listRoot).toBe('')
   })
 

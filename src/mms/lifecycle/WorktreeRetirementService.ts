@@ -431,7 +431,10 @@ export class WorktreeRetirementService {
   }
   load(path: string): WorktreeReconstructionManifest {
     assertLifecyclePath(this.store.root, path)
-    const value = JSON.parse(readFileSync(path, 'utf8')) as WorktreeReconstructionManifest
+    return this.parseManifest(path, readFileSync(path, 'utf8'))
+  }
+  private parseManifest(path: string, text: string): WorktreeReconstructionManifest {
+    const value = JSON.parse(text) as WorktreeReconstructionManifest
     if (value.schemaVersion !== 1 || value.profileId !== this.store.profileId || !samePath(path, this.pathFor(value.taskId, value.worktreePath)) || !isValidBranchName(value.branch)) throw new Error('Invalid workspace reconstruction authority')
     const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${value.taskId}/${hash(value.worktreePath).slice(0, 32)}`
     if (value.snapshotSha !== undefined && (value.snapshotRef !== `${prefix}/snapshot` || ![value.snapshotSha, value.snapshotTree].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace reconstruction manifest')
@@ -1688,6 +1691,15 @@ export class WorktreeRetirementService {
     const path = this.pathFor(taskId, worktreePath)
     if (!existsSync(path)) return false
     try { return this.load(path).rebuilding !== undefined } catch { return false }
+  }
+  /** The same check for passive reads that must leave the event loop free while the drive answers. */
+  async rebuildUnfinishedAsync(taskId: string, worktreePath: string): Promise<boolean> {
+    const path = this.pathFor(taskId, worktreePath)
+    try {
+      await access(path)
+      await assertLifecyclePathAsync(this.store.root, path)
+      return this.parseManifest(path, await readFile(path, 'utf8')).rebuilding !== undefined
+    } catch { return false }
   }
   async verifyPins(manifest: WorktreeReconstructionManifest): Promise<void> {
     await assertLifecyclePathAsync(dirname(manifest.commonDir), manifest.commonDir)

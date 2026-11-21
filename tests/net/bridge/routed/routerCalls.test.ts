@@ -3,7 +3,7 @@
  * a computer that refused or is older, a lost reply, big replies and queue changes.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { NetError, type NodeId } from '../../../../src/shared/net'
@@ -11,6 +11,7 @@ import { RoutedClient } from '../../../../src/mms/bridge/routed/RoutedClient'
 import { FIRST_SEND_BINDING_CAPABILITY } from '../../../../src/mms/protocol/types'
 import { atomicWriteJsonSync } from '../../../../src/mms/data/AtomicFs'
 import { ThreadWorkspaceManager } from '../../../../src/mms/workspace/ThreadWorkspaceManager'
+import * as worktreeCheckout from '../../../../src/mms/worktree/worktreeCheckout'
 import type { GitStatusSnapshot } from '../../../../src/shared/types'
 import { cleanupAll, linked } from './routerFixture'
 
@@ -61,6 +62,38 @@ const withClient = async <T>(client: RoutedClient, run: () => Promise<T>): Promi
     inside.options.client = original
   }
 }
+
+it('reports provisioning from the owner before the checkout exists', async () => {
+  const repo = join(t.owner.getProfileHomeDir(), 'routed-provisioning')
+  mkdirSync(repo)
+  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo })
+  execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-qm', 'base'], { cwd: repo })
+  const project = t.owner.projects.openProject(repo)
+  const thread = t.owner.threads.createThread('Provisioning Git', project.id, repo, { started: true, worktreeEnabled: true })
+  const manager = new ThreadWorkspaceManager(t.owner.threads.getThreadDir(thread.id))
+  const threadId = t.qualified(thread.id)
+  const beforeCheckout = Promise.withResolvers<string>()
+  const gate = Promise.withResolvers<void>()
+  const addWorktree = worktreeCheckout.addWorktree
+  const hold = vi.spyOn(worktreeCheckout, 'addWorktree').mockImplementationOnce(async (options) => {
+    beforeCheckout.resolve(options.worktreePath)
+    await gate.promise
+    return addWorktree(options)
+  })
+  const provisioning = manager.provision(thread.id, 'main', repo)
+  try {
+    const path = await Promise.race([beforeCheckout.promise, provisioning.then(() => { throw new Error('Provisioning did not wait before checkout creation') })])
+    expect(existsSync(path)).toBe(false)
+    const status = await t.dispatch('workspace.getStatus', { threadId })
+    expect(status.metadata).toMatchObject({ lifecycle: 'provisioning' })
+    expect(status.execution).toMatchObject({ lifecycle: 'provisioning' })
+  } finally {
+    gate.resolve()
+    try { await provisioning } finally { hold.mockRestore() }
+  }
+  const ready = await t.dispatch('workspace.getStatus', { threadId })
+  expect(ready.execution).toMatchObject({ lifecycle: 'ready', projectPath: (await provisioning).worktreePath })
+}, 60_000)
 
 it('retries a held status on the owner and rejects an in-flight read from before a same-path rebuild', async () => {
   const repo = join(t.owner.getProfileHomeDir(), 'routed-git-retry')

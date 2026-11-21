@@ -18,8 +18,9 @@ import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
+import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, isExecutionLeaseHeld, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
 import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
@@ -1157,20 +1158,28 @@ function checkGitReadParams(method: string, params: unknown): void {
 }
 
 /**
- * Reads through the named workspace. Check its generation before and after the Git read, so a rebuild at the same
- * path cannot answer with a previous checkout's status. Older windows omit the generation.
+ * Checks the workspace generation and its rebuild record before and after the read. A half-built checkout can
+ * already exist at the same path while the workspace record still names the previous generation.
  */
 async function readGit<T>(ctx: HandlerContext, p: Record<string, unknown>, read: (root: string, shareKey?: string) => Promise<T>): Promise<T> {
   if (typeof p.workspaceGeneration !== 'number' || typeof p.threadId !== 'string') return read(projectRootContext(ctx, p))
   const threadId = p.threadId
   const known = await ctx.mms.threads.peekThreadLocation(threadId)
-  const check = async () => {
-    const workspace = known && await readWorkspaceRecord(known.directory)
+  const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
+  const requireReady = (workspace: ThreadWorkspaceMetadata | undefined) => {
     const generation = workspace?.generation ?? 0
     if (!workspace || isProjectFolderWorkspace(workspace) || workspace.lifecycle !== 'ready' || generation !== p.workspaceGeneration) {
       throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation })
     }
     return workspace
+  }
+  const check = async () => {
+    const workspace = requireReady(known && await readWorkspaceRecord(known.directory))
+    if (await retirement.rebuildUnfinishedAsync(workspace.threadId, workspace.worktreePath)) {
+      throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation: workspace.generation ?? 0 })
+    }
+    // A rebuild can finish while its manifest is being checked. Read the generation again afterward.
+    return requireReady(await readWorkspaceRecord(known!.directory))
   }
   const workspace = await check()
   const root = new ThreadWorkspaceManager(known!.directory).workingFolder(workspace.worktreePath, workspace)
@@ -4192,14 +4201,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const lookup = threadLookupContext(ctx, p)
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const stored = manager.load()
+      // Before the live writer makes the checkout, the absent folder is part of provisioning.
+      const provisioning = stored?.lifecycle === 'provisioning' && isExecutionLeaseHeld(lookup.threadDirectory)
       // A turn still recording its end-of-turn checkpoint under its live lease is not waiting on recovery.
       const inFlight = liveCheckpointTest(lookup.threadDirectory)
-      const metadata = stored && lookup.projectPath ? await manager.verify(stored, { inFlight }) : stored
+      const metadata = stored && lookup.projectPath && !provisioning ? await manager.verify(stored, { inFlight }) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
-      const marker = stored && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      const marker = stored && !provisioning && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
       // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
       // store (no Git of its own) is read through `loadOrSnapshotAsync`, so it shows the banner too.
-      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
+      const recovery = provisioning ? undefined : await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
       const execution = lookup.projectPath
         ? await manager.executionContext(lookup.projectPath, metadata)
         : manager.unboundExecutionContext(lookup.threadId)
@@ -4863,10 +4874,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           projects[projectId] = project ? await folderHead(project.path) : { error: 'Project not found' }
         }),
         ...ids('threadIds').map(async (threadId) => {
+          const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
           threads[threadId] = await threadHead(ctx.mms.getProfileHomeDir(), async () => {
             const known = await ctx.mms.threads.peekThreadLocation(threadId)
             return known && { directory: known.directory, placement: known.thread ? threadPlacement(known.thread) : undefined }
-          }, typeof p.attempt === 'number')
+          }, retirement, typeof p.attempt === 'number')
         })
       ])
       return { projects, threads } satisfies GitHeadsResult

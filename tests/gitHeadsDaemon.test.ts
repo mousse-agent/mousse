@@ -17,6 +17,7 @@ import type { GitHeadsResult } from '../src/shared/types'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import type { ProviderAdapter, TurnInput, TurnResult, TurnSink } from '../src/mms/harness/adapter'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
+import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -152,4 +153,72 @@ it('rejects malformed Git scopes before asking for access to a folder', async ()
   await expect(dispatchMethod({ mms: main, globalSequence: () => 0 }, 'git.status', { projectId, cwd: path })).rejects.toThrow(/cwd/)
   await expect(dispatchMethod({ mms: main, globalSequence: () => 0 }, 'git.log', { projectId, limit: -1 })).rejects.toThrow(/limit/)
   expect(wait).not.toHaveBeenCalled()
+})
+
+it('hides a half-built checkout and refuses Git reads on both sides of the rebuild', { timeout: 120_000 }, async () => {
+  const request = (method: string, params: unknown) => dispatchMethod({
+    mms: main,
+    globalSequence: () => 0,
+    connection: { id: 'git-panel', clientType: 'gui', capabilities: new Set() }
+  }, method, params)
+  const thread = main.threads.createThread('Rebuilt', projectId, repo, {})
+  const manager = new ThreadWorkspaceManager(main.threads.getThreadDir(thread.id))
+  const workspace = await manager.provision(thread.id, 'main', repo)
+  const scope = { threadId: thread.id, workspaceGeneration: workspace.generation ?? 0 }
+
+  const reading = Promise.withResolvers<void>()
+  const finishRead = Promise.withResolvers<void>()
+  const getStatus = main.gitService.getStatus.bind(main.gitService)
+  const status = vi.spyOn(main.gitService, 'getStatus').mockImplementationOnce(async (...args) => {
+    const result = await getStatus(...args)
+    reading.resolve()
+    await finishRead.promise
+    return result
+  })
+  const pending = request('git.status', scope)
+  // Attach the rejection handler before releasing the read.
+  const readResult = pending.catch((error: unknown) => error)
+  let restoring: Promise<unknown> | undefined
+  const finishRebuild = Promise.withResolvers<void>()
+  try {
+    await Promise.race([reading.promise, pending])
+    main.storageCleanup.setClockForTests(() => Date.now() + 40 * 86_400_000)
+    await request('storage.configure', { policy: {
+      schemaVersion: 1,
+      worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: false },
+      browser: { captureDays: null }
+    } })
+    await request('storage.cleanup.run', {})
+    expect(existsSync(workspace.worktreePath)).toBe(false)
+
+    const created = Promise.withResolvers<void>()
+    const reconstruct = WorktreeRetirementService.prototype.reconstruct
+    vi.spyOn(WorktreeRetirementService.prototype, 'reconstruct').mockImplementationOnce(function (this: WorktreeRetirementService, path) {
+      return reconstruct.call(this, path, { env: {}, prepare: async () => {
+        created.resolve()
+        await finishRebuild.promise
+      } })
+    })
+    restoring = request('workspace.restore', { threadId: thread.id })
+    await Promise.race([created.promise, restoring.then(() => { throw new Error('Reconstruction did not wait after worktree creation') })])
+    expect(existsSync(join(workspace.worktreePath, '.git'))).toBe(true)
+    expect(existsSync(join(workspace.worktreePath, 'value.txt'))).toBe(false)
+    expect(manager.load()).toMatchObject({ generation: scope.workspaceGeneration, lifecycle: 'ready' })
+
+    expect.soft((await heads({ threadIds: [thread.id] })).threads[thread.id]).toMatchObject({ missing: true })
+    expect.soft(status).toHaveBeenCalledTimes(1)
+    await expect.soft(request('git.status', { ...scope, attempt: 1 })).rejects.toMatchObject({ code: 'workspace_changed' })
+    expect.soft(status).toHaveBeenCalledTimes(1)
+    finishRead.resolve()
+    expect.soft(await readResult).toMatchObject({ code: 'workspace_changed' })
+  } finally {
+    finishRead.resolve()
+    finishRebuild.resolve()
+    await readResult
+    await restoring
+  }
+
+  const generation = scope.workspaceGeneration + 1
+  expect((await heads({ threadIds: [thread.id] })).threads[thread.id]).toMatchObject({ folder: workspace.worktreePath, generation })
+  await expect(request('git.status', { ...scope, workspaceGeneration: generation })).resolves.toMatchObject({ status: { isRepo: true } })
 })

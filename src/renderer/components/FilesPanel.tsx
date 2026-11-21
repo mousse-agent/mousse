@@ -7,7 +7,8 @@ import type { editor } from 'monaco-editor'
 import { AlertTriangle, ArrowShrink, ChevronRight, Code2, Eye, Maximize, Search, WrapText, X } from '../lib/icons'
 import { profilePreferenceKey } from '../lib/profilePreferences'
 import { useCommand } from '../commands/commandRegistry'
-import { useActiveProjectLocation, useFilesRoot } from '../hooks/useActiveProjectPath'
+import { useFilesRoot } from '../hooks/useActiveProjectPath'
+import { isNewEmptyThread, localWorkspaceFor } from '../lib/newThread'
 import type { FileGrepMatch } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { registerAutosaveFlush } from '../services/reloadWindow'
@@ -146,8 +147,15 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const codeFont = useMonacoCodeFont()
   const profileId = useAppStore((s) => s.profileId)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const threads = useAppStore((s) => s.threads)
-  const projectId = threads.find((thread) => thread.id === activeThreadId)?.projectId ?? null
+  const thread = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId))
+  const projectId = thread?.projectId ?? null
+  const projects = useAppStore((s) => s.projects)
+  const draft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
+  const isNew = useAppStore((s) => isNewEmptyThread(s.activeThreadId, thread, s.messages.length))
+  const draftWorkspace = isNew ? localWorkspaceFor(draft, thread, projects) : undefined
+  const draftProjectId = draftWorkspace?.projectId
+  const draftWorktree = Boolean(draftProjectId && draftWorkspace?.worktreeEnabled)
+  const projectFolder = projects.find((project) => project.id === (draftProjectId ?? projectId))?.path ?? null
   const scope = fileWorkspaceScope(profileId, activeThreadId, projectId)
   const workspace = useFileWorkspaceStore((s) => s.workspaces[scope])
   const openFile = useFileWorkspaceStore((s) => s.openFile)
@@ -156,17 +164,16 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const openPaths = workspace?.openPaths ?? []
   const selectedPath = workspace?.activePath ?? null
   const { root: filesRoot } = useFilesRoot()
-  const location = useActiveProjectLocation()
-  const projects = useAppStore((s) => s.projects)
   // A thread of another computer shows its own folder; so does an app whose main process cannot browse others yet.
-  const remote = Boolean(threads.find((thread) => thread.id === activeThreadId)?.node) || typeof window.mousse.fs.listDrives !== 'function'
+  const remote = Boolean(thread?.node) || typeof window.mousse.fs.listDrives !== 'function'
   // Where the person went in this panel, per thread; a thread they never moved in follows its own folder.
   const navKey = `${profileId}:${activeThreadId ?? '__blank__'}`
   const [navigated, setNavigated] = useState<Record<string, string>>({})
   const [home, setHome] = useState<string | null>(null)
   const [pathEditRequest, setPathEditRequest] = useState(0)
-  const threadFolder = remote ? null : location.path
-  const browseInput = { threadFolder, threadFolderLoading: location.loading, filesRoot, remote }
+  const draftFolder = draftProjectId && !draftWorktree ? projectFolder : null
+  const threadFolder = remote ? null : draftFolder ?? (projectId && filesRoot ? filesRoot : null)
+  const browseInput = { threadFolder, threadFolderLoading: draftWorktree, filesRoot, remote }
   const defaultFolder = filesBrowseRoot({ ...browseInput, navigated: undefined })
   const browseRoot = filesBrowseRoot({ ...browseInput, navigated: navigated[navKey] })
   // The folder the daemon gives the thread is listed by the thread; any other folder is named to it.
@@ -672,16 +679,15 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     return target ? navigate(target) : 'Type a folder path'
   }, [browseRoot, home, navigate])
 
-  const projectFolder = projects.find((project) => project.id === (location.projectId ?? projectId))?.path ?? null
   const quickPlaces = useMemo(() => {
     const places: FilesPlaceItem[] = []
     if (threadFolder) places.push({ kind: 'thread', label: 'Thread folder', path: threadFolder })
     if (projectFolder && !samePath(projectFolder, threadFolder)) places.push({ kind: 'project', label: 'Project folder', path: projectFolder })
     // A thread without a folder shows home; the daemon names it.
-    const homeFolder = home ?? (!threadFolder && !location.loading ? filesRoot : null)
+    const homeFolder = home ?? (!threadFolder && !draftWorktree ? filesRoot : null)
     if (homeFolder && !places.some((place) => samePath(place.path, homeFolder))) places.push({ kind: 'home', label: 'Home', path: homeFolder })
     return places
-  }, [filesRoot, home, location.loading, projectFolder, threadFolder])
+  }, [draftWorktree, filesRoot, home, projectFolder, threadFolder])
 
   const beforeMount: BeforeMount = (monaco) => {
     monacoRef.current = monaco

@@ -197,20 +197,22 @@ export function useActiveProjectPath(): string | null {
 export function useFilesRoot(): { root: string; label: string } {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
-  const [root, setRoot] = useState('')
-  const [label, setLabel] = useState('~')
+  const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
+  const [resolved, setResolved] = useState<{ scope: string; root: string } | null>(null)
+  // Follow the daemon's Files root when a turn makes the first checkout or a later workspace change replaces it.
+  const changed = useSyncExternalStore(subscribeChanges, () => activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0)
+  const turnPhase = useAppStore((s) => activeThreadId && s.threads.find((thread) => thread.id === activeThreadId)?.projectId
+    ? s.turnStates[activeThreadId]?.phase ?? null
+    : null)
 
   useEffect(() => {
     let cancelled = false
-    setRoot('')
-    setLabel('~')
-    void window.mousse.app.getFilesRoot(activeThreadId).then((filesRoot) => {
-      if (cancelled) return
-      setRoot(filesRoot)
-      setLabel(filesRoot || '~')
-    }).catch(() => { if (!cancelled) setRoot('') })
+    void window.mousse.app.getFilesRoot(activeThreadId, changed > 0 || turnPhase !== null).then((root) => {
+      if (!cancelled) setResolved({ scope, root })
+    }).catch(() => { if (!cancelled) setResolved({ scope, root: '' }) })
     return () => { cancelled = true }
-  }, [activeThreadId, profileId])
+  }, [activeThreadId, scope, changed, turnPhase])
 
-  return { root, label }
+  const root = resolved?.scope === scope ? resolved.root : ''
+  return { root, label: root || '~' }
 }
