@@ -1,5 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'fs'
-import { readdir, readFile } from 'fs/promises'
+import { lstat, readdir, readFile, stat } from 'fs/promises'
 import { dirname, join, relative, sep } from 'path'
 import type {
   IntegrationDiagnostic,
@@ -60,6 +59,9 @@ export class SkillsRegistry {
   private lastSnapshots = new Map<string, SkillsRegistrySnapshot>()
   /** Background scans of a project for a `stale` caller that got the last snapshot. */
   private revalidating = new Map<string, Promise<unknown>>()
+  /** Per project, the number of the newest scan started, and of the newest one published: an older scan never replaces a newer one. */
+  private scansStarted = new Map<string, number>()
+  private scansPublished = new Map<string, number>()
   private static readonly DISCOVERY_TTL_MS = 30_000
   static readonly MAX_DISCOVERY_ENTRIES = 16
   private readonly context: IntegrationRuntimeContext
@@ -102,9 +104,13 @@ export class SkillsRegistry {
     }
 
     const generation = this.sharedGeneration
+    const scan = (this.scansStarted.get(cacheKey) ?? 0) + 1
+    this.scansStarted.set(cacheKey, scan)
     const { snapshot, scannedAt } = await this.discoverUncached(options)
-    // A scan that started before a change Mousse made is returned to its caller but kept for no one else.
-    if (generation !== this.sharedGeneration) return snapshot
+    // A scan that started before a change Mousse made, or before a scan already published (a background refresh that
+    // ended after a newer one), is returned to its caller but kept for no one else.
+    if (generation !== this.sharedGeneration || scan < (this.scansPublished.get(cacheKey) ?? 0)) return snapshot
+    this.scansPublished.set(cacheKey, scan)
     this.lastSnapshots.delete(cacheKey)
     this.lastSnapshots.set(cacheKey, snapshot)
     while (this.lastSnapshots.size > SkillsRegistry.MAX_DISCOVERY_ENTRIES) this.lastSnapshots.delete(this.lastSnapshots.keys().next().value!)
@@ -137,25 +143,26 @@ export class SkillsRegistry {
   ): Promise<{ snapshot: SkillsRegistrySnapshot; scannedAt: number }> {
     let scannedAt = Date.now()
     const projectPath = options.projectPath ?? this.context.projectPath
-    const external = getSkillRootPaths(projectPath).map(
-      (descriptor): SkillSourceDescriptor => ({
+    // Nothing here blocks the event loop: every look at the disk is awaited (a hard disk may seek for each).
+    const external = await Promise.all(getSkillRootPaths(projectPath).map(
+      async (descriptor): Promise<SkillSourceDescriptor> => ({
         ...descriptor,
-        exists: existsSync(descriptor.path),
+        exists: await pathExists(descriptor.path),
         managed: false,
         projectId: descriptor.scope === 'project' && projectPath ? getProjectIdentity(projectPath) : undefined
       })
-    )
-    const native = getNativeSkillRoots(this.context, projectPath).map(
-      (descriptor): SkillSourceDescriptor => ({
+    ))
+    const native = await Promise.all(getNativeSkillRoots(this.context, projectPath).map(
+      async (descriptor): Promise<SkillSourceDescriptor> => ({
         source: descriptor.source,
         scope: descriptor.scope,
         path: descriptor.path,
-        exists: existsSync(descriptor.path),
+        exists: await pathExists(descriptor.path),
         projectId: descriptor.projectId,
         profileId: descriptor.profileId,
         managed: descriptor.managed
       })
-    )
+    ))
     const sources = [...native, ...external]
 
     const skills: SkillDescriptor[] = []
@@ -177,7 +184,7 @@ export class SkillsRegistry {
       diagnostics.push(...scanned.diagnostics)
     }
 
-    this.applyManagedState(skills)
+    await this.applyManagedState(skills)
     const visible = options.includeDisabled === false
       ? skills.filter((skill) => skill.enabled !== false && skill.archived !== true)
       : skills.filter((skill) => skill.archived !== true)
@@ -251,10 +258,11 @@ export class SkillsRegistry {
     }
     const pinned = await this.readPinnedRevision(skill, options)
     if (pinned) return pinned
+    // The file as it is now, with the policy it states now: a snapshot may be older than an edit that denied it.
     const content = await readFile(skill.skillPath, 'utf-8')
     const parsed = splitSkillMarkdown(content)
     return {
-      skill,
+      skill: { ...skill, 'disable-model-invocation': booleanValue(parsed.attributes['disable-model-invocation']) },
       content,
       body: parsed.body,
       frontmatter: parsed.attributes
@@ -289,8 +297,8 @@ export class SkillsRegistry {
       join(getManagedSkillRevisionRoot(this.context.profileRoot, installationId), revision, 'SKILL.md'),
       'skill revision'
     )
-    if (!existsSync(revisionPath)) return undefined
-    const content = await readFile(revisionPath, 'utf-8')
+    let content: string
+    try { content = await readFile(revisionPath, 'utf-8') } catch { return undefined }
     const parsed = splitSkillMarkdown(content)
     return {
       skill: { ...skill, revision, skillPath: revisionPath, rootPath: dirname(revisionPath) },
@@ -300,15 +308,16 @@ export class SkillsRegistry {
     }
   }
 
-  private applyManagedState(skills: SkillDescriptor[]): void {
+  private async applyManagedState(skills: SkillDescriptor[]): Promise<void> {
     const path = assertOwnedPath(
       this.context.profileRoot,
       getManagedSkillStatePath(this.context.profileRoot),
       'managed skill state'
     )
-    if (!existsSync(path)) return
+    let text: string
+    try { text = await readFile(path, 'utf-8') } catch { return }
     try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
+      const parsed = JSON.parse(text) as {
         installations?: Record<
           string,
           { enabled?: boolean; archived?: boolean; revision?: string; installationId?: string }
@@ -395,9 +404,9 @@ export class SkillsRegistry {
         compatibility: compatibilityValue(frontmatter.attributes.compatibility),
         license: stringValue(frontmatter.attributes.license),
         allowedTools: stringValue(frontmatter.attributes['allowed-tools']),
-        hasScripts: existsSync(join(rootPath, 'scripts')),
-        hasAssets: existsSync(join(rootPath, 'assets')),
-        hasReferences: existsSync(join(rootPath, 'references')),
+        hasScripts: await pathExists(join(rootPath, 'scripts')),
+        hasAssets: await pathExists(join(rootPath, 'assets')),
+        hasReferences: await pathExists(join(rootPath, 'references')),
         profileId: source.profileId ?? (managed ? this.context.profileId : undefined),
         projectId: source.projectId,
         managed,
@@ -406,7 +415,7 @@ export class SkillsRegistry {
           : `external-skill:${source.projectId ?? shortHash(source.path, 24)}:${source.source}:${relativeRoot || name}`,
         revision: contentHash,
         contentHash,
-        executableAssets: listExecutableAssets(rootPath)
+        executableAssets: await listExecutableAssets(rootPath)
       }
     }
   }
@@ -443,26 +452,16 @@ async function findSkillFiles(rootPath: string): Promise<string[]> {
   // A slot is held for the listing only, never while subfolders are read, so the recursion cannot wait on itself.
   const entries = await scanSlot(() => readdir(rootPath, { withFileTypes: true }))
   // Subfolders are read together, up to `SKILL_SCAN_CONCURRENCY` at a time; results keep the entries' order.
-  const found: Array<string[] | Promise<string[]>> = []
-
-  for (const entry of entries) {
-    if (entry.isSymbolicLink() || entry.name === '.' || entry.name === '..') continue
+  const found = await Promise.all(entries.map(async (entry): Promise<string[]> => {
+    if (entry.isSymbolicLink() || entry.name === '.' || entry.name === '..') return []
     const entryPath = join(rootPath, entry.name)
-    try {
-      if (lstatSync(entryPath).isSymbolicLink()) continue
-    } catch {
-      continue
-    }
-    if (entry.isFile() && entry.name === 'SKILL.md') {
-      found.push([entryPath])
-      continue
-    }
-    if (entry.isDirectory()) {
-      found.push(findSkillFiles(entryPath))
-    }
-  }
-
-  return (await Promise.all(found)).flat()
+    // A link the listing did not name as one (a Windows junction) is never followed either.
+    const info = await scanSlot(() => lstat(entryPath)).catch(() => undefined)
+    if (!info || info.isSymbolicLink()) return []
+    if (entry.isFile() && entry.name === 'SKILL.md') return [entryPath]
+    return entry.isDirectory() ? findSkillFiles(entryPath) : []
+  }))
+  return found.flat()
 }
 
 function compatibilityValue(
@@ -476,26 +475,40 @@ function isNativeSkillSource(source: SkillSource): boolean {
   return source === 'mousse-profile' || source === 'mousse-project' || source === 'generated-agent'
 }
 
-function listExecutableAssets(rootPath: string): string[] | undefined {
+async function listExecutableAssets(rootPath: string): Promise<string[] | undefined> {
   const scriptsRoot = join(rootPath, 'scripts')
-  if (!existsSync(scriptsRoot)) return undefined
+  if (!(await pathExists(scriptsRoot))) return undefined
   try {
-    return collectFiles(scriptsRoot, scriptsRoot)
+    return await collectFiles(scriptsRoot, scriptsRoot)
   } catch {
     return undefined
   }
 }
 
-function collectFiles(root: string, current: string): string[] {
-  const entries = readdirSync(current, { withFileTypes: true })
+/**
+ * Every file under `current`, relative to `root`, one folder listing at a time. It runs inside a skill's parse, which
+ * already holds one of the scan's slots, so it takes none of its own (that could wait on itself).
+ */
+async function collectFiles(root: string, current: string): Promise<string[]> {
+  const entries = await readdir(current, { withFileTypes: true })
   const files: string[] = []
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue
     const entryPath = join(current, entry.name)
-    if (entry.isDirectory()) files.push(...collectFiles(root, entryPath))
+    if (entry.isDirectory()) files.push(...await collectFiles(root, entryPath))
     else if (entry.isFile()) files.push(normalizePath(relative(root, entryPath)))
   }
   return files
+}
+
+/** Whether `path` is there. Takes no scan slot: it runs inside a parse that holds one, or for a handful of roots. */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function compareSkills(a: SkillDescriptor, b: SkillDescriptor): number {

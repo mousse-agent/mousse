@@ -241,6 +241,45 @@ describe('Skills discovery cache', () => {
     })
   })
 
+  it('a background scan that ends after a newer one never replaces it', async () => {
+    const skills = registry()
+    const path = await project(40)
+    const snapshotNamed = (name: string): SkillsRegistrySnapshot => ({ sources: [], diagnostics: [], skills: [{ id: name, name, description: name, rootPath: '', skillPath: '', scope: 'project', source: 'claude-project', managed: false } as never] })
+    const finish: Array<(value: { snapshot: SkillsRegistrySnapshot; scannedAt: number }) => void> = []
+    const uncached = vi.spyOn(skills as unknown as { discoverUncached: () => Promise<unknown> }, 'discoverUncached')
+      .mockImplementation(() => new Promise((resolve) => { finish.push(resolve as never) }))
+    try {
+      const older = skills.discover({ projectPath: path, refresh: true })
+      const newer = skills.discover({ projectPath: path, refresh: true })
+      await vi.waitFor(() => expect(finish).toHaveLength(2))
+      // The newer scan ends first; the older one after it.
+      finish[1]!({ snapshot: snapshotNamed('newer'), scannedAt: Date.now() })
+      await newer
+      finish[0]!({ snapshot: snapshotNamed('older'), scannedAt: Date.now() })
+      expect((await older).skills[0]!.name).toBe('older')
+    } finally {
+      uncached.mockRestore()
+    }
+    expect((await skills.discover({ projectPath: path, stale: true })).skills.map((skill) => skill.name)).toEqual(['newer'])
+  })
+
+  it('a skill is loaded with the policy and text its file has now: one denied since the scan is refused, one removed is left out', async () => {
+    const path = join(root, 'projects', 'policy')
+    const folder = (name: string) => join(path, '.claude', 'skills', name)
+    for (const name of ['kept', 'denied', 'removed']) await writeSkill(folder(name), name, `Body of ${name}.`)
+    const skills = registry()
+    const snapshot = await skills.discover({ projectPath: path })
+    // After the turn's scan: one skill is denied to the model, another is deleted.
+    await writeFile(join(folder('denied'), 'SKILL.md'), '---\nname: denied\ndescription: The denied skill for this test run\ndisable-model-invocation: true\n---\nBody of denied.\n', 'utf-8')
+    await rm(folder('removed'), { recursive: true, force: true })
+    const id = (name: string) => snapshot.skills.find((skill) => skill.name === name)!.id
+    expect((await skills.readSkill(id('denied'), { projectPath: path }, snapshot)).skill['disable-model-invocation']).toBe(true)
+    await expect(skills.readSkill(id('removed'), { projectPath: path }, snapshot)).rejects.toThrow()
+    // A turn naming both a removed skill and a kept one still loads the kept one.
+    const loaded = await prepareSkills({ registry: skills, settings: () => getDefaultSettings().integrations.skills, projectPath: path, mode: 'agent', userContent: '/removed and /kept', actor: { kind: 'main', skillIds: snapshot.skills.map((skill) => skill.installationId ?? skill.id) } })
+    expect(loaded.loadedSkills.map((skill) => skill.name)).toEqual(['kept'])
+  })
+
   it('keeps no SKILL.md text alive through parsed names and descriptions', async () => {
     const marker = 'skill-text-retention-probe'
     const dir = join(root, 'big-project')

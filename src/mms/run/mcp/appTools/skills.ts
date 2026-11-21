@@ -73,12 +73,18 @@ export function skillTools(host: AppToolHost): MousseTool[] {
       if (!skill) return { text: `Skill not found: ${requested}`, isError: true }
       const decided = check(skill)
       if (decided && !decided.ok) return { text: checkMessage(decided), isError: true }
-      if (skill['disable-model-invocation'])
-        return { text: `Skill ${skill.name} can only be loaded by explicit user invocation.`, isError: true }
       const registry = host.skills?.()
       if (!registry) return { text: `Skill not found: ${requested}`, isError: true }
       ctx.markEffect?.()
-      const result = await registry.readSkill(skill.installationId ?? skill.id, { projectPath: ctx.turn.projectPath })
+      // The file as it is now and the policy it states now, read together: the turn's list may be older than an edit.
+      let result: Awaited<ReturnType<typeof registry.readSkill>>
+      try {
+        result = await registry.readSkill(skill.installationId ?? skill.id, { projectPath: ctx.turn.projectPath }, { skills: available, sources: [], diagnostics: [] })
+      } catch {
+        return { text: `Skill ${skill.name} is no longer available.`, isError: true }
+      }
+      if (result.skill['disable-model-invocation'])
+        return { text: `Skill ${skill.name} can only be loaded by explicit user invocation.`, isError: true }
       ctx.timeline?.record({
         kind: 'skill_loaded',
         title: `Loaded skill ${result.skill.name}`,

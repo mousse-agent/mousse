@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
 import type { SpawnedRoot } from '../../stopProcesses'
@@ -19,12 +18,8 @@ import type { SpawnedRoot } from '../../stopProcesses'
  * the query and drives the runs.
  */
 
-/**
- * How long a thread with no background work keeps its idle process before it is closed. A new process costs about a
- * second before it takes the prompt (two at p90), so a reply written after reading the last answer should still find it
- * open; at most `LIVE_MAX_IDLE_SESSIONS` stay open idle. `MOUSSE_CLAUDE_IDLE_CLOSE_MS` sets it.
- */
-export const LIVE_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CLAUDE_IDLE_CLOSE_MS', 15 * 60_000)
+/** How long a thread with no background work keeps its idle process before it is closed. */
+export const LIVE_IDLE_CLOSE_MS = 3 * 60_000
 /** With background work pending: how long the thread may be silent before the release is reconsidered. */
 export const LIVE_IDLE_RELEASE_MS = 30 * 60_000
 /**

@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -137,11 +136,8 @@ const TREE_PROBE_THREAD_ID = '00000000-0000-0000-0000-000000000000'
 const TREE_REQUEST_MS = 10_000
 /** Pages of `thread/list` read per snapshot before the listing is taken as broken. */
 const TREE_MAX_PAGES = 100
-/**
- * The app-server process is closed once it has been unused this long after a turn (`MOUSSE_CODEX_IDLE_CLOSE_MS` sets it):
- * one process serves every thread, and starting it again costs the next Send a second or more...
- */
-export const CODEX_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CODEX_IDLE_CLOSE_MS', 15 * 60_000)
+/** The app-server process is closed once it has been unused this long after a turn... */
+export const CODEX_IDLE_CLOSE_MS = 60_000
 /** ...or after a sign-in check or model listing that started it. */
 export const CODEX_CHECK_CLOSE_MS = 5_000
 /**

@@ -112,6 +112,19 @@ function filterEnabledSkills(
   return resolveEffectiveSkills({ snapshot, settings, actor })
 }
 
+/**
+ * A skill's file as it is now, or undefined when it cannot be read (removed since the scan): that skill is left out of
+ * the turn, and the others still load.
+ */
+async function readOrSkip(registry: SkillsRegistry, skillId: string, projectPath: string | undefined, snapshot: SkillsRegistrySnapshot | undefined) {
+  try {
+    return await registry.readSkill(skillId, { projectPath }, snapshot)
+  } catch (error) {
+    console.warn('a skill could not be read for the turn; it is left out', { skill: skillId, error: error instanceof Error ? error.message : String(error) })
+    return undefined
+  }
+}
+
 async function loadSkillForMode(
   registry: SkillsRegistry,
   mode: ChatMode,
@@ -120,8 +133,8 @@ async function loadSkillForMode(
 ): Promise<Array<{ name: string; content: string }>> {
   const skillId = getSkillIdFromMode(mode)
   if (!skillId) return []
-  const result = await registry.readSkill(skillId, { projectPath }, snapshot)
-  return [{ name: result.skill.name, content: truncateForModel(result.content) }]
+  const result = await readOrSkip(registry, skillId, projectPath, snapshot)
+  return result ? [{ name: result.skill.name, content: truncateForModel(result.content) }] : []
 }
 
 /**
@@ -146,7 +159,8 @@ async function loadExplicitSkills(
   for (const name of requestedNames) {
     const skill = availableSkills.find((candidate) => normalizeSkillName(candidate.name) === name)
     if (!skill) continue
-    const result = await registry.readSkill(skill.id, { projectPath }, snapshot)
+    const result = await readOrSkip(registry, skill.id, projectPath, snapshot)
+    if (!result) continue
     loaded.push({ name: result.skill.name, content: truncateForModel(result.content) })
   }
   return loaded

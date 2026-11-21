@@ -39,6 +39,7 @@ const skill = (name: string, extra: Partial<SkillDescriptor> = {}): SkillDescrip
 
 const REVIEW = skill('review')
 const GATED = skill('deploy', { 'disable-model-invocation': true })
+const GONE = skill('gone')
 const BODY: Record<string, string> = { review: '# Review\nRead every changed line.', deploy: '# Deploy\nShip it.' }
 
 /** A skills registry over `skills`, recording the skills read. */
@@ -71,7 +72,7 @@ describe('list_skills and load_skill over MCP', () => {
     const run = await fx.runningRun('thread-a')
     const skills = fakeSkills([REVIEW, GATED])
     const { registry, turns } = appToolRegistry(fx.engine, fakeAppToolHost({ skills: () => skills.registry }).host)
-    turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, projectPath: '/work', enabledSkills: [REVIEW, GATED] }))
+    turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, projectPath: '/work', enabledSkills: [REVIEW, GATED, GONE] }))
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
     const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
@@ -80,20 +81,25 @@ describe('list_skills and load_skill over MCP', () => {
     expect(listed.error).toBeUndefined()
     expect(JSON.parse(listed.text!)).toEqual([
       expect.objectContaining({ id: 'review', name: 'review', modelInvocationDisabled: false }),
-      expect.objectContaining({ id: 'deploy', name: 'deploy', modelInvocationDisabled: true })
+      expect.objectContaining({ id: 'deploy', name: 'deploy', modelInvocationDisabled: true }),
+      expect.objectContaining({ id: 'gone', name: 'gone' })
     ])
 
     const loaded = await callTool(mcp, 'load_skill', { skill: 'review' })
     expect(loaded).toMatchObject({ isError: undefined, text: BODY.review })
     // Read by installation id, in the turn's project.
-    expect(skills.registry.readSkill).toHaveBeenCalledWith('inst-review', { projectPath: '/work' })
+    expect(skills.registry.readSkill).toHaveBeenCalledWith('inst-review', { projectPath: '/work' }, expect.anything())
 
     const refused = await callTool(mcp, 'load_skill', { skill: 'deploy' })
     expect(refused.error).toBeUndefined()
     expect(refusalOf(refused)).toMatchObject({ message: 'Skill deploy can only be loaded by explicit user invocation.' })
+    // Listed when the turn began, removed since: that skill is unavailable, nothing else changes.
+    const gone = await callTool(mcp, 'load_skill', { skill: 'gone' })
+    expect(refusalOf(gone)).toMatchObject({ message: 'Skill gone is no longer available.' })
     const unknown = await callTool(mcp, 'load_skill', { skill: 'nope' })
     expect(refusalOf(unknown)).toMatchObject({ message: 'Skill not found: nope' })
-    expect(skills.reads).toEqual(['inst-review'])
+    // The refused skill was read for its policy as the file states it now; its text was not returned.
+    expect(skills.reads).toEqual(['inst-review', 'inst-deploy', 'inst-gone'])
   })
 
   it('are not listed when the host has no skills registry', async () => {
