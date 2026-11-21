@@ -51,12 +51,6 @@ export type { Crossed } from './tap'
 
 /** Whether the checks run the real helper (`MOUSSE_NET_HELPER`) instead of the fake one. */
 export const REAL_HELPER = !!process.env.MOUSSE_NET_HELPER?.trim()
-// Every helper of a run on one computer listens on loopback; only a cross-machine cell's role listens on the LAN. Set
-// before any profile exists, so no helper, whoever starts it, takes the app's default (every interface).
-if (REAL_HELPER)
-  process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
-    ? '0.0.0.0'
-    : '127.0.0.1'
 
 /**
  * The route a 1b routes check runs over (`--route`, 1b §14): each computer is given only that route, and every
@@ -77,6 +71,12 @@ const CROSS_ROLE = ((role) => (role === 'host' || role === 'caller' ? role : und
  * only, and each computer starts with none.
  */
 const CROSS_ROUTED = !!CHECK_ROUTE && !!CROSS_ROLE
+// Every helper of a run on one computer listens on loopback; only a cross-machine cell's computers listen on the LAN,
+// and of a routes cell only the host's (the PC listens on loopback, 1b §14). Set before any profile exists, so no
+// helper, whoever starts it, takes the app's default (every interface).
+if (REAL_HELPER)
+  process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||=
+    CROSS_ROLE === 'host' || (CROSS_ROLE && !CHECK_ROUTE) ? '0.0.0.0' : '127.0.0.1'
 /** In a real-helper tcp run, how many computers' loopback ports (from 47301) the class map names. */
 const CLASS_MAPPED_PORTS = 32
 /** The class `tcp` is mapped to for this run (`MOUSSE_NET_ENGINE_CHECK_CLASS`): tailnet, then public. */
@@ -331,10 +331,6 @@ export class Fabric {
         ).join(',')
       }
       if (this.mappedPorts.has(name)) computer.port = this.mappedPorts.get(name)
-      // A cross-machine cell's computers listen on every interface, except a routes cell's caller (the PC listens
-      // only on loopback, 1b §14); the others only on loopback.
-      process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||=
-        CROSS_ROLE === 'host' || (CROSS_ROLE && !CHECK_ROUTE) ? '0.0.0.0' : '127.0.0.1'
       mms.netEngine.launcher = async () => {
         const launched = await mms.netEngine.launchBuilt(
           computer.port === undefined ? {} : { port: computer.port }
