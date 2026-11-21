@@ -11,7 +11,7 @@ import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
-import { EnterLinkPanel, JoinRoutes, SendLinkPanel } from './SendLinkParts'
+import { EnterLinkPanel, JoinedLine, JoinRoutes, SendLinkPanel } from './SendLinkParts'
 import { SshAddSteps } from './SshAddSteps'
 
 type Step =
@@ -178,11 +178,7 @@ export function AddEngineDeviceDialog({
           <div className="engine-dialog-home">
             {engine &&
               (joined ? (
-                <p role="status" className="settings-muted">
-                  {joined.state === 'connected'
-                    ? `${joined.name} is connected.`
-                    : `${joined.name} can use this computer; finishing the other direction…`}
-                </p>
+                <JoinedLine device={joined} />
               ) : approved ? (
                 <p role="status" className="settings-muted">
                   Adding {approved}…

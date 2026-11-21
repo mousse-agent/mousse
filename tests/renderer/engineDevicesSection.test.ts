@@ -243,7 +243,7 @@ describe('Settings → Devices, new networking', () => {
     expect(rowText('n2')).toContain("This computer can't reach Laptop")
     // Two lines: the name, then the state; no id and no separator left hanging.
     expect(rowText('n3')).not.toMatch(/04a223d6|· ·|·\s*$/)
-    expect(rowOf('n3')!.querySelector('[title*="Check Tailscale is on for both"]')).toBeTruthy()
+    expect(rowOf('n3')!.querySelector('[title*="Keep Tailscale on and online on both computers, then Retry."]')).toBeTruthy()
     expect(await menuItems('Laptop')).toEqual(['Routes', 'Retry', 'Remove…'])
   })
 

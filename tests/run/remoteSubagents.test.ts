@@ -11,6 +11,7 @@ import type { RemoteComputer, RemoteComputersPort } from '../../src/mms/protocol
 import type { RemoteSubagents } from '../../src/mms/orchestrator/RemoteSubagents'
 import { useSubagentWorld, type Json } from './subagentWorld'
 import { waitFor } from './phase6Fixture'
+import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 
 const MAC = 'node-mac'
 
@@ -234,6 +235,11 @@ describe('remote subagents (issue #469)', () => {
     await say('go')
     mac.pending = [{ requestId: 'q-1', questions: [] }]
     await service.pass()
+    // What the app lists (`subagents.list`), as well as what the agent tools read: the parent's card says it needs
+    // input there, with the thread there to open, not "Queued".
+    const ctx = { mms: { runEngine: d.engine, threads: d.store, questions: d.questions, orchestrator: d.orch }, globalSequence: () => 0 } as unknown as HandlerContext
+    const listed = (await dispatchMethod(ctx, 'subagents.list', { threadId: parent.id })) as { subagents: Json[] }
+    expect(listed.subagents[0]).toMatchObject({ state: 'needs_input', computer: { name: 'Studio Mac', ref: 'node-mac:far-thread-1' } })
     expect((d.orch as any).subagentView(parent.id)[0].state).toBe('needs_input')
     await say('answer')
     expect(out.answer).toMatchObject({ answered: false, code: 'answer_on_computer' })

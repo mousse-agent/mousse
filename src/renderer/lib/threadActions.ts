@@ -1,6 +1,7 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
+import type { NodeId } from '../../shared/net'
 import { expiryPresetMs } from '../../shared/threadExpiry'
-import { composerWorkspaceFor, rememberedChoiceOf, workspaceWithPrivate } from './newThread'
+import { composerWorkspaceFor, newThreadWorktree, rememberedChoiceOf, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
 import type { NewThreadChoice, Project, Thread } from '../../shared/types'
@@ -157,6 +158,8 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   const store = useAppStore.getState()
   const profileId = store.profileId
   store.setLastNewThreadProjectId(projectId)
+  const node = store.projects.find((project) => project.id === projectId)?.node
+  if (node) return openRemoteProjectDraft(projectId, node as NodeId)
   // A project just added (Add project) may not be listed in this window yet when the create answers.
   const listedBefore = store.projects.some((project) => project.id === projectId)
   const empty = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly), projectId)
@@ -173,6 +176,21 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   if (current.profileId !== profileId) return
   if (listedBefore && !current.projects.some((project) => project.id === projectId)) return
   if (!current.threads.some((entry) => entry.id === thread.id)) current.upsertThread(thread)
+  await selectThread(thread.id)
+}
+
+/**
+ * A new chat in a project of another computer: an empty draft here whose composer runs on that computer, in that
+ * project, as if both were picked in it. The thread is made there when its first message is sent.
+ */
+async function openRemoteProjectDraft(projectId: string, node: NodeId): Promise<void> {
+  const store = useAppStore.getState()
+  const profileId = store.profileId
+  const thread = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly && !entry.node)) ?? await window.mousse.threads.create()
+  const current = useAppStore.getState()
+  if (current.profileId !== profileId) return
+  current.upsertThread(thread)
+  current.setComposerWorkspaceDraft(thread.id, { projectId, node, worktreeEnabled: newThreadWorktree(current.projects, projectId) })
   await selectThread(thread.id)
 }
 

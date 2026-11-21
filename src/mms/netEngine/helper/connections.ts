@@ -180,7 +180,9 @@ export class HelperConnection implements EngineConnection {
     /** The role this computer holds at the peer, on an outbound connection (`conn.up` says, when it knows). */
     readonly role?: string,
     /** The route it runs over (`conn.up.route`, protocol 1.1). */
-    readonly route?: EngineRoute
+    readonly route?: EngineRoute,
+    /** The other way of a both-ways connection (`EngineConnection.reversed`). */
+    readonly reversed?: boolean
   ) {
     this.id = String(conn)
   }
@@ -280,6 +282,12 @@ export interface HelperPeers {
  */
 export class EngineHelper {
   private readonly connections = new Map<number, HelperConnection>()
+  /**
+   * The other way of each connection that carries calls both ways (`conn.up {both}`, wire minor 3), by the helper's
+   * number: on a connection this computer dialled, the other computer's calls, served under this computer's grant
+   * for it (`stream.incoming {grant}`); on one it was dialled on, this computer's calls to the dialler.
+   */
+  private readonly reverse = new Map<number, HelperConnection>()
   /** The `conn.up` of each connection the helper holds up, by its number, until its `conn.down`. */
   private readonly ups = new Map<number, Record<string, unknown>>()
   /** Connections up for an identity with no pairing here yet, by the helper's number. */
@@ -303,8 +311,10 @@ export class EngineHelper {
   ) {
     channel.onEvent((event) => this.event(event))
     channel.onClose((reason) => {
-      for (const connection of [...this.connections.values()]) connection.close(reason)
+      for (const connection of [...this.connections.values(), ...this.reverse.values()])
+        connection.close(reason)
       this.connections.clear()
+      this.reverse.clear()
       this.unclaimed.clear()
       this.ups.clear()
     })
@@ -331,6 +341,9 @@ export class EngineHelper {
    * up already (`already`) whose use here ended (its hello was refused) is attached again.
    */
   async dial(identity: string): Promise<{ conn?: number; already: boolean }> {
+    // A connection the other computer dialled that carries calls both ways is this computer's way to it: no dial back.
+    const both = this.callBack(identity)
+    if (both !== undefined) return { conn: both, already: true }
     const answer = await this.channel.request('dial', { identity })
     this.reattach(identity)
     return {
@@ -352,6 +365,48 @@ export class EngineHelper {
       this.connections.delete(conn)
       this.up(event)
     }
+  }
+
+  /**
+   * This computer's calls to `identity` over a connection it was dialled on that carries calls both ways: attached
+   * (again, when its use ended, as a hello the other computer refused before it granted this computer). Answers that
+   * connection's number, or undefined without one.
+   */
+  callBack(identity: string): number | undefined {
+    for (const [conn, event] of this.ups) {
+      if (event.identity !== identity || event.dir !== 'in' || event.both !== true) continue
+      const inbound = this.connections.get(conn)
+      if (!inbound?.isOpen()) continue
+      if (!this.reverse.get(conn)?.isOpen()) this.attachReverse(conn, event, 'outbound')
+      return conn
+    }
+    return undefined
+  }
+
+  /** The other way of the both-ways connection `conn` (`event` its `conn.up`), attached as a connection of its own. */
+  private attachReverse(
+    conn: number,
+    event: Record<string, unknown>,
+    direction: 'inbound' | 'outbound',
+    grant?: string
+  ): HelperConnection | undefined {
+    const peer = this.options.peers.byIdentity(String(event.identity))
+    if (!peer) return undefined
+    this.reverse.get(conn)?.resetStreams('cancelled')
+    const connection = new HelperConnection(
+      this.channel,
+      conn,
+      peer.node,
+      direction,
+      grant,
+      peer.endpoint,
+      undefined,
+      readRoute(event.route),
+      true
+    )
+    this.reverse.set(conn, connection)
+    void this.options.attach(connection).catch(() => connection.close('refused'))
+    return connection
   }
 
   /** Whether the helper speaks protocol 1.`minor` or later (its `hello` answer). */
@@ -461,10 +516,14 @@ export class EngineHelper {
       if (typeof event.conn !== 'number') return
       this.unclaimed.delete(event.conn)
       this.ups.delete(event.conn)
+      const reason = typeof event.reason === 'string' ? event.reason : 'closed'
+      const other = this.reverse.get(event.conn)
+      this.reverse.delete(event.conn)
+      other?.down(reason)
       const connection = this.connections.get(event.conn)
       if (!connection) return
       this.connections.delete(event.conn)
-      connection.down(typeof event.reason === 'string' ? event.reason : 'closed')
+      connection.down(reason)
       return
     }
     if (event.ev === 'net.paused') {
@@ -481,21 +540,36 @@ export class EngineHelper {
       const handle = event.handle,
         label = event.label
       if (typeof handle !== 'number') return
-      // Only the engine's labels, and only on a connection that serves here (the helper resets the rest too).
-      if (
-        !connection ||
-        connection.direction !== 'inbound' ||
-        typeof label !== 'string' ||
-        !(ENGINE_LABELS as readonly string[]).includes(label)
-      ) {
+      const cls = event.class === 'bulk' ? 'bulk' : 'interactive'
+      // Only the engine's labels (the helper resets the rest too).
+      if (!connection || typeof label !== 'string' || !(ENGINE_LABELS as readonly string[]).includes(label)) {
         this.channel.reset(handle, 'refused')
         return
       }
-      connection.incoming(
-        handle,
-        label as EngineLabel,
-        event.class === 'bulk' ? 'bulk' : 'interactive'
-      )
+      const up = this.ups.get(event.conn as number)
+      if (connection.direction === 'outbound') {
+        // The other computer calls this one over this computer's own connection (both ways, minor 3), under the
+        // grant this computer holds for it, which the helper names.
+        const grant =
+          typeof event.grant === 'number' || typeof event.grant === 'string' ? String(event.grant) : undefined
+        if (!up || up.both !== true || grant === undefined) {
+          this.channel.reset(handle, 'refused')
+          return
+        }
+        let served = this.reverse.get(event.conn as number)
+        if (!served?.isOpen() || served.grant !== grant)
+          served = this.attachReverse(event.conn as number, up, 'inbound', grant)
+        if (!served) {
+          this.channel.reset(handle, 'refused')
+          return
+        }
+        served.incoming(handle, label as EngineLabel, cls)
+        return
+      }
+      connection.incoming(handle, label as EngineLabel, cls)
+      // The dialler opened a stream: this computer may call it back on the same connection.
+      if (up?.both === true && !this.reverse.get(event.conn as number)?.isOpen())
+        this.attachReverse(event.conn as number, up, 'outbound')
     }
   }
 }

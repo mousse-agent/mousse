@@ -62,6 +62,26 @@ export const relayLimitDetail = (callersMax?: number): string =>
 export const relayOfferLine = (name: string, destination: string): string =>
   `${name} can be reached through relay ${relayText(destination)}. Allow?`
 
+/**
+ * What to do when one direction to a device does not come up, by the route it uses: the one its connection runs
+ * over now, else the first address added for it, else the local network. `in`: it can't reach this computer; `out`:
+ * this computer can't reach it.
+ */
+export function unreachableDetail(device: NetEngineDevice, way: 'in' | 'out'): string {
+  const name = device.name
+  const added = device.addresses?.map((address) => parseRoute(address)).find(Boolean)
+  const cls = device.route ?? (added ? routeClass(added) : device.source === 'ssh' || device.ssh ? 'ssh' : 'lan')
+  if (cls === 'tailnet') return 'Keep Tailscale on and online on both computers, then Retry.'
+  if (cls === 'ssh') return `Check you can sign in to ${name} over SSH, then Retry.`
+  if (cls !== 'lan')
+    return way === 'in'
+      ? 'Check the address this computer shares, then Retry.'
+      : `Check the address ${name} shares, then Retry.`
+  return way === 'in'
+    ? `${name} can't reach this computer. Let Mousse through this computer's firewall, then Retry.`
+    : `This computer can't reach ${name}. Let Mousse through the firewall on ${name}, then Retry.`
+}
+
 /** A device's row as Settings → Devices shows it (design §5.2, with the clock case of §8). */
 export function engineRow(device: NetEngineDevice): EngineRowView {
   const name = device.name
@@ -121,7 +141,7 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
     return device.stuck
       ? {
           line: 'Finishing pairing…',
-          detail: `Pairing is taking longer than it should. ${capitalized(reachAdvice(device))}, then Retry.`,
+          detail: unreachableDetail(device, 'in'),
           warn: true,
           actions: ['retry', 'remove']
         }
@@ -129,14 +149,14 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
   if (device.unreachable === 'in')
     return {
       line: `${name} can't reach this computer`,
-      detail: `Let Mousse through this computer's firewall, and ${reachAdvice(device)}.`,
+      detail: unreachableDetail(device, 'in'),
       warn: true,
       actions: ['retry', 'remove']
     }
   if (device.unreachable === 'out')
     return {
       line: `This computer can't reach ${name}`,
-      detail: `Let Mousse through the firewall on ${name}, and ${reachAdvice(device)}.`,
+      detail: unreachableDetail(device, 'out'),
       warn: true,
       actions: ['retry', 'remove']
     }
@@ -199,42 +219,12 @@ export function readPairingLink(text: string): { ticket: string; host?: string }
   return { ticket: value, ...(host ? { host } : {}) }
 }
 
-const capitalized = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
-
 /** The class of a stored route (`tcp://`, `wss://`, `ssh://`), or undefined for one that doesn't read. */
 export function classOf(route: string): RouteClass | undefined {
   const parsed = parseRoute(route)
   if (!parsed) return undefined
   const cls = routeClass(parsed)
   return cls === 'forbidden' ? undefined : cls
-}
-
-/** The way a device is reached, for advice: the route in use, else one added for it, else the local network. */
-function reachedBy(device: NetEngineDevice): RouteClass | 'relay' {
-  if (device.route) return device.route
-  if (device.source === 'ssh' || device.ssh) return 'ssh'
-  for (const address of device.addresses ?? []) {
-    const cls = classOf(address)
-    if (cls && cls !== 'lan') return cls
-  }
-  return 'lan'
-}
-
-/** What to check so a device can be reached again, in words that fit the way it is reached. */
-export function reachAdvice(device: NetEngineDevice): string {
-  switch (reachedBy(device)) {
-    case 'tailnet':
-      return 'check Tailscale is on for both'
-    case 'ssh':
-      return `check you can sign in to ${device.name} over SSH`
-    case 'relay':
-      return 'check both can reach the relay'
-    case 'public':
-    case 'tunnel':
-      return `check the address added for ${device.name} still reaches it`
-    default:
-      return 'keep both computers on the same network'
-  }
 }
 
 /** A route's kind as the expanded row names it. */
