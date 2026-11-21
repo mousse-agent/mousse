@@ -263,7 +263,7 @@
         "src/renderer/components/ThreadsSidebar.tsx"
       ],
       "claimedAt": "2026-11-21T04:26:46.988Z",
-      "expiresAt": "2026-11-21T06:26:46.988Z"
+      "expiresAt": "2026-11-21T06:36:56.876Z"
     },
     {
       "task": "storage-cleanup-keeps-shared-worktrees",
