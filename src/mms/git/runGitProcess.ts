@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import { StoppedGitTree } from './stoppedGitTree'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
-import { cancelQueuedGit, gitChildSpawned, gitChildStartedAt, spawnGit } from './gitSpawn'
+import { cancelQueuedGit, gitChildSpawned, gitChildStartedAt, spawnGit, stopWindowsGit } from './gitSpawn'
 export { gitStopProbe, StoppedGitTree } from './stoppedGitTree'
 
 /** What a Git process left: as `spawnSync` reports it. */
@@ -79,13 +79,11 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * True once nothing of `tree` is left, false when something still is at `deadline`. On Windows a cheap look by pid comes
- * first and the list confirms; elsewhere the list is read each time (`ps` is quick, and tells zombies apart).
+ * True once no member of the stopped POSIX group is left, false when something still is at `deadline`.
  */
 async function goneBy(tree: StoppedGitTree, deadline: number): Promise<boolean> {
   for (;;) {
-    const there = process.platform === 'win32' && tree.quickAlive() ? true : await tree.alive()
-    if (!there) return true
+    if (!(await tree.alive())) return true
     if (Date.now() >= deadline) return false
     await sleep(Math.min(GIT_STOP_TIMING.pollMs, Math.max(0, deadline - Date.now())))
   }
@@ -178,6 +176,15 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       if (settled || error) return
       error = Object.assign(new Error(`spawnSync git ${code}`), { code, syscall: 'spawnSync git' })
       if (cancelQueuedGit(child)) return
+      if (process.platform === 'win32') {
+        stoppingTree = true
+        void stopWindowsGit(child).then(() => {
+          cleanLock()
+          for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.destroy()
+          finish(exitCode)
+        })
+        return
+      }
       if (!scope && code !== 'ETIMEDOUT') { child.kill(); return }
       stoppingTree = true
       // From the stop, not from when the output closes: something that escaped the kill may hold it open for good. The

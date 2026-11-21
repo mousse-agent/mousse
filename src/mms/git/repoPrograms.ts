@@ -359,7 +359,13 @@ async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal, c
       if (size > PROBE_MAX_BUFFER) stop('size')
       else chunks.push(chunk)
     })
-    child.on('error', () => finish({ ok: false, stdout: '', failed: true, timedOut: false }))
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EGITWORKER') {
+        done = true
+        clearTimeout(timer)
+        reject(error)
+      } else finish({ ok: false, stdout: '', failed: true, timedOut: false })
+    })
     child.on('close', (code) => finish(stopped
       ? { ok: false, stdout: '', failed: true, timedOut: stopped === 'time' }
       : { ok: code === 0, stdout: Buffer.concat(chunks).toString('utf8'), failed: false, timedOut: false }))

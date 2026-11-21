@@ -2,8 +2,11 @@ import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks'
 import { execFile, spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createReadStream, statSync } from 'node:fs'
+import { createRequire as createGitWorkerRequire } from 'node:module'
 import { resolve, win32 } from 'node:path'
 import { Readable, Writable } from 'node:stream'
+import { setTimeout as delay } from 'node:timers/promises'
+import { windowsGitRuntime } from './windowsGitProcess'
 
 /**
  * Where Git processes are started: off the daemon's event loop.
@@ -77,6 +80,7 @@ function workerEnabled(): boolean {
  * to process creation.
  */
 export function spawnGit<I extends Pipe = 'pipe', O extends Pipe = 'pipe', E extends Pipe = 'pipe'>(file: string, args: readonly string[], options: GitSpawnOptions & { stdio?: [I, O, E] } = {}): GitChild<I, O, E> {
+  if (draining) throw workerError('The daemon is shutting down')
   if (options.beforeStart || !workerEnabled()) return spawnHere(file, args, options) as GitChild<I, O, E>
   return lane(lanes.getStore() ?? 'interactive').start(file, args, options) as unknown as GitChild<I, O, E>
 }
@@ -86,14 +90,19 @@ export type GitChild<I extends Pipe, O extends Pipe, E extends Pipe> = ChildProc
 
 /** On the calling thread, as before the worker: also the shape the worker itself uses. */
 function spawnHere(file: string, args: readonly string[], options: GitSpawnOptions): ChildProcess {
-  const { inputFile, onInputFileError, beforeStart, ...spawnOptions } = options
-  beforeStart?.()
-  const child = spawn(file, [...args], spawnOptions)
+  const { inputFile, onInputFileError, beforeStart, signal, killSignal, ...spawnOptions } = options
+  let child: ChildProcess
+  if (process.platform === 'win32') child = spawnWindowsHere(file, args, { ...spawnOptions, beforeStart }, signal, killSignal)
+  else {
+    beforeStart?.()
+    child = spawn(file, [...args], { ...spawnOptions, signal, killSignal })
+  }
   if (inputFile !== undefined && child.stdin) {
     const stdin = child.stdin
     stdin.on('error', () => undefined)
     const source = createReadStream(inputFile)
     source.on('error', (error) => { stdin.destroy(); child.kill(); onInputFileError?.(error) })
+    child.once('close', () => source.destroy())
     source.pipe(stdin)
   }
   return child
@@ -102,6 +111,103 @@ function spawnHere(file: string, args: readonly string[], options: GitSpawnOptio
 /** Settles once the process `spawnGit` returned has started (or failed to); at once for one started on this thread. */
 export function gitChildSpawned(child: ChildProcess): Promise<void> {
   return child instanceof WorkerGitChild ? child.spawned : Promise.resolve()
+}
+
+const requireHere = createGitWorkerRequire(import.meta.url)
+let windows: ReturnType<typeof windowsGitRuntime> | undefined
+const windowsRuntime = () => windows ??= windowsGitRuntime(requireHere, requireHere.resolve('koffi'))
+const windowsJobs = new Set<WindowsGitJob>()
+const directChildren = new Set<Promise<void>>()
+const childJobs = new WeakMap<ChildProcess | WorkerGitChild, WindowsGitJob>()
+let draining: Promise<void> | undefined
+
+function workerError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: 'EGITWORKER' })
+}
+
+/** The daemon keeps the handle across helper loss. Reap only after this job cannot admit another root. */
+class WindowsGitJob {
+  private readonly runtime = windowsRuntime()
+  private readonly job = this.runtime.job()
+  private ending?: Promise<void>
+
+  constructor() { windowsJobs.add(this) }
+  get name(): string { return this.job.name }
+
+  finish(): Promise<void> {
+    return this.ending ??= this.reap()
+  }
+
+  private async reap(): Promise<void> {
+    let terminated = false
+    for (;;) {
+      try {
+        if (this.runtime.active(this.job.owned) === 0) break
+        if (!terminated) { this.runtime.terminate(this.job.owned); terminated = true }
+      } catch { /* A failed query cannot let a mutation release the repository. Retry until the job is empty. */ }
+      await delay(10)
+    }
+    this.runtime.close(this.job.owned)
+    windowsJobs.delete(this)
+  }
+}
+
+export function stopWindowsGit(child: ChildProcess): Promise<void> {
+  return gitChildSpawned(child).then(() => childJobs.get(child)?.finish())
+}
+
+function spawnWindowsHere(file: string, args: readonly string[], options: GitSpawnOptions, signal?: AbortSignal, killSignal?: NodeJS.Signals | number): ChildProcess {
+  const job = new WindowsGitJob()
+  let child: ChildProcess
+  let refused = false
+  try {
+    child = windowsRuntime().spawn(file, args, options, job.name, () => {
+      try { options.beforeStart?.() } catch (error) { refused = true; throw error }
+    })
+  } catch (error) {
+    if (refused) { void job.finish(); throw error }
+    const failed = new EventEmitter()
+    const streams = (options.stdio ?? ['pipe', 'pipe', 'pipe']).map((pipe) => pipe === 'pipe' ? new Readable({ read() {} }) : null)
+    child = Object.assign(failed, {
+      stdin: options.stdio?.[0] === 'ignore' ? null : new Writable({ write(_chunk, _encoding, done) { done() } }),
+      stdout: streams[1], stderr: streams[2], kill: () => false, unref: () => undefined
+    }) as unknown as ChildProcess
+    void job.finish().then(() => { failed.emit('error', error); failed.emit('close', null, null) })
+  }
+  childJobs.set(child, job)
+  let abortError: Error | undefined
+  let closed = false
+  const ended = new Promise<void>((done) => child.once('close', done))
+  directChildren.add(ended)
+  void ended.then(() => directChildren.delete(ended))
+  const emit = child.emit.bind(child)
+  child.emit = (event: string | symbol, ...values: unknown[]) => {
+    if (event !== 'close') return emit(event, ...values)
+    void job.finish().then(() => {
+      closed = true
+      if (abortError) emit('error', abortError)
+      emit(event, ...values)
+    })
+    return true
+  }
+  const killRoot = child.kill.bind(child)
+  child.kill = (requested) => {
+    if (closed) return false
+    killRoot(requested)
+    void job.finish()
+    Object.assign(child, { killed: true })
+    return true
+  }
+  const abort = (): void => {
+    abortError = Object.assign(new Error('The operation was aborted', { cause: signal?.reason }), { name: 'AbortError', code: 'ABORT_ERR' })
+    child.kill(killSignal)
+  }
+  if (signal?.aborted) process.nextTick(abort)
+  else if (signal) {
+    signal.addEventListener('abort', abort, { once: true })
+    child.once('close', () => signal.removeEventListener('abort', abort))
+  }
+  return child
 }
 
 /** Cancel before the request has been sent to the helper, without starting a Git process. */
@@ -115,12 +221,12 @@ export function gitChildStartedAt(child: ChildProcess, fallback: number): number
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The helper: plain CommonJS run with `-e`, so it needs no bundling and loads only Node's own modules. It ends when the
-// daemon does (its channel closes); what it started keeps running, as Git started by the daemon itself would.
+// The helper is plain CommonJS run with `-e`. The daemon owns the Windows jobs through helper shutdown or loss.
 
 const HELPER_SOURCE = `
 const { spawn } = require('node:child_process')
 const { createReadStream } = require('node:fs')
+const windows = process.platform === 'win32' ? (${windowsGitRuntime.toString()})(require, process.argv[1]) : undefined
 const children = new Map()
 const plain = (e) => ({ message: String(e && e.message || e), name: e && e.name, code: e && e.code, errno: e && e.errno, syscall: e && e.syscall, path: e && e.path, spawnargs: e && e.spawnargs })
 const send = (message, done) => process.connected && process.send(message, done)
@@ -141,7 +247,8 @@ process.on('message', (m) => {
     const post = (message, done) => send(Object.assign({ id: m.id }, message), done)
     const at = Date.now()
     let child
-    try { child = spawn(m.file, m.args, m.options) } catch (error) { post({ t: 'throw', error: plain(error) }); return }
+    try { child = windows ? windows.spawn(m.file, m.args, m.options, m.job) : spawn(m.file, m.args, m.options) }
+    catch (error) { post({ t: 'throw', error: plain(error) }); return }
     children.set(m.id, child)
     child.once('spawn', () => post({ t: 'spawn', pid: child.pid, at }))
     child.on('error', (error) => post({ t: 'error', error: plain(error) }))
@@ -199,7 +306,9 @@ let nextChildId = 1
 
 class Lane {
   private worker: ChildProcess | undefined
+  private readonly workers = new Map<ChildProcess, Promise<void>>()
   private readonly children = new Map<number, WorkerGitChild>()
+  private closing = false
 
   private idle: NodeJS.Timeout | undefined
   private refs = 0
@@ -226,9 +335,18 @@ class Lane {
       }
     }
     const launch = (): void => {
-      this.ensure()
-      this.post(message)
-      child.launched()
+      if (this.closing) return
+      try {
+        const job = process.platform === 'win32' ? new WindowsGitJob() : undefined
+        if (job) childJobs.set(child, job)
+        const worker = this.ensure()
+        this.post(worker, { ...message, job: job?.name })
+        child.launched(worker)
+      } catch (error) {
+        // The disk slot was consumed even though the command could not be sent.
+        child.isLaunched = true
+        process.nextTick(() => { void child.lost(workerError(String(error))) })
+      }
     }
     const disk = diskOf(options.cwd)
     if (this.name === 'interactive') {
@@ -243,9 +361,8 @@ class Lane {
     return child
   }
 
-  post(message: Record<string, unknown>): void {
-    const helper = this.worker
-    if (helper?.connected) helper.send(message)
+  post(worker: ChildProcess, message: Record<string, unknown>): void {
+    if (worker.connected) worker.send(message, (error) => { if (error) worker.kill() })
   }
 
   /** A child that keeps the daemon alive started (+1) or no longer does (-1): the worker is referenced while any does. */
@@ -261,7 +378,7 @@ class Lane {
 
   settled(child: WorkerGitChild): void {
     this.children.delete(child.id)
-    if (this.children.size) return
+    if (this.closing || this.children.size) return
     clearTimeout(this.idle)
     const worker = this.worker
     this.idle = setTimeout(() => {
@@ -272,20 +389,21 @@ class Lane {
     this.idle.unref()
   }
 
-  /** Stops the helper now: what it started keeps running, and each caller still waiting gets an error and the end. */
+  /** Stops admission, all helpers (including idle ones still exiting), and their Windows process trees. */
   async terminate(): Promise<void> {
+    this.closing = true
+    const closed = [...this.children.values()].map((child) => new Promise<void>((done) => child.once('close', done)))
     for (const child of this.children.values()) if (!child.isLaunched) child.kill()
     clearTimeout(this.idle)
-    const helper = this.worker
-    if (!helper || helper.exitCode !== null || helper.signalCode !== null) return
-    const gone = new Promise((settle) => helper.once('exit', settle))
-    helper.kill()
-    await gone
+    const workers = [...this.workers]
+    for (const [worker] of workers) { worker.ref(); worker.kill() }
+    await Promise.all([...workers.map(([, exited]) => exited), ...closed])
   }
 
   private ensure(): ChildProcess {
     if (this.worker) return this.worker
-    const worker = spawn(process.execPath, ['-e', HELPER_SOURCE], {
+    const args = ['-e', HELPER_SOURCE, ...(process.platform === 'win32' ? [requireHere.resolve('koffi')] : [])]
+    const worker = spawn(process.execPath, args, {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       serialization: 'advanced',
@@ -300,21 +418,29 @@ class Lane {
     // Which disk each drive is on matters only once background Git has to share a disk: asked by that lane's helper.
     if (this.name === 'background' && process.platform === 'win32' && !diskMapAsked) {
       diskMapAsked = true
-      worker.send({ t: 'disks' })
+      this.post(worker, { t: 'disks' })
     }
-    const lost = (reason: string): void => {
-      if (this.worker !== worker) return
-      this.worker = undefined
-      // A helper that stopped before it answered which disk each drive is on: the next one is asked.
-      if (!physicalDisks.size) diskMapAsked = false
-      const error = Object.assign(new Error(`The Git helper stopped (${reason})`), { code: 'EGITWORKER' })
-      // Ending a command can open a disk slot and start queued work on a replacement helper. Only commands already
-      // sent to the old helper failed.
-      const launched = [...this.children.values()].filter((child) => child.isLaunched)
-      for (const child of launched) child.lost(error)
+    const lost = async (reason: string): Promise<void> => {
+      if (this.worker === worker) {
+        this.worker = undefined
+        if (!physicalDisks.size) diskMapAsked = false
+      }
+      const error = workerError(`The Git helper stopped (${reason})`)
+      await Promise.all([...this.children.values()].filter((child) => child.worker === worker).map((child) => child.lost(error)))
+      this.workers.delete(worker)
     }
-    worker.on('error', (error) => lost(error.message))
-    worker.on('exit', (code, signal) => lost(`exit ${code ?? signal}`))
+    this.workers.set(worker, new Promise<void>((done) => {
+      let reason = 'closed'
+      let ended = false
+      const end = () => {
+        if (ended) return
+        ended = true
+        void lost(reason).then(done)
+      }
+      worker.on('error', (error) => { reason = error.message })
+      worker.once('exit', (code, signal) => { reason = `exit ${code ?? signal}`; end() })
+      worker.once('close', end) // Also fires if the helper itself failed to spawn.
+    }))
     this.worker = worker
     this.hold(0)
     return worker
@@ -326,13 +452,32 @@ function lane(name: GitLane): Lane {
   return laneWorkers[name]
 }
 
-/** Stops both lanes' helpers now (tests; a daemon's exit ends them anyway). Processes already started keep running. */
+/** Permanently stop admission and wait for both lanes and direct Windows commands during daemon teardown. */
+export function drainGitSpawnWorkers(): Promise<void> {
+  return draining ??= Promise.resolve().then(async () => {
+    await Promise.all([laneWorkers.background.terminate(), laneWorkers.interactive.terminate()])
+    await Promise.all([...windowsJobs].map((job) => job.finish()))
+    await Promise.all(directChildren)
+  })
+}
+
+/** A new foreground daemon can start after the previous daemon has fully drained. */
+export async function resumeGitSpawnWorkers(): Promise<void> {
+  if (!draining) return
+  const previous = draining
+  await previous
+  if (previous !== draining) return
+  laneWorkers.background = new Lane('background')
+  laneWorkers.interactive = new Lane('interactive')
+  draining = undefined
+}
+
+/** Reset the lanes for tests. */
 export async function stopGitSpawnWorkers(): Promise<void> {
-  for (const name of ['background', 'interactive'] as const) {
-    const old = laneWorkers[name]
-    laneWorkers[name] = new Lane(name)
-    await old.terminate()
-  }
+  const { background, interactive } = laneWorkers
+  laneWorkers.background = new Lane('background')
+  laneWorkers.interactive = new Lane('interactive')
+  await Promise.all([background.terminate(), interactive.terminate()])
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -460,9 +605,12 @@ class WorkerGitChild extends EventEmitter {
   private exited = false
   /** The worker was asked to start it; until then what is sent to it waits here. */
   isLaunched = false
+  worker: ChildProcess | undefined
+  private finishing = false
   private readonly unsent: Record<string, unknown>[] = []
   private cancelWaiting: (() => boolean) | undefined
   private readonly doneHooks: (() => void)[] = []
+  private abortError?: Error
 
   constructor(private readonly owner: Lane, readonly id: number, file: string, args: readonly string[], pipes: [Pipe, Pipe, Pipe], options: GitSpawnOptions) {
     super()
@@ -478,7 +626,10 @@ class WorkerGitChild extends EventEmitter {
     if (signal) {
       // As `spawn` does with its `signal`.
       const onAbort = (): void => {
-        if (this.kill(options.killSignal)) this.emit('error', Object.assign(new Error('The operation was aborted', { cause: signal.reason }), { name: 'AbortError', code: 'ABORT_ERR' }))
+        if (!this.kill(options.killSignal)) return
+        const error = Object.assign(new Error('The operation was aborted', { cause: signal.reason }), { name: 'AbortError', code: 'ABORT_ERR' })
+        if (childJobs.has(this)) this.abortError = error
+        else this.emit('error', error)
       }
       if (signal.aborted) process.nextTick(onAbort)
       else {
@@ -513,10 +664,11 @@ class WorkerGitChild extends EventEmitter {
   }
 
   /** The worker was asked to start it: what waited for that goes now. */
-  launched(): void {
+  launched(worker: ChildProcess): void {
+    this.worker = worker
     this.isLaunched = true
     this.cancelWaiting = undefined
-    for (const message of this.unsent.splice(0)) this.owner.post(message)
+    for (const message of this.unsent.splice(0)) this.owner.post(worker, message)
   }
 
   /** It waits for its disk (background Git); `cancel` takes it out of the wait. */
@@ -530,12 +682,12 @@ class WorkerGitChild extends EventEmitter {
 
   private toWorker(message: Record<string, unknown>): void {
     if (this.done) return
-    if (this.isLaunched) this.owner.post(message)
+    if (this.worker) this.owner.post(this.worker, message)
     else this.unsent.push(message)
   }
 
   kill(signal?: NodeJS.Signals | number): boolean {
-    if (this.done || this.exitCode !== null || this.signalCode !== null) return false
+    if (this.done || this.finishing || (!childJobs.has(this) && (this.exitCode !== null || this.signalCode !== null))) return false
     this.killed = true
     if (!this.isLaunched && this.cancelWaiting?.()) {
       // Killed while waiting for its disk: it never starts, and ends as a process killed at once would.
@@ -550,6 +702,7 @@ class WorkerGitChild extends EventEmitter {
       return true
     }
     this.toWorker({ t: 'kill', id: this.id, signal: signal ?? 'SIGTERM' })
+    if (childJobs.has(this)) void this.spawned.then(() => childJobs.get(this)!.finish())
     return true
   }
 
@@ -590,6 +743,7 @@ class WorkerGitChild extends EventEmitter {
         this.stdin?.destroy(revive(message.error))
         return
       case 'inputFileError':
+        if (childJobs.has(this)) this.kill()
         this.inputFileError?.(revive(message.error))
         return
       case 'error':
@@ -597,27 +751,30 @@ class WorkerGitChild extends EventEmitter {
         this.emit('error', revive(message.error))
         return
       case 'throw':
-        // `spawn` threw on the worker (a working folder that is a file, say): an error, and nothing more will come.
-        this.markSpawned()
-        this.emit('error', revive(message.error))
-        this.close(null, null)
+        void this.lost(revive(message.error))
         return
       case 'close':
         if (!this.exited && this.exitCode === null && this.signalCode === null) {
           if (message.signal) this.signalCode = message.signal
           else this.exitCode = message.code
         }
-        this.close(message.code, message.signal)
+        void this.finish(message.code, message.signal)
     }
   }
 
   /** The worker stopped with this process running: an error, then the end, so whoever waits for it is answered. */
-  lost(error: Error): void {
-    if (this.done) return
-    this.markSpawned()
+  lost(error: Error): Promise<void> {
+    return this.finish(null, null, error)
+  }
+
+  private async finish(code: number | null, signal: NodeJS.Signals | null, error?: Error): Promise<void> {
+    if (this.done || this.finishing) return
+    this.finishing = true
+    await childJobs.get(this)?.finish()
     this.asyncScope.runInAsyncScope(() => {
-      this.emit('error', error)
-      this.close(null, null)
+      const failure = error ?? this.abortError
+      if (failure) this.emit('error', failure)
+      this.close(code, signal)
     })
   }
 
@@ -676,7 +833,7 @@ export function execFileGit(file: string, args: readonly string[], options: Exec
 export function execFileGit(file: string, args: readonly string[], options: ExecGitOptions, callback: ExecGitCallback<string>): ChildProcess
 export function execFileGit(file: string, args: readonly string[], options: ExecGitOptions, callback: ExecGitCallback<string> | ExecGitCallback<Buffer>): ChildProcess {
   // With the helper off, Node's own `execFile`, as before.
-  if (!workerEnabled()) return execFile(file, [...args], options as Parameters<typeof execFile>[2], callback as Parameters<typeof execFile>[3])
+  if (!workerEnabled() && process.platform !== 'win32' && !draining) return execFile(file, [...args], options as Parameters<typeof execFile>[2], callback as Parameters<typeof execFile>[3])
   const maxBuffer = options.maxBuffer ?? 1024 * 1024
   const killSignal = options.killSignal ?? 'SIGTERM'
   const encoding = options.encoding === 'buffer' || options.encoding === null ? undefined : options.encoding ?? 'utf8'
@@ -689,15 +846,15 @@ export function execFileGit(file: string, args: readonly string[], options: Exec
   })
   // As `execFile`: Git's input is a pipe that is never written to.
   child.stdin?.on('error', () => undefined)
-  const out: Buffer[] = []
-  const err: Buffer[] = []
+  const out: (Buffer | string)[] = []
+  const err: (Buffer | string)[] = []
   let outSize = 0
   let errSize = 0
   let killed = false
   let failure: ExecGitError | undefined
   let finished = false
   let timer: NodeJS.Timeout | undefined
-  const text = (chunks: Buffer[]): string | Buffer => encoding ? Buffer.concat(chunks).toString(encoding) : Buffer.concat(chunks)
+  const text = (chunks: (Buffer | string)[]): string | Buffer => encoding ? chunks.join('') : Buffer.concat(chunks as Buffer[])
   const kill = (): void => {
     child.stdout?.destroy()
     child.stderr?.destroy()
@@ -711,7 +868,7 @@ export function execFileGit(file: string, args: readonly string[], options: Exec
     const stdout = text(out)
     const stderr = text(err)
     const done = callback as (error: ExecGitError | null, stdout: string | Buffer, stderr: string | Buffer) => void
-    if (!failure && code === 0 && signal === null) { done(null, stdout, stderr); return }
+    if (!failure && code === 0 && signal === null && !(process.platform === 'win32' && killed)) { done(null, stdout, stderr); return }
     const cmd = [file, ...args].join(' ')
     const error: ExecGitError = failure ?? Object.assign(new Error(`Command failed: ${cmd}\n${String(stderr)}`), {
       code: (code !== null && code < 0 ? undefined : code) as unknown as string, killed: child.killed || killed, signal
@@ -722,14 +879,20 @@ export function execFileGit(file: string, args: readonly string[], options: Exec
   if (options.timeout && options.timeout > 0) {
     void gitChildSpawned(child).then(() => { if (!finished) timer = setTimeout(() => { kill(); timer = undefined }, options.timeout) })
   }
-  const collect = (chunks: Buffer[], name: 'stdout' | 'stderr') => (chunk: Buffer): void => {
-    const size = (name === 'stdout' ? (outSize += chunk.length) : (errSize += chunk.length))
+  const collect = (chunks: (Buffer | string)[], name: 'stdout' | 'stderr') => (chunk: Buffer | string): void => {
+    const length = typeof chunk === 'string' ? Buffer.byteLength(chunk, encoding) : chunk.length
+    const size = name === 'stdout' ? (outSize += length) : (errSize += length)
     if (size > maxBuffer) {
-      const room = chunk.length - (size - maxBuffer)
-      if (room > 0) chunks.push(chunk.subarray(0, room))
+      const room = maxBuffer - (size - length)
+      // Node counts encoded bytes and then slices decoded chunks by character index.
+      chunks.push(typeof chunk === 'string' ? chunk.slice(0, room) : chunk.subarray(0, room))
       failure ??= Object.assign(new RangeError(`${name} maxBuffer length exceeded`), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }) as ExecGitError
       kill()
     } else chunks.push(chunk)
+  }
+  if (encoding) {
+    child.stdout?.setEncoding(encoding)
+    child.stderr?.setEncoding(encoding)
   }
   child.stdout?.on('data', collect(out, 'stdout'))
   child.stderr?.on('data', collect(err, 'stderr'))

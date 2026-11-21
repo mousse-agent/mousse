@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { createHash, randomUUID, type Hash } from 'node:crypto'
 import { readFrozenEntryAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { gitEnv, guardedAsync } from './git'
@@ -75,10 +74,9 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
     // The process may still be starting on the Git worker: its pid is known once it has.
     const stopAll = (): void => { if (!cancelQueuedGit(child)) void gitChildSpawned(child).then(stopStarted) }
     const stopStarted = (): void => {
-      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return
+      if (child.pid === undefined) return
       // Git first, so it never reports the filters it started as failed; then everything else in its group.
       if (group) { child.kill('SIGKILL'); try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ } }
-      else if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => child.kill('SIGKILL'))
       else child.kill('SIGKILL')
     }
     const timer = deadline === undefined ? undefined : setTimeout(() => { stopped = true; stopAll() }, Math.max(0, deadline - Date.now()))
@@ -86,7 +84,7 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
     child.stderr.on('data', (chunk: Buffer) => { if (errors.length < 64) errors.push(chunk) })
     child.on('error', (error) => { if (timer) clearTimeout(timer); fail(error) })
     // Stopped: the group is gone, so its output closes at once. A program that left the group is not waited for long.
-    child.on('exit', () => { if (stopped) setTimeout(() => settle({ stopped, stderr: Buffer.concat(errors).toString('utf8').trim() }), 250).unref() })
+    child.on('exit', () => { if (stopped && process.platform !== 'win32') setTimeout(() => settle({ stopped, stderr: Buffer.concat(errors).toString('utf8').trim() }), 250).unref() })
     child.on('close', (code) => {
       if (timer) clearTimeout(timer)
       const stderr = Buffer.concat(errors).toString('utf8').trim()

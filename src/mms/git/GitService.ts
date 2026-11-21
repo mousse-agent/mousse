@@ -1,5 +1,4 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -470,9 +469,7 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
     }
     const timer = setTimeout(() => {
       if (!cancelQueuedGit(child)) void gitChildSpawned(child).then(() => {
-        if (!child.pid || child.exitCode !== null || child.signalCode !== null) return
-        if (process.platform === 'win32') spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill())
-        else child.kill()
+        child.kill()
       })
       // Close ends the read; the backstop only covers a process that never closes its pipes.
       backstop = setTimeout(() => finish(false), SUMMARY_KILL_SETTLE_MS)
@@ -932,15 +929,17 @@ export class GitService {
   }
 
   private async withLease<T>(cwd: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    let identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>> | null = null
+    await waitForFolderAccess([resolve(cwd)])
     try {
-      await waitForFolderAccess([resolve(cwd)])
-      identity = await pathExists(cwd) ? await resolveRepositoryIdentityAsync(cwd) : null
-    } catch {
-      identity = null
+      await stat(cwd)
+    } catch (error) {
+      // Init may create a missing directory. An unreadable directory has not been established as missing.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return operation()
+      throw error
     }
+    const identity = await resolveRepositoryIdentityAsync(cwd)
     // Not a repository yet, or no commit yet: there is nothing a push or an amend could race with.
-    if (!identity?.capability.allowed) return operation()
+    if (!identity.capability.allowed) return operation()
     // Background Git actions already hold this lease when they call in; taking it again would wait on itself.
     if (holdsRepositoryMutation(identity.key)) return operation()
     let lease: Awaited<ReturnType<typeof acquireRepositoryLease>>
