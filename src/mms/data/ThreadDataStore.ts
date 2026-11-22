@@ -3146,10 +3146,11 @@ export class ThreadDataStore extends EventEmitter {
     const targets = [...this.indexDirty].map(([threadId, target]) => ({ threadId, ...target })).filter((target) => !final || !target.drop)
     this.indexDirty.clear()
     if (!targets.length) return
+    const closes = this.indexCloses
     this.indexUpdate = this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).then(() => undefined, (error: unknown) => {
-      // Skipped while the index worker backs off after crashing; the client has logged that once. One that ends after
-      // the profile began closing (its folder may be gone) is expected: the next start's reconcile catches it up.
-      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || this.sweepStopped) return
+      // Skipped while the index worker backs off after crashing; the client has logged that once. One sent at or
+      // before closing that fails after it (its folder may be gone) is expected: the next start's reconcile catches it up.
+      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || final || this.indexCloses !== closes) return
       console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
     })
   }
@@ -3187,6 +3188,8 @@ export class ThreadDataStore extends EventEmitter {
   /** The search index's first sweep while it is waited for or runs: a search waits for it (`indexedMessageResults`). */
   private firstSweep?: Promise<void>
   private sweepStopped = false
+  /** Counts `stopSearchIndexSweep` calls: index work sent before one is expected to fail if it ends after it. */
+  private indexCloses = 0
 
   /**
    * Reconciles the search index with every listed thread's database: once `after` settles (at once without it), then
@@ -3206,9 +3209,10 @@ export class ThreadDataStore extends EventEmitter {
       try {
         const live = await this.databaseThreads(() => this.sweepStopped)
         if (this.sweepStopped || (!live.length && !this.threadDbStore)) return
+        const closes = this.indexCloses
         this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
-          // A reconcile cut off by the profile closing runs again at the next start.
-          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || this.sweepStopped) return
+          // A reconcile cut off by closing runs again at the next start.
+          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || this.indexCloses !== closes) return
           console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
         })
       } finally {
@@ -3225,6 +3229,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   stopSearchIndexSweep(): void {
+    this.indexCloses += 1
     this.sweepStopped = true
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.sweepTimer = undefined

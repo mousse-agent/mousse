@@ -44,26 +44,35 @@ const messageIds = (results: Array<{ matchType: string; messageId?: string }>): 
   results.filter((result) => result.matchType === 'message').map((result) => result.messageId!)
 
 describe('thread search index', () => {
-  // Index work runs in a worker and can end after the profile began closing, when its folder may already be gone. The
-  // next start's reconcile catches it up, so only a failure while the store is open is reported.
+  // Index work runs in a worker and can end after the store closed, when the profile's folder may already be gone. The
+  // next start's reconcile catches it up, so only work sent while the store is open, and failing while it still is, is
+  // reported; a store used again after closing reports again.
   it.each([
-    { work: 'an update', op: 'indexUpdate', closed: false, warns: 'thread search index update failed' },
-    { work: 'an update', op: 'indexUpdate', closed: true, warns: undefined },
-    { work: 'a reconcile', op: 'indexReconcile', closed: false, warns: 'thread search index sweep failed' },
-    { work: 'a reconcile', op: 'indexReconcile', closed: true, warns: undefined }
-  ])('reports $work that fails after the store closed: $closed', async ({ op, closed, warns }) => {
+    { work: 'an update', op: 'indexUpdate', when: 'open', warns: 'thread search index update failed' },
+    { work: 'an update', op: 'indexUpdate', when: 'sent, then closed', warns: undefined },
+    { work: 'an update', op: 'indexUpdate', when: 'sent by the close', warns: undefined },
+    { work: 'an update', op: 'indexUpdate', when: 'sent after reuse', warns: 'thread search index update failed' },
+    { work: 'a reconcile', op: 'indexReconcile', when: 'open', warns: 'thread search index sweep failed' },
+    { work: 'a reconcile', op: 'indexReconcile', when: 'sent, then closed', warns: undefined }
+  ])('reports $work that fails when $when', async ({ op, when, warns }) => {
     const failures: Array<(error: Error) => void> = []
     vi.spyOn(ThreadDbClient.prototype, 'callIndex').mockImplementation(((called: string) => called === op
       ? new Promise((_, reject) => { failures.push(reject) })
       : Promise.resolve(undefined)) as never)
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const store = open(home())
-    thread(store, 'Alpha', [message('m1', 'the zebra crossing')])
-    if (op === 'indexUpdate') void store.flushSearchIndex()
+    const id = thread(store, 'Alpha', [message('m1', 'the zebra crossing')])
+    if (when === 'sent after reuse') {
+      store.closeThreadStorage()
+      store.mutateThreadData(id, () => ({ messages: [message('m1', 'the zebra crossing'), message('m2', 'again')] }))
+      failures.length = 0
+    }
+    if (when === 'sent by the close') store.closeThreadStorage()
+    else if (op === 'indexUpdate') void store.flushSearchIndex()
     else store.startSearchIndexSweep(60_000)
-    await vi.waitFor(() => expect(failures).toHaveLength(1))
-    if (closed) store.closeThreadStorage()
-    failures[0]!(new Error('unable to open database file'))
+    await vi.waitFor(() => expect(failures.length).toBeGreaterThan(0))
+    if (when === 'sent, then closed') store.closeThreadStorage()
+    failures.at(-1)!(new Error('unable to open database file'))
     await new Promise((done) => setImmediate(done))
     const reported = warn.mock.calls.filter(([text]) => typeof text === 'string' && text.startsWith('thread search index'))
     expect(reported.map(([text]) => text)).toEqual(warns ? [expect.stringContaining(warns)] : [])
