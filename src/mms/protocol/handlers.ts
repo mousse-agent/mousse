@@ -122,7 +122,7 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { settledPreparation } from '../workspace/workspacePreparation'
+import { isPreparing, settledPreparation } from '../workspace/workspacePreparation'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { uncommittedLeftBehindNote, WorkspaceResolver } from '../workspace/WorkspaceResolver'
 import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
@@ -1355,6 +1355,17 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
   const directory = ctx.mms.threads.getThreadDir(threadId)
   if (!heldThreadLease) {
+    // A worktree that is already there and whole needs no change, only the checks below, so the thread's lease is not
+    // taken: a Git action waiting for that thread's locks is then already followed, and can be cancelled meanwhile.
+    const manager = new ThreadWorkspaceManager(directory)
+    const stored = manager.load()
+    if (stored && !stored.prepared && !isPreparing(directory) && threadPlacement(thread) !== 'project-folder' && !isProjectFolderWorkspace(stored)) {
+      await assertWorktreeFolderConnected(stored.worktreePath)
+      if (existsSync(join(stored.worktreePath, '.git')) && !manager.rebuildUnfinished(stored)) {
+        if ((await manager.verify(stored)).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
+        return
+      }
+    }
     await settledPreparation(directory)
     const lease = await waitAcquireExecutionLease(directory, { source: 'task-workspace' })
     try {
