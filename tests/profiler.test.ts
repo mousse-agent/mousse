@@ -404,10 +404,10 @@ describe('the profiler tools', () => {
 
   it('keeps missing and mixed child measurements explicit in the child tool', async () => {
     const { service, monitor } = profilerFixture(home())
-    vi.spyOn(monitor, 'readChildrenNow').mockResolvedValue([
+    vi.spyOn(monitor, 'readChildTreeNow').mockResolvedValue({ discovery: 'complete', children: [
       { kind: 'codex', mb: 80 }, { kind: 'codex', mb: null },
       { kind: 'mcp', mb: 40, footprint: true }, { kind: 'mcp', mb: 20 }
-    ])
+    ].map((child) => ({ ...child, relationship: 'tracked' as const })) })
     try {
       const { value } = await call(toolsFor(() => ON, service), 'profiler_children')
       expect(value.totalMb).toBeNull()
@@ -587,7 +587,7 @@ describe('the profiler tools', () => {
     expect(gpu.value).toMatchObject({ gpu: { privateMb: 334, workingSetMb: 380 }, hints: { surfaceMb: 10.8, acrylic: true, webglContexts: 1, views: { applet: 1 } }, viewSizes: { applet: [{ w: 640, h: 480 }] } })
     expectNoPrivateData(gpu.outcome.text, dir)
     const children = await call(registry, 'profiler_children')
-    expect(children.value).toMatchObject({ processes: [{ kind: 'claude', mb: 210 }, { kind: 'other', mb: 12 }], totalMb: 222 })
+    expect(children.value).toMatchObject({ processes: [{ kind: 'claude', mb: 210 }, { kind: 'other', mb: 12 }], totalMb: null, measuredTotalMb: 222, discovery: 'unavailable' })
     expectNoPrivateData(children.outcome.text, dir)
   })
 
