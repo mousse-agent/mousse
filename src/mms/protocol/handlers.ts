@@ -122,7 +122,7 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { isPreparing, settledPreparation } from '../workspace/workspacePreparation'
+import { settledPreparation } from '../workspace/workspacePreparation'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { uncommittedLeftBehindNote, WorkspaceResolver } from '../workspace/WorkspaceResolver'
 import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
@@ -1357,17 +1357,6 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   const manager = new ThreadWorkspaceManager(directory)
   const placement = threadPlacement(thread)
   if (!heldThreadLease) {
-    // A worktree that is already there and whole needs no change, only the checks below, so the thread's lease is not
-    // taken: a Git action waiting for that thread's locks is then already followed, and can be cancelled meanwhile.
-    const manager = new ThreadWorkspaceManager(directory)
-    const stored = manager.load()
-    if (stored && !stored.prepared && !isPreparing(directory) && threadPlacement(thread) !== 'project-folder' && !isProjectFolderWorkspace(stored)) {
-      await assertWorktreeFolderConnected(stored.worktreePath)
-      if (existsSync(join(stored.worktreePath, '.git')) && !manager.rebuildUnfinished(stored)) {
-        if ((await manager.verify(stored)).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
-        return
-      }
-    }
     await settledPreparation(directory)
     // Only making, claiming or rebuilding the worktree takes the thread's lease. A thread in its project's folder, or one
     // whose worktree is ready, is used as it is: a Git action does not wait for a terminal open in the thread, which
