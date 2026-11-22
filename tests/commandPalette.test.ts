@@ -408,6 +408,22 @@ describe('opening a thread from the palette', () => {
     expect(win.mousse.threads.create).toHaveBeenCalledWith(undefined, 'p1', { rememberedChoices: true })
   })
 
+  it('starts another draft while the first draft is submitting its prompt', async () => {
+    const { holdNewChat } = await import('../src/renderer/lib/pendingThreadRows')
+    const { win } = stubWindow(composer())
+    const starting = thread('starting-draft', 'New Thread', { projectId: 'p1', startedAt: undefined })
+    const next = thread('next-draft', 'New Thread', { projectId: 'p1', startedAt: undefined })
+    useAppStore.setState({ threads: [starting] })
+    win.mousse.threads.create.mockResolvedValue(next)
+    const release = holdNewChat(useAppStore.getState().profileId, starting.id)!
+    try {
+      await createAndSelectProjectThread('p1')
+      expect(win.mousse.threads.select).toHaveBeenCalledExactlyOnceWith(next.id)
+    } finally {
+      release()
+    }
+  })
+
   // Add project, then start a thread: the new project is often not in this window's list yet when the create answers.
   it('opens the new thread of a project this window does not list yet', async () => {
     const { win } = stubWindow(composer())

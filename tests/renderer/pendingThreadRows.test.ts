@@ -160,6 +160,8 @@ describe('the list the sidebar shows', () => {
     expect(shown.activity.d1).toBe('processing')
     expect(shown.threads.filter((entry) => entry.id === 'd1')).toHaveLength(1)
     expect([...shown.unmade]).toEqual(['d1'])
+    const admitted = withPendingRows([...listed, draft('d1')], [row], { d1: 'processing' }, 'd1')
+    expect(admitted.unmade.has('d1')).toBe(false)
     const started = withPendingRows([...listed, { ...draft('d1'), startedAt: at }], [row], {}, 'd1')
     expect(started.unmade.size).toBe(0)
   })
@@ -235,7 +237,7 @@ describe('in the sidebar', () => {
   beforeEach(() => {
     const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
     const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32' } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32', git: {} } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
     usePendingThreadRows.setState({ rows: [], rowKeys: new Map() })
     useAppStore.setState({ profileId: 'default', projects: [project('p1', 'Mousse')], threads: [...listed, draft('d1')], threadActivity: {}, activeThreadId: 'd1', threadsSidebarView: 'projects', sidebarMode: 'projects', threadFeedOrder: [] })
     host = document.createElement('div')
@@ -271,8 +273,7 @@ describe('in the sidebar', () => {
       act(() => useAppStore.setState({ sidebarAnimations: false }))
       expect(row.querySelector('.turning.icon-spin')).toBeNull()
       expect(cancel).toHaveBeenCalled()
-      if (view === 'projects') expect(row.querySelector('[aria-label="Agent is working"]')).not.toBeNull()
-      else expect(row.textContent).toContain('Working')
+      expect(row.textContent).toContain('Working')
 
       act(() => useAppStore.setState({ sidebarAnimations: true }))
       expect(row.querySelector('.turning.icon-spin')).not.toBeNull()
@@ -317,7 +318,7 @@ describe('in the sidebar', () => {
     expect(pending.dataset.threadId).toBe('pending:k1')
     expect(pending.textContent).toContain('Plan the release')
     expect(pending.classList.contains('active')).toBe(true)
-    expect(pending.querySelector('.threads-sidebar-status-spinner')).not.toBeNull()
+    expect(pending.querySelector('.threads-sidebar-card-status-working')).not.toBeNull()
     // Nothing to act on before the thread exists.
     act(() => pending.click())
     expect(actions.selectThread).not.toHaveBeenCalled()
@@ -363,10 +364,14 @@ describe('in the sidebar', () => {
     expect(host.querySelector('[data-thread-id^="pending:"]')).toBeNull()
   })
 
-  it('offers nothing on the reused empty thread until the service starts it, and takes no drop', () => {
+  it('opens the reused empty thread, and offers nothing else on it until the service starts it, and takes no drop', () => {
     addRow({ reuses: true })
     const row = rows()[0]!
     expect(row.dataset.threadId).toBe('d1')
+    // Left for another thread while its worktree is made, it opens again from its row.
+    act(() => useAppStore.setState({ activeThreadId: 'a' }))
+    act(() => row.click())
+    expect(actions.selectThread).toHaveBeenCalledWith('d1')
     expect(row.draggable).toBe(false)
     expect(row.parentElement!.querySelector('.threads-sidebar-thread-actions')).toBeNull()
     act(() => { row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })

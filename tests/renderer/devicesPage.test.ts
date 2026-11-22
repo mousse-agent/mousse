@@ -1,30 +1,45 @@
 // @vitest-environment jsdom
+/**
+ * Settings → Devices as a person sees it: one Networking switch, one Add device, and one list where an engine pairing
+ * and a device paired under the old networking sit side by side. Only the daemon is stubbed.
+ */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { NetDevicesSection } = await import('../../src/renderer/components/NetDevicesSection')
+const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 const { MousseIdAccount } = await import('../../src/renderer/components/MousseIdAccount')
 const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')
+const { SERVICE_ANSWERED_LATE, SERVICE_STOPPED_ANSWERING } = await import('../../src/shared/errors')
 
-const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false }
+const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true }
 /** A set-up computer that manages its devices, with one other computer and a phone. */
 const daemon = {
   error: undefined as string | undefined,
   removed: false,
   plus: undefined as Record<string, unknown> | undefined,
-  finishError: undefined as unknown
+  finishError: undefined as unknown,
+  enabled: true,
+  initError: undefined as unknown
 }
-const request = vi.fn(async (method: string) => {
+const request = vi.fn(async (method: string, _params?: unknown) => {
   switch (method) {
+    case 'netEngine.status':
+      return {
+        enabled: true, on: true, helper: { state: 'running' }, approvals: [],
+        devices: [{ node: 'n_studio', name: 'Studio Mac', shortId: 'ab12', state: 'connected', route: 'lan' }]
+      }
     case 'net.status':
       return {
-        enabled: true, keystore: 'unlocked', protected: true, rosterState: 'ok', routes: [], transports: [],
-        self: { node: 'nod_self', user: 'usr_a', isAuthority: true, removed: daemon.removed }, peers: [], workOnThreads: true, error: daemon.error
+        enabled: daemon.enabled, keystore: 'unlocked', protected: true, rosterState: 'ok', routes: [], transports: [],
+        self: { node: 'nod_self', user: 'usr_a', isAuthority: true, removed: daemon.removed }, peers: [], workOnThreads: true, shareBots: true, error: daemon.error
       }
     case 'net.plus.status': return daemon.plus
+    case 'net.init':
+      if (daemon.initError) throw daemon.initError
+      return {}
     case 'net.plus.login.begin':
       return { id: 'login-1', userCode: 'ABCDEF-123456', verificationUri: 'https://id.example/approve', expiresAt: Date.now() + 60_000 }
     case 'net.plus.login.finish':
@@ -33,9 +48,9 @@ const request = vi.fn(async (method: string) => {
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
     case 'net.ssh.list': return { records: [] }
     case 'bridge.nodes': return { nodes: [
-      { node: 'nod_self', name: 'agibook', self: true, revoked: false, caps: ['read'], kind: 'computer', state: 'open', version: '0.44.2', routes: [] },
-      { node: 'nod_agigo', name: 'Agigo', self: false, revoked: false, caps: ['read', 'settings'], kind: 'computer', state: 'open', version: '0.44.2', route: { transport: 'direct', direction: 'out' }, routes: [], policy },
-      { node: 'nod_pixel', name: 'Pixel 9', self: false, revoked: false, caps: ['read'], kind: 'phone', state: 'closed', lastSeenAt: Date.now() - 3 * 3600_000, routes: [], policy }
+      { node: 'nod_self', name: 'agibook', self: true, revoked: false, caps: ['read'], kind: 'computer', state: 'open', routes: [] },
+      { node: 'n_studio', name: 'Studio Mac', self: false, revoked: false, caps: ['read', 'chat', 'write', 'terminal', 'settings'], kind: 'computer', state: 'open', routes: [], policy, connection: 'connected', source: 'engine' },
+      { node: 'nod_nas', name: 'Old NAS', self: false, revoked: false, caps: ['read', 'chat', 'write', 'settings'], kind: 'computer', state: 'open', route: { transport: 'relay', direction: 'out' }, routes: [], policy, connection: 'connected' }
     ] }
     case 'bridge.activity': return { entries: [], rules: [], counts: [], uncertain: 0, refused: 0, reads: { calls: 0, bytes: 0, hours: [] } }
     default: return {}
@@ -45,74 +60,61 @@ const request = vi.fn(async (method: string) => {
 let root: Root
 let host: HTMLElement
 beforeEach(() => {
+  request.mockClear()
   daemon.error = undefined
   daemon.removed = false
   daemon.plus = undefined
   daemon.finishError = undefined
+  daemon.enabled = true
+  daemon.initError = undefined
   useMousseIdStore.setState({ runtimeOrigin: '' })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
   ;(window as unknown as { mousse: unknown }).mousse = {
     platformRequest: { request },
-    app: { getInfo: async () => ({ deviceName: 'agibook' }) },
+    netEngine: { onChanged: () => () => undefined },
     editorAsks: { list: async () => [], onChanged: () => () => undefined }
   }
 })
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+  document.body.innerHTML = ''
 })
 
 const flush = async () => { for (let i = 0; i < 6; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
-const mount = async () => { await act(async () => root.render(createElement(NetDevicesSection))); await flush() }
-const list = () => host.querySelector('[data-settings-anchor="devices-list"]')!
-const rowText = (node: string) => list().querySelector(`[data-device-node="${node}"]`)?.textContent ?? ''
-const toggle = (name: string) => host.querySelector<HTMLButtonElement>(`button[aria-label$="details for ${name}"]`)!
+const mount = async () => { await act(async () => root.render(createElement(EngineDevicesSection))); await flush() }
+const buttons = (name: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].filter((item) => item.textContent?.trim() === name || item.getAttribute('aria-label') === name)
+const click = async (target: HTMLElement | undefined) => { expect(target).toBeTruthy(); await act(async () => target!.click()); await flush() }
+const rowText = (node: string) => (host.querySelector(`[data-device-node="${node}"]`)?.textContent ?? '').replace(/\s+/g, ' ')
+const called = (method: string) => request.mock.calls.filter(([name]) => name === method)
 
 describe('Settings → Devices', () => {
-  it('lists every device on one line each, this computer first, with no permission rows until one is opened', async () => {
+  it('lists an engine pairing and an old pairing in one list, with one switch, one Add device and none of the old controls', async () => {
     await mount()
-    const names = [...list().querySelectorAll('[data-device-node] .settings-item-title')].map((title) => title.textContent)
-    expect(names).toEqual(['agibook', 'Agigo', 'Pixel 9'])
-    expect(rowText('nod_self')).toContain('This computer')
-    expect(rowText('nod_agigo')).toContain('Computer · Online')
-    expect(rowText('nod_pixel')).toContain('Phone · Offline · last seen 3h ago')
-    expect(list().textContent).not.toContain('Block on this computer')
-    expect(list().textContent).not.toContain('Terminals from this device')
+    expect(rowText('n_studio')).toContain('Connected · same network · Works on threads')
+    expect(rowText('nod_nas')).toContain('Connected · via relay')
+    expect(buttons('Add device')).toHaveLength(1)
+    expect([...host.querySelectorAll('[role="switch"][aria-label="Networking"]')]).toHaveLength(1)
+    for (const gone of ['Start over', 'Connection checks', 'Connection add-ons', 'Advertised routes', 'Device name', 'cloudflared'])
+      expect(host.textContent).not.toContain(gone)
+
+    // The old pairing opens the same Access panel, and Remove goes to the old networking.
+    await click(buttons('Actions for Old NAS')[0])
+    await click(buttons('Access')[0])
+    expect(host.textContent).toContain('All projects, except private threads')
+    await click(buttons('Actions for Old NAS')[0])
+    await click(buttons('Remove…')[0])
+    await click(buttons('Remove').at(-1))
+    expect(called('bridge.revoke')).toEqual([['bridge.revoke', { node: 'nod_nas' }]])
   })
 
-  it('opens one device at a time, with its permissions, Block and Remove', async () => {
+  it('turning Networking off turns off both the engine and the old networking', async () => {
     await mount()
-    await act(async () => toggle('Agigo').click())
-    await flush()
-    expect(toggle('Agigo').getAttribute('aria-expanded')).toBe('true')
-    const text = list().textContent ?? ''
-    for (const words of ['Works on threads', 'Limits…', 'Terminals from this device', 'Editor connections from this device', 'Block on this computer', 'Remove from my devices'])
-      expect(text).toContain(words)
-    await act(async () => toggle('Pixel 9').click())
-    await flush()
-    expect(toggle('Agigo').getAttribute('aria-expanded')).toBe('false')
-    // A phone keeps the phone API: no thread permissions, but Block and Remove.
-    expect(list().textContent).not.toContain('Terminals from this device')
-    expect(list().textContent).toContain('Block on this computer')
-  })
-
-  it('puts this computer’s own switch in its detail and networking under Advanced', async () => {
-    await mount()
-    const advanced = host.querySelector('details.settings-advanced')!
-    expect(advanced.querySelector('[data-settings-anchor="devices-networking"]')).not.toBeNull()
-    await act(async () => toggle('agibook').click())
-    expect(list().textContent).toContain('Let my other devices work here')
-  })
-
-  it('reads a lapsed device pass as Reconnecting, never as the raw code', async () => {
-    daemon.error = 'bad_delegation'
-    await mount()
-    expect(host.textContent).toContain('This computer’s pass to your devices ran out while it was away')
-    expect(host.textContent).toContain('Open Mousse on Agigo')
-    expect(rowText('nod_self')).toContain('Reconnecting')
-    expect(host.textContent).not.toMatch(/bad.delegation|delegation invalid/)
+    await click(host.querySelector<HTMLElement>('[role="switch"][aria-label="Networking"]')!)
+    expect(called('netEngine.disable')).toHaveLength(1)
+    expect(called('net.disable')).toHaveLength(1)
   })
 
   it('a computer removed from your devices is told signing in adds it back, not that it is reconnecting', async () => {
@@ -151,6 +153,45 @@ describe('Settings → Devices', () => {
     expect(alert).toContain('Your Mousse ID already has a devices list on another computer.')
     expect(alert).toContain('can’t join that list without leaving them')
     expect(alert).not.toMatch(/binding|identifier/i)
+  })
+
+  /** Signs in from the account row and returns the alert it shows. */
+  const signInAlert = async (): Promise<HTMLElement | null> => {
+    daemon.plus = daemon.plus ?? { configured: false, connected: false }
+    useMousseIdStore.setState({ runtimeOrigin: 'https://id.example' })
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    await act(async () => root.render(createElement(MousseIdAccount, { onSetUp: () => undefined })))
+    await flush()
+    await act(async () => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Sign in')!.click())
+    await flush()
+    open.mockRestore()
+    return host.querySelector<HTMLElement>('[role="alert"]')
+  }
+
+  it('a sign-in whose call to the background service lost its connection says the service stopped answering', async () => {
+    // As main answers a platform request whose connection to the service dropped.
+    daemon.finishError = { code: 'service_connection_lost', message: SERVICE_STOPPED_ANSWERING }
+    expect((await signInAlert())?.textContent).toBe(SERVICE_STOPPED_ANSWERING)
+  })
+
+  it('turning networking on for sign-in tells a slow service apart from a dropped one', async () => {
+    daemon.enabled = false
+    daemon.initError = { code: 'service_timeout', message: SERVICE_ANSWERED_LATE }
+    expect((await signInAlert())?.textContent).toBe(`Couldn’t turn on networking: ${SERVICE_ANSWERED_LATE}`)
+  })
+
+  it('a generic failure shows its words with the reference in the tooltip, and Copy copies both', async () => {
+    const message = 'Something went wrong. Please try again or report this error. Reference: 0d6c1c1e-4a5b-4f43-9d6e-1b2c3d4e5f60'
+    daemon.finishError = { code: 'platform_request_failed', message }
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const alert = await signInAlert()
+    expect(alert?.textContent).toContain('Something went wrong. Please try again or report this error.')
+    expect(alert?.querySelector('[title*="0d6c1c1e"]')).not.toBeNull()
+    const copy = alert!.querySelector<HTMLButtonElement>('button[aria-label="Copy error"]')!
+    await act(async () => copy.click())
+    expect(writeText).toHaveBeenCalledWith(message)
+    expect(copy.textContent).toBe('Copied')
   })
 
   it('a disconnected account can be signed out, so signing in to a different one is never stuck', async () => {

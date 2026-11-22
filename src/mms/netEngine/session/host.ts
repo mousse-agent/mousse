@@ -41,6 +41,10 @@ export interface EngineHostPort {
    * Resolves once its own `hello` there was answered; the reply is `pairback.done`.
    */
   pairback?(caller: EngineCaller, request: { routes: string[]; receipt?: string }): Promise<void>
+  /** A `mousse.tunnel` stream from a caller this connection serves: one editor tunnel (Phase 1b §9.2). */
+  tunnel?(connection: EngineConnection, stream: EngineStream): void
+  /** The caller said its name in `hello` (`<computer> (<profile>)`). */
+  calledBy?(caller: EngineCaller, name: string): void
 }
 
 /**
@@ -85,6 +89,19 @@ export class EngineHost {
   }
 
   private accept(stream: EngineStream): void {
+    if (stream.label === 'mousse.tunnel') {
+      // The tunnels read their own stream; the caller is checked here first, and the editor refusal for each open.
+      try {
+        if (this.closed) throw new NetError('peer_offline')
+        this.port.caller(this.connection)
+      } catch {
+        stream.reset('forbidden')
+        return
+      }
+      if (this.port.tunnel) this.port.tunnel(this.connection, stream)
+      else stream.reset('not_supported')
+      return
+    }
     const channel = new Channel(stream)
     let count = 0
     let sub: HostSubscription | undefined
@@ -140,7 +157,10 @@ export class EngineHost {
     const h = message.header
     switch (label) {
       case 'mousse.hello':
-        if (h.t === 'hello') channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+        if (h.t === 'hello') {
+          if (typeof h.name === 'string') this.port.calledBy?.(caller, h.name)
+          channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+        }
         else if (h.t === 'pairback') {
           if (!this.port.pairback) throw new NetError('bad_request')
           const routes = Array.isArray(h.routes)
@@ -164,6 +184,8 @@ export class EngineHost {
         return this.blob(channel, h.stream as StreamId, h.blob as BlobId, caller)
       case 'mousse.put':
         return this.put(channel, message, caller, first)
+      case 'mousse.tunnel':
+        return
     }
   }
 

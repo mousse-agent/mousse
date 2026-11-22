@@ -113,7 +113,7 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       launchConfig: () => ({ binaryPath: binary }),
       query: cli.query,
-      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+      probe: () => ({ kind: 'signed_in', account: { subject: 'test-account', credential: 'subscription' } })
     })
     stops.push(async () => service.stop())
     const d = phase6Daemon(home, [new ClaudeSubscriptionAdapter(() => service)])
@@ -158,7 +158,7 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       launchConfig: () => ({ binaryPath: binary }),
       query: cli.query,
-      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+      probe: () => ({ kind: 'signed_in', account: { subject: 'test-account', credential: 'subscription' } })
     })
     stops.push(async () => service.stop())
     const d = phase6Daemon(home, [new ClaudeSubscriptionAdapter(() => service)])

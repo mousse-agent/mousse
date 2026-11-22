@@ -7,6 +7,9 @@ import { SKIP_DIR_NAMES, resolveWithinRoot } from './pathGuard'
 import { detectGitRoute, isPhysicallyWithin, type GitRoute } from './WorkspaceIndex'
 import { getWorkspaceIndexRegistry, type WorkspaceIndexLookup } from './WorkspaceIndexRegistry'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { spawnGit as spawnGitOffLoop } from '../git/gitSpawn'
 
 export interface GrepWorkspaceOptions {
   /** Regular expressions run in `git grep` only; elsewhere the query is searched literally. */
@@ -277,7 +280,7 @@ async function grepWithGit(
   route: Extract<GitRoute, { ok: true }>
 ): Promise<Omit<FileGrepResponse, 'root' | 'source' | 'elapsedMs'>> {
   const { root, query, now, deadline, signal } = context
-  const spawnGit = context.deps.spawn ?? nodeSpawn
+  const spawnGit = context.deps.spawn ?? (spawnGitOffLoop as unknown as typeof nodeSpawn)
   const supportsMaxCount =
     route.version[0] > MAX_COUNT_GIT_VERSION[0] ||
     (route.version[0] === MAX_COUNT_GIT_VERSION[0] && route.version[1] >= MAX_COUNT_GIT_VERSION[1])
@@ -320,12 +323,12 @@ async function grepWithGit(
         reject(abortError())
         return
       }
-      const child = spawnGit('git', argv, {
+      const child = timeGitChild(() => spawnGit(gitFile(), argv, {
         cwd: root,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })
-      })
+        env: gitEnvFor(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' }))
+      }))
       let stoppedByUs = false
       let deadlineHit = false
       let aborted = false

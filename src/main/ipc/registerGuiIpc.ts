@@ -5,6 +5,7 @@ import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalize
 import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import type { SubagentSummary } from '../../shared/subagents'
+import type { ThreadBackgroundWork } from '../../shared/backgroundWork'
 import type { SetVendorSettingInput } from '../../shared/harness/vendorSettings'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
@@ -33,10 +34,13 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMo
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces, readAssetStamp } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
-import { daemonGitParams } from './daemonGitParams'
+import { daemonGitParams, daemonGitReadParams } from './daemonGitParams'
+import { headsFromOlderService } from './gitHeadsFallback'
 import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
 import { getComputerName } from '../../mms/computerName'
 import { randomUUID } from 'node:crypto'
+import type { WarmStartCache } from '../warmStartCache'
+import type { ProfilePublicDto } from '../../shared/profiles/types'
 import type { GuiMmsController, ReadOrder, ThreadSnapshotResult } from '../mms/GuiMmsController'
 import { updateOrders, type UpdateKind } from '../mms/updateOrder'
 import { PresentationState } from '../mms/PresentationState'
@@ -44,7 +48,8 @@ import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { coalescedRunner } from '../mms/coalescedRunner'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
-import { guiChatRequestError, guiSendFailureAnswer } from '../mms/requestErrors'
+import { DELETE_TOO_LONG } from '../../shared/resourceLifecycle'
+import { guiChatRequestError, guiPlatformRequestError, guiSendFailureAnswer } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -135,6 +140,7 @@ import type {
   CreateScheduledJobInput,
   FileAsset,
   FileEntry,
+  FileText,
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
@@ -147,6 +153,8 @@ import type {
   GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
+  GitHeadsRequest,
+  GitHeadsResult,
   GitContinueResult,
   GitInProgress,
   GitUpstreamCheck,
@@ -228,9 +236,14 @@ export interface GuiIpcServices {
    * second, to see the catch-up recover by hand.
    */
   devDropTurnEnd?: boolean
+  /** What each profile's window last showed, for the next launch to show before the service answers. */
+  warmStart?: Pick<WarmStartCache, 'observe' | 'noteProfile' | 'noteProjectIcon' | 'noteAppInfo' | 'view' | 'lastActiveThread' | 'forget'>
 }
 
 let activeGuiMms: GuiMmsController | null = null
+/** The synchronous `app:warmStartView` read (a sync message has one listener; the last registration answers it). */
+let answerWarmStartView: (event: Electron.IpcMainEvent) => void = (event) => { event.returnValue = null }
+let warmStartViewListening = false
 
 /** An update main could not hand to a window is followed by a catch-up this long after the first of a burst. */
 const UNDELIVERED_CATCH_UP_DELAY_MS = 1_000
@@ -280,7 +293,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
   'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth',
-  'runs.resumeNow', 'runs.cancelPause', 'threads.goal', 'threads.setHidden'
+  'orchestrator.sendAccepted', 'runs.resumeNow', 'runs.cancelPause', 'threads.goal', 'threads.setHidden'
 ])
 
 class PlatformRequestError extends AppError {
@@ -413,6 +426,8 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   continuationOfRunId?: string
   acknowledgeUncertain?: boolean
   await?: 'ack'
+  steer?: boolean
+  steerRunId?: string
 } {
   if (typeof request === 'string') return { content: request }
   return {
@@ -424,6 +439,7 @@ function normalizeSendContent(request: OrchestratorSendInput): {
       ? { continuationOfRunId: request.continuationOfRunId, ...(request.acknowledgeUncertain === true ? { acknowledgeUncertain: true } : {}) }
       : {}),
     ...(request.expect && typeof request.expect === 'object' ? { expect: request.expect } : {}),
+    ...(request.steer === true ? { steer: true, ...(typeof request.steerRunId === 'string' ? { steerRunId: request.steerRunId } : {}) } : {}),
     mode: request.mode,
     images: request.images
   }
@@ -448,7 +464,8 @@ export function registerGuiIpc(
     presentation,
     settings,
     browserView,
-    repoRoot
+    repoRoot,
+    warmStart
   } = services
   activeGuiMms = guiMms
   registerLinuxWindowResizeIpc(getWindow)
@@ -506,9 +523,8 @@ export function registerGuiIpc(
           : value
       }
     } catch (error) {
-      const descriptor = error instanceof MmsProtocolError
-        ? knownAppError({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo })
-        : normalizeAppError(error, 'platform_request_failed')
+      const method = (request as { method?: unknown } | null)?.method
+      const descriptor = guiPlatformRequestError(error, typeof method === 'string' ? method : undefined)
       console.error('GUI platform request failed', errorDiagnostic(descriptor, 'platform.call'))
       return { ok: false, error: serializeAppError(descriptor) }
     }
@@ -572,7 +588,9 @@ export function registerGuiIpc(
     // activeEventProfileId instead. Installation-wide listeners remain global.
     const targetProfileId = profileId ?? activeEventProfileId ?? senderProfile
     if (channel === 'threads:updated') notificationThreads.note(targetProfileId ?? currentProfileKey(), data)
+    if (channel === 'threads:row') notificationThreads.noteRow(targetProfileId ?? currentProfileKey(), data)
     if (channel === 'projects:updated') notificationThreads.noteProjects(targetProfileId ?? currentProfileKey(), data)
+    warmStart?.observe(targetProfileId, channel, data)
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
         if (targetProfileId) {
@@ -1197,7 +1215,9 @@ export function registerGuiIpc(
     quietWatch.touch(senderId, event.threadId)
     queueMicrotask(() => noteShown(senderId))
     const target = (channel: string, data: unknown): void => {
-      if (!win.isDestroyed()) win.webContents.send(channel, data)
+      if (win.isDestroyed()) return
+      warmStart?.observe(binding.profileId, channel, data)
+      win.webContents.send(channel, data)
     }
     const tracker = activityTrackerFor(binding.profileId)
     const previousActivity = event.type === 'activity' && event.threadId
@@ -1207,6 +1227,7 @@ export function registerGuiIpc(
     // A thread that finishes while a focused window shows it was seen as it finished.
     if (event.type === 'activity' || event.type === 'activity.snapshot') reportSeenIfDone(win)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
+    if (event.type === 'threads.row') notificationThreads.noteRow(binding.profileId, event.data)
     if (event.type === 'projects.updated') notificationThreads.noteProjects(binding.profileId, event.data)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {
@@ -1436,7 +1457,9 @@ export function registerGuiIpc(
     const presentation = presentationForSender(senderId)
     const activeId = presentation.getActiveThreadId()
     const target = (channel: string, data: unknown): void => {
-      if (!win.isDestroyed()) win.webContents.send(channel, data)
+      if (win.isDestroyed()) return
+      warmStart?.observe(profileId, channel, data)
+      win.webContents.send(channel, data)
     }
     const tracker = activityTrackerFor(profileId)
     const activityBefore = activeId ? tracker.getState(activeId) ?? 'idle' : undefined
@@ -1813,6 +1836,8 @@ export function registerGuiIpc(
           ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {}),
           ...(body.continuationOfRunId ? { continuationOfRunId: body.continuationOfRunId, ...(body.acknowledgeUncertain ? { acknowledgeUncertain: true } : {}) } : {}),
           ...(body.expect ? { expect: body.expect } : {}),
+          // Steer: only this computer's threads take it; a send to another computer's thread goes without.
+          ...(body.steer && !isQualifiedId(targetThreadId) ? { steer: true, ...(body.steerRunId ? { steerRunId: body.steerRunId } : {}) } : {}),
           // Opt-in: answer once the run is committed, so a caller that watches the turn is not held for all of it.
           ...(body.await === 'ack' ? { await: 'ack' } : {})
         }
@@ -2034,8 +2059,8 @@ export function registerGuiIpc(
 
   // ── Projects / threads (protocol) ────────────────────────────────────────
 
-  registerHandler('workspace:getStatus', async (_e, threadId: string) =>
-    guiMms.request('workspace.getStatus', { threadId })
+  registerHandler('workspace:getStatus', async (_e, threadId: string, fresh?: boolean) =>
+    guiMms.request('workspace.getStatus', { threadId }, undefined, { fresh: fresh === true })
   )
   registerHandler('workspace:restore', async (_e, threadId: string, expectedJournalGeneration?: number) =>
     guiMms.request('workspace.restore', { threadId, expectedJournalGeneration })
@@ -2167,6 +2192,8 @@ export function registerGuiIpc(
   registerHandler('projects:icon', async (_e, projectId: string) => {
     try {
       const res = await guiMms.request<{ icon: ProjectIconImage | null }>('projects.icon', { projectId })
+      // The next launch shows this icon before the service answers.
+      warmStart?.noteProjectIcon(guiMms.getWindowBinding()?.profileId, projectId, res.icon ?? null)
       return res.icon ?? null
     } catch (error) {
       // A daemon from before project icons: the folder glyph.
@@ -2298,7 +2325,9 @@ export function registerGuiIpc(
     } catch (error) {
       console.warn('thread statuses could not be read; showing the last ones received', error)
     }
-    return tracker.getSnapshot()
+    const snapshot = tracker.getSnapshot()
+    warmStart?.observe(guiMms.getWindowBinding()?.profileId, 'threads:activity', snapshot)
+    return snapshot
   })
 
   // The renderer calls this after it knows its trusted profile and subscribes.
@@ -2318,11 +2347,15 @@ export function registerGuiIpc(
       if (!isCurrent()) return
       if (channel === 'threads:updated') notificationThreads.note(binding.profileId, data)
       if (channel === 'projects:updated') notificationThreads.noteProjects(binding.profileId, data)
+      warmStart?.observe(binding.profileId, channel, data)
       event.sender.send(channel, data)
     }
+    warmStart?.noteProfile(binding.profileId)
     const promise = bootstrapPresentation(guiMms, currentPresentation(), target, {
       isCurrent,
-      onTurnSnapshot: syncDaemonTurnSnapshot
+      onTurnSnapshot: syncDaemonTurnSnapshot,
+      // A new window opens on the thread this profile's window showed last, as its warm start showed it.
+      preferThreadId: warmStart?.lastActiveThread(binding.profileId) ?? undefined
     }).finally(() => presentationBootstraps.delete(key))
     presentationBootstraps.set(key, promise)
     return promise
@@ -2474,6 +2507,12 @@ export function registerGuiIpc(
       withThreadId({ messageId, index }, threadId)
     )
   )
+  registerHandler('threads:queueImage', async (_e, threadId: string, queueItemId: string, index: number) =>
+    guiMms.request<{ name: string; mimeType: string; data: string }>(
+      'thread.messageImage',
+      withThreadId({ queueItemId, index }, threadId)
+    )
+  )
 
   // What a window has in view may be older than what happened on the other computer once a call there is
   // not confirmed ("may have happened"): read it again.
@@ -2491,7 +2530,11 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId, discard: true }
-    )
+    ).catch((error: unknown) => {
+      // The request's time limit passed: the window says so in plain words instead of an unknown error.
+      if (error instanceof Error && /^Request timeout:/.test(error.message)) throw knownAppError({ code: 'delete_timeout', message: DELETE_TOO_LONG }, { category: 'unavailable', retryable: true })
+      throw error
+    })
     broadcastIfRouted([threadId], res)
   })
 
@@ -2688,10 +2731,11 @@ export function registerGuiIpc(
       return res.threads
     }
   )
-  registerHandler('threads:search', async (_e, query: string, limit?: number) => {
+  registerHandler('threads:search', async (_e, query: string, limit?: number, options?: { perThread?: boolean }) => {
     const res = await guiMms.request<ThreadSearchResponse>('threads.search', {
       query,
-      limit
+      limit,
+      ...(options?.perThread === true ? { perThread: true } : {})
     })
     // The computers that were not searched are named with the matches of the others.
     return { results: res.results, ...(res.skipped?.length ? { skipped: res.skipped } : {}) }
@@ -2716,6 +2760,11 @@ export function registerGuiIpc(
   })
   registerHandler('subagents:stopAll', async (_e, threadId: string) => {
     const res = await guiMms.request<{ ok: boolean }>('subagents.stopAll', { threadId })
+    return res.ok
+  })
+  registerHandler('threads:backgroundWork', async (_e, threadId: string) => guiMms.request<ThreadBackgroundWork>('threads.backgroundWork', { threadId }))
+  registerHandler('threads:stopBackground', async (_e, threadId: string, id: string) => {
+    const res = await guiMms.request<{ ok: boolean }>('threads.stopBackground', { threadId, id })
     return res.ok
   })
   registerHandler('subagents:list', async (_e, threadId: string) => {
@@ -3077,33 +3126,80 @@ export function registerGuiIpc(
 
   // The computer name is looked up once; starting it here keeps getInfo fast.
   void getComputerName()
-  registerHandler('app:getInfo', async () => ({
-    platform: process.platform,
-    deviceName: await getComputerName(),
-    repoRoot,
-    llmProvider: settings.get().provider.llmProvider
-  }))
+  registerHandler('app:getInfo', async () => {
+    const info = {
+      platform: process.platform,
+      deviceName: await getComputerName(),
+      repoRoot,
+      llmProvider: settings.get().provider.llmProvider
+    }
+    // The rows' provider marks and the computer's name, for the next launch's warm start.
+    warmStart?.noteAppInfo(guiMms.getWindowBinding()?.profileId, info)
+    return info
+  })
 
-  registerHandler('app:windowsGitSetup', () => guiMms.windowsGitSetup)
-  guiMms.on('windows-git-setup', (setup: import('../../shared/windowsGit').WindowsGitSetup) => {
+  registerHandler('app:gitSetup', () => guiMms.gitPrerequisite)
+  registerHandler('app:installGit', (event) => {
+    if (event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) {
+      throw new Error('Git setup is only available from the workspace window')
+    }
+    return guiMms.installGit()
+  })
+  guiMms.on('git-setup', (setup: import('../../shared/gitSetup').GitSetup) => {
     // This runs before any window has a profile binding.
     for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send('app:windowsGitSetupChanged', setup)
+      if (!win.isDestroyed()) win.webContents.send('app:gitSetupChanged', setup)
     }
   })
 
   // Profile operations are installation metadata plus a trusted per-window
   // binding. The renderer supplies only an id/slug; daemon admission resolves
   // the owned profile root and changes the sender's session epoch.
-  registerHandler('profiles:list', () => guiMms.request('profiles.list'))
+  registerHandler('profiles:list', async () => {
+    const listed = await guiMms.request<{ profiles?: ProfilePublicDto[] }>('profiles.list')
+    // The bound profile's name, colour and avatar, for the warm start's profile button.
+    const bound = guiMms.getWindowBinding()?.profileId
+    const profile = bound ? listed?.profiles?.find((entry) => entry?.id === bound) : undefined
+    if (bound && profile) warmStart?.noteProfile(bound, profile)
+    return listed
+  })
+  // What this profile's window showed last, read from disk at startup; it never waits for the service. The window's
+  // preload asks once, synchronously, so its first frame already shows it. Only the main window's own page is answered.
+  answerWarmStartView = (event) => {
+    const win = getWindow()
+    const fromWindow = Boolean(win && !win.isDestroyed() && event.sender === win.webContents && event.senderFrame?.parent === null)
+    if (!fromWindow || !warmStart) {
+      event.returnValue = null
+      return
+    }
+    // The file is read as the app starts, before the window loads; this waits only if that read is still going.
+    void warmStart.view().then((view) => { event.returnValue = view ?? null }, () => { event.returnValue = null })
+  }
+  if (!warmStartViewListening) {
+    warmStartViewListening = true
+    ipcMain.on('app:warmStartView', (event) => answerWarmStartView(event))
+  }
   registerHandler('profiles:status', () => guiMms.request('profiles.status'))
   registerHandler('profiles:bind', (_e, profile: string) => guiMms.request('profiles.bind', { profile }))
   registerHandler('profiles:create', (_e, input: unknown) => guiMms.request('profiles.create', input))
   registerHandler('profiles:update', (_e, input: unknown) => guiMms.request('profiles.update', input))
-  registerHandler('profiles:archive', (_e, input: unknown) => guiMms.request('profiles.archive', input))
+  // A profile archived or removed is not shown at the next launch.
+  const forgetProfileOf = (input: unknown): void => {
+    const profileId = (input as { profileId?: unknown } | null)?.profileId
+    if (typeof profileId === 'string') warmStart?.forget(profileId)
+  }
+  registerHandler('profiles:archive', async (_e, input: unknown) => {
+    const archived = await guiMms.request('profiles.archive', input)
+    forgetProfileOf(input)
+    return archived
+  })
   registerHandler('profiles:restore', (_e, input: unknown) => guiMms.request('profiles.restore', input))
   registerHandler('profiles:removePreview', (_e, profileId: string) => guiMms.request('profiles.removePreview', { profileId }))
-  registerHandler('profiles:remove', (_e, input: unknown) => guiMms.request('profiles.remove', input))
+  registerHandler('profiles:remove', async (_e, input: unknown) => {
+    const removed = await guiMms.request('profiles.remove', input)
+    forgetProfileOf(input)
+    return removed
+  })
 
   registerHandler('app:getActiveProjectPath', async (_e, threadId?: string | null) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
@@ -3119,9 +3215,9 @@ export function registerGuiIpc(
     ...(typeof threadId === 'string' && threadId ? { threadId } : {})
   })
 
-  registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
+  registerHandler('app:getFilesRoot', async (_e, threadId?: string | null, fresh?: boolean) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
-    return (await guiMms.request<{ root: string }>('files.root', filesScope(undefined, id))).root
+    return (await guiMms.request<{ root: string }>('files.root', filesScope(undefined, id), undefined, { fresh: fresh === true })).root
   })
 
   // `root` is a folder the Files panel browses instead of the thread's; the daemon accepts it from this computer's
@@ -3136,18 +3232,30 @@ export function registerGuiIpc(
     async (_e, dirPath?: string, projectId?: string, threadId?: string | null, root?: string) =>
       (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: dirPath ?? '' })).entries
   )
+  const canonicalFileParams = (include: boolean, threadId?: string | null) =>
+    include && !(threadId && isQualifiedId(threadId)) ? { includeCanonicalPath: true } : {}
+
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) =>
-      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath })).content
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, view: boolean | { expectedRoot?: string } = false) => {
+      const params = { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath }
+      // A thread's editor binds the read to the workspace it opened; a details read also names the file's canonical path.
+      if (view && typeof view === 'object') return guiMms.readThreadEditorFile({ ...params, ...canonicalFileParams(true, threadId) }, view.expectedRoot)
+      const details = view === true
+      const reply = await guiMms.request<FileText>('files.read', { ...params, ...canonicalFileParams(details, threadId) })
+      return details ? reply : reply.content
+    }
   )
   registerHandler(
     'fs:readAsset',
     // The daemon sends a preview in pieces that fit a message; they are joined here.
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> => {
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false): Promise<FileAsset> => {
       const browsed = await browsedRoot(root)
       return readAssetInPieces((offset, length) =>
-        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
+        guiMms.request('files.readAsset', {
+          ...filesScope(projectId, threadId), ...browsed, ...canonicalFileParams(details && offset === 0, threadId),
+          path: filePath, offset, length
+        })
       )
     }
   )
@@ -3169,17 +3277,20 @@ export function registerGuiIpc(
       content: string,
       projectId?: string,
       threadId?: string | null,
-      root?: string
+      root?: string,
+      expectedRoot?: string
     ) => {
       // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
       if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
-      await guiMms.request('files.writeDirect', {
+      const params = {
         ...filesScope(projectId, threadId),
         ...await browsedRoot(root),
         path: filePath,
         content,
         expectedProfileId: guiMms.getWindowBinding()?.profileId
-      })
+      }
+      if (threadId && !root) await guiMms.writeThreadEditorFile(params, expectedRoot)
+      else await guiMms.request('files.writeDirect', params)
     }
   )
 
@@ -3240,17 +3351,33 @@ export function registerGuiIpc(
 
   // Git reads name the folder by scope, like the mutations below: the thread when the folder is its own
   // worktree, the project otherwise. The daemon resolves the folder; a path from the renderer is never used.
+  // A current service (one with `git.heads`) also checks the worktree generation and takes a Retry's number.
+  const gitRead = async <T,>(method: string, scope: GitScope | undefined, args?: Record<string, unknown>) => {
+    const params = daemonGitReadParams(scope, await guiMms.supports('git.heads'), args)
+    return guiMms.request<T>(method, params, undefined, { fresh: typeof scope?.attempt === 'number' })
+  }
   registerHandler('git:status', async (_e, scope?: GitScope) =>
-    (await guiMms.request<{ status: GitStatusSnapshot }>('git.status', daemonGitParams(scope))).status
+    (await gitRead<{ status: GitStatusSnapshot }>('git.status', scope)).status
   )
+  // The branches thread cards name, read from Git's files in the daemon (`git.heads`); from the workspace records and
+  // status reads of an older service that lacks it.
+  registerHandler('git:heads', async (_e, request?: GitHeadsRequest) => {
+    const heads: GitHeadsRequest = {
+      ...(Array.isArray(request?.threadIds) ? { threadIds: request.threadIds } : {}),
+      ...(Array.isArray(request?.projectIds) ? { projectIds: request.projectIds } : {}),
+      ...(Number.isSafeInteger(request?.attempt) ? { attempt: request!.attempt } : {})
+    }
+    if (await guiMms.supports('git.heads')) return guiMms.request<GitHeadsResult>('git.heads', heads)
+    return headsFromOlderService((method, params) => guiMms.request(method, params, undefined, { fresh: heads.attempt !== undefined }), heads)
+  })
   registerHandler('git:log', async (_e, limit: number | undefined, scope?: GitScope) =>
-    (await guiMms.request<{ commits: GitCommit[] }>('git.log', daemonGitParams(scope, { limit }))).commits
+    (await gitRead<{ commits: GitCommit[] }>('git.log', scope, { limit })).commits
   )
   registerHandler('git:branches', async (_e, scope?: GitScope) =>
-    (await guiMms.request<{ branches: GitBranchInfo }>('git.branches', daemonGitParams(scope))).branches
+    (await gitRead<{ branches: GitBranchInfo }>('git.branches', scope)).branches
   )
   registerHandler('git:diffStats', async (_e, scope?: GitScope) =>
-    (await guiMms.request<{ stats: GitDiffStats }>('git.diffStats', daemonGitParams(scope))).stats
+    (await gitRead<{ stats: GitDiffStats }>('git.diffStats', scope)).stats
   )
   // Every Git mutation runs in the daemon, so the thread-worktree rules and the repository lease apply
   // to the GUI like any other client. Storage handlers keep the daemon's error code across IPC.

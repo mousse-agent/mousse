@@ -447,7 +447,8 @@ export class AppChannel {
       clearTimeout(waiting.timer)
       if (typeof message.error === 'string') {
         const reason = typeof message.reason === 'string' ? message.reason : undefined
-        waiting.reject(helperError(message.error, reason))
+        const why = typeof message.why === 'string' ? message.why : undefined
+        waiting.reject(helperError(message.error, reason, why))
       } else {
         try {
           waiting.onReply?.(message)
@@ -510,13 +511,23 @@ function wireCode(code: string): string {
   return 'cancelled'
 }
 
-/** A helper's error reply as a Net error: its code when the app knows it, with its reason; `details.helper` is the helper's code. */
-function helperError(code: string, reason?: string): NetError {
+/**
+ * A helper's error reply as a Net error: its code when the app knows it, with its reason; `details.helper` is the
+ * helper's code and `details.why` the cause it named (a dial's SSH refusal, say).
+ */
+function helperError(code: string, reason?: string, why?: string): NetError {
+  const cause = why ? { why } : {}
   try {
-    return new NetError(code as never, undefined, { details: { ...(reason ? { reason } : {}), helper: code } })
+    return new NetError(code as never, undefined, { details: { ...(reason ? { reason } : {}), helper: code, ...cause } })
   } catch {
-    return new NetError('internal', reason, { details: { reason: code, helper: code } })
+    return new NetError('internal', reason, { details: { reason: code, helper: code, ...cause } })
   }
+}
+
+/** The cause a helper's error reply named (`why`), if any. */
+export function helperWhy(error: unknown): string | undefined {
+  const why = (error as { details?: { why?: unknown } } | undefined)?.details?.why
+  return typeof why === 'string' ? why : undefined
 }
 
 /** The helper's own code for an error its reply carried. */

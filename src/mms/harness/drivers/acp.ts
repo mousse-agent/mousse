@@ -327,9 +327,11 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     ...(preset.classifyOption ? { classifyOption: preset.classifyOption } : {}),
     ...(preset.initializeMeta ? { initializeMeta: preset.initializeMeta } : {}),
     urlElicitation: true,
-    // ACP 1.5: agents offer terminal sign-in only to clients that can run one, and send sign-in
-    // links as URL elicitations only to clients that accept them.
-    clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {} } }),
+    formElicitation: true,
+    // ACP 1.5: agents offer terminal sign-in only to clients that can run one, send sign-in
+    // links as URL elicitations only to clients that accept them, and route interactive questions
+    // through form elicitations only when form support is advertised.
+    clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {}, form: {} } }),
     closeSessions: true,
     beforeLaunch: () => checkInstall(undefined, { reuse: true }),
     store: {
@@ -515,9 +517,16 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     capabilities: preset.staticCaps,
     planMode: () => Boolean(state.facts?.modes?.some((mode) => /^(plan|architect)$/i.test(mode.id) || /^(plan|architect)$/i.test(mode.name)))
   })
+  const standaloneWorkspace = (threadId: string): string => {
+    const directory = join(context.stateDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
+  }
   const client = {
     chat: (input: Parameters<AcpSessions['chat']>[0]) => sessions.chat(input),
     commitConversation: (threadId: string, history: string) => sessions.commitConversation(threadId, history),
+    commitInterrupted: (threadId: string, history: string) => sessions.commitInterrupted(threadId, history),
+    standaloneWorkspace,
     configured: () => runtime.configured(),
     interrupt: (sessionId: string | undefined) => sessions.interrupt(sessionId)
   }

@@ -49,7 +49,8 @@ function history(request: UsageHistoryRequest, tokens: Partial<Record<UsageAgent
   }
 }
 
-const usageHistory = vi.fn(async (request: UsageHistoryRequest) => history(request, { 'claude-code': 1_500_000, codex: 500_000 }))
+const defaultUsageHistory = async (request: UsageHistoryRequest) => history(request, { 'claude-code': 1_500_000, codex: 500_000 })
+const usageHistory = vi.fn(defaultUsageHistory)
 const kept = (used: number) => [{ id: 'claude-subscription', label: 'Claude subscription', windows: [
   { id: 'five_hour', label: '5-hour', points: [[Date.now() - 3_600_000, used]], resets: [] },
   { id: 'seven_day', label: 'Weekly', points: [[Date.now() - 3_600_000, used / 2]], resets: [] }
@@ -67,7 +68,8 @@ let host: HTMLElement | undefined
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
-  usageHistory.mockClear()
+  usageHistory.mockReset()
+  usageHistory.mockImplementation(defaultUsageHistory)
   limitTrends.mockClear()
   platformRequest.mockClear()
   useAppStore.setState({ profileId: 'prf_work' })
@@ -189,6 +191,26 @@ describe('the history', () => {
     // A session no Mousse thread ran is named by its agent, with nothing to open.
     expect(sessions.textContent).toContain('Codex session')
     expect(sessions.querySelectorAll('[data-testid="usage-session-link"]')).toHaveLength(1)
+  })
+
+  it('shows Antigravity in the tiles, provider filter, breakdown and priciest sessions', async () => {
+    usageHistory.mockImplementation(async (request: UsageHistoryRequest) => {
+      const base = history(request, { 'claude-code': 1_500_000, antigravity: 600_000 })
+      return {
+        ...base,
+        models: base.models.map((row) => (row.agent === 'antigravity' ? { ...row, model: 'gemini-4-neon-high', priced: false, costUsd: 0 } : row))
+      }
+    })
+    await render()
+    const tile = q('[data-testid="usage-agent-tile"][data-agent="antigravity"]')!
+    expect(tile).not.toBeNull()
+    expect(tile.textContent).toContain('Antigravity')
+    expect(q('[data-testid="usage-history-table"]')!.textContent).toContain('no price')
+    expect(q('[data-testid="usage-history-sessions"]')!.textContent).toContain('Antigravity session')
+
+    await pick('usage-history-agent', 'Antigravity')
+    expect(usageHistory).toHaveBeenLastCalledWith(expect.objectContaining({ agent: 'antigravity' }))
+    expect(total()).toBe('600K')
   })
 
   it('shows no computer filter on a computer with no others', async () => {

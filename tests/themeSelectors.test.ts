@@ -54,7 +54,7 @@ describe('stable theme selectors', () => {
 
 /**
  * Where a person approves, denies, allows or trusts something. Each carries `data-mousse-decision` while the decision is
- * open, and the theme is off while one is on the page (tests/renderer/theme-css-electron.test.ts shows the pause).
+ * open, and the theme's CSS is off while one is on the page (tests/renderer/theme-css-electron.test.ts shows it).
  * Two checks: these named surfaces, some of whose labels are variables, and a scan for any button labelled Allow,
  * Approve, Deny, Reject or Trust… in a file without the marker, so a new decision surface cannot ship unmarked.
  */
@@ -77,21 +77,22 @@ const DECISIONS: Record<string, string> = {
   'an editor access request left in Settings': 'src/renderer/components/devices/DeviceAccessRows.tsx',
   'an SSH route approval': 'src/renderer/components/devices/ApproveSshRouteDialog.tsx',
   'an SSH host key to trust (every dialog that shows one)': 'src/renderer/components/devices/HostKeyConfirm.tsx',
-  'trusting a repository\'s Git settings': 'src/renderer/components/ThreadsContextMenu.tsx',
+  'trusting a repository\'s Git settings': 'src/renderer/components/ThreadsContextMenu.tsx'
+}
+
+/**
+ * Pages, panels and menus that hold access settings in their own layout, rather than a request waiting for an answer.
+ * Each carries `data-mousse-guarded` while open: the theme's CSS is off there (its colors stay), so it cannot relabel,
+ * hide or move those controls.
+ */
+const GUARDED: Record<string, string> = {
+  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx',
+  'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx',
   'the composer\'s permission mode menu': 'src/renderer/components/ComposerPermissionPicker.tsx',
   'an automation draft, also in a chat': 'src/renderer/components/automations/DraftCard.tsx',
   'an agent definition (grants, scripts)': 'src/renderer/components/agentDefinitions/AgentEditor.tsx',
   'a device\'s limits': 'src/renderer/components/devices/DeviceLimitsDialog.tsx',
   'a bot\'s About panel (what it may use, which devices reach it)': 'src/renderer/components/bots/BotAboutPanel.tsx'
-}
-
-/**
- * Pages that hold access controls in their own layout. Each carries `data-mousse-guarded` while open: the theme's CSS is
- * off there (its colors stay), so it cannot relabel, hide or move those controls.
- */
-const GUARDED: Record<string, string> = {
-  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx',
-  'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx'
 }
 
 /**
@@ -105,7 +106,6 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
   'src/renderer/components/OrchestratorChat.tsx': 'the handler, no control',
   'src/renderer/components/sideChats/SideChatsPanel.tsx': 'a side chat\'s handler, no control; the menu is ComposerPermissionPicker',
   'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, guarded with the page',
-  'src/renderer/components/NetDevicesSection.tsx': 'Settings → Devices, guarded with the page; names a device’s highest mode, no control',
   'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, guarded with it',
   'src/renderer/components/automations/inbox/EditDetailsPane.tsx': 'only on the Automations page, guarded with it'
 }
@@ -113,7 +113,7 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
 /** A button whose visible label is a decision word. */
 const DECISION_BUTTON = /(?:>|\/>|<\/[A-Za-z]+>)\s*(?:Allow|Approve|Deny|Reject|Trust[^<{]{0,40})\s*<\/button>|label: '(?:Allow|Approve|Deny|Reject)'/
 
-describe('decisions pause the theme', () => {
+describe('decisions turn the theme CSS off', () => {
   it.each(Object.entries(DECISIONS))('%s is marked data-mousse-decision', (_what, file) => {
     expect(readFileSync(file, 'utf8')).toContain('data-mousse-decision')
   })

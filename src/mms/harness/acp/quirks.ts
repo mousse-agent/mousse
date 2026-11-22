@@ -26,6 +26,20 @@ export interface AcpQuirks {
    * report its task running), so the next turn reopens the session on a new one.
    */
   xaiExtensions?: boolean
+  /**
+   * From this `agentInfo.version` on, the agent folds a `session/prompt` sent while another one runs into the running
+   * work (Antigravity 1.5.0): the running prompt answers at once and the new one carries the rest of the turn. A steer
+   * then goes in that way, with no cancel. An older version, or an agent that refuses the second prompt, is cut and
+   * restarted as any other ACP agent.
+   */
+  nativeSteerFrom?: string
+  /**
+   * The agent runs background commands (`run_command` left open at `end_turn`) and background subagents
+   * (`invoke_subagent` whose launch completes before the child does) after `session/prompt` returns, then wakes up
+   * out-of-turn with updates and tool calls when they finish (Antigravity `agy acp`). Mousse tracks that pending work
+   * (`LiveProcessHost.backgroundWork`) and runs each reactive wakeup as a `provider-continuation` turn.
+   */
+  backgroundWork?: boolean
 }
 
 export const NO_QUIRKS: Readonly<AcpQuirks> = Object.freeze({})

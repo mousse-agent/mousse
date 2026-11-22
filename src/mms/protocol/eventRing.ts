@@ -14,6 +14,9 @@ import { MMS_PROTOCOL_REPLAY_RING_BYTES, MMS_PROTOCOL_REPLAY_RING_SIZE } from '.
  */
 function supersededKey(type: string, data: unknown, threadId?: string): string | undefined {
   if (type === 'threads.updated') return type
+  // A thread's row carries its whole state: a later row of the same thread replaces it (a list sent between them
+  // holds an older state still, so the later row is applied after it).
+  if (type === 'threads.row') return `${type}\0${threadId ?? ''}`
   if (type === 'thread.messages') return `${type}\0${threadId ?? ''}`
   if (type !== 'thread.message-updated') return undefined
   const id = (data as { message?: { id?: unknown } } | null | undefined)?.message?.id

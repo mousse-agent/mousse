@@ -1,8 +1,9 @@
 name: Package
 
 # Builds the Windows and Linux installers and CLIs, and the macOS disk images, for one
-# version. Called by the nightly and stable release workflows, which publish the uploaded
-# artifacts.
+# version, on x64 and arm64. Called by the nightly and stable release workflows, which publish
+# the uploaded artifacts. Each architecture packages on a runner of its own architecture: the
+# build packages the Electron and the native modules npm installed there.
 on:
   workflow_call:
     inputs:
@@ -26,9 +27,24 @@ env:
 
 jobs:
   linux:
-    name: Package Linux
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    name: Package Linux (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            unpacked: linux-unpacked
+            artifact: mousse-linux
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            unpacked: linux-arm64-unpacked
+            artifact: mousse-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      ARCH: ${{ matrix.arch }}
+      UNPACKED: release/${{ matrix.unpacked }}
+      CLI_UNPACKED: release/cli/${{ matrix.unpacked }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,15 +53,27 @@ jobs:
         with:
           node-version: '24.20.0'
           cache: npm
+      # The network helper keeps its keys in the OS keyring over D-Bus, so its build links libdbus
+      # (found with pkg-config); xvfb runs the packaged CLI's version check.
+      - name: Install the network helper's build libraries and xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libdbus-1-dev pkg-config xvfb xauth
       - run: npm ci
       - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
       # Nightlies get their own icon so they are easy to tell apart from stable.
       - name: Use the nightly icon
         if: contains(inputs.version, '-nightly.')
         run: cp resources/nightly/icon.png resources/nightly/icon.ico resources/
-      # Read aloud's voice engine (native/voice-engine) is Rust; the packaging script builds it and fails without it.
-      - name: Install the Rust toolchain for the voice engine
+      # Read aloud's voice engine (native/voice-engine) and the network helper (mousse-net at
+      # native/net-helper/ENGINE_COMMIT) are Rust; the packaging script builds them and fails without them.
+      - name: Install the Rust toolchain for the voice engine and the network helper
         run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -58,21 +86,22 @@ jobs:
           restore-keys: voice-engine-${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-
       - run: npm run dist:linux
       - name: Check the package carries the voice engine
-        run: test -x release/linux-unpacked/resources/voice-engine/mousse-voice
+        run: test -x "$UNPACKED/resources/voice-engine/mousse-voice"
+      # The release helper of the engine commit the app pins (phase1b.desktop-builds).
+      - name: Check the package carries the network helper of the pinned engine commit
+        run: node scripts/check-packaged-net-helper.mjs "$UNPACKED"
       - name: Check the packaged CLI reports the version
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb xauth
           # Chromium's supported SUID sandbox helper, as in the CI full-suite job.
-          sudo chown root:root release/cli/linux-unpacked/chrome-sandbox
-          sudo chmod 4755 release/cli/linux-unpacked/chrome-sandbox
-          out=$(xvfb-run --auto-servernum release/cli/linux-unpacked/mousse-cli --version)
+          sudo chown root:root "$CLI_UNPACKED/chrome-sandbox"
+          sudo chmod 4755 "$CLI_UNPACKED/chrome-sandbox"
+          out=$(xvfb-run --auto-servernum "$CLI_UNPACKED/mousse-cli" --version)
           echo "$out"
           test "$out" = "mousse-cli $VERSION"
       - name: Scan the packaged apps for secrets and private files
         run: |
           # docs/DEPLOYMENT_GUIDE.md, "Secret and package-content gate".
-          for app in release/linux-unpacked release/cli/linux-unpacked; do
+          for app in "$UNPACKED" "$CLI_UNPACKED"; do
             dest="scan/$(basename "$(dirname "$app")")-$(basename "$app")"
             npx asar extract "$app/resources/app.asar" "$dest"
             cp -r "$app/resources/." "$dest-resources" && rm -f "$dest-resources/app.asar"
@@ -85,34 +114,68 @@ jobs:
           npx --yes -p secretlint@13.0.7 -p @secretlint/secretlint-rule-preset-recommend@13.0.7 \
             secretlint --secretlintrc "$RUNNER_TEMP/secretlintrc.json" --maskSecrets "scan/**/*"
       # One flat folder, so the release gets the files themselves. The in-app updater reads
-      # latest-linux.yml on stable releases and nightly-linux.yml on nightlies (docs/releases.md).
+      # latest-linux.yml on stable releases and nightly-linux.yml on nightlies (docs/releases.md);
+      # on arm64, latest-linux-arm64.yml and nightly-linux-arm64.yml.
       - name: Collect the release files
         run: |
           mkdir upload
-          cp "release/Mousse-$VERSION.AppImage" "release/cli/mousse-cli-$VERSION-linux-x86_64.AppImage" upload/
           channel=latest; case "$VERSION" in *-nightly.*) channel=nightly ;; esac
-          grep -qx "path: Mousse-$VERSION.AppImage" release/latest-linux.yml
-          grep -q "provider: github" release/linux-unpacked/resources/app-update.yml
-          cp release/latest-linux.yml "upload/$channel-linux.yml"
+          grep -q "provider: github" "$UNPACKED/resources/app-update.yml"
+          if [ "$ARCH" = x64 ]; then
+            cp "release/Mousse-$VERSION.AppImage" "release/cli/mousse-cli-$VERSION-linux-x86_64.AppImage" upload/
+            grep -qx "path: Mousse-$VERSION.AppImage" release/latest-linux.yml
+            cp release/latest-linux.yml "upload/$channel-linux.yml"
+          else
+            app="Mousse-$VERSION-$ARCH.AppImage"
+            cp "release/$app" "release/cli/mousse-cli-$VERSION-linux-$ARCH.AppImage" upload/
+            grep -qx "path: $app" "release/latest-linux-$ARCH.yml"
+            cp "release/latest-linux-$ARCH.yml" "upload/$channel-linux-$ARCH.yml"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mousse-linux
+          name: ${{ matrix.artifact }}
           if-no-files-found: error
           path: upload/*
 
   # The desktop installer and the portable CLI build on separate runners at the same time,
-  # because each takes about five minutes to package.
+  # because each takes about five minutes to package. arm64 builds natively on a Windows arm64 runner.
   windows:
-    name: Package Windows
-    runs-on: windows-latest
+    name: Package Windows (${{ matrix.part }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       matrix:
         include:
           - part: app
+            arch: x64
+            runner: windows-latest
             builder-args: --win
+            unpacked: win-unpacked
+            artifact: mousse-windows-app
           - part: cli
+            arch: x64
+            runner: windows-latest
             builder-args: --win --config electron-builder.cli.yml
+            unpacked: win-unpacked
+            artifact: mousse-windows-cli
+          # The x64 installer and its update feed keep their names; the arm64 installer is named for its
+          # architecture and has no update feed of its own.
+          - part: app
+            arch: arm64
+            runner: windows-11-arm
+            builder-args: --win --arm64 '-c.nsis.artifactName=Mousse.Setup.${version}-arm64.${ext}'
+            unpacked: win-arm64-unpacked
+            artifact: mousse-windows-arm64-app
+          - part: cli
+            arch: arm64
+            runner: windows-11-arm
+            builder-args: --win --arm64 --config electron-builder.cli.yml
+            unpacked: win-arm64-unpacked
+            artifact: mousse-windows-arm64-cli
+    env:
+      ARCH: ${{ matrix.arch }}
+      PART: ${{ matrix.part }}
+      UNPACKED: ${{ matrix.part == 'cli' && format('release\cli\{0}', matrix.unpacked) || format('release\{0}', matrix.unpacked) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,11 +194,23 @@ jobs:
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
           if (-not $msbuild) { throw 'MSBuild not found' }
           "MSBUILD_PATH=$msbuild" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      # The SSH endpoint's helper (native/sshd-helper) and read aloud's voice engine (native/voice-engine)
-      # are Rust; dist:win:prep builds them and fails without them.
-      - name: Install the Rust toolchain for the SSH helper and the voice engine
+      # The SSH endpoint's helper (native/sshd-helper), read aloud's voice engine (native/voice-engine)
+      # and the network helper (mousse-net at native/net-helper/ENGINE_COMMIT) are Rust;
+      # dist:win:prep builds them and fails without them.
+      - name: Install the Rust toolchain for the SSH helper, the voice engine and the network helper
         run: |
-          rustup toolchain install 1.96.0 --profile minimal --target x86_64-pc-windows-msvc
+          $target = if ($env:ARCH -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            $url = if ($env:ARCH -eq 'arm64') { 'https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe' } else { 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe' }
+            Invoke-WebRequest $url -OutFile $init
+            & $init -y --profile minimal --default-toolchain none
+            if ($LASTEXITCODE -ne 0) { throw 'rustup-init failed' }
+            $cargo = Join-Path $env:USERPROFILE '.cargo\bin'
+            $cargo | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $env:PATH = "$cargo;$env:PATH"
+          }
+          rustup toolchain install 1.96.0 --profile minimal --target $target
           rustup default 1.96.0
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -143,37 +218,46 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             native/sshd-helper/target
-          key: sshd-helper-${{ runner.os }}-rust-1.96.0-${{ hashFiles('native/sshd-helper/Cargo.lock', 'native/sshd-helper/Cargo.toml', 'native/sshd-helper/src/**') }}
-          restore-keys: sshd-helper-${{ runner.os }}-rust-1.96.0-
+          key: sshd-helper-${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-${{ hashFiles('native/sshd-helper/Cargo.lock', 'native/sshd-helper/Cargo.toml', 'native/sshd-helper/src/**') }}
+          restore-keys: sshd-helper-${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: native/voice-engine/target
-          key: voice-engine-${{ runner.os }}-rust-1.96.0-${{ hashFiles('native/voice-engine/Cargo.lock', 'native/voice-engine/Cargo.toml', 'native/voice-engine/build.rs', 'native/voice-engine/src/**') }}
-          restore-keys: voice-engine-${{ runner.os }}-rust-1.96.0-
+          key: voice-engine-${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-${{ hashFiles('native/voice-engine/Cargo.lock', 'native/voice-engine/Cargo.toml', 'native/voice-engine/build.rs', 'native/voice-engine/src/**') }}
+          restore-keys: voice-engine-${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-
       # The CI Static checks job typechecks the same commit, and publishing waits for it.
       - run: npm run dist:win:prep
+      # Setup unpacks the app with the Nsis7z 19.00 plugin, which cannot read 7-Zip's ARM64 filter;
+      # the 7-Zip electron-builder packs with picks that filter for arm64 programs, and Setup then
+      # installs no Mousse.exe. The x86 BCJ filter is one that plugin reads. x64 keeps the default.
       - run: npx electron-builder ${{ matrix.builder-args }} --publish never
+        env:
+          ELECTRON_BUILDER_7Z_FILTER: ${{ matrix.arch == 'arm64' && 'BCJ' || '' }}
       # Unsigned, like the rest of the Windows build for now.
       - name: Check the package carries the SSH helper
         run: |
-          $folder = if ('${{ matrix.part }}' -eq 'cli') { 'release\cli\win-unpacked' } else { 'release\win-unpacked' }
-          if (-not (Test-Path "$folder\resources\editor-ssh\sshd.exe")) { throw "$folder has no resources\editor-ssh\sshd.exe" }
+          if (-not (Test-Path "$env:UNPACKED\resources\editor-ssh\sshd.exe")) { throw "$env:UNPACKED has no resources\editor-ssh\sshd.exe" }
       - name: Check the package carries the voice engine
         if: matrix.part == 'app'
         run: |
           foreach ($file in 'mousse-voice.exe', 'msvcp140.dll', 'vcruntime140.dll') {
-            if (-not (Test-Path "release\win-unpacked\resources\voice-engine\$file")) { throw "The package has no resources\voice-engine\$file" }
+            if (-not (Test-Path "$env:UNPACKED\resources\voice-engine\$file")) { throw "The package has no resources\voice-engine\$file" }
           }
+      # The release helper of the engine commit the app pins (phase1b.desktop-builds).
+      - name: Check the package carries the network helper of the pinned engine commit
+        if: matrix.part == 'app'
+        run: node scripts/check-packaged-net-helper.mjs "$env:UNPACKED"
       # Setup carries Mousse.exe once; its installer makes mousse-cli.exe, the console copy the
       # mousse-cli command runs. Install it silently and run that copy.
       - name: Check the installer makes the console mousse-cli.exe
         if: matrix.part == 'app'
         run: |
-          $installer = "release\Mousse.Setup.$env:VERSION.exe"
+          $installer = if ($env:ARCH -eq 'x64') { "release\Mousse.Setup.$env:VERSION.exe" } else { "release\Mousse.Setup.$env:VERSION-$env:ARCH.exe" }
           '{0:N0} MB {1}' -f ((Get-Item $installer).Length / 1MB), $installer
           $dir = Join-Path $env:RUNNER_TEMP 'mousse-install'
           $p = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$dir" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "The installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $dir 'Mousse.exe'))) { throw 'The installer did not install Mousse.exe' }
           $cli = Join-Path $dir 'mousse-cli.exe'
           if (-not (Test-Path $cli)) { throw 'The installer did not make mousse-cli.exe' }
           $bytes = [IO.File]::ReadAllBytes($cli)
@@ -188,29 +272,35 @@ jobs:
       - name: Check the packaged CLI reports the version
         if: matrix.part == 'cli'
         run: |
-          $out = (& release\cli\win-unpacked\mousse-cli.exe --version | Out-String).Trim()
+          $out = (& "$env:UNPACKED\mousse-cli.exe" --version | Out-String).Trim()
           $out
           if ($out -ne "mousse-cli $env:VERSION") { throw "Unexpected version output: $out" }
       # One flat folder. The in-app updater reads latest.yml on stable releases and nightly.yml
-      # on nightlies, and downloads only the changed blocks listed in the .blockmap.
+      # on nightlies, and downloads only the changed blocks listed in the .blockmap. Those name
+      # the x64 installer; the arm64 one is collected without a feed.
       - name: Collect the installer and update files
         if: matrix.part == 'app'
         run: |
           New-Item -ItemType Directory upload | Out-Null
-          $installer = "Mousse.Setup.$env:VERSION.exe"
-          $channel = if ($env:VERSION -match '-nightly\.') { 'nightly' } else { 'latest' }
-          if (-not (Select-String -Path release\latest.yml -SimpleMatch -Quiet "path: $installer")) { throw "latest.yml does not name $installer" }
-          if (-not (Select-String -Path release\win-unpacked\resources\app-update.yml -SimpleMatch -Quiet 'provider: github')) { throw 'The packaged app has no update feed' }
-          Copy-Item "release\$installer", "release\$installer.blockmap" upload
-          Copy-Item release\latest.yml "upload\$channel.yml"
+          if (-not (Select-String -Path "$env:UNPACKED\resources\app-update.yml" -SimpleMatch -Quiet 'provider: github')) { throw 'The packaged app has no update feed' }
+          if ($env:ARCH -eq 'x64') {
+            $installer = "Mousse.Setup.$env:VERSION.exe"
+            $channel = if ($env:VERSION -match '-nightly\.') { 'nightly' } else { 'latest' }
+            if (-not (Select-String -Path release\latest.yml -SimpleMatch -Quiet "path: $installer")) { throw "latest.yml does not name $installer" }
+            Copy-Item "release\$installer", "release\$installer.blockmap" upload
+            Copy-Item release\latest.yml "upload\$channel.yml"
+          } else {
+            $installer = "Mousse.Setup.$env:VERSION-$env:ARCH.exe"
+            Copy-Item "release\$installer", "release\$installer.blockmap" upload
+          }
       - name: Collect the CLI
         if: matrix.part == 'cli'
         run: |
           New-Item -ItemType Directory upload | Out-Null
-          Copy-Item "release\cli\mousse-cli-$env:VERSION-win-x64.exe" upload
+          Copy-Item "release\cli\mousse-cli-$env:VERSION-win-$env:ARCH.exe" upload
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mousse-windows-${{ matrix.part }}
+          name: ${{ matrix.artifact }}
           if-no-files-found: error
           path: upload/*
 
@@ -244,10 +334,10 @@ jobs:
       - name: Use the nightly icon
         if: contains(inputs.version, '-nightly.')
         run: cp resources/nightly/icon.png resources/
-      # Read aloud's voice engine (native/voice-engine) is Rust; the packaging script builds it and fails without it.
+      # Read aloud's voice engine (native/voice-engine) and the network helper (mousse-net at
+      # native/net-helper/ENGINE_COMMIT) are Rust; the packaging script builds them and fails without them.
       # ONNX Runtime has no prebuilt libraries for Intel macOS, which reads aloud on WebAssembly instead.
-      - name: Install the Rust toolchain for the voice engine
-        if: matrix.arch == 'arm64'
+      - name: Install the Rust toolchain for the voice engine and the network helper
         run: |
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
@@ -271,6 +361,9 @@ jobs:
       - name: Check the package carries the voice engine
         if: matrix.arch == 'arm64'
         run: test -x release/mac*/Mousse.app/Contents/Resources/voice-engine/mousse-voice
+      # The release helper of the engine commit the app pins (phase1b.desktop-builds).
+      - name: Check the package carries the network helper of the pinned engine commit
+        run: node scripts/check-packaged-net-helper.mjs "$(echo release/mac*/Mousse.app)"
       # macOS builds are not covered by in-app updates, so no update manifest is attached.
       - name: Collect the release files
         run: |

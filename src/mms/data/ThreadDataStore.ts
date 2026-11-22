@@ -41,6 +41,7 @@ import type {
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { visibleThreads } from '../../shared/threadLineage'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
+import { loadQueueImages, storeQueueImages, sweepQueueImages } from '../queue/queueImageFiles'
 import type { QueueJournal } from '../queue/queueJournal'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
@@ -74,7 +75,9 @@ import { sharedThreadDbClient, WORKER_BACKOFF_CODE } from './threadDb/threadDbCl
 import type { MessageEstimate } from '../orchestrator/contextEstimate'
 import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
+import { stampOf as threadDbStampOf } from './threadDb/threadIndex'
 import { publishStagedBlobs } from './threadDb/threadBlobs'
+import { forEachYielding } from '../startup/startupTiming'
 
 export { ThreadDataCorruptionError } from './legacyThreadData'
 
@@ -250,6 +253,37 @@ function retryOnceWhenListBusy<T>(write: () => T): T {
   }
 }
 
+/**
+ * Writes to a thread list's files (a project's list revision, the standalone index) made by any store of this process.
+ * A store reuses what it checked of its lists in this stretch of work only while no other store wrote (`groupStale`).
+ */
+let processListWrites = 0
+
+/**
+ * The current synchronous stretch of work: the same object until the microtasks queued during it have run. List
+ * caches are checked against the disk at most once in it, however many lookups it makes.
+ */
+let currentStretch: object | undefined
+function workStretch(): object {
+  if (!currentStretch) {
+    const stretch = {}
+    currentStretch = stretch
+    queueMicrotask(() => {
+      if (currentStretch === stretch) currentStretch = undefined
+    })
+  }
+  return currentStretch
+}
+
+/** How long a changed standalone index entry may wait in memory before the file is written. */
+const STANDALONE_INDEX_WRITE_MS = 1_000
+/** Ids `getThread` found nowhere, kept while the lists are as they were; dropped whole past this many. */
+const MISSING_THREADS_MAX = 1_000
+/** `freshGroups` key of the standalone index file itself (group keys are '' and project ids). */
+const STANDALONE_INDEX_KEY = ':index'
+/** How often the search index is reconciled with every listed thread (also once after startup). */
+const SEARCH_INDEX_RECONCILE_MS = 60 * 60 * 1000
+
 /** What the host said about a pull request a link is made for. */
 type PullRequestInfo = Partial<Pick<GitPullRequestInfo, 'title' | 'state' | 'isDraft'>>
 
@@ -324,6 +358,11 @@ export interface ThreadSearchOptions {
   maxMessageThreads?: number
   /** Archived threads are searched too; without it they are left out. */
   includeSettled?: boolean
+  /**
+   * One message match per thread (its first), so a word that many messages of one thread hold does not use up the
+   * limit: for a caller that asks which threads match, not where (`searchThreadsAsync` only).
+   */
+  perThread?: boolean
 }
 
 /** A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field. */
@@ -584,6 +623,7 @@ export class ThreadDataStore extends EventEmitter {
   closeThreadStorage(): void {
     this.stopBackgroundImport()
     this.flushMetaTouches()
+    this.flushStandaloneIndex()
     this.stopSearchIndexSweep()
     const store = this.threadDbStore
     if (!store) return
@@ -848,6 +888,46 @@ export class ThreadDataStore extends EventEmitter {
     this.listCacheProjectsKey = null
     this.standaloneListCache = null
     this.projectListCache.clear()
+    this.listedById = undefined
+    this.missingThreads.clear()
+  }
+
+  /**
+   * Every listed thread by id, built from the cached groups when first needed after they changed, so a lookup
+   * (`peekThread`, `getThread`) costs the same with ten threads or a thousand.
+   */
+  private listedById?: Map<string, Thread>
+
+  private listedThread(id: string): Thread | undefined {
+    if (!this.listedById) {
+      const byId = new Map<string, Thread>()
+      for (const threads of this.projectListCache.values()) for (const thread of threads) byId.set(thread.id, thread)
+      if (this.standaloneListCache) for (const thread of this.standaloneListCache) byId.set(thread.id, thread)
+      this.listedById = byId
+    }
+    return this.listedById.get(id)
+  }
+
+  /** A write this store made to a list's files: what it checked this stretch still holds; other stores re-check. */
+  private ownListWrites = 0
+  private noteListWrite(): void {
+    processListWrites += 1
+    this.ownListWrites += 1
+  }
+
+  /** Groups found unchanged on disk in this stretch of work, while no other store of the process wrote a list. */
+  private readonly freshGroups = new Set<string>()
+  private freshFor?: { stretch: object; othersWrites: number }
+
+  /** Whether what was checked in this stretch still holds; starts a new check when not. */
+  private checkedThisStretch(): Set<string> {
+    const stretch = workStretch()
+    const othersWrites = processListWrites - this.ownListWrites
+    if (this.freshFor?.stretch !== stretch || this.freshFor.othersWrites !== othersWrites) {
+      this.freshGroups.clear()
+      this.freshFor = { stretch, othersWrites }
+    }
+    return this.freshGroups
   }
 
   /**
@@ -857,19 +937,27 @@ export class ThreadDataStore extends EventEmitter {
    */
   private addToListCaches(thread: Thread): void {
     this.listCache = null
+    this.missingThreads.delete(thread.id)
     if (!this.isLifecycleVisible(thread.id)) {
       this.dropGroupCache(thread.projectId)
       return
     }
+    const row = { ...thread }
     const withThread = (threads: Thread[]): Thread[] =>
-      this.sortThreads([...threads.filter((entry) => entry.id !== thread.id), { ...thread }])
+      this.sortThreads([...threads.filter((entry) => entry.id !== thread.id), row])
     // A project's list was kept in step, or dropped, inside its lock by the write that made the thread
     // (`projectListWrite`); a group not cached is read from disk next time.
     if (!thread.projectId) {
-      if (this.standaloneListCache) this.standaloneListCache = withThread(this.standaloneListCache)
+      if (this.standaloneListCache) {
+        this.standaloneListCache = withThread(this.standaloneListCache)
+        this.listedById?.set(row.id, row)
+      }
     } else {
       const cached = this.projectListCache.get(thread.projectId)
-      if (cached) this.projectListCache.set(thread.projectId, withThread(cached))
+      if (cached) {
+        this.projectListCache.set(thread.projectId, withThread(cached))
+        this.listedById?.set(row.id, row)
+      }
     }
   }
 
@@ -935,6 +1023,7 @@ export class ThreadDataStore extends EventEmitter {
         mkdirSync(join(this.homeDir, 'thread-list-revisions'), { recursive: true })
         const content = `${phase}:${uuidv4()}`
         writeFileSync(path, content)
+        this.noteListWrite()
         return content
       } catch (error) {
         lastError = error
@@ -1146,6 +1235,8 @@ export class ThreadDataStore extends EventEmitter {
 
   private dropGroupCache(projectId?: string): void {
     this.listCache = null
+    this.listedById = undefined
+    this.missingThreads.clear()
     this.groupSignatures.delete(projectId ?? '')
     if (projectId) this.projectListCache.delete(projectId)
     else this.standaloneListCache = null
@@ -1160,8 +1251,15 @@ export class ThreadDataStore extends EventEmitter {
   private groupStale(projectId?: string): boolean {
     const cached = projectId ? this.projectListCache.has(projectId) : this.standaloneListCache !== null
     if (!cached) return false
-    const recorded = this.groupSignatures.get(projectId ?? '')
-    return recorded === undefined || recorded !== this.groupSignature(projectId)
+    // Checked once per stretch of work: the lookups that follow a change (often dozens) reuse the answer. This
+    // store's own writes keep its lists in step; a write by another store of this process starts a new check.
+    const fresh = this.checkedThisStretch()
+    const key = projectId ?? ''
+    if (fresh.has(key)) return false
+    const recorded = this.groupSignatures.get(key)
+    const stale = recorded === undefined || recorded !== this.groupSignature(projectId)
+    if (!stale) fresh.add(key)
+    return stale
   }
 
   /**
@@ -1188,6 +1286,7 @@ export class ThreadDataStore extends EventEmitter {
 
   /** Replace one thread in the warm cache (avoids full rescan after meta updates). */
   private patchListCache(thread: Thread): void {
+    if (this.listedById?.has(thread.id)) this.listedById.set(thread.id, thread)
     if (this.listCache) {
       const idx = this.listCache.findIndex((entry) => entry.id === thread.id)
       if (idx >= 0) this.listCache[idx] = thread
@@ -1197,14 +1296,14 @@ export class ThreadDataStore extends EventEmitter {
       if (this.standaloneListCache) {
         const idx = this.standaloneListCache.findIndex((entry) => entry.id === thread.id)
         if (idx >= 0) this.standaloneListCache[idx] = thread
-        else this.standaloneListCache = null
+        else this.dropGroupCache()
       }
     } else {
       const cached = this.projectListCache.get(thread.projectId)
       if (cached) {
         const idx = cached.findIndex((entry) => entry.id === thread.id)
         if (idx >= 0) cached[idx] = thread
-        else this.projectListCache.delete(thread.projectId)
+        else this.dropGroupCache(thread.projectId)
       }
     }
   }
@@ -1231,6 +1330,8 @@ export class ThreadDataStore extends EventEmitter {
       started?: boolean
       /** See `Thread.firstSendPending`: the thread is made for a message a window is about to send. */
       firstSendPending?: boolean
+      /** The inherited transcript of a fork still awaiting acceptance by the run store. */
+      forkMessages?: ChatMessage[]
       worktreeEnabled?: boolean
       lineage?: ThreadLineage
       modelOverride?: ModelOverride
@@ -1269,7 +1370,7 @@ export class ThreadDataStore extends EventEmitter {
       // A project thread's order is taken under the project's list lock, with its first write (below).
       order: projectId ? 0 : this.nextThreadOrder()
     }
-    if (opts?.started === true) meta.startedAt = now
+    if (opts?.started === true || opts?.forkMessages) meta.startedAt = now
     if (opts?.firstSendPending === true) meta.firstSendPending = true
     // `false` is kept: a thread that chose its project's folder never gets a worktree (`WorkspaceResolver`).
     if (typeof opts?.worktreeEnabled === 'boolean') meta.worktreeEnabled = opts.worktreeEnabled
@@ -1298,7 +1399,7 @@ export class ThreadDataStore extends EventEmitter {
       // registration requires an active owner.
       if (opts?.ownerThreadId) this.getThreadDir(opts.ownerThreadId)
       const register = (): void => {
-        this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true })
+        this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true, ...(opts?.forkMessages ? { pendingFork: true } : {}) })
       }
 
       if (projectId) {
@@ -1321,8 +1422,9 @@ export class ThreadDataStore extends EventEmitter {
       }
       if (this.sqliteStoreEnabled()) {
         this.threadDb().client.callSync('create', threadDir)
+        if (opts?.forkMessages) this.threadDb().save(threadDir, { messages: opts.forkMessages })
       } else {
-        this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
+        this.writeJsonAtomic(join(threadDir, 'messages.json'), opts?.forkMessages ?? [])
         this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
         this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
       }
@@ -1336,12 +1438,41 @@ export class ThreadDataStore extends EventEmitter {
       this.invalidateListCache()
       throw error
     }
+    if (opts?.forkMessages) return meta
     this.addToListCaches(meta)
 
     // This is the authoritative creation notification for every producer:
     // GUI/CLI protocol calls, remote sends, and scheduled jobs.
     this.emit('created', meta)
     return meta
+  }
+
+  /** Make the staged fork visible only after its lineage, transfer and receipt commit. */
+  publishPendingFork(id: string): void {
+    if (!this.lifecycleStore.get(id)?.pendingFork) return
+    this.lifecycleStore.update(id, (record) => {
+      this.lifecycleStore.assertTaskIdentity(record.location, id)
+      delete record.pendingFork
+    })
+    this.invalidateListCache()
+    const meta = this.getThread(id)
+    if (meta) this.emit('created', meta)
+  }
+
+  /** Only staged forks can be removed here. Their messages are inherited copies, written before any Send could run. */
+  discardPendingFork(id: string): void {
+    this.withLifecycleGates(['_registry', id], () => {
+      const record = this.lifecycleStore.get(id)
+      if (!record?.pendingFork) return
+      this.lifecycleStore.assertTaskLocation(record.location)
+      if (existsSync(join(record.location, 'meta.json'))) this.lifecycleStore.assertTaskIdentity(record.location, id)
+      this.quiesceThreadStorage(record.location)
+      this.removeFromStandaloneIndex(id)
+      // Keep the durable fence until the files are gone, including when cleanup itself is interrupted.
+      rmSync(record.location, { recursive: true, force: true })
+      this.lifecycleStore.forgetCreatedTask(id, record.parentTaskId ? { ownedBy: record.parentTaskId } : undefined)
+      this.invalidateListCache()
+    })
   }
 
   /**
@@ -1417,7 +1548,7 @@ export class ThreadDataStore extends EventEmitter {
     const discarded: string[] = []
     let indexed: Set<string> | undefined
     for (const record of this.lifecycleStore.list()) {
-      if (!record.parentTaskId || record.state !== 'active') continue
+      if (!record.parentTaskId || record.state !== 'active' || record.pendingFork) continue
       const id = record.taskId
       // Workflow execution threads (v5 ids) are owned too, but their admission retries and keeps them.
       if (!uuidValidate(id) || uuidVersion(id) !== 4) continue
@@ -1426,7 +1557,7 @@ export class ThreadDataStore extends EventEmitter {
         const metaPath = join(record.location, 'meta.json')
         const meta = existsSync(metaPath) ? this.readJsonFile<ThreadMeta | null>(metaPath, null) : null
         if (meta) {
-          indexed ??= new Set(this.readStandaloneIndexRaw().map((entry) => entry.id))
+          indexed ??= new Set(this.standaloneIndexEntries().map((entry) => entry.id))
           // Project threads are listed by scanning their directories, so only a standalone one can miss.
           if (meta.projectId || indexed.has(id)) continue
         }
@@ -1470,10 +1601,12 @@ export class ThreadDataStore extends EventEmitter {
       const metaPath = join(threadDir, 'meta.json')
       let meta = existsSync(metaPath) ? readThreadMeta<ThreadMeta>(metaPath) : initial
       if (meta.id !== id || meta.projectId !== projectId || meta.settledAt) throw new Error('Execution thread identity or state changed')
+      let markedBot = false
       if (opts?.botOwned === true && !meta.botOwned && meta !== initial) {
+        markedBot = true
         meta = { ...meta, botOwned: true }
         this.writeJsonAtomic(metaPath, meta)
-        const entry = projectId ? undefined : this.readStandaloneIndexRaw().find((thread) => thread.id === id)
+        const entry = projectId ? undefined : this.standaloneIndexEntries().find((thread) => thread.id === id)
         if (entry) this.updateStandaloneIndexEntry({ ...entry, botOwned: true })
       }
       // A previous process may have died between these writes. Preserve every
@@ -1487,10 +1620,17 @@ export class ThreadDataStore extends EventEmitter {
         }
       }
       if (!existsSync(metaPath)) this.writeJsonAtomic(metaPath, meta)
-      const indexed = !projectId && this.readStandaloneIndexRaw().some((entry) => entry.id === id)
+      const indexed = !projectId && this.standaloneIndexEntries().some((entry) => entry.id === id)
       if (!projectId && !indexed) this.addToStandaloneIndex(meta)
-      this.invalidateListCache()
-      if (meta === initial || (!projectId && !indexed)) this.emit('created', meta)
+      // Called for every run a bot or a schedule starts: a thread that exists as it was leaves the lists as they are,
+      // and one made or marked here is put in them, not every list read again.
+      const created = meta === initial || (!projectId && !indexed)
+      if (created || markedBot) this.addToListCaches(meta)
+      if (created) this.emit('created', meta)
+      else if (markedBot) {
+        this.emit('updated', meta)
+        this.emit('bot-owned', { id })
+      }
       return meta
     }))
   }
@@ -1499,16 +1639,22 @@ export class ThreadDataStore extends EventEmitter {
    * Marks each of `threadIds` that is still listed as a personal bot's (`Thread.botOwned`), without
    * touching it: a bot's thread made by an earlier build, or by a bot that never runs again, leaves the
    * lists once its bots.db opens. Returns how many it marked.
+   *
+   * The lists are read once and the ids looked up in them: looking each id up on its own reads the whole
+   * standalone index again for every id, which at startup took seconds with a few hundred bot threads.
    */
   markBotOwned(threadIds: Iterable<string>): number {
+    const wanted = new Set(threadIds)
+    if (!wanted.size) return 0
     let marked = 0
-    for (const id of new Set(threadIds)) {
-      const thread = this.getThread(id)
-      if (!thread || thread.botOwned) continue
+    for (const thread of [...this.listAllThreads()]) {
+      if (!wanted.has(thread.id) || thread.botOwned) continue
       const updated = this.writeThreadMeta(thread, (base) => ({ ...base, botOwned: true }))
       if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
       this.patchListCache(updated)
       this.emit('updated', updated)
+      // Windows listed it until now: they are told it left (`bot-owned`); a bot's other changes reach no window.
+      this.emit('bot-owned', { id: updated.id })
       marked += 1
     }
     return marked
@@ -1529,11 +1675,13 @@ export class ThreadDataStore extends EventEmitter {
       if (!project) return []
       const threads = this.readGroup(projectId, () => this.scanProjectThreads(project.path))
       this.projectListCache.set(projectId, threads)
+      this.listedById = undefined
       return threads
     }
     if (this.standaloneListCache) return this.standaloneListCache
     const standalone = this.readGroup(undefined, () => this.readStandaloneIndex())
     this.standaloneListCache = standalone
+    this.listedById = undefined
     return standalone
   }
 
@@ -1545,6 +1693,15 @@ export class ThreadDataStore extends EventEmitter {
   listAllThreadsVersioned(): { threads: Thread[]; version: ThreadListVersion } {
     const threads = this.listAllThreads()
     return { threads, version: { epoch: this.listEpoch, seq: this.listSeq } }
+  }
+
+  /**
+   * One thread's row as `listAllThreadsVersioned` lists it now, with that snapshot's version; no `thread` when it is
+   * not listed. What windows are sent when only that thread changed, instead of the whole list.
+   */
+  listedThreadVersioned(id: string): { thread?: Thread; version: ThreadListVersion } {
+    const { version } = this.listAllThreadsVersioned()
+    return { thread: this.listedThread(id), version }
   }
 
   listAllThreads(): Thread[] {
@@ -1560,6 +1717,7 @@ export class ThreadDataStore extends EventEmitter {
     // threads scanned from a previous project path for the same id.
     if (this.listCacheProjectsKey !== projectsKey) {
       this.projectListCache.clear()
+      this.listedById = undefined
       this.listCache = null
     }
     const standalone = this.listThreads()
@@ -1593,7 +1751,7 @@ export class ThreadDataStore extends EventEmitter {
       seen.add(current)
       const record = this.lifecycleStore.get(current)
       if (!record) return true
-      if (record.state !== 'active') return false
+      if (record.state !== 'active' || record.pendingFork) return false
       current = record.parentTaskId
     }
     return true
@@ -1605,19 +1763,49 @@ export class ThreadDataStore extends EventEmitter {
    * lookups that must have no side effects, such as working out which threads a request or a delete touches.
    */
   peekThread(id: string): Thread | undefined {
-    if (this.listCache && this.listCacheProjectsKey === this.projectsCacheKey()) {
-      const hit = this.listCache.find((t) => t.id === id)
-      if (hit) return hit
+    return this.listedThread(id)
+  }
+
+  /**
+   * A thread's folder (and its metadata, when the list caches have it) for a read-only lookup: from its lifecycle record,
+   * else worked out from the listed thread. No project is scanned, and nothing is migrated or registered.
+   * Undefined for a thread neither knows, or one in the trash.
+   */
+  async peekThreadLocation(id: string): Promise<{ directory: string; thread?: Thread } | undefined> {
+    const record = await this.lifecycleStore.getAsync(id)
+    const seen = new Set([id])
+    for (let current = record; current;) {
+      if (current.state !== 'active') return undefined
+      const parent = current.parentTaskId
+      if (!parent) break
+      if (seen.has(parent)) throw new Error('Cyclic lifecycle task ownership')
+      seen.add(parent)
+      current = await this.lifecycleStore.getAsync(parent)
     }
-    if (this.standaloneListCache) {
-      const hit = this.standaloneListCache.find((t) => t.id === id)
-      if (hit) return hit
+    const thread = this.listedThread(id)
+    if (record) return { directory: record.location, ...(thread ? { thread } : {}) }
+    if (!thread) return undefined
+    return { directory: thread.projectId ? this.storageLayout.repositoryThreadDir(thread.projectId, id) : this.storageLayout.standaloneThreadDir(id), thread }
+  }
+
+  /**
+   * Ids `getThread` looked for on disk and did not find. Kept only while every group is cached and found unchanged on
+   * disk (`missingStillHolds`); cleared whenever a cached group changes, so a thread made since is always found.
+   */
+  private readonly missingThreads = new Set<string>()
+
+  /** Whether a lookup that missed may be answered from `missingThreads`: every group cached, none changed on disk. */
+  private missingStillHolds(): boolean {
+    if (!this.standaloneListCache || !this.missingThreads.size) return false
+    const projects = this.projectManager.listProjects()
+    if (projects.some((project) => !this.projectListCache.has(project.id))) return false
+    for (const projectId of [undefined, ...projects.map((project) => project.id)]) {
+      if (this.groupStale(projectId)) {
+        this.dropGroupCache(projectId)
+        return false
+      }
     }
-    for (const threads of this.projectListCache.values()) {
-      const hit = threads.find((t) => t.id === id)
-      if (hit) return hit
-    }
-    return undefined
+    return true
   }
 
   getThread(id: string): Thread | undefined {
@@ -1625,9 +1813,17 @@ export class ThreadDataStore extends EventEmitter {
     // Prefer warm list cache (common after list/setModel/pin paths).
     const cached = this.peekThread(id)
     if (cached) return cached
+    if (this.missingThreads.has(id) && this.missingStillHolds()) return undefined
 
-    const standalone = this.readStandaloneIndex().find((t) => t.id === id)
-    if (standalone) return standalone
+    // The standalone index is in memory: only this thread is looked at, not every entry with its lifecycle record.
+    const entry = this.standaloneIndexEntries().find((t) => t.id === id)
+    if (entry) {
+      // A legacy entry without an order is ordered with its whole group, as a listing does.
+      if (!Number.isFinite(entry.order)) return this.readStandaloneIndex().find((t) => t.id === id)
+      const standalone = { ...entry }
+      this.ensureStartedAt(standalone)
+      return standalone
+    }
 
     for (const project of this.projectManager.listProjects()) {
       const targetMetaPath = join(this.storageLayout.repositoryThreadDir(project.id, id), 'meta.json')
@@ -1638,6 +1834,8 @@ export class ThreadDataStore extends EventEmitter {
         return readThreadMeta<Thread>(join(threadDir, 'meta.json'))
       }
     }
+    if (this.missingThreads.size >= MISSING_THREADS_MAX) this.missingThreads.clear()
+    this.missingThreads.add(id)
     return undefined
   }
 
@@ -1944,10 +2142,13 @@ export class ThreadDataStore extends EventEmitter {
     const audit = this.readJsonFile<Array<{ operationId: string; cancelledAt: string; queue: QueuedMessage[] }>>(auditPath, [])
     if (!Array.isArray(audit)) throw new Error('Corrupt lifecycle queue cancellation audit')
     if (!audit.some((entry) => entry.operationId === operationId)) {
-      audit.push({ operationId, cancelledAt: new Date().toISOString(), queue })
+      // The audit names the cancelled messages' images; their data goes with the queue's image files.
+      const named = queue.map((item) => item.images?.length ? { ...item, images: item.images.map(({ name, mimeType }) => ({ name, mimeType })) } : item)
+      audit.push({ operationId, cancelledAt: new Date().toISOString(), queue: named as QueuedMessage[] })
       this.writeJsonAtomic(auditPath, audit)
     }
     this.writeJsonAtomic(join(record.location, 'queue.json'), [])
+    sweepQueueImages(record.location, new Set())
   }
 
   /** Idempotent index projection; lifecycle location is the durable authority. */
@@ -1970,7 +2171,12 @@ export class ThreadDataStore extends EventEmitter {
       this.setActiveThreadId(null)
     }
     this.invalidateListCache()
-    this.emit('list-changed', { id: record.taskId })
+    // A thread in `thread.db` has search rows, kept while this process keeps the index (`startSearchIndexSweep`):
+    // dropped while it is in the trash, indexed again when it is back. (A purge needs nothing: its rows went at its
+    // trash, or at the next start's reconcile.)
+    if (this.firstSweep && ThreadDbStore.usesDb(record.location)) this.noteIndexChange(record.taskId, record.location, { drop: record.location !== record.originalLocation })
+    // The threads it owns leave or come back with it: windows are sent the whole list, not this one row.
+    this.emit('list-changed', { id: record.taskId, wholeList: true })
   }
 
   /** Purge projection uses only stable IDs; it never reads already removed conversation data. */
@@ -1984,11 +2190,20 @@ export class ThreadDataStore extends EventEmitter {
       atomicWriteJsonSync(legacyIndex, entries.filter((entry) => entry.threadId !== record.taskId))
     }
     this.invalidateListCache()
-    this.emit('list-changed', { id: record.taskId })
+    this.emit('list-changed', { id: record.taskId, wholeList: true })
   }
 
   loadThreadData(id: string): ThreadData {
     return this.loadThreadDataFromDir(this.getThreadDir(id), id)
+  }
+
+  /**
+   * A stamp of the files a thread's transcript is read from, without reading them: a different stamp means a write
+   * happened since. Undefined when the thread keeps its transcript in JSON files, which have no single stamp.
+   */
+  transcriptStamp(id: string): string | undefined {
+    const threadDir = this.getThreadDir(id)
+    return ThreadDbStore.usesDb(threadDir) ? threadDbStampOf(threadDir) : undefined
   }
 
   /**
@@ -2107,15 +2322,21 @@ export class ThreadDataStore extends EventEmitter {
         new Error('queue must be an array')
       )
     }
-    return normalizeQueuedMessages(raw, threadId)
+    // Images are kept in files beside queue.json (`queueImageFiles.ts`).
+    return loadQueueImages(threadDir, normalizeQueuedMessages(raw, threadId))
   }
 
-  /** Atomically persist the message queue for a thread (backwards-compatible queue.json). */
+  /**
+   * Atomically persist the message queue for a thread (queue.json). Its images go to files beside it, each written
+   * once, so a change to the queue writes only the small queue.json; files no message names are removed after.
+   */
   saveMessageQueue(id: string, queue: QueuedMessage[]): void {
     const threadDir = this.getThreadDir(id)
     this.ensureThreadDir(threadDir)
     const normalized = normalizeQueuedMessages(queue, id)
-    this.writeJsonAtomic(join(threadDir, 'queue.json'), normalized)
+    const stored = storeQueueImages(threadDir, normalized)
+    this.writeJsonAtomic(join(threadDir, 'queue.json'), stored.items)
+    sweepQueueImages(threadDir, stored.files)
   }
 
   /**
@@ -2324,9 +2545,8 @@ export class ThreadDataStore extends EventEmitter {
     if (!thread) return undefined
     if (thread.settledAt) return { thread, bumped: false }
 
-    const siblings = thread.projectId
-      ? this.listThreads(thread.projectId)
-      : this.readStandaloneIndex()
+    // The group's list, read from disk again only when its files changed since.
+    const siblings = this.listThreads(thread.projectId)
     // Rows of the user's other computers sort with these (in the same project, or none): the front is theirs too.
     const floor = this.remoteFloor?.(thread.projectId)
     const alreadyFront =
@@ -2347,7 +2567,8 @@ export class ThreadDataStore extends EventEmitter {
       order: projectId ? this.projectOrderUnderLock(projectId, cacheTrusted) : minOrder - 1
     })))
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
-    this.invalidateListCache()
+    // Only this row moved: its group is sorted again, not every list read again.
+    this.addToListCaches(updated)
     this.emit('updated', updated)
     return { thread: updated, bumped: true }
   }
@@ -2399,7 +2620,7 @@ export class ThreadDataStore extends EventEmitter {
         // Still expose startedAt in-memory for this listing.
       }
     }
-    if (!updated.projectId) this.writeStandaloneIndexEntryRaw(updated)
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     thread.startedAt = updated.startedAt
     this.patchListCache({ ...thread, ...updated })
     return true
@@ -2479,12 +2700,53 @@ export class ThreadDataStore extends EventEmitter {
     })
   }
 
-  private readStandaloneIndexRaw(): Thread[] {
-    return this.readJsonFile<Thread[]>(join(this.homeDir, 'threads-index.json'), [])
+  private standaloneIndexPath(): string {
+    return join(this.homeDir, 'threads-index.json')
+  }
+
+  /**
+   * The standalone index as this store has it: the file as last read or written, with the entry changes this store
+   * made since (`standaloneIndexPending`), which are written within STANDALONE_INDEX_WRITE_MS. A change to which threads
+   * it holds (a create, a trash, a restore) is written at once, so a crash can lose a second of list metadata but never
+   * a thread. Another process's write shows as a new stamp on the file, checked at most once per stretch of work; the
+   * file is then read again with this store's unwritten changes kept.
+   */
+  private standaloneIndex: Thread[] | null = null
+  private standaloneIndexStamp: string | undefined
+  private readonly standaloneIndexPending = new Set<string>()
+  private standaloneIndexTimer?: ReturnType<typeof setTimeout>
+
+  /** The index entries, every thread's, visible or not; never to be changed by the caller. `now`: compare with the file now. */
+  private standaloneIndexEntries(now = false): Thread[] {
+    const path = this.standaloneIndexPath()
+    const fresh = this.checkedThisStretch()
+    if (this.standaloneIndex) {
+      if (!now && fresh.has(STANDALONE_INDEX_KEY)) return this.standaloneIndex
+      const stamp = this.stamp(path)
+      if (stamp !== undefined && stamp === this.standaloneIndexStamp) {
+        fresh.add(STANDALONE_INDEX_KEY)
+        return this.standaloneIndex
+      }
+    }
+    const stamp = this.stamp(path)
+    let entries = this.readJsonFile<Thread[]>(path, [])
+    const kept = this.standaloneIndex
+    if (kept && this.standaloneIndexPending.size && Array.isArray(entries)) {
+      const mine = new Map(kept.filter((entry) => this.standaloneIndexPending.has(entry.id)).map((entry) => [entry.id, entry]))
+      entries = entries.map((entry) => mine.get(entry.id) ?? entry)
+      // An entry another process removed meanwhile stays removed.
+      const listed = new Set(entries.map((entry) => entry.id))
+      for (const id of [...this.standaloneIndexPending]) if (!listed.has(id)) this.standaloneIndexPending.delete(id)
+    }
+    this.standaloneIndex = entries
+    this.standaloneIndexStamp = stamp
+    if (stamp !== undefined) fresh.add(STANDALONE_INDEX_KEY)
+    return entries
   }
 
   private readStandaloneIndex(): Thread[] {
-    const threads = this.readStandaloneIndexRaw().filter((thread) => this.isLifecycleVisible(thread.id))
+    // Copies: a listing repairs its rows (`ensureStartedAt`, `ensureThreadOrders`) without touching the index in memory.
+    const threads = this.standaloneIndexEntries().filter((thread) => this.isLifecycleVisible(thread.id)).map((thread) => ({ ...thread }))
     for (const thread of threads) this.ensureStartedAt(thread)
     return this.ensureThreadOrders(threads, (ordered) => this.writeVisibleStandaloneProjection(ordered))
   }
@@ -2492,38 +2754,70 @@ export class ThreadDataStore extends EventEmitter {
   /** Visibility changes do not delete retained children or their conversation index entries. */
   private writeVisibleStandaloneProjection(visible: Thread[]): void {
     const replaced = new Set(visible.map((thread) => thread.id))
-    const retained = this.readStandaloneIndexRaw().filter((thread) => !replaced.has(thread.id))
-    this.writeStandaloneIndex([...visible, ...retained])
+    this.writeStandaloneIndexNow((entries) => [...visible.map((thread) => ({ ...thread })), ...entries.filter((thread) => !replaced.has(thread.id))])
   }
 
-  private writeStandaloneIndex(threads: Thread[]): void {
-    const dir = this.homeDir
-    mkdirSync(dir, { recursive: true })
-    this.writeJsonAtomic(join(this.homeDir, 'threads-index.json'), threads)
+  /** Writes the index now, as `change` makes it from the file as it is now, with this store's unwritten changes. */
+  private writeStandaloneIndexNow(change: (entries: Thread[]) => Thread[]): void {
+    if (this.standaloneIndexTimer) clearTimeout(this.standaloneIndexTimer)
+    this.standaloneIndexTimer = undefined
+    const next = change(this.standaloneIndexEntries(true))
+    mkdirSync(this.homeDir, { recursive: true })
+    this.writeJsonAtomic(this.standaloneIndexPath(), next)
+    this.standaloneIndex = next
+    this.standaloneIndexPending.clear()
+    this.standaloneIndexStamp = this.stamp(this.standaloneIndexPath())
   }
 
   private addToStandaloneIndex(meta: ThreadMeta): void {
-    const index = this.readStandaloneIndexRaw()
-    index.push(meta)
-    this.writeStandaloneIndex(index)
+    this.writeStandaloneIndexNow((entries) => [...entries, { ...meta }])
   }
 
+  /** Changes a thread's entry in memory; the file follows within STANDALONE_INDEX_WRITE_MS (`flushStandaloneIndex`). */
   private updateStandaloneIndexEntry(thread: Thread): void {
-    this.writeStandaloneIndexEntryRaw(thread)
+    const entries = this.standaloneIndexEntries()
+    const idx = entries.findIndex((t) => t.id === thread.id)
+    if (idx < 0) return
+    entries[idx] = { ...thread }
+    this.standaloneIndexPending.add(thread.id)
+    if (this.standaloneIndexTimer) return
+    this.standaloneIndexTimer = setTimeout(() => {
+      this.standaloneIndexTimer = undefined
+      this.flushStandaloneIndex()
+    }, STANDALONE_INDEX_WRITE_MS)
+    this.standaloneIndexTimer.unref?.()
   }
 
-  private writeStandaloneIndexEntryRaw(thread: Thread): void {
-    const index = this.readStandaloneIndexRaw()
-    const idx = index.findIndex((t) => t.id === thread.id)
-    if (idx >= 0) {
-      index[idx] = thread
-      this.writeStandaloneIndex(index)
+  /** Writes the entry changes still held in memory: when they are STANDALONE_INDEX_WRITE_MS old, and at shutdown. */
+  flushStandaloneIndex(): void {
+    if (this.standaloneIndexTimer) clearTimeout(this.standaloneIndexTimer)
+    this.standaloneIndexTimer = undefined
+    if (!this.standaloneIndexPending.size) return
+    try {
+      this.writeStandaloneIndexNow((entries) => entries)
+    } catch (error) {
+      // Kept in memory and tried again shortly; every thread's own meta.json already has the change.
+      console.warn('thread list index write failed; trying again', { error: error instanceof Error ? error.message : String(error) })
+      if (!this.standaloneIndexTimer) {
+        this.standaloneIndexTimer = setTimeout(() => this.flushStandaloneIndex(), STANDALONE_INDEX_WRITE_MS)
+        this.standaloneIndexTimer.unref?.()
+      }
     }
   }
 
   private removeFromStandaloneIndex(id: string): void {
-    const index = this.readStandaloneIndexRaw().filter((t) => t.id !== id)
-    this.writeStandaloneIndex(index)
+    if (!this.standaloneIndexEntries(true).some((t) => t.id === id)) return
+    this.writeStandaloneIndexNow((entries) => entries.filter((t) => t.id !== id))
+  }
+
+  /**
+   * A thread whose record names another folder was moved out of this old one already, and may since have been deleted:
+   * the copy the move left (one on another drive than the profile stays where it was) is never copied back.
+   */
+  private movedOutOfLegacy(legacyDir: string, threadId: string): boolean {
+    let record: ReturnType<ResourceLifecycleStore['get']>
+    try { record = this.lifecycleStore.get(threadId) } catch { return false }
+    return Boolean(record && !record.locations.some((location) => pathsEqual(location, legacyDir)))
   }
 
   private scanProjectThreads(projectPath: string): Thread[] {
@@ -2535,7 +2829,8 @@ export class ThreadDataStore extends EventEmitter {
     const legacyRoot = this.storageLayout.legacyRepositoryRoot(projectPath)
     if (this.storageLayout.allowLegacyProjectData && existsSync(legacyRoot)) {
       for (const entry of readdirSync(legacyRoot, { withFileTypes: true })) {
-        if (entry.isDirectory()) this.storageMigration.migrateRepository(projectPath, project.id, entry.name)
+        if (!entry.isDirectory() || this.movedOutOfLegacy(join(legacyRoot, entry.name), entry.name)) continue
+        this.storageMigration.migrateRepository(projectPath, project.id, entry.name)
       }
     }
 
@@ -2621,6 +2916,7 @@ export class ThreadDataStore extends EventEmitter {
     const recorded = this.groupSignatures.get('')
     const inSync = recorded !== undefined && recorded === this.groupSignature()
     atomicWriteJsonSync(filePath, value)
+    this.noteListWrite()
     if (inSync) {
       const signature = this.groupSignature()
       if (signature !== undefined) this.groupSignatures.set('', signature)
@@ -2677,13 +2973,14 @@ export class ThreadDataStore extends EventEmitter {
         if (budget <= 0) continue
         budget -= 1
         try {
-          messages.push(...this.messageResults(thread, plan, this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), [])))
+          const found = this.messageResults(thread, plan, this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), []))
+          messages.push(...(options.perThread ? found.slice(0, 1) : found))
         } catch {
           /* skip invalid thread data */
         }
       }
     }
-    if (indexed.length) messages.push(...(await this.indexedMessageResults(indexed, plan, limit)))
+    if (indexed.length) messages.push(...(await this.indexedMessageResults(indexed, plan, limit, options.perThread === true)))
     return this.finishSearch([...plan.titles, ...messages], limit)
   }
 
@@ -2692,22 +2989,25 @@ export class ThreadDataStore extends EventEmitter {
    * are found or the matches run out (a result that repeats another's does not count). If the index cannot answer,
    * each thread's transcript is searched in the read worker instead, so a broken cache never breaks search.
    */
-  private async indexedMessageResults(indexed: Array<Thread & { dir: string }>, plan: SearchPlan, limit: number): Promise<ScoredSearchResult[]> {
+  private async indexedMessageResults(indexed: Array<Thread & { dir: string }>, plan: SearchPlan, limit: number, perThread = false): Promise<ScoredSearchResult[]> {
     const byId = new Map(indexed.map((thread) => [thread.id, thread]))
     const ordered = [...indexed].sort((a, b) => a.name.localeCompare(b.name)).map((thread) => ({ id: thread.id, name: thread.name, dir: thread.dir }))
     const out: ScoredSearchResult[] = []
     const distinct = new Set<string>()
+    const keyOf = (result: ScoredSearchResult) => perThread ? result.threadId : `${result.threadId}:${result.messageId}:${result.snippet}`
     try {
+      // The index's first sweep is sent first, so the worker answers from a caught-up (or rebuilt) index.
+      await this.firstSweep
       this.flushIndexNotices()
       const batch = Math.max(limit, 50)
       for (let offset = 0; distinct.size < limit; offset += batch) {
-        const hits = await this.threadDb().client.callIndex('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: batch, offset })
+        const hits = await this.threadDb().client.callIndex('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: batch, offset, perThread })
         for (const hit of hits) {
           const thread = byId.get(hit.threadId)
           if (!thread) continue
           for (const result of this.messageResults(thread, plan, [{ id: hit.messageId, content: hit.body }])) {
             out.push(result)
-            distinct.add(`${result.threadId}:${result.messageId}:${result.snippet}`)
+            distinct.add(keyOf(result))
           }
         }
         if (hits.length < batch) break
@@ -2722,10 +3022,10 @@ export class ThreadDataStore extends EventEmitter {
       for (const thread of ordered) {
         if (distinct.size >= limit) break
         try {
-          const found = await this.threadDb().client.call('searchTranscript', thread.dir, plan.normalized, Number.MAX_SAFE_INTEGER)
+          const found = await this.threadDb().client.call('searchTranscript', thread.dir, plan.normalized, perThread ? 1 : Number.MAX_SAFE_INTEGER)
           for (const result of this.messageResults(byId.get(thread.id)!, plan, found)) {
             out.push(result)
-            distinct.add(`${result.threadId}:${result.messageId}:${result.snippet}`)
+            distinct.add(keyOf(result))
           }
         } catch {
           /* skip a thread that cannot be read now */
@@ -2819,25 +3119,33 @@ export class ThreadDataStore extends EventEmitter {
     return dir
   }
 
-  private readonly indexDirty = new Map<string, string>()
+  private readonly indexDirty = new Map<string, { dir: string; drop?: boolean }>()
   private indexTimer?: ReturnType<typeof setTimeout>
   private sweepTimer?: ReturnType<typeof setInterval>
 
-  /** A thread in `thread.db` was saved: its index rows are brought up to date shortly (or before the next search). */
-  private noteIndexChange(id: string, threadDir: string): void {
-    this.indexDirty.set(id, threadDir)
+  /**
+   * A thread in `thread.db` was saved: its index rows are brought up to date shortly (or before the next search).
+   * `drop`: the thread left the lists (trashed or purged), and its rows go.
+   */
+  private noteIndexChange(id: string, threadDir: string, options: { drop?: boolean } = {}): void {
+    this.indexDirty.set(id, options.drop ? { dir: threadDir, drop: true } : { dir: threadDir })
     if (this.indexTimer) return
     this.indexTimer = setTimeout(() => this.flushIndexNotices(), 1_000)
     this.indexTimer.unref?.()
   }
 
-  /** Sends the pending index notices; the read worker applies them before anything sent later. */
-  private flushIndexNotices(): void {
+  /**
+   * Sends the pending index notices; the read worker applies them before anything sent later. At shutdown (`final`)
+   * drops are left out: the next start's reconcile drops every thread that is not listed, and the index is not opened
+   * for them while the profile closes.
+   */
+  private flushIndexNotices(final = false): void {
     if (this.indexTimer) clearTimeout(this.indexTimer)
     this.indexTimer = undefined
     if (!this.indexDirty.size || !this.threadDbStore) return
-    const targets = [...this.indexDirty].map(([threadId, dir]) => ({ threadId, dir }))
+    const targets = [...this.indexDirty].map(([threadId, target]) => ({ threadId, ...target })).filter((target) => !final || !target.drop)
     this.indexDirty.clear()
+    if (!targets.length) return
     this.indexUpdate = this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).then(() => undefined, (error: unknown) => {
       // Skipped while the index worker backs off after crashing; the client has logged that once.
       if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
@@ -2854,10 +3162,15 @@ export class ThreadDataStore extends EventEmitter {
     await this.indexUpdate
   }
 
-  /** Threads kept in `thread.db`, with their folders. */
-  private databaseThreads(): Array<{ threadId: string; dir: string }> {
+  /**
+   * Threads kept in `thread.db`, with their folders. Read a few at a time, so a sweep over every thread never holds up
+   * requests; threads listed while it read are added at the end.
+   */
+  private async databaseThreads(shouldStop: () => boolean): Promise<Array<{ threadId: string; dir: string }>> {
     const out: Array<{ threadId: string; dir: string }> = []
-    for (const thread of this.listAllThreads()) {
+    const seen = new Set<string>()
+    const add = (thread: Thread): void => {
+      seen.add(thread.id)
       try {
         const dir = this.listedThreadDir(thread.id)
         if (ThreadDbStore.usesDb(dir)) out.push({ threadId: thread.id, dir })
@@ -2865,32 +3178,55 @@ export class ThreadDataStore extends EventEmitter {
         // A thread whose folder cannot be resolved now is not indexed now.
       }
     }
+    await forEachYielding(this.listAllThreads(), add, shouldStop)
+    for (const thread of this.listAllThreads()) if (!seen.has(thread.id)) add(thread)
     return out
   }
 
+  /** The search index's first sweep while it is waited for or runs: a search waits for it (`indexedMessageResults`). */
+  private firstSweep?: Promise<void>
+  private sweepStopped = false
+
   /**
-   * Keeps the search index matching the thread databases: at once, then every `intervalMs`. Threads whose
-   * database files changed since they were indexed (written by another process, or a notice that was lost) are
-   * caught up, and threads no longer listed are dropped. A missing or damaged index is rebuilt by the first pass.
+   * Reconciles the search index with every listed thread's database: once `after` settles (at once without it), then
+   * every `intervalMs` (an hour). Between them the index follows notices: each save (`noteIndexChange`), each trash or
+   * purge (the thread's rows are dropped) and each restore. A search also catches up any thread whose database files
+   * changed since it was indexed. The reconcile catches what those miss (a write another process made that left the
+   * file's stamp as it was, a lost notice) and drops threads no longer listed. A missing or damaged index is rebuilt by
+   * the first pass, which a search waits for.
    */
-  startSearchIndexSweep(intervalMs = 60_000): void {
-    if (this.sweepTimer) return
-    const sweep = (): void => {
-      const live = this.databaseThreads()
-      if (!live.length && !this.threadDbStore) return
-      this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
-        console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
-      })
+  startSearchIndexSweep(intervalMs = SEARCH_INDEX_RECONCILE_MS, options: { after?: Promise<unknown> } = {}): void {
+    if (this.sweepTimer || this.firstSweep) return
+    this.sweepStopped = false
+    let sweeping = false
+    const sweep = async (): Promise<void> => {
+      if (sweeping || this.sweepStopped) return
+      sweeping = true
+      try {
+        const live = await this.databaseThreads(() => this.sweepStopped)
+        if (this.sweepStopped || (!live.length && !this.threadDbStore)) return
+        this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
+          console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
+        })
+      } finally {
+        sweeping = false
+      }
     }
-    sweep()
-    this.sweepTimer = setInterval(sweep, intervalMs)
-    this.sweepTimer.unref?.()
+    this.firstSweep = Promise.resolve(options.after).catch(() => undefined).then(async () => {
+      if (this.sweepStopped) return
+      await sweep()
+      if (this.sweepStopped) return
+      this.sweepTimer = setInterval(() => void sweep(), intervalMs)
+      this.sweepTimer.unref?.()
+    }).catch(() => undefined)
   }
 
   stopSearchIndexSweep(): void {
+    this.sweepStopped = true
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.sweepTimer = undefined
-    this.flushIndexNotices()
+    this.firstSweep = undefined
+    this.flushIndexNotices(true)
   }
 }

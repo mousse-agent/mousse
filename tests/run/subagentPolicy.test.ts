@@ -157,16 +157,15 @@ describe('delegated child policy', () => {
     expect(d.store.listAllThreads()).toHaveLength(before)
   }, 30_000)
 
-  it('refuses an isolated child on Antigravity, which runs only messages its owner sends, creating no thread', async () => {
+  it('starts an isolated child on Antigravity', async () => {
     const outcomes: Record<string, Record<string, unknown>> = {}
     const { d, thread, antigravity } = daemon(async (delegation) => {
       outcomes.isolated = await delegate(delegation, { workspace: 'isolated', role: 'implement', instanceId: 'antigravity' }, 'isolated')
     })
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
-    expect(outcomes.isolated).toMatchObject({ started: false, code: 'owner_only_provider', message: expect.stringContaining('personal Google sign-in') })
-    expect(d.engine.delegations.listForParentThread(thread.id)).toEqual([])
-    expect(d.store.listAllThreads().map((entry) => entry.id)).toEqual([thread.id])
-    expect(antigravity.turns).toEqual([])
+    expect(outcomes.isolated.started).not.toBe(false)
+    await waitFor(() => d.engine.getRun(outcomes.isolated.childRunId as string)?.status === 'completed', 'the child run')
+    expect(antigravity.turns).toHaveLength(1)
   }, 30_000)
 
   it('refuses a child that would inherit an Antigravity parent selection', async () => {
@@ -175,13 +174,13 @@ describe('delegated child policy', () => {
       (d.orch as unknown as { delegationRefusal(parent: string, instanceId: string | undefined, readOnly: boolean): Promise<unknown> }).delegationRefusal(thread.id, instanceId, readOnly)
     d.orch.setThreadModelOverride(thread.id, { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'agent' })
     expect(await refusalFor()).toMatchObject({ started: false, code: 'shared_unsupported_for_provider' })
-    expect(await refusalFor(undefined, false)).toMatchObject({ started: false, code: 'owner_only_provider' })
+    expect(await refusalFor(undefined, false)).toBeNull()
     // An explicit instance wins over the parent's selection, in both directions.
     expect(await refusalFor('claude')).toBeNull()
     d.orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     expect(await refusalFor()).toBeNull()
     expect(await refusalFor('antigravity')).toMatchObject({ code: 'shared_unsupported_for_provider' })
-    expect(await refusalFor('antigravity', false)).toMatchObject({ code: 'owner_only_provider' })
+    expect(await refusalFor('antigravity', false)).toBeNull()
   })
 
   it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
@@ -439,7 +438,7 @@ describe('delegated child policy', () => {
     }, 30_000)
   })
 
-  it('a child switched to Antigravity is refused on its next turn, shared or isolated', async () => {
+  it('a shared child switched to Antigravity is refused on its next turn, and an isolated one is not', async () => {
     const started: Record<string, { childThreadId: string; childRunId: string }> = {}
     const { d, claude, antigravity, thread } = daemon(async (delegation) => {
       started.shared = await delegate(delegation, { workspace: 'shared', role: 'research', readOnly: true }, 'shared') as never
@@ -456,10 +455,8 @@ describe('delegated child policy', () => {
     expect(JSON.stringify(shared) + d.orch.getMessagesForPersistence(started.shared.childThreadId).map((message) => message.content).join('\n')).toContain('cannot run a read-only subagent')
     expect(claude.turns.filter((turn) => turn.input.threadId === started.shared.childThreadId)).toHaveLength(1)
 
-    // An isolated child could run there, but Antigravity's personal sign-in runs only messages its owner sends.
-    const isolated = await d.orch.send('Look again', false, { threadId: started.isolated.childThreadId, clientRequestId: 'again-isolated', source: 'gui', ownerProof: { via: 'gui' } }).catch((error: Error) => error)
-    expect(antigravity.turns.filter((turn) => turn.input.threadId === started.isolated.childThreadId)).toEqual([])
-    expect(JSON.stringify(isolated) + d.orch.getMessagesForPersistence(started.isolated.childThreadId).map((message) => message.content).join('\n')).toContain('personal Google sign-in')
+    await d.orch.send('Look again', false, { threadId: started.isolated.childThreadId, clientRequestId: 'again-isolated' })
+    expect(antigravity.turns.filter((turn) => turn.input.threadId === started.isolated.childThreadId)).toHaveLength(1)
   }, 30_000)
 
   it('shared and isolated children both get the delegation tools', async () => {

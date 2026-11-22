@@ -9,11 +9,9 @@ import { shortModelName } from '../../../shared/modelNames'
 import { Brain } from '../../lib/icons'
 import { scaleMotionMs } from '../../lib/motion'
 import { ProviderIcon } from '../../lib/providerIcons'
-import { DEVICE_SCOPE, useProviderSnapshots } from '../../lib/providerSnapshots'
 import { usageLevel } from '../../lib/subscriptionUsage'
 import { botsClient, useBotsStore } from '../../stores/botsStore'
 import { errorText } from '../../services/personalBotsClient'
-import { DRIVER_INFO } from '../providers/providerView'
 import { SettingsModelPicker } from '../settings/SettingsModelPicker'
 import { borrowedRow, borrowedRowTitle, botRowTitle, offeredListing, PICK_A_MODEL, sameAsLabel, severalEntries } from './BotRunsOn'
 import { nextReading, usageReading, type BotUsageReading } from './botUsageRing'
@@ -109,12 +107,6 @@ function UsageRing({ left }: { left: number }) {
     {share > 0 && <circle className="bot-model-ring-fill" cx={centre} cy={centre} r={RING_RADIUS} strokeWidth={RING_STROKE}
       strokeDasharray={`${RING_LENGTH * share} ${RING_LENGTH}`} transform={`rotate(-90 ${centre} ${centre})`} />}
   </svg>
-}
-
-function BotAntigravityNote() {
-  const { snapshots } = useProviderSnapshots(DEVICE_SCOPE)
-  if (!snapshots?.some((entry) => DRIVER_INFO[entry.driver]?.ownerOnly && entry.enabled.effective && entry.auth.state === 'signed_in')) return null
-  return <p className="bot-model-note">Google Antigravity is available for regular chats you send yourself.</p>
 }
 
 export function BotModelButton({ bot }: { bot: BotSummary }) {
@@ -217,7 +209,6 @@ export function BotModelButton({ bot }: { bot: BotSummary }) {
           </div>
         })}
       </div></div>
-      {info.computer === 'this_computer' && <BotAntigravityNote />}
       {error && <p className="bot-model-pop-error" role="alert">{error}</p>}
     </div>}
   </div>

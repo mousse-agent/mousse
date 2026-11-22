@@ -20,7 +20,13 @@ function useActiveChatPrivate(): boolean {
  * The logo and headline above an empty chat's composer, anchored so the composer stays centred.
  * In a private chat the logo wears sunglasses and the headline says the chat is off the record.
  */
-export function EmptyThreadHeading({ headline, incognito, animate = true }: { headline: string; incognito?: boolean; animate?: boolean }) {
+export function EmptyThreadHeading({ headline, incognito, animate = true, continued = false }: {
+  headline: string
+  incognito?: boolean
+  animate?: boolean
+  /** It takes the place of the same heading already on screen (the warm start's): the logo does not draw itself in again. */
+  continued?: boolean
+}) {
   const privateChat = useActiveChatPrivate()
   const on = incognito ?? privateChat
   const label = on ? 'Mousse, incognito' : 'Mousse'
@@ -38,7 +44,7 @@ export function EmptyThreadHeading({ headline, incognito, animate = true }: { he
   }
   return (
     <>
-      <EmptyThreadLogo label={label} incognito={on} />
+      <EmptyThreadLogo label={label} incognito={on} drawnAtStart={continued} />
       <AnimatedHeadline className="chat-empty-title" title={title} text={text} />
     </>
   )

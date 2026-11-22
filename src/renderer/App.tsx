@@ -19,7 +19,9 @@ import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
-import type { WindowsGitSetup } from '../shared/windowsGit'
+import type { GitSetup } from '../shared/gitSetup'
+import { WarmChat } from './components/WarmChat'
+import { showSavedView } from './lib/warmHandover'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
@@ -27,6 +29,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { NewProjectDialog } from './components/NewProjectDialog'
 import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
+import { PairLinkHost } from './components/netEngine/PairLinkHost'
 import { BugReportDialogHost } from './components/bugReports/BugReportDialog'
 import { useBugReportStore } from './stores/bugReportStore'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
@@ -39,7 +42,7 @@ import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './li
 import { selectThread } from './lib/threadActions'
 import { useShownBotThread } from './lib/botThread'
 import { isSessionClosing } from './lib/errorText'
-import { useAppStore, withNewerTimes } from './stores/appStore'
+import { useAppStore, withNewerTimes, withThreadRow } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
 import { applyStreamedUpdates, landMessage } from './stores/liveTextStore'
 import { useViewSwap } from './lib/motion'
@@ -48,7 +51,7 @@ import { useMemoryNotices } from './hooks/useMemoryNotices'
 import { useWindowCounters } from './lib/windowCounters'
 import { normalizeRunSettings } from '../shared/settings'
 import { applyPlusLegacy } from './stores/mousseIdStore'
-import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
+import { isOlderThreadList, threadRowAction, type ThreadListVersion, type ThreadRowPayload } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
 import { useBotsStore } from './stores/botsStore'
 // Rail pages, Chats and New bot load as their own chunks; see lib/lazySurfaces.
@@ -88,6 +91,10 @@ const CHATS_FALLBACK_MS = 30_000
 
 
 
+// What this window's profile showed last time is in the store before App first renders, so the window's first frame
+// shows it. It is read once, from this computer only; the service is not asked and nothing in it is sent there.
+showSavedView()
+
 export default function App() {
 
   useCommandShortcuts()
@@ -112,6 +119,10 @@ export default function App() {
   // which takes the threads sidebar's place.
   const inboxThread = useInboxShowsThread() && automationsOpen
   const workspaceReady = useAppStore((s) => s.workspaceReady)
+  // What this window's profile showed last time, on screen until the workspace is ready (showWarmView).
+  const warmShown = useAppStore((s) => s.warmView !== null)
+  // The sidebar and conversation are laid out: from the trusted binding, or earlier from the warm start.
+  const workspaceShown = profileReady || warmShown
   const newBotOpen = useBotsStore((s) => s.newBotOpen)
   // The Automations page's (hidden) shell is there from the profile binding; the page itself, and its first inbox
   // read, mount once the workspace has painted (or when it is opened first) and then stay mounted.
@@ -196,8 +207,13 @@ export default function App() {
   const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
   const [bootstrapError, setBootstrapError] = useState<string | null>(null)
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
-  const [windowsGitSetup, setWindowsGitSetup] = useState<WindowsGitSetup>(null)
+  const [gitSetup, setGitSetup] = useState<GitSetup>(null)
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), [])
+  const installGit = useCallback(() => {
+    void window.mousse.app.installGit().then((finished) => {
+      if (finished) retryBootstrap()
+    }).catch(() => retryBootstrap())
+  }, [retryBootstrap])
   // A rail page that replaces the workspace hides the sidebar, so the peek stands down for it.
   const threadsPeek = useThreadsPeek(!threadsSidebarOpen && !railPageOpen)
   const resizeRef = useRef<{
@@ -209,15 +225,15 @@ export default function App() {
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    if (profileReady || window.mousse.platform !== 'win32') return
+    if (profileReady) return
     let live = true
     let receivedUpdate = false
-    const unsubscribe = window.mousse.app.onWindowsGitSetupChanged((setup) => {
+    const unsubscribe = window.mousse.app.onGitSetupChanged((setup) => {
       receivedUpdate = true
-      setWindowsGitSetup(setup)
+      setGitSetup(setup)
     })
-    void window.mousse.app.windowsGitSetup().then((setup) => {
-      if (live && !receivedUpdate) setWindowsGitSetup(setup)
+    void window.mousse.app.gitSetup().then((setup) => {
+      if (live && !receivedUpdate) setGitSetup(setup)
     }).catch(() => {})
     return () => {
       live = false
@@ -279,7 +295,8 @@ export default function App() {
     }
     const finishHydration = (): void => {
       if (isCurrentProfile() && hydrationFinished && hydrationReceived) {
-        useAppStore.setState({ workspaceReady: true })
+        // The real chat takes the warm start's place in this update.
+        useAppStore.setState({ workspaceReady: true, warmView: null })
       }
     }
 
@@ -289,6 +306,22 @@ export default function App() {
       if (version) heldThreadList = version
       threadListRevision += 1
       setThreads(withNewerTimes(threads, useAppStore.getState().threads))
+    }
+
+    // One thread's change: put in the list held when it is newer than that list; read the whole list again when there
+    // is no versioned list to put it in, or it comes from a restarted service.
+    const applyThreadRow = (row: ThreadRowPayload) => {
+      if (!isCurrentProfile()) return
+      const action = threadRowAction(row.version, heldThreadList)
+      if (action === 'drop') return
+      if (action === 'refresh') {
+        void refreshThreads()
+        return
+      }
+      heldThreadList = row.version
+      threadListRevision += 1
+      const held = useAppStore.getState().threads
+      setThreads(withNewerTimes(withThreadRow(held, row), held))
     }
 
     const refreshThreads = async (): Promise<void> => {
@@ -411,6 +444,7 @@ export default function App() {
       window.mousse.tasks.onUpdated(applyIfCurrent(setTasks)),
       window.mousse.projects.onUpdated(applyIfCurrent(setProjects)),
       window.mousse.threads.onUpdated(applyThreadList),
+      window.mousse.threads.onRow(applyThreadRow),
       // A save moved only threads' times: those rows move ("Needs me", recent threads, row ages) without a whole list.
       window.mousse.threads.onTouched?.(applyIfCurrent(useAppStore.getState().applyThreadTouches)) ?? (() => undefined),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
@@ -611,15 +645,17 @@ export default function App() {
           <Suspense fallback={null}><SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} /></Suspense>
         </div>}
         <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} data-inbox-thread={inboxThread || undefined} style={{ display: railPageOpen && !inboxThread ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
-        {!profileReady && <WorkspaceLoading
+        {!workspaceShown && <WorkspaceLoading
           error={bootstrapError}
           onRetry={retryBootstrap}
-          windowsGitSetup={windowsGitSetup}
+          gitSetup={gitSetup}
+          onInstallGit={installGit}
           sidebarWidth={threadsSidebarOpen ? threadsSidebarWidth : undefined}
         />}
 
-        {/* Profile-scoped panels need the trusted binding before their mount effects run. */}
-        {profileReady && <>
+        {/* Profile-scoped panels need the trusted binding before their mount effects run. Before it, the warm start shows
+            the sidebar (inert) and the conversation as they were, and asks the service nothing. */}
+        {workspaceShown && <>
           <SlidingThreadsPane
             open={threadsSidebarOpen && !inboxThread}
             width={threadsSidebarWidth}
@@ -669,19 +705,24 @@ export default function App() {
           style={layoutMode === 'chats' && !botThread ? { display: 'none' } : undefined}
         >
           {inboxThread && <RunStrip />}
-          {botThread && <Suspense fallback={null}><BotThreadHeader botId={botThread.botId} threadId={botThread.threadId} /></Suspense>}
+          {botThread && profileReady && <Suspense fallback={null}><BotThreadHeader botId={botThread.botId} threadId={botThread.threadId} /></Suspense>}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
-          {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
+          {workspaceReady ? <OrchestratorChat key={profileId} />
+            : gitSetup ? <WorkspaceLoading conversationOnly gitSetup={gitSetup} onInstallGit={installGit} onRetry={retryBootstrap} />
+              : warmShown ? <WarmChat error={bootstrapError} onRetry={retryBootstrap} />
+              : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
           </KeepMounted>
-          <ThreadSideCard />
-          <QuickActionEditorHost />
+          {/* From the warm start on: the conversation column keeps the card's room from the first frame. */}
+          {workspaceShown && <ThreadSideCard />}
+          {profileReady && <QuickActionEditorHost />}
         </aside>
 
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {layoutMode === 'chats' && <KeepMounted active={!usageOpen && !botThread} className="keep-mounted-pane">
+        {layoutMode === 'chats' && !profileReady && <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
+        {layoutMode === 'chats' && profileReady && <KeepMounted active={!usageOpen && !botThread} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <Suspense fallback={null}><ChatWorkspace key={profileId} /></Suspense>}
@@ -706,8 +747,9 @@ export default function App() {
         <KeepMounted as="main" data-mousse="panel" active={panelShown} preserveLayout className={`main-area${panelClosing ? ' is-closing' : ''}`}
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
-          <MainViewTabs />
-          <MainViewPanel open={panelShown} />
+          {/* Before the binding the panel area only keeps its width, so the conversation does not move when it fills. */}
+          {profileReady && <MainViewTabs />}
+          {profileReady && <MainViewPanel open={panelShown} />}
         </KeepMounted>
         </>}
         </div>
@@ -721,6 +763,8 @@ export default function App() {
       {/* New bot opens from the Chats sidebar, which can show while the pane is on Projects (after a restart). */}
       {profileReady && newBotOpen && <Suspense fallback={null}><NewBotDialogHost /></Suspense>}
 
+      {/* A `mousse://pair` link that opened Mousse: the profile that joins, then Enter link. */}
+      {profileReady && <PairLinkHost />}
       <ToastHost />
       <BugReportDialogHost />
 

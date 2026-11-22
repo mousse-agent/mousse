@@ -74,6 +74,34 @@ export function findNetHelper(
   return built && existsSync(built) ? built : undefined
 }
 
+/**
+ * The engine commit an installed app's helper was built from: `ENGINE_COMMIT` beside it, which
+ * `scripts/build-net-helper.mjs` writes from the commit the app pins. Undefined when there is none.
+ */
+export function packagedHelperCommit(binary: string): string | undefined {
+  try {
+    const commit = readFileSync(join(dirname(binary), 'ENGINE_COMMIT'), 'utf8')
+      .trim()
+      .toLowerCase()
+    return /^[0-9a-f]{7,64}$/.test(commit) ? commit : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether a helper's build (`<commit>[-dirty]+<profile>`, as `--version` and hello say) is a clean release build of
+ * `commit`. Either commit may be abbreviated (at least 7 digits).
+ */
+export function helperBuildMatches(build: unknown, commit: string): boolean {
+  if (typeof build !== 'string') return false
+  const match = /^([0-9a-f]{7,64})\+release$/i.exec(build.trim())
+  if (!match) return false
+  const reported = match[1]!.toLowerCase(),
+    pinned = commit.trim().toLowerCase()
+  return pinned.length >= 7 && (reported.startsWith(pinned) || pinned.startsWith(reported))
+}
+
 const FILE_KEY_VARIABLE = 'MOUSSE_NET_ENGINE_INSECURE_FILE_KEY'
 
 /**
@@ -250,9 +278,16 @@ export function launchHelper(
       })
       child.on('exit', (code, signal) => {
         closeOnce()
-        // What the helper wrote last on its way out arrives before its streams close.
-        child.stderr.once('close', () => resolvePromise({ code, signal, stderr }))
-        if (child.stderr.closed) resolvePromise({ code, signal, stderr })
+        // What the helper wrote last on its way out arrives before its streams close. A process it started (an ssh
+        // client) may hold stderr open past its exit, so that wait is bounded.
+        const done = () => {
+          clearTimeout(drain)
+          resolvePromise({ code, signal, stderr })
+        }
+        const drain = setTimeout(done, engineLimits().helperStderrDrainMs)
+        drain.unref?.()
+        child.stderr.once('close', done)
+        if (child.stderr.closed) done()
       })
     }
   )

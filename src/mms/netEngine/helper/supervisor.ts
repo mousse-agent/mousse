@@ -1,5 +1,6 @@
 import { engineLimits } from '../limits'
 import { helperCode } from './appChannel'
+import { helperBuildMatches } from './process'
 import type { EngineHelper } from './connections'
 import type { LaunchedHelper } from './process'
 
@@ -7,7 +8,8 @@ import type { LaunchedHelper } from './process'
 export type HelperStatus =
   | { state: 'off' }
   | { state: 'not_in_build'; text: string }
-  | { state: 'starting' }
+  /** `step`: `launch` while the process starts, `hello` while it says who it is. */
+  | { state: 'starting'; step?: 'launch' | 'hello' }
   | { state: 'running'; generation: number; paused?: string; text?: string }
   | { state: 'restarting'; inMs: number; text?: string; reason?: string }
   | { state: 'mismatch'; text: string }
@@ -53,8 +55,13 @@ export class HelperSupervisor {
       launch(): Promise<LaunchedHelper>
       /** Says hello over the new helper's pipe; answers the app's view of it. */
       use(pipe: LaunchedHelper['pipe']): Promise<EngineHelper>
-      /** The helper speaks another major version: a packaging error, and the switch turns off. */
+      /**
+       * The helper speaks another major version, or is not the build this app was packaged with: a packaging error,
+       * and the switch turns off.
+       */
       mismatch(): void
+      /** The engine commit the helper must say it was built from (`build` in hello), when the app pins one. */
+      expectedBuild?(): string | undefined
       /** The endpoint belongs to another profile (`wrong_profile`): it is set aside, and the next start makes one. */
       wrongProfile(): void
       now?(): number
@@ -115,7 +122,7 @@ export class HelperSupervisor {
   private async cycle(): Promise<void> {
     const generation = ++this.generation
     this.timer = undefined
-    this.set({ state: 'starting' })
+    this.set({ state: 'starting', step: 'launch' })
     let launched: LaunchedHelper
     try {
       launched = await this.deps.launch()
@@ -136,6 +143,7 @@ export class HelperSupervisor {
     const startedAt = this.now()
     const current = { generation, launched } as NonNullable<typeof this.current>
     this.current = current
+    this.set({ state: 'starting', step: 'hello' })
     void launched.exited.then(({ code, signal, stderr }) =>
       this.exited(generation, startedAt, lastWords(stderr) || `exited ${code ?? signal}`)
     )
@@ -161,6 +169,8 @@ export class HelperSupervisor {
     }
     if (generation !== this.generation) return
     if (!Array.isArray(helper.info.proto) || helper.info.proto[0] !== 1) return this.mismatched(launched)
+    const expected = this.deps.expectedBuild?.()
+    if (expected && !helperBuildMatches(helper.info.build, expected)) return this.mismatched(launched)
     current.helper = helper
     this.lockedSince = undefined
     const show = (paused: string | undefined) => {

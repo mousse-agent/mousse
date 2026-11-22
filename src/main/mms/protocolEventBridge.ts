@@ -4,7 +4,7 @@
 
 import type { ProtocolEvent } from '../../mms/protocol'
 import type { PresentationState } from './PresentationState'
-import type { TurnState, TurnStateSnapshot } from '../../shared/types'
+import type { Thread, ThreadRowPayload, TurnState, TurnStateSnapshot } from '../../shared/types'
 
 export type BroadcastFn = (channel: string, data: unknown) => void
 
@@ -20,6 +20,20 @@ export function threadListPayload(data: unknown, list: 'threads' | 'all' = 'thre
   return version && typeof version.epoch === 'string' && typeof version.seq === 'number'
     ? { threads: value[list], version: { epoch: version.epoch, seq: version.seq, generation: listGeneration(version.epoch) } }
     : value[list]
+}
+
+/**
+ * A `threads.row` event as the `threads:row` channel carries it: the thread's row, or the id of one that left the list,
+ * with the version of the list it belongs to (numbered like `threadListPayload`'s). Null for anything else.
+ */
+export function threadRowPayload(data: unknown): ThreadRowPayload | null {
+  const value = data as { thread?: { id?: unknown }; removed?: unknown; version?: { epoch?: unknown; seq?: unknown } } | null
+  const version = value?.version
+  if (!version || typeof version.epoch !== 'string' || typeof version.seq !== 'number') return null
+  const listVersion = { epoch: version.epoch, seq: version.seq, generation: listGeneration(version.epoch) }
+  if (value.thread && typeof value.thread.id === 'string') return { thread: value.thread as Thread, version: listVersion }
+  if (typeof value.removed === 'string') return { removed: value.removed, version: listVersion }
+  return null
 }
 
 /**
@@ -72,10 +86,21 @@ export function bridgeProtocolEvent(
       broadcast('threads:updated', threadListPayload(event.data))
       return true
     }
+    // One thread changed: its row (or its removal), which the window puts in the list it holds.
+    case 'threads.row': {
+      const row = threadRowPayload(event.data)
+      if (row) broadcast('threads:row', row)
+      return true
+    }
     // Saves that moved only threads' times (`threads.touched`): the window patches those rows.
     case 'threads.touched': {
       const touches = (event.data as { touches?: unknown } | null)?.touches
       if (Array.isArray(touches)) broadcast('threads:touched', touches)
+      return true
+    }
+    case 'thread.backgroundWork': {
+      // The whole picture of what the thread runs in the background (the composer's status row).
+      if (threadId != null && event.data && typeof event.data === 'object') broadcast('threads:backgroundWork', event.data)
       return true
     }
     case 'subagents.updated': {
@@ -219,6 +244,11 @@ export function bridgeProtocolEvent(
     // Another view changed what the next commit takes: the Changes tab reads it again.
     case 'git.selectionChanged': {
       broadcast('git:selectionChanged', event.data)
+      return true
+    }
+    // Mousse changed these threads' branches: their cards read them again.
+    case 'git.headsChanged': {
+      broadcast('git:headsChanged', event.data)
       return true
     }
     case 'scheduled.status': {

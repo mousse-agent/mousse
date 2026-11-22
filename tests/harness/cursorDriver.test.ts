@@ -5,9 +5,9 @@
  * turn once as interrupted, and the uncontrolled-tools rules.
  */
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
 import { CursorSessions, cursorToolActivity, cursorToolName, type SavedCursorAgent } from '../../src/mms/harness/cursor/session'
@@ -51,7 +51,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
   const texts = new Map<string, string>()
-  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl } = {}): TurnSpec => ({
+  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; cwd?: string | null; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl } = {}): TurnSpec => ({
     binding,
     input: {
       threadId,
@@ -60,7 +60,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       model: binding.model,
       mode: 'agent',
       prompt: options.prompt ?? 'hi',
-      cwd: home,
+      cwd: options.cwd === undefined ? home : options.cwd,
       nativeHistory: options.history ?? '',
       signal: options.signal ?? new AbortController().signal
     } as unknown as TurnInput,
@@ -116,6 +116,28 @@ describe('Cursor turns at the host protocol', () => {
     await expect((await turn('thread')).result).rejects.toThrow(/still running an earlier request/)
     expect(host.calls('cancelRun')).toEqual([])
     expect(host.calls('send')).toHaveLength(1)
+  })
+
+  it('runs a standalone turn (cwd: null) in a private per-thread workspace inside the instance state dir', async () => {
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-standalone' }),
+      send: (params, fake) => {
+        setImmediate(() => {
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'text-delta', text: `hi from ${params.agentId}` } })
+          fake.emit({ event: 'run_end', runId: 'run-1', status: 'finished' })
+        })
+        return { runId: 'run-1' }
+      }
+    })
+    const { home, harness, turn } = setup(host.connect)
+    const result = await (await turn('../../outside', { cwd: null })).result
+    expect(result).toMatchObject({ text: 'hi from agent-standalone', aborted: false })
+    const expected = harness.standaloneWorkspace(INSTANCE, '../../outside')
+    expect(expected).toBeTruthy()
+    expect(host.calls('create')[0]).toMatchObject({ cwd: expected })
+    expect(existsSync(expected!)).toBe(true)
+    expect(statSync(expected!).isDirectory()).toBe(true)
+    expect(relative(home, expected!).startsWith('..')).toBe(false)
   })
 
   it('ends a turn whose reply is only a transport failure once, after its tool ran, and sends nothing again', async () => {

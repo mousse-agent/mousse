@@ -71,6 +71,19 @@ export class NotificationThreadIndex {
     this.byProfile.set(profileId, next)
   }
 
+  /** Puts one thread's row in, or takes it out, from a `threads.row` event (`{ thread }` or `{ removed }`). */
+  noteRow(profileId: string, data: unknown): void {
+    const row = data as { thread?: NotificationThread | null; removed?: unknown } | null
+    const threads = this.byProfile.get(profileId)
+    if (!threads) return
+    const thread = row?.thread
+    if (thread && typeof thread.id === 'string') {
+      threads.set(thread.id, { id: thread.id, name: thread.name, lineage: thread.lineage, projectId: thread.projectId, ...(thread.hidden ? { hidden: true as const } : {}) })
+    } else if (typeof row?.removed === 'string') {
+      threads.delete(row.removed)
+    }
+  }
+
   /** Replaces a profile's project names from a project list, or from an event carrying `{ projects }`. */
   noteProjects(profileId: string, data: unknown): void {
     const rows = rowsOf(data, 'projects')

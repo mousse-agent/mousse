@@ -20,6 +20,7 @@ import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex
 import { codexBotSandbox, codexTurnPolicy } from '../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MODEL_PROVIDER, CodexProviderService, type CodexChatInput } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { CodexAdapter } from '../src/mms/harness/drivers/codex/adapter'
+import { codexFixtureAccessToken } from '../src/mms/run/testkit/codexAppServerReplay'
 import type { ChildTurnPolicy } from '../src/mms/harness/adapter'
 
 const SHARED: ChildTurnPolicy = { readOnly: true }
@@ -249,9 +250,12 @@ describe('Codex children', () => {
   let home: string
   const services: CodexProviderService[] = []
   const questions = new UserQuestionService()
+  const WORKSPACE = 'fixture-workspace'
+  const TOKEN = codexFixtureAccessToken(WORKSPACE)
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-child-'))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: WORKSPACE, access_token: TOKEN } }))
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -308,7 +312,9 @@ describe('Codex children', () => {
           const reply: Record<string, unknown> =
             options.answer?.(message, send) ??
             (message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
-            : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
+            // The signed-in terminal account, proven as Codex proves it: the selected workspace and the token it holds match auth.json.
+            : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, workspaceRouting: { chatgptAccountId: WORKSPACE }, requiresOpenaiAuth: true } }
+            : message.method === 'getAuthStatus' ? { result: { authMethod: 'chatgpt', authToken: TOKEN } }
             : message.method === 'config/read' ? (options.configFails ? { error: { code: -32603, message: 'unreadable' } } : { result: { config: { mcp_servers: options.mcpServers ?? {} }, layers: options.layers ?? [] } })
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
@@ -345,7 +351,7 @@ describe('Codex children', () => {
   const create = (s: ReturnType<typeof server>) => {
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-    const service = new CodexProviderService(home, questions, { launch: s.launch }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const service = new CodexProviderService(home, questions, { launch: s.launch }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(service)
     return service
   }
@@ -368,7 +374,7 @@ describe('Codex children', () => {
     await chat(service, { child: SHARED })
     service.commitConversation('child', '')
     service.stop()
-    const restarted = new CodexProviderService(home, questions, { launch: s.launch }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const restarted = new CodexProviderService(home, questions, { launch: s.launch }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(restarted)
     await chat(restarted, { child: SHARED })
     expect(s.requests('thread/resume')[0].params).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'on-request' })
@@ -376,8 +382,8 @@ describe('Codex children', () => {
     const turns = s.requests('turn/start')
     expect(turns).toHaveLength(3)
     for (const turn of turns) expect(turn.params).toMatchObject({ approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
-    // The turns themselves never read or write the user's Codex config.
-    expect(s.messages.map((message) => message.method)).not.toContain('config/read')
+    // The startup sign-in check reads the store. Shared children need no separate MCP setup read.
+    expect(s.requests('config/read').some((message) => message.params?.includeLayers)).toBe(false)
   })
 
   it('an isolated child and a thread that is not a subagent run under the thread\'s permission mode', async () => {
@@ -739,7 +745,7 @@ describe('Codex children', () => {
       const withCaps = (s: ReturnType<typeof server>, caps: { helperIdleCapMs?: number; helperPinCapMs?: number }) => {
         mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
         writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-        const service = new CodexProviderService(home, questions, { launch: s.launch, ...caps }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+        const service = new CodexProviderService(home, questions, { launch: s.launch, ...caps }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
         services.push(service)
         return service
       }
@@ -994,7 +1000,7 @@ describe('Codex children', () => {
     const createFast = (s: Server, deps: Partial<ConstructorParameters<typeof CodexProviderService>[2]> = {}) => {
       mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
       writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-      const service = new CodexProviderService(home, questions, { launch: s.launch, helperTiming: FAST, helperSweepMs: 900, ...deps }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+      const service = new CodexProviderService(home, questions, { launch: s.launch, helperTiming: FAST, helperSweepMs: 900, ...deps }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
       services.push(service)
       return service
     }

@@ -67,7 +67,8 @@ export class ThreadExpiryService {
     if (!this.stopped) return
     this.stopped = false
     this.offRunEnd = this.deps.onRunEnd((threadId) => {
-      if (this.waiting.has(threadId) || this.waitingOwnerOf(threadId)) void this.pass()
+      // Every run's end comes here: with nothing waiting to expire, no thread list is looked at.
+      if (this.waiting.size && (this.waiting.has(threadId) || this.waitingOwnerOf(threadId))) void this.pass()
     })
     void this.pass()
   }

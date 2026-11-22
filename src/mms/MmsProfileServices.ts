@@ -9,6 +9,7 @@ import { userAction } from './git/gitPolicy'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
+import { registerBranchNamer } from './workspace/branchNaming'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
 import { EventEmitter } from 'node:events'
@@ -55,7 +56,7 @@ import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
-import { personTurnRequest } from './run/mcp/appTools/agentMessage'
+import { isPersonMessage, personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { jobThreadIn, lastReplyOf, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
@@ -63,7 +64,7 @@ import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
-import { pullRequestStateOf, wakeThreadState } from './bots/wakeSources'
+import { pullRequestStateOf, wakeThreadState, type WakeThreadDeps } from './bots/wakeSources'
 import { wakeEventLabel } from '../shared/bots/personal/wakes'
 import { botThreadReach } from './run/mcp/appTools/thread'
 import { openPersonalBots } from './bots/activation/open'
@@ -102,6 +103,10 @@ import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
 import { RunningRegistry } from './running/RunningRegistry'
+import { ThreadMonitors, withShellPath } from './monitors/ThreadMonitors'
+import { ThreadWakes } from './wakes/ThreadWakes'
+import { sharedShellPath } from './harness/shellPath'
+import { postNote } from './run/mcp/appTools/threadNotes'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
 import { McpManager } from './integrations/mcp/McpManager'
 import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
@@ -112,6 +117,7 @@ import type { TerminalSendSink } from './terminals/PtyManager'
 import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { UnseenDoneStore } from './runtime/UnseenDoneStore'
+import { LiveWorkMarks } from './runtime/LiveWorkMarks'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
@@ -130,6 +136,7 @@ import { mousseIdNetModule } from './net/plus'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
 import { PeerDirectory } from './bridge/peers'
 import { NetEngineService } from './netEngine/NetEngineService'
+import { loginStartQuestion } from './netEngine/loginStart'
 import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
@@ -149,7 +156,7 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from './execution/OwnedWorkBarrier'
 import { threadScope, type WorkScope } from './execution/workScope'
-import { canonicalPathSync, pathsOverlap } from './lifecycle/canonicalPath'
+import { canonicalPathSync, pathsOverlap, pathWithin } from './lifecycle/canonicalPath'
 import { readThreadWorkspaceRecord } from './workspace/ThreadWorkspaceManager'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
@@ -159,9 +166,9 @@ import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCl
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
-import { threadHasPendingWork } from './lifecycle/threadIdle'
+import { threadDescendants, threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
@@ -181,6 +188,9 @@ import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
 import { trustExistingProjectsOnce } from './git/repoPrograms'
 import { LimitPoller } from './usageHistory/limitPoller'
+import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup/startupTiming'
+import { logInfo } from './log/diag'
+import { onThreadBranchChanged } from './workspace/threadHeads'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -281,6 +291,7 @@ export class MmsProfileServices {
   readonly domains: DomainHandlerRegistry
   readonly config: MousseConfigStore
   readonly settings: SettingsStore
+  private forgetBranchNamer?: () => void
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
   readonly claudeSubscription: ClaudeSubscriptionProviderService
@@ -432,6 +443,18 @@ export class MmsProfileServices {
   private webhooksClosed = false
   private started = false
   private stopped = false
+  /**
+   * The daemon leaves the start's slow passes (the lifecycle pass, the runtime pass, the search index's first sweep) for
+   * after it is ready (`startAfterReadyWork`); every other owner runs them during its start, as before.
+   */
+  private readonly deferStartupWork: boolean
+  /** Whether the daemon is ready, as its profile host knows it: a profile started after that begins its deferred work at once. */
+  private daemonReady: () => boolean = () => false
+  /** Settles once the start's lifecycle pass is done: deletes and cleanup runs wait for it (`untilStartupLifecycleDone`). */
+  private startupLifecycleDone: Promise<void> = Promise.resolve()
+  private finishStartupLifecycle: () => void = () => undefined
+  private deferredStartupWork?: Promise<void>
+  private startupWorkStopped = false
   private readonly requests = new OwnedWorkBarrier()
   private stopOperation?: Promise<void>
   private readonly ownerHandle: MmsOwnerHandle | null
@@ -461,6 +484,7 @@ export class MmsProfileServices {
   ) {
     this.config = config
     this.ownerHandle = ownerHandle
+    this.deferStartupWork = opts?.ownerKind === 'daemon'
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
     this.domains = shared.domains
@@ -606,6 +630,11 @@ export class MmsProfileServices {
       this.projects,
       { questions: this.questions, modeRegistry: this.modeRegistry }
     )
+    // New worktree branches of this profile's threads are named by its title model, as Settings → Storage → Branches says.
+    this.forgetBranchNamer = registerBranchNamer(homeDir, {
+      settings: () => this.settings.get().branches,
+      ask: (request, signal) => this.orchestrator.askBranchName(request, signal)
+    })
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, remote sends). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
@@ -617,7 +646,11 @@ export class MmsProfileServices {
       registry: this.orchestrator.mcpToolRegistry(),
       relay: this.orchestrator.relayHandler(),
       boundary: this.orchestrator.mcpToolBoundary(),
-      attribute: (threadId, meta) => this.orchestrator.attributeMcpCall(threadId, meta)
+      attribute: (threadId, meta) => this.orchestrator.attributeMcpCall(threadId, meta),
+      compactToolSchemas: (provider) =>
+        this.providerInstances.get(provider)?.driver === 'antigravity' ||
+        provider === 'antigravity' ||
+        provider.startsWith('antigravity:')
     })
     this.orchestrator.setAppletStore(this.applets)
     // Registry agents install once per installation; each profile records which versions it uses.
@@ -782,24 +815,8 @@ export class MmsProfileServices {
       },
       runs: () => this.runEngine,
       // What a bot's wakes wait on: one of the owner's threads it may see, and a pull request of one of their projects.
-      wakeThread: (from, threadId) => wakeThreadState({
-        thread: (id) => this.threads.getThread(id),
-        trashed: (id) => {
-          const record = this.threads.lifecycleStore.get(id)
-          return Boolean(record && record.state !== 'active')
-        },
-        reachable: (caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id)),
-        working: (id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null || this.runEngine.store.getPausedRun(id) !== null,
-        lastRun: (id) => {
-          const run = this.runEngine.listRuns(id, { limit: 1 })[0]
-          return run ? { status: run.status, endedAt: run.completedAt } : undefined
-        }
-      }, from, threadId),
-      pullRequestState: (repo, number) => pullRequestStateOf({
-        folders: () => this.projects.listProjects().map((project) => project.path),
-        repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
-        pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
-      }, repo, number),
+      wakeThread: (from, threadId) => wakeThreadState(this.wakeThreadDeps((caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id))), from, threadId),
+      pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works. Of
       // those done, only the ones not archived and updated in the last six hours ("Recent").
       launchedThreads: (creators) => launchedThreadsIn({
@@ -905,6 +922,7 @@ export class MmsProfileServices {
         journal: {
           asksFirstEnabled: () => botAsksFirst(this.settings.get()),
           readThread: (threadId) => this.threads.loadThreadData(threadId),
+          transcriptStamp: (threadId) => this.threads.transcriptStamp(threadId),
           listThreads: () => botThreadsForCatchUp(store.captureThreads()),
           // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
           isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
@@ -1012,10 +1030,45 @@ export class MmsProfileServices {
       const row = botStore.registry(botId)
       return Boolean(row && !row.deletedAt && !row.pausedReason && botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_COMPUTER_PERMISSION))
     } : null)
+    // What threads' agents leave running in the background (#1605). Its notices go to the thread's inbox, the path
+    // agents' notes take; a restart tells each thread whose monitors it ended, once the daemon is ready.
+    const runEngine = this.runEngine
+    // Scripts find what the agent's own commands find: the login shell's PATH, asked once per daemon and never waited for
+    // (a script started before the answer runs with the inherited PATH).
+    let shellPath: readonly string[] = []
+    void sharedShellPath().then((result) => { shellPath = result.entries }, () => undefined)
+    const monitors = new ThreadMonitors({
+      env: () => withShellPath(process.env, shellPath),
+      post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
+      working: (threadId, active) => this.threadRuntimes?.setPendingMonitors(threadId, active),
+      changed: (threadId) => this.orchestrator.backgroundWorkChanged(threadId),
+      recordFile: join(this.homeDir, 'monitors.json'),
+      threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
+    })
+    this.monitors = monitors
+    this.orchestrator.setMonitors(monitors)
+    // Threads' agents' own wake-ups (`wake`): kept per profile, delivered to the thread's inbox as notes are. They read
+    // threads and pull requests as a bot's wakes do; a thread's agent may wait on any thread but a bot's, and a shared
+    // thread's never on a private one.
+    const threadWakes = new ThreadWakes({
+      file: join(this.homeDir, 'thread-wakes.json'),
+      post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
+      changed: (threadId) => this.orchestrator.backgroundWorkChanged(threadId),
+      threadState: (from, threadId) => wakeThreadState(this.wakeThreadDeps((caller, id) => {
+        if (this.orchestrator.mcpToolHost().botRole?.(id)) return false
+        return !(this.threads.getThread(id)?.localOnly && !this.threads.getThread(caller)?.localOnly)
+      }), from, threadId),
+      pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
+      personLastWroteAt: (threadId) => [...this.orchestrator.visibleMessagesWithoutLoading(threadId)].reverse().find((message) => !message.hidden && isPersonMessage(message))?.timestamp,
+      threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
+    })
+    this.threadWakes = threadWakes
+    this.orchestrator.setThreadWakes(threadWakes)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
       terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
       watchers: () => personalBots?.runningWatchers() ?? [],
+      monitors: () => monitors.processes(),
       thread: (threadId) => orchestrator.runningSources().thread(threadId),
       botName: (botId) => personalBots?.botName(botId)
     }))
@@ -1069,7 +1122,8 @@ export class MmsProfileServices {
       orchestrator: this.orchestrator,
       ptyManager: this.ptyManager,
       questions: this.questions,
-      unseenDone: new UnseenDoneStore(homeDir)
+      unseenDone: new UnseenDoneStore(homeDir),
+      liveWork: new LiveWorkMarks(homeDir)
     })
     // A bot's task list changed: its header's checklist reads it again.
     if (personalBots) {
@@ -1079,6 +1133,10 @@ export class MmsProfileServices {
       this.threadRuntimes.on('tasks.updated', onTasks)
       this.platform.onDispose(() => { this.threadRuntimes.off('tasks.updated', onTasks) })
     }
+    // Mousse made a thread's worktree or renamed its branch: windows read that card's branch again (`git.heads`).
+    this.platform.onDispose(onThreadBranchChanged((threadId) => {
+      if (this.threads.getThread(threadId)) this.events.broadcast('protocol:event', { type: 'git.headsChanged', data: { threadIds: [threadId] } })
+    }))
     // Minimum MMS-owned persistence so headless turns survive without the GUI.
     // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).
     this.orchestrator.setPersistCallback((threadId) => {
@@ -1406,6 +1464,8 @@ export class MmsProfileServices {
     this.netEngine = new NetEngineService({
       profileDir: this.homeDir,
       profileId: this.profileId,
+      // Nothing is read until a window turns the switch on or reads the status.
+      loginStart: loginStartQuestion(shared.installationHome),
       net: this.net,
       bridge: () => this.bridgeService,
       // "<computer> (<profile>)", as the other computer's question names it (§5.1).
@@ -1534,11 +1594,12 @@ export class MmsProfileServices {
       beforePurgeRemoval: async (record) => {
         // A delete that keeps the thread's work keeps its snapshots too: nothing is released, and no store is collected.
         if (record.purge?.keptWork) return
+        const owned = this.lifecycleOwnedTasks(record.taskId)
         // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
         // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
         // tries again instead of leaving the refs or the store behind for good.
         const failures: string[] = []
-        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+        for (const task of owned) {
           try { await releaseThreadSnapshots(task.location, undefined, { discardAuthorized: Boolean(record.purge?.discardAuthorized) }) } catch (error) { failures.push(`${task.taskId}: ${error instanceof Error ? error.message : String(error)}`) }
         }
         if (failures.length) throw new Error(`The snapshots of a deleted thread could not be released yet; the delete will try again. ${failures.join('; ')}`)
@@ -1609,9 +1670,14 @@ export class MmsProfileServices {
     })
     // A bot's wakes on a thread look when its run ends or it is archived, not only at the next tick.
     this.orchestrator.on('run-event', (event: ThreadEvent) => {
-      if (event.type === 'run.status' && TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) this.personalBots?.threadRunEnded(event.threadId)
+      if (event.type !== 'run.status' || !TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) return
+      this.personalBots?.threadRunEnded(event.threadId)
+      this.threadWakes.threadRunEnded(event.threadId)
     })
-    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.personalBots?.threadRunEnded(payload.threadId))
+    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => {
+      this.personalBots?.threadRunEnded(payload.threadId)
+      this.threadWakes.threadRunEnded(payload.threadId)
+    })
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
     // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.settleThread`).
@@ -1634,6 +1700,7 @@ export class MmsProfileServices {
       policy: this.storagePolicy,
       clock: storageClock,
       idle: (threadId) => this.threadPendingWork(threadId),
+      otherWork: (path, exceptThreadId) => this.otherWorkIn(path, exceptThreadId),
       installationHome: shared.installationHome,
       codeHost: this.gitService.codeHost,
       browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
@@ -1686,6 +1753,35 @@ export class MmsProfileServices {
     else settle()
   }
 
+  /**
+   * How a wake sees a thread (`wakeThreadState`), a bot's and a thread agent's alike; `reachable` is who may wait on it.
+   * A thread works while a turn or run of it is live, waits its turn, or is paused by a usage limit (it goes on by itself).
+   */
+  private wakeThreadDeps(reachable: (from: string, threadId: string) => boolean): WakeThreadDeps {
+    return {
+      thread: (id) => this.threads.getThread(id),
+      trashed: (id) => {
+        const record = this.threads.lifecycleStore.get(id)
+        return Boolean(record && record.state !== 'active')
+      },
+      reachable,
+      working: (id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null || this.runEngine.store.getPausedRun(id) !== null,
+      lastRun: (id) => {
+        const run = this.runEngine.listRuns(id, { limit: 1 })[0]
+        return run ? { status: run.status, endedAt: run.completedAt } : undefined
+      }
+    }
+  }
+
+  /** A pull request a wake waits on, read through the first of the person's projects whose repository it is. */
+  private wakePullRequestState(repo: string, number: number): ReturnType<typeof pullRequestStateOf> {
+    return pullRequestStateOf({
+      folders: () => this.projects.listProjects().map((project) => project.path),
+      repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
+      pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
+    }, repo, number)
+  }
+
   /** Why a thread is not idle for storage cleanup, or undefined. Looks only at what is already loaded. */
   private threadPendingWork(threadId: string): string | undefined {
     return threadHasPendingWork(
@@ -1705,6 +1801,22 @@ export class MmsProfileServices {
       },
       threadId
     )
+  }
+
+  /**
+   * Why others use `path`, a worktree storage cleanup would remove, or undefined. A project whose folder is in it keeps
+   * it even with nothing running: removing it takes that project's folder away. A running turn or an open terminal of a
+   * thread other than `exceptThreadId` and its subagents keeps it while it works there. Reads only what is in memory.
+   */
+  private otherWorkIn(path: string, exceptThreadId?: string): string | undefined {
+    const root = canonicalPathSync(path)
+    const inside = (folder: string | undefined) => Boolean(folder) && pathWithin(root, canonicalPathSync(folder!))
+    if (this.projects.listProjects().some((project) => inside(project.path))) return "A project's folder is in this worktree"
+    let except: Set<string> | undefined
+    const other = (threadId: string) => !(except ??= new Set(exceptThreadId ? [exceptThreadId, ...threadDescendants(this.threads.listAllThreads(), exceptThreadId)] : [])).has(threadId)
+    if (this.orchestrator.liveWorkspaceClaims().some((claim) => inside(claim.path) && other(claim.threadId))) return 'Another thread is working in this worktree'
+    if (this.ptyManager.runningTerminals().some((terminal) => inside(terminal.cwd) && other(terminal.threadId) && this.ptyManager.isAlive(terminal.ptyId))) return 'A terminal is open in this worktree'
+    return undefined
   }
 
   /** The profile's execution a delete looks at: turns and sends, agent and chat runs, automations, MCP work. */
@@ -1922,14 +2034,17 @@ export class MmsProfileServices {
    * Deletes a thread and its subagent threads for good (`ThreadDeleter`): it must be archived, or be Mousse's own
    * delete (`internal`), and only a person in the app may discard unpublished work.
    */
-  deleteThreadForGood(taskId: string, options: DeleteOptions): Promise<TaskLifecycleRecord> {
+  async deleteThreadForGood(taskId: string, options: DeleteOptions): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
+    // After the start's lifecycle pass, which finishes the deletes a crash cut short and reads the same records.
+    await this.startupLifecycleDone
     return this.threadDeletes.delete(taskId, options)
   }
 
   /** `threads.delete` before its admission: see `ThreadDeleter.stopBeforeDelete`. */
   async stopThreadBeforeDelete(threadId: string, options: { human: boolean; discard: boolean }): Promise<void> {
     this.threads.assertLifecycleMutationAvailable()
+    await this.startupLifecycleDone
     try {
       await this.threadDeletes.stopBeforeDelete(threadId, options)
     } catch (error) {
@@ -2014,11 +2129,18 @@ export class MmsProfileServices {
     const running = (): string[] => this.runningForDelete(threadIds)
     const stopping = running()
     if (!stopping.length) return
-    for (const threadId of stopping) {
-      await this.orchestrator.stopThread(threadId, 'deleted', { clearQueue: true }).catch((error: unknown) => {
-        console.warn('a delete could not stop the thread\'s turn', { threadId, error: error instanceof Error ? error.message : String(error) })
-      })
-    }
+    // The Stops get the same bound as the wait for the turns to end after them. A Stop that does not answer leaves the
+    // delete to the trash's own check, which refuses while a turn still runs, instead of holding the delete with no answer.
+    const stops = (async () => {
+      for (const threadId of stopping) {
+        await this.orchestrator.stopThread(threadId, 'deleted', { clearQueue: true }).catch((error: unknown) => {
+          console.warn('a delete could not stop the thread\'s turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+        })
+      }
+    })()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([stops, new Promise((resolve) => { timer = setTimeout(resolve, this.deleteStopWaitMs) })])
+    clearTimeout(timer)
     const until = Date.now() + this.deleteStopWaitMs
     while (running().length && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50))
   }
@@ -2109,6 +2231,9 @@ export class MmsProfileServices {
   /** Bug reports: filing, the reports filed from here, and agents' drafts waiting for the person. */
   bugReports!: BugReportService
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
+  /** Threads' monitors, background commands and `keep_working` holds. */
+  readonly monitors: ThreadMonitors
+  readonly threadWakes: ThreadWakes
   automationDrafts!: AutomationDrafts
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
@@ -2368,6 +2493,9 @@ export class MmsProfileServices {
 
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
+    // The start's deferred passes stop at their next step; what waits for the lifecycle pass goes on (and is refused).
+    this.startupWorkStopped = true
+    this.finishStartupLifecycle()
     void this.undoRetention.stop()
     void this.threadExpiry.stop()
     void this.pullRequestWatch.stop()
@@ -2391,6 +2519,8 @@ export class MmsProfileServices {
     this.secretSweepTimer = null
     this.secretRequests?.dispose()
     this.bugReports?.dispose()
+    this.monitors.close()
+    this.threadWakes.close()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -2466,22 +2596,44 @@ export class MmsProfileServices {
 
   async initialize(): Promise<void> {
     // The chosen worktree folders that are connected, with what Mousse made in them, before anything recovers or runs Git there.
-    await refreshWorktreeFolders()
+    await startupPhase('init.worktreeFolders', () => refreshWorktreeFolders())
+    if (this.deferStartupWork) {
+      // The daemon finishes the lifecycle pass after it is ready (`startAfterReadyWork`); deletes wait for it until then.
+      this.startupLifecycleDone = new Promise<void>((resolve) => { this.finishStartupLifecycle = resolve })
+    } else {
+      await this.recoverLifecycleAtStart()
+      startupPhase('init.agentEpisodes', () => { for (const thread of this.threads.listAllThreads()) this.interruptOrphanedEpisodes(thread.id) })
+      startupPhase('init.subagentLineage', () => this.repairSubagentLineage())
+    }
+    // The worktree manager opens its repository when an operation first needs it (`WorktreeManager.getRepository`);
+    // project-bound operations call RepositoryContext.open() themselves and fail clearly if their project is invalid.
+    this.config.startWatching(() => {
+      /* external edits reload sections; stores read on demand */
+    })
+  }
+
+  /**
+   * What a crash or a stop left of the trash: deletes cut short keep their work, interrupted trash and restore moves
+   * finish, the old trash comes back archived, and deletes still in the trash are finished or put back.
+   */
+  private async recoverLifecycleAtStart(): Promise<void> {
     // A delete an older version cut short keeps the thread's work before recovery resumes it; only an expiry's goes on.
-    const keeping = this.lifecycle.cleanup.keepWorkOfInterruptedDeletes()
+    const keeping = startupPhase('init.keepWorkOfInterruptedDeletes', () => this.lifecycle.cleanup.keepWorkOfInterruptedDeletes())
     if (keeping.kept.length) console.warn('deletes cut short keep their threads’ worktrees and refs', { threads: keeping.kept })
     // One that could not be set to keep the work is left pending, untouched, and never resumed as it began; the next start tries again.
     if (keeping.failed.length) console.warn('deletes cut short could not be set to keep their work; left pending until the next start', { failed: keeping.failed })
-    await this.lifecycle.recoverAll(keeping.skip)
+    await startupPhase('init.lifecycleRecovery', () => this.lifecycle.recoverAll(keeping.skip))
     // After the trash operations a crash left are finished: once, what was in the old trash comes back, archived.
     // Only then is a thread still in the trash a delete that was cut short, and it is finished.
     try {
-      const returned = await this.returnTrashToArchive()
+      const returned = await startupPhase('init.trashToArchive', () => this.returnTrashToArchive())
       if (returned.failed.length) console.warn('some threads in the trash could not be moved to Archived; trying again at the next start', { failed: returned.failed })
       // While the move is still bringing threads back, those are left to it; everything else is finished now.
-      const finished = await this.finishCutShortDeletes(new Set(returned.waiting))
+      const finished = await startupPhase('init.finishCutShortDeletes', () => this.finishCutShortDeletes(new Set(returned.waiting)))
       const kept = finished.filter((entry) => entry.outcome === 'kept')
       if (kept.length) console.warn('some threads in the trash could not be finished or put back; trying again at the next start', { kept })
+      const givenUp = finished.filter((entry) => entry.outcome === 'archived' && entry.reason)
+      if (givenUp.length) console.warn('deletes that kept being refused were given up; their threads are back in Archived', { threads: givenUp })
     } catch (error) {
       console.warn('threads in the trash could not be moved to Archived or finished', { error: error instanceof Error ? error.message : String(error) })
     }
@@ -2490,16 +2642,62 @@ export class MmsProfileServices {
       const trash = this.lifecycle.cleanup.policy()
       if (trash.automaticPurge) this.lifecycle.cleanup.configure({ ...trash, automaticPurge: false }, true)
     } catch { /* An unreadable policy keeps the sweep off: it reads the same file and stops. */ }
-    for (const thread of this.threads.listAllThreads()) {
-      const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
-      if (existsSync(episodes.path)) episodes.interruptOrphans()
+  }
+
+  /** Named agents' episodes a restart cut short end as interrupted (`AgentEpisodeStore.interruptOrphans`). */
+  private interruptOrphanedEpisodes(threadId: string): void {
+    const episodes = new AgentEpisodeStore(this.threads.getThreadDir(threadId))
+    if (existsSync(episodes.path)) episodes.interruptOrphans()
+  }
+
+  /**
+   * Called once the daemon is ready (`MousseMainService.afterReady`), and by a profile that starts after that: the
+   * start's slow passes run now, in the background, each logged with how long it took. A request that needs one waits
+   * only for it: a delete or a cleanup run for the lifecycle pass (`untilStartupLifecycleDone`), a search for the
+   * index's first sweep, and a thread's first use for its own part of the runtime pass (`ThreadRuntimeManager`).
+   */
+  startAfterReadyWork(): void {
+    if (!this.deferStartupWork || !this.started || this.deferredStartupWork || this.startupWorkStopped) return
+    const work = this.runDeferredStartupWork()
+    this.deferredStartupWork = work
+    void work.catch(() => undefined)
+  }
+
+  /** Settles once the start's lifecycle pass is done (at once for an owner that does it during its start). */
+  untilStartupLifecycleDone(): Promise<void> {
+    return this.startupLifecycleDone
+  }
+
+  private async runDeferredStartupWork(): Promise<void> {
+    const stopping = (): boolean => this.startupWorkStopped
+    const log = (line: string): void => logInfo('startup', this.getInstallationHost() ? line : `profile ${this.profileId.slice(0, 8)}: ${line}`)
+    try {
+      await startupBackgroundTimed('lifecycle', async () => {
+        // Every lifecycle record is read and checked once, a few at a time, so the passes below do not hold up requests.
+        const store = this.threads.lifecycleStore
+        const tasks = join(store.root, 'tasks')
+        const ids = existsSync(tasks) ? readdirSync(tasks).filter((name) => name.endsWith('.json')).map((name) => name.slice(0, -5)) : []
+        await forEachYielding(ids, (id) => { try { store.get(id) } catch { /* Reported by the pass that needs it. */ } }, stopping)
+        if (!stopping()) await this.recoverLifecycleAtStart()
+      }, log)
+      // Before deletes go ahead: their inventory reads the agents' episodes, and the subagents they include are found by lineage.
+      if (!stopping()) await startupBackgroundTimed('agentEpisodes', () => forEachYielding(this.threads.listAllThreads(), (thread) => {
+        try { this.interruptOrphanedEpisodes(thread.id) } catch (error) {
+          console.warn('agent episodes a restart cut short could not be ended', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
+        }
+      }, stopping), log)
+      if (!stopping()) await startupBackgroundTimed('forkCheckpoints', () => this.orchestrator.recoverForkCreations(stopping), log)
+      if (!stopping()) await startupBackgroundTimed('subagentLineage', async () => this.repairSubagentLineage(), log)
+    } finally {
+      this.finishStartupLifecycle()
     }
-    this.repairSubagentLineage()
-    // The worktree manager opens its repository when an operation first needs it (`WorktreeManager.getRepository`);
-    // project-bound operations call RepositoryContext.open() themselves and fail clearly if their project is invalid.
-    this.config.startWatching(() => {
-      /* external edits reload sections; stores read on demand */
-    })
+    if (stopping()) return
+    // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI, a few threads at a time,
+    // alongside the passes below.
+    void startupBackgroundTimed('queueRecovery', () => this.orchestrator.recoverStartupQueues(), log)
+    // The storage service is the only scheduler; it runs the trash sweep inside its own run.
+    this.storageCleanup.start()
+    await startupBackgroundTimed('threadRuntimes', () => this.threadRuntimes.settleRestartedThreads(stopping), log)
   }
 
   /**
@@ -2657,6 +2855,13 @@ export class MmsProfileServices {
     }
     // Reads the usage limits every 15 minutes, its first read a full interval after start.
     this.limitPoller.start()
+    // A profile started after the daemon is ready (created, restored) runs its deferred passes now.
+    if (this.daemonReady()) this.startAfterReadyWork()
+  }
+
+  /** The profile host's answer to whether the daemon is ready (`ProfileHost.startAfterReadyWork`). */
+  setDaemonReady(ready: () => boolean): void {
+    this.daemonReady = ready
   }
 
   private async startOwned(): Promise<void> {
@@ -2667,62 +2872,75 @@ export class MmsProfileServices {
     // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn,
     // and before anything that can send one (H4): scheduled jobs and the network both
     // start below, so none of their sends can create a run that boot recovery then interrupts.
-    this.orchestrator.recoverRunEngineOnBoot()
+    startupPhase('start.runEngineRecovery', () => this.orchestrator.recoverRunEngineOnBoot())
     // Personal bots settle what the crash left before any worker can change a bot run (PR 6 §5a).
     if (this.personalBots) {
       try {
-        await this.personalBots.reconcileOnStartup()
+        await startupPhase('start.botReconcile', () => this.personalBots!.reconcileOnStartup())
       } catch (error) {
         console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
       }
     }
     // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
-    this.runEngine.inbox.withdrawRetiredRows()
-    this.startRunEngineWorkers()
+    startupPhase('start.runEngineWorkers', () => { this.runEngine.inbox.withdrawRetiredRows(); this.startRunEngineWorkers() })
+    // Threads' wake-ups whose time passed while the daemon was off fire now; the rest wait for theirs.
+    startupPhase('start.threadWakes', () => this.threadWakes.start())
+    // Monitors the last run left ended with it: their threads are told, in the background.
+    void this.monitors.recoverOnBoot().catch((error: unknown) => {
+      console.warn('monitors left by the last run could not be reported', { error: error instanceof Error ? error.message : String(error) })
+    })
 
     if (this.config.getScheduledSection().enabled) {
       // Bot schedules are jobs in the same scheduler: with it off, nothing starts on its own.
-      this.scheduled.start()
+      startupPhase('start.scheduled', () => this.scheduled.start())
     }
-    await this.net.start()
+    await startupPhase('start.net', () => this.net.start())
     // The network engine starts after the daemon is ready, with its helper (`ProfileHost.startNetworkedProfiles`):
     // its database, identity bootstrap and tombstone sweep do not delay readiness. That is after v1 too, so a
     // profile that joined another computer's network finds v1 on.
     // After the net service has loaded its ports, so the listener can refuse one of them.
-    await this.listenScheduledWebhooksIfEnabled()
+    await startupPhase('start.webhooks', () => this.listenScheduledWebhooksIfEnabled())
 
-    await this.startMcpServer()
+    await startupPhase('start.mcpServer', () => this.startMcpServer())
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
-    this.threadRuntimes.restoreOnStartup()
-    // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute.
-    this.threads.startSearchIndexSweep()
+    // The daemon settles each thread on its first use, and the rest after ready (`startAfterReadyWork`).
+    // Only the threads whose saved agents or tasks were working, and those whose runs boot recovery cut off, are read.
+    const cutOff = this.orchestrator.restartCutOffThreads ?? []
+    startupPhase('start.threadRuntimes', () => this.deferStartupWork ? this.threadRuntimes.beginRestart(cutOff) : this.threadRuntimes.restoreOnStartup(cutOff))
+    // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute. The
+    // daemon's first sweep waits for the lifecycle pass after ready; a search waits for that sweep.
+    startupPhase('start.searchIndex', () => this.threads.startSearchIndexSweep(undefined, this.deferStartupWork ? { after: this.startupLifecycleDone } : {}))
     // Idle threads leave memory and reload from disk when next needed; the feature flag is the kill switch.
     this.orchestrator.residency?.setEnabled(() => this.config.get().features.releaseIdleThreads !== false)
-    this.orchestrator.residency?.start()
+    startupPhase('start.residency', () => this.orchestrator.residency?.start())
+    this.orchestrator.startPreparedWorkspaceCleanup()
     // Threads still on JSON files move to thread.db in the background, one at a time.
-    this.threads.startBackgroundImport()
+    startupPhase('start.threadImport', () => this.threads.startBackgroundImport())
     // Wallpaper images no theme has used for a week go, in the background.
     void this.wallpapers.collect(this.usedWallpaperIds()).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
-    this.questions.markInterruptedByDaemonRestart()
-    await this.platform.workflowRuns.startRecovery()
-    this.undoRetention.start()
-    this.pullRequestWatch.start()
+    startupPhase('start.questions', () => this.questions.markInterruptedByDaemonRestart())
+    await startupPhase('start.workflowRecovery', () => this.platform.workflowRuns.startRecovery())
+    startupPhase('start.undoRetention', () => this.undoRetention.start())
+    startupPhase('start.pullRequestWatch', () => this.pullRequestWatch.start())
     // A profile with no storage policy gets one now: what it had before for a profile in use, the recommended rules for a new one.
-    try { this.storagePolicy.initialize(() => this.threads.lifecycleStore.list().length > 0 || this.threads.listAllThreads().length > 0) }
+    try { startupPhase('start.storagePolicy', () => this.storagePolicy.initialize(() => this.threads.lifecycleStore.list().length > 0 || this.threads.listAllThreads().length > 0)) }
     catch { /* The policy is read again by every run; one that cannot be written is reported there. */ }
-    // The storage service is the only scheduler; it runs the trash sweep inside its own run.
-    this.storageCleanup.start()
-    this.storageUsage.start()
+    // The storage service is the only scheduler; it runs the trash sweep inside its own run. The daemon starts it
+    // once the lifecycle pass is done.
+    startupPhase('start.storage', () => { if (!this.deferStartupWork) this.storageCleanup.start(); this.storageUsage.start() })
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
-    this.orchestrator.scheduleStartupQueueRecovery()
+    // The daemon does this after ready, once the lifecycle pass is done (`startAfterReadyWork`).
+    if (!this.deferStartupWork) startupPhase('start.queueRecovery', () => this.orchestrator.scheduleStartupQueueRecovery())
 
-    this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
-    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
-    this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
-    this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
+    startupPhase('start.announce', () => {
+      this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
+      this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+      this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+      this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
+    })
   }
 
   /**
@@ -2932,6 +3150,7 @@ export class MmsProfileServices {
     // constructing the array would let one synchronous throw prevent every
     // later owner from even receiving shutdown.
     const cleanups = [
+      () => this.deferredStartupWork,
       () => this.undoRetention.stop(),
       () => this.pullRequestWatch.stop(),
       () => this.storageCleanup.stop(),
@@ -2995,6 +3214,7 @@ export class MmsProfileServices {
     }
     // What this profile chose for worktrees is no longer Mousse's to act on through it.
     forgetWorktreeFolders(this.homeDir)
+    this.forgetBranchNamer?.()
     this.started = false
     this.stopped = true
   }

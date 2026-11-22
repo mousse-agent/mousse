@@ -2,6 +2,11 @@
   "comment": "Runtime edges the import graph cannot see: tests that spawn built output, read data files or drive Electron. `when` matches changed repo paths; `run` names test files, `projects` names whole vitest projects. Keep rules to implicit edges only; ordinary imports are selected by the graph.",
   "rules": [
     {
+      "name": "Windows Git daemon fixture runs the bundled shutdown path",
+      "when": ["tests/fixtures/windowsGitShutdownDaemon.ts", "src/mms/git/gitSpawn.ts", "src/mms/git/windowsGitProcess.ts"],
+      "run": ["tests/gitSpawnWorker.test.ts"]
+    },
+    {
       "name": "cli, main, preload and build inputs reach every spawned process",
       "when": ["src/cli/**", "src/main/**", "src/preload/**", "scripts/build*", "scripts/after-pack*", "scripts/prepare-package*", "scripts/ensure-*", "scripts/cached-build*", "scripts/start.mjs", "electron-builder*.yml", "build/**", "resources/**"],
       "projects": ["process", "heavy"]
@@ -20,6 +25,11 @@
       "name": "run engine, orchestrator and MCP reach the run and MCP process contracts",
       "when": ["src/mms/run/**", "src/mms/orchestrator/**", "src/mms/integrations/mcp/**", "src/shared/run/**"],
       "run": ["tests/run/**/*.test.ts", "tests/harness/boundary.test.ts", "tests/platformMcpLifecycleDrain.test.ts", "tests/platformIntegrationMcpRuntime.test.ts"]
+    },
+    {
+      "name": "checkout process fixture runs the workspace provision and disk slot code in another process",
+      "when": ["tests/run/checkoutChild.ts", "src/mms/worktree/checkoutSlots.ts", "src/mms/workspace/checkoutProcess.ts"],
+      "run": ["tests/run/earlyCheckoutPreparation.test.ts"]
     },
     {
       "name": "network, bridge, bots, spaces and chats reach the bundled net daemons and crash children",
@@ -82,6 +92,11 @@
       "name": "the example workflow is read from disk by the workflow tests",
       "when": ["examples/**"],
       "run": ["tests/platformWorkflowCompiler.test.ts", "tests/platformWorkflowRegistry.test.ts", "tests/platformWorkflowRuntime.test.ts"]
+    },
+    {
+      "name": "the warm start column fixture is bundled at run time, so the import graph cannot see it",
+      "when": ["tests/fixtures/warm-start-column/**"],
+      "run": ["tests/renderer/warm-start-column-electron.test.ts"]
     },
     {
       "name": "the Storage page fixture is bundled at run time, so the import graph cannot see it",

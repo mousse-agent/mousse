@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { extractArchive } from '../../mms/harness/agents/archive'
 import { downloadArtifact } from '../../mms/harness/agents/install'
-import type { WindowsGitSetup } from '../../shared/windowsGit'
+import type { GitSetup } from '../../shared/gitSetup'
 
 const run = promisify(execFile)
 const release = 'https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1'
@@ -55,7 +55,7 @@ export async function ensureWindowsGit(options: {
   homeDir: string
   env: NodeJS.ProcessEnv
   signal: AbortSignal
-  onSetup: (state: Exclude<WindowsGitSetup, null | { phase: 'failed' }>) => void
+  onSetup: (state: Extract<GitSetup, { phase: 'downloading' | 'installing' }>) => void
   platform?: NodeJS.Platform
   arch?: string
 }): Promise<string | undefined> {

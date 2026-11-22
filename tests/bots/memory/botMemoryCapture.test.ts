@@ -166,6 +166,34 @@ describe('crash catch-up', () => {
     expect(fx.store.getState('ada', 'cursor:run-1')).toEqual({ n: 3, lastId: 'a1' })
   })
 
+  it('reads only the threads written since their last copy, so startup does not read every bot conversation', async () => {
+    const fx = memoryFixture()
+    const refs = botThreadsForCatchUp([
+      { threadId: 'quiet', botId: 'ada', role: 'activation', activationId: 'act-1' },
+      { threadId: 'busy', botId: 'ada', role: 'activation', activationId: 'act-2' },
+      { threadId: 'json', botId: 'ada', role: 'activation', activationId: 'act-3' }
+    ])
+    const t = threads()
+    // A stamp per thread stands for its files on disk; 'json' has none (a thread still in JSON files).
+    const stamps = new Map([['quiet', 'q1'], ['busy', 'b1']])
+    const journal = createBotJournal({ store: fx.store, readThread: t.readThread, transcriptStamp: (id) => stamps.get(id), listThreads: () => refs })
+    t.data.set('quiet', [assistant('q', 'Done earlier.')])
+    t.data.set('busy', [assistant('b', 'Started.')])
+    t.data.set('json', [assistant('j', 'Old format.')])
+    for (const ref of refs) journal.syncNow(ref)
+    // Mousse stopped; while it was off only 'busy' was written.
+    t.data.set('busy', [assistant('b', 'Started.'), assistant('b2', 'Finished while you were away.', 1)])
+    stamps.set('busy', 'b2')
+    t.reads.length = 0
+    await journal.catchUp()
+    expect(t.reads.sort()).toEqual(['busy', 'json'])
+    expect(fx.store.journal('ada').map((row) => row.text)).toContain('Finished while you were away.')
+    // A copy after a dispatch still reads the thread whatever its stamp.
+    t.reads.length = 0
+    await journal.syncThread(refs[0]!)
+    expect(t.reads).toEqual(['quiet'])
+  })
+
   it('nothing is lost: owner and bot messages, run reports, asks, answers, tool calls and model changes are all in the journal', async () => {
     const fx = memoryFixture()
     const { t, journal } = setup(fx)

@@ -29,6 +29,7 @@ import {
   type PhoneSpeechSelection,
   type SpeechJobInput
 } from '../../shared/speechRelay'
+import { spokenShortFormsIfEnglish } from '../readAloud/shortForms'
 import { markdownToSpeechText, splitSpeechChunks } from '../readAloud/speechText'
 import type { SpeechPreferences } from '../speech/speechPreferences'
 import { ipcErrorMessage } from '../utils/voiceErrors'
@@ -299,7 +300,7 @@ async function speak(job: SpeechJobInput, deps: PhoneSpeechDeps, io: PhoneSpeech
         onClip: (samples, sampleRate) => send(encodeWav(samples, sampleRate), 'audio/wav', 1)
       })
     } else {
-      const chunks = splitSpeechChunks(text, PROVIDER_TTS_MAX_CHARS)
+      const chunks = splitSpeechChunks(spokenShortFormsIfEnglish(text), PROVIDER_TTS_MAX_CHARS)
       // The next chunk is requested while this one is sent; never more than one ahead.
       const request = (index: number): Promise<ProviderSpeechResult> | null => {
         if (index >= chunks.length || stop.signal.aborted) return null

@@ -128,7 +128,7 @@ describe('starting a thread from a pull request', () => {
     expect(git(workspace.worktreePath, 'rev-parse', 'HEAD')).toBe(prSha)
     expect(f.read(workspace.worktreePath)).toBe('pull request value\n')
     // The thread's branch is its own; no remote or branch was added for the fork, and the primary checkout stays put.
-    expect(workspace.branch).toBe('mousse/pr-7-fix-the-thing')
+    expect(workspace.branch).toMatch(/^mousse\/[0-9a-f]{8}$/)
     expect(git(f.repo, 'remote')).toBe(remotesBefore)
     expect(git(f.repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(primaryBranch)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(primaryHead)
@@ -398,6 +398,9 @@ describe('starting a thread from a pull request', () => {
      */
     function blockWorktree(): { threadId: () => string; unblock: () => void } {
       let id = ''
+      // A branch named `mousse` makes `git worktree add -b mousse/<id>` fail after the workspace record is written. The
+      // temporary name is picked as if `mousse/` were free, as it would be when the branch appears between the two steps.
+      vi.spyOn(ThreadWorkspaceManager.prototype as unknown as { freeTemporaryBranch(path: string): Promise<string> }, 'freeTemporaryBranch').mockResolvedValue('mousse/0blocked')
       const create = mms.threads.createThread.bind(mms.threads)
       vi.spyOn(mms.threads, 'createThread').mockImplementation((...args) => {
         const thread = create(...args)

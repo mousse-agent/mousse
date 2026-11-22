@@ -45,7 +45,7 @@ export interface AcpClientHandlers {
   requestPermission(request: RequestPermissionRequest): Promise<RequestPermissionResponse>
   readTextFile?(request: ReadTextFileRequest): Promise<ReadTextFileResponse>
   writeTextFile?(request: WriteTextFileRequest): Promise<WriteTextFileResponse>
-  /** `elicitation/create`: a sign-in link (URL mode) during sign-in; anything else is declined. */
+  /** `elicitation/create`: a sign-in link (URL mode) or an interactive question form (form mode); anything else is declined. */
   createElicitation?(request: CreateElicitationRequest): Promise<CreateElicitationResponse>
   /** A preset's own extension requests (`_x.ai/ask_user_question`), by method. */
   extRequests?: Record<string, (params: unknown) => Promise<unknown>>
@@ -54,7 +54,7 @@ export interface AcpClientHandlers {
 }
 
 /** Why a connection opens. */
-export type AcpPurpose = 'turn' | 'sign_in' | 'sign_out' | 'models' | 'handshake'
+export type AcpPurpose = 'turn' | 'sign_in' | 'sign_out' | 'models' | 'handshake' | 'one_shot'
 
 export interface AcpLaunchRequest {
   purpose: AcpPurpose

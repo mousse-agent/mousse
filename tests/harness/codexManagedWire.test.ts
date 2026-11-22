@@ -12,17 +12,18 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSy
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 import { zstdDecompressSync, gunzipSync } from 'node:zlib'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ChatGptAuth } from '../../src/mms/harness/chatgpt/chatgptAuth'
 import { ChatGptTokenBroker } from '../../src/mms/harness/vendors/codex/broker'
 import { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
-import { createManagedCodexRuntime, MANAGED_MODEL_PROVIDER } from '../../src/mms/harness/vendors/codex/managedRuntime'
+import { createManagedCodexRuntime, MANAGED_MODEL_PROVIDER, MANAGED_OFFLINE_OVERRIDES } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { spawnCodexAppServer, type CodexLaunch } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { CodexTurnFailure, type CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { spawnCodexAppServer, type CodexLaunch, type CodexProcess } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
+import { CODEX_MAX_LOADED_THREADS, CodexTurnFailure, CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexHarnessError } from '../../src/mms/harness/drivers/codex/adapter'
 import { FakeIssuer, plainCodec } from './chatgpt/fakeIssuer'
 import { signIn } from './chatgpt/signInFlow'
@@ -67,6 +68,7 @@ class FakeOpenAi {
   base = ''
   readonly requests: Recorded[] = []
   answer: Answer = () => ({ status: 200, sse: reply('Hello from the plan.') })
+  workspaces: string[] = []
   private server!: Server
 
   async start(): Promise<this> {
@@ -76,6 +78,15 @@ class FakeOpenAi {
         if (recorded.path.endsWith('/models')) {
           response.writeHead(200, { 'content-type': 'application/json' })
           response.end(JSON.stringify({ models: [{ slug: 'gpt-wire', display_name: 'GPT Wire', visibility: 'list', supported_in_api: true, priority: 1 }] }))
+          return
+        }
+        if (recorded.path.endsWith('/accounts/check')) {
+          response.writeHead(200, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({
+            accounts: this.workspaces.map((id) => ({
+              id, plan_type: 'plus', workspace_backend_origin: 'https://chatgpt.com', account_routing_override: 'NO_CONSTRAINT'
+            }))
+          }))
           return
         }
         const answer = this.answer(recorded, this.requests.filter((entry) => entry.path.endsWith('/responses')).length - 1)
@@ -167,7 +178,8 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
   let proxy: RefusingProxy
   let broker: ChatGptTokenBroker
   let dirs: string[] = []
-  const stops: Array<() => void> = []
+  let blockedTargets: string[] = []
+  const stops: Array<() => Promise<void>> = []
 
   beforeAll(async () => {
     if (!new CodexInstallation({ installationHome: pinHome }).installed()) throw new Error('The pinned Codex is missing: run `npm run codex:pin`.')
@@ -185,7 +197,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
   })
   afterEach(async () => {
     if (process.env.MOUSSE_CODEX_WIRE_LOG) writeFileSync(`${process.env.MOUSSE_CODEX_WIRE_LOG}.requests.json`, JSON.stringify(openai.requests, null, 2))
-    for (const stop of stops.splice(0)) stop()
+    await Promise.all(stops.splice(0).map((stop) => stop()))
     await broker?.close()
     for (const dir of dirs.splice(0)) {
       try {
@@ -195,12 +207,105 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
       }
     }
     openai.requests.length = 0
+    openai.workspaces = []
     openai.answer = () => ({ status: 200, sse: reply('Hello from the plan.') })
     issuer.onToken = undefined
-    // Checked after everything is stopped and removed: Codex reached no host but the fakes
-    // (Mousse's config turns off what would call out).
-    const outside = proxy.targets.splice(0)
+    // The proxy refuses every external connection. Managed cases expect no attempts.
+    const outside = proxy.targets.splice(0).filter((target) => !blockedTargets.includes(target))
+    blockedTargets = []
     if (outside.length) throw new Error(`Codex tried to reach ${[...new Set(outside)].join(', ')}`)
+  })
+
+  function isolatedEnv(userHome: string): NodeJS.ProcessEnv {
+    // The user's real home is never visible to this Codex.
+    const outside = { HTTP_PROXY: proxy.url, HTTPS_PROXY: proxy.url, ALL_PROXY: proxy.url, NO_PROXY: '127.0.0.1,localhost' }
+    return {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/_proxy$|^(?:OPENAI_|CODEX_)/i.test(key))),
+      ...outside,
+      ...Object.fromEntries(Object.entries(outside).map(([key, value]) => [key.toLowerCase(), value])),
+      HOME: userHome,
+      USERPROFILE: userHome,
+      CODEX_HOME: join(userHome, '.codex')
+    }
+  }
+
+  it.each([
+    ['workspace-one', true],
+    ['workspace-two', false]
+  ] as const)('checks a terminal sign-in with startup notifications and selected workspace %s', async (selected, matchesFile) => {
+    const dir = mkdtempSync(join(root, '.cache', 'terminal-wire-'))
+    dirs.push(dir)
+    const fileWorkspace = 'workspace-one'
+    const env = isolatedEnv(dir)
+    const token = ['e30', Buffer.from(JSON.stringify({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      email: 'wire@example.com',
+      'https://api.openai.com/auth': { chatgpt_account_id: fileWorkspace, chatgpt_plan_type: 'plus', chatgpt_user_id: 'wire-user' }
+    })).toString('base64url'), 'fixture'].join('.')
+    const writeAuth = (home: string, workspace: string) => {
+      mkdirSync(home, { recursive: true })
+      writeFileSync(join(home, 'auth.json'), JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: { id_token: token, access_token: token, refresh_token: 'fixture', account_id: workspace },
+        last_refresh: new Date().toISOString()
+      }))
+      writeFileSync(join(home, 'config.toml'), [
+        `chatgpt_base_url = "${new URL('/backend-api', openai.base)}"`,
+        'cli_auth_credentials_store = "file"',
+        '[analytics]',
+        'enabled = false'
+      ].join('\n'))
+    }
+    openai.workspaces = ['workspace-one', 'workspace-two']
+    // Terminal Codex can try its default ChatGPT backend on startup. The proxy still refuses it.
+    blockedTargets = ['chatgpt.com:443']
+    writeAuth(env.CODEX_HOME!, fileWorkspace)
+    // Model a server that selected another workspace using the same bearer as the terminal file.
+    const serverHome = matchesFile ? env.CODEX_HOME! : join(dir, 'server-home')
+    if (!matchesFile) writeAuth(serverHome, selected)
+    const questions = new UserQuestionService()
+    const profileHome = join(dir, 'profile')
+    const providerDir = join(profileHome, 'providers', 'codex')
+    mkdirSync(providerDir, { recursive: true })
+    writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ models: [{ id: 'gpt-wire', label: 'GPT Wire' }] }))
+    let sawNotification = false
+    let sawSelectedWorkspace = false
+    let sawMatchingBearer = false
+    let launches = 0
+    const service = new CodexProviderService(profileHome, questions, {
+      launch: (spec) => {
+        launches += 1
+        const child = spawnCodexAppServer({ ...spec, env: { ...spec.env, CODEX_HOME: serverHome } })
+        createInterface({ input: child.stdout! }).on('line', (line) => {
+          const message = JSON.parse(line) as { method?: string; result?: { workspaceRouting?: { chatgptAccountId: string }; authToken?: string } }
+          sawNotification ||= message.method === 'account/updated'
+          sawSelectedWorkspace ||= message.result?.workspaceRouting?.chatgptAccountId === selected
+          sawMatchingBearer ||= message.result?.authToken === token
+        })
+        return child
+      }
+    }, {
+      launch: () => ({
+        binaryPath: new CodexInstallation({ installationHome: pinHome }).installed()!.path,
+        args: MANAGED_OFFLINE_OVERRIDES.flatMap((override) => ['-c', override])
+      }),
+      env: () => env
+    })
+    stops.push(async () => {
+      try { await service.stop() } finally { questions.shutdown() }
+    })
+
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    if (matchesFile) {
+      await expect.poll(() => sawNotification, { timeout: 10_000 }).toBe(true)
+      expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+      expect(launches).toBe(1)
+    }
+    expect(sawSelectedWorkspace).toBe(true)
+    expect(sawMatchingBearer).toBe(true)
+    expect(service.account()?.subject).toBe(matchesFile
+      ? JSON.stringify([`chatgpt:terminal-workspace:${selected}`, 'wire@example.com'])
+      : 'chatgpt:wire@example.com')
   })
 
   /** A signed-in managed entry whose Codex runs with `extraArgs` after Mousse's own. */
@@ -214,18 +319,8 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     mkdirSync(userHome, { recursive: true })
     const instanceId = 'codex:wire'
     const stateDir = join(profileHome, 'harness', 'codex-wire')
-    // The user's real home is never visible to this Codex.
-    const outside = { HTTP_PROXY: proxy.url, HTTPS_PROXY: proxy.url, ALL_PROXY: proxy.url, NO_PROXY: '127.0.0.1,localhost' }
-    const base: NodeJS.ProcessEnv = {
-      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/_proxy$/i.test(key))),
-      ...outside,
-      ...Object.fromEntries(Object.entries(outside).map(([key, value]) => [key.toLowerCase(), value])),
-      HOME: userHome,
-      USERPROFILE: userHome,
-      CODEX_HOME: join(userHome, '.codex')
-    }
     // As the gateway builds it for a managed entry: telemetry Off by default (`-c analytics.enabled=false`).
-    const env = instanceEnv({ instanceId, driver: 'codex', configRevision: 0, home: join(stateDir, 'home'), searchPath: [], base, enforcedArgs: ['-c', 'analytics.enabled=false'] })
+    const env = instanceEnv({ instanceId, driver: 'codex', configRevision: 0, home: join(stateDir, 'home'), searchPath: [], base: isolatedEnv(userHome), enforcedArgs: ['-c', 'analytics.enabled=false'] })
     const questions = new UserQuestionService()
     const context: DriverContext = {
       instanceId, builtIn: false, config: { home: 'private', setup: 'managed' }, env, profileHome,
@@ -241,6 +336,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     }
     broker = new ChatGptTokenBroker()
     const launches: CodexLaunch[] = []
+    const processes: CodexProcess[] = []
     let auth!: ChatGptAuth
     const runtime = createManagedCodexRuntime(context, {
       installation: new CodexInstallation({ installationHome: pinHome }),
@@ -253,15 +349,15 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
           const spec = { ...launch, args: [...launch.args, ...(options.extraArgs ?? [])] }
           launches.push(spec)
           const child = spawnCodexAppServer(spec)
+          processes.push(child)
           if (process.env.MOUSSE_CODEX_WIRE_LOG) child.stderr?.on('data', (chunk: Buffer) => appendFileSync(process.env.MOUSSE_CODEX_WIRE_LOG!, chunk))
           return child
         },
         requestTimeoutMs: 60_000
       }
     })
-    stops.push(() => {
-      runtime.stop()
-      questions.shutdown()
+    stops.push(async () => {
+      try { await runtime.stop() } finally { questions.shutdown() }
     })
     const service = (runtime.adapter as unknown as { service: () => CodexProviderService }).service()
     await signIn(issuer, auth, { subject: 'wire-user', email: 'wire@example.com' }, { method: 'chatgpt-new-account' })
@@ -273,7 +369,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
         .chat({ threadId, instanceId, cwd: workspace, model: options.model ?? 'gpt-wire', prompt, mcp: null, ...(options.history ? { history: options.history } : {}), onText: (delta) => text.push(delta) })
         .then((result) => ({ result, text: text.join('') }))
     }
-    return { runtime, service, auth, launches, turn, instanceId, dir, userHome }
+    return { runtime, service, auth, launches, processes, turn, instanceId, dir, userHome }
   }
 
   /** What a failed turn carries, and the harness error a managed entry maps it to. */
@@ -317,6 +413,61 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     expect(second.result.codexThreadId).toBe(first.result.codexThreadId)
     const resumed = JSON.stringify(openai.responses().at(-1)!.body!.input)
     expect(resumed).toContain('lantern')
+  })
+
+  /** Observe the physical loaded set on the same connection, with a request id the service never uses. */
+  async function loadedThreads(process: CodexProcess): Promise<string[]> {
+    const lines = createInterface({ input: process.stdout })
+    const id = 'observe-loaded-threads'
+    try {
+      return await new Promise<string[]>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Codex did not answer thread/loaded/list')), 5000)
+        lines.on('line', (line) => {
+          const message = JSON.parse(line) as { id?: string; result?: { data: string[] }; error?: unknown }
+          if (message.id !== id) return
+          clearTimeout(timeout)
+          if (message.result) resolve(message.result.data)
+          else reject(new Error(JSON.stringify(message.error)))
+        })
+        process.stdin.write(JSON.stringify({ id, method: 'thread/loaded/list', params: { limit: 100 } }) + '\n')
+      })
+    } finally {
+      lines.close()
+      process.stdout.resume()
+    }
+  }
+
+  it('reaps the old app-server at the idle cap when its acknowledged unload is delayed', async () => {
+    const { turn, processes } = await setup()
+    const ids: string[] = []
+    for (let index = 0; index < CODEX_MAX_LOADED_THREADS; index += 1) {
+      const { result } = await turn('idle-' + index, 'Hello ' + index)
+      ids.push(result.codexThreadId)
+    }
+    expect(processes).toHaveLength(1)
+    expect(new Set(await loadedThreads(processes[0]!))).toEqual(new Set(ids))
+    const overflow = await turn('overflow', 'Send one more.')
+    expect(processes[0]!.exitCode !== null || processes[0]!.signalCode !== null).toBe(true)
+    const { result } = await turn('next', 'On the replacement.')
+    expect(processes).toHaveLength(2)
+    expect(new Set(await loadedThreads(processes[1]!))).toEqual(new Set([overflow.result.codexThreadId, result.codexThreadId]))
+  })
+
+  it('switches to a new server and submits copied history under the new account', async () => {
+    const { turn, service, processes, auth } = await setup()
+    const first = await turn('switch', 'First account request.')
+    const history = 'user: First account request.\nassistant: ' + first.text
+    service.commitConversation('switch', history)
+    const originalBearer = openai.responses().at(-1)?.authorization
+    await signIn(issuer, auth, { subject: 'wire-other', email: 'other@example.com' }, { method: 'chatgpt-new-account', clientId: 'oaiapp_two' })
+    expect(processes[0]!.exitCode !== null || processes[0]!.signalCode !== null).toBe(true)
+    const second = await turn('switch', 'Continue.', { history })
+    expect(processes).toHaveLength(2)
+    expect(second.result.codexThreadId).not.toBe(first.result.codexThreadId)
+    const request = openai.responses().at(-1)
+    expect(request?.authorization).not.toBe(originalBearer)
+    expect(JSON.stringify(request?.body?.input)).toContain('Previous conversation')
+    expect(JSON.stringify(request?.body?.input)).toContain('First account request.')
   })
 
   it('a 401 runs the helper again, the broker renews the token, and the retry carries the new one', async () => {
@@ -387,7 +538,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
       const { text } = await turn(`wire-models-${name}`, 'Hi.')
       const models = openai.requests.filter((request) => request.path.endsWith('/models'))
       observed[name] = { answered: text.includes('Hello'), modelRequests: models.length, modelBearer: models.map((request) => /^Bearer at-\d+$/.test(request.authorization ?? '')) }
-      for (const stop of stops.splice(0)) stop()
+      await Promise.all(stops.splice(0).map((stop) => stop()))
       await broker.close()
       openai.requests.length = 0
     }

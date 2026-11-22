@@ -61,7 +61,10 @@ describe('a person\'s steer on Claude Code goes in now', () => {
     home = mkdtempSync(join(tmpdir(), 'mousse-claude-hold-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
-    vi.stubEnv('CLAUDE_CONFIG_DIR', join(home, 'claude-config'))
+    const claudeHome = join(home, 'claude-config')
+    mkdirSync(claudeHome)
+    writeFileSync(join(claudeHome, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
+    vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
     stops.push(async () => vi.unstubAllEnvs())
     const binary = join(home, 'claude')
     writeFileSync(binary, 'fixture')

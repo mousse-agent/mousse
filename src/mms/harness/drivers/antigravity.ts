@@ -63,6 +63,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     mirrorsVendorFile: true,
     // Sign-in and sign-out run in Mousse, whichever executable runs.
     ownsSignIn: true,
+    // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`service.oneShot`).
+    oneShot: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,
@@ -96,6 +98,7 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         identity: async () => (service.signedIn() ? SIGN_IN_SUBJECT : undefined),
         // The plan limits, read by `agy` itself when the usage page asks; never in the background.
         usage: (signal) => service.usage(signal),
+        usageOnRequest: true,
         refreshModels: async (cwd) => void (await service.refreshModels(cwd)),
         signIn: (session, cwd) => service.login(session, cwd),
         signOut: () => service.logout(),
@@ -107,6 +110,11 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         managed: () => service.managedRuntime(),
         validateOverride: (path) => void manualAntigravityRuntime(path),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
+        oneShot: (spec, signal) => service.oneShot(spec, signal),
+        setLiveHost: (host) => service.setLiveHost(host),
+        inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
+        hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
+        discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
         stop: () => {}
       }
     }

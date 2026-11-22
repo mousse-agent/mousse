@@ -30,6 +30,8 @@ export interface Tap {
   decide?: (message: Crossed) => 'drop' | void
   /** Decides each event or reply a helper sends its app; `drop` loses it before the app. */
   hold?: (message: Record<string, unknown>, to: string) => 'drop' | void
+  /** Sees each event or reply a helper sends its app (`to` is the app's endpoint), before any hold. */
+  watch?: (message: Record<string, unknown>, to: string) => void
 }
 
 interface Stream {
@@ -60,6 +62,7 @@ export function tapPipe(pipe: AppPipe, from: () => string, tap: Tap): AppPipe {
       const body = Buffer.from(frame.body)
       if (frame.type === FRAME_JSON) {
         const message = JSON.parse(body.toString('utf8')) as Record<string, unknown>
+        tap.watch?.(message, from())
         if (typeof message.re === 'number' && typeof message.handle === 'number' && opening.has(message.re)) {
           stream(message.handle).label = opening.get(message.re)
           opening.delete(message.re)

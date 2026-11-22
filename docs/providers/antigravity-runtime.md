@@ -54,8 +54,6 @@ profile share it. Mousse never reads the credentials itself.
   Mousse profile too. The button's tooltip says so.
 - The 1.1.1 server keeps its own sign-in in a file in the profile (`AGY_ACP_FORCE_FILE_STORAGE=1`).
   After a switch between the two runtimes, the card reads the sign-in again.
-- Antigravity's personal Google sign-in still runs only messages its owner sends
-  (`src/mms/harness/ownerOnly.ts`), whichever executable runs.
 
 ## Limits on the Usage page
 

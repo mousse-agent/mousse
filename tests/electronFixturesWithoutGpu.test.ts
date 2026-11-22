@@ -21,6 +21,7 @@ const ENTRY_POINTS = [
   'tests/fixtures/chat-undo-full-shell-driver.mjs',
   'tests/fixtures/code-block-copy/main.ts',
   'tests/fixtures/dialog-surface/main.ts',
+  'tests/fixtures/frameless-shell/main.mjs',
   'tests/fixtures/git-foundation-full-shell-driver.mjs',
   'tests/fixtures/image-clipboard/main.ts',
   'tests/fixtures/live-row-spacing/main.ts',
@@ -38,11 +39,13 @@ const ENTRY_POINTS = [
   'tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts',
   'tests/fixtures/resource-lifecycle-full-shell-driver.mjs',
   'tests/fixtures/shell-scroll/main.ts',
+  'tests/fixtures/steer-and-selection-actions/main.ts',
   'tests/fixtures/storage-settings/main.ts',
   'tests/fixtures/style-recalc-scope/main.ts',
   'tests/fixtures/theme-css/main.ts',
   'tests/fixtures/turn-window/main.ts',
-  'tests/fixtures/wallpaper/main.ts'
+  'tests/fixtures/wallpaper/main.ts',
+  'tests/fixtures/warm-start-column/main.ts'
 ]
 
 /** Modules that use Electron's `app` but only run inside an entry point that imports them, after its own call. */
@@ -76,7 +79,7 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
   'tests/renderer/image-clipboard-electron.test.ts:44': { starts: 'tests/fixtures/image-clipboard/main.ts', how: 'esbuild bundle of tests/fixtures/image-clipboard/main.ts (line 40) in a temporary folder' },
   'tests/renderer/archived-list-electron.test.ts:52': { starts: 'tests/fixtures/archived-list/main.ts', how: 'esbuild bundle of tests/fixtures/archived-list/main.ts (line 49) in a temporary folder' },
   'tests/renderer/shell-scroll-electron.test.ts:34':{ starts: 'tests/fixtures/shell-scroll/main.ts', how: 'esbuild bundle of tests/fixtures/shell-scroll/main.ts (line 31) in a temporary folder' },
-  'tests/renderer/wallpaper-electron.test.ts:25': { starts: 'tests/fixtures/wallpaper/main.ts', how: 'esbuild bundle of tests/fixtures/wallpaper/main.ts (line 22) in a temporary folder' },
+  'tests/renderer/wallpaper-electron.test.ts:26': { starts: 'tests/fixtures/wallpaper/main.ts', how: 'esbuild bundle of tests/fixtures/wallpaper/main.ts in a temporary folder' },
   'tests/renderer/bot-list-electron.test.ts:53': { starts: 'tests/fixtures/bot-list/main.ts', how: 'esbuild bundle of tests/fixtures/bot-list/main.ts (line 50) in a temporary folder' },
   'tests/renderer/code-block-copy-electron.test.ts:24': { starts: 'tests/fixtures/code-block-copy/main.ts', how: 'esbuild bundle of tests/fixtures/code-block-copy/main.ts (line 21) in a temporary folder' },
   'tests/renderer/mermaid-size-electron.test.ts:33': { starts: 'tests/fixtures/mermaid-size/main.ts', how: 'esbuild bundle of tests/fixtures/mermaid-size/main.ts (line 30) in a temporary folder' },
@@ -89,8 +92,10 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
   'tests/renderer/profileReady-startup-electron.test.ts:43': { starts: 'tests/fixtures/renderer-startup/main.ts', how: 'esbuild bundle of tests/fixtures/renderer-startup/main.ts (line 40) in a temporary folder' },
   'tests/renderer/prompt-rail-electron.test.ts:33': { starts: 'tests/fixtures/prompt-rail/main.ts', how: 'esbuild bundle of tests/fixtures/prompt-rail/main.ts (line 30) in a temporary folder' },
   'tests/renderer/storage-settings-electron.test.ts:25': { starts: 'tests/fixtures/storage-settings/main.ts', how: 'esbuild bundle of tests/fixtures/storage-settings/main.ts (line 20) in a temporary folder' },
-  'tests/renderer/theme-css-electron.test.ts:33': { starts: 'tests/fixtures/theme-css/main.ts', how: 'esbuild bundle of tests/fixtures/theme-css/main.ts (line 30) in a temporary folder' },
-  'tests/renderer/turn-window-electron.test.ts:94': { starts: 'tests/fixtures/turn-window/main.ts', how: 'esbuild bundle of tests/fixtures/turn-window/main.ts (line 91) in a temporary folder' },
+  'tests/renderer/steer-and-selection-actions-electron.test.ts:30': { starts: 'tests/fixtures/steer-and-selection-actions/main.ts', how: 'esbuild bundle of tests/fixtures/steer-and-selection-actions/main.ts in a temporary folder' },
+  'tests/renderer/theme-css-electron.test.ts:34': { starts: 'tests/fixtures/theme-css/main.ts', how: 'esbuild bundle of tests/fixtures/theme-css/main.ts in a temporary folder' },
+  'tests/renderer/turn-window-electron.test.ts:100': { starts: 'tests/fixtures/turn-window/main.ts', how: 'esbuild bundle of tests/fixtures/turn-window/main.ts in a temporary folder' },
+  'tests/renderer/warm-start-column-electron.test.ts:37': { starts: 'tests/fixtures/warm-start-column/main.ts', how: 'esbuild bundle of tests/fixtures/warm-start-column/main.ts (line 34) in a temporary folder' },
   'tests/net/chats/gui-electron.test.ts:37': { starts: 'tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts', how: 'esbuild bundle of tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts (line 32) in a temporary folder' },
   'tests/net/chats/gui-renderer-lifecycle.test.ts:19': { starts: 'tests/fixtures/net-gui/mounted-lifecycle/main.ts', how: 'esbuild bundle of tests/fixtures/net-gui/mounted-lifecycle/main.ts (line 16) in a temporary folder' },
   'tests/fixtures/agent-platform/electron-attached-browser/run-electron-fixture.mjs:49': { starts: 'tests/fixtures/agent-platform/electron-attached-browser/electron-main.ts', how: 'esbuild bundle of fixtureDir/electron-main.ts (line 33) in a temporary folder; a manual runner' }

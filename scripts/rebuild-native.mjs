@@ -25,10 +25,12 @@ if (process.platform !== 'win32') {
   process.exit(0)
 }
 
-console.log(`Rebuilding node-pty for Electron ${electronVersion}...`)
+// For this computer's architecture: each Windows target is packaged on a computer of its own (x64 or arm64).
+const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
+console.log(`Rebuilding node-pty for Electron ${electronVersion} (${arch})...`)
 
 execSync(
-  `npx node-gyp configure --target=${electronVersion} --arch=x64 --dist-url=https://electronjs.org/headers`,
+  `npx node-gyp configure --target=${electronVersion} --arch=${arch} --dist-url=https://electronjs.org/headers`,
   { cwd: nodePtyDir, stdio: 'inherit', shell: true }
 )
 
@@ -38,7 +40,7 @@ const msbuildResult = spawnSync(
     'build/binding.sln',
     '/t:Rebuild',
     '/p:Configuration=Release',
-    '/p:Platform=x64',
+    `/p:Platform=${arch === 'arm64' ? 'ARM64' : 'x64'}`,
     '/p:SpectreMitigation=false',
     '/p:GenerateDebugInformation=false',
     '/p:DebugSymbols=false',

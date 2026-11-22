@@ -14,6 +14,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { GuiMmsController } from '../src/main/mms/GuiMmsController'
 import * as daemonHost from '../src/cli/daemonHost'
 import * as windowsGit from '../src/main/mms/windowsGit'
+import * as nativeGit from '../src/main/mms/nativeGit'
 
 function fakeWindow(id: number): WebContents {
   return Object.assign(new EventEmitter(), { id, isDestroyed: () => false }) as unknown as WebContents
@@ -56,13 +57,49 @@ describe('GuiMmsController while an update installs', () => {
     try {
       const start = gui.start()
       const failure = expect(start).rejects.toThrow('MMS daemon exited before readiness')
-      expect(gui.windowsGitSetup?.phase).toBe('downloading')
+      expect(gui.gitPrerequisite?.phase).toBe('downloading')
       completeSetup(cmdDir)
       await failure
       expect(readFileSync(join(home, 'mms-startup.log'), 'utf8').trim()).toBe(`${cmdDir};original-path`)
-      expect(gui.windowsGitSetup).toBeNull()
+      expect(gui.gitPrerequisite).toBeNull()
     } finally {
       completeSetup(cmdDir)
+      await gui.stop()
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('starts the service only after the native installer makes Git available', async () => {
+    const home = newHome()
+    const gui = new GuiMmsController({ homeDir: home })
+    const gitDir = join(home, 'system-bin')
+    const findGit = vi.spyOn(nativeGit, 'findNativeGit').mockResolvedValue(undefined)
+    vi.spyOn(nativeGit, 'nativeGitInstaller').mockResolvedValue({
+      platform: 'linux', command: '/usr/bin/pkexec', args: [], readyMessage: 'Confirm the package install.',
+      failureMessage: 'The package install failed.'
+    })
+    const install = vi.spyOn(nativeGit, 'installNativeGit').mockRejectedValueOnce(new Error('Canceled'))
+      .mockImplementationOnce(async () => {
+        findGit.mockResolvedValue(gitDir)
+        return true
+      })
+    vi.spyOn(daemonHost, 'resolveDaemonHostInvocation').mockReturnValue({
+      command: process.execPath,
+      argsPrefix: ['-e', 'console.log(process.env.PATH)', '--'],
+      env: { PATH: '/original' }
+    })
+
+    try {
+      await expect(gui.start()).rejects.toThrow('Git is required')
+      expect(gui.gitPrerequisite).toMatchObject({ phase: 'required', canInstall: true })
+      expect(install).not.toHaveBeenCalled()
+
+      await expect(gui.installGit()).resolves.toBe(false)
+      expect(gui.gitPrerequisite).toMatchObject({ phase: 'required', message: 'The package install failed.' })
+      await expect(gui.installGit()).resolves.toBe(true)
+      await expect(gui.start()).rejects.toThrow('MMS daemon exited before readiness')
+      expect(readFileSync(join(home, 'mms-startup.log'), 'utf8').trim()).toBe(`${gitDir}:/original`)
+      expect(gui.gitPrerequisite).toBeNull()
+    } finally {
       await gui.stop()
     }
   })

@@ -458,8 +458,9 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
   const runs = detail?.runs ?? []
   const reminders = detail?.reminders ?? []
 
-  // What the bot may use and which devices reach it are changed here: the panel pauses a theme while it is open.
-  return <aside className={`bot-about settings-scope${inPanel ? ' is-in-panel' : ''}`} data-mousse-decision="" aria-label={`About ${bot.name}`}>
+  // What the bot may use and which devices reach it are changed here: while the panel is open a theme's CSS is off
+  // (its colors stay), so it cannot relabel them.
+  return <aside className={`bot-about settings-scope${inPanel ? ' is-in-panel' : ''}`} data-mousse-guarded="" aria-label={`About ${bot.name}`}>
     <div className="bot-about-scroll" ref={scroller}>
       <header className="bot-about-head">
         <BotFace look={bot.look} state={botFaceState(bot, happy)} size={76} view="full" />

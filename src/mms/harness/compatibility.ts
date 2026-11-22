@@ -60,8 +60,12 @@ export const COMPATIBILITY: Readonly<Record<CompatibilityKey, CompatibilityRow>>
     ]
   },
   antigravity: {
-    tested: { min: '1.1.1', max: '1.1.1' },
-    evidence: [{ version: '1.1.1', kind: 'fixture', ref: 'tests/run/fixtures/plain-turn/antigravity.ndjson' }]
+    tested: { min: '1.1.1', max: '1.5.13' },
+    evidence: [
+      { version: '1.1.1', kind: 'fixture', ref: 'tests/run/fixtures/plain-turn/antigravity.ndjson' },
+      { version: '1.5.13', kind: 'smoke', ref: '#1711' },
+      { version: '1.5.13', kind: 'fixture', ref: 'tests/run/fixtures/steer-mid-tool/antigravity.ndjson' }
+    ]
   },
   grok: {
     tested: { min: '1.0.70', max: '1.0.70' },

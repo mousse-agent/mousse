@@ -1,4 +1,4 @@
-import type { WindowsGitSetup } from '../../shared/windowsGit'
+import type { GitSetup } from '../../shared/gitSetup'
 import { RefreshCw } from '../lib/icons'
 import { LOADER_DELAY_MS, useShownAfter } from './ui/DelayedLoader'
 import './workspace-loading.css'
@@ -11,7 +11,8 @@ interface WorkspaceLoadingProps {
   onRetry?: () => void
   sidebarWidth?: number
   conversationOnly?: boolean
-  windowsGitSetup?: WindowsGitSetup
+  gitSetup?: GitSetup
+  onInstallGit?: () => void
 }
 
 /**
@@ -20,14 +21,15 @@ interface WorkspaceLoadingProps {
  * A prerequisite download reports its own status immediately.
  * A failure shows one error block with Retry in the same place.
  */
-export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnly = false, windowsGitSetup }: WorkspaceLoadingProps) {
-  const gitError = windowsGitSetup?.phase === 'failed' ? windowsGitSetup.message : undefined
-  const setup = windowsGitSetup?.phase === 'downloading' || windowsGitSetup?.phase === 'installing'
+export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnly = false, gitSetup, onInstallGit }: WorkspaceLoadingProps) {
+  const required = gitSetup?.phase === 'required' ? gitSetup : undefined
+  const gitError = gitSetup?.phase === 'failed' ? gitSetup.message : undefined
+  const setup = gitSetup?.phase === 'downloading' || gitSetup?.phase === 'installing'
   const skeleton = useShownAfter(WORKSPACE_SKELETON_DELAY_MS)
 
   return (
     <div className={`workspace-loading${conversationOnly ? ' workspace-loading-conversation-only' : ''}`}
-      aria-busy={!setup && !gitError && !error} data-workspace-loading={conversationOnly ? 'content' : 'connection'}>
+      aria-busy={!gitSetup && !error} data-workspace-loading={conversationOnly ? 'content' : 'connection'}>
       {skeleton && !conversationOnly && sidebarWidth !== undefined && <aside className="workspace-loading-sidebar"
         style={{ width: sidebarWidth }} aria-hidden="true">
         <div className="workspace-loading-line workspace-loading-heading" />
@@ -38,12 +40,24 @@ export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnl
       <section className="workspace-loading-content">
         {setup ? <div className="workspace-loading-error" role="status">
           <p className="workspace-loading-error-title">
-            {windowsGitSetup.phase === 'downloading' ? 'Downloading Git for Windows…' : 'Setting up Git for Windows…'}
+            {gitSetup.phase === 'downloading' ? 'Downloading Git for Windows…'
+              : gitSetup.native ? 'Installing Git…' : 'Setting up Git for Windows…'}
           </p>
           <p className="workspace-loading-detail">Mousse needs Git to start the workspace.</p>
+        </div> : required ? <div className="workspace-loading-error" role="alert">
+          <p className="workspace-loading-error-title">Git is required</p>
+          <p className="workspace-loading-detail">{required.message}</p>
+          <div className="workspace-loading-actions">
+            {required.canInstall && <button type="button" className="workspace-loading-retry" onClick={onInstallGit}>
+              Install Git
+            </button>}
+            <button type="button" className="workspace-loading-retry" onClick={onRetry}>
+              <RefreshCw size={14} aria-hidden="true" />Retry
+            </button>
+          </div>
         </div> : (gitError || error) ? <div className="workspace-loading-error" role="alert">
           <p className="workspace-loading-error-title">
-            {gitError ? 'Could not set up Git for Windows' : conversationOnly ? 'Could not load workspace' : 'Could not connect to workspace'}
+            {gitError ? 'Could not set up Git' : conversationOnly ? 'Could not load workspace' : 'Could not connect to workspace'}
           </p>
           <p className="workspace-loading-detail">{gitError || error}</p>
           <button type="button" className="workspace-loading-retry" onClick={onRetry}>

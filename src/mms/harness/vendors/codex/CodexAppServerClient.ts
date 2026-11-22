@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawnProviderProcess, windowsProviderTree, type WindowsProviderTree } from '../../windowsProviderProcess'
 import { trackChildProcess } from '../../../diagnostics/liveCounts'
 import type { Readable, Writable } from 'node:stream'
 import {
@@ -32,6 +32,7 @@ export interface CodexProcess {
   kill(signal?: NodeJS.Signals): boolean
   /** Set once the process started (a real child); `stopAll` kills its whole tree by it. */
   readonly pid?: number
+  readonly windowsTree?: WindowsProviderTree
   readonly exitCode: number | null
   readonly signalCode: NodeJS.Signals | null
   once(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown
@@ -119,6 +120,7 @@ export class CodexAppServerClient implements CodexConnection {
   private readonly abort = new AbortController()
   private buffer = Buffer.alloc(0)
   private stderrTail = ''
+  private closing = false
   /** Lines that were not JSON-RPC messages (skipped). */
   malformedLines = 0
   readonly defaultTimeoutMs: number
@@ -218,7 +220,13 @@ export class CodexAppServerClient implements CodexConnection {
 
   /** Ends the process: SIGTERM, then SIGKILL after a grace period. */
   close(): void {
+    if (this.closing) return
+    this.closing = true
     this.terminate('Codex app-server was closed')
+    if (this.process.windowsTree) {
+      void this.process.windowsTree.stop().catch(() => undefined)
+      return
+    }
     if (this.process.exitCode === null && this.process.signalCode === null) {
       this.process.kill()
       const timer = setTimeout(() => {
@@ -321,14 +329,12 @@ export class CodexAppServerClient implements CodexConnection {
 
 /** Spawns `<binary> [entryArgs] app-server [args]` with piped stdio. */
 export function spawnCodexAppServer(launch: CodexLaunch): CodexProcess {
-  const child = spawn(launch.binary, [...(launch.entryArgs ?? []), 'app-server', ...launch.args], {
+  const child = spawnProviderProcess(launch.binary, [...(launch.entryArgs ?? []), 'app-server', ...launch.args], {
     env: launch.env,
-    cwd: launch.cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true
+    cwd: launch.cwd
   })
   trackChildProcess(child, 'codex')
-  return child
+  return Object.assign(child, { windowsTree: windowsProviderTree(child) })
 }
 
 /** TOML literal for a `-c key=value` override (strings, numbers, booleans, arrays and tables). */

@@ -267,6 +267,22 @@ export class EffectOutbox {
   }
 
   /**
+   * The thread's `turn.start` effects deferred because the thread was busy (`defer`, reason `thread_busy`) become due
+   * now: the turn that kept them waiting has settled. Returns how many.
+   */
+  bringForwardDeferred(threadId: string, now: string): number {
+    return this.db.transaction(() => {
+      let moved = 0
+      for (const effect of this.listForThread(threadId, { status: 'pending' })) {
+        if (effect.kind !== 'turn.start' || effect.lastError !== 'thread_busy' || effect.availableAt <= now) continue
+        this.write(effect, { availableAt: now, updatedAt: now })
+        moved += 1
+      }
+      return moved
+    })
+  }
+
+  /**
    * Cancels a pending or running effect. Without `owner` there is no lease check (a Stop or
    * boot); with it the cancel is a settlement CAS like `succeed`.
    */

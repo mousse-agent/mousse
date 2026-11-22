@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
@@ -7,7 +7,8 @@ import type { LlmModelOption, LlmProviderOption } from '../../../../../shared/se
 import { ANTIGRAVITY_INSTANCE_ID } from '../../../../../shared/providerInstances'
 import type { UserQuestionService } from '../../../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../../../data/AtomicFs'
-import { compareVersions, type RuntimeUsage } from '../../../driver'
+import { harnessAppError } from '../../../../../shared/harness/types'
+import { compareVersions, type LiveProcessHost, type OneShotSpec, type RuntimeUsage } from '../../../driver'
 import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
 import { isAuthRequired } from '../../auth'
 import type { AcpConnectionFactory } from '../../connection'
@@ -62,6 +63,8 @@ type ProfileSettings = {
   /** The `agy` whose limits reply reported a turn: its limits are not read again. */
   usageStopped?: { binary: string; version: string }
 }
+/** The notice `agy` sends as its reply when the model's quota is used up (seen on agy 1.5.13). */
+const AGY_QUOTA_NOTICE = /^\s*(⚠\s*)?Individual quota reached(\s|\.|$)/i
 const NOT_INSTALLED_MESSAGE = 'Install Antigravity first, then sign in'
 const SIGN_IN_REQUIRED_MESSAGE = 'Sign in to Antigravity in Settings before chatting'
 
@@ -146,11 +149,15 @@ export class AntigravityProviderService {
     }
     this.acp = new AcpSessions({
       label: ANTIGRAVITY_LABEL,
+      usageLimitProvider: ANTIGRAVITY_PROVIDER_ID,
       defaultInstanceId: ANTIGRAVITY_INSTANCE_ID,
       questions,
       quirks: ANTIGRAVITY_QUIRKS,
       // Antigravity's own option labels; it asks for every tool.
       classifyOption: keepOption,
+      // Advertise ACP form elicitation so `agy` routes `ask_question` through Mousse's question widget instead of dumping markdown choices in chat.
+      formElicitation: true,
+      clientCapabilities: () => ({ elicitation: { form: {} } }),
       connect: options.connect ?? antigravityConnectionFactory({
         profileDir: this.profileDir,
         profileHome,
@@ -457,11 +464,43 @@ export class AntigravityProviderService {
     this.acp.commitConversation(threadId, history)
   }
 
+  /** The history a turn that did not finish left: its session may be resumed from it (`AcpSessions.commitInterrupted`). */
+  commitInterrupted(threadId: string, history: string): void {
+    this.acp.commitInterrupted(threadId, history)
+  }
+
+  /** Per-thread private working directory for standalone ("No Project") chats. */
+  standaloneWorkspace(threadId: string): string {
+    const directory = join(this.profileDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
+  }
+
   /** A turn on the thread's agent session (see `AcpSessions.chat`). */
   async chat(input: AcpChatInput): Promise<string> {
     input.signal?.throwIfAborted()
     if (!this.configured()) throw new Error('Antigravity is not signed in')
     return this.acp.chat(input)
+  }
+
+  /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. Its
+   * own agent process and session in a new empty folder, removed afterwards (`AcpSessions.oneShot`).
+   */
+  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    if (!this.configured()) throw harnessAppError({ code: 'signed_out', message: SIGN_IN_REQUIRED_MESSAGE })
+    const cwd = join(this.profileDir, 'one-shot', randomUUID())
+    mkdirSync(cwd, { recursive: true, mode: 0o700 })
+    try {
+      const text = await this.acp.oneShot({ cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() })
+      // `agy` answers a model whose quota is used up with a notice as the reply ("⚠ Individual quota reached. …"): never an answer.
+      if (AGY_QUOTA_NOTICE.test(text)) throw harnessAppError({ code: 'rate_limited', message: `Antigravity's quota for this model is used up: ${text.trim().replace(/^⚠\s*/, '')}` })
+      return { text }
+    } finally {
+      // The ended process may hold the folder a moment longer on Windows: a leftover empty folder is harmless.
+      try { rmSync(cwd, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* kept */ }
+    }
   }
 
   /** Explicit model-picker refresh; never run this from background health checks. */
@@ -485,6 +524,42 @@ export class AntigravityProviderService {
   /** Drops the saved ACP session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     this.acp.forgetConversation(threadId)
+  }
+
+  /** Where live ACP processes report background work, task ends and reactive continuation turns. */
+  setLiveHost(host: LiveProcessHost | null): void {
+    this.acp.setLiveHost(host)
+  }
+
+  /** The reactive continuation turn `threadId`'s live process is running now, if any. */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
+    return this.acp.inFlightContinuation(threadId)
+  }
+
+  /** Whether `threadId`'s live process still holds a reactive continuation waiting to run. */
+  hasContinuation(threadId: string, id?: string): boolean {
+    return this.acp.hasContinuation(threadId, id)
+  }
+
+  /** Drops reactive continuations held by `threadId`'s live process. */
+  discardContinuations(threadId: string, id?: string): void {
+    this.acp.discardContinuations(threadId, id)
+  }
+
+  /** Stops any background work or active turn on `threadId`'s live ACP process. */
+  stopThread(threadId: string): 'stopped' | 'not_active' {
+    return this.acp.stopThread(threadId)
+  }
+
+  /** The Mousse thread that owns each of these Antigravity session ids, where one does. */
+  threadsForSessions(sessionIds: readonly string[]): Map<string, string> {
+    const found = new Map<string, string>()
+    if (!sessionIds.length || !this.settings.sessions) return found
+    const wanted = new Set(sessionIds)
+    for (const [threadId, saved] of Object.entries(this.settings.sessions)) {
+      if (saved?.sessionId && wanted.has(saved.sessionId)) found.set(saved.sessionId, threadId)
+    }
+    return found
   }
 
   /** The installation's install, whichever profile started it: running, and its latest progress line. */

@@ -220,6 +220,7 @@ const PHRASES: Record<string, Phrase> = {
   'runs.resumeNow': PAUSE,
   'runs.cancelPause': PAUSE,
   'subagents.stopAll': AGENTS,
+  'threads.stopBackground': AGENTS,
   'agents.stop': AGENTS,
   'tasks.create': TASKS,
   'tasks.update': TASKS,

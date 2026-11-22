@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 
 /**
@@ -13,8 +13,17 @@ import { useAppStore } from '../stores/appStore'
 const IDLE_REST_MS = 30_000
 const ACTIVITY_EVENTS = ['pointermove', 'pointerdown', 'keydown', 'wheel'] as const
 
-export function AmbientGlow() {
+export function AmbientGlow({ since }: { since?: number } = {}) {
   const ref = useRef<HTMLDivElement>(null)
+
+  // A glow that takes another's place (the real chat after the warm start's) carries on its loop from `since`
+  // (performance.now()), so the waves and the composer's rim do not jump back to their start.
+  useLayoutEffect(() => {
+    const chat = ref.current?.closest<HTMLElement>('.chat--empty')
+    if (!chat || since === undefined) return
+    chat.style.setProperty('--ambient-glow-delay', `${-Math.max(0, performance.now() - since)}ms`)
+    return () => { chat.style.removeProperty('--ambient-glow-delay') }
+  }, [since])
 
   useEffect(() => {
     const chat = ref.current?.closest('.chat--empty')

@@ -8,7 +8,7 @@ import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { GitService } from '../src/mms/git/GitService'
 import { userAction, withUserRequest } from '../src/mms/git/gitPolicy'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
-import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, trustRepositoryPrograms, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
+import { clearRepoProgramCache, guardedGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, trustRepositoryPrograms, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -413,14 +413,14 @@ describe("the user's own actions keep the repository's programs; Mousse's own co
 })
 
 describe('settings are worked out for each command', () => {
-  it('a filter written between two commands on one simple-git does not run', async () => {
+  it('a filter written between two commands on the same repository does not run', async () => {
     const cwd = repo()
-    const git = guardedSimpleGit(cwd)
-    await git.status()
+    const git = guardedGit(cwd)
+    await git.raw(['status', '--porcelain'])
     plain(cwd, 'config', 'filter.z.clean', command('late-filter', true))
     writeFileSync(join(cwd, '.gitattributes'), '*.txt filter=z\n')
     writeFileSync(join(cwd, 'a.txt'), 'changed\n')
-    expect(await git.diff(['--no-ext-diff', '--no-textconv', '--', 'a.txt'])).toContain('+changed')
+    expect(await git.raw(['diff', '--no-ext-diff', '--no-textconv', '--', 'a.txt'])).toContain('+changed')
     expect(ran()).toEqual([])
   })
 

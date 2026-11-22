@@ -1,17 +1,23 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
+import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
+import { recordSubagentCall, subagentToolName, toolResultText } from '../../../shared/subagentTools'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { IMAGE_MAX_DATA_CHARS } from '../../../shared/imageLimits'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { harnessAppError } from '../../../shared/harness/types'
+import { compareVersions } from '../../../shared/net/version'
+import type { ContinuationInfo, LiveProcessHost } from '../driver'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
 import { closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
+import { answerFormElicitation } from './elicitation'
 import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
+import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { AGENT_DEFAULT_MODEL, agentModels, agentModes, modelOptions, planModeId, type ModelControl } from './models'
 import {
@@ -29,7 +35,7 @@ import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopRea
 import { xaiHandlers, xaiStopFailure } from './xai'
 
 /** The title is generic on agy: its launch arguments name the role and describe the work. */
-function subagentActivity(rawInput: unknown, title: string | undefined) {
+function subagentActivity(rawInput: unknown, title: string | undefined, background = false) {
   const args = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {}
   const role = typeof args.Role === 'string' ? args.Role.trim() : ''
   const agentType = typeof args.TypeName === 'string' ? args.TypeName.trim().slice(0, ACTIVITY_DESCRIPTION_CHARS) : ''
@@ -38,15 +44,124 @@ function subagentActivity(rawInput: unknown, title: string | undefined) {
     kind: 'subagent' as const,
     description: (role || title || 'Task').slice(0, ACTIVITY_DESCRIPTION_CHARS),
     ...(agentType ? { agentType } : {}),
-    ...(prompt ? { prompt } : {})
+    ...(prompt ? { prompt } : {}),
+    ...(background ? { background: true as const } : {})
   }
 }
+
+/** Command activity for ACP shell tools (`run_command`), so backgrounded commands can settle in place. */
+function commandActivity(rawInput: unknown, title: string | undefined) {
+  const args = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {}
+  const raw = typeof args.CommandLine === 'string' ? args.CommandLine.trim()
+    : typeof args.command === 'string' ? args.command.trim()
+      : ''
+  return {
+    kind: 'command' as const,
+    command: (raw || title || 'command').slice(0, 1000)
+  }
+}
+
+function isDaemonCommand(rawInput: unknown): boolean {
+  return Boolean(rawInput && typeof rawInput === 'object' && (rawInput as { IsDaemon?: unknown }).IsDaemon === true)
+}
+
+/** Extracts text from an ACP `tool_call_update`'s `rawOutput` or `content` blocks (for subagent call records and summaries). */
+function extractToolOutputText(event: { rawOutput?: unknown; content?: unknown }): string | undefined {
+  const { rawOutput, content } = event
+  if (typeof rawOutput === 'string' && rawOutput.trim()) return rawOutput
+  if (rawOutput && typeof rawOutput === 'object') {
+    if (Array.isArray(rawOutput)) {
+      const joined = toolResultText(rawOutput)
+      if (joined) return joined
+    } else {
+      const obj = rawOutput as Record<string, unknown>
+      if (Array.isArray(obj.content)) {
+        const joined = toolResultText(obj.content)
+        if (joined) return joined
+      }
+      if (typeof obj.delegationId === 'string' || typeof obj.childThreadId === 'string' || typeof obj.started === 'boolean') {
+        try {
+          return JSON.stringify(obj)
+        } catch {
+          // Ignore unserializable rawOutput
+        }
+      }
+      for (const key of ['output', 'text', 'stdout', 'result', 'message'] as const) {
+        if (typeof obj[key] === 'string' && (obj[key] as string).trim()) return obj[key] as string
+      }
+      try {
+        return JSON.stringify(rawOutput)
+      } catch {
+        // Ignore unserializable rawOutput
+      }
+    }
+  }
+  if (Array.isArray(content)) {
+    const parts: string[] = []
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue
+      const b = block as { type?: unknown; text?: unknown; content?: { type?: unknown; text?: unknown } }
+      if (typeof b.text === 'string' && b.text) parts.push(b.text)
+      else if (b.content && typeof b.content.text === 'string' && b.content.text) parts.push(b.content.text)
+    }
+    if (parts.length) return parts.join('')
+  }
+  return undefined
+}
+
+function extractToolSummary(event: { rawOutput?: unknown; content?: unknown }): string | undefined {
+  const text = extractToolOutputText(event)
+  if (!text) return undefined
+  const line = text.replace(/\s+/g, ' ').trim()
+  if (!line) return undefined
+  return line.length > 200 ? `${line.slice(0, 199)}…` : line
+}
+
+/** A background command or native subagent still running in the ACP process after a turn settled. */
+interface AcpBackgroundTask {
+  callId: string
+  kind: 'command' | 'subagent'
+  description: string
+  startedAt: number
+}
+
+/** A reactive turn an ACP agent started on its own after background work completed. */
+interface AcpContinuation {
+  id: string
+  info: ContinuationInfo
+  buffer: Array<{ update: unknown; sessionId?: string }>
+  claimed: boolean
+  discarded: boolean
+  settled: boolean
+  attachWaiters: Array<() => void>
+  done: Promise<void>
+  resolve: () => void
+  reject: (error: Error) => void
+  settleTimer?: ReturnType<typeof setTimeout>
+  quietTimer?: ReturnType<typeof setTimeout>
+  openTools: Map<string, string>
+  sawText: boolean
+  sawUsage: boolean
+  modelMovedPastOpenTools: boolean
+}
+
+/** How long a reactive continuation waits after `usage_update` (with no open tools/requests) before settling. */
+export const CONTINUATION_SETTLE_MS = 1_500
+/** Fallback quiet window for a reactive continuation that wrote text without sending `usage_update`. */
+export const CONTINUATION_QUIET_MS = 10_000
+/** Grace window after a background task finishes waiting for the agent's reactive wakeup to begin. */
+export const WAKE_GRACE_MS = 30_000
+/** Safety cap so a forgotten or silent background task cannot hold Waiting forever. */
+export const MAX_BACKGROUND_MS = 60 * 60_000
+
+/** Out-of-turn session updates that indicate a reactive continuation turn has started. */
+const CONTINUATION_START_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'plan'])
 
 /**
  * The ACP session lifecycle shared by every ACP agent: one agent process per thread, kept between
  * turns while its saved session still matches the committed history; `session/new`, or the saved
  * session reopened (resume, or load behind the load gate); the prompt loop with steer as
- * cancel-and-restart; stop through the turn's signal or a native cancel.
+ * cancel-and-restart (or a second prompt into the running one, `steersNatively`); stop through the turn's signal or a native cancel.
  */
 
 /** A connection the core opened, with the turn state it carries. */
@@ -98,6 +213,40 @@ export interface AcpProcess extends AcpConnection {
   cancelRequested?: boolean
   /** The slash commands the agent advertised (`available_commands_update`), without the slash. */
   commands?: Set<string>
+  /** The agent answered a steer's second prompt with an error: its later steers are cut and restarted (`AcpQuirks.nativeSteerFrom`). */
+  nativeSteerRefused?: boolean
+  /**
+   * Set on a one-shot's process (`AcpSessions.oneShot`): every request of the agent to use a tool (a permission, a
+   * file read or write) is refused, and ends the request.
+   */
+  refuseTools?: (what: string) => void
+  /** Background commands/subagents still running in the agent process after a turn settled (`quirks.backgroundWork`). */
+  backgroundTasks?: Map<string, AcpBackgroundTask>
+  /** Background tasks that ended between turns before the reactive wakeup began. */
+  recentlyEnded?: Array<{ taskId: string; description: string; summary?: string }>
+  /** True once any background-capable call ran on this process, so late reactive wakeups are accepted. */
+  mayWake?: boolean
+  /** Grace timer holding `backgroundWork` briefly after a background command ends until wakeup starts. */
+  wakeGraceTimer?: ReturnType<typeof setTimeout>
+  /** Safety cap timer so background work never holds Waiting indefinitely. */
+  backgroundCapTimer?: ReturnType<typeof setTimeout>
+  /** Last value reported to `liveHost.backgroundWork(threadId, active)`. */
+  reportedBackground?: boolean
+  /** In-flight reactive continuation started by the agent between turns. */
+  continuation?: AcpContinuation
+}
+
+/** Whether a steer goes into `process`'s running prompt as a second prompt, with no cancel (`AcpQuirks.nativeSteerFrom`). */
+export function steersNatively(quirks: AcpQuirks, process: Pick<AcpProcess, 'info' | 'nativeSteerRefused'>): boolean {
+  if (!quirks.nativeSteerFrom || process.nativeSteerRefused) return false
+  const version = compareVersions(process.info?.agentInfo?.version, quirks.nativeSteerFrom)
+  return version === 0 || version === 1
+}
+
+/** A one-shot's file request: refused, and the request ends (`AcpProcess.refuseTools`). */
+function refuseFile(refuse: (what: string) => void, what: string): Promise<never> {
+  refuse(what)
+  return Promise.reject(new Error('This request runs no tools.'))
 }
 
 /** Session updates that show the agent working on the prompt in flight (not session bookkeeping). */
@@ -111,10 +260,10 @@ interface DrainedSteer {
   images?: ChatImageAttachment[]
 }
 
-/** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP up to 10 MiB). */
+/** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP within `IMAGE_MAX_DATA_CHARS`). */
 function acpImageBlock(image: ChatImageAttachment): { type: 'image'; data: string; mimeType: string } | undefined {
   const mimeType = image.mimeType.toLowerCase()
-  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024) return undefined
+  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || typeof image.data !== 'string' || !image.data || image.data.length > IMAGE_MAX_DATA_CHARS) return undefined
   return { type: 'image', data: image.data, mimeType }
 }
 
@@ -216,6 +365,79 @@ export interface AcpSessionStore {
   setModels(models: LlmModelOption[]): void
 }
 
+/** Token usage reported by an ACP agent across the prompt(s) of one turn (`PromptResponse.usage`). */
+export interface AcpTurnUsage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  /** Thought/reasoning token breakdown when reported (`thoughtTokens`). */
+  reasoning?: number
+  totalTokens: number
+  /** True when at least one prompt reported `outputTokens`, so output speed can be derived. */
+  hasOutput: boolean
+}
+
+function nonNegativeFinite(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** Token usage carried on an ACP `session/prompt` response (`PromptResponse.usage`), or undefined when absent. */
+export function readAcpPromptUsage(outcome: unknown): AcpTurnUsage | undefined {
+  if (!outcome || typeof outcome !== 'object') return undefined
+  const raw = (outcome as { usage?: unknown }).usage
+  if (!raw || typeof raw !== 'object') return undefined
+  const usage = raw as Record<string, unknown>
+  const input = nonNegativeFinite(usage.inputTokens)
+  const output = nonNegativeFinite(usage.outputTokens)
+  const cacheRead = nonNegativeFinite(usage.cachedReadTokens)
+  const cacheWrite = nonNegativeFinite(usage.cachedWriteTokens)
+  const reasoning = nonNegativeFinite(usage.thoughtTokens)
+  const reportedTotal = nonNegativeFinite(usage.totalTokens)
+  if (
+    input === undefined &&
+    output === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined &&
+    reportedTotal === undefined
+  ) {
+    return undefined
+  }
+  const inputTokens = input ?? 0
+  const outputTokens = output ?? 0
+  const cacheReadTokens = cacheRead ?? 0
+  const cacheWriteTokens = cacheWrite ?? 0
+  const sum = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
+  const totalTokens = reportedTotal !== undefined && (reportedTotal > 0 || sum === 0) ? reportedTotal : sum
+  return {
+    input: inputTokens,
+    output: outputTokens,
+    cacheRead: cacheReadTokens,
+    cacheWrite: cacheWriteTokens,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    totalTokens,
+    hasOutput: output !== undefined
+  }
+}
+
+/** Sums prompt-level ACP usage across multiple prompts of a single turn (steered turns). */
+export function addAcpTurnUsage(total: AcpTurnUsage | undefined, next: AcpTurnUsage): AcpTurnUsage {
+  if (!total) return { ...next }
+  const reasoning =
+    total.reasoning !== undefined || next.reasoning !== undefined
+      ? (total.reasoning ?? 0) + (next.reasoning ?? 0)
+      : undefined
+  return {
+    input: total.input + next.input,
+    output: total.output + next.output,
+    cacheRead: total.cacheRead + next.cacheRead,
+    cacheWrite: total.cacheWrite + next.cacheWrite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    totalTokens: total.totalTokens + next.totalTokens,
+    hasOutput: total.hasOutput || next.hasOutput
+  }
+}
+
 export interface AcpChatInput {
   threadId: string
   instanceId?: string
@@ -228,6 +450,10 @@ export interface AcpChatInput {
    * file writes are answered without asking. Absent asks about everything.
    */
   permissionMode?: PermissionMode
+  /** True when claiming a reactive continuation turn the ACP agent started on its own. */
+  continuation?: boolean
+  /** The continuation id reported by `LiveProcessHost.continuationStarted`. */
+  continuationId?: string
   prompt: string
   /** Prefixed to every prompt: the turn's skills, mode, applet catalogue and usable Mousse tools. */
   turnPreamble?: string
@@ -244,6 +470,8 @@ export interface AcpChatInput {
    */
   bot?: true
   onText: (text: string) => void
+  /** The agent's thoughts so far this turn (`agent_thought_chunk`), cumulative like `onText`. */
+  onThinking?: (text: string) => void
   drainSteer?: () => string | undefined
   /**
    * A steer drain with its token (`TurnControl.drainSteerEntry`). With `expect`, it takes only when the decision now is
@@ -265,12 +493,14 @@ export interface AcpChatInput {
   onProviderTurn?: () => void
   /** A person is asked about the call `callId` (a permission request); false once it is answered. */
   onToolAwaiting?: (callId: string, waiting: boolean) => void
-  /** A tool call started, changed or ended; `status` says how it ended (`unfinished`: the turn ended first). */
-  onTool?: (event: ProviderToolEvent & { status?: 'completed' | 'failed' | 'unfinished' }) => void
+  /** A tool call started, changed or ended; `status` says how it ended (`unfinished`: the turn ended first; `background`: still running after `end_turn`). */
+  onTool?: (event: ProviderToolEvent & { status?: 'completed' | 'failed' | 'unfinished' | 'background' }) => void
   /** Who answers this turn's permission requests (the turn bridge's `permission`). */
   prompter?: PermissionPrompter
   /** The agent's session id, once known (provider refs name it for interrupt and terminate). */
   onSession?: (sessionId: string) => void
+  /** Token usage summed across the prompts of this turn, when the agent reports `PromptResponse.usage`. */
+  onUsage?: (usage: AcpTurnUsage) => void
 }
 
 /** What the core learned about the agent and its sessions, for runtime facts. */
@@ -282,6 +512,8 @@ export interface AcpObservations {
 export interface AcpSessionsOptions {
   /** The agent's name in prompts and errors ("Allow Antigravity to run this tool?"). */
   label: string
+  /** The provider a usage limit the agent reports names (`antigravity`), for the pause's wording. */
+  usageLimitProvider?: string
   /** The instance of sessions saved before provider instances existed. */
   defaultInstanceId: string
   questions: UserQuestionService
@@ -300,10 +532,20 @@ export interface AcpSessionsOptions {
   loadIdleMs?: number
   /** Test seam: how long a prompt may get no sign of life before the turn fails (`PROMPT_SILENCE_MS`); 0 turns it off. */
   promptSilenceMs?: number
+  /** Test seam: settle wait after `usage_update` in a reactive continuation (`CONTINUATION_SETTLE_MS`). */
+  continuationSettleMs?: number
+  /** Test seam: fallback quiet window in a reactive continuation (`CONTINUATION_QUIET_MS`). */
+  continuationQuietMs?: number
+  /** Test seam: grace window after a background task completes waiting for wakeup (`WAKE_GRACE_MS`). */
+  wakeGraceMs?: number
+  /** Test seam: max duration a background task holds Waiting (`MAX_BACKGROUND_MS`). */
+  maxBackgroundMs?: number
   /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
   urlElicitation?: boolean
+  /** Interactive agent questions may arrive as form elicitations (`elicitation/create`, `mode: 'form'`). */
+  formElicitation?: boolean
   /** End a session with `session/close` (when advertised) before its process is killed. */
   closeSessions?: boolean
   /** Bumped when the launch settings change; a process from an older one is not reused. */
@@ -330,11 +572,316 @@ export class AcpSessions {
   private readonly processes = new Set<AcpProcess>()
   /** Processes running a turn right now. */
   private readonly turning = new Set<AcpProcess>()
+  /** Per thread, the session a turn that did not finish left resumable, until `commitInterrupted` fingerprints it. */
+  private readonly interrupted = new Map<string, string>()
   private stopped = false
+  private liveHost: LiveProcessHost | null = null
   private readonly prompter: PermissionPrompter
 
   constructor(private readonly options: AcpSessionsOptions) {
     this.prompter = options.prompter ?? questionsPrompter(options.questions)
+  }
+
+  /** Where live processes report background work, task ends and reactive continuation turns. */
+  setLiveHost(host: LiveProcessHost | null): void {
+    this.liveHost = host
+  }
+
+  /** The reactive continuation `threadId`'s process started itself and is still running, if any. */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
+    const cont = this.sessions.get(threadId)?.continuation
+    if (!cont || cont.settled) return undefined
+    return { id: cont.id, discarded: cont.discarded }
+  }
+
+  /** Whether `threadId`'s live process still holds a reactive continuation waiting to be claimed. */
+  hasContinuation(threadId: string, id?: string): boolean {
+    const cont = this.sessions.get(threadId)?.continuation
+    return Boolean(cont && !cont.discarded && !cont.claimed && (!id || cont.id === id))
+  }
+
+  /** Drops a reactive continuation held by `threadId`'s live process (only `id`, when given). */
+  discardContinuations(threadId: string, id?: string): void {
+    const active = this.sessions.get(threadId)
+    const cont = active?.continuation
+    if (!active || !cont || (id && cont.id !== id)) return
+    cont.discarded = true
+    this.clearContinuationTimers(cont)
+    this.wakeAttachWaiters(cont)
+    if (!cont.settled) {
+      cont.settled = true
+      cont.resolve()
+    }
+    if (!this.turning.has(active)) {
+      active.continuation = undefined
+      this.clearBackgroundState(active)
+      if (this.sessions.get(threadId) === active) {
+        this.sessions.delete(threadId)
+        this.forgetConversation(threadId)
+      }
+      setImmediate(() => { if (!this.turning.has(active)) closeAcpConnection(active) })
+    }
+  }
+
+  /** Stops any running turn, background work, or reactive continuation on `threadId`'s process. */
+  stopThread(threadId: string): 'stopped' | 'not_active' {
+    const active = this.sessions.get(threadId)
+    if (!active) return 'not_active'
+    const hadWork = this.turning.has(active) || this.hasBackgroundWork(active) || Boolean(active.continuation && !active.continuation.discarded)
+    if (!hadWork) return 'not_active'
+    if (active.backgroundTasks?.size) {
+      for (const task of active.backgroundTasks.values()) {
+        try {
+          this.liveHost?.taskEnded?.(threadId, {
+            toolUseId: task.callId,
+            taskId: task.callId,
+            status: 'stopped',
+            durationMs: Math.max(0, Date.now() - task.startedAt)
+          })
+        } catch { /* best effort */ }
+      }
+    }
+    this.clearBackgroundState(active)
+    this.failContinuation(active, new Error(`${this.options.label} was stopped`))
+    this.sessions.delete(threadId)
+    this.options.questions.autoRejectPendingForThread(threadId)
+    closeAcpConnection(active)
+    return 'stopped'
+  }
+
+  private hasBackgroundWork(process: AcpProcess): boolean {
+    return Boolean(process.backgroundTasks?.size) || Boolean(process.wakeGraceTimer)
+  }
+
+  private clearContinuationTimers(cont: AcpContinuation): void {
+    if (cont.settleTimer) { clearTimeout(cont.settleTimer); cont.settleTimer = undefined }
+    if (cont.quietTimer) { clearTimeout(cont.quietTimer); cont.quietTimer = undefined }
+  }
+
+  private wakeAttachWaiters(cont: AcpContinuation): void {
+    for (const wake of cont.attachWaiters.splice(0)) wake()
+  }
+
+  private settleContinuation(cont: AcpContinuation): void {
+    if (cont.settled) return
+    cont.settled = true
+    this.clearContinuationTimers(cont)
+    this.wakeAttachWaiters(cont)
+    cont.resolve()
+  }
+
+  private failContinuation(process: AcpProcess, error: Error): void {
+    const cont = process.continuation
+    if (!cont) return
+    cont.discarded = true
+    this.clearContinuationTimers(cont)
+    this.wakeAttachWaiters(cont)
+    if (!cont.settled) {
+      cont.settled = true
+      cont.reject(error)
+    }
+    if (process.continuation === cont) process.continuation = undefined
+  }
+
+  private syncBackgroundWork(process: AcpProcess): void {
+    const threadId = process.threadId
+    if (!threadId) return
+    const active = this.hasBackgroundWork(process)
+    if (active && !process.backgroundCapTimer) {
+      const capMs = this.options.maxBackgroundMs ?? MAX_BACKGROUND_MS
+      if (capMs > 0) {
+        process.backgroundCapTimer = setTimeout(() => {
+          process.backgroundCapTimer = undefined
+          if (!this.turning.has(process) && (!process.continuation || process.continuation.settled || process.continuation.discarded)) {
+            this.clearBackgroundState(process)
+          }
+        }, capMs)
+        process.backgroundCapTimer.unref?.()
+      }
+    } else if (!active && process.backgroundCapTimer) {
+      clearTimeout(process.backgroundCapTimer)
+      process.backgroundCapTimer = undefined
+    }
+    if (Boolean(process.reportedBackground) === active) return
+    process.reportedBackground = active
+    try {
+      this.liveHost?.backgroundWork?.(threadId, active)
+    } catch { /* host notification is best effort */ }
+  }
+
+  private clearBackgroundState(process: AcpProcess): void {
+    if (process.wakeGraceTimer) { clearTimeout(process.wakeGraceTimer); process.wakeGraceTimer = undefined }
+    if (process.backgroundCapTimer) { clearTimeout(process.backgroundCapTimer); process.backgroundCapTimer = undefined }
+    process.backgroundTasks?.clear()
+    process.recentlyEnded = undefined
+    if (process.reportedBackground && process.threadId) {
+      process.reportedBackground = false
+      try {
+        this.liveHost?.backgroundWork?.(process.threadId, false)
+      } catch { /* host notification is best effort */ }
+    }
+  }
+
+  private canSettleContinuationTools(cont: AcpContinuation): boolean {
+    if (cont.openTools.size === 0) return true
+    if (!cont.modelMovedPastOpenTools) return false
+    for (const name of cont.openTools.values()) if (name !== 'run_command') return false
+    return true
+  }
+
+  private continuationWaitingOnHost(process: AcpProcess): boolean {
+    if ((process.openRequests ?? 0) > 0) return true
+    return Boolean(process.threadId && this.options.questions.listPendingForThread(process.threadId).length > 0)
+  }
+
+  private scheduleContinuationSettle(process: AcpProcess, cont: AcpContinuation, kind: 'settle' | 'quiet'): void {
+    if (cont.settled || cont.discarded) return
+    const ms = kind === 'settle'
+      ? (this.options.continuationSettleMs ?? CONTINUATION_SETTLE_MS)
+      : (this.options.continuationQuietMs ?? CONTINUATION_QUIET_MS)
+    const arm = () => {
+      if (cont.settled || cont.discarded) return
+      if (this.continuationWaitingOnHost(process)) {
+        const retry = setTimeout(arm, Math.min(500, Math.max(20, ms)))
+        retry.unref?.()
+        if (kind === 'settle') cont.settleTimer = retry
+        else cont.quietTimer = retry
+        return
+      }
+      if (!this.canSettleContinuationTools(cont)) return
+      this.settleContinuation(cont)
+    }
+    if (kind === 'settle') {
+      if (cont.settleTimer) clearTimeout(cont.settleTimer)
+      cont.settleTimer = setTimeout(arm, ms)
+      cont.settleTimer.unref?.()
+    } else {
+      if (cont.quietTimer) clearTimeout(cont.quietTimer)
+      cont.quietTimer = setTimeout(arm, ms)
+      cont.quietTimer.unref?.()
+    }
+  }
+
+  private trackContinuationUpdate(process: AcpProcess, cont: AcpContinuation, update: unknown): void {
+    if (cont.settled || cont.discarded || !update || typeof update !== 'object') return
+    const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; name?: string; status?: string }
+    const kind = event.sessionUpdate
+    if (kind && (PROMPT_WORK_UPDATES.has(kind) || kind === 'usage_update')) {
+      this.clearContinuationTimers(cont)
+    }
+    if (kind === 'tool_call' && event.toolCallId) {
+      cont.openTools.set(event.toolCallId, event.name ?? '')
+      cont.modelMovedPastOpenTools = false
+      cont.sawUsage = false
+    } else if (kind === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
+      cont.openTools.delete(event.toolCallId)
+    } else if (kind === 'agent_message_chunk' && event.content?.type === 'text' && event.content.text) {
+      cont.sawText = true
+      if (cont.openTools.size > 0) cont.modelMovedPastOpenTools = true
+    } else if (kind === 'agent_thought_chunk' && event.content?.type === 'text' && event.content.text) {
+      if (cont.openTools.size > 0) cont.modelMovedPastOpenTools = true
+    }
+    if (kind === 'usage_update') {
+      cont.sawUsage = true
+      if (this.canSettleContinuationTools(cont)) this.scheduleContinuationSettle(process, cont, 'settle')
+    } else if (cont.sawText && this.canSettleContinuationTools(cont)) {
+      this.scheduleContinuationSettle(process, cont, 'quiet')
+    }
+  }
+
+  private maybeRearmContinuation(process: AcpProcess): void {
+    const cont = process.continuation
+    if (!cont || cont.settled || cont.discarded) return
+    if (!this.canSettleContinuationTools(cont) || this.continuationWaitingOnHost(process)) return
+    if (cont.sawUsage && !cont.settleTimer) this.scheduleContinuationSettle(process, cont, 'settle')
+    else if (cont.sawText && !cont.quietTimer) this.scheduleContinuationSettle(process, cont, 'quiet')
+  }
+
+  /** Handles `session/update` notifications while no turn is active on `process`. */
+  private handleRestingUpdate(process: AcpProcess, update: unknown, sessionId?: string): void {
+    noteCommands(process, update)
+    if (!this.options.quirks.backgroundWork || !update || typeof update !== 'object') return
+    const existing = process.continuation
+    if (existing && !existing.settled && !existing.discarded) {
+      existing.buffer.push({ update, sessionId })
+      this.trackContinuationUpdate(process, existing, update)
+      return
+    }
+    const event = update as { sessionUpdate?: string; toolCallId?: string; status?: string; rawOutput?: unknown; content?: unknown; title?: string }
+    const threadId = process.threadId
+    if (!threadId) return
+    if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
+      const task = process.backgroundTasks?.get(event.toolCallId)
+      if (!task) return
+      process.backgroundTasks!.delete(event.toolCallId)
+      const summary = extractToolSummary(event)
+      try {
+        this.liveHost?.taskEnded?.(threadId, {
+          toolUseId: task.callId,
+          taskId: task.callId,
+          status: event.status,
+          ...(summary ? { summary } : {}),
+          durationMs: Math.max(0, Date.now() - task.startedAt)
+        })
+      } catch { /* best effort */ }
+      ;(process.recentlyEnded ??= []).push({ taskId: task.callId, description: task.description, ...(summary ? { summary } : {}) })
+      if (process.wakeGraceTimer) clearTimeout(process.wakeGraceTimer)
+      const graceMs = this.options.wakeGraceMs ?? WAKE_GRACE_MS
+      if (graceMs > 0) {
+        process.wakeGraceTimer = setTimeout(() => {
+          process.wakeGraceTimer = undefined
+          this.syncBackgroundWork(process)
+        }, graceMs)
+        process.wakeGraceTimer.unref?.()
+      }
+      this.syncBackgroundWork(process)
+      return
+    }
+    if (!process.mayWake || !event.sessionUpdate || !CONTINUATION_START_UPDATES.has(event.sessionUpdate)) return
+    if (process.wakeGraceTimer) { clearTimeout(process.wakeGraceTimer); process.wakeGraceTimer = undefined }
+    const ended = process.recentlyEnded?.splice(0) ?? []
+    const pendingSubagents = [...(process.backgroundTasks?.values() ?? [])].filter((t) => t.kind === 'subagent')
+    const tasks = [
+      ...ended.map((item) => ({ taskId: item.taskId, description: item.description })),
+      ...pendingSubagents.map((item) => ({ taskId: item.callId, description: item.description }))
+    ]
+    const summaries = ended.flatMap((item) => (item.summary ? [item.summary] : item.description ? [item.description] : []))
+    if (!summaries.length && pendingSubagents.length) {
+      summaries.push(...pendingSubagents.map((item) => item.description))
+    }
+    const id = randomUUID()
+    let resolveDone!: () => void
+    let rejectDone!: (error: Error) => void
+    const done = new Promise<void>((resolve, reject) => { resolveDone = resolve; rejectDone = reject })
+    // Prevent unhandled rejection if the process exits before `chat({ continuation: true })` awaits `done`.
+    done.catch(() => undefined)
+    const cont: AcpContinuation = {
+      id,
+      info: { id, taskIds: tasks.map((t) => t.taskId), summaries, ...(tasks.length ? { tasks } : {}) },
+      buffer: [{ update, sessionId }],
+      claimed: false,
+      discarded: false,
+      settled: false,
+      attachWaiters: [],
+      done,
+      resolve: resolveDone,
+      reject: rejectDone,
+      openTools: new Map(),
+      sawText: false,
+      sawUsage: false,
+      modelMovedPastOpenTools: false
+    }
+    process.continuation = cont
+    this.trackContinuationUpdate(process, cont, update)
+    if (!this.liveHost?.continuationStarted) {
+      this.discardContinuations(threadId, id)
+      return
+    }
+    try {
+      this.liveHost.continuationStarted(threadId, cont.info)
+    } catch {
+      this.discardContinuations(threadId, id)
+    }
   }
 
   /** Opens a connection to the agent. `onAuthUrl` receives sign-in links; without it a link means the sign-in is gone. */
@@ -342,13 +889,44 @@ export class AcpSessions {
     const { label, questions, quirks } = this.options
     if (this.stopped) throw new Error(`${label} provider is stopped`)
     let active: AcpProcess | undefined
+    const inTurn = () => Boolean(active && this.turning.has(active))
+    // When a reactive continuation has started on `active` and is waiting for the orchestrator to attach its
+    // `provider-continuation` turn (`chat({ continuation: true })`), hold any permission, file or form request until the
+    // turn adopts the process (or the continuation is discarded/settled). Idle processes without an open continuation
+    // fail immediately below, preserving the idle-process isolation guard.
+    const waitForTurn = async (): Promise<boolean> => {
+      if (inTurn()) return true
+      const cont = active?.continuation
+      if (!cont || cont.discarded || cont.settled || cont.claimed) return false
+      await new Promise<void>((resolve) => {
+        if (inTurn() || cont.discarded || cont.settled) { resolve(); return }
+        cont.attachWaiters.push(resolve)
+      })
+      return inTurn()
+    }
+    // An agent that wakes up on its own between turns (for instance, its own background shell task finishing) has no
+    // running turn, transcript stream, lease or permission mode. Detach and close the idle process and drop its saved
+    // session so it cannot keep acting unobserved or drift from Mousse's committed history; the next turn opens fresh
+    // with Mousse's canonical history.
+    const stopIdle = () => {
+      const idle = active
+      if (!idle || this.turning.has(idle)) return
+      this.clearBackgroundState(idle)
+      this.failContinuation(idle, new Error(`${label} cannot act outside a turn`))
+      if (idle.threadId && this.sessions.get(idle.threadId) === idle) {
+        this.sessions.delete(idle.threadId)
+        this.forgetConversation(idle.threadId)
+      }
+      setImmediate(() => { if (!this.turning.has(idle)) closeAcpConnection(idle) })
+    }
     const scope: AcpRequestScope = {
-      get threadId() { return active?.threadId },
-      get cwd() { return active?.cwd },
-      get approvals() { return active?.turnPrompter?.approvals },
-      get permissionMode() { return active?.permissionMode },
-      aborted: () => Boolean(active?.turnSignal?.aborted || active?.connection.signal.aborted),
+      get threadId() { return inTurn() ? active?.threadId : undefined },
+      get cwd() { return inTurn() ? active?.cwd : undefined },
+      get approvals() { return inTurn() ? active?.turnPrompter?.approvals : undefined },
+      get permissionMode() { return inTurn() ? active?.permissionMode : undefined },
+      aborted: () => Boolean(!inTurn() || active?.turnSignal?.aborted || active?.connection.signal.aborted),
       throwIfAborted: () => {
+        if (!inTurn()) throw new Error(`${label} cannot act outside a turn`)
         active?.turnSignal?.throwIfAborted()
         active?.connection.signal.throwIfAborted()
       }
@@ -356,6 +934,15 @@ export class AcpSessions {
     const classify = this.options.classifyOption ?? classifyGenericOption
     const handlers: AcpClientHandlers = {
       requestPermission: async (request) => {
+        // A one-shot runs no tool: refused unasked, and the request ends.
+        if (active?.refuseTools) {
+          active.refuseTools(request.toolCall?.title ?? 'a tool')
+          return { outcome: { outcome: 'cancelled' } }
+        }
+        if (!(await waitForTurn())) {
+          stopIdle()
+          return { outcome: { outcome: 'cancelled' } }
+        }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId
         const awaiting = callId ? active?.turnToolAwaiting : undefined
@@ -367,21 +954,58 @@ export class AcpSessions {
         return answer
       },
       ...(quirks.clientFs ? {
-        readTextFile: (request) => readWorkspaceFile(scope, request),
-        writeTextFile: (request) => writeWorkspaceFile(questions, scope, request, label)
+        readTextFile: async (request) => {
+          if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
+          if (!(await waitForTurn())) {
+            stopIdle()
+            throw RequestError.invalidRequest(undefined, `${label} cannot read files outside a turn`)
+          }
+          return readWorkspaceFile(scope, request)
+        },
+        writeTextFile: async (request) => {
+          if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
+          if (!(await waitForTurn())) {
+            stopIdle()
+            throw RequestError.invalidRequest(undefined, `${label} cannot write files outside a turn`)
+          }
+          return writeWorkspaceFile(questions, scope, request, label)
+        }
       } : {}),
-      // A sign-in link the agent sends as a URL elicitation goes to the sign-in; nothing else is answered.
-      ...(this.options.urlElicitation ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
-        const url = (request as { mode?: unknown; url?: unknown }).mode === 'url' ? (request as { url?: unknown }).url : undefined
-        if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
-        onAuthUrl(url)
-        return { action: 'accept' }
+      // URL elicitations carry sign-in links; form elicitations carry interactive questions for the thread's widget.
+      ...((this.options.urlElicitation || this.options.formElicitation) ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
+        const mode = (request as { mode?: unknown }).mode
+        if (mode === 'url' && this.options.urlElicitation) {
+          const url = (request as { url?: unknown }).url
+          if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
+          onAuthUrl(url)
+          return { action: 'accept' }
+        }
+        if (mode === 'form' && this.options.formElicitation) {
+          if (active?.refuseTools) {
+            active.refuseTools('a question')
+            return { action: 'cancel' }
+          }
+          if (!(await waitForTurn())) {
+            stopIdle()
+            return { action: 'cancel' }
+          }
+          const callId = (request as { toolCallId?: unknown }).toolCallId
+          const awaiting = typeof callId === 'string' && callId ? active?.turnToolAwaiting : undefined
+          awaiting?.(callId as string, true)
+          try {
+            return await answerFormElicitation(questions, scope, request)
+          } finally {
+            awaiting?.(callId as string, false)
+          }
+        }
+        return { action: 'decline' }
       } } : {}),
       ...(quirks.xaiExtensions ? xaiHandlers({
         questions,
         scope,
         awaiting: () => active?.turnToolAwaiting,
-        promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params)
+        promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params),
+        onOutsideTurn: stopIdle
       }) : {})
     }
     const connection = this.options.connect({
@@ -396,6 +1020,7 @@ export class AcpSessions {
           if (!active) return
           active.openRequests = Math.max(0, (active.openRequests ?? 0) - 1)
           active.activity?.()
+          this.maybeRearmContinuation(active)
         }
       }),
       onAuthUrl: onAuthUrl ?? (() => {
@@ -405,13 +1030,17 @@ export class AcpSessions {
         active.connection.close(new Error(this.options.signInRequiredMessage))
       }),
       onExit: () => {
-        if (active) this.processes.delete(active)
+        if (!active) return
+        this.processes.delete(active)
+        this.clearBackgroundState(active)
+        this.failContinuation(active, new Error(`${label} exited`))
+        if (active.threadId && this.sessions.get(active.threadId) === active) this.sessions.delete(active.threadId)
       }
     })
     active = Object.assign(connection, { generation: this.options.launchGeneration(), signInGeneration: this.options.signInGeneration() })
-    // Between turns, and while a session opens, the agent's command list is still kept.
+    // Between turns, and while a session opens, keep the agent's command list and watch for background completions/wakeups.
     const resting = active
-    resting.onUpdate = (update) => noteCommands(resting, update)
+    resting.onUpdate = (update, sessionId) => this.handleRestingUpdate(resting, update, sessionId)
     this.processes.add(active)
     return active
   }
@@ -528,6 +1157,21 @@ export class AcpSessions {
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
   }
 
+  /**
+   * A turn that did not finish (stopped, failed, a usage limit) left its saved session resumable: `history` is the
+   * canonical history as that turn left it (its request included, no reply), which the next turn sends as its history,
+   * so that turn resumes the session and sends only its new message. Only a session `chat` marked for it (see
+   * `resumableAfterFailure`) is fingerprinted; anything else stays as it was, and the next turn hands its history to a
+   * new session.
+   */
+  commitInterrupted(threadId: string, history: string): void {
+    const sessionId = this.interrupted.get(threadId)
+    this.interrupted.delete(threadId)
+    const saved = this.options.store.saved(threadId)
+    if (!sessionId || !saved || saved.sessionId !== sessionId) return
+    this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
+  }
+
   /** Drops the saved session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     if (!this.options.store.saved(threadId)) return
@@ -578,6 +1222,8 @@ export class AcpSessions {
   terminate(sessionId: string | undefined): void {
     const active = this.bySession(sessionId)
     if (!active) return
+    this.clearBackgroundState(active)
+    this.failContinuation(active, new Error(`${this.options.label} was terminated`))
     closeAcpConnection(active)
     if (active.threadId) {
       this.sessions.delete(active.threadId)
@@ -672,12 +1318,23 @@ export class AcpSessions {
   async chat(input: AcpChatInput): Promise<string> {
     const { label, store, questions, quirks } = this.options
     input.signal?.throwIfAborted()
+    this.interrupted.delete(input.threadId)
     const historyKey = this.historyKey(input.history ?? '')
     const instanceId = input.instanceId ?? this.options.defaultInstanceId
     // A native session belongs to the instance that opened it; another instance starts fresh.
     const stored = store.saved(input.threadId)
     let saved = stored && (stored.instanceId ?? this.options.defaultInstanceId) === instanceId ? stored : undefined
     let active = this.sessions.get(input.threadId)
+    let claimedContinuation: AcpContinuation | undefined
+    let priorSubagentIds: string[] = []
+    if (input.continuation) {
+      const cont = active?.continuation
+      if (!active || active.connection.signal.aborted || !cont || cont.discarded || (input.continuationId && cont.id !== input.continuationId)) {
+        return ''
+      }
+      claimedContinuation = cont
+      priorSubagentIds = [...(active.backgroundTasks?.values() ?? [])].filter((task) => task.kind === 'subagent').map((task) => task.callId)
+    }
     const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
     // A bot's session given other instructions is neither reused nor resumed (`AcpChatInput.bot`): a new one is opened.
     const opened = active ? active.instructionsHash : saved?.instructionsHash
@@ -686,7 +1343,9 @@ export class AcpSessions {
     const mcpToken = input.mcp?.token ?? null
     // A new relay catalogue reopens the session too: an agent reads its tool lists when the session opens.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
-    if (active && (botStale || active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.relayKey ?? null) !== relayKey || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
+    if (!claimedContinuation && active && (botStale || active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.relayKey ?? null) !== relayKey || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
+      this.clearBackgroundState(active)
+      this.failContinuation(active, new Error(`${label} session replaced`))
       this.close(active)
       this.sessions.delete(input.threadId)
       active = undefined
@@ -710,23 +1369,49 @@ export class AcpSessions {
     adopt(active)
     const abort = () => {
       questions.autoRejectPendingForThread(input.threadId)
+      this.failContinuation(current, new Error(`${label} was stopped`))
       // Closing also aborts setup RPCs; a lost startup abort must never dispatch a prompt.
       this.close(current)
     }
     input.signal?.addEventListener('abort', abort, { once: true })
     let text = ''
-    const toolTitles = new Map<string, string>()
+    let thinking = ''
+    let turnUsage: AcpTurnUsage | undefined
+    interface TrackedTool {
+      title: string
+      name?: string
+      rawInput?: unknown
+      startedAt: number
+      isDaemon: boolean
+      isInvokeSubagent: boolean
+      description: string
+    }
+    interface LaunchedSubagent {
+      callId: string
+      description: string
+      startedAt: number
+      textResponses: number
+      sawTextInStep: boolean
+    }
+    const openTools = new Map<string, TrackedTool>()
+    const launchedSubagents = new Map<string, LaunchedSubagent>()
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let steerFailure: unknown
     // A prompt is in flight, and the agent's silence is counted (`PROMPT_SILENCE_MS`).
     let prompting = false
+    // A prompt of this turn was sent, and the agent showed it works on one (`PROMPT_WORK_UPDATES`).
+    let promptSent = false
+    let worked = false
     // Steers drained for the next prompt, and those the prompt in flight carries that the agent has not shown it has.
     // A drain with a token is read (`steerTaken`, `onSteer`) only once the agent works on the prompt that carries it,
     // or answers it; until then a failure hands it back (`returnSteer`), so it is never lost
     // (docs/design/steer-and-interruptions.md §2.6, §2.7).
     const pendingSteers: DrainedSteer[] = []
     const carried: DrainedSteer[] = []
+    // A steer sent as a second prompt while one runs (`steersNatively`), with the steers it carries. The running
+    // prompt's answer shows the agent took it in: from then on it is the prompt in flight, and its end ends the turn.
+    let riding: { reply: Promise<unknown>; steers: DrainedSteer[] } | undefined
     const readCarried = (): void => {
       for (const entry of carried.splice(0)) {
         if (!entry.token) continue
@@ -742,7 +1427,9 @@ export class AcpSessions {
       }
     }
     const handBack = (): void => {
-      for (const entry of [...carried.splice(0), ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
+      const unconfirmed = riding?.steers.splice(0) ?? []
+      riding = undefined
+      for (const entry of [...carried.splice(0), ...unconfirmed, ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
     }
     // The prompt in flight (xAI tags each one), and whether an earlier prompt of the turn may still send updates: one a
     // steer cancelled whose own end never came within `PROMPT_COMPLETE_WAIT_MS`. Its late updates are not work on
@@ -789,28 +1476,114 @@ export class AcpSessions {
       watchSilence()
       noteCommands(current, update)
       if (!update || typeof update !== 'object') return
-      const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; rawInput?: unknown; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
+      const event = update as { sessionUpdate?: string; content?: unknown; toolCallId?: string; title?: string; name?: string; status?: string; rawInput?: unknown; rawOutput?: unknown; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
+      const textContent = event.content && typeof event.content === 'object' && !Array.isArray(event.content) ? event.content as { type?: string; text?: string } : undefined
       // The agent works on the prompt that carries drained steers: they are read now, before what it writes.
       // An update that may be a cancelled prompt's late one does not count: the carrying prompt's reply reads them then.
-      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) readCarried()
-      if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
-        text += event.content.text ?? ''
+      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) {
+        worked = true
+        readCarried()
+      }
+      if (event.sessionUpdate === 'agent_message_chunk' && textContent?.type === 'text') {
+        const chunk = textContent.text ?? ''
+        if (chunk) for (const sub of launchedSubagents.values()) sub.sawTextInStep = true
+        text += chunk
         input.onText(text)
+      }
+      if (event.sessionUpdate === 'usage_update') {
+        for (const sub of launchedSubagents.values()) {
+          if (sub.sawTextInStep) {
+            sub.textResponses += 1
+            sub.sawTextInStep = false
+          }
+        }
+      }
+      // Agents such as Antigravity say what they are doing between tool calls as thoughts, not as message text.
+      if (event.sessionUpdate === 'agent_thought_chunk' && textContent?.type === 'text' && textContent.text) {
+        thinking += textContent.text
+        input.onThinking?.(thinking)
       }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
         const subagent = isAcpSubagentTool(event.name)
-        const activity = subagent ? subagentActivity(event.rawInput, event.title) : undefined
-        const title = activity ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
-        toolTitles.set(event.toolCallId, title)
+        const isInvokeSubagent = quirks.backgroundWork === true && event.name === 'invoke_subagent'
+        const isCommand = quirks.backgroundWork === true && event.name === 'run_command'
+        const activity = subagent
+          ? subagentActivity(event.rawInput, event.title, isInvokeSubagent && !input.bot)
+          : isCommand
+            ? commandActivity(event.rawInput, event.title)
+            : undefined
+        const record = subagentToolName(event.name) ? (recordSubagentCall(event.name, event.rawInput, {}) ?? undefined) : undefined
+        const title = subagent && activity?.kind === 'subagent' ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
+        const description = subagent && activity?.kind === 'subagent'
+          ? activity.description
+          : isCommand && activity?.kind === 'command'
+            ? activity.command
+            : title
+        openTools.set(event.toolCallId, {
+          title,
+          name: event.name,
+          rawInput: event.rawInput,
+          startedAt: Date.now(),
+          isDaemon: isCommand && isDaemonCommand(event.rawInput),
+          isInvokeSubagent,
+          description
+        })
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}) })
+        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
-      if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && toolTitles.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed')
-        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: toolTitles.get(event.toolCallId)! })
+      if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed') {
+        const tracked = openTools.get(event.toolCallId)!
+        if (event.rawInput !== undefined && tracked.rawInput === undefined) tracked.rawInput = event.rawInput
+        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title })
+      }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
-        input.onTool?.({ phase: 'complete', callId: event.toolCallId, title: event.title ?? toolTitles.get(event.toolCallId) ?? `${label} tool`, status: event.status as 'completed' | 'failed' })
-        toolTitles.delete(event.toolCallId)
+        const tracked = openTools.get(event.toolCallId)
+        const bg = current.backgroundTasks?.get(event.toolCallId)
+        if (!tracked && bg) {
+          current.backgroundTasks?.delete(event.toolCallId)
+          const summary = extractToolSummary(event)
+          try {
+            this.liveHost?.taskEnded?.(input.threadId, {
+              toolUseId: bg.callId,
+              taskId: bg.callId,
+              status: event.status,
+              ...(summary ? { summary } : {}),
+              durationMs: Math.max(0, Date.now() - bg.startedAt)
+            })
+          } catch { /* best effort */ }
+        } else {
+          openTools.delete(event.toolCallId)
+          const isBackgroundLaunch = tracked?.isInvokeSubagent && event.status === 'completed' && !input.bot
+          if (tracked && isBackgroundLaunch) {
+            launchedSubagents.set(event.toolCallId, {
+              callId: event.toolCallId,
+              description: tracked.description,
+              startedAt: tracked.startedAt,
+              textResponses: 0,
+              sawTextInStep: false
+            })
+          }
+          const toolName = tracked?.name ?? event.name
+          const rawInput = tracked?.rawInput ?? event.rawInput
+          const outputText = extractToolOutputText(event)
+          const record = subagentToolName(toolName)
+            ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
+            : undefined
+          const served = toolName ? mousseServerToolOf(toolName) : undefined
+          const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
+            ? { output: outputText }
+            : undefined
+          input.onTool?.({
+            phase: 'complete',
+            callId: event.toolCallId,
+            title: event.title ?? tracked?.title ?? `${label} tool`,
+            ...(toolName ? { toolName } : {}),
+            status: isBackgroundLaunch ? 'background' : event.status,
+            ...(record ? { record } : {}),
+            ...(followUpOutput ? { activity: followUpOutput } : {})
+          })
+        }
       }
       if (event.sessionUpdate === 'config_option_update' && event.configOptions) {
         const updated = quirks.modelConfigId ? modelOptions({ configOptions: event.configOptions }) : agentModels({ configOptions: event.configOptions }).models
@@ -874,7 +1647,8 @@ export class AcpSessions {
         }
         input.signal?.throwIfAborted()
         // Until the owning turn commits its updated history, this ACP session is
-        // deliberately non-resumable after a crash or a failed/aborted prompt.
+        // deliberately non-resumable after a crash or a failed/aborted prompt (an
+        // agent that resumes by `session/resume` may be fingerprinted after one: `commitInterrupted`).
         // A resumed session keeps the instructions it was given; a new one has none yet.
         current.instructionsHash = resumed ? saved?.instructionsHash : undefined
         const instructions = current.instructionsHash ? { instructionsHash: current.instructionsHash } : {}
@@ -892,11 +1666,18 @@ export class AcpSessions {
         this.sessions.set(input.threadId, current)
       }
       active = current
-      active.onUpdate = onUpdate
+      active.onUpdate = claimedContinuation
+        ? (update) => {
+            onUpdate(update)
+            if (claimedContinuation && !claimedContinuation.settled) this.trackContinuationUpdate(active!, claimedContinuation, update)
+          }
+        : onUpdate
       if (!active.sessionId) throw new Error(`${label} session was not created`)
       input.onSession?.(active.sessionId)
-      await this.selectModel(active, input.model)
-      if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
+      if (!claimedContinuation) {
+        await this.selectModel(active, input.model)
+        if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
+      }
       input.signal?.throwIfAborted()
       const imageBlocks = (input.images ?? []).map((image) => {
         const block = acpImageBlock(image)
@@ -906,53 +1687,97 @@ export class AcpSessions {
       let cancelSent = false
       const turnProcess = active
       // The hold (docs/design/steer-and-interruptions.md §2.7): a person's steer waits while a tool runs. While a prompt
-      // runs only a cut is taken; between prompts (the boundary), whatever can go in joins the next prompt.
+      // runs only a cut is taken, unless the agent steers natively: then whatever may go in now joins the running work as
+      // a second prompt. Between prompts (the boundary), whatever can go in joins the next prompt.
       const holds = Boolean(input.peekSteer && input.drainSteerEntry)
+      const native = () => prompting && !cancelSent && steersNatively(quirks, turnProcess)
       const drain = (): DrainedSteer | undefined => {
         if (holds) {
           const delivery = input.peekSteer!()?.delivery
-          if (!delivery || delivery === 'hold' || (prompting && delivery !== 'cut')) return undefined
-          return input.drainSteerEntry!({ expect: prompting ? ['cut'] : ['cut', 'native'] })
+          const now: Array<'cut' | 'native'> = prompting && !native() ? ['cut'] : ['cut', 'native']
+          if (!delivery || delivery === 'hold' || !now.includes(delivery)) return undefined
+          return input.drainSteerEntry!({ expect: now })
         }
         if (input.drainSteerEntry) return input.drainSteerEntry()
         const text = input.drainSteer?.()
         return text ? { text } : undefined
       }
+      /** Cancels the running prompt for the drained steers: the next prompt carries them. */
+      const cut = (): void => {
+        cancelSent = true
+        questions.autoRejectPendingForThread(input.threadId)
+        if (claimedContinuation && !claimedContinuation.settled) {
+          void turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! }).catch(() => undefined)
+          this.settleContinuation(claimedContinuation)
+          return
+        }
+        // The same cancel and deadline as a stop: an agent that does not stop for the steer is
+        // ended, and the turn fails rather than replaying a request whose outcome is unknown.
+        void interruptWithDeadline({
+          interrupt: async () => {
+            await turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! })
+            await turnProcess.prompting
+            return 'interrupted'
+          },
+          terminate: () => {
+            steerFailure ??= new Error(`${label} did not stop for the new guidance, so it was ended. Send the guidance again.`)
+            closeAcpConnection(turnProcess)
+            this.sessions.delete(input.threadId)
+          },
+          forgetConversation: (threadId) => this.forgetConversation(threadId)
+        }, { provider: '', ...(turnProcess.sessionId ? { sessionId: turnProcess.sessionId } : {}) }, { threadId: input.threadId, ...(this.options.cancelDeadlineMs !== undefined ? { deadlineMs: this.options.cancelDeadlineMs } : {}) })
+          .catch((error) => { steerFailure ??= error; this.close(turnProcess) })
+      }
+      /**
+       * Sends the drained steers as a second prompt into the running one, with no cancel: nothing the agent does now is
+       * stopped. They are read once the running prompt has answered (the agent took them in) and the agent works on
+       * them or answers; an error answer before that hands them back, and this process cuts from then on.
+       */
+      const sendNative = (): void => {
+        const steers = pendingSteers.splice(0)
+        const reply = turnProcess.connection.agent.request(methods.agent.session.prompt, { sessionId: turnProcess.sessionId!,
+          prompt: [{ type: 'text' as const, text: steers.map((entry) => entry.text).join('\n') }, ...steerImageBlocks(steers)] })
+        const sent = { reply, steers }
+        riding = sent
+        // A stop's cancel ends both prompts: it waits for the second one too.
+        const running = turnProcess.prompting
+        turnProcess.prompting = Promise.all([running, reply.then(() => undefined, () => undefined)]).then(() => undefined)
+        if (claimedContinuation && !claimedContinuation.settled) this.settleContinuation(claimedContinuation)
+        reply.catch((error: unknown) => {
+          // Only an error answer while the first prompt still runs is a refusal; a closed connection ends the turn anyway.
+          const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+          if (riding !== sent || typeof code !== 'number' || input.signal?.aborted) return
+          riding = undefined
+          turnProcess.nativeSteerRefused = true
+          console.warn('[acp] the agent refused a steer sent as a second prompt; it is cut in instead', { code })
+          for (const entry of sent.steers.splice(0)) {
+            if (entry.token) input.returnSteer?.(entry.text, entry.token)
+            else pendingSteers.push(entry)
+          }
+          if (pendingSteers.length && prompting && !cancelSent) cut()
+        })
+      }
       const collectSteer = () => {
         if (input.signal?.aborted || steerFailure) return
+        // One second prompt at a time: the next steer waits until the running prompt shows the agent took this one.
+        if (prompting && riding) return
         try {
+          const nativeNow = native()
           const entry = drain()
           const steer = entry?.text.trim()
           if (!entry || !steer) return
           const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}), ...(entry.images?.length ? { images: entry.images } : {}) }
-          // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
-          if (prompting && !cancelSent && drained.token && input.mayCut && !input.mayCut(drained.token)) {
+          // The check at dispatch: a tool that started since the decision is not cancelled for this steer (a native
+          // steer cancels nothing).
+          if (prompting && !cancelSent && !nativeNow && drained.token && input.mayCut && !input.mayCut(drained.token)) {
             input.returnSteer?.(drained.text, drained.token)
             return
           }
           // A drain without a token keeps the old rule: read when it is drained.
           if (!drained.token) input.onSteer?.(steer)
           pendingSteers.push(drained)
-          if (prompting && !cancelSent) {
-            cancelSent = true
-            questions.autoRejectPendingForThread(input.threadId)
-            // The same cancel and deadline as a stop: an agent that does not stop for the steer is
-            // ended, and the turn fails rather than replaying a request whose outcome is unknown.
-            void interruptWithDeadline({
-              interrupt: async () => {
-                await turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! })
-                await turnProcess.prompting
-                return 'interrupted'
-              },
-              terminate: () => {
-                steerFailure ??= new Error(`${label} did not stop for the new guidance, so it was ended. Send the guidance again.`)
-                closeAcpConnection(turnProcess)
-                this.sessions.delete(input.threadId)
-              },
-              forgetConversation: (threadId) => this.forgetConversation(threadId)
-            }, { provider: '', ...(turnProcess.sessionId ? { sessionId: turnProcess.sessionId } : {}) }, { threadId: input.threadId, ...(this.options.cancelDeadlineMs !== undefined ? { deadlineMs: this.options.cancelDeadlineMs } : {}) })
-              .catch((error) => { steerFailure ??= error; this.close(turnProcess) })
-          }
+          if (nativeNow) sendNative()
+          else if (prompting && !cancelSent) cut()
         } catch (error) { steerFailure = error; this.close(turnProcess) }
       }
       steerTimer = setInterval(collectSteer, 100)
@@ -981,41 +1806,95 @@ export class AcpSessions {
         : [orchestration + history + preamble + (input.prompt || '(image attachment)')]
       let commandTurn = command !== undefined
       let attachments = imageBlocks
-      for (;;) {
-        input.signal?.throwIfAborted()
-        if (steerFailure) throw steerFailure
-        collectSteer()
-        if (pendingSteers.length) {
-          const steers = pendingSteers.splice(0)
-          carried.push(...steers)
-          const guidance = 'Additional guidance:\n' + steers.map((entry) => entry.text).join('\n')
-          if (commandTurn) blocks = [blocks[0], blocks[1] ? `${blocks[1]}\n\n${guidance}` : guidance]
-          else blocks = [`${blocks[0]}\n\n${guidance}`]
-          // The steers' images join the prompt they ride in.
-          attachments = [...attachments, ...steerImageBlocks(steers)]
-        }
+      // A native steer's prompt the agent took in: the loop waits on it next, and sends nothing.
+      let adopted: Promise<unknown> | undefined
+      let runPromptLoop = true
+      if (claimedContinuation) {
+        claimedContinuation.claimed = true
         prompting = true
-        // A boundary the previous prompt's end reported is over.
+        promptSent = true
         input.onProviderTurn?.()
-        cancelSent = false
-        active.cancelRequested = false
         active.activity = watchSilence
         watchSilence()
-        // Any accepted prompt makes the old history fingerprint stale until commit.
-        const accepted = store.saved(input.threadId)
-        if (accepted) {
-          const { historyKey: _stale, ...rest } = accepted
-          store.setSaved(input.threadId, rest)
+        for (const buffered of claimedContinuation.buffer.splice(0)) onUpdate(buffered.update)
+        this.wakeAttachWaiters(claimedContinuation)
+        // Re-check settle conditions in case a request or buffered update arrived before attach.
+        this.maybeRearmContinuation(active)
+        await claimedContinuation.done
+        if (active.continuation === claimedContinuation) active.continuation = undefined
+        if (riding) {
+          readCarried()
+          const taken = riding
+          riding = undefined
+          carried.push(...taken.steers.splice(0))
+          adopted = taken.reply
+          active.prompting ??= adopted.then(() => undefined, () => undefined)
+          input.onProviderTurn?.()
+          if (text) text += '\n\n'
+          watchSilence()
+        } else {
+          prompting = false
+          watchSilence()
+          input.signal?.throwIfAborted()
+          if (steerFailure) throw steerFailure
+          input.onBoundary?.()
+          collectSteer()
+          if (steerFailure) throw steerFailure
+          if (pendingSteers.length) {
+            const steers = pendingSteers.splice(0)
+            carried.push(...steers)
+            blocks = [steers.map((entry) => entry.text).join('\n')]
+            commandTurn = false
+            attachments = steerImageBlocks(steers)
+            if (text) text += '\n\n'
+          } else {
+            runPromptLoop = false
+          }
         }
-        // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
-        const promptId = quirks.xaiExtensions ? randomUUID() : undefined
-        promptInFlight = promptId
-        const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
-          prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
+      }
+      if (runPromptLoop) for (;;) {
+        input.signal?.throwIfAborted()
+        if (steerFailure) throw steerFailure
+        let reply: Promise<unknown>
+        let promptId: string | undefined
+        if (adopted) {
+          reply = adopted
+          adopted = undefined
+        } else {
+          collectSteer()
+          if (pendingSteers.length) {
+            const steers = pendingSteers.splice(0)
+            carried.push(...steers)
+            const guidance = 'Additional guidance:\n' + steers.map((entry) => entry.text).join('\n')
+            if (commandTurn) blocks = [blocks[0], blocks[1] ? `${blocks[1]}\n\n${guidance}` : guidance]
+            else blocks = [`${blocks[0]}\n\n${guidance}`]
+            // The steers' images join the prompt they ride in.
+            attachments = [...attachments, ...steerImageBlocks(steers)]
+          }
+          prompting = true
+          // A boundary the previous prompt's end reported is over.
+          input.onProviderTurn?.()
+          cancelSent = false
+          active.cancelRequested = false
+          active.activity = watchSilence
+          watchSilence()
+          // Any accepted prompt makes the old history fingerprint stale until commit.
+          const accepted = store.saved(input.threadId)
+          if (accepted) {
+            const { historyKey: _stale, ...rest } = accepted
+            store.setSaved(input.threadId, rest)
+          }
+          // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
+          promptId = quirks.xaiExtensions ? randomUUID() : undefined
+          promptInFlight = promptId
+          promptSent = true
+          reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
+            prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
+        }
         const completion = promptId ? this.completionOf(active, promptId) : undefined
         const request: Promise<unknown> = completion ? Promise.race([reply, completion.done]) : reply
         if (completion) reply.catch(() => undefined)
-        active.prompting = request.then(() => undefined, () => undefined)
+        active.prompting ??= request.then(() => undefined, () => undefined)
         let outcome: unknown
         try {
           outcome = await request
@@ -1023,7 +1902,29 @@ export class AcpSessions {
           completion?.dispose()
           throw error
         } finally {
-          active.prompting = undefined
+          // A steer's prompt that rides on is still the work a stop waits for.
+          active.prompting = riding?.reply.then(() => undefined, () => undefined)
+        }
+        // The SDK settles an answer at once but hands an update to its handlers a few steps later: what the agent
+        // wrote just before it answered (often its whole reply) is still on its way. It lands before the turn ends.
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        const promptUsage = readAcpPromptUsage(outcome)
+        if (promptUsage) turnUsage = addAcpTurnUsage(turnUsage, promptUsage)
+        if (riding) {
+          // A native steer rides: the prompt answered because the agent took it into the running work (or the prompt
+          // was already ending, and it runs next). The steer's prompt carries the turn on, and its end ends the turn,
+          // so this answer's stop reason is not the turn's. Its steers are read once the agent works on them or answers.
+          readCarried()
+          const taken = riding
+          riding = undefined
+          carried.push(...taken.steers.splice(0))
+          adopted = taken.reply
+          active.prompting ??= adopted.then(() => undefined, () => undefined)
+          completion?.dispose()
+          input.onProviderTurn?.()
+          if (text) text += '\n\n'
+          watchSilence()
+          continue
         }
         prompting = false
         // The agent answered the prompt: it has the steers it carried, whatever it says of how it ended.
@@ -1066,23 +1967,85 @@ export class AcpSessions {
         attachments = steerImageBlocks(steers)
         if (text) text += '\n\n'
       }
-      for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
+      for (const sub of launchedSubagents.values()) {
+        if (sub.sawTextInStep) {
+          sub.textResponses += 1
+          sub.sawTextInStep = false
+        }
+      }
+      for (const [callId, tracked] of openTools) {
+        if (quirks.backgroundWork && !input.bot && tracked.name === 'run_command') {
+          input.onTool?.({ phase: 'complete', callId, title: tracked.title, toolName: tracked.name, status: 'background' })
+          active.mayWake = true
+          if (!tracked.isDaemon) {
+            ;(active.backgroundTasks ??= new Map()).set(callId, { callId, kind: 'command', description: tracked.description, startedAt: tracked.startedAt })
+          }
+        } else {
+          input.onTool?.({ phase: 'complete', callId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}), status: 'unfinished' })
+        }
+      }
+      if (quirks.backgroundWork && !input.bot) {
+        for (const sub of launchedSubagents.values()) {
+          active.mayWake = true
+          if (sub.textResponses >= 2) {
+            try {
+              this.liveHost?.taskEnded?.(input.threadId, {
+                toolUseId: sub.callId,
+                taskId: sub.callId,
+                status: 'completed',
+                durationMs: Math.max(0, Date.now() - sub.startedAt)
+              })
+            } catch { /* best effort */ }
+          } else {
+            ;(active.backgroundTasks ??= new Map()).set(sub.callId, { callId: sub.callId, kind: 'subagent', description: sub.description, startedAt: sub.startedAt })
+          }
+        }
+        if (claimedContinuation) {
+          for (const callId of priorSubagentIds) {
+            const task = active.backgroundTasks?.get(callId)
+            if (!task) continue
+            active.backgroundTasks!.delete(callId)
+            try {
+              this.liveHost?.taskEnded?.(input.threadId, {
+                toolUseId: task.callId,
+                taskId: task.callId,
+                status: 'completed',
+                durationMs: Math.max(0, Date.now() - task.startedAt)
+              })
+            } catch { /* best effort */ }
+          }
+        }
+        this.syncBackgroundWork(active)
+      }
+      if (turnUsage) input.onUsage?.(turnUsage)
       return text
     } catch (error) {
+      // An agent that reopens a saved session by `session/resume` keeps it after a failed or stopped prompt. The next
+      // turn may resume it when the agent holds what Mousse's history then says: a prompt of this turn reached it, the
+      // session already held the conversation before it (resumed or reused) or the agent worked on it (a new session's
+      // first prompt carries the handed-over history, which the agent may not have kept if it never started), and no
+      // steer is in doubt (one a prompt carried that the agent never showed it read goes back and runs again, so
+      // Mousse's history lacks what the agent may hold). The adapter then fingerprints it (`commitInterrupted`).
+      const steerInDoubt = steerFailure !== undefined || carried.some((entry) => entry.token)
+      const sessionId = current.sessionId
+      if (quirks.preferResume && promptSent && (resumed || worked) && !steerInDoubt && sessionId && store.saved(input.threadId)?.sessionId === sessionId)
+        this.interrupted.set(input.threadId, sessionId)
       // Drained steers no prompt delivered go back; they run as the follow-up.
       handBack()
+      this.clearBackgroundState(current)
+      this.failContinuation(current, error instanceof Error ? error : new Error(String(error)))
       this.close(current)
       this.sessions.delete(input.threadId)
       if (steerFailure) throw steerFailure
       if (silenceFailure && !input.signal?.aborted) throw silenceFailure
       // A sign-in the agent asks for is a sign-in; any other error the agent answered with is shown in its words.
-      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error)) ?? error
+      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error, this.options.usageLimitProvider)) ?? error
     } finally {
       clearTimeout(silenceTimer)
       current.activity = undefined
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', abort)
-      current.onUpdate = (update) => noteCommands(current, update)
+      current.onUpdate = (update, sessionId) => this.handleRestingUpdate(current, update, sessionId)
       current.turnSignal = undefined
       current.turnPrompter = undefined
       current.turnToolAwaiting = undefined
@@ -1091,22 +2054,99 @@ export class AcpSessions {
     }
   }
 
-  /** Whether any agent process runs a turn now. */
-  busy(): boolean {
-    return this.turning.size > 0
+  /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. A
+   * fresh agent process and session of its own in `cwd` (an empty folder the caller made for it), with no MCP
+   * server and no client file system; the system text and the prompt go as one prompt. Every permission or file
+   * request is refused, and any tool call the agent reports ends the request as refused. The answer is the agent's
+   * text. One attempt, never saved or resumed; `signal` stops it, and the process ends afterwards.
+   */
+  async oneShot(input: { cwd: string; model: string; system: string; prompt: string; signal: AbortSignal; onActivity(): void }): Promise<string> {
+    const { label, quirks } = this.options
+    input.signal.throwIfAborted()
+    // xAI's tagged prompts end on a notice this request does not wait for.
+    if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
+    await this.options.beforeLaunch?.('one_shot')
+    input.signal.throwIfAborted()
+    const active = this.launch('one_shot')
+    active.cwd = input.cwd
+    let refused: Error | undefined
+    active.refuseTools = (what) => {
+      refused ??= harnessAppError({ code: 'policy_unenforceable', message: `${label} tried to use a tool (${what}) in a request that runs none, so Mousse stopped it.` })
+      closeAcpConnection(active)
+    }
+    const abort = () => closeAcpConnection(active)
+    input.signal.addEventListener('abort', abort, { once: true })
+    let text = ''
+    try {
+      await this.initialize(active)
+      input.signal.throwIfAborted()
+      input.onActivity()
+      const session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers: [] })
+      active.sessionId = session.sessionId
+      input.signal.throwIfAborted()
+      input.onActivity()
+      // The session's model control, read without recording anything: this session is not the profile's.
+      if (!quirks.modelConfigId) active.modelControl = agentModels(session, active.info?.meta).control
+      await this.selectModel(active, input.model)
+      input.signal.throwIfAborted()
+      active.onUpdate = (update) => {
+        if (!update || typeof update !== 'object' || refused) return
+        const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; title?: string; name?: string }
+        // A tool is refused before anything else runs, a slow activity callback included.
+        if (event.sessionUpdate === 'tool_call' || event.sessionUpdate === 'tool_call_update') {
+          active.refuseTools?.(event.title ?? event.name ?? 'a tool')
+          return
+        }
+        input.onActivity()
+        if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') text += event.content.text ?? ''
+      }
+      const prompt = [input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
+      const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
+      // What the agent wrote just before it answered is still on its way (see `chat`).
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if (refused) throw refused
+      input.signal.throwIfAborted()
+      const ended = promptStopOutcome(label, outcome)
+      if (ended === 'cancelled') throw agentCancelledError(label)
+      if (ended) throw ended
+      return text
+    } catch (error) {
+      if (refused) throw refused
+      if (input.signal.aborted) throw error
+      throw this.authRequiredError(active, error) ?? acpAgentError(error) ?? error
+    } finally {
+      // `refuseTools` stays: a request that arrives while the process ends is refused too.
+      input.signal.removeEventListener('abort', abort)
+      active.onUpdate = undefined
+      this.close(active)
+    }
   }
 
-  /** Idle agent processes close now; a busy one is replaced on that thread's next turn. */
+  /** Whether any agent process runs a turn or holds active background work now. */
+  busy(): boolean {
+    if (this.turning.size > 0) return true
+    for (const active of this.sessions.values()) {
+      if (this.hasBackgroundWork(active) || (active.continuation && !active.continuation.discarded)) return true
+    }
+    return false
+  }
+
+  /** Idle agent processes close now; a busy one (or one with background work) is replaced on that thread's next turn. */
   closeIdle(): void {
     for (const [threadId, active] of this.sessions) {
-      if (this.turning.has(active)) continue
+      if (this.turning.has(active) || this.hasBackgroundWork(active) || (active.continuation && !active.continuation.discarded)) continue
       this.close(active)
       this.sessions.delete(threadId)
     }
   }
 
   closeAll(): void {
-    for (const active of this.processes) closeAcpConnection(active)
+    for (const active of this.processes) {
+      this.clearBackgroundState(active)
+      this.failContinuation(active, new Error(`${this.options.label} provider closed`))
+      closeAcpConnection(active)
+    }
     this.sessions.clear()
   }
 

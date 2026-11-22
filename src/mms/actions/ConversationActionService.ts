@@ -29,17 +29,15 @@ export class ConversationActionService {
   }
 
   private save(action: ThreadAction): void {
-    const actions = this.actions.list()
+    const actions = this.actions.view()
     const index = actions.findIndex((item) => item.id === action.id)
-    if (index < 0) actions.push(action)
-    else actions[index] = action
-    this.actions.replace(actions)
+    this.actions.replace(index < 0 ? [...actions, action] : actions.map((item, at) => at === index ? action : item))
   }
 
   begin(turnId: string, branchId: string, start: number, boundary: NativeContextBoundary, lease: ThreadLeaseHandle): ThreadAction {
     assertHeldThreadLease(this.directory, lease)
     new ChangeReceiptService(this.directory).assertNoPendingOperation()
-    if (this.actions.list().some((item) => item.turnId === turnId)) throw new Error('Turn already has a recorded conversation boundary.')
+    if (this.actions.view().some((item) => item.turnId === turnId)) throw new Error('Turn already has a recorded conversation boundary.')
     const action: ThreadAction = {
       scope: 'conversation', id: randomUUID(), turnId, conversationBranchId: branchId,
       presentationMessageStart: start, presentationMessageEnd: start,
@@ -55,8 +53,9 @@ export class ConversationActionService {
   /** `notice`: a line Undo shows with its result, when the turn's files could not be recorded and Undo takes back the conversation only. */
   settle(turnId: string, end: number, boundary: NativeContextBoundary, state: 'completed' | 'stopped' | 'failed', toolsUsed: boolean, lease: ThreadLeaseHandle, notice?: string, notCovered?: string): ThreadAction {
     assertHeldThreadLease(this.directory, lease)
-    const previous = this.actions.list().find((item) => item.turnId === turnId)
-    if (!previous || previous.scope !== 'conversation' || previous.state !== 'running') throw new Error('Conversation turn has no open boundary.')
+    const found = this.actions.view().find((item) => item.turnId === turnId)
+    if (!found || found.scope !== 'conversation' || found.state !== 'running') throw new Error('Conversation turn has no open boundary.')
+    const previous = structuredClone(found)
     const action: ThreadAction = { ...previous, presentationMessageEnd: end, nativeContextBoundary: structuredClone(boundary), state,
       ...(notice ? { notice: `${notice} Only the conversation is taken back.` } : {}),
       ...(notCovered ? { notCovered } : {}),
@@ -69,7 +68,7 @@ export class ConversationActionService {
   }
 
   recoverHistoryIfIdle(isBusy: () => boolean, restore: Restore): void {
-    const pending = [...this.journal.latestByOperation().values()].some(record => record.operationType === 'conversation-history' && !['completed', 'failed', 'cancelled'].includes(record.state))
+    const pending = this.journal.unsettled().some(record => record.operationType === 'conversation-history' && !['completed', 'failed', 'cancelled'].includes(record.state))
     if (!pending || isBusy()) return
     const lease = tryAcquireExecutionLease(this.directory, { source: 'conversation-history-recovery' })
     if (!lease) return
@@ -78,7 +77,7 @@ export class ConversationActionService {
 
   recover(lease: ThreadLeaseHandle, restore: Restore, historyOnly = false): void {
     assertHeldThreadLease(this.directory, lease)
-    for (const record of this.journal.latestByOperation().values()) {
+    for (const record of this.journal.unsettled()) {
       if (historyOnly && record.operationType !== 'conversation-history') continue
       if (!['conversation-checkpoint', 'conversation-history'].includes(record.operationType) || ['completed', 'failed', 'cancelled'].includes(record.state)) continue
       const intent = record.details as Intent

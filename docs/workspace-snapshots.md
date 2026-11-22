@@ -48,7 +48,7 @@ In detail:
 - Mousse never sets aside or drops a thread's uncommitted work to make room for an operation. An operation that cannot proceed on the files as they are refuses with the file names and changes nothing.
 - A snapshot's parent is the real HEAD and snapshots never chain to each other. Releasing the expired refs of a receipt (`ReceiptRefReleaseService`) therefore frees the snapshots it pinned; nothing else keeps them reachable.
 - An action's `startSha` and `endSha` mean "the code before / after". They are snapshots, or branch commits in actions recorded before snapshots; both are commits, so every consumer that reads a tree or a diff keeps working.
-- `workspace.json` `branch` stays "the thread branch Mousse created". It is named once, when the worktree is made at the thread's first editing turn: `mousse/<slug>` from the thread's first message (lowercase ASCII, at most 40 characters, `-2`, `-3` … when the name is taken), or `mousse/thread-<id>` when the message has no usable word. It is never renamed. Threads made before that keep their `mousse/thread/<threadId>/<branchId>` branches, which are still Mousse's. Every branch under `mousse/` is Mousse's; one the agent makes elsewhere is never touched. The agent may be on another branch; nothing follows it. What the thread reports (`ThreadWorkspaceManager.executionContext().branch`) is the branch HEAD is on now, none when detached.
+- `workspace.json` `branch` stays "the thread branch Mousse created". The worktree is made at the thread's first editing turn on a temporary branch `<prefix>/<8 random hex digits>` (Settings → Storage → Branches; `mousse` unless the person changed it). In the background the title model is asked for a name from the first message, and Mousse renames the branch once (`git branch -m`, under the repository's lease); a private thread, a failure, a timeout or a taken name keeps the temporary name, and the folder never moves. Ownership comes from the thread's journal, not the name: a completed `workspace-provision` proves Mousse made the branch (`worktree add -b` fails on a taken name), and a completed `workspace-branch-rename` moves ownership to the new name (`threadBranchRecord`). A rename a stop interrupts is settled from the repository at the next turn; until then neither name is deleted. Threads made before that keep `mousse/<slug>` or `mousse/thread/<threadId>/<branchId>` branches, which are still Mousse's by their `mousse/` prefix. One the agent makes elsewhere is never touched. The agent may be on another branch; nothing follows it. What the thread reports (`ThreadWorkspaceManager.executionContext().branch`) is the branch HEAD is on now, none when detached.
 - Only files change when Mousse restores something. HEAD, branches, the real index and the stash are never touched.
 - Every ref Mousse writes or deletes is written with `--no-deref`, and a branch name that is a symbolic ref is never followed, so a ref can never move or delete the branch it points at.
 - A turn's changes are uncommitted files until someone commits them. That is the normal state between turns.
@@ -87,15 +87,35 @@ In detail:
 
 Turn start no longer requires a clean worktree, no longer moves uncommitted changes aside, and no longer compares the branch name or HEAD. `ThreadWorkspaceManager.verify` reports a workspace ready when the worktree exists and no Mousse operation is waiting for recovery (`recovery_required`, `prepared`, `git_applied`, `context_pending`).
 
+A turn's start (from the workspace check to the start check) and its end (around the checkpoint) each read the worktree's top, Git folder, in-progress markers, HEAD and branch once, in one `rev-parse` and, when the branch is needed, one `symbolic-ref` (`src/mms/git/repositoryFacts.ts`). Every caller in that window (workspace check, lock identity, snapshot, checkpoint, receipt) uses those answers. What was read before the repository's lease is read again once it is held, and nothing carries over to the next window, so HEAD at the end and a `.git` replaced between turns are always read fresh. Hidden stores and synchronous callers ask Git themselves.
+
+### Hand-off to the next turn
+
+A turn that the previous turn's settle starts begins from that turn's end snapshot, without checking the worktree or taking a start snapshot (`OrchestratorService.recordTurnHandoff`, `settleTurnHandoff`, `takeTurnHandoff`). That turn is either a queued message the settle's queue drain claims, or the wake for notices that arrived during the turn: at its settle the thread runs reconciler rule 4 for itself, and a wake deferred while it was busy is made due, instead of waiting for the next reconciler pass. The hand-off is kept in memory and is used once at most:
+- It is recorded only when a worktree turn completed and its end is a real, reversible snapshot (no `unrecorded-end.json`) that is also `workspace.json`'s latest snapshot.
+- Only the turn it was armed for may use it: the queued message the settle's drain claimed, under that claim, or the wake runs pending at the settle.
+- The settle runs rule 4 only when it has a snapshot to hand off. In other cases the regular reconciler handles pending notices.
+- Pending workspace recovery still stops the next turn before it accepts a queued message.
+- It is dropped at the settle when nothing is waiting or the turn was stopped, by a Stop, when the thread is deleted, when the armed start is released or skipped without a turn, and by whichever turn starts next.
+- Before use it must still hold: no journal entry since, the same latest action and recorded snapshot, the same generation and conversation branch, and the worktree still there. An Undo, Publish or revert in between makes the turn read and snapshot the worktree as usual. A turn whose setup waited more than a second (its folders, its drive, the thread's lease) does not use it.
+
+A hand-off turn shows no setup step once the hand-off is confirmed. An edit made outside Mousse in the seconds between the two turns counts as made during the next turn, as an edit made while a turn runs does.
+
 What still stops a turn: an operation Mousse left unfinished (an interrupted restore or checkpoint), until recovery settles it. Recovery runs before the next turn and admits `recovery_required` too, so a thread an older version left waiting unlocks on its own. A refused publish leaves nothing unfinished.
 
 ## Checkpoint
 
 `checkpoint()` records the action's end: it takes a snapshot, describes the Git work between the start and the end (`describeGit`), diffs the two trees, records the receipt and pins its refs. A failed or stopped turn is recorded the same way. There is no commit, so a user's own commit that a hook rejected is recorded as a failed action without anything to bypass; the `onFailure: 'record'` option is gone.
 
+The receipt's two refs and the worktree's pin of its newest snapshot (`retainedRef`) are written in one `update-ref --no-deref --stdin` transaction; the journal entry follows, and the worktree's record (`workspace.json`) only after it. A start whose snapshot was just made or found already there is not checked again before the turn begins (`OutsideChangesResult.startCheck`).
+
 A nested snapshot recorded while the action runs becomes one of its `contributions`, found by the action's time window (a snapshot has no ancestry to test).
 
 Interrupted checkpoints recover by taking the snapshot again from the files. If that fails too, the operation stays `recovery_required` with the new error, so the reason shown is what stopped the retake.
+
+## Measuring a turn's start and end
+
+Every turn writes two `[turn-boundary]` lines to the service log (`src/mms/diagnostics/turnBoundary.ts`): one when it reaches its provider, one when it settles. Each lists its phases, each named by the mark that ends it (at the start `folders`, `lease`, `recovery`, `workspace`, then the snapshot's `locks`, `snapshotHead`, `snapshotIndex`, `snapshotState`, `snapshotExact`, `snapshotIgnored`, `snapshotCommit`, then `startCheck`, `accepted`, `starting`, … `harness`; at the end `finishing`, the same snapshot steps, `describe`, `receipt`, `completed`, `settled`) with their milliseconds and, per phase, the Git commands started (`git`), their summed lifetimes (`gitMs`), the time `spawn()` itself held the event loop (`spawnMs`), the commands run synchronously and their time (`sync`, `syncMs`), and the wait for the repository's lease (`leaseMs`). The start line also has `waitedMs`, from the run's request to the start of its setup. Commands are counted at each Git spawn site (`timeGitChild`, `timeGitSync`, `timeGitRun`), whatever executable they name; Git run through `simple-git` is not counted.
 
 ## Undo, Redo and revert
 
@@ -245,7 +265,7 @@ A whole folder cannot be snapshotted when it is a home or system folder (the fil
 
 ### Admission and turns
 
-`OrchestratorService` decides per turn (`snapshotFolderFor`): a turn that changes files (`agent`, `build`, a skill; not a read-only turn, a bot's, or a subagent's shared view) in a thread with no worktree of its own and a folder as above is recorded in the folder's store. The project's folder is the project's path; for a thread with no project it is the folder the selected runtime keeps for the thread (`ProviderAdapter.standaloneWorkspace`, implemented by Claude Code and Codex). A runtime that keeps no such folder records the conversation only, as before.
+`OrchestratorService` decides per turn (`snapshotFolderFor`): a turn that changes files (`agent`, `build`, a skill; not a read-only turn, a bot's, or a subagent's shared view) in a thread with no worktree of its own and a folder as above is recorded in the folder's store. The project's folder is the project's path; for a thread with no project it is the folder the selected runtime keeps for the thread (`ProviderAdapter.standaloneWorkspace`, implemented by Claude Code, Codex, Antigravity, ACP agents, Grok, and Cursor). A runtime that keeps no such folder records the conversation only, as before.
 
 The turn then runs exactly as a Git thread's: `recordOutsideChanges` takes the first snapshot (changes made outside Mousse become an action of the person), `beginTurn`, and `checkpointExistingTurn` at the end; interrupted checkpoints and Undo operations recover at the next turn start. `capability.checkpointable` stays false for these threads, so everything that needs an owned Git workspace (isolated subagents, workflow integration, Publish) refuses as it did before.
 

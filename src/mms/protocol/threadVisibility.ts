@@ -1,7 +1,7 @@
 import type { Project, Thread, ThreadActivitySnapshot } from '../../shared/types'
 import { isLocalOnlyThread, visibleThreads } from '../../shared/threadLineage'
 import type { RemoteListsPort } from './remoteListsPort'
-import type { ProtocolClientType, ProtocolEvent } from './types'
+import type { ProtocolClientType, ProtocolEvent, ThreadRowEventData } from './types'
 
 /**
  * Which threads a client is shown. The thread inventory is always complete; this is the one place
@@ -121,8 +121,15 @@ function withRemoteLists(event: ProtocolEvent, remote: RemoteListsPort): Protoco
   }
 }
 
-/** A `threads.updated` event without a personal bot's threads, for every client; any other event as it is. */
+/**
+ * A `threads.updated` event without a personal bot's threads, and a `threads.row` of one as its removal, for every
+ * client; any other event as it is.
+ */
 function withoutBotThreadRows(event: ProtocolEvent): ProtocolEvent {
+  if (event.type === 'threads.row') {
+    const row = event.data as ThreadRowEventData | null
+    return row?.thread?.botOwned ? { ...event, data: { removed: row.thread.id, version: row.version } } : event
+  }
   if (event.type !== 'threads.updated') return event
   const data = event.data
   const rows = Array.isArray(data) ? (data as Thread[]) : (data as { threads?: unknown } | null)?.threads

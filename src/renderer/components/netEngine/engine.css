@@ -19,9 +19,6 @@
   vertical-align: -1px;
 }
 
-.engine-row-id {
-  font-family: var(--font-mono);
-}
 
 .engine-dialog {
   display: flex;
@@ -30,9 +27,85 @@
   min-width: 280px;
 }
 
+/* Add device, all in one: the code, its time left and link, then the paste field and More ways. */
+.engine-dialog-home {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.engine-dialog-home .engine-qr .engine-paste {
+  align-self: stretch;
+}
+
+.engine-qr-timer {
+  font-variant-numeric: tabular-nums;
+}
+
+.engine-dialog-home .settings-input {
+  max-width: none;
+  height: var(--settings-control-h, 28px);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
 .engine-dialog-choices {
   display: flex;
+  flex-direction: column;
   gap: var(--space-8);
+}
+
+/* Buttons in the Devices dialogs share the row control size, as they do in Settings rows. */
+:is(.devices-dialog-actions, .engine-paste, .engine-choice, .engine-link-ended) > .settings-btn {
+  height: var(--settings-control-h, 28px);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+/* One way to add a device: its name over a one-line hint. */
+.engine-choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-choice > .settings-btn {
+  min-width: 120px;
+}
+
+.engine-choice-hint {
+  color: var(--text-muted);
+  font-size: var(--font-size-small, 12px);
+}
+
+.engine-more-ways {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-more-ways > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  cursor: pointer;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.engine-more-ways > summary::-webkit-details-marker {
+  display: none;
+}
+
+.engine-more-ways[open] > summary .settings-advanced-chevron {
+  transform: rotate(90deg);
+}
+
+.engine-more-ways > .engine-choice + .engine-choice {
+  margin-top: var(--space-8);
 }
 
 .engine-qr {
@@ -40,6 +113,16 @@
   flex-direction: column;
   align-items: center;
   gap: var(--space-8);
+}
+
+/* Holds the code's place while it is made, so nothing jumps when it shows. */
+.engine-preparing {
+  justify-content: center;
+  min-height: 208px;
+}
+
+.engine-preparing-percent {
+  font-variant-numeric: tabular-nums;
 }
 
 .engine-qr p {
@@ -67,10 +150,184 @@
 
 .engine-paste {
   display: flex;
+  align-items: center;
   gap: var(--space-8);
 }
 
 .engine-paste .settings-input {
   flex: 1;
   min-width: 0;
+}
+
+/* Mousse Plus (Phase 4): the sign-in code, typed on the Plus website. */
+.engine-plus-code {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
+.engine-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Send link (design 1b §5.1): the link with Copy, then the code to read out. */
+.engine-link {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-link p,
+.engine-link-ended p,
+.engine-code-entry p {
+  margin: 0;
+}
+
+.engine-link-code {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  letter-spacing: 0.08em;
+  text-align: center;
+  cursor: default;
+}
+
+.engine-link-ended,
+.engine-code-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+}
+
+/* Enter link: six boxes for the code. */
+.engine-code-boxes {
+  display: flex;
+  gap: var(--space-6, 6px);
+}
+
+.engine-code-box {
+  width: 36px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* 1b: route lists, Also share and Reach. */
+.engine-destinations {
+  margin: 0 0 var(--space-8);
+  overflow-wrap: anywhere;
+}
+
+.engine-share {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-8);
+  padding: 0;
+  border: 0;
+}
+
+.engine-share legend {
+  padding: 0;
+  margin-bottom: var(--space-4);
+}
+
+.engine-share-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-address-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.engine-hosts label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-ask {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-ask span {
+  flex: 1;
+}
+
+.engine-address-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+
+.engine-reach-control,
+.engine-reach-form {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+
+.engine-reach-form .settings-input {
+  min-width: 0;
+  width: 220px;
+}
+
+.engine-profile-choice,
+.engine-ssh {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-fingerprint {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* A device's routes in its open row, and Add route under them. The chosen kind has a background, no edge. */
+.engine-route-live {
+  color: var(--text-primary);
+}
+
+.engine-route-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-12) var(--space-12) calc(var(--space-12) + var(--space-24, 24px));
+}
+
+.engine-route-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.engine-route-kinds > .settings-btn,
+.engine-route-add .engine-paste > .settings-btn {
+  height: var(--settings-control-h, 28px);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+.engine-route-kinds > .settings-btn.engine-route-kind-on {
+  background: var(--ui-selected, var(--ui-hover));
 }

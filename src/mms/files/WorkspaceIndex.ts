@@ -1,12 +1,13 @@
-import { execFile, spawn } from 'node:child_process'
 import { readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
-import { promisify } from 'node:util'
 import { lowerPath } from '../../shared/fuzzyPath'
 import { SKIP_DIR_NAMES } from './pathGuard'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { assertGitAllowed, GitPolicyError, rethrowGitPolicyError } from '../git/gitPolicy'
+import { timeGitChild, timeGitRun } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { execFileGitAsync, spawnGit } from '../git/gitSpawn'
 
 export type WorkspaceIndexFallbackReason = 'not-a-repo' | 'git-missing' | 'git-too-old'
 
@@ -51,14 +52,12 @@ const WALK_YIELD_EVERY = 2_000
 /** `git grep --column` (2018) is the oldest feature the daemon relies on. */
 const MIN_GIT_VERSION: [number, number] = [2, 19]
 
-const execFileAsync = promisify(execFile)
-
 let gitVersion: [number, number] | null = null
 
 async function readGitVersion(): Promise<[number, number] | null> {
   if (gitVersion) return gitVersion
   try {
-    const { stdout } = await execFileAsync('git', ['--version'], { windowsHide: true })
+    const { stdout } = await timeGitRun(() => execFileGitAsync(gitFile(), ['--version'], { windowsHide: true, env: gitEnvFor(undefined) }))
     const match = /(\d+)\.(\d+)/.exec(stdout)
     if (!match) return null
     // Only a successful probe is cached, so installing git later takes effect without a restart.
@@ -82,7 +81,7 @@ export async function detectGitRoute(root: string): Promise<GitRoute> {
   }
   try {
     assertGitAllowed({ cwd: root, args: ['rev-parse', '--show-toplevel'] })
-    await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: root, env: repoProgramEnv(), windowsHide: true })
+    await timeGitRun(() => execFileGitAsync(gitFile(), ['rev-parse', '--show-toplevel'], { cwd: root, env: gitEnvFor(repoProgramEnv()), windowsHide: true }))
     return { ok: true, version }
   } catch (error) {
     rethrowGitPolicyError(error)
@@ -227,12 +226,12 @@ async function listWithGit(root: string, collector: IndexCollector, signal: Abor
     return false
   }
   return new Promise<boolean>((resolvePromise, reject) => {
-    const child = spawn('git', args, {
+    const child = timeGitChild(() => spawnGit(gitFile(), args, {
       cwd: root,
-      env: repoProgramEnv(),
+      env: gitEnvFor(repoProgramEnv()),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore']
-    })
+    }))
     let pending: Buffer = Buffer.alloc(0)
     let stopped = false
     let spawnFailed = false

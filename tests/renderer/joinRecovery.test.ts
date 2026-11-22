@@ -6,13 +6,14 @@ import type { NetStatus } from '../../src/shared/net'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { NetDevicesSection } = await import('../../src/renderer/components/NetDevicesSection')
+const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 
 /** The daemon as the Devices page sees it: a status, and answers or errors per method. */
 const daemon: { status: NetStatus; answers: Record<string, () => unknown> } = { status: { enabled: false, keystore: 'missing', routes: [], peers: [] }, answers: {} }
 const request = vi.fn(async (method: string, _params?: unknown) => {
   if (daemon.answers[method]) return daemon.answers[method]()
   switch (method) {
+    case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
     case 'net.status': return daemon.status
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
     case 'net.ssh.list': return { records: [] }
@@ -46,7 +47,7 @@ afterEach(() => {
 })
 
 const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
-const mount = async () => { await act(async () => root.render(createElement(NetDevicesSection))); await flush() }
+const mount = async () => { await act(async () => root.render(createElement(EngineDevicesSection))); await flush() }
 const button = (name: string | RegExp) => [...document.querySelectorAll<HTMLButtonElement>('button')].find((item) => typeof name === 'string' ? item.textContent?.trim() === name : name.test(item.textContent ?? ''))
 const click = async (element: HTMLElement | undefined) => { expect(element).toBeDefined(); await act(async () => element!.click()); await flush() }
 const type = async (element: HTMLInputElement | HTMLTextAreaElement, value: string) => {
@@ -64,9 +65,8 @@ describe('a join whose answer never arrived', () => {
   it('offers Retry, and says why a retry failed in plain words', async () => {
     daemon.answers['net.join.retry'] = () => { throw joinError('route_unreachable', { reason: 'unreachable', label: 'Studio Mac' }) }
     await mount()
-    expect(host.textContent).toContain('Finishing the connection to Studio Mac')
-    // Networking can't start a new set of devices meanwhile.
-    expect(host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Networking"]')!.disabled).toBe(true)
+    expect(host.textContent).toContain('Studio Mac')
+    expect(host.textContent).toContain('Connecting didn’t finish')
     await click(button('Retry'))
     expect(calls('net.join.retry')).toEqual([{}])
     expect(alert()).toBe('Couldn’t reach Studio Mac. Check that it’s on and that both computers are on the same network or tailnet, then try again.')
@@ -97,46 +97,4 @@ describe('a join whose answer never arrived', () => {
     await click(button('Give up'))
     expect(calls('net.join.abandon')).toEqual([{}])
   })
-})
-
-describe('joining with a link', () => {
-  const openJoin = async () => {
-    await click(button(/Add device/))
-    await click(button(/Join with invitation/))
-  }
-
-  it('asks for no passphrase unless the keychain refuses, then asks once', async () => {
-    let refuse = true
-    daemon.answers['bridge.join'] = () => {
-      if (refuse) { refuse = false; throw joinError('keystore_locked') }
-      return { connected: true }
-    }
-    await mount()
-    await openJoin()
-    expect(document.querySelectorAll('.devices-dialog input[type="password"]')).toHaveLength(0)
-    await type(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Device invitation to join"]')!, 'mj1_link')
-    await click(button('Join'))
-    expect(calls('bridge.join')).toEqual([{ invite: 'mj1_link', name: 'Laptop' }])
-    expect(alert()).toBe('The system keychain refused to protect this computer’s keys. Set a passphrase to continue.')
-    const passphrase = document.querySelector<HTMLInputElement>('.devices-dialog input[type="password"]')!
-    await type(passphrase, 'secret words')
-    await click(button('Join'))
-    expect(calls('bridge.join')[1]).toEqual({ invite: 'mj1_link', name: 'Laptop', passphrase: 'secret words' })
-  })
-
-  it('names the other computer when the clocks are apart', async () => {
-    daemon.answers['bridge.join'] = () => { throw joinError('clock_skew', { reason: 'clock', label: 'Studio Mac' }) }
-    await mount()
-    await openJoin()
-    await type(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Device invitation to join"]')!, 'mj1_link')
-    await click(button('Join'))
-    expect(alert()).toBe('The clocks on this computer and Studio Mac are too far apart. Set both to the correct time, then try again.')
-  })
-})
-
-it('moves passphrase-protected keys to the keychain in one click', async () => {
-  daemon.status = { enabled: true, keystore: 'unlocked', protected: true, passphraseProtected: true, routes: [], peers: [], self: { node: 'node_a' as never, user: 'user_a' as never, isAuthority: true } }
-  await mount()
-  await click(button('Use the keychain'))
-  expect(calls('net.protect')).toEqual([{}])
 })

@@ -7,11 +7,13 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { WindowsGitSetup } from '../../src/shared/windowsGit'
+import type { GitSetup } from '../../src/shared/gitSetup'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const stub = (testId: string) => () => createElement('div', { 'data-testid': testId })
+// The composer's microphone needs audio APIs jsdom lacks; the warm start's composer is in App's own chunk.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/services/navigationGuards', () => ({ confirmNavigation: vi.fn(async () => true) }))
 vi.mock('../../src/renderer/components/downloads/DownloadsIndicator', () => ({ DownloadsIndicator: () => null }))
 vi.mock('../../src/renderer/components/TitleBar', () => ({ TitleBar: () => null }))
@@ -34,9 +36,11 @@ vi.mock('../../src/renderer/commands/useCommandShortcuts', () => ({ useCommandSh
 let selected: ((payload: { id: string }) => void) | undefined
 let openThread: ((threadId: string) => void) | undefined
 function bridge(git?: {
-  initial: WindowsGitSetup
-  subscribe: (listener: (setup: WindowsGitSetup) => void) => void
+  initial: GitSetup
+  subscribe: (listener: (setup: GitSetup) => void) => void
   listProfiles: () => Promise<unknown>
+  platform?: 'win32' | 'linux' | 'darwin'
+  install?: () => Promise<boolean>
 }): unknown {
   const pending: Record<string, unknown> & (() => void) = Object.assign(() => {}, {})
   pending.then = () => pending
@@ -45,9 +49,10 @@ function bridge(git?: {
   const node = (path: string): unknown => new Proxy(() => {}, {
     get: (_target, key) => {
       if (key === 'then') return undefined
-      if (!path && key === 'platform' && git) return 'win32'
-      if (path === 'app' && key === 'windowsGitSetup' && git) return async () => git.initial
-      if (path === 'app' && key === 'onWindowsGitSetupChanged' && git) return (listener: (setup: WindowsGitSetup) => void) => {
+      if (!path && key === 'platform' && git) return git.platform ?? 'win32'
+      if (path === 'app' && key === 'installGit' && git?.install) return git.install
+      if (path === 'app' && key === 'gitSetup' && git) return async () => git.initial
+      if (path === 'app' && key === 'onGitSetupChanged' && git) return (listener: (setup: GitSetup) => void) => {
         git.subscribe(listener)
         return () => {}
       }
@@ -115,7 +120,7 @@ describe('the window under the Chats tab', () => {
 })
 
 it('shows the prerequisite before the workspace connects and retries after a download failure', async () => {
-  let update!: (setup: WindowsGitSetup) => void
+  let update!: (setup: GitSetup) => void
   let fail!: (reason: Error) => void
   const first = new Promise<never>((_, reject) => { fail = reject })
   const listProfiles = vi.fn(() => new Promise<never>(() => {}))
@@ -133,11 +138,47 @@ it('shows the prerequisite before the workspace connects and retries after a dow
     update({ phase: 'failed', message: 'Offline' })
     fail(new Error("Error invoking remote method 'profiles:list': Offline"))
   })
-  expect(host.querySelector('[role="alert"]')?.textContent).toContain('Could not set up Git for Windows')
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain('Could not set up Git')
   const retry = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Retry')
   expect(retry).toBeDefined()
   await act(async () => retry!.click())
   expect(listProfiles).toHaveBeenCalledTimes(2)
   await act(async () => update({ phase: 'installing' }))
   expect(host.querySelector('[role="status"]')?.textContent).toContain('Setting up Git for Windows')
+})
+
+it.each(['linux', 'darwin'] as const)('offers Git installation before workspace startup on %s', async (platform) => {
+  let update!: (setup: GitSetup) => void
+  let complete!: (finished: boolean) => void
+  const install = vi.fn(() => new Promise<boolean>((resolve) => { complete = resolve }))
+  const listProfiles = vi.fn(async () => { throw new Error('Git is required to start the workspace.') })
+  ;(window as unknown as { mousse: unknown }).mousse = bridge({
+    initial: { phase: 'required', canInstall: true, message: 'Git is missing.' },
+    platform,
+    subscribe: (listener) => { update = listener },
+    listProfiles,
+    install
+  })
+  useAppStore.setState({ profileReady: false, workspaceReady: false })
+  await act(async () => root.render(createElement(App)))
+  const button = (label: string) => [...host.querySelectorAll('button')].find((item) => item.textContent === label)
+  expect(button('Install Git')).toBeDefined()
+  expect(install).not.toHaveBeenCalled()
+  await act(async () => {
+    button('Install Git')!.click()
+    update({ phase: 'installing', native: true })
+  })
+  expect(install).toHaveBeenCalledOnce()
+  expect(host.querySelector('[role="status"]')?.textContent).toContain('Installing Git')
+  await act(async () => {
+    if (platform === 'darwin') {
+      update({ phase: 'required', canInstall: true, message: 'Finish the system install, then click Retry.' })
+    }
+    complete(platform === 'linux')
+  })
+  if (platform === 'darwin') {
+    expect(listProfiles).toHaveBeenCalledTimes(1)
+    await act(async () => button('Retry')!.click())
+  }
+  expect(listProfiles).toHaveBeenCalledTimes(2)
 })

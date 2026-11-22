@@ -1,4 +1,5 @@
 import { EventEmitter, getEventListeners } from 'node:events'
+import { createInterface } from 'node:readline'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,9 +8,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { userCodexLimitsReader } from '../src/mms/harness/drivers/codex'
 import { LoginSession } from '../src/mms/providers/LoginSession'
-import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
+import { claudeLockedSpawn } from '../src/mms/harness/claude/locked'
+import type { WindowsProviderTree } from '../src/mms/harness/windowsProviderProcess'
+import { spawnCodexAppServer, type CodexLaunch, type CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 import {
   CODEX_ACCOUNT_TTL_MS,
+  CODEX_IDLE_CLOSE_MS,
+  CODEX_MAX_LOADED_THREADS,
   CODEX_MODEL_PROVIDER,
   CodexProviderService,
   CodexTurnFailure,
@@ -19,18 +24,30 @@ import {
   type CodexServiceOptions
 } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
+import { codexFixtureAccessToken } from '../src/mms/run/testkit/codexAppServerReplay'
 import { CODEX_ONE_SHOT_FEATURES_OFF, codexOneShotRunsOn } from '../src/mms/harness/vendors/codex/oneShot'
+import { CHATGPT_CODEX_BASE_URL, type CodexDirectStream } from '../src/mms/harness/vendors/codex/directOneShot'
+import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream } from '@earendil-works/pi-ai'
 
 type Message = { id?: number | string; method?: string; params?: unknown }
 type Reply = { result?: unknown; error?: { code: number; message: string } }
 
 /** An app-server stand-in answering each request through `answer`; records launches and messages. */
-function scriptedServer(answer: (message: Message) => Reply | undefined) {
+function scriptedServer(answer: (message: Message, launchIndex: number) => Reply | undefined) {
   const launches: CodexLaunch[] = []
   const messages: Message[] = []
   const processes: Array<EventEmitter & CodexProcess & { stdout: PassThrough }> = []
   const launch = (spec: CodexLaunch): CodexProcess => {
-    launches.push(spec)
+    const launchIndex = launches.push(spec) - 1
+    const authHome = spec.env.CODEX_HOME ?? join(home, '.codex')
+    let startupAuth: { access_token?: string; account_id?: string } | undefined
+    if (authHome.startsWith(home)) {
+      try {
+        startupAuth = JSON.parse(readFileSync(join(authHome, 'auth.json'), 'utf8')).tokens
+      } catch {
+        // No file-backed credentials for this process.
+      }
+    }
     const stdout = new PassThrough()
     const stdin = new PassThrough()
     const process = Object.assign(new EventEmitter(), {
@@ -55,7 +72,17 @@ function scriptedServer(answer: (message: Message) => Reply | undefined) {
         pending = pending.slice(end + 1)
         messages.push(message)
         if (message.id === undefined || !message.method) continue
-        const reply = message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } } : answer(message)
+        let reply = message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } } : answer(message, launchIndex)
+        // The fixture defaults to Codex's file store unless the test supplies a config or an error.
+        if (message.method === 'config/read' && !reply?.error &&
+            !(reply?.result && typeof reply.result === 'object' && 'config' in reply.result)) reply = { result: { config: {} } }
+        if (message.method === 'account/read' && reply?.result && typeof reply.result === 'object' &&
+            'account' in reply.result && (reply.result.account as { type?: string } | null)?.type === 'chatgpt' &&
+            !('workspaceRouting' in reply.result) && startupAuth?.account_id)
+          reply = { result: { ...reply.result, workspaceRouting: { chatgptAccountId: startupAuth.account_id } } }
+        if (message.method === 'getAuthStatus' && !reply?.error &&
+            !(reply?.result && typeof reply.result === 'object' && 'authMethod' in reply.result))
+          reply = { result: { authMethod: 'chatgpt', authToken: startupAuth?.access_token ?? null } }
         if (reply) stdout.write(JSON.stringify({ id: message.id, ...reply }) + '\n')
       }
     })
@@ -67,6 +94,14 @@ function scriptedServer(answer: (message: Message) => Reply | undefined) {
 
 const chatgpt = { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
 
+function writeTerminalAuth(dir: string, workspace: string | undefined, signature?: string): void {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'auth.json'), JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { account_id: workspace, access_token: codexFixtureAccessToken(workspace, signature) }
+  }))
+}
+
 let home: string
 let binary: string
 let questions: UserQuestionService
@@ -76,6 +111,9 @@ const services: CodexProviderService[] = []
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'mousse-codex-service-'))
+  const terminalHome = join(home, 'terminal')
+  writeTerminalAuth(terminalHome, 'workspace-one')
+  vi.stubEnv('CODEX_HOME', terminalHome)
   binary = join(home, 'codex')
   writeFileSync(binary, '#!/bin/sh\nexit 0\n')
   chmodSync(binary, 0o755)
@@ -83,20 +121,21 @@ beforeEach(() => {
   signedOut = false
 })
 afterEach(() => {
-  for (const service of services.splice(0)) service.stop()
+  for (const service of services.splice(0)) void service.stop().catch(() => undefined)
   questions.shutdown()
   vi.useRealTimers()
   vi.unstubAllEnvs()
   rmSync(home, { recursive: true, force: true })
 })
 
-function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}): CodexProviderService {
+function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}, options: CodexServiceOptions = {}): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
   // The instance config's launch settings and sign-out flag, as the gateway hands them over.
   const service = new CodexProviderService(home, questions, { launch: server.launch }, {
     launch: () => ({ binaryPath: binary }),
-    signedOut: () => signedOut
+    signedOut: () => signedOut,
+    ...options
   })
   services.push(service)
   return service
@@ -122,6 +161,105 @@ describe('Codex credentials in messages', () => {
     expect(status.message).not.toContain(canary)
     expect(JSON.stringify(status)).not.toContain(canary)
   })
+})
+
+describe('Windows provider process shutdown', () => {
+  it.runIf(process.platform === 'win32')('awaits a real detached descendant after the root exits on EOF', async () => {
+    const fixturePath = join(home, 'provider.cjs')
+    writeFileSync(fixturePath, [
+      "const { spawn } = require('node:child_process')",
+      "const readline = require('node:readline')",
+      "const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })",
+      'helper.unref()',
+      'const input = readline.createInterface({ input: process.stdin })',
+      "input.on('line', (line) => { const { id } = JSON.parse(line); if (id) console.log(JSON.stringify({ id, result: { userAgent: 'fixture' } })) })",
+      "input.once('close', () => process.exit(0))",
+      "helper.once('spawn', () => console.error(helper.pid))"
+    ].join('\n'))
+    let helper: number | undefined
+    let ready!: (pid: number) => void
+    const spawned = new Promise<number>((resolve) => { ready = resolve })
+    const service = create({ launch: (spec) => {
+      const proc = spawnCodexAppServer({ ...spec, binary: process.execPath, entryArgs: [fixturePath] })
+      const lines = createInterface({ input: proc.stderr! })
+      lines.on('line', (line) => { if (/^[0-9]+$/.test(line.trim())) ready(Number(line)) })
+      return proc
+    } })
+    const alive = (pid: number): boolean => {
+      try { process.kill(pid, 0); return true } catch { return false }
+    }
+    try {
+      await service.userSetup(home)
+      helper = await spawned
+      expect(alive(helper)).toBe(true)
+      await service.stop()
+      expect(alive(helper)).toBe(false)
+    } finally {
+      await service.stop()
+      if (helper && alive(helper)) process.kill(helper, 'SIGKILL')
+    }
+  })
+
+  it.runIf(process.platform === 'win32').each(['Codex', 'locked Claude'])('%s drains the supervisor, provider and detached child with backpressured stdin', async (provider) => {
+    const fixturePath = join(home, 'blocked-provider.cjs')
+    writeFileSync(fixturePath, [
+      "const { spawn } = require('node:child_process')",
+      "const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })",
+      'helper.unref()',
+      "helper.once('spawn', () => console.log(JSON.stringify([process.pid, helper.pid])))",
+      'setInterval(() => {}, 1000)'
+    ].join('\n'))
+    let tree: WindowsProviderTree | undefined
+    let codex: CodexProcess | undefined
+    const controller = new AbortController()
+    const service = provider === 'Codex' ? create({ launch: (spec) => {
+      codex = spawnCodexAppServer({ ...spec, binary: process.execPath, entryArgs: [fixturePath], cwd: home })
+      return codex
+    } }) : undefined
+    const setup = service?.userSetup(home)
+    const proc = codex ?? claudeLockedSpawn({ onWindowsTree: (job) => { tree = job } })({
+      command: process.execPath,
+      args: [fixturePath],
+      env: process.env,
+      cwd: home,
+      signal: controller.signal
+    }) as unknown as CodexProcess
+    const lines = createInterface({ input: proc.stdout! })
+    const pids = [proc.pid!]
+    const alive = (pid: number) => {
+      try { process.kill(pid, 0); return true } catch { return false }
+    }
+    try {
+      const line = await new Promise<string>((resolve, reject) => {
+        lines.once('line', resolve)
+        proc.once('exit', () => reject(new Error('Provider exited before publishing its PIDs')))
+      })
+      pids.push(...JSON.parse(line) as number[])
+      expect(pids.map(alive)).toEqual([true, true, true])
+      expect(proc.stdin!.write(Buffer.alloc(16 * 1024 * 1024))).toBe(false)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(proc.stdin!.writableNeedDrain).toBe(true)
+      if (provider === 'locked Claude') {
+        expect(tree).toBeDefined()
+        controller.abort()
+        await tree!.exited
+      } else {
+        await service!.stop()
+        await setup
+      }
+      expect(pids.map(alive)).toEqual([false, false, false])
+    } finally {
+      lines.close()
+      if (pids.some(alive)) {
+        const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()))
+        for (const pid of pids) {
+          try { if (alive(pid)) process.kill(pid, 'SIGKILL') } catch { /* The job may have ended it. */ }
+        }
+        if (proc.exitCode === null && proc.signalCode === null) await exited
+      }
+    }
+  }, 15_000)
+
 })
 
 describe('codexEnvironment', () => {
@@ -150,7 +288,10 @@ describe('CodexProviderService', () => {
   it('launches `app-server` with the stripped environment and no arguments', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk-live')
     vi.stubEnv('CODEX_API_KEY', 'ck-live')
-    vi.stubEnv('CODEX_HOME', undefined as unknown as string)
+    vi.stubEnv('CODEX_HOME', undefined)
+    vi.stubEnv('HOME', home)
+    vi.stubEnv('USERPROFILE', home)
+    writeTerminalAuth(join(home, '.codex'), 'workspace-one')
     const server = scriptedServer(() => chatgpt)
     const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
     expect(await service.status()).toMatchObject({ state: 'connected', planType: 'plus' })
@@ -162,7 +303,7 @@ describe('CodexProviderService', () => {
     expect(launch.env.CODEX_API_KEY).toBeUndefined()
     expect('CODEX_HOME' in launch.env).toBe(false)
     expect(launch.env.PATH).toBe(process.env.PATH)
-    expect(server.methods()).toEqual(['initialize', 'initialized', 'account/read'])
+    expect(server.methods()).toEqual(['initialize', 'initialized', 'config/read', 'account/read', 'getAuthStatus'])
   })
 
   it('caches the account check for five minutes; Recheck and expiry check again', async () => {
@@ -187,8 +328,8 @@ describe('CodexProviderService', () => {
     vi.setSystemTime(Date.now() + CODEX_ACCOUNT_TTL_MS)
     expect(await service.status()).toMatchObject({ state: 'connected' })
     expect(server.methods().filter((method) => method === 'account/read')).toHaveLength(3)
-    // One process served every check.
-    expect(server.launches).toHaveLength(1)
+    expect(server.processes[0].signalCode).toBe('SIGTERM')
+    expect(server.launches).toHaveLength(2)
   })
 
   it('keeps Codex listed while a forced check (a turn\'s account check) waits for its answer', async () => {
@@ -210,6 +351,77 @@ describe('CodexProviderService', () => {
     server.processes.at(-1)!.stdout.write(JSON.stringify({ id: held!.id, result: { account: null, requiresOpenaiAuth: true } }) + '\n')
     expect(await forced).toMatchObject({ state: 'signed_out' })
     expect(service.configured()).toBe(false)
+  })
+
+  it('re-verifies a late startup notification on the same terminal server', async () => {
+    const server = scriptedServer(() => chatgpt)
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    const owner = service.account()?.subject
+    server.processes[0].stdout.write(JSON.stringify({ method: 'account/updated', params: { authMode: 'chatgpt' } }) + '\n')
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(service.account()?.subject).toBe(owner)
+    expect(server.launches).toHaveLength(1)
+  })
+
+  it.each(['matching', 'changed'])('waits for a %s startup account recheck before admitting the first Send', async (identity) => {
+    const listing = Promise.withResolvers<Message>()
+    const recheck = Promise.withResolvers<Message>()
+    let checking = false
+    const server = scriptedServer((message) => {
+      if (message.method === 'account/read') {
+        if (!checking) return chatgpt
+        recheck.resolve(message)
+        return undefined
+      }
+      if (message.method === 'thread/list') {
+        listing.resolve(message)
+        return undefined
+      }
+      if (message.method === 'thread/start') {
+        return { result: { thread: { id: 'first-thread' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+      }
+      if (message.method === 'turn/start') {
+        setImmediate(() => write({ method: 'turn/completed', params: { threadId: 'first-thread', turn: { id: 'first-turn', status: 'completed', error: null } } }))
+        return { result: { turn: { id: 'first-turn', status: 'inProgress', error: null } } }
+      }
+      return { result: {} }
+    })
+    const write = (message: object) => server.processes[0].stdout.write(JSON.stringify(message) + '\n')
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    let settled = false
+    const sending = service.chat({ threadId: 't', cwd: home, model: 'gpt-x', prompt: 'first Send', onText: () => {} }).then(
+      (result) => { settled = true; return { result } },
+      (error: unknown) => { settled = true; return { error } }
+    )
+    const list = await listing.promise
+    checking = true
+    write({ method: 'account/updated', params: { authMode: 'chatgpt' } })
+    const check = await recheck.promise
+    write({ id: list.id, error: { code: -32601, message: 'unknown method' } })
+    // Let the thread preparation finish while the account response is still held.
+    await new Promise((resolve) => setImmediate(resolve))
+    const settledBeforeRecheck = settled
+    const openedBeforeRecheck = server.methods().includes('thread/start')
+    write({
+      id: check.id,
+      result: { ...chatgpt.result, workspaceRouting: { chatgptAccountId: identity === 'matching' ? 'workspace-one' : 'workspace-two' } }
+    })
+
+    const outcome = await sending
+    expect(settledBeforeRecheck).toBe(false)
+    expect(openedBeforeRecheck).toBe(false)
+    expect(server.launches).toHaveLength(1)
+    if (identity === 'matching') {
+      expect(outcome).toMatchObject({ result: { codexThreadId: 'first-thread' } })
+      expect(server.processes[0].signalCode).toBeNull()
+      expect(server.methods()).toContain('turn/start')
+    } else {
+      expect(outcome).toMatchObject({ error: expect.any(Error) })
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+      expect(server.methods()).not.toContain('thread/start')
+      expect(server.methods()).not.toContain('turn/start')
+    }
   })
 
   it('refuses an API-key sign-in so turns never bill an API key', async () => {
@@ -260,7 +472,8 @@ describe('CodexProviderService', () => {
       { id: 'gpt-a', label: 'GPT A', efforts: ['low', 'ultra'], thinkingOff: false, defaultEffort: 'low', effortDescriptions: { low: 'Fast responses', ultra: 'Maximum reasoning with automatic task delegation' } },
       { id: 'gpt-b', label: 'GPT B', oneShot: false }
     ])
-    expect(service.llmProvider()).toEqual({ id: 'codex', label: 'Codex', models })
+    // On OpenAI's own provider a one-shot is a direct request with no tools, so the picker offers every model.
+    expect(service.llmProvider()).toEqual({ id: 'codex', label: 'Codex', models: [models[0], { id: 'gpt-b', label: 'GPT B' }] })
 
     const fresh = scriptedServer(() => chatgpt)
     const unlisted = new CodexProviderService(mkdtempSync(join(tmpdir(), 'mousse-codex-empty-')), questions, { launch: fresh.launch, findBinary: () => binary })
@@ -345,13 +558,19 @@ describe('CodexProviderService options (managed Codex)', () => {
   type Turn = { status: 'completed' | 'failed'; error?: unknown }
 
   /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
-  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another' } = {}) {
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStatus?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string) } = {}) {
     let threads = 0
-    const server = scriptedServer((message) => {
+    const server = scriptedServer((message, launchIndex) => {
       const method = message.method!
-      if (method === 'account/read') return chatgpt
+      if (method === 'account/read') return options.account?.(launchIndex) ?? chatgpt
+      if (method === 'getAuthStatus' && options.authStatus) return options.authStatus(launchIndex)
+      if (method === 'config/read') {
+        const store = typeof options.authStore === 'function' ? options.authStore(launchIndex) : options.authStore
+        return { result: { config: { cli_auth_credentials_store: store } } }
+      }
       if (method === 'thread/resume' && options.resume === 'missing') return { error: { code: -32600, message: 'no rollout found for thread id' } }
       if (['thread/start', 'thread/resume', 'thread/fork'].includes(method)) {
+        if (options.beforeOpen?.(message) === false) return undefined
         // A resume opens the thread it names, unless the test makes it open another one.
         const resumed = options.resume === 'another' ? 'thr-other' : (message.params as { threadId: string }).threadId
         return { result: { thread: { id: method === 'thread/resume' ? resumed : `thr-${++threads}` }, model: 'gpt-x', modelProvider: options.provider?.(method) ?? 'openai', cwd: home } }
@@ -414,6 +633,132 @@ describe('CodexProviderService options (managed Codex)', () => {
       const params = server.requests(method)[0].params as { modelProvider: string; config: { model_provider: string } }
       return [params.modelProvider, params.config.model_provider]
     })
+
+  it('rejects a terminal logout even when the open server still reports the old sign-in', async () => {
+    const server = turnServer({ account: (launch) => launch === 0 ? chatgpt : { result: { account: null, requiresOpenaiAuth: true } } })
+    const service = create(server)
+    await chat(service)
+    rmSync(join(process.env.CODEX_HOME!, 'auth.json'))
+
+    await expect(chat(service, { threadId: 'after-logout' })).rejects.toMatchObject({ code: 'codex_not_connected' })
+    expect(server.launches).toHaveLength(2)
+    expect(server.processes[0]!.signalCode).toBe('SIGTERM')
+    expect(server.requests('turn/start')).toHaveLength(1)
+  })
+
+  it('hands over the transcript when the terminal switches workspaces with the same email', async () => {
+    const server = turnServer()
+    const service = create(server)
+    await chat(service)
+    service.commitConversation('t', 'first workspace transcript')
+    writeTerminalAuth(process.env.CODEX_HOME!, 'workspace-two', 'replacement-token')
+
+    await chat(service, { history: 'first workspace transcript' })
+    expect(server.launches).toHaveLength(2)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(server.requests('thread/start')).toHaveLength(2)
+    expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain('first workspace transcript')
+  })
+
+  it('hands over history when the selected workspace differs despite a matching file bearer', async () => {
+    const server = turnServer({
+      account: (launch) => ({
+        result: { ...chatgpt.result, workspaceRouting: { chatgptAccountId: launch === 0 ? 'workspace-one' : 'workspace-two' } }
+      })
+    })
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    const first = await chat(service)
+    const history = 'workspace one transcript'
+    service.commitConversation('t', history)
+    await service.stopAll('switch selected workspace')
+
+    const second = await chat(service, { history })
+    expect(second.codexThreadId).not.toBe(first.codexThreadId)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain(history)
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(service.account()?.subject).toBe('chatgpt:me@example.com')
+  })
+
+  it('rebuilds history when Codex only identifies the account by its email', async () => {
+    writeTerminalAuth(process.env.CODEX_HOME!, undefined)
+    const server = turnServer()
+    const service = create(server)
+    await chat(service)
+    service.commitConversation('t', 'previous conversation')
+    await service.stopAll('restart')
+
+    await chat(service, { history: 'previous conversation' })
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain('previous conversation')
+  })
+
+  it('uses a fresh server for each terminal turn when the configured auth store is opaque', async () => {
+    writeFileSync(join(process.env.CODEX_HOME!, 'config.toml'), 'cli_auth_credentials_store = "keyring"')
+    const server = turnServer({ authStore: 'keyring' })
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    const first = await chat(service)
+    service.commitConversation('t', 'previous conversation')
+    const second = await chat(service, { history: 'previous conversation' })
+
+    expect(second.codexThreadId).not.toBe(first.codexThreadId)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(server.requests('turn/start')).toHaveLength(2)
+    expect(server.processes.every((process) => process.signalCode === 'SIGTERM')).toBe(true)
+  })
+
+  it('reads the store selected by system config before trusting a leftover terminal auth file', async () => {
+    const server = turnServer({ authStore: (launch) => launch === 0 ? 'file' : 'keyring' })
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    const first = await chat(service)
+    service.commitConversation('t', 'file-backed conversation')
+    await service.stopAll('switch to system keyring')
+
+    // The user home has no config.toml, and auth.json still names the original workspace.
+    const second = await chat(service, { history: 'file-backed conversation' })
+    service.commitConversation('t', 'keyring-backed conversation')
+    const third = await chat(service, { history: 'keyring-backed conversation' })
+
+    expect(new Set([first.codexThreadId, second.codexThreadId, third.codexThreadId]).size).toBe(3)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(server.requests('config/read')).toHaveLength(server.launches.length)
+    expect(JSON.stringify(server.requests('turn/start')[1])).toContain('file-backed conversation')
+    expect(JSON.stringify(server.requests('turn/start')[2])).toContain('keyring-backed conversation')
+    expect(server.processes.every((process) => process.signalCode === 'SIGTERM')).toBe(true)
+  })
+
+  it('rebuilds the transcript when config/read switches to file after Codex opened the keyring', async () => {
+    let systemStore = 'file'
+    const startedWith: string[] = []
+    let startFromKeyring = false
+    const server = turnServer({
+      authStore: (launch) => {
+        if (startedWith[launch] === 'keyring') systemStore = 'file'
+        return systemStore
+      },
+      authStatus: (launch) => ({
+        result: { authMethod: 'chatgpt', authToken: codexFixtureAccessToken(startedWith[launch] === 'keyring' ? 'workspace-two' : 'workspace-one') }
+      })
+    })
+    const service = create({ launch: (spec) => {
+      if (startFromKeyring) systemStore = 'keyring'
+      startedWith.push(systemStore)
+      return server.launch(spec)
+    } }, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+
+    const first = await chat(service)
+    service.commitConversation('t', 'file workspace transcript')
+    await service.stopAll('restart for the new system policy')
+    startFromKeyring = true
+    // The file stayed on disk, and account/read reports the same email in both workspaces.
+    const second = await chat(service, { history: 'file workspace transcript' })
+
+    expect(startedWith).toContain('keyring')
+    expect(systemStore).toBe('file')
+    expect(second.codexThreadId).not.toBe(first.codexThreadId)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain('file workspace transcript')
+  })
 
   it('the existing CLI pins openai on start, fork and resume', async () => {
     const server = turnServer()
@@ -499,6 +844,19 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(server.requests('thread/compact/start')).toHaveLength(0)
       expect(await compact(service, 'h')).toBe(false)
       expect(server.requests('thread/compact/start')).toHaveLength(1)
+    })
+
+    it('releases the server when a cold compaction fails and unload is unconfirmed', async () => {
+      const server = turnServer({ compact: () => ({ status: 'failed', error: { message: 'context too small' } }) })
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      await service.stopAll('cold compaction')
+      await expect(compact(service, 'h')).rejects.toThrow('context too small')
+      expect(server.requests('thread/unsubscribe').map((request) => request.params)).toContainEqual({ threadId: 'thr-1' })
+      expect(server.processes[1]!.signalCode).toBe('SIGTERM')
+      await chat(service, { history: 'h' })
+      expect(server.launches).toHaveLength(3)
     })
 
     it('fails when Codex reports the compaction failed', async () => {
@@ -761,6 +1119,7 @@ describe('CodexProviderService options (managed Codex)', () => {
       const server = scriptedServer((message) => {
         const method = message.method!
         if (method === 'account/read') return chatgpt
+        if (method === 'getAuthStatus') return { result: { authMethod: 'chatgpt', authToken: null } }
         if (method === 'model/list') return { result: { data: models, nextCursor: null } }
         if (method === 'config/read') return mcp ? { result: { config: { mcp_servers: mcp }, layers: [] } } : { error: { code: -32603, message: 'config unreadable' } }
         if (method === 'thread/start') {
@@ -883,6 +1242,130 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect([null, 'v1', 'v2', 'v3', undefined].map(codexOneShotRunsOn)).toEqual([true, false, false, false, false])
     })
 
+    describe("as a direct request on OpenAI's provider with a ChatGPT sign-in", () => {
+      const TOKEN = 'header.eyJ0b2tlbiI6dHJ1ZX0.sig'
+      const reply = (text: string): AssistantMessage => ({
+        role: 'assistant', api: 'openai-codex-responses', provider: 'openai-codex', model: 'm', content: [{ type: 'text', text }], stopReason: 'stop', timestamp: 0,
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+      })
+      /** A transport whose answer `script` writes; every request is recorded. */
+      function directStream(script: (stream: AssistantMessageEventStream, signal: AbortSignal) => void = (stream) => {
+        const message = reply('Login redirect fix')
+        stream.push({ type: 'text_delta', contentIndex: 0, delta: 'Login redirect fix', partial: message })
+        stream.push({ type: 'done', reason: 'stop', message })
+        stream.end(message)
+      }) {
+        const requests: Array<{ model: any; context: any; options: any }> = []
+        const send = vi.fn((model: unknown, context: unknown, options: any) => {
+          requests.push({ model, context, options })
+          const stream = createAssistantMessageEventStream()
+          queueMicrotask(() => script(stream, options.signal))
+          return stream
+        }) as unknown as CodexDirectStream
+        return { send, requests }
+      }
+      /** A server that answers `getAuthStatus` as `auth` says, and lists `LISTED`. */
+      function authServer(auth: Record<string, unknown>) {
+        const server = scriptedServer((message) => {
+          const method = message.method!
+          if (method === 'account/read') return chatgpt
+          if (method === 'getAuthStatus') return { result: { authMethod: null, ...auth } }
+          if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
+          if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
+          return { result: {} }
+        })
+        return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
+      }
+      const withStream = (server: { launch: NonNullable<CodexServiceDependencies['launch']> }, send: CodexDirectStream, settings: Record<string, unknown> = {}) => {
+        mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+        writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
+        const service = new CodexProviderService(home, questions, { launch: server.launch, directStream: send }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
+        services.push(service)
+        return service
+      }
+
+      it("names a chat on a model with subagents through one request with no tools and Codex's own token", async () => {
+        const server = authServer({ authMethod: 'chatgpt', authToken: TOKEN })
+        const direct = directStream()
+        const service = withStream(server, direct.send, { models: [{ id: 'gpt-v2', label: 'GPT V2', efforts: ['low', 'high'] }] })
+        const onActivity = vi.fn()
+        const answer = await service.oneShot({ model: 'gpt-v2:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+        expect(answer).toEqual({ text: 'Login redirect fix' })
+        // Codex's token as it holds it: Mousse never asks Codex to refresh it.
+        const authChecks = server.requests('getAuthStatus')
+        expect(authChecks.length).toBeGreaterThan(0)
+        for (const { params } of authChecks) expect(params).toEqual({ includeToken: true, refreshToken: false })
+        // No Codex thread or turn runs.
+        expect(server.requests('thread/start')).toEqual([])
+        expect(server.requests('turn/start')).toEqual([])
+        expect(direct.requests).toHaveLength(1)
+        const [request] = direct.requests
+        expect(request.model).toMatchObject({ id: 'gpt-v2', api: 'openai-codex-responses', baseUrl: CHATGPT_CODEX_BASE_URL })
+        // The system text and one user message, with no tools declared.
+        expect(request.context.messages).toEqual([
+          { role: 'system', content: 'Name the chat.', timestamp: 0 },
+          expect.objectContaining({ role: 'user', content: 'Request: fix the login redirect' })
+        ])
+        expect(request.options).toMatchObject({ apiKey: TOKEN, transport: 'sse', maxRetries: 0, reasoningEffort: 'low' })
+        expect(onActivity).toHaveBeenCalled()
+      })
+
+      it("runs the model Codex lists for `default`, with that model's own effort, and refuses an unlisted one", async () => {
+        const direct = directStream()
+        const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
+        await service.oneShot({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+        expect(direct.requests[0].model.id).toBe('gpt-x')
+        expect(direct.requests[0].options.reasoningEffort).toBe('low')
+        await expect(service.oneShot({ model: 'gpt-missing', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'model_unavailable' })
+        expect(direct.requests).toHaveLength(1)
+      })
+
+      it('aborts the request on Stop', async () => {
+        let seen: AbortSignal | undefined
+        const direct = directStream((_stream, signal) => { seen = signal })
+        const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
+        const stop = new AbortController()
+        const run = service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, stop.signal)
+        await vi.waitFor(() => expect(seen).toBeDefined())
+        stop.abort(new Error('Stopped'))
+        await expect(run).rejects.toThrow()
+        expect(seen!.aborted).toBe(true)
+      })
+
+      it('reports a failed request', async () => {
+        const direct = directStream((stream) => {
+          const message: AssistantMessage = { ...reply(''), content: [], stopReason: 'error', errorMessage: 'You have hit your ChatGPT usage limit (plus plan).' }
+          stream.push({ type: 'error', reason: 'error', error: message })
+          stream.end(message)
+        })
+        const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
+        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'provider_usage_limit' })
+      })
+
+      it('is not used by a managed entry on its own provider, which keeps the app-server rule and its marks', async () => {
+        const server = authServer({ authMethod: 'chatgpt', authToken: TOKEN })
+        const direct = directStream()
+        const service = managed(server as never, { models: { list: async () => [{ id: 'gpt-v2', label: 'GPT V2', oneShot: false }] } }, { directStream: direct.send })
+        await service.refreshModels()
+        expect(service.models()).toEqual([{ id: 'gpt-v2', label: 'GPT V2', oneShot: false }])
+        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'unsupported' })
+        expect(server.requests('getAuthStatus')).toEqual([])
+        expect(direct.requests).toEqual([])
+      })
+
+      it.each([
+        ['an API-key sign-in', { authMethod: 'apikey', authToken: 'sk-test' }],
+        ['no token', { authMethod: 'chatgpt', authToken: null }],
+        ['a Codex that does not report one', {}]
+      ])('keeps the app-server rule with %s', async (_case, auth) => {
+        const direct = directStream()
+        const service = withStream(authServer(auth), direct.send)
+        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
+          .rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V2 can start subagents') })
+        expect(direct.requests).toEqual([])
+      })
+    })
+
     it('ends as refused and interrupts the turn when Codex starts any tool', async () => {
       for (const type of ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'collabAgentToolCall', 'dynamicToolCall']) {
         const server = oneShotServer([{ method: 'item/started', params: { item: { type, id: 'tool-1' } } }], null)
@@ -910,7 +1393,7 @@ describe('CodexProviderService options (managed Codex)', () => {
       let mode: 'answer' | 'fail' | 'hold' = 'answer'
       const server = scriptedServer((message) => {
         const method = message.method!
-        if (method === 'account/read') return chatgpt
+        if (method === 'getAuthStatus') return { result: { authMethod: 'chatgpt', authToken: null } }
         if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
         if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
         if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
@@ -925,7 +1408,9 @@ describe('CodexProviderService options (managed Codex)', () => {
         }
         return { result: {} }
       })
-      const service = create(server)
+      const service = create(server, {}, {
+        account: { read: async () => ({ kind: 'signed_in', planType: 'plus', email: null, subject: 'chatgpt:account' }) }
+      })
       await service.status()
       const baseline = connectionListeners(service)
       for (let run = 0; run < 3; run += 1) {
@@ -963,7 +1448,7 @@ describe('CodexProviderService options (managed Codex)', () => {
       const failure = await allRoutes(service, server).catch((error: unknown) => error)
       expect(failure).toMatchObject({ code: 'codex_provider_not_chatgpt' })
       expect((failure as Error).message).not.toMatch(/openai/)
-      service.stop()
+      void service.stop().catch(() => undefined)
     }
   })
 
@@ -1109,7 +1594,7 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(Date.now() - started).toBeLessThan(1_000)
       // Nothing it holds is released while it may still run.
       expect(onExit).not.toHaveBeenCalled()
-      service.stop()
+      void service.stop().catch(() => undefined)
     }
   })
 
@@ -1156,6 +1641,276 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(server.launches).toHaveLength(1)
     expect(server.launches[0].env.CODEX_HOME).toBe(join(home, 'harness', 'codex-2', 'home'))
     expect(server.methods()).toContain('config/read')
+  })
+
+  describe('the process kept between turns', () => {
+    const update = (server: ReturnType<typeof turnServer>, authMode: string | null) =>
+      server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'account/updated', params: { authMode, planType: 'plus' } }) + '\n')
+
+    it('verifies a replacement and rebuilds history after a ChatGPT account switch', async () => {
+      const server = turnServer({ provider: () => MANAGED })
+      let subject = 'chatgpt:client:first'
+      const service = managed(server, { account: { read: async () => ({ kind: 'signed_in', planType: 'plus', email: null, subject }) } })
+      const first = await chat(service)
+      service.commitConversation('t', 'first history')
+      const same = await chat(service, { history: 'first history' })
+      expect(same.codexThreadId).toBe(first.codexThreadId)
+      expect(server.launches).toHaveLength(1)
+      service.commitConversation('t', 'latest history')
+
+      subject = 'chatgpt:client:second'
+      update(server, 'chatgpt')
+      const second = await chat(service, { history: 'latest history' })
+      expect(second.codexThreadId).not.toBe(first.codexThreadId)
+      expect(server.requests('thread/resume')).toHaveLength(0)
+      expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain('latest history')
+      expect(server.launches).toHaveLength(2)
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+    })
+
+    it.each(['apiKey', null] as const)('discards the reply to an account check invalidated by %s', async (authMode) => {
+      let delay = false
+      let started!: () => void
+      const began = new Promise<void>((resolve) => { started = resolve })
+      const account = { kind: 'signed_in' as const, planType: 'plus', email: null, subject: 'chatgpt:first' }
+      let release!: (reading: typeof account) => void
+      const blocked = new Promise<typeof account>((resolve) => { release = resolve })
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server, { account: { read: async () => delay ? (started(), blocked) : account } })
+      await chat(service)
+      delay = true
+      const rejected = chat(service)
+      void rejected.catch(() => undefined)
+      await began
+      update(server, authMode)
+      release(account)
+      await expect(rejected).rejects.toThrow()
+      expect(server.requests('turn/start')).toHaveLength(1)
+      expect(service.account()).toBeUndefined()
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+      delay = false
+      await chat(service)
+      expect(server.launches).toHaveLength(2)
+      expect(server.requests('turn/start')).toHaveLength(2)
+    })
+
+    it('accepts no steer or follow-up after an account update during a turn', async () => {
+      const server = turnServer({ provider: () => MANAGED, turn: () => null })
+      const service = managed(server)
+      let boundary!: () => void
+      const started = new Promise<void>((resolve) => { boundary = resolve })
+      const running = chat(service, { onProviderTurn: boundary, drainSteer: () => 'queued text' })
+      void running.catch(() => undefined)
+      await started
+      update(server, 'chatgpt')
+      await expect(running).rejects.toThrow()
+      expect(server.requests('turn/steer')).toHaveLength(0)
+      expect(server.requests('turn/start')).toHaveLength(1)
+    })
+
+    it('does not send queued text as a follow-up when the account changes at the turn boundary', async () => {
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server)
+      let queued: string | undefined
+      const run = chat(service, {
+        onBoundary: () => {
+          queued = 'held follow-up'
+          update(server, 'chatgpt')
+        },
+        drainSteer: () => {
+          const text = queued
+          queued = undefined
+          return text
+        }
+      })
+      await expect(run).rejects.toThrow()
+      expect(server.requests('turn/start')).toHaveLength(1)
+      expect(JSON.stringify(server.requests('turn/start'))).not.toContain('held follow-up')
+    })
+
+    it('reaps an app-server that may have loaded a cancelled open before admitting another turn', async () => {
+      let hold = true
+      let opening!: () => void
+      const waitingForOpen = new Promise<void>((resolve) => { opening = resolve })
+      const server = turnServer({ provider: () => MANAGED, beforeOpen: () => {
+        if (!hold) return true
+        opening()
+        return false
+      } })
+      const service = managed(server)
+      const stop = new AbortController()
+      const interrupted = chat(service, { signal: stop.signal })
+      void interrupted.catch(() => undefined)
+      await waitingForOpen
+      stop.abort(new Error('Stopped while opening'))
+      await expect(interrupted).rejects.toThrow('Stopped while opening')
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+      expect(server.requests('turn/start')).toHaveLength(0)
+      hold = false
+      await chat(service, { threadId: 'next' })
+      expect(server.launches).toHaveLength(2)
+    })
+
+    it('reserves the last loaded-thread slot once across parallel sign-in checks while a turn is active', async () => {
+      const account = { kind: 'signed_in' as const, planType: 'plus', email: null, subject: 'chatgpt:account' }
+      const reads: Array<(result: typeof account) => void> = []
+      let holdReads = false
+      let holdTurn = false
+      const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
+      const service = managed(server, { account: { read: async () => holdReads ? new Promise((resolve) => reads.push(resolve)) : account } })
+      const lifetime = new AbortController()
+      const start = (threadId: string) => chat(service, { threadId, signal: lifetime.signal })
+      const pending: Array<Promise<unknown>> = []
+      try {
+        for (let index = 0; index < CODEX_MAX_LOADED_THREADS - 2; index++) await start('idle' + index)
+        holdTurn = true
+        pending.push(start('active'))
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS - 1))
+
+        holdTurn = false
+        holdReads = true
+        pending.push(start('parallel-a'), start('parallel-b'))
+        await vi.waitFor(() => expect(reads).toHaveLength(2))
+        holdReads = false
+        for (const reply of reads) reply(account)
+        await vi.waitFor(() => expect(server.requests('thread/unsubscribe')).toHaveLength(1))
+        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
+        expect(server.launches).toHaveLength(1)
+
+        const victim = (server.requests('thread/unsubscribe')[0]!.params as { threadId: string }).threadId
+        server.processes[0]!.stdout.write(JSON.stringify({ method: 'thread/closed', params: { threadId: victim } }) + '\n')
+        await Promise.all(pending.slice(1))
+        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1)
+        expect(server.launches).toHaveLength(1)
+      } finally {
+        lifetime.abort()
+        await Promise.allSettled(pending)
+        await service.stop()
+      }
+    })
+
+    it.each([
+      ['at capacity', CODEX_MAX_LOADED_THREADS],
+      ['with one slot left', CODEX_MAX_LOADED_THREADS - 1]
+    ])(
+      'reuses a loaded thread %s while other turns stay active',
+      async (_capacity, loadedCount) => {
+        let holdTurn = false
+        const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
+        const service = managed(server)
+        const lifetime = new AbortController()
+        const pending: Array<Promise<unknown>> = []
+        const start = (threadId: string, history?: string) => {
+          const turn = chat(service, { threadId, history, signal: lifetime.signal })
+          void turn.catch(() => undefined)
+          pending.push(turn)
+        }
+        try {
+          const warm = await chat(service)
+          service.commitConversation('t', 'warm history')
+          holdTurn = true
+          for (let index = 1; index < loadedCount; index++) start('active-' + index)
+          await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(loadedCount))
+
+          start('t', 'warm history')
+          await vi.waitFor(() => expect(server.requests('turn/start').at(-1)?.params).toMatchObject({ threadId: warm.codexThreadId }))
+          expect(server.requests('thread/start')).toHaveLength(loadedCount)
+          expect(server.requests('thread/resume')).toHaveLength(0)
+
+          if (loadedCount < CODEX_MAX_LOADED_THREADS) {
+            holdTurn = false
+            await chat(service, { threadId: 'last-slot', signal: AbortSignal.timeout(2_000) })
+            expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
+          }
+          expect(server.requests('thread/unsubscribe')).toHaveLength(0)
+          expect(server.launches).toHaveLength(1)
+        } finally {
+          lifetime.abort()
+          await service.stop()
+          await Promise.allSettled(pending)
+        }
+      }
+    )
+
+    it('admits a queued ninth Send after a stopped turn finishes settling', async () => {
+      let holdTurn = true
+      const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
+      let reads = 0
+      const service = managed(server, { account: { read: async () => {
+        reads += 1
+        return { kind: 'signed_in', planType: 'plus', email: null, subject: 'chatgpt:account' }
+      } } })
+      const lifetime = new AbortController()
+      const stop = new AbortController()
+      const pending: Array<Promise<unknown>> = []
+      const start = (threadId: string, signal = lifetime.signal) => {
+        const turn = chat(service, { threadId, signal })
+        void turn.catch(() => undefined)
+        pending.push(turn)
+        return turn
+      }
+      try {
+        const stopped = start('stopped', stop.signal)
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(1))
+        const victim = (server.requests('turn/start')[0]!.params as { threadId: string }).threadId
+        for (let index = 1; index < CODEX_MAX_LOADED_THREADS; index++) start('active-' + index)
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS))
+
+        const readsBefore = reads
+        const queued = start('ninth')
+        await vi.waitFor(() => expect(reads).toBeGreaterThan(readsBefore))
+        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
+
+        stop.abort(new Error('Stopped'))
+        await expect(stopped).rejects.toThrow('Stopped')
+        expect(server.requests('turn/interrupt').map((message) => message.params)).toContainEqual({ threadId: victim, turnId: 'turn-1' })
+        expect(server.requests('thread/unsubscribe')).toHaveLength(0)
+
+        const notify = (method: string, params: unknown) => server.processes[0]!.stdout.write(JSON.stringify({ method, params }) + '\n')
+        notify('turn/completed', { threadId: victim, turn: { id: 'turn-1', status: 'interrupted', error: null } })
+        await vi.waitFor(() => expect(server.requests('thread/unsubscribe').map((message) => message.params)).toEqual([{ threadId: victim }]))
+        holdTurn = false
+        notify('thread/closed', { threadId: victim })
+
+        expect((await queued).codexThreadId).not.toBe(victim)
+        expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1)
+        expect(server.launches).toHaveLength(1)
+      } finally {
+        stop.abort()
+        lifetime.abort()
+        await service.stop()
+        await Promise.allSettled(pending)
+      }
+    })
+
+    it('recycles when unsubscribe acknowledges without confirming unload', async () => {
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server)
+      // Reuse t0 just before the ninth turn, so thr-2 is the least recently used.
+      for (let index = 0; index < CODEX_MAX_LOADED_THREADS; index++) await chat(service, { threadId: 't' + index })
+      service.commitConversation('t0', 'h')
+      await chat(service, { threadId: 't0', history: 'h' })
+      await chat(service, { threadId: 'overflow' })
+      expect(server.requests('thread/unsubscribe').map((request) => request.params)).toContainEqual({ threadId: 'thr-2' })
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+      await chat(service, { threadId: 'later' })
+      expect(server.launches).toHaveLength(2)
+    })
+
+    it('one process serves turns on different threads for the whole idle window, and closes once it has passed', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server)
+      await chat(service, { threadId: 'a' })
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      await chat(service, { threadId: 'b' })
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      await chat(service, { threadId: 'a' })
+      expect(server.launches).toHaveLength(1)
+      expect(server.processes[0].signalCode).toBeNull()
+      await vi.advanceTimersByTimeAsync(CODEX_IDLE_CLOSE_MS + 1)
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+    })
   })
 })
 
@@ -1275,7 +2030,7 @@ describe("the managed entry's reader of the user's own Codex CLI", () => {
     const reader = userCodexLimitsReader({ profileHome: home, questions, stateDir, instanceId: 'codex:managed' }, () => binary, server.launch)
     services.push(reader)
     expect((await reader.status()).state).toBe('connected')
-    expect(reader.account()?.subject).toBe('chatgpt:me@example.com')
+    expect(reader.account()?.subject).toContain('workspace-one')
     expect(await reader.rateLimits()).toMatchObject({ live: true, snapshot: { primary: limits.primary, secondary: limits.secondary } })
     // It reads; it never starts a thread or a turn.
     expect(server.methods().filter((method) => method.startsWith('thread/') || method.startsWith('turn/'))).toEqual([])
@@ -1336,6 +2091,7 @@ describe('plan usage limits for the usage page', () => {
     expect(await service.rateLimits()).toMatchObject({ live: false, snapshot: limits(10) })
     // Another account signs in in the terminal: the old account's numbers are not shown.
     email = 'other@example.com'
+    writeTerminalAuth(process.env.CODEX_HOME!, 'workspace-two', 'replacement-token')
     await service.status({ force: true })
     await expect(service.rateLimits()).rejects.toThrow(/unavailable/)
     // A read that succeeds for the new account is that account's own snapshot from then on; a disconnect forgets it.
@@ -1408,7 +2164,7 @@ describe('plan usage limits for the usage page', () => {
     await service.status({ force: true })
     await service.rateLimits()
     const subject = service.account()?.subject
-    expect(subject).toBe('chatgpt:me@example.com')
+    expect(subject).toContain('workspace-one')
     expect(service.reportedRateLimits()).toEqual({ snapshot: limits(40), at: expect.any(Number) })
     const saved = () => readFileSync(join(home, 'providers', 'codex', 'settings.json'), 'utf8')
     expect(saved()).not.toContain('me@example.com')

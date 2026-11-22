@@ -40,6 +40,8 @@ export interface ProfileHostShared {
    * read at start, such as what bots may do here before the owner changed it.
    */
   installationConfig?: MousseConfigStore
+  /** A profile was created, archived, restored or removed (the installation's SSH endpoints follow, Phase 1b §3.3). */
+  onProfilesChanged?: () => void
 }
 
 export class ProfileHost {
@@ -54,6 +56,8 @@ export class ProfileHost {
   private stopping = false
   /** The daemon is ready and its networked profiles were started: a profile started from now on starts its own. */
   private networkReady = false
+  /** Set once the daemon is ready (`startAfterReadyWork`): a profile started after that runs its deferred passes at once. */
+  private daemonReady = false
   private defaultServices: MmsProfileServices | null = null
   private defaultProfileId: ProfileId | null = null
 
@@ -97,6 +101,7 @@ export class ProfileHost {
 
   attachDefault(services: MmsProfileServices, profileId: ProfileId): void {
     this.shared.configureServices?.(services)
+    services.setDaemonReady(() => this.daemonReady)
     this.defaultServices = services
     this.defaultProfileId = profileId
     this.live.set(profileId, services)
@@ -131,7 +136,18 @@ export class ProfileHost {
       avatar: record.avatar,
       status: record.status,
       revision: record.revision,
-      isDefault: record.id === this.getDefaultProfileId()
+      isDefault: record.id === this.getDefaultProfileId(),
+      ...(this.networked(record) ? { networked: true } : {})
+    }
+  }
+
+  /** Its new networking's switch is on (read from its running services; a profile not started has none on). */
+  private networked(record: ProfileRecord): boolean {
+    if (record.status !== 'active') return false
+    try {
+      return !!this.live.get(record.id)?.netEngine.settings()?.enabled
+    } catch {
+      return false
     }
   }
 
@@ -193,6 +209,15 @@ export class ProfileHost {
    * tombstone sweep, and the helper's launch, never delay it. Each profile starts on its own, and a failure marks
    * only that profile.
    */
+  /**
+   * The daemon is ready: each running profile begins the passes its start left for now (`startAfterReadyWork`), in the
+   * background. A profile started later begins them at the end of its start.
+   */
+  startAfterReadyWork(): void {
+    this.daemonReady = true
+    for (const services of this.live.values()) services.startAfterReadyWork()
+  }
+
   async startNetworkedProfiles(): Promise<void> {
     this.networkReady = true
     for (const record of this.manager.list()) {
@@ -301,7 +326,18 @@ export class ProfileHost {
   async archive(profileRef: string, expectedRevision: number): Promise<ProfileRecord> {
     const record = this.manager.get(profileRef)
     if (record.revision !== expectedRevision) throw new ProfileRevisionConflictError(record.id, expectedRevision, record.revision)
-    return this.withDrainedProfile(record.id, () => this.manager.archive(record.id, expectedRevision))
+    const archived = await this.withDrainedProfile(record.id, () => this.manager.archive(record.id, expectedRevision))
+    this.profilesChanged()
+    return archived
+  }
+
+  /** Tells the installation a profile came or went (create, archive, restore, remove). Never throws. */
+  profilesChanged(): void {
+    try {
+      this.shared.onProfilesChanged?.()
+    } catch {
+      // What follows the profiles catches up on its next change.
+    }
   }
 
   /** Idempotent host cleanup; shared provider/owner teardown remains with MousseMainService. */
@@ -344,7 +380,11 @@ export class ProfileHost {
       })
     }
     const identity = lstatSync(preview.ownedRoots[0])
-    return this.withDrainedProfile(preview.profileId, () => this.removeDrained(preview, expectedRevision, identity))
+    const removed = await this.withDrainedProfile(preview.profileId, () =>
+      this.removeDrained(preview, expectedRevision, identity)
+    )
+    this.profilesChanged()
+    return removed
   }
 
   private removeDrained(preview: ProfileRemovePreview, expectedRevision: number, identity: { dev: number; ino: number }): ProfileRemovePreview {
@@ -533,6 +573,7 @@ export class ProfileHost {
       includeExternalCliConfigs: isDefault
     })
     this.shared.configureServices?.(services)
+    services.setDaemonReady(() => this.daemonReady)
     await services.initialize()
     return services
   }

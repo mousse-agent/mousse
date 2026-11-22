@@ -8,7 +8,8 @@ import type { Thread } from '../../shared/types'
  * - `botId`: only the threads that bot started, hidden or not, whatever `show` says.
  * - `projectId`: only the threads of that project group (`groupProjects`).
  * - `archived`: the list holds archived threads instead of the others.
- * - `query`: each word must be in the thread's title, its project's name or its bot's name.
+ * - `query`: each word must be in the thread's title, its project's name or its bot's name; or what is typed, as a
+ *   whole, is in one of the thread's messages (`ThreadFilterContext.messageMatches`).
  */
 export type ThreadShow = 'mine' | 'bots' | 'all'
 
@@ -28,6 +29,8 @@ export interface ThreadFilterContext {
   groupOf(projectId: string): string
   projectName(projectId: string): string | undefined
   botName(botId: string): string | undefined
+  /** Threads with a message (one people typed, or an agent's reply) that holds the query; found by the service. */
+  messageMatches?: ReadonlySet<string>
 }
 
 /** The query's words, lower case. */
@@ -54,7 +57,7 @@ export function threadInFilter(thread: Thread, filter: ThreadFilter, context: Th
     thread.projectId ? context.projectName(thread.projectId) : undefined,
     bot ? (context.botName(bot.botId) ?? bot.name) : undefined
   ].filter(Boolean).join('\n').toLowerCase()
-  return words.every((word) => haystack.includes(word))
+  return words.every((word) => haystack.includes(word)) || context.messageMatches?.has(thread.id) === true
 }
 
 /** Whether anything narrows the list beyond the default (My threads, nothing typed). */

@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { spawn, spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
@@ -8,6 +7,9 @@ import { getMousseHomeDir } from '../data/paths'
 import { cachedGitFolder } from './gitFolderCache'
 import { isGitDirectory, isGitDirectoryAsync, stripInheritedGitEnv, withGitConfigEnv } from './gitEnv'
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
+import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from './gitExecutable'
+import { spawnGitSync, spawnGit } from './gitSpawn'
 
 /**
  * The central check for the Git (and `gh`) commands Mousse itself runs. It never applies to commands an
@@ -148,7 +150,7 @@ const SYNC_READS: CheckReads = {
   },
   isGitDirectory,
   git(cwd, args, gitDir) {
-    const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: readGitEnv(gitDir) })
+    const result = timeGitSync(() => spawnGitSync(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: gitEnvFor(readGitEnv(gitDir)) }))
     return result.error ? null : { status: result.status, stdout: result.stdout }
   },
   gitFolder(cwd, gitDir, routing) {
@@ -159,7 +161,7 @@ const SYNC_READS: CheckReads = {
 /** {@link SYNC_READS}'s `git` without blocking: the same command, time limit and answer. */
 function readGitAsync(cwd: string, args: readonly string[], gitDir: string | undefined, signal?: AbortSignal): Promise<GitRead> {
   return new Promise((settle) => {
-    const child = spawn('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true, env: readGitEnv(gitDir), stdio: ['ignore', 'pipe', 'ignore'], signal })
+    const child = timeGitChild(() => spawnGit(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true, env: gitEnvFor(readGitEnv(gitDir)), stdio: ['ignore', 'pipe', 'ignore'], signal }))
     const chunks: Buffer[] = []
     let failed = false
     const timer = setTimeout(() => { failed = true; child.kill() }, READ_GIT_TIMEOUT_MS)
@@ -263,10 +265,23 @@ export function isOwnedPath(path: string): boolean {
   return ownedRoots().some((root) => contains(root, real))
 }
 
-/** `refs/mousse/*` and `mousse/*` branches, also on a remote. */
+/** `refs/mousse/*` and `mousse/*` branches, also on a remote, and the branches a {@link withOwnedBranches} scope names. */
 export function isOwnedRef(ref: string): boolean {
   const name = ref.replace(/^\+/, '')
-  return /^refs\/mousse\//i.test(name) || /^refs\/heads\/mousse\//i.test(name)
+  if (/^refs\/mousse\//i.test(name) || /^refs\/heads\/mousse\//i.test(name)) return true
+  return ownedBranchScope.getStore()?.has(name) === true
+}
+
+const ownedBranchScope = new AsyncLocalStorage<ReadonlySet<string>>()
+
+/**
+ * Runs `work` with `branches` (full names, without `refs/heads/`) counted as Mousse's, for Git commands it runs itself.
+ * Only for a branch Mousse's own records show it made, or a new name Git will create only if it is free. Whatever the name, the person's
+ * prefix or one the title model picked, the branch is then judged as a `mousse/` branch is.
+ */
+export function withOwnedBranches<T>(branches: readonly string[], work: () => T): T {
+  const outer = ownedBranchScope.getStore()
+  return ownedBranchScope.run(new Set([...(outer ?? []), ...branches.map((name) => `refs/heads/${name}`)]), work)
 }
 
 /**
@@ -335,6 +350,8 @@ const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boole
   [/^core\.(quotepath|autocrlf|eol|safecrlf|symlinks)$/, () => true],
   // Windows: a worktree's files may be checked out past the 260-character path limit (Git for Windows only; elsewhere ignored).
   [/^core\.longpaths$/, (value) => value === 'true'],
+  // A new worktree's files are written by parallel workers when Git's config does not say how many (`worktreeCheckout.ts`).
+  [/^checkout\.workers$/, (value) => /^\d{1,3}$/.test(value)],
   // A snapshot's first exact index streams its new blobs into one pack instead of thousands of loose files, on Git 2.37 and later (`snapshots.ts`).
   [/^core\.bigfilethreshold$/, (value) => value === '1'],
   // Only restrictive values: `always` would open a protocol Git keeps closed by default.
@@ -429,6 +446,8 @@ interface Effect {
   /** It sends commits to a remote repository. */
   publishes?: boolean
   config?: boolean
+  /** The config it writes is only the sections of the branches in `refs` (a branch rename moves `branch.<name>.*`). */
+  branchConfig?: boolean
   /** A command Mousse never runs: it can delete what nothing else keeps. */
   banned?: string
   /** Its ref writes follow symbolic refs, so each ref is judged by where it finally points. */
@@ -462,14 +481,20 @@ function heads(names: readonly string[], prefix = 'refs/heads/'): string[] {
   return names.map((name) => (name.startsWith('refs/') ? name : `${prefix}${name}`))
 }
 
-function updateRefInput(stdin: string | undefined): string[] | null {
+function updateRefInput(stdin: string | undefined): { refs: string[]; head: boolean } | null {
   if (stdin === undefined) return null
   const refs: string[] = []
+  let head = false
   for (const line of stdin.split(/[\n\0]/)) {
-    const [command, ref] = line.trim().split(/\s+/)
-    if (command && ref && /^(update|create|delete|symref-update|symref-create|symref-delete)$/.test(command)) refs.push(ref)
+    const words = line.trim().split(/\s+/)
+    const [command, ref, target, oldType, oldTarget] = words
+    if (command === 'symref-update' && ref === 'HEAD' && words.length === 5 &&
+      target?.startsWith('refs/heads/') && oldType === 'ref' && oldTarget?.startsWith('refs/heads/')) {
+      head = true
+      refs.push(target, oldTarget)
+    } else if (command && ref && /^(update|create|delete|symref-update|symref-create|symref-delete)$/.test(command)) refs.push(ref)
   }
-  return refs
+  return { refs, head }
 }
 
 const isObjectName = (value: string): boolean => /^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(value)
@@ -567,6 +592,10 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       // Records the index's cache tree back into the index.
       return { refs: [], index: true }
     case 'config': {
+      if (rest.length === 4 && rest[0] === '--local' && rest[1] === '--rename-section' &&
+        rest.slice(2).every((section) => section.startsWith('branch.'))) {
+        return { refs: rest.slice(2).map((section) => `refs/heads/${section.slice('branch.'.length)}`), config: true, branchConfig: true }
+      }
       const [first] = positionals(rest, new Set(['--file', '-f', '--blob', '--type', '--default', '--comment']))
       const reads = has(rest, '--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l', '--get-color', '--get-colorbool') || first === 'get' || first === 'list'
       const writes = has(rest, '--unset', '--unset-all', '--add', '--replace-all', '--rename-section', '--remove-section', '-e', '--edit') || ['set', 'unset', 'rename-section', 'remove-section', 'edit'].includes(first ?? '')
@@ -588,7 +617,7 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       // Deleting a symbolic branch deletes the symbolic ref itself, never its target.
       if (has(rest, '-d', '-D', '--delete')) return { refs: heads(names, has(rest, '-r', '--remotes') ? 'refs/remotes/' : 'refs/heads/') }
       // A rename or copy also moves the branch's config section.
-      if (has(rest, '-m', '-M', '--move', '-c', '-C', '--copy')) return { refs: heads(names), config: true, unlistedRefs: names.length < 2 }
+      if (has(rest, '-m', '-M', '--move', '-c', '-C', '--copy')) return { refs: heads(names), config: true, branchConfig: names.length === 2, unlistedRefs: names.length < 2 }
       if (!names.length || has(rest, '--list', '-l', '--show-current', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at')) return READ
       return { refs: heads(names.slice(0, 1)), config: has(rest, '--track', '-t'), deref: true }
     }
@@ -606,13 +635,21 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       // Without `--no-deref` an update or delete follows a symbolic ref and lands on its target.
       const deref = !has(rest, '--no-deref')
       if (has(rest, '--stdin')) {
-        const refs = updateRefInput(stdin)
+        const input = updateRefInput(stdin)
         const perLine = stdin !== undefined && /(^|[\n\0])\s*option\s+no-deref/.test(stdin)
-        return refs ? { refs, deref: deref && !perLine } : { refs: [], unlistedRefs: true }
+        return input ? { ...input, deref: deref && !perLine } : { refs: [], unlistedRefs: true }
       }
       const [ref] = positionals(rest, new Set(['-m']))
       if (!ref) return { refs: [], unlistedRefs: true }
       return ref === 'HEAD' ? { refs: [], headBranch: true } : { refs: [ref], deref }
+    }
+    case 'pack-refs': {
+      // Moves loose refs into `packed-refs`, values unchanged; symbolic refs are never packed. Without `--include` it
+      // packs every tag and, with `--all`, every ref; with it, only the refs its patterns match (`*` crosses `/`).
+      const value = (arg: string, index: number): string | undefined => arg === '--include' ? rest[index + 1] : arg.startsWith('--include=') ? arg.slice('--include='.length) : undefined
+      const includes = rest.flatMap((arg, index) => { const pattern = value(arg, index); return pattern === undefined ? [] : [pattern] })
+      const known = rest.every((arg, index) => arg === '--include' || arg.startsWith('--include=') || rest[index - 1] === '--include' || arg === '--no-prune' || arg === '--prune')
+      return known && includes.length ? { refs: includes } : { refs: [], unlistedRefs: true }
     }
     case 'reflog': {
       const [first] = positionals(rest)
@@ -835,7 +872,8 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
   // In a snapshot store the index and HEAD are the store's; the files of its work tree are still the folder's.
   const repositoryOwned = cwdOwned || redirect.store !== undefined
   const problems: string[] = []
-  if (effect.config) problems.push('it writes the repository\'s config')
+  // A rename of branches Mousse owns moves only their own config sections.
+  if (effect.config && !(effect.branchConfig && effect.refs.length === 2 && effect.refs.every((ref) => isOwnedRef(ref)))) problems.push('it writes the repository\'s config')
   if (effect.remote) problems.push('it changes a remote')
   if (effect.publishes) problems.push('it pushes to a remote')
   if (effect.sparse) {

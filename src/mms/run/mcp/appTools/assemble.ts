@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { MousseIntegrationsSettings, SkillDescriptor, SkillsRegistrySnapshot } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
-import { sha256Hex } from '../../../../shared/agents/hashes'
 import type { EffectiveAgentGrants } from '../../../../shared/agents/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../../../shared/chatMode'
 import type { ChatMode } from '../../../../shared/types'
@@ -46,6 +45,7 @@ export function modeFactsFor(modeRegistry: ModeRegistry, mode: ChatMode, project
 }
 
 export interface SkillsContext {
+  snapshot?: SkillsRegistrySnapshot
   enabledSkills: SkillDescriptor[]
   loadedSkills: Array<{ name: string; content: string; revision?: string }>
 }
@@ -78,27 +78,36 @@ export async function prepareSkills(input: {
     snapshot = await registry.discover({ projectPath, refresh: true })
     enabledSkills = filterEnabledSkills(snapshot, mode, input.settings(), input.actor)
   }
-  const modeSkills = input.grants ? [] : await loadSkillForMode(registry, mode, projectPath, snapshot)
-  const explicitSkills = await loadExplicitSkills(registry, input.userContent, enabledSkills, projectPath, snapshot)
   const grants = input.grants
-  const grantedSkills = grants
-    ? await Promise.all(enabledSkills.map(async (skill) => {
-        const grant = grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)!
-        const result = await registry.readSkill(skill.installationId ?? skill.id, { projectPath }, snapshot)
-        if (grant.hash && sha256Hex(result.content) !== grant.hash) {
-          throw new Error(`Granted skill changed after agent resolution: ${grant.id}.`)
-        }
-        if (!grant.hash && grant.revision && result.skill.revision !== grant.revision && result.skill.contentHash !== grant.revision) {
-          throw new Error(`Granted skill revision is unavailable: ${grant.id}@${grant.revision}.`)
-        }
-        return { name: result.skill.name, content: truncateForModel(result.content) }
-      }))
-    : []
-  const loadedSkills = grants ? grantedSkills : [
+  if (grants) {
+    const resolved = await Promise.all(enabledSkills.map(async (skill) => {
+      const grant = grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)
+      if (!grant) return undefined
+      try {
+        const result = await registry.readSkillForModel(skill, grant)
+        const current = resolveEffectiveSkills({
+          snapshot: { ...snapshot, skills: [result.skill] },
+          settings: input.settings(),
+          actor: input.actor,
+          grantSource: grant.source
+        })
+        if (!current.length) return undefined
+        return { skill: result.skill, loaded: { name: result.skill.name, content: truncateForModel(result.content) } }
+      } catch (error) {
+        console.warn('a granted skill could not be read for the turn', { skill: grant.id, error: error instanceof Error ? error.message : String(error) })
+        return undefined
+      }
+    }))
+    const available = resolved.filter((entry) => entry !== undefined)
+    return { snapshot, enabledSkills: available.map((entry) => entry.skill), loadedSkills: available.map((entry) => entry.loaded) }
+  }
+  const modeSkills = await loadSkillForMode(registry, mode, projectPath, snapshot)
+  const explicitSkills = await loadExplicitSkills(registry, input.userContent, enabledSkills, projectPath, snapshot)
+  const loadedSkills = [
     ...modeSkills,
     ...explicitSkills.filter((skill) => !modeSkills.some((loaded) => loaded.name === skill.name))
   ]
-  return { enabledSkills, loadedSkills }
+  return { snapshot, enabledSkills, loadedSkills }
 }
 
 function filterEnabledSkills(
@@ -112,6 +121,19 @@ function filterEnabledSkills(
   return resolveEffectiveSkills({ snapshot, settings, actor })
 }
 
+/**
+ * A skill's file as it is now, or undefined when it cannot be read (removed since the scan): that skill is left out of
+ * the turn, and the others still load.
+ */
+async function readOrSkip(registry: SkillsRegistry, skillId: string, projectPath: string | undefined, snapshot: SkillsRegistrySnapshot | undefined) {
+  try {
+    return await registry.readSkill(skillId, { projectPath }, snapshot)
+  } catch (error) {
+    console.warn('a skill could not be read for the turn; it is left out', { skill: skillId, error: error instanceof Error ? error.message : String(error) })
+    return undefined
+  }
+}
+
 async function loadSkillForMode(
   registry: SkillsRegistry,
   mode: ChatMode,
@@ -120,8 +142,8 @@ async function loadSkillForMode(
 ): Promise<Array<{ name: string; content: string }>> {
   const skillId = getSkillIdFromMode(mode)
   if (!skillId) return []
-  const result = await registry.readSkill(skillId, { projectPath }, snapshot)
-  return [{ name: result.skill.name, content: truncateForModel(result.content) }]
+  const result = await readOrSkip(registry, skillId, projectPath, snapshot)
+  return result ? [{ name: result.skill.name, content: truncateForModel(result.content) }] : []
 }
 
 /**
@@ -146,7 +168,8 @@ async function loadExplicitSkills(
   for (const name of requestedNames) {
     const skill = availableSkills.find((candidate) => normalizeSkillName(candidate.name) === name)
     if (!skill) continue
-    const result = await registry.readSkill(skill.id, { projectPath }, snapshot)
+    const result = await readOrSkip(registry, skill.id, projectPath, snapshot)
+    if (!result) continue
     loaded.push({ name: result.skill.name, content: truncateForModel(result.content) })
   }
   return loaded

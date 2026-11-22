@@ -28,6 +28,8 @@ export type MousseNoticeKind =
   | 'question_answered'
   | 'question_dismissed'
   | 'agent_note'
+  | 'monitor_event'
+  | 'thread_wake'
 
 export type MousseReply = 'if-needed' | 'required'
 

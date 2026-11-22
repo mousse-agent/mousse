@@ -26,8 +26,8 @@ let api: { list: ReturnType<typeof vi.fn>; edit: ReturnType<typeof vi.fn>; reord
 let toComposer: ReturnType<typeof vi.fn>
 
 /** The queue as the chat renders it: in the conversation, with its errors and notes in the composer's notice slot. */
-function Chat({ hold = null, lastPromptId = null, lastPromptQueueItemId = null }: { hold?: QueueHold | null; lastPromptId?: string | null; lastPromptQueueItemId?: string | null }) {
-  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer, lastPromptId, lastPromptQueueItemId })
+function Chat({ hold = null, lastPromptId = null, lastPromptQueueItemId = null, turnSettingUp = false }: { hold?: QueueHold | null; lastPromptId?: string | null; lastPromptQueueItemId?: string | null; turnSettingUp?: boolean }) {
+  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer, lastPromptId, lastPromptQueueItemId, turnSettingUp })
   // The reply's steered messages, as the conversation shows them: the transcript with the steers on their way.
   const transcript = useAppStore((state) => state.messages)
   const steered = withSteersOnTheWay(transcript, thread.steersOnTheWay, 't1').filter((message) => message.role === 'user' && message.steered)
@@ -157,6 +157,20 @@ describe('queued messages in the conversation', () => {
     expect(labels[0]!.getAttribute('title')).toBe('Sends after the reply to your next message, or send it now')
   })
 
+  it('says why the queue waits while no reply runs: the last turn finishing, the next being set up, other work', async () => {
+    const label = () => [...host.querySelectorAll('.queued-message-state')].map((entry) => [entry.textContent, entry.getAttribute('title')])
+    await show([queued('a', 'one', { waitsFor: 'finish' }), queued('b', 'two', { waitsFor: 'finish' })])
+    expect(label()).toEqual([['Waits for the last turn to finish', 'The reply is complete; the turn is still saving its checkpoint']])
+    expect(row('b').querySelector('.queued-message-state')).not.toBeNull()
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { waitsFor: 'setup' }), queued('b', 'two', { waitsFor: 'setup' })] }) })
+    expect(label()).toEqual([['Next turn is starting', 'The next turn is being set up']])
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { waitsForLease: true })] }) })
+    expect(label()).toEqual([['Waits for the thread to be free', 'Other work on this thread is running']])
+    // The wait is over: back to "Queued".
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
+    expect(label()).toEqual([['Queued', 'Sends when the current reply ends']])
+  })
+
   it('edits in place: Enter saves the new text and the message keeps its place', async () => {
     await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
     await click(button('b', 'Edit'))
@@ -270,7 +284,7 @@ describe('queued messages in the conversation', () => {
     it('moves the unsaved edit to the composer when the message leaves the queue', async () => {
       await editA('one, but better')
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, but better', markers: '' }))
       expect(host.querySelector('textarea')).toBeNull()
       expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
     })
@@ -278,7 +292,7 @@ describe('queued messages in the conversation', () => {
     it('moves it too when the message is still listed but already sending', async () => {
       await editA('one, but better')
       await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { state: 'steering' }), queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, but better', markers: '' }))
       expect(host.querySelector('textarea')).toBeNull()
     })
 
@@ -296,7 +310,7 @@ describe('queued messages in the conversation', () => {
       await click(button('a', 'Save'))
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
       await act(async () => { answer.reject(new Error("Error invoking remote method 'queue:edit': Error: Queue item a already started and can no longer be edited.")) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, but better', markers: '' }))
       const notices = [...host.querySelectorAll('.composer-notice')].map((entry) => entry.textContent)
       expect(notices).toHaveLength(1)
       expect(notices[0]).toContain(QUEUE_DRAFT_MOVED_NOTICE)
@@ -323,7 +337,7 @@ describe('queued messages in the conversation', () => {
       await click(button('a', 'Edit'))
       await type(row('a').querySelector('textarea')!, 'Look at that')
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'Look at that', markers, images: [image] })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'Look at that', markers, images: [image] }))
     })
 
     it('gives the images back when the edit cleared the text of a message with images', async () => {
@@ -332,7 +346,7 @@ describe('queued messages in the conversation', () => {
       await click(button('a', 'Edit'))
       await type(row('a').querySelector('textarea')!, '')
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: '', markers: '', images: [image] })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: '', markers: '', images: [image] }))
       expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
     })
 
@@ -469,12 +483,42 @@ describe('queued messages in the conversation', () => {
     expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
   })
 
-  it('shows a message sent now while its turn is being set up in the reply, and back in the queue if the turn never takes it', async () => {
+  it('keeps a message sent now in the reply when the queue drops it before its copy in the turn arrives', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
+    expect(reply()).toEqual(['two'])
+    await act(async () => {
+      useAppStore.getState().addMessage({ id: 'echo-b', role: 'user', content: 'two', timestamp: '2026-11-09T10:01:00Z', steered: true, steerItemId: 'b' } as never)
+    })
+    expect(reply()).toEqual(['two'])
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+  })
+
+  it('keeps a steer in the reply when it is sent now before the queue lists it', async () => {
+    let thread!: ReturnType<typeof useThreadQueue>
+    function Steering() {
+      thread = useThreadQueue({ threadId: 't1', onDraftToComposer: toComposer })
+      const transcript = useAppStore((state) => state.messages)
+      const steered = withSteersOnTheWay(transcript, thread.steersOnTheWay, 't1').filter((message) => message.role === 'user' && message.steered)
+      return createElement('ol', { className: 'reply' }, steered.map((message) => createElement('li', { key: message.id }, message.content)))
+    }
+    listed = [queued('a', 'one')]
+    act(() => root.render(createElement(Steering)))
+    await act(async () => { push!({ threadId: 't1', items: listed }) })
+    // The send answered with the queued item before the daemon's list shows it: it is sent now by its id.
+    await act(async () => { void thread.steer('srv-1', queued('srv-1', 'steer this')) })
+    expect(reply()).toEqual(['steer this'])
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-1', 'steer this', { intent: 'steer', state: 'steering' })] }) })
+    expect(reply()).toEqual(['steer this'])
+  })
+
+  it('shows a message sent now into the running reply back in the queue if the turn never takes it', async () => {
     vi.useFakeTimers()
     try {
       await show([queued('a', 'one'), queued('b', 'two')])
       await click(button('b', 'Send'))
-      // The turn is still being set up: the daemon lists B as waiting, first.
+      // The turn has not taken it: the daemon lists B as waiting, first.
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
       expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
       expect(reply()).toEqual(['two'])
@@ -571,8 +615,8 @@ describe('queued messages in the conversation', () => {
 
 describe('the first queued message when its turn starts', () => {
   /** The chat with the transcript's last prompt: `p1` until the next turn's prompt shows. */
-  const render = (prompt: { id: string; queueItemId?: string }) =>
-    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat, { lastPromptId: prompt.id, lastPromptQueueItemId: prompt.queueItemId ?? null }))))
+  const render = (prompt: { id: string; queueItemId?: string }, turnSettingUp = false) =>
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat, { lastPromptId: prompt.id, lastPromptQueueItemId: prompt.queueItemId ?? null, turnSettingUp }))))
   const start = async (items: QueuedMessage[]) => {
     listed = items
     render({ id: 'p1' })
@@ -590,6 +634,33 @@ describe('the first queued message when its turn starts', () => {
     // Its prompt shows: it leaves the queue in the same render.
     render({ id: 'p2', queueItemId: 'a' })
     expect(ids()).toEqual(['b'])
+  })
+
+  it('says its turn is starting while it waits for its prompt, not what it waited for before', async () => {
+    await start([queued('a', 'one', { waitsFor: 'finish' })])
+    expect(row('a').querySelector('.queued-message-state')?.textContent).toBe('Waits for the last turn to finish')
+    // The last turn finished and the daemon took A for the next one, still being set up.
+    await act(async () => { push!({ threadId: 't1', items: [] }) })
+    expect(row('a').querySelector('.queued-message-state')?.textContent).toBe('Next turn is starting')
+  })
+
+  it('stays as long as its turn is being set up, then waits a while for its prompt', async () => {
+    vi.useFakeTimers()
+    try {
+      await start([queued('a', 'one')])
+      // The daemon took A for its turn, whose setup takes a minute.
+      render({ id: 'p1' }, true)
+      await act(async () => { push!({ threadId: 't1', items: [] }) })
+      await act(async () => { vi.advanceTimersByTime(60_000) })
+      expect(ids()).toEqual(['a'])
+      expect(row('a').querySelector('.queued-message-state')?.textContent).toBe('Next turn is starting')
+      // The setup ends: its prompt is due; with none, it leaves after the usual while.
+      render({ id: 'p1' })
+      await act(async () => { vi.advanceTimersByTime(STARTING_ITEM_HOLD_MS) })
+      expect(ids()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('leaves when another prompt shows, or after a while when none does', async () => {
@@ -645,22 +716,28 @@ function deferred<T>() {
 }
 
 describe('a message shown while its send is on its way', () => {
-  function SendingChat({ optimistic, hidden, onReconciled }: { optimistic: QueuedMessage[]; hidden?: ReadonlySet<string>; onReconciled?: (id: string) => void }) {
-    const thread = useThreadQueue({ threadId: 't1', optimisticItems: optimistic, hiddenRequestIds: hidden, onOptimisticItemReconciled: onReconciled })
+  function SendingChat({ optimistic, hidden, onQueueObserved }: {
+    optimistic: QueuedMessage[]
+    hidden?: ReadonlySet<string>
+    onQueueObserved?: (threadId: string, items: QueuedMessage[]) => void
+  }) {
+    const thread = useThreadQueue({ threadId: 't1', optimisticItems: optimistic, hiddenRequestIds: hidden, onQueueObserved })
     return createElement(QueuedMessages, { queue: thread })
   }
   const ids = () => rows().map((item) => item.dataset.queuedId)
 
   it('shows once when the queue lists it before the send answers', async () => {
-    const reconciled = vi.fn()
+    const observed = vi.fn()
     const copy = queued('optimistic:x', 'two', { clientRequestId: 'req-2' })
-    act(() => root.render(createElement(SendingChat, { optimistic: [copy], onReconciled: reconciled })))
+    act(() => root.render(createElement(SendingChat, { optimistic: [copy], onQueueObserved: observed })))
     await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
     expect(ids()).toEqual(['a', 'optimistic:x'])
     // The daemon lists the item its send queued; the send has not answered yet.
     await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-2', 'two', { clientRequestId: 'req-2' })] }) })
     expect(ids()).toEqual(['a', 'srv-2'])
-    expect(reconciled).toHaveBeenCalledWith('optimistic:x')
+    expect(observed).toHaveBeenLastCalledWith('t1', expect.arrayContaining([
+      expect.objectContaining({ id: 'srv-2', clientRequestId: 'req-2' })
+    ]))
   })
 
   it('keeps an identical message sent earlier apart from it', async () => {
@@ -768,7 +845,7 @@ describe('a change that answers after the thread changed', () => {
     await type(row('a').querySelector('textarea')!, 'one, edited')
     await open('t2', t2)
     await act(async () => { push!({ threadId: 't1', items: [t1[1]!] }) })
-    expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+    expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, edited', markers: '' }))
     // The note belongs to that thread: it shows there, not here.
     expect(host.querySelector('.composer-notice')).toBeNull()
     await open('t1', [t1[1]!])
@@ -783,7 +860,7 @@ describe('a change that answers after the thread changed', () => {
     await type(row('a').querySelector('textarea')!, 'one, edited')
     await open('t2', t2)
     await open('t1', [t1[1]!])
-    expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+    expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, edited', markers: '' }))
     expect(host.querySelector('textarea')).toBeNull()
   })
 
@@ -809,7 +886,7 @@ describe('a change that answers after the thread changed', () => {
       await act(async () => { push!({ threadId: 't1', items: [t1[1]!] }) })
       expect(toComposer).not.toHaveBeenCalled()
       await act(async () => { answer.reject(new Error('Queue item a already started and can no longer be edited.')) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, edited', markers: '' }))
       expect(useAppStore.getState().queueEditDrafts.t1).toBeUndefined()
     })
   }

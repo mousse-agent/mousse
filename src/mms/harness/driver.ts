@@ -191,6 +191,8 @@ export interface ProviderTaskEnd {
   durationMs?: number
 }
 
+export type NamingOrigin = 'new_thread' | 'send' | 'regenerate'
+
 /**
  * One model request with no tools and no session (a chat title), run by the gateway's `oneShot`.
  * The gateway resolved and admitted the selection and owns the timeout; the driver makes exactly one
@@ -208,22 +210,25 @@ export interface OneShotSpec {
   sessionKey?: string
   /** What the request is for, so a refusal can say so; absent reads as `title`. */
   task?: OneShotTask
+  /** The action that requested thread naming, when one did. */
+  namingOrigin?: NamingOrigin
   /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
   onActivity(): void
 }
 
 /**
- * What a one-shot writes: a chat title, a pull request draft or a commit message on the title model, or the digest of a
+ * What a one-shot writes: a chat title, a pull request draft, a commit message or a worktree branch's name on the title model, or the digest of a
  * bot's chat on the bot's own model.
  */
-export type OneShotTask = 'title' | 'pull_request' | 'commit_message' | 'chat_digest'
+export type OneShotTask = 'title' | 'pull_request' | 'commit_message' | 'chat_digest' | 'branch_name'
 
 /** What each one-shot task does, for a refusal that names it ("… cannot name chats"). */
 export const ONE_SHOT_TASK_TEXT: Readonly<Record<OneShotTask, string>> = {
   title: 'name chats',
   pull_request: 'draft pull requests',
   commit_message: 'write commit messages',
-  chat_digest: "summarise a bot's chat"
+  chat_digest: "summarise a bot's chat",
+  branch_name: 'name branches'
 }
 
 /**
@@ -326,6 +331,8 @@ export interface DriverRuntime {
    * Throws when it cannot be read; the gateway reports that as an error entry. Absent: no usage.
    */
   usage?(signal: AbortSignal): Promise<RuntimeUsage>
+  /** The usage is read only when someone asks (the usage page), never by the background limit reads (`LimitPoller`). */
+  usageOnRequest?: true
   /**
    * Uses one limit-reset credit of the signed-in account (the one named, or the provider's next) and
    * reads the limits again. Absent: the provider has no resets to use.

@@ -35,6 +35,11 @@ type FoldRun = {
   samples: { top: number | null; scrollTop: number; gap: number; hold: boolean }[]
   windowed: boolean; folded: boolean | null; workMounted: boolean
 }
+type PrependRun = {
+  start: { top: number | null; scrollTop: number; windowed: boolean }
+  samples: { top: number | null; scrollTop: number }[]
+  windowed: boolean
+}
 type Evidence = {
   small: Mounted; large: Mounted; opened: Opened; positions: Position[]
   hold: { text: string; row: number; top: number }
@@ -64,6 +69,7 @@ type Evidence = {
   small40: { windowed: boolean; mounted: number; spacers: number }; grown: { windowed: boolean; mounted: number; gap: number }
   afterLoad: { added: number; addedWithTurns: number; mounted: number; last: boolean; endGap: number }
   fold: Record<'following' | 'readingWork' | 'older', FoldRun>
+  prepend: Record<'windowedTop' | 'windowedNear' | 'becomesWindowed' | 'short', PrependRun>
   find: {
     opened: boolean; focusFrames: number; farFrames: number; far: FindState; manyFrames: number; many: FindState
     last: FindState; wrapFrames: number; wrapped: FindState; backFrames: number; back: FindState
@@ -295,6 +301,21 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     expect(fold.readingWork.folded).toBe(true)
     expect(fold.readingWork.workMounted).toBe(false)
     expect(fold.readingWork.samples.some(sample => sample.hold)).toBe(true)
+
+    // An earlier page of a long thread comes in above the turns shown while the reader reads near the top: the paragraph
+    // being read stays within 2 px of where it was on every frame, from the commit on, and the view is no longer at the
+    // top (the next page is not asked for by the move). Windowed at the very top and a few turns down, in a list of every
+    // row that the page makes windowed, and in one that stays short.
+    const prepend = result.prepend
+    expect([prepend.windowedTop.start.windowed, prepend.windowedNear.start.windowed]).toEqual([true, true])
+    expect([prepend.becomesWindowed.start.windowed, prepend.becomesWindowed.windowed]).toEqual([false, true])
+    expect([prepend.short.start.windowed, prepend.short.windowed]).toEqual([false, false])
+    for (const [name, run] of Object.entries(prepend)) {
+      const label = `${name}: ${JSON.stringify({ ...run, samples: run.samples.slice(0, 12) })}`
+      expect(run.start.top, label).not.toBeNull()
+      for (const sample of run.samples) expect(within(sample.top, run.start.top!), label).toBe(true)
+      expect(run.samples.at(-1)!.scrollTop - run.start.scrollTop, label).toBeGreaterThan(800)
+    }
 
     // Find: the bar opens from the command and takes focus; a word that only exists in a turn that is not mounted is
     // counted from the messages, and landing on it mounts that turn and puts the match inside the visible area.

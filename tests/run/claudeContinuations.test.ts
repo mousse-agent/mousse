@@ -53,7 +53,11 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     const binary = join(home, 'claude')
     // `delegate_task` starts only an entry the picker lists as ready, and the picker's check runs
     // `claude --version`; turns themselves run on `FakeClaudeCli`.
-    writeFileSync(binary, "#!/bin/sh\necho '2.1.291 (Claude Code)'\n")
+    // On Windows, an npm-style shim that Mousse resolves to node and the script beside it.
+    if (process.platform === 'win32') {
+      writeFileSync(join(home, 'claude.js'), "console.log('2.1.291 (Claude Code)')\n")
+      writeFileSync(binary, 'exec node "$basedir/claude.js" "$@"\n')
+    } else writeFileSync(binary, "#!/bin/sh\necho '2.1.291 (Claude Code)'\n")
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
     writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
@@ -240,6 +244,27 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(manager.getActivity(s.childThread)).toBe('completed')
   })
 
+  it('an approval asked by background work after the turn ended stops waiting on the person once answered', async () => {
+    const manager = new ThreadRuntimeManager()
+    const s = await scene({ manager })
+    expect(manager.getActivity(s.childThread)).toBe('waiting')
+    // The daemon marks a thread as waiting for input when a question or approval opens on it, and calls back once the
+    // thread's last one is answered (`questions` pending / cleared in the protocol server).
+    s.d.orch.setAwaitingInput(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('awaiting_input')
+    s.d.orch.inputAnswered(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('waiting')
+    expect(s.d.orch.getTurnState(s.childThread).phase).not.toBe('awaiting_input')
+
+    // Once the work is over, a later request and its answer leave the thread quiet, not Done again.
+    s.cli.last.emit(notification('build-1'), textDelta('done'), resultFrame({ text: 'done', origin: 'task-notification' }))
+    await waitFor(() => manager.getActivity(s.childThread) === 'completed', 'the work to finish')
+    s.d.orch.setAwaitingInput(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('awaiting_input')
+    s.d.orch.inputAnswered(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('idle')
+  })
+
   it('a Stop that cannot end what the provider runs says so in the thread (issue #417)', async () => {
     const s = await scene()
     vi.spyOn(s.service, 'stopThread').mockImplementation(() => {
@@ -403,6 +428,81 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(response.error?.message).toContain('did not become active')
     for (const run of s.d.engine.listRuns(s.childThread)) expect(s.d.engine.tools.listForRun(run.runId).map((invocation) => invocation.tool)).not.toContain('list_tasks')
   })
+
+  /** The tools Mousse recorded under `runId`. */
+  const toolsOf = (s: { d: { engine: { tools: { listForRun(runId: string): Array<{ tool: string }> } } } }, runId: string) =>
+    s.d.engine.tools.listForRun(runId).map((invocation) => invocation.tool)
+
+  it('a tool call waits for a continuation run that is recorded but slow to become active, and acts as it', async () => {
+    const s = await scene({ mcp: true })
+    ;(s.d.orch as any).continuationCallWaitMs = 80
+    // The run is recorded at once, but its effect waits (a busy machine, a slow setup) well past the wait.
+    await s.d.worker.stop()
+    s.cli.last.emit(notification('build-1'), textDelta('checking'))
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
+    const call = s.callMousse('list_tasks')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    s.d.worker.start()
+    const response = await call
+    expect(response.error).toBeUndefined()
+    const continuation = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')!
+    expect(toolsOf(s, continuation.runId)).toContain('list_tasks')
+    s.cli.last.emit(resultFrame({ text: 'checked', origin: 'task-notification' }))
+    await waitFor(() => s.d.engine.getRun(continuation.runId)?.status === 'completed', 'the continuation run to complete')
+  }, 40_000)
+
+  it('a tool call made while the continuation run is active acts as it', async () => {
+    const s = await scene({ mcp: true })
+    ;(s.d.orch as any).continuationCallWaitMs = 80
+    s.cli.last.emit(notification('build-1'), textDelta('checking'))
+    await waitFor(() => s.d.engine.getActiveRun(s.childThread)?.source === 'provider-continuation', 'the continuation run to be active')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const response = await s.callMousse('list_tasks')
+    expect(response.error).toBeUndefined()
+    const continuation = s.d.engine.getActiveRun(s.childThread)!
+    expect(toolsOf(s, continuation.runId)).toContain('list_tasks')
+    s.cli.last.emit(resultFrame({ text: 'checked', origin: 'task-notification' }))
+    await waitFor(() => s.d.engine.getRun(continuation.runId)?.status === 'completed', 'the continuation run to complete')
+  }, 40_000)
+
+  it('a tool call of a second continuation queued behind the first waits for its own run, not the first one', async () => {
+    const s = await scene({ mcp: true })
+    ;(s.d.orch as any).continuationCallWaitMs = 80
+    // The second continuation's effect looks at the thread again soon after the first one ends.
+    ;(s.d.orch as any).wakeBusyDeferMs = 50
+    await s.d.worker.stop()
+    // Claude runs the first wake to its result before Mousse runs it; then a second helper's wake starts.
+    s.cli.last.emit(notification('build-1'), textDelta('first'), resultFrame({ text: 'first done', origin: 'task-notification' }))
+    s.cli.last.emit(notification('build-2'), textDelta('second'))
+    await waitFor(() => s.d.engine.listRuns(s.childThread).filter((run) => run.source === 'provider-continuation').length === 2, 'both continuation runs')
+    const call = s.callMousse('list_tasks')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    s.d.worker.start()
+    // Newest first.
+    const [second, first] = s.d.engine.listRuns(s.childThread).filter((run) => run.source === 'provider-continuation')
+    await waitFor(() => s.d.engine.getRun(first.runId)?.status === 'completed', 'the first continuation run to complete', 15_000)
+    const response = await call
+    expect(response.error).toBeUndefined()
+    expect(toolsOf(s, second.runId)).toContain('list_tasks')
+    expect(toolsOf(s, first.runId)).not.toContain('list_tasks')
+    s.cli.last.emit(resultFrame({ text: 'second done', origin: 'task-notification' }))
+    await waitFor(() => s.d.engine.getRun(second.runId)?.status === 'completed', 'the second continuation run to complete')
+  }, 40_000)
+
+  it('a tool call waiting for a recorded continuation run that is cancelled before it starts is refused', async () => {
+    const s = await scene({ mcp: true })
+    ;(s.d.orch as any).continuationCallWaitMs = 80
+    await s.d.worker.stop()
+    s.cli.last.emit(notification('build-1'), textDelta('checking'))
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
+    const continuation = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')!
+    const call = s.callMousse('list_tasks')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    s.d.engine.markTerminal(continuation.runId, 'cancelled')
+    const response = await call
+    expect(response.error?.message).toContain('did not become active')
+    for (const run of s.d.engine.listRuns(s.childThread)) expect(toolsOf(s, run.runId)).not.toContain('list_tasks')
+  }, 40_000)
 
   it('an admitted turn whose send holds the admission and waits behind a continuation in the lane is passed by it, and keeps its place', async () => {
     const s = await scene()

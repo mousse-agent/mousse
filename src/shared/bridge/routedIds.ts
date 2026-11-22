@@ -104,6 +104,7 @@ export const ROUTED_RESULT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
 export const ROUTED_EVENT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
   'thread.metadata': { threads: ['thread.id'] },
   'threads.updated': { threads: ['threads[].id'] },
+  'threads.row': { threads: ['thread.id', 'removed'] },
   'projects.updated': { projects: ['projects[].id'] }
 }
 

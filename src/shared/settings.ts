@@ -10,6 +10,7 @@ import type { ModelOverride } from './providerInstances'
 import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
+import { normalizeBranchPrefix, type BranchNamingMode } from './mousseBranches'
 import type { ShortcutOverrides } from './commands'
 import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
 import { normalizeUserThemes, type UserTheme } from './themes/userThemes'
@@ -71,7 +72,7 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** How cards in the Threads tab show their project's color. */
   threadProjectColors: ThreadProjectColorStyle
-  /** Thread rows and the Bots list show the latest reply under each title, on one muted line. */
+  /** Thread link cards and the Bots list show the latest reply under each title, on one muted line. */
   replyPreviews: boolean
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean
@@ -517,6 +518,28 @@ export function normalizeStorageSettings(raw?: Partial<StorageSettings> | null):
   return { worktreeFolder: current, previousWorktreeFolders: previous }
 }
 
+/**
+ * How a thread's worktree branch is named (Settings → Storage → Branches). The worktree is always made at once on
+ * `<prefix>/<random id>`; the title model then names it in the background, unless the thread is private.
+ * `static`: `<prefix>/<slug>`. `semantic`: the model picks a kind (`feat/`, `fix/`, …) instead of the prefix.
+ * `custom`: the model names the whole branch, following `instructions`.
+ */
+export interface BranchNamingSettings {
+  mode: BranchNamingMode
+  /** Without a trailing slash; empty for no prefix. */
+  prefix: string
+  instructions: string
+}
+
+/** The longest naming instructions kept. */
+export const BRANCH_NAMING_INSTRUCTIONS_MAX = 2000
+
+export function normalizeBranchNamingSettings(raw?: Partial<BranchNamingSettings> | null): BranchNamingSettings {
+  const mode = raw?.mode === 'semantic' || raw?.mode === 'custom' ? raw.mode : 'static'
+  const instructions = typeof raw?.instructions === 'string' ? raw.instructions.slice(0, BRANCH_NAMING_INSTRUCTIONS_MAX) : ''
+  return { mode, prefix: normalizeBranchPrefix(raw?.prefix ?? undefined), instructions }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -531,6 +554,8 @@ export interface MousseSettings {
   runs: RunSettings
   experimental: ExperimentalSettings
   storage: StorageSettings
+  /** Settings → Storage → Branches: how thread worktree branches are named. */
+  branches: BranchNamingSettings
   /** Settings → General → Error reports: the Report button and `report_bug`, and whose account files them. */
   errorReports: ErrorReportSettings
   provider: {
@@ -555,6 +580,8 @@ export interface MousseSettings {
     effort?: string
     /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
     instanceId?: string
+    /** The person's own instructions for the title model (`titleSystemPrompt`); absent or blank for none. */
+    prompt?: string
   }
   /**
    * The model bots run on when a bot's own choice is automatic (Bot Phase 1 §5.6). Blank values are
@@ -951,6 +978,7 @@ export function getDefaultSettings(): MousseSettings {
     runs: normalizeRunSettings(),
     experimental: normalizeExperimentalSettings(),
     storage: normalizeStorageSettings(),
+    branches: normalizeBranchNamingSettings(),
     errorReports: normalizeErrorReportSettings(),
     provider: {
       llmProvider: '',

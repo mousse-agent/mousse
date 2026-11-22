@@ -266,10 +266,13 @@ describe('profile start order (H4)', () => {
       netEngine: { start: async () => { calls.push('netEngine') }, startHelper: async () => { calls.push('netEngine') } },
       orchestrator: {
         recoverRunEngineOnBoot: () => { engine.reconcileOnBoot(); calls.push('recover') },
-        scheduleStartupQueueRecovery: () => undefined
+        scheduleStartupQueueRecovery: () => undefined,
+        startPreparedWorkspaceCleanup: () => undefined
       },
       runEngine: engine,
       startRunEngineWorkers: () => { calls.push('workers') },
+      monitors: { recoverOnBoot: async () => undefined },
+      threadWakes: { start: () => undefined },
       startMcpServer: async () => undefined,
       threadRuntimes: { restoreOnStartup: () => undefined },
       questions: { markInterruptedByDaemonRestart: () => undefined },

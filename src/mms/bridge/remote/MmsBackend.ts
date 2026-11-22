@@ -188,7 +188,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   }
   private async executeFor(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     // The mark of an agent's call is set only by another computer's daemon, through the routed API, never by a phone.
-    if (Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
+    // `usage.history` uses `agent` for its provider filter, validated by `dto.ts` against `USAGE_AGENT_LABELS`.
+    if (method !== 'usage.history' && Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     if (
@@ -209,7 +210,12 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (method === 'projects.match') return mmsJson(await this.matchProject(params))
     const composer = await this.composer(method, params, caller)
     if (composer !== undefined) return mmsJson(composer)
-    if (method === 'threads.create') return mmsJson(await this.createThread(params, caller))
+    if (method === 'threads.create') {
+      // Phones need the new thread to send its first message. The full inventory travels over
+      // the lists stream and can make this reply too large for the phone to read inline.
+      const { thread } = await this.createThread(params, caller)
+      return mmsJson({ thread })
+    }
     if (method === 'threads.regenerateTitle' || method === 'threads.setExpiry') {
       // An expected refusal (no title came back, an expired thread, a time out of range) reaches the phone in words,
       // as `{ ok: false, error }`: a mutating call that throws reports only that it may have happened.
@@ -243,7 +249,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     params: Record<string, unknown>,
     caller?: { node: NodeId },
     started?: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
-  ): Promise<unknown> {
+  ): Promise<{ thread: { id: string } } & Record<string, unknown>> {
     const { startedFromProjectId, ...create } = params
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>

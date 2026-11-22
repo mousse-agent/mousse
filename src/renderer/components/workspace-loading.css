@@ -49,6 +49,7 @@
 .workspace-loading-error p { margin: 0; }
 .workspace-loading-error-title { color: var(--text-primary); font-size: 13.5px; }
 .workspace-loading-detail { overflow-wrap: anywhere; line-height: 1.5; font-size: 12.5px; }
+.workspace-loading-actions { display: flex; gap: 8px; }
 .workspace-loading-retry {
   display: inline-flex;
   align-items: center;

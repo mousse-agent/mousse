@@ -44,7 +44,7 @@ const threads = [
 function preload(): unknown {
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-  return new Proxy({} as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+  return new Proxy({ git: {} } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
 }
 
 const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode'] as const
@@ -110,6 +110,24 @@ describe('the sidebar filter', () => {
 
     click(host.querySelector('button[aria-label="Clear project filter: smiletrack"]'))
     expect(chips()).toEqual([])
+    expect(listed()).toEqual(['t1', 't2'])
+  })
+
+  it('typing also lists the threads whose messages hold it, as the service finds them', async () => {
+    const search = vi.fn(async (query: string) => ({
+      results: query === 'flaky retry'
+        ? [{ threadId: 't2', threadName: 'Appointment reminders', matchType: 'message', messageId: 'm1', snippet: 'a flaky retry' }]
+        : []
+    }))
+    ;(window as unknown as { mousse: { threads: Record<string, unknown> } }).mousse.threads = { search }
+    show()
+    type('flaky retry')
+    // Nothing has the words in its title; the message match arrives once typing pauses.
+    expect(listed()).toEqual([])
+    await act(async () => { await new Promise((done) => setTimeout(done, 400)) })
+    expect(search).toHaveBeenLastCalledWith('flaky retry', expect.any(Number), { perThread: true })
+    expect(listed()).toEqual(['t2'])
+    type('')
     expect(listed()).toEqual(['t1', 't2'])
   })
 

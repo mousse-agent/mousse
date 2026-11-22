@@ -170,7 +170,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     let integrations: ClaudeTurnIntegrations | undefined
     try {
       // A locked turn takes none of the user's MCP servers or skills.
-      integrations = locked ? undefined : await this.integrations()?.resolve(input.cwd ?? undefined)
+      integrations = locked ? undefined : await this.integrations()?.resolve(input.cwd ?? undefined, host.bridge?.skillsSnapshot)
     } catch (error) {
       // The user's integrations are optional; a broken registry cannot block the turn.
       console.warn(`[claude-subscription] integrations unavailable: ${error instanceof Error ? error.message : String(error)}`)

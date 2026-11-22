@@ -1,8 +1,9 @@
 import type { NodeId } from '../../shared/net'
+import { isSubagentThread } from '../../shared/threadLineage'
 import { isThreadStarted } from '../../shared/threadTitle'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ModelOverride } from '../../shared/providerInstances'
-import { isTurnActivePhase, type NewThreadChoice, type Project, type TurnPhase } from '../../shared/types'
+import { isTurnActivePhase, type NewThreadChoice, type Project, type ThreadLineage, type TurnPhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 
 /**
@@ -51,9 +52,10 @@ export function withoutPicks(workspace: ComposerWorkspace): ComposerWorkspace {
  */
 export function isNewEmptyThread(
   activeThreadId: string | null,
-  thread: { startedAt?: string; name?: string } | undefined,
+  thread: { startedAt?: string; name?: string; lineage?: ThreadLineage } | undefined,
   messageCount: number
 ): boolean {
+  if (thread && isSubagentThread(thread)) return false
   return !activeThreadId || Boolean(thread && !isThreadStarted(thread) && messageCount === 0)
 }
 

@@ -20,7 +20,7 @@ import { EffectWorker } from '../../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../../src/mms/run/RunEngine'
 import { RunStore } from '../../../src/mms/run/RunStore'
 import { replayAcpProcess } from '../../../src/mms/run/testkit/acpReplay'
-import { replayCodexAppServer } from '../../../src/mms/run/testkit/codexAppServerReplay'
+import { replayCodexAppServer, replayCodexEnv } from '../../../src/mms/run/testkit/codexAppServerReplay'
 import { createCodexProviderService, type CodexProviderService } from '../../../src/mms/harness/vendors/codex/CodexProviderService'
 import { createHarnessGateway } from '../../../src/mms/harness/gateway'
 import { antigravityDriver } from '../../../src/mms/harness/drivers/antigravity'
@@ -208,7 +208,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     mkdirSync(providerDir, { recursive: true })
     writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-replay-codex', label: 'Replay' }] }))
     // Replace the app-server process only; the client, service and adapter run for real.
-    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) }, { launch: () => ({ binaryPath: binary }) })
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) }, { env: replayCodexEnv(home), launch: () => ({ binaryPath: binary }) })
     stops.push(() => service.stop())
     services.codex = service
   }
@@ -255,9 +255,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       thread = store.createThread(name, project.id, workspace)
     } else thread = store.createThread(name)
     threadId = thread.id
-    // Sent as a Mousse window sends it: Antigravity's personal sign-in runs only messages its owner sends.
-    const owner = adapterId === 'antigravity' ? { source: 'gui', ownerProof: { via: 'gui' as const } } : {}
-    const response = await orch.send(scenario.prompt, false, { threadId, clientRequestId: 'scenario-send', ...owner })
+    const response = await orch.send(scenario.prompt, false, { threadId, clientRequestId: 'scenario-send' })
     await transport.idle()
     transport.assertDone()
     const run = engine.listRuns(threadId).find((entry) => entry.clientRequestId === 'scenario-send')

@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, normalize, sep } from 'node:path'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { assertGitAllowed, decideGitCommand, GitPolicyError, gitPolicyMode } from '../src/mms/git/gitPolicy'
@@ -140,9 +140,9 @@ test('with no folder chosen, a short worktree root takes new worktrees with shor
     expect(chosenWorktreeFolder(location)).toBe(short.path)
     const made = await new ThreadWorkspaceManager(location).provision('thread-short', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the checkout total when the cart has a discount' })
     expect(JSON.parse(readFileSync(join(short.path, WORKTREE_FOLDER_MARKER), 'utf8')).id).toBe(short.id)
-    // `<project, at most 16>-<short key>/<slug, at most 20>-<thread tag>`.
+    // `<project, at most 16>-<short key>/thread-<thread tag>`: a new worktree's branch has only a temporary name.
     const leaf = made.worktreePath.slice(short.path.length + 1).split(/[\\/]/)
-    expect(leaf).toEqual([`shop-${f.key.slice(0, 12)}`, `fix-the-checkout-tot-${threadTag('thread-short')}`])
+    expect(leaf).toEqual([`shop-${f.key.slice(0, 12)}`, `thread-${threadTag('thread-short')}`])
     expect((await new ThreadWorkspaceManager(location).verify(made)).lifecycle).toBe('ready')
     expect(trashRootFor(made.worktreePath, f.home)).toBe(join(short.path, WORKTREE_TRASH_FOLDER))
     // The worktree made before is still Mousse's and still ready.
@@ -156,12 +156,12 @@ test('with no folder chosen, a short worktree root takes new worktrees with shor
   }
 })
 
-test('a thread named "Agents" never takes the agents folder', async () => {
+test('a thread branch named "agents" never takes the agents folder', async () => {
   const f = await fixture()
   await f.choose(f.entry)
-  const made = await new ThreadWorkspaceManager(f.thread('thread-one')).provision('thread-one', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Agents' })
-  expect(made.worktreePath).toBe(join(f.repositoryFolder, `agents-${threadTag('thread-one')}`))
-  expect(isThreadWorktreePlace(made.worktreePath, { home: f.home, repositoryId: f.key, threadId: 'thread-one' })).toBe(true)
+  const placed = await placeThreadWorktree({ home: f.home, folder: f.folder, repositoryId: f.key, projectName: 'shop', threadId: 'thread-one', conversationBranchId: 'main', branch: 'mousse/agents' })
+  expect(placed.path).toBe(join(f.repositoryFolder, `agents-${threadTag('thread-one')}`))
+  expect(isThreadWorktreePlace(placed.path, { home: f.home, repositoryId: f.key, threadId: 'thread-one' })).toBe(true)
   expect(existsSync(join(f.repositoryFolder, 'agents'))).toBe(false)
 })
 
@@ -171,14 +171,14 @@ test('a thread provisioned with a chosen folder works there; after the setting c
   const one = new ThreadWorkspaceManager(f.thread('thread-one'))
   expect(chosenWorktreeFolder(one.threadDirectory)).toBe(f.folder)
   const first = await one.provision('thread-one', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the prices page' })
-  expect(first.worktreePath).toBe(join(f.repositoryFolder, `fix-the-prices-page-${threadTag('thread-one')}`))
-  expect(git(first.worktreePath, ['branch', '--show-current'])).toBe('mousse/fix-the-prices-page')
+  expect(first.worktreePath).toBe(join(f.repositoryFolder, `thread-${threadTag('thread-one')}`))
+  expect(git(first.worktreePath, ['branch', '--show-current'])).toBe(first.branch)
   expect((await one.verify(first)).lifecycle).toBe('ready')
   const second = await checkWorktreeFolder(join(f.other, 'Elsewhere'), f.home)
   await f.choose(second, [f.entry])
   const two = new ThreadWorkspaceManager(f.thread('thread-two'))
   const made = await two.provision('thread-two', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Add a checkout button' })
-  expect(made.worktreePath).toBe(join(second.path, `shop-${f.key.slice(0, 12)}`, `add-a-checkout-button-${threadTag('thread-two')}`))
+  expect(made.worktreePath).toBe(join(second.path, `shop-${f.key.slice(0, 12)}`, `thread-${threadTag('thread-two')}`))
   expect(one.load()!.worktreePath).toBe(first.worktreePath)
   expect((await one.verify()).lifecycle).toBe('ready')
   // Back to Mousse's own folder: both earlier worktrees stay where they are.
@@ -312,7 +312,8 @@ test('a chosen folder whose marker went missing is still the one chosen: its rep
   expect((await checkWorktreeFolder(f.folder, f.home)).id).toBe(f.entry.id)
   await f.choose(f.entry)
   expect(decideGitCommand({ cwd: made.worktreePath, args: ['add', '-A'] }).allowed).toBe(true)
-  expect((await new ThreadWorkspaceManager(f.thread('thread-two')).provision('thread-two', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Second' })).worktreePath.startsWith(f.repositoryFolder + '/')).toBe(true)
+  const next = await new ThreadWorkspaceManager(f.thread('thread-two')).provision('thread-two', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Second' })
+  expect(dirname(normalize(next.worktreePath))).toBe(f.repositoryFolder)
 })
 
 test('a worktree in a chosen folder stays the thread\'s after its repository is moved and repaired, and the record takes the new key', async () => {
@@ -398,7 +399,7 @@ test('a worktree in a chosen folder is trashed on its own drive, and a restore m
   writeFileSync(join(f.worktree, 'a.txt'), 'edited\n')
   await f.service.prepare(f.input)
   const trashed = await f.service.retire(f.path)
-  expect(trashed.trashPath!.startsWith(join(f.folder, WORKTREE_TRASH_FOLDER, 'worktrees') + '/')).toBe(true)
+  expect(normalize(trashed.trashPath!).startsWith(join(f.folder, WORKTREE_TRASH_FOLDER, 'worktrees') + sep)).toBe(true)
   expect(existsSync(f.worktree)).toBe(false)
   expect(existsSync(join(f.home, 'trash', 'worktrees'))).toBe(false)
   const before = filesOf(trashed.trashPath!)
@@ -586,7 +587,7 @@ test('agent worktrees of a dispatch go to the chosen folder and are cleaned up t
   // Cleanup renames the folder beside itself, in the chosen folder and so on its drive, before it deletes it.
   const renamed: string[] = []
   expect(await manager.cleanupValidatedAgentWorktree(info, { keepIgnored: { owner: f.thread('dispatch-owner'), deleteIgnored: true, record: (step) => { if (step.phase === 'deleting') renamed.push(step.path) } } })).toMatchObject({ success: true })
-  expect(renamed).toEqual([expect.stringMatching(/\/\.deleting-[a-f0-9]{16}$/)])
+  expect(renamed.map((path) => basename(path))).toEqual([expect.stringMatching(/^\.deleting-[a-f0-9]{16}$/)])
   expect(dirname(renamed[0]!)).toBe(join(f.repositoryFolder, 'agents'))
   expect(manager.isValidatedAgentWorktreePath(renamed[0]!)).toBe(true)
   expect(existsSync(info.path)).toBe(false)
@@ -602,8 +603,8 @@ test("a workflow's isolated agents get their worktrees in the chosen folder", as
   const owner = { profileId: 'test', threads: { getThread: () => ({ id: 'workflow-parent', projectId: 'project' }), getThreadDir: () => directory }, projects: { getProject: () => ({ id: 'project', path: f.repo }) } }
   const registrationRoot = join(f.home, 'workflow-agent-bindings', 'workspaces')
   const made = await provisionOwnedAgentWorkspace({ owner, context, idempotencyKey: 'worker', registrationRoot, scratchRoot: registrationRoot } as never)
-  expect(made.worktreePath.startsWith(join(f.repositoryFolder, 'agents') + '/')).toBe(true)
-  expect(git(made.worktreePath, ['rev-parse', '--show-toplevel'])).toBe(made.worktreePath)
+  expect(dirname(normalize(made.worktreePath))).toBe(join(f.repositoryFolder, 'agents'))
+  expect(normalize(git(made.worktreePath, ['rev-parse', '--show-toplevel']))).toBe(normalize(made.worktreePath))
 })
 
 // ---- File modes ----

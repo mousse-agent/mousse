@@ -20,6 +20,8 @@ vi.mock('electron', async () => {
     whenReady: () => { startup.featuresWhenReady ??= startup.switches.get('enable-features'); return Promise.resolve() },
     requestSingleInstanceLock: () => true,
     quit: vi.fn(), isPackaged: false, name: 'Mousse', getVersion: () => 'test',
+    // The warm start file's folder: none, so the window opens without one.
+    getPath: (name: string) => `${process.env.TMP ?? '/tmp'}/mousse-startup-test-${name}-missing`,
     commandLine: {
       getSwitchValue: (name: string) => startup.switches.get(name) ?? '',
       appendSwitch: (name: string, value = '') => { startup.switches.set(name, value) }
@@ -72,7 +74,7 @@ vi.mock('electron', async () => {
     destroy() { this.destroyed = true }
   }
   return {
-    app, BrowserWindow, Tray, Menu: { buildFromTemplate: (template: unknown) => ({ template }) }, ipcMain: new EventEmitter(),
+    app, BrowserWindow, Tray, Menu: { buildFromTemplate: (template: unknown) => ({ template }) }, ipcMain: Object.assign(new EventEmitter(), { handle: vi.fn(), removeHandler: vi.fn() }),
     nativeTheme: { shouldUseDarkColors: true },
     powerSaveBlocker: { start: () => 0, stop: () => undefined },
     dialog: { showErrorBox: vi.fn() }, shell: { openExternal: vi.fn() },
@@ -98,7 +100,7 @@ vi.mock('../src/main/mms/GuiMmsController', () => ({ GuiMmsController: class {
   constructor() { startup.controller = this; startup.controllers.push(this) }
 } }))
 // The real log would write under the home this test resolves, which is not a test folder.
-vi.mock('../src/main/mms/guiConnectionLog', () => ({ GuiConnectionLog: class {
+vi.mock(import('../src/main/mms/guiConnectionLog'), async (importOriginal) => ({ ...await importOriginal(), GuiConnectionLog: class {
   write = vi.fn()
   undeliverable = vi.fn()
   flushSync = vi.fn()

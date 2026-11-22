@@ -3,11 +3,12 @@
  * checked with an `initialize`-only handshake, runs only for interactive purposes, and a sign-in
  * changed from outside between two turns forgets the thread's native session.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AcpConnection } from '../../src/mms/harness/acp/connection'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -23,10 +24,30 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean } = {}) {
+type Update = Record<string, unknown>
+const say = (text: string): Update => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+
+/**
+ * The connection as the SDK runs it over stdio: an update reaches `onUpdate` only after its handler chain (some
+ * microtasks), while the answer to a request settles at once. An update written just before an answer lands after it.
+ */
+function lateUpdates(connection: AcpConnection): AcpConnection {
+  let handler: AcpConnection['onUpdate']
+  return Object.defineProperty(connection, 'onUpdate', {
+    get: () => (update: unknown, sessionId?: string) => {
+      let chain = Promise.resolve()
+      for (let step = 0; step < 50; step++) chain = chain.then(() => undefined)
+      void chain.then(() => handler?.(update, sessionId))
+    },
+    set: (next: AcpConnection['onUpdate']) => { handler = next }
+  })
+}
+
+function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; lateUpdates?: boolean; updates?: Update[] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
+  const sessionCwds: string[] = []
   const agent = inProcessAgent((app) => {
     app
       .onRequest(methods.agent.initialize, () => {
@@ -42,13 +63,15 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean 
         calls.push('logout')
         return {}
       })
-      .onRequest(methods.agent.session.new, () => {
+      .onRequest(methods.agent.session.new, (c) => {
         calls.push('session/new')
+        sessionCwds.push(c.params.cwd)
         return { sessionId: `s${calls.length}` }
       })
       .onRequest(methods.agent.session.prompt, async (c) => {
         calls.push(`prompt ${c.params.sessionId}`)
-        await c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello' } } })
+        for (const update of options.updates ?? [say('hello')])
+          await c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: update as never })
         return { stopReason: 'end_turn' }
       })
   })
@@ -56,7 +79,8 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean 
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const notices: string[] = []
   let clock = Date.now()
-  const harness = testHarness({ drivers: [acpDriver({ connect: (_context, request) => agent.connect(request) })], instances, profileHome: home, now: () => clock })
+  const connect = (request: Parameters<typeof agent.connect>[0]) => options.lateUpdates ? lateUpdates(agent.connect(request)) : agent.connect(request)
+  const harness = testHarness({ drivers: [acpDriver({ connect: (_context, request) => connect(request) })], instances, profileHome: home, now: () => clock })
   harness.setLiveHost({ notice: (_threadId, text) => notices.push(text) })
   harnesses.push(harness)
   const sink = Object.fromEntries(['text', 'thinking', 'tool', 'nativeMessages', 'compaction', 'retry', 'progress', 'usage', 'providerRef', 'steerAccepted', 'providerMetrics', 'lineEdits'].map((name) => [name, vi.fn()])) as unknown as TurnSpec['sink']
@@ -69,7 +93,7 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean 
     control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
     host: { mcp: null, context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as TurnSpec['host']
   })
-  return { home, harness, calls, agent, notices, spec, tick: (ms: number) => { clock += ms } }
+  return { home, harness, calls, sessionCwds, agent, notices, spec, tick: (ms: number) => { clock += ms } }
 }
 
 describe('the generic ACP driver', () => {
@@ -139,6 +163,39 @@ describe('the generic ACP driver', () => {
     expect(notices).toEqual(['Fake agent approves tools itself.'])
   })
 
+  it('shows the agent’s thoughts as they come, one row before each tool call and one after, then its reply', async () => {
+    const thought = (text: string): Update => ({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } })
+    const { harness, spec } = fixture([], {
+      updates: [
+        thought('Reading the '), thought('switcher.'),
+        { sessionUpdate: 'tool_call', toolCallId: 'read1', title: 'Read SideChatsPanel.tsx', status: 'in_progress' },
+        { sessionUpdate: 'tool_call_update', toolCallId: 'read1', status: 'completed' },
+        thought('Found the race.'),
+        say('Fixed.')
+      ]
+    })
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
+    const turn = spec(binding)
+    await expect(harness.startTurn(turn).result).resolves.toMatchObject({ text: 'Fixed.' })
+    const thinking = vi.mocked(turn.sink.thinking).mock.calls.map(([event]) => event)
+    const rows = thinking.filter((event) => event.phase === 'complete').map((event) => event.content)
+    expect(rows).toEqual(['Reading the switcher.', 'Found the race.'])
+    // The first thought is on screen before the tool call starts, not held to the end of the turn.
+    const firstThought = vi.mocked(turn.sink.thinking).mock.invocationCallOrder[0]!
+    const toolStart = vi.mocked(turn.sink.tool).mock.invocationCallOrder[0]!
+    expect(firstThought).toBeLessThan(toolStart)
+    // A thought is never the reply.
+    expect(vi.mocked(turn.sink.text).mock.calls.map(([event]) => event).filter((event) => event.phase === 'complete').map((event) => event.content)).toEqual(['Fixed.'])
+  })
+
+  it('keeps the reply an agent writes just before it answers the prompt', async () => {
+    const { harness, spec } = fixture([], { lateUpdates: true })
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
+    await expect(harness.startTurn(spec(binding)).result).resolves.toMatchObject({ text: 'hello' })
+  })
+
   it('never resumes across turns: the account is unknown, so each turn hands the history to a new session', async () => {
     const { harness, calls, spec } = fixture()
     await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
@@ -153,5 +210,21 @@ describe('the generic ACP driver', () => {
     const prompted = calls.filter((call) => call.startsWith('prompt'))
     expect(prompted).toHaveLength(2)
     expect(prompted[0]).not.toBe(prompted[1])
+  })
+
+  it('runs a standalone turn (cwd: null) in a private per-thread workspace inside the instance state dir', async () => {
+    const { home, harness, sessionCwds, spec } = fixture()
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
+    const turn = spec(binding)
+    turn.input.cwd = null
+    turn.input.threadId = '../../outside'
+    await expect(harness.startTurn(turn).result).resolves.toMatchObject({ text: 'hello' })
+    const expected = harness.standaloneWorkspace('acp:fake-agent', '../../outside')
+    expect(expected).toBeTruthy()
+    expect(sessionCwds).toEqual([expected])
+    expect(existsSync(expected!)).toBe(true)
+    expect(statSync(expected!).isDirectory()).toBe(true)
+    expect(relative(home, expected!).startsWith('..')).toBe(false)
   })
 })

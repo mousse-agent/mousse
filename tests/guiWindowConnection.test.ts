@@ -96,7 +96,7 @@ describe("a window's own service connection", () => {
     const events: string[] = []
     gui.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => { if (senderId === 901) events.push(event.type) })
     await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'After' }))
-    await vi.waitFor(() => expect(events).toContain('threads.updated'))
+    await vi.waitFor(() => expect(events).toContain('threads.row'))
   })
 
   it("is not opened again after main closed it itself", async () => {
@@ -129,7 +129,7 @@ describe("a window's own service connection", () => {
     const events: string[] = []
     gui.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => { if (senderId === 904) events.push(event.type) })
     await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'First live update' }))
-    await vi.waitFor(() => expect(events).toContain('threads.updated'))
+    await vi.waitFor(() => expect(events).toContain('threads.row'))
     await vi.waitFor(() => expect((gui as unknown as Internals).windowSessions.get(904)!.client.lastKnownSequence).toBe(ringOf(mms.profileId).currentSequence))
   })
 
@@ -175,7 +175,7 @@ describe("a window's own service connection", () => {
     const events: ProtocolEvent[] = []
     gui.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => { if (senderId === 908) events.push(event) })
     await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'Alice thread' }))
-    await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.updated')).toBe(true))
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.row')).toBe(true))
     expect(events.filter((event) => event.profileId).every((event) => event.profileId === alice.id)).toBe(true)
   })
 

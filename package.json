@@ -33,7 +33,7 @@
     "dist:win": "npm run typecheck && npm run dist:win:prep && electron-builder --win --publish never",
     "dist:win:cli": "npm run typecheck && npm run dist:win:prep && electron-builder --win --config electron-builder.cli.yml --publish never",
     "dist:win:prep": "npm run clean:build-output && npm run prepare:package && npm run build && node scripts/rebuild-native.mjs && node scripts/ensure-webrtc-prebuilt.mjs && node scripts/build-sshd-helper.mjs --require && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require",
-    "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
+    "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
     "dist:mac": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require && electron-builder --mac dmg --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint .",
@@ -74,6 +74,7 @@
     "highlight.js": "^11.11.1",
     "jose": "6.2.3",
     "jsqr": "^1.4.0",
+    "koffi": "3.3.8",
     "micromark-extension-gfm-table": "^2.1.2",
     "node-datachannel": "0.33.4",
     "node-pty": "^1.0.0",
@@ -134,6 +135,7 @@
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
+    "resedit": "^1.7.2",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.71.0",
@@ -214,6 +216,7 @@
     ],
     "asarUnpack": [
       "out/net-native/**",
+      "node_modules/@koromix/**",
       "out/browser-worker/**",
       "out/pi-runtime/**",
       "node_modules/node-pty/build/Release/**",
@@ -222,6 +225,7 @@
       "node_modules/node-pty/prebuilds/linux-x64/**",
       "node_modules/node-pty/third_party/**",
       "node_modules/@node-datachannel/**",
+      "node_modules/@koromix/koffi-win32-*/**",
       "node_modules/@cursor/sdk-*/**",
       "out/main/cursorHost.js",
       "out/main/threadDbWorker.js",
@@ -251,10 +255,7 @@
     "win": {
       "target": [
         {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "target": "nsis"
         }
       ],
       "icon": "resources/icon.ico",
@@ -279,10 +280,7 @@
     "linux": {
       "target": [
         {
-          "target": "AppImage",
-          "arch": [
-            "x64"
-          ]
+          "target": "AppImage"
         }
       ],
       "category": "Development",

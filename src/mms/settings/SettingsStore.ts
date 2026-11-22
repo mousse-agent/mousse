@@ -1,12 +1,13 @@
 import { normalizeErrorReportSettings } from '../../shared/bugReports'
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
-import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
+import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings, normalizeBranchNamingSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import { upgradeSelection } from '../../shared/modelSelection'
+import { TITLE_PROMPT_MAX } from '../../shared/threadTitleText'
 
 function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<T>): T {
   const result = { ...base }
@@ -45,6 +46,13 @@ function withInstance<T extends { instanceId?: unknown; model?: unknown; effort?
   const id = kept(instanceId)
   const stored = { ...rest, ...(id ? { instanceId: id } : {}), ...(kept(effort) ? { effort: kept(effort) } : {}), ...(kept(name) ? { name: kept(name) } : {}) }
   return (typeof rest.model === 'string' ? upgradeSelection(stored as typeof stored & { model: string }) : stored) as T
+}
+
+/** The title settings with their prompt trimmed and capped; a blank or non-text prompt is dropped. */
+function withTitlePrompt(title: MousseSettings['title']): MousseSettings['title'] {
+  const { prompt, ...rest } = title
+  const kept = typeof prompt === 'string' ? prompt.trim().slice(0, TITLE_PROMPT_MAX) : ''
+  return kept ? { ...rest, prompt: kept } : rest
 }
 
 /** A selection without a reasoning level or name. */
@@ -99,9 +107,10 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     runs: normalizeRunSettings(settings.runs),
     experimental: normalizeExperimentalSettings(settings.experimental),
     storage: normalizeStorageSettings(settings.storage),
+    branches: normalizeBranchNamingSettings(settings.branches),
     errorReports: normalizeErrorReportSettings(settings.errorReports),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
-    ...(settings.title ? { title: withInstance(settings.title) } : {}),
+    ...(settings.title ? { title: withTitlePrompt(withInstance(settings.title)) } : {}),
     // The bot's depth sets the level, so a bot model keeps none.
     ...(settings.botModel ? { botModel: withoutLevel(withInstance(settings.botModel)) } : {}),
     integrations: {
@@ -212,6 +221,8 @@ export class SettingsStore {
       ...(namesModel(update) && !update.effort ? { effort: '' } : {})
     })
     if (partial.title) normalized.title = cleared(normalized.title, partial.title)
+    // A cleared title prompt is written blank for the same reason.
+    if (partial.title && Object.hasOwn(partial.title, 'prompt')) normalized.title = { ...normalized.title, prompt: normalized.title.prompt ?? '' }
     // The bot model keeps no level, so only its instance is cleared.
     if (partial.botModel && namesProviderOnly(partial.botModel)) normalized.botModel = { ...normalized.botModel, instanceId: '' }
     const skillModels = Object.entries(partial.integrations?.skills?.model ?? {})

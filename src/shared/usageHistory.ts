@@ -8,14 +8,15 @@ export type UsageHistoryRange = '24h' | '7d' | '30d' | '90d'
 export const USAGE_HISTORY_RANGES: readonly UsageHistoryRange[] = ['24h', '7d', '30d', '90d']
 
 /** The agents whose local logs are read. */
-export type UsageAgentId = 'claude-code' | 'codex' | 'grok' | 'pi' | 'opencode'
+export type UsageAgentId = 'claude-code' | 'codex' | 'grok' | 'pi' | 'opencode' | 'antigravity'
 
 export const USAGE_AGENT_LABELS: Record<UsageAgentId, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   grok: 'Grok',
   pi: 'Pi',
-  opencode: 'OpenCode'
+  opencode: 'OpenCode',
+  antigravity: 'Antigravity'
 }
 
 /** Token counts. The four kinds don't overlap: input is the uncached part. */

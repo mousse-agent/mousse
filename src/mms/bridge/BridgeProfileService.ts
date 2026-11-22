@@ -24,6 +24,7 @@ import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource, readerListsKey, readerOfListsKey } from './remote/MmsListsSource'
+import { copyLimits } from './copyLimits'
 import { createBotReach, keepMakerInReach } from './remote/botReach'
 import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
@@ -531,10 +532,20 @@ export class BridgeProfileService {
       engine: {
         isEngine: (node) => this.peers.isEngine(node),
         bind: (stream, node) => this.peers.bind(stream, node),
-        verifyStream: (stream) => this.peers.verifyStream(stream)
+        verifyStream: (stream) => this.peers.verifyStream(stream),
+        resolveResult: (value, client, target, rpc, method, signal) =>
+          this.artifacts.resolveRouted(value, client, target, rpc, method, signal, this.peers)
       },
       resolveResult: (...args) => this.artifacts.resolveResult(...args)
     })
+    // The copies of other computers' threads and lists on disk are tidied once the Bridge has started, in the
+    // background (`BridgeHub.tidyCopies`): a start never waits for it.
+    const tidy = setTimeout(
+      () => void this.track(this.hub.tidyCopies().catch(() => 0)),
+      copyLimits().sweepDelayMs
+    )
+    tidy.unref?.()
+    this.disposers.add(() => clearTimeout(tidy))
     this.router = new ThreadRouter({
       services,
       net,

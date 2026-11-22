@@ -8,6 +8,7 @@ import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
+import { folderHead, readWorkspaceRecord, threadHead } from '../workspace/threadHeads'
 import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
 import { WALLPAPER_PIECE_MAX_BYTES, WallpaperRefused } from '../appearance/WallpaperStore'
 import { isWallpaperBucket, WALLPAPER_MAX_BYTES, WALLPAPER_UPLOAD_MAX_BASE64, WALLPAPER_UPLOAD_MAX_BYTES } from '../../shared/themes/wallpaperImage'
@@ -17,8 +18,9 @@ import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
+import { tryAcquireExecutionLease, waitAcquireExecutionLease, type ThreadLeaseHandle, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, isExecutionLeaseHeld, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
 import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
@@ -36,7 +38,6 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import { LocalActionGated, type CommandResult } from '../run/RunEngine'
 import { canUndoNatively } from '../run/policy/featureGates'
 import type { RunOutcome } from '../run/types'
-import type { OwnerProof } from '../run/ownerProof'
 import { CommandRejection } from '../run/db/RunStoreError'
 import { EFFECT_PAGE_MAX } from '../run/EffectOutbox'
 import { evaluateRestore, restoreDiff, restoreDiffSha, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
@@ -49,7 +50,8 @@ import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
 import { lifecycleForReply } from '../../shared/resourceLifecycle'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitHeadsResult, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import { WORKSPACE_CHANGED_MESSAGE } from '../../shared/types'
 import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
@@ -104,7 +106,7 @@ import {
   isObject
 } from './validators'
 import { FIRST_SEND_BINDING_CAPABILITY, PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
-import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes } from './transcriptPaging'
+import { imageAt, messagesAfter, messagesBefore, newestPage, withNewestImages, withoutImageBytes, withImageBudget } from './transcriptPaging'
 import { isOpenActivityRow } from '../run/restartNote'
 import { ROUTED_AGENT_READ, ROUTED_MESSAGES_PAGE_BYTES, ROUTED_RUN_WAIT_MAX_MS, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
 import { waitOnRun } from '../run/runWait'
@@ -120,6 +122,9 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { settledPreparation } from '../workspace/workspacePreparation'
+import { isThreadStarted } from '../../shared/threadTitle'
+import { uncommittedLeftBehindNote, WorkspaceResolver } from '../workspace/WorkspaceResolver'
 import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
@@ -185,6 +190,12 @@ import { locateTurnFile, threadWroteFile, turnFilePath } from '../git/turnFile'
 import { writtenFilePaths } from '../../shared/turnFiles'
 import { resolveReviewScope } from '../actions/reviewRange'
 
+/** A send's answer as a window is sent it: a queued message's images within the queue's preview budget. */
+function queueItemForClient<T>(sent: T): T {
+  const item = (sent as { queueItem?: { images?: Array<{ name: string; mimeType: string; data?: string }> } } | null)?.queueItem
+  return item?.images?.length ? { ...sent, queueItem: withImageBudget([item])[0] } : sent
+}
+
 /** The writer holds of open terminals, one per thread and caller (`pty.create`). */
 const threadTerminalWriters = new ThreadTerminalWriters()
 
@@ -205,6 +216,57 @@ function withoutLocalOnlyKeys<T>(ctx: HandlerContext, byThread: Record<string, T
   const hidden = localOnlyThreadIds(ctx.mms.threads.listAllThreads())
   if (!hidden.size) return byThread
   return Object.fromEntries(Object.entries(byThread).filter(([threadId]) => !hidden.has(threadId)))
+}
+
+interface DraftCheckoutChoice {
+  enabled: boolean
+  picked: boolean
+}
+interface PendingDraftCheckout {
+  choice: DraftCheckoutChoice
+  settled: Promise<Thread>
+}
+const draftCheckoutChanges = new Map<string, PendingDraftCheckout>()
+
+/** All callers wait for the same committed choice, including Send and the composer's preparation effect. */
+function setDraftCheckout(directory: string, choice: DraftCheckoutChoice, apply: (choice: DraftCheckoutChoice, latest: () => boolean) => Promise<Thread>): Promise<Thread> {
+  const key = process.platform === 'win32' || process.platform === 'darwin' ? directory.toLowerCase() : directory
+  const previous = draftCheckoutChanges.get(key)
+  if (previous) {
+    if (previous.choice.enabled !== choice.enabled || choice.picked && !previous.choice.picked) previous.choice = choice
+    return previous.settled
+  }
+  const pending: PendingDraftCheckout = { choice, settled: Promise.resolve().then(async () => {
+    for (;;) {
+      const selected = pending.choice
+      const latest = () => selected === pending.choice
+      try {
+        const thread = await apply(selected, latest)
+        if (latest()) return thread
+      } catch (error) {
+        if (latest()) throw error
+      }
+    }
+  }).finally(() => draftCheckoutChanges.delete(key)) }
+  draftCheckoutChanges.set(key, pending)
+  return pending.settled
+}
+
+/** Prepares the selected checkout while a window shows an empty local project thread. */
+function prepareShownNewThread(ctx: HandlerContext, threadId: string): void {
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread?.projectId || isThreadStarted(thread) || thread.settledAt || thread.lineage || thread.runsOn || thread.native || thread.hidden || thread.scheduledJobId) return
+  const project = ctx.mms.projects.getProject(thread.projectId)
+  const worktree = thread.worktreeEnabled ?? project?.newThread?.worktreeEnabled ?? ctx.mms.settings.get().runs.newThreadWorktree
+  if (!project?.path || !worktree || ctx.mms.orchestrator.isActiveTurnRunning(threadId)) return
+  try {
+    ctx.mms.orchestrator.prepareNewThreadWorkspace({
+      threadId, threadDirectory: ctx.mms.threads.getThreadDir(threadId), projectPath: project.path,
+      startNote: () => uncommittedLeftBehindNote(project.path)
+    })
+  } catch (error) {
+    console.warn('[worktree-prep] not started', { threadId, error: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 /** Remembers a person's pick in a thread for its project's next new thread (`Project.newThread`), and tells windows. */
@@ -372,19 +434,6 @@ function showWrittenThread(ctx: HandlerContext, threadId: string): void {
   if (!isPerson(ctx.connection) || !ctx.mms.threads.getThread(threadId)?.hidden) return
   ctx.mms.threads.setThreadHidden(threadId, false)
   ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreadsVersioned().threads })
-}
-
-/**
- * Proof that the owner wrote a send themselves (`OwnerProof`), from the connection it came in on and nothing the caller
- * says: a Mousse window on this computer, or a window on another of the owner's computers through a routed call (whose
- * RPC layer admits only the owner's own devices, and which an agent's call never reaches as a person's). The CLI, a
- * phone's remote bridge and every internal caller get none.
- */
-function ownerProofOf(ctx: HandlerContext): OwnerProof | undefined {
-  const connection = ctx.connection
-  if (connection?.clientType === 'gui' && !connection.bridgeCaller) return { via: 'gui' }
-  if (connection?.clientType === 'bridge' && connection.bridgeCaller) return { via: 'bridge', node: connection.bridgeCaller.node }
-  return undefined
 }
 
 /** Browser authority uses the authenticated ingress, never a caller's source label. */
@@ -813,7 +862,8 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
     const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
     if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
-    const workspace = manager.load()
+    const stored = manager.load()
+    const workspace = stored?.prepared ? undefined : stored
     if (workspace && workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', `Task workspace is ${workspace.lifecycle}; recovery is required.`)
     return workspace ? manager.workingFolder(projectPath, workspace) : projectPath
   }
@@ -821,6 +871,12 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   const project = ctx.mms.projects.getProject(projectId)
   if (!project) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
   return project.path
+}
+
+function assertFileWorkspace(expectedRoot: string | undefined, actualRoot: string | undefined): void {
+  if (expectedRoot !== undefined && (actualRoot === undefined || !samePath(expectedRoot, actualRoot))) {
+    throw new DomainRpcError('file_workspace_changed', 'The workspace changed after this file was opened. Your edits were kept.')
+  }
 }
 
 /** Only a Mousse window on this computer browses and saves files the way the Files panel does. */
@@ -909,6 +965,7 @@ async function localFilesRoot(ctx: HandlerContext, params: Record<string, unknow
   if (threadId && threadProject) {
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
     const stored = manager.load()
+    if (stored?.prepared) return threadProject
     // A worktree in a worktree folder the person chose is never stood in for by the project folder: while its drive is
     // not connected the panel says so, and a save can never land in the person's own checkout instead.
     const chosen = stored && !isProjectFolderWorkspace(stored) && chosenFolderHolding(stored.worktreePath)
@@ -1106,7 +1163,7 @@ async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string
   const workspace = manager.load()
   // A folder without its `.git` file is what a retirement that failed partway leaves; `restore` sets it aside and rebuilds.
   // An unfinished rebuild is finished here too, whatever it left at the worktree's path.
-  if (!workspace || existsSync(join(workspace.worktreePath, '.git')) && !manager.rebuildUnfinished(workspace) || !manager.hasReconstructionManifest()) return
+  if (!workspace || workspace.prepared || existsSync(join(workspace.worktreePath, '.git')) && !manager.rebuildUnfinished(workspace) || !manager.hasReconstructionManifest()) return
   // One restore per thread: calls that arrive together (a focus refresh asks for status, files and the pull request at once) share it.
   const key = ctx.mms.threads.getThreadDir(threadId)
   const running = restoresInFlight.get(key)
@@ -1122,6 +1179,76 @@ async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string
   return restore
 }
 const restoresInFlight = new Map<string, Promise<void>>()
+
+/** The most threads, and the most projects, one `git.heads` call names: more than a sidebar shows. */
+const GIT_HEADS_MAX = 2_000
+
+// The thread or project supplies the folder even if an older caller also sends cwd.
+const GIT_READ_SCOPE = ['threadId', 'projectId', 'workspaceGeneration', 'attempt', 'cwd'] as const
+/** The Git reads whose parameters are checked before their folder is waited for or looked at, and the keys each takes. */
+const GIT_READ_KEYS: Record<string, readonly string[]> = {
+  'git.heads': ['threadIds', 'projectIds', 'attempt'],
+  'git.status': GIT_READ_SCOPE,
+  'git.diff': [...GIT_READ_SCOPE, 'path', 'staged'],
+  'git.log': [...GIT_READ_SCOPE, 'limit'],
+  'git.branches': GIT_READ_SCOPE,
+  'git.diffStats': GIT_READ_SCOPE
+}
+
+/** Refuses a malformed Git read before anything touches a folder: no drive is waited for on its account. */
+function checkGitReadParams(method: string, params: unknown): void {
+  if (!Object.hasOwn(GIT_READ_KEYS, method)) return
+  const keys = GIT_READ_KEYS[method]!
+  if (params !== undefined && !isObject(params)) throw new DomainRpcError('invalid_params', `${method} expects an object`)
+  const p = isObject(params) ? params : {}
+  rejectUnknownKeys(p, keys)
+  asOptionalBoundedInt(p.attempt, 'attempt', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  if (method === 'git.heads') {
+    for (const field of ['threadIds', 'projectIds']) if (p[field] !== undefined) asStringArray(p[field], field, { unique: true, maxItems: GIT_HEADS_MAX, maxItemLen: 256 })
+    return
+  }
+  const threadId = asOptionalString(p.threadId, 256)
+  const projectId = asOptionalString(p.projectId, 256)
+  if (Boolean(threadId) === Boolean(projectId)) throw new DomainRpcError('invalid_params', 'Specify either threadId or projectId')
+  const generation = asOptionalBoundedInt(p.workspaceGeneration, 'workspaceGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  if (generation !== undefined && !threadId) throw new DomainRpcError('invalid_params', 'workspaceGeneration names a thread worktree: give threadId')
+  if (method === 'git.log') asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 })
+  if (method === 'git.diff') {
+    asString(p.path, 'path', 4096)
+    asOptionalBoolean(p.staged, 'staged')
+  }
+}
+
+/**
+ * Checks the workspace generation and its rebuild record before and after the read. A half-built checkout can
+ * already exist at the same path while the workspace record still names the previous generation.
+ */
+async function readGit<T>(ctx: HandlerContext, p: Record<string, unknown>, read: (root: string, shareKey?: string) => Promise<T>): Promise<T> {
+  if (typeof p.workspaceGeneration !== 'number' || typeof p.threadId !== 'string') return read(projectRootContext(ctx, p))
+  const threadId = p.threadId
+  const known = await ctx.mms.threads.peekThreadLocation(threadId)
+  const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
+  const requireReady = (workspace: ThreadWorkspaceMetadata | undefined) => {
+    const generation = workspace?.generation ?? 0
+    if (!workspace || isProjectFolderWorkspace(workspace) || workspace.lifecycle !== 'ready' || workspace.rebuilding || generation !== p.workspaceGeneration) {
+      throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation })
+    }
+    return workspace
+  }
+  const check = async () => {
+    const workspace = requireReady(known && await readWorkspaceRecord(known.directory))
+    if (await retirement.rebuildUnfinishedAsync(workspace.threadId, workspace.worktreePath)) {
+      throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation: workspace.generation ?? 0 })
+    }
+    // A rebuild can finish while its manifest is being checked. Read the generation again afterward.
+    return requireReady(await readWorkspaceRecord(known!.directory))
+  }
+  const workspace = await check()
+  const root = new ThreadWorkspaceManager(known!.directory).workingFolder(workspace.worktreePath, workspace)
+  const result = await read(root, `${threadId}:${p.workspaceGeneration}`)
+  await check()
+  return result
+}
 
 /** `ensureWorkspaceMaterialized` for a request that names a thread; an unknown thread fails later with its usual error. */
 async function materializeRequestedWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
@@ -1219,24 +1346,58 @@ function branchNameSource(ctx: HandlerContext, threadId: string): string | undef
  * Makes sure a thread that works in its own worktree has one before a file write, terminal or Git action uses it.
  * A thread in its project's folder (`threadPlacement`) gets none: those actions run in the project folder.
  */
-async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
+async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
   const thread = ctx.mms.threads.getThread(threadId)
   if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found')
   const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
-  // No worktree for a thread in its project's folder; its record lets file writes and terminals be recorded and undone.
-  if (threadPlacement(thread) === 'project-folder') {
-    await new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).ensureProjectFolder(threadId, 'main', project)
-    return
+  const directory = ctx.mms.threads.getThreadDir(threadId)
+  const manager = new ThreadWorkspaceManager(directory)
+  const placement = threadPlacement(thread)
+  if (!heldThreadLease) {
+    await settledPreparation(directory)
+    // Only making, claiming or rebuilding the worktree takes the thread's lease. A thread in its project's folder, or one
+    // whose worktree is ready, is used as it is: a Git action does not wait for a terminal open in the thread, which
+    // holds the lease for as long as it runs.
+    if (workspaceNeedsWriter(manager, manager.load(), placement)) {
+      const lease = await waitAcquireExecutionLease(directory, { source: 'task-workspace' })
+      try {
+        return await ensureOwnedTaskWorkspace(ctx, params, lease)
+      } finally {
+        releaseExecutionLeaseHandle(lease)
+      }
+    }
   }
-  const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
-  if (!manager.load()) await manager.provision(threadId, 'main', project, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, threadId) })
-  // On a drive that is not connected: says so, and the worktree is left as it is (`worktreeLayout`).
-  await assertWorktreeFolderConnected(manager.load()?.worktreePath)
-  await ensureWorkspaceMaterialized(ctx, threadId, project)
+  const workspace = manager.load()
+  if (workspace?.prepared) {
+    await new WorkspaceResolver(directory, threadId, project, placement).resolve('agent', 'main', undefined, heldThreadLease, branchNameSource(ctx, threadId))
+  } else if (placement === 'project-folder') {
+    await manager.ensureProjectFolder(threadId, 'main', project)
+    return
+  } else if (!workspace) {
+    await manager.provision(threadId, 'main', project, undefined, heldThreadLease, undefined, { nameFrom: branchNameSource(ctx, threadId) })
+  }
+  const stored = manager.load()
+  await assertWorktreeFolderConnected(stored?.worktreePath)
+  if (stored && worktreeNeedsRestore(manager, stored)) {
+    await manager.restore(project, undefined, heldThreadLease, (notice) => ctx.mms.orchestrator.noteThreadUpdate(threadId, notice.text, { messageId: notice.id, kind: 'warning' }))
+    clearCleanupMarker(ctx.mms.threads.lifecycleStore, threadId)
+  }
   if ((await manager.verify()).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
+}
+
+/** A worktree a retirement or rebuild left without its `.git`, or unfinished, that its reconstruction manifest can bring back. */
+function worktreeNeedsRestore(manager: ThreadWorkspaceManager, workspace: ThreadWorkspaceMetadata): boolean {
+  return (!existsSync(join(workspace.worktreePath, '.git')) || manager.rebuildUnfinished(workspace)) && manager.hasReconstructionManifest(workspace)
+}
+
+/** Whether {@link ensureOwnedTaskWorkspace} has a worktree to claim, make or restore, which needs the thread's lease. */
+function workspaceNeedsWriter(manager: ThreadWorkspaceManager, workspace: ThreadWorkspaceMetadata | undefined, placement: ReturnType<typeof threadPlacement>): boolean {
+  if (workspace?.prepared) return true
+  if (placement === 'project-folder') return false
+  return !workspace || worktreeNeedsRestore(manager, workspace)
 }
 
 /** Refusals that follow from a thread's worktree being the thread's own. Each has a fixed code the GUI can show copy for. */
@@ -1459,7 +1620,7 @@ function threadWorktreeDirectory(ctx: HandlerContext, threadId: string): string 
   if (threadPlacement(ctx.mms.threads.getThread(threadId)) === 'project-folder') return null
   const directory = ctx.mms.threads.getThreadDir(threadId)
   const workspace = new ThreadWorkspaceManager(directory).load()
-  return workspace && !isProjectFolderWorkspace(workspace) ? directory : null
+  return workspace && !workspace.prepared && !isProjectFolderWorkspace(workspace) ? directory : null
 }
 
 /**
@@ -1560,7 +1721,7 @@ function revertOwnerFor(ctx: HandlerContext, p: Record<string, unknown>): string
   if (threadId) {
     const directory = ctx.mms.threads.getThreadDir(threadId)
     const workspace = new ThreadWorkspaceManager(directory).load()
-    if (workspace && (!isProjectFolderWorkspace(workspace) ? threadPlacement(ctx.mms.threads.getThread(threadId)) !== 'project-folder' : workspace.lifecycle === 'ready')) return directory
+    if (workspace && !workspace.prepared && (!isProjectFolderWorkspace(workspace) ? threadPlacement(ctx.mms.threads.getThread(threadId)) !== 'project-folder' : workspace.lifecycle === 'ready')) return directory
   }
   const projectId = requestProjectId(ctx, p)
   try { return projectId ? projectKeptFilesOwner(profileHome(ctx), projectId) : undefined } catch { return undefined }
@@ -1721,6 +1882,8 @@ function mergeSearchResults(local: ThreadSearchResult[], remote: ThreadSearchRes
 
 /** Transcripts a routed search reads: the newest threads, as the agent tool's search does. */
 const ROUTED_SEARCH_MESSAGE_THREADS = 100
+/** Results a `perThread` search may ask for: about one per thread, so a large profile's every match fits. */
+const SEARCH_PER_THREAD_MAX_LIMIT = 5000
 
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
@@ -1758,6 +1921,7 @@ export async function dispatchMethod(
 }
 
 async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (method === 'git.heads') checkGitReadParams(method, params)
   // Deleting an archived thread stops what still runs in it first, once nothing that would refuse the delete is found:
   // the send waiting for its turn is a request the delete's admission would otherwise wait for, and refuse. Another
   // computer's delete is refused anyway. A thread of another computer (a qualified id) is routed to its owner, which
@@ -1773,7 +1937,8 @@ async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unk
     // Read only: a listed thread, or one with a lifecycle record (live, in the trash, a subagent's, a bot's). An id found
     // in neither is counted as the profile's; nothing is scanned, migrated or registered for it before admission. An id
     // no lifecycle record can have (another computer's qualified thread id) is never a thread here.
-    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || ctx.mms.threads?.lifecycleStore?.get(id))
+    // Git's sidebar batch uses only the memory cache here. Its asynchronous lifecycle lookup has its own deadline.
+    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || (method !== 'git.heads' && ctx.mms.threads?.lifecycleStore?.get(id)))
     return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params, isThread))
   }
   return dispatchOwnedMethod(ctx, method, params)
@@ -1886,12 +2051,12 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
 const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
 const FOLDER_METHODS = new Set([
   'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup',
-  'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.delete', 'agents.spawn', 'tasks.create',
+  'thread.fork', 'thread.mergeBack', 'threads.delete', 'agents.spawn', 'tasks.create',
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
 ])
-/** Methods under those prefixes that only signal work already in memory. */
-const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
+/** Methods that skip the generic folder wait. The sidebar batch sets its own volume deadlines. */
+const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'git.heads', 'pullRequests.watchStatus'])
 
 /** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
 const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup'])
@@ -1905,9 +2070,9 @@ function readsFolder(method: string): boolean {
  * Waits for the folders a request works in. A Stop of its thread or the profile's shutdown ends the wait
  * with an error, so neither waits on a pending macOS permission prompt.
  */
-async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
+async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown, browsedRoot?: string): Promise<void> {
   if (!readsFolder(method)) return
-  const folders = requestFolders(ctx, params)
+  const folders = browsedRoot ? [browsedRoot] : requestFolders(ctx, params, !Object.hasOwn(GIT_READ_KEYS, method))
   if (folders.length === 0) return
   const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
   const shutdown = ctx.mms.requestShutdownSignal
@@ -1933,7 +2098,7 @@ async function waitForRequestFolders(ctx: HandlerContext, method: string, params
 const FOLDER_PARAMS = ['path', 'cwd', 'root', 'projectPath', 'workspacePath', 'folder', 'directory'] as const
 
 /** The project folders a request names: its thread's project, its project, or a folder path. */
-function requestFolders(ctx: HandlerContext, params: unknown): string[] {
+function requestFolders(ctx: HandlerContext, params: unknown, allowPath: boolean): string[] {
   if (!isObject(params)) return []
   const folders: string[] = []
   try {
@@ -1948,7 +2113,8 @@ function requestFolders(ctx: HandlerContext, params: unknown): string[] {
   } catch {
     // An unknown thread or project is the handler's to report.
   }
-  for (const key of FOLDER_PARAMS) {
+  // Scoped Git reads may inspect a path only after it passes containment checks in the named folder.
+  for (const key of allowPath ? FOLDER_PARAMS : []) {
     const value = params[key]
     if (typeof value === 'string' && isAbsolute(value)) folders.push(value)
   }
@@ -1962,6 +2128,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     const routed = await ctx.mms.threadRouter.dispatch(ctx, method, params)
     if (routed) return routed.result
   }
+  if (method !== 'git.heads') checkGitReadParams(method, params)
   if (isObject(params) && typeof params.threadId === 'string' &&
       !['threads.delete', 'threads.inventory', 'threads.focus',
         // Answers "not found" for a thread being deleted, so a window that shows it knows to leave it.
@@ -1972,11 +2139,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
-  // A browsed folder is checked before its volume is waited for, so one that is refused (a network share, a
-  // device path, a caller that is not this computer's window) is never touched.
-  if (BROWSED_ROOT_METHODS.has(method) && isObject(params)) browsedFilesRoot(ctx, params)
+  // An explicit browsed root replaces the checkout for this call. Validate access before probing its volume.
+  const browsedRoot = BROWSED_ROOT_METHODS.has(method) && isObject(params) ? browsedFilesRoot(ctx, params) : undefined
   // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
-  await waitForRequestFolders(ctx, method, params)
+  await waitForRequestFolders(ctx, method, params, browsedRoot)
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'threads.focus': {
@@ -1988,6 +2154,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread of this computer a window shows stays loaded in memory (`ThreadResidency`).
       if (!parseQualifiedId(threadId)) {
         if (ctx.connection?.clientType === 'gui') ctx.mms.orchestrator.setThreadViewed(ctx.connection.id, threadId, focused, ctx.connection.lifetime)
+        // A window opened a new thread: its worktree is prepared while the first message is typed.
+        if (focused && ctx.connection?.clientType === 'gui' && !ctx.connection.bridgeCaller) prepareShownNewThread(ctx, threadId)
         return { routed: false, focused: false }
       }
       return ctx.mms.threadRouter?.focus(ctx, threadId, focused) ?? { routed: false, focused: false }
@@ -2377,9 +2545,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.search': {
       const p = isObject(params) ? params : {}
       const query = asString(p.query, 'query', 512)
+      // `perThread`: which threads match (the sidebar's filter), one message hit each, from this computer only; it may
+      // ask for every thread of the profile.
+      const perThread = p.perThread === true
       const limit =
         typeof p.limit === 'number' && Number.isFinite(p.limit) && p.limit > 0
-          ? Math.min(Math.floor(p.limit), 200)
+          ? Math.min(Math.floor(p.limit), perThread ? SEARCH_PER_THREAD_MAX_LIMIT : 200)
           : 50
       // Search hides subagents for every client, the desktop app included: a subagent is reached
       // through its parent's Lineage, not as a result of its own.
@@ -2391,11 +2562,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         hideSubagents: true,
         includeSettled: true,
         allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
-        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
+        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {}),
+        ...(perThread ? { perThread } : {})
       })
       // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
       const remote =
-        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
+        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists && !perThread
           ? await ctx.mms.remoteLists.search(ctx.connection.id, query, limit)
           : undefined
       if (!remote) return { results }
@@ -2447,10 +2619,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const items = ctx.mms.threads.loadMessageQueue(threadId)
         return {
           ...common,
-          messages: page?.messages ?? [],
+          messages: withNewestImages(page?.messages ?? []),
           ...(page?.earlier ? { earlier: page.earlier } : {}),
-          queue: withTranscript ? listPendingQueue(items).filter((item) => !item.internal) : [],
-          claimed: listClaimedQueue(items).filter((item) => !item.internal),
+          queue: withTranscript ? withImageBudget(listPendingQueue(items).filter((item) => !item.internal)) : [],
+          claimed: withImageBudget(listClaimedQueue(items).filter((item) => !item.internal)),
           connectionFailed: rt.connectionFailed,
           ...(page ? { seq: page.seq, epoch: page.epoch } : {})
         }
@@ -2463,10 +2635,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const position = ctx.mms.threads.threadDbPosition(threadId)
       return {
         ...common,
-        messages: shown.messages,
+        messages: withNewestImages(shown.messages),
         ...(shown.earlier ? { earlier: shown.earlier } : {}),
-        queue: withTranscript ? ctx.mms.orchestrator.listQueue(threadId) : [],
-        claimed: listClaimedQueue(session.queue).filter((item) => !item.internal),
+        queue: withTranscript ? withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) : [],
+        claimed: withImageBudget(listClaimedQueue(session.queue).filter((item) => !item.internal)),
         connectionFailed: session.failedConnectionRequest !== null || rt.connectionFailed,
         ...(position ?? {})
       }
@@ -2584,13 +2756,35 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A checkout the person picked is remembered for the project; one a send records as it was shown is not.
       const pickedCheckout = asOptionalBoolean(p.picked, 'picked') === true
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      // Refuse once an isolated workspace exists — the toggle is new-chat only.
-      const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
-      if (workspace?.lifecycle === 'ready' || workspace?.lifecycle === 'provisioning') {
-        throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
-      }
-      const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
-      if (pickedCheckout) rememberPick(ctx, threadId, { worktreeEnabled: enabled })
+      const directory = ctx.mms.threads.getThreadDir(threadId)
+      const thread = await setDraftCheckout(directory, { enabled, picked: pickedCheckout }, async ({ enabled, picked }, latest) => {
+        await settledPreparation(directory)
+        const lease = await waitAcquireExecutionLease(directory, { source: 'draft-checkout-choice' })
+        try {
+          const manager = new ThreadWorkspaceManager(directory)
+          const workspace = manager.load()
+          const current = ctx.mms.threads.getThread(threadId)!
+          if (!latest()) return current
+          if (workspace && !workspace.prepared && current.worktreeEnabled === enabled) {
+            if (picked) rememberPick(ctx, threadId, { worktreeEnabled: enabled })
+            return current
+          }
+          if (workspace && !workspace.prepared && (workspace.lifecycle === 'ready' || workspace.lifecycle === 'provisioning')) {
+            throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
+          }
+          if (enabled && workspace?.prepared) await manager.separateRenamedPreparation(lease)
+          if (!latest()) return ctx.mms.threads.getThread(threadId)!
+          const updated = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
+          if (picked) rememberPick(ctx, threadId, { worktreeEnabled: enabled })
+          if (!enabled && workspace?.prepared) {
+            await manager.releasePrepared(lease, () => latest() && ctx.mms.threads.getThread(threadId)?.worktreeEnabled === false)
+          }
+          return updated
+        } finally {
+          releaseExecutionLeaseHandle(lease)
+        }
+      })
+      if (enabled && thread.worktreeEnabled && ctx.connection?.clientType === 'gui' && !ctx.connection.bridgeCaller) prepareShownNewThread(ctx, threadId)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
@@ -2665,7 +2859,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect',
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect', 'steer', 'steerRunId',
         ROUTED_SEND_WINDOW_KEY
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -2676,6 +2870,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A parent's follow-up to a subagent on this computer: a paused thread refuses it, as for a parent here.
       const refuseWhilePaused = asOptionalBoolean(p.refuseWhilePaused, 'refuseWhilePaused') === true
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
+      // A person's Steer (a window here, or the CLI): it joins the busy thread's turn instead of waiting for it.
+      const steer = asOptionalBoolean(p.steer, 'steer') === true && (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli')
+      const steerRunId = steer ? asOptionalString(p.steerRunId, 256) : undefined
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
@@ -2714,22 +2911,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const window = ctx.connection?.clientType === 'gui'
           ? (ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older')
           : ctx.connection?.clientType === 'bridge' ? routedWindow : undefined
-        if (window === 'binds')
+        // A Stop before the first prompt leaves binding pending. The engine can still replay an admitted Steer
+        // after checking its prompt and any explicit target against the receipt.
+        const receipt = window && steer && clientRequestId ? ctx.mms.runEngine.store.getReceipt(clientRequestId) : undefined
+        const receiptRunId = receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted'
+          ? (receipt.result as { steerRunId?: string } | null)?.steerRunId
+          : undefined
+        if (receiptRunId === undefined && window === 'binds')
           throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
-        if (window === 'older')
+        if (receiptRunId === undefined && window === 'older')
           throw new DomainRpcError('first_send_unbound', 'Update Mousse to send the first message in this chat.', { threadId, update: true })
       }
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
       // Before the send: a send may answer only once its turn has run, and the thread shows in the sidebar from the click.
       showWrittenThread(ctx, threadId)
-      const ownerProof = source === 'gui' ? ownerProofOf(ctx) : undefined
-      return await ctx.mms.orchestrator.send(input, false, {
+      return queueItemForClient(await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
-        ...(ownerProof ? { ownerProof } : {}),
         forceQueue,
         clientRequestId,
         awaitMode,
+        ...(steer ? { steer: true, steerRunId } : {}),
         actor: questionAnswerer(ctx),
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),
@@ -2739,7 +2941,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(sentFrom ? { sentFrom } : {}),
         ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
-      })
+      }))
+    }
+    case 'orchestrator.sendAccepted': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'clientRequestId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const clientRequestId = asString(p.clientRequestId, 'clientRequestId', 128)
+      const receipt = ctx.mms.runEngine.store.getReceipt(clientRequestId)
+      return { accepted: receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted' }
     }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}
@@ -2761,6 +2971,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
       const runId = asOptionalString(p.runId, 256)
+      // A person's steer, from a window or the CLI, brings an archived thread back first.
+      if (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli') await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       if (runId) {
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx)), runId)
@@ -2794,6 +3006,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!Array.isArray(p.itemIds) || p.itemIds.length > 100) throw new DomainRpcError('invalid_params', 'itemIds must be a list of at most 100 ids')
       const itemIds = p.itemIds.map((id, index) => asString(id, `itemIds[${index}]`, 256))
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
       return { ...runCommandResponse(result, runId), clientRequestId }
     }
@@ -2894,7 +3107,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
-      return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId, ownerProofOf(ctx)))
+      return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
     }
     case 'threads.goal': {
       // The thread's goal (`/goal`, issue #1207): show it, set it (and queue its first turn), adopt it for the first message
@@ -2977,8 +3190,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // the revision is checked against. `open` is false while a merge-back keeps the queue from taking messages.
       const snapshot = ctx.mms.orchestrator.queueSnapshot(threadId)
       return {
-        items: snapshot.items,
-        claimed: snapshot.claimed,
+        items: withImageBudget(snapshot.items),
+        claimed: withImageBudget(snapshot.claimed),
         revision: snapshot.revision,
         open: snapshot.open,
         ...(snapshot.blockedReason ? { blockedReason: snapshot.blockedReason } : {})
@@ -3000,7 +3213,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         { source, ...(limit ? { permissionMode: limit } : {}), ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {}) }
       )
       noteSentFrom(ctx, threadId)
-      return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
+      return { item: withImageBudget([item])[0], items: withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) }
     }
     case 'queue.edit': {
       const p = isObject(params) ? params : {}
@@ -3016,7 +3229,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const sentFrom = sentFromOf(ctx)
       const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision, ...(limit ? { permissionMode: limit } : {}), ...(sentFrom ? { sentFrom } : {}) }))
       noteSentFrom(ctx, threadId)
-      return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
+      return { item: withImageBudget([item])[0], items: withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) }
     }
     case 'queue.reorder': {
       const p = isObject(params) ? params : {}
@@ -3027,7 +3240,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       })
       const expectedRevision = asOptionalString(p.expectedRevision, 64)
       const items = queueRpc(() => ctx.mms.orchestrator.reorderQueue(threadId, orderedIds, { expectedRevision }))
-      return { items }
+      return { items: withImageBudget(items) }
     }
     case 'queue.remove': {
       const p = isObject(params) ? params : {}
@@ -3044,7 +3257,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
         throw new DomainRpcError('queue_item_not_found', 'Queued message was not found or is no longer removable.')
       }
-      return { outcome: 'removed', removed }
+      return { outcome: 'removed', removed: withImageBudget([removed])[0] }
     }
     case 'queue.promoteToSteer': {
       const p = isObject(params) ? params : {}
@@ -3057,7 +3270,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread released from memory is read off the event loop before the Steer reaches it.
       if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.getThread(threadId)) await ctx.mms.orchestrator.ensureSessionLoaded(threadId).catch(() => undefined)
       const sent = queueRpc(() => ctx.mms.orchestrator.promoteQueueItem(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
-      return { ok: sent.ok, ...(sent.notice ? { notice: sent.notice } : {}), items: ctx.mms.orchestrator.listQueue(threadId) }
+      return { ok: sent.ok, ...(sent.notice ? { notice: sent.notice } : {}), items: withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) }
     }
     case 'orchestrator.contextUsage': {
       const p = isObject(params) ? params : {}
@@ -3149,6 +3362,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { threadId, ...(await ctx.mms.orchestrator.stopSubagents(threadId)) }
     }
+    case 'threads.backgroundWork': {
+      // What the thread runs in the background besides its subagents (the composer's status row).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return ctx.mms.orchestrator.backgroundWork(threadId)
+    }
+    case 'threads.stopBackground': {
+      // The status row's Stop of one item: a monitor, a background command, a hold, or the provider's own work.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'id'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const id = asString(p.id, 'id', 256)
+      return { ok: await ctx.mms.orchestrator.stopBackground(threadId, id) }
+    }
     case 'subagents.list': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId'])
@@ -3159,7 +3387,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         inbox: engine.inbox,
         store: engine.store,
         thread: (id: string) => ctx.mms.threads.getThread(id),
-        hasPendingQuestion: (id: string) => ctx.mms.questions.listPendingForThread(id).length > 0
+        hasPendingQuestion: (id: string) => ctx.mms.questions.listPendingForThread(id).length > 0,
+        // A remote subagent's computer, and what it does there: a question waiting there reads as needing input, not queued.
+        remote: (id: string) => ctx.mms.orchestrator.remoteSubagentOverlay(id)
       }
       // Subagents whose thread is gone come apart from `subagents`, so a client that does not know them lists only
       // live ones; the transcript still draws their cards from them.
@@ -3257,9 +3487,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const task = threadId !== '__unbound__' ? ctx.mms.threads.getThread(threadId) : undefined
       if (threadId !== '__unbound__' && !task) throw new DomainRpcError('thread_not_found', 'Task not found for terminal', { threadId })
       const directory = task ? ctx.mms.threads.getThreadDir(threadId) : undefined
-      if (task?.projectId) await ensureOwnedTaskWorkspace(ctx, { threadId })
+      if (directory) await settledPreparation(directory)
       const manager = directory ? new ThreadWorkspaceManager(directory) : undefined
-      const metadata = manager?.load()
       // A project terminal cannot bypass a task's writer ownership by naming its checkout.
       if (!task) for (const candidate of ctx.mms.threads.listAllThreads()) {
         const owned = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(candidate.id)).load()
@@ -3270,14 +3499,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
       }
       if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new DomainRpcError('terminal_not_allowed', 'Read-only agents cannot open an arbitrary shell')
-      // A thread in its project's folder has no worktree: its terminal starts in the project folder.
-      if (!metadata && task?.projectId && (routed || p.cwd === undefined)) cwd = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) ?? cwd
-      if (metadata) {
-        await assertWorktreeFolderConnected(metadata.worktreePath)
-        if ((await manager!.verify(metadata)).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
-        const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-        if (routed || p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.workingFolder(projectPath ?? metadata.worktreePath, metadata)
-        else cwd = assertEpisodePath(metadata.worktreePath, cwd)
+      const terminalFolder = (metadata: ThreadWorkspaceMetadata | undefined): void => {
+        const projectPath = task?.projectId ? resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) : undefined
+        if (!metadata) {
+          if (routed || p.cwd === undefined) cwd = projectPath ?? cwd
+        } else if (routed || p.cwd === undefined || cwd === projectPath) {
+          cwd = manager!.workingFolder(projectPath ?? metadata.worktreePath, metadata)
+        } else {
+          cwd = assertEpisodePath(metadata.worktreePath, cwd)
+        }
       }
       // The thread's terminals (from this computer, or from one other computer) are one writer under one lease: the
       // first takes it and starts the terminal turn, the others join, and the last to end checkpoints and releases.
@@ -3285,6 +3515,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         acquire: () => tryAcquireExecutionLease(directory, { source: 'task-terminal' }),
         busy: () => new DomainRpcError('workspace_busy', leaseBusyMessage(readLeaseOwner(getExecutionLeasePath(directory)), 'Task writer is busy; wait for it to finish before opening a terminal')),
         begin: async (lease) => {
+          if (task?.projectId) await ensureOwnedTaskWorkspace(ctx, { threadId }, lease)
+          const metadata = manager?.load()
+          terminalFolder(metadata)
           if (!metadata) return async () => undefined
           const actions = new ThreadActionService(directory)
           const actionOptions = { threadId, turnId: `terminal:${randomUUID()}`, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,
@@ -3304,6 +3537,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }) : undefined
       let ptyId: string
       try {
+        const metadata = manager?.load()
+        terminalFolder(metadata)
         if (task && !task.projectId && !metadata) {
           // Projectless tasks have a durable private scratch root. A caller's
           // generic cwd hint never turns this into an unchecked project shell.
@@ -3877,7 +4112,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const history = await usageHistoryReader(ctx.mms.getHomeDir()).history({ range, ...(timeZone ? { timeZone } : {}), ...(agent ? { agent } : {}) })
       // Folders, projects and sessions stay on this computer: another one gets the totals only.
       if (!connectionIsLocal(ctx.connection)) return { ...history, sources: history.sources.map((source) => ({ ...source, path: '' })), projects: [], topSessions: [] }
-      return nameUsageProjects(history, ctx.mms.projects.listProjects(), (ids) => ctx.mms.runEngine.store.threadsForSessions(ids), (id) => ctx.mms.threads.getThread(id)?.name)
+      const threadsFor = (ids: string[]) => {
+        let map: Map<string, string>
+        try {
+          map = ctx.mms.runEngine.store.threadsForSessions(ids)
+        } catch {
+          map = new Map()
+        }
+        for (const [sessionId, threadId] of ctx.mms.antigravity?.threadsForSessions(ids) ?? []) {
+          if (!map.has(sessionId)) map.set(sessionId, threadId)
+        }
+        return map
+      }
+      return nameUsageProjects(history, ctx.mms.projects.listProjects(), threadsFor, (id) => ctx.mms.threads.getThread(id)?.name)
     }
     case 'providers.getUsageFor': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
@@ -4108,20 +4355,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const lookup = threadLookupContext(ctx, p)
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const stored = manager.load()
+      // Before the live writer makes the checkout, the absent folder is part of provisioning.
+      const provisioning = stored?.lifecycle === 'provisioning' && isExecutionLeaseHeld(lookup.threadDirectory)
       // A turn still recording its end-of-turn checkpoint under its live lease is not waiting on recovery.
       const inFlight = liveCheckpointTest(lookup.threadDirectory)
-      const metadata = stored && lookup.projectPath ? await manager.verify(stored, { inFlight }) : stored
+      const metadata = stored && lookup.projectPath && !provisioning ? await manager.verify(stored, { inFlight }) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
-      const marker = stored && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      const marker = stored && !provisioning && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
       // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
       // store (no Git of its own) is read through `loadOrSnapshotAsync`, so it shows the banner too.
-      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
+      const recovery = provisioning ? undefined : await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
+      const execution = lookup.projectPath
+        ? await manager.executionContext(lookup.projectPath, metadata)
+        : manager.unboundExecutionContext(lookup.threadId)
       return {
         metadata,
         ...(recovery ? { recovery } : {}),
-        execution: lookup.projectPath
-          ? await manager.executionContext(lookup.projectPath, metadata)
-          : manager.unboundExecutionContext(lookup.threadId),
+        execution: !stored && lookup.projectPath && threadPlacement(lookup.thread) === 'project-folder'
+          ? { ...execution, placement: 'project-folder' }
+          : execution,
         journalGeneration: lookup.currentGeneration,
         ...(marker ? { retiredByCleanup: { at: marker.retiredAt, rule: marker.rule } } : {})
       }
@@ -4172,7 +4424,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       // The project folder's uncommitted changes are the person's own; this button only ever cleans a thread's worktree.
       if (isProjectFolderWorkspace(workspace)) throw new DomainRpcError('thread_in_project_folder', 'This chat works in the project folder, whose uncommitted changes are yours; Mousse does not discard them.')
-      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
+      if (!workspace || workspace.prepared || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // Everything uncommitted goes, the results of the thread's turns included. The files as they are now are recorded
       // as a snapshot first (the turns' receipts keep theirs), and a copy stays for the thread's Undo window.
       return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', async () => {
@@ -4542,15 +4794,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       // What still waits after this attempt, in plain words: recovery reports the truth, not only that it ran.
       const left = await threadRecovery(operation.threadDirectory, operation.projectPath)
-      const stillWaiting = !left ? undefined
+      const stillWaiting = !left
+        ? releaseRetained && `old Undo history could not be released yet: ${releaseRetained}`
         : publish.some((item) => item.state === 'pending') && left.kind === 'publish' ? "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch"
-        : releaseRetained && left.operationType === 'undo-ref-release' ? `old Undo history could not be released yet: ${releaseRetained}`
         : left.kind === 'merge' ? 'a merge from an earlier version is still in progress; abort it, or finish it with Git'
         : left.operationType ? `recovery could not finish the ${left.operationType} operation: ${left.reason}` : left.reason
       return {
         ok: true,
-        settled: !left,
-        ...(left ? { recovery: left, stillWaiting } : {}),
+        settled: !left && !releaseRetained,
+        ...(left ? { recovery: left } : {}),
+        ...(stillWaiting ? { stillWaiting } : {}),
         ...(cancelledIntegrations.length ? { cancelledIntegrations } : {})
       }
     }
@@ -4580,8 +4833,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       // A thread in its project's folder has nothing to publish: its work is already in the primary checkout.
       if (isProjectFolderWorkspace(workspace)) return { available: false, workspace, reason: PROJECT_FOLDER_PUBLISH_REASON }
-      const sourceSha = workspace?.lifecycle === 'ready' ? workspace.snapshotSha ?? await workspaceGitAsync(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined
-      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha, targetSha: await workspaceGitAsync(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
+      const available = !workspace?.prepared && workspace?.lifecycle === 'ready'
+      const sourceSha = available ? workspace.snapshotSha ?? await workspaceGitAsync(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined
+      return { available, workspace, sourceSha, targetSha: await workspaceGitAsync(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
     case 'publish.start': {
       const p = isObject(params) ? params : {}
@@ -4591,7 +4845,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (isProjectFolderWorkspace(workspace)) throw new DomainRpcError('thread_in_project_folder', PROJECT_FOLDER_PUBLISH_REASON)
-      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
+      if (!workspace || workspace.prepared || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // The thread's name is the commit message in the primary checkout, where the person's own history reads it.
       const message = ctx.mms.threads.getThread(operation.threadId)?.name?.trim() || undefined
       return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { message, expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
@@ -4613,16 +4867,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'files.list': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         return { entries: await ctx.mms.fileService.listDir(root, containedPath(ctx, root, p.path), guardFor(ctx)) }
       })
     }
     case 'files.read': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
+        const expectedRoot = asOptionalString(p.expectedRoot, 4096)
+        const localWindow = isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
+        const bindRoot = localWindow && (p.bindRoot === true || expectedRoot !== undefined)
+        const workspaceRoot = bindRoot ? await realpathNative(root) : undefined
+        assertFileWorkspace(expectedRoot, workspaceRoot)
+        // Held inside the folder as the window spells it (a tab names its file by that path); read from its real path.
         const path = requiredContainedPath(ctx, root, p.path)
-        return { path, content: await ctx.mms.fileService.readFile(root, path, guardFor(ctx)) }
+        const includeCanonicalPath = p.includeCanonicalPath === true && localWindow
+        return { path, ...await ctx.mms.fileService.readFileDetails(workspaceRoot ?? root, path, guardFor(ctx), includeCanonicalPath), ...(workspaceRoot ? { workspaceRoot } : {}) }
       })
     }
     case 'files.readAsset': {
@@ -4631,10 +4892,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const offset = asOptionalBoundedInt(p.offset, 'offset', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
       const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: FILE_ASSET_PIECE_BYTES }) ?? FILE_ASSET_PIECE_BYTES
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
-        const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx))
-        return { path, mimeType: piece.mimeType, size: piece.size, mtimeMs: piece.mtimeMs, offset, data: Buffer.from(piece.data).toString('base64') }
+        const includeCanonicalPath = offset === 0 && p.includeCanonicalPath === true && isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
+        const { data, ...piece } = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx), includeCanonicalPath)
+        return { path, ...piece, offset, data: Buffer.from(data).toString('base64') }
       })
     }
     case 'files.writeDirect': {
@@ -4651,64 +4913,79 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (saveExceedsRequest(p.content)) throw new DomainRpcError('file_too_large', SAVE_TOO_LARGE_MESSAGE)
       const content = p.content
       return await fileCall(ctx, async () => {
-        const browsed = browsedFilesRoot(ctx, p)
+        const expectedRoot = asOptionalString(p.expectedRoot, 4096)
+        const threadId = asOptionalString(p.threadId, 256)
+        if (!browsedRoot && threadId && expectedRoot === undefined) {
+          if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+          throw new DomainRpcError('workspace_binding_required', 'Reopen this file in a current Mousse window before saving.')
+        }
         // The file was read from the thread's worktree, so a retired one comes back before it is written.
-        if (!browsed) await materializeRequestedWorkspace(ctx, p)
-        const root = browsed ?? await localFilesRoot(ctx, p)
+        if (!browsedRoot) await materializeRequestedWorkspace(ctx, p)
+        const root = browsedRoot ?? await localFilesRoot(ctx, p)
+        const workspaceRoot = expectedRoot === undefined ? undefined : await realpathNative(root)
+        assertFileWorkspace(expectedRoot, workspaceRoot)
+        // Held inside the folder as the window spells it (a tab names its file by that path); written at its real path.
         const path = requiredContainedPath(ctx, root, p.path)
-        if (browsed) {
+        if (browsedRoot) {
           // A folder the person browsed to is any folder of this computer: Git's own files, the Mousse data
           // folders and the folders of the user's sign-ins and keys are never saved into from there.
           const refusal = browsedSaveRefusal(resolve(root, path), [ctx.mms.getHomeDir(), ctx.mms.getProfileHomeDir()])
           if (refusal) throw new DomainRpcError('path_protected', refusal)
         }
-        const lines = await ctx.mms.fileService.writeFile(root, path, content)
+        const lines = await ctx.mms.fileService.writeFile(workspaceRoot ?? root, path, content)
         ctx.mms.lineEditStats.record('manual', lines)
         return { path }
       })
     }
     case 'files.write': {
       const p = isObject(params) ? params : {}
-      await ensureOwnedTaskWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      const guard = guardFor(ctx)
-      const wanted = asString(p.path, 'path', 4096)
-      // Checked once, before the action is recorded, so a refused path leaves no action behind. What the repository says about
-      // hooks and configuration is looked up first, without blocking the daemon.
-      await guard.prepare?.(root, wanted, 'write').catch(() => undefined)
-      let guarded: GuardedPath
-      try {
-        guarded = guard.resolve(root, wanted, 'write')
-      } catch (error) {
-        throw refusedPath(error)
-      }
-      const path = guarded.relative
-      // Another computer sends a large file ahead of the call (a staged value, at most what staging holds); every other caller keeps the 512 KiB limit.
-      const content = asString(p.content, 'content', ctx.connection?.bridgeCaller ? ROUTED_STAGE_ITEM_BYTES : 512 * 1024)
       const threadId = asOptionalString(p.threadId, 256)
-      if (threadId) {
-        const operation = threadOperationContext(ctx, p)
-        const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-        if (workspace) {
-          if (workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Task workspace requires recovery before saving.')
-          const actions = new ThreadActionService(operation.threadDirectory)
-          const latest = actions.latest(workspace.conversationBranchId)
-          const { result: lineEdits, action } = await actions.runCheckpointedAction({
-            threadId, turnId: randomUUID(), conversationBranchId: workspace.conversationBranchId,
-            workspacePath: root, actor: { kind: 'user' }, expectedJournalRevision: operation.currentGeneration,
-            presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
-            nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' }
-          }, () => ctx.mms.fileService.writeFile(root, path, content, guard, guarded)).catch(refusalOfAction)
-          // Covers daemon-side writers only: desktop saves and agent edits never reach this method
-          // (the search index refreshes on its own 15 s stale rule).
-          getWorkspaceIndexRegistry().invalidate(root)
-          ctx.emitEvent?.('actions.updated', { threadId, action }, threadId)
-          return { path, lineEdits, receiptId: action.receiptId }
+      const directory = threadId && ctx.mms.threads.getThread(threadId) ? ctx.mms.threads.getThreadDir(threadId) : undefined
+      if (directory) await settledPreparation(directory)
+      const lease = directory ? await waitAcquireExecutionLease(directory, { source: 'task-file-write' }) : undefined
+      try {
+        await ensureOwnedTaskWorkspace(ctx, p, lease)
+        const root = projectRootContext(ctx, p)
+        const guard = guardFor(ctx)
+        const wanted = asString(p.path, 'path', 4096)
+        // Checked once, before the action is recorded, so a refused path leaves no action behind. What the repository says about
+        // hooks and configuration is looked up first, without blocking the daemon.
+        await guard.prepare?.(root, wanted, 'write').catch(() => undefined)
+        let guarded: GuardedPath
+        try {
+          guarded = guard.resolve(root, wanted, 'write')
+        } catch (error) {
+          throw refusedPath(error)
         }
+        const path = guarded.relative
+        // Another computer sends a large file ahead of the call (a staged value, at most what staging holds); every other caller keeps the 512 KiB limit.
+        const content = asString(p.content, 'content', ctx.connection?.bridgeCaller ? ROUTED_STAGE_ITEM_BYTES : 512 * 1024)
+        if (threadId) {
+          const operation = threadOperationContext(ctx, p)
+          const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+          if (workspace) {
+            if (workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Task workspace requires recovery before saving.')
+            const actions = new ThreadActionService(operation.threadDirectory)
+            const latest = actions.latest(workspace.conversationBranchId)
+            const { result: lineEdits, action } = await actions.runCheckpointedAction({
+              threadId, turnId: randomUUID(), conversationBranchId: workspace.conversationBranchId,
+              workspacePath: root, heldThreadLease: lease, actor: { kind: 'user' }, expectedJournalRevision: operation.currentGeneration,
+              presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
+              nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' }
+            }, () => ctx.mms.fileService.writeFile(root, path, content, guard, guarded)).catch(refusalOfAction)
+            // Covers daemon-side writers only: desktop saves and agent edits never reach this method
+            // (the search index refreshes on its own 15 s stale rule).
+            getWorkspaceIndexRegistry().invalidate(root)
+            ctx.emitEvent?.('actions.updated', { threadId, action }, threadId)
+            return { path, lineEdits, receiptId: action.receiptId }
+          }
+        }
+        const lineEdits = await ctx.mms.fileService.writeFile(root, path, content, guard, guarded).catch(refusalOfAction)
+        getWorkspaceIndexRegistry().invalidate(root)
+        return { path, lineEdits }
+      } finally {
+        if (lease) releaseExecutionLeaseHandle(lease)
       }
-      const lineEdits = await ctx.mms.fileService.writeFile(root, path, content, guard, guarded).catch(refusalOfAction)
-      getWorkspaceIndexRegistry().invalidate(root)
-      return { path, lineEdits }
     }
     case 'files.stat': {
       const p = isObject(params) ? params : {}
@@ -4762,36 +5039,53 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         timeoutMs: asOptionalBoundedInt(p.timeoutMs, 'timeoutMs', { min: 100, max: 10_000 }) ?? 1_000
       }) satisfies FileGrepResponse
     }
+    case 'git.heads': {
+      // The branches the sidebar's thread cards name, from Git's files: no Git process, no worktree set up or brought
+      // back, nothing waited for but each folder's own drive. One folder that cannot be read answers why; the rest answer.
+      // Checked before anything else (`checkGitReadParams`). `attempt` only makes a Retry's request its own.
+      const p = isObject(params) ? params : {}
+      const ids = (field: string) => p[field] === undefined ? [] : asStringArray(p[field], field, { unique: true, maxItems: GIT_HEADS_MAX, maxItemLen: 256 })
+      const projects: GitHeadsResult['projects'] = Object.create(null)
+      const threads: GitHeadsResult['threads'] = Object.create(null)
+      await Promise.all([
+        ...ids('projectIds').map(async (projectId) => {
+          const project = ctx.mms.projects.getProject(projectId)
+          projects[projectId] = project ? await folderHead(project.path) : { error: 'Project not found' }
+        }),
+        ...ids('threadIds').map(async (threadId) => {
+          const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
+          threads[threadId] = await threadHead(ctx.mms.getProfileHomeDir(), async () => {
+            const known = await ctx.mms.threads.peekThreadLocation(threadId)
+            return known && { directory: known.directory, placement: known.thread ? threadPlacement(known.thread) : undefined }
+          }, retirement, typeof p.attempt === 'number')
+        })
+      ])
+      return { projects, threads } satisfies GitHeadsResult
+    }
+    // The Git panel's reads never set a worktree up or bring a retired one back: a folder not on disk reads as missing.
     case 'git.status': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      const status = await ctx.mms.gitService.getStatus(root)
+      const status = await readGit(ctx, p, (root, shareKey) => ctx.mms.gitService.getStatus(root, { shareKey, fresh: typeof p.attempt === 'number' }))
       // How long a Discard here keeps its copy, for the confirmation to say: the owner's Undo window.
       const owner = discardOwnerFor(ctx, p)
       return { status: owner ? { ...status, discardKeptForMs: keptCopyWindowMs(owner) } : status }
     }
     case 'git.diff': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), asOptionalBoolean(p.staged, 'staged') === true) }
+      return { diff: await readGit(ctx, p, (root) => ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), p.staged === true)) }
     }
     case 'git.log': {
       const p = isObject(params) ? params : {}
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 }) ?? 30
-      await materializeRequestedWorkspace(ctx, p)
-      return { commits: await ctx.mms.gitService.getLog(projectRootContext(ctx, p), limit) }
+      return { commits: await readGit(ctx, p, (root) => ctx.mms.gitService.getLog(root, limit)) }
     }
     case 'git.branches': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
+      return { branches: await readGit(ctx, p, (root) => ctx.mms.gitService.getBranches(root)) }
     }
     case 'git.diffStats': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      return { stats: await ctx.mms.gitService.getDiffStats(projectRootContext(ctx, p)) }
+      return { stats: await readGit(ctx, p, (root) => ctx.mms.gitService.getDiffStats(root)) }
     }
     case 'git.checkUpstream': {
       const p = isObject(params) ? params : {}
@@ -5452,6 +5746,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     // With a `token` from the dry run it removes only what that plan named, and only if it is still eligible.
     case 'storage.cleanup.run': {
       const p = isObject(params) ? params : {}
+      // After the start's lifecycle pass, which finishes and checks the same records.
+      await ctx.mms.untilStartupLifecycleDone()
       return { report: await ctx.mms.storageCleanup.run('manual', p.token === undefined ? undefined : { plan: asPlanToken(p.token) }) }
     }
     // Dry run: what a run would remove or keep now. Changes nothing, so it is open to any local client too.

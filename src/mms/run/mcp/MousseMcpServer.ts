@@ -5,8 +5,9 @@ import type { AddressInfo, Socket } from 'node:net'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { ANTIGRAVITY_INSTANCE_ID } from '../../../shared/providerInstances'
 import { mousseVersion } from '../../appVersion'
-import { McpToolError, refusalOutcome, type McpCredentialAuthority, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
+import { McpToolError, refusalOutcome, type JsonSchema, type McpCredentialAuthority, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
 import type { CallAttribution } from '../nativeHelpers'
@@ -15,13 +16,86 @@ import { RELAY_BOT_INSTRUCTIONS, RELAY_INSTRUCTIONS, type RelayHandler } from '.
 /** The `tools/list` `_meta` key that keeps a tool out of Claude Code's tool search (`MousseTool.alwaysLoad`). */
 export const ALWAYS_LOAD_META = 'anthropic/alwaysLoad'
 
-/** One Mousse tool as `tools/list` gives it; an `alwaysLoad` tool says so in its `_meta`. */
-export function listedTool(tool: Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'alwaysLoad'>) {
+/** Max top-level tool description length when compacting `tools/list` for tight-budget runtimes (Antigravity). */
+const COMPACT_DESCRIPTION_CHARS = 120
+/** Max nested property description length kept when compacting schemas. */
+const COMPACT_PROPERTY_DESCRIPTION_CHARS = 50
+
+function compactText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  const sentence = /^.{15,}?[.!?](?=\s|$)/.exec(text)
+  if (sentence && sentence[0].length <= maxChars) return sentence[0]
+  return `${text.slice(0, maxChars - 1).trimEnd()}…`
+}
+
+function compactSchemaNode(node: unknown, depth: number): unknown {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) return node.map((item) => compactSchemaNode(item, depth + 1))
+  const record = node as Record<string, unknown>
+  // Collapse TypeBox literal unions (`anyOf: [{ const: 'a', type: 'string' }, ...]`) into a compact string enum.
+  if (
+    Array.isArray(record.anyOf) &&
+    record.anyOf.length > 0 &&
+    record.anyOf.every(
+      (entry) =>
+        Boolean(entry) &&
+        typeof entry === 'object' &&
+        !Array.isArray(entry) &&
+        typeof (entry as { const?: unknown }).const === 'string' &&
+        (entry as { type?: unknown }).type === 'string'
+    )
+  ) {
+    const out: Record<string, unknown> = {
+      type: 'string',
+      enum: record.anyOf.map((entry) => (entry as { const: string }).const)
+    }
+    if (typeof record.description === 'string') {
+      if (depth === 0) out.description = compactText(record.description, COMPACT_DESCRIPTION_CHARS)
+      else if (record.description.length <= COMPACT_PROPERTY_DESCRIPTION_CHARS && !/retry the same call/i.test(record.description)) {
+        out.description = record.description
+      }
+    }
+    return out
+  }
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(record)) {
+    if (key === 'description' && typeof value === 'string') {
+      if (depth >= 1 && (value.length > COMPACT_PROPERTY_DESCRIPTION_CHARS || /retry the same call/i.test(value))) continue
+      out[key] = depth === 0 ? compactText(value, COMPACT_DESCRIPTION_CHARS) : value
+      continue
+    }
+    out[key] = compactSchemaNode(value, depth + 1)
+  }
+  return out
+}
+
+/**
+ * Compacts a Mousse tool's `tools/list` entry so runtimes with a tight eager MCP schema budget
+ * (Antigravity `agy` drops larger tools once cumulative MCP schema bytes pass ~64 KiB) keep core
+ * tools like `delegate_task` instead of silently omitting them. Parameter names, types, enums and
+ * `required` fields stay intact; full prose already lives in `mousseOrchestrationInstructions`.
+ */
+export function compactListedTool<T extends Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'alwaysLoad'>>(tool: T): T {
   return {
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> },
-    ...(tool.alwaysLoad ? { _meta: { [ALWAYS_LOAD_META]: true } } : {})
+    ...tool,
+    description: compactText(tool.description, COMPACT_DESCRIPTION_CHARS),
+    inputSchema: compactSchemaNode(tool.inputSchema, 0) as JsonSchema
+  }
+}
+
+/** Default check for runtimes whose eager MCP tool budget needs compact Mousse schemas. */
+export function isCompactSchemaProvider(provider: string): boolean {
+  return provider === ANTIGRAVITY_INSTANCE_ID || provider.startsWith(`${ANTIGRAVITY_INSTANCE_ID}:`)
+}
+
+/** One Mousse tool as `tools/list` gives it; an `alwaysLoad` tool says so in its `_meta`. */
+export function listedTool(tool: Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'alwaysLoad'>, options?: { compact?: boolean }) {
+  const effective = options?.compact ? compactListedTool(tool) : tool
+  return {
+    name: effective.name,
+    description: effective.description,
+    inputSchema: effective.inputSchema as { type: 'object'; properties?: Record<string, object> },
+    ...(effective.alwaysLoad ? { _meta: { [ALWAYS_LOAD_META]: true } } : {})
   }
 }
 
@@ -113,6 +187,8 @@ export class MousseMcpServer implements McpAttachmentProvider {
        * every call is the run's own.
        */
       attribute?: (threadId: string, meta: unknown) => Promise<CallAttribution>
+      /** Whether `tools/list` should compact tool schemas for `provider` (defaults to Antigravity instances). */
+      compactToolSchemas?: (provider: string) => boolean
       /** Defaults to `127.0.0.1`. */
       host?: string
       /** Defaults to 0 (a random free port). */
@@ -259,11 +335,15 @@ export class MousseMcpServer implements McpAttachmentProvider {
       { name: 'mousse', version: mousseVersion() },
       { capabilities: { tools: {} }, ...(registry.isBotThread(resolved.threadId) ? {} : { instructions: mousseOrchestrationInstructions() }) }
     )
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       // For the thread's ceiling, not the turn's mode; the call-time check refuses a tool the list left out in any case.
       // A bot's thread tools follow the run the credential acts for now (`ToolListing.botTurnTools`).
-      tools: ((current) => registry.listForThread(resolved.threadId, 'default', current.runId))(credentials.current(resolved.tokenHash) ?? resolved).map(listedTool)
-    }))
+      const current = credentials.current(resolved.tokenHash) ?? resolved
+      const compact = (this.options.compactToolSchemas ?? isCompactSchemaProvider)(current.provider)
+      return {
+        tools: registry.listForThread(resolved.threadId, 'default', current.runId).map((tool) => listedTool(tool, { compact }))
+      }
+    })
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { clientRequestId, ...args } = (request.params.arguments ?? {}) as Record<string, unknown>
       const toolCallId = typeof clientRequestId === 'string' && clientRequestId.trim()

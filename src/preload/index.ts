@@ -1,5 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
-import type { WindowsGitSetup } from '../shared/windowsGit'
+import type { GitSetup } from '../shared/gitSetup'
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import type { WindowCacheSize } from '../shared/diagnostics/profiler'
@@ -20,6 +20,7 @@ import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
 import type { SubagentSummary, SubagentsUpdatedEvent } from '../shared/subagents'
+import type { ThreadBackgroundWork } from '../shared/backgroundWork'
 import type {
   Agent,
   BrowserBounds,
@@ -32,6 +33,7 @@ import type {
   FileAsset,
   EditorInfo,
   FileEntry,
+  FileText,
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
@@ -66,6 +68,9 @@ import type {
   GitPushOptions,
   GitScope,
   GitStatusSnapshot,
+  GitHeadsChangedEvent,
+  GitHeadsRequest,
+  GitHeadsResult,
   MainView,
   OrchestratorResponse,
   PermissionMode,
@@ -88,6 +93,7 @@ import type {
   TaskStatus,
   Thread,
   ThreadListVersion,
+  ThreadRowPayload,
   ThreadActivitySnapshot,
   TurnState,
   TurnStateSnapshot,
@@ -114,6 +120,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
+import type { WarmStartView } from '../shared/warmStart'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
@@ -206,6 +213,9 @@ let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number
 async function attachmentPath(file: File, target: { kind: 'bot' } | { kind: 'thread'; threadId: string | null }): Promise<string> {
   return webUtils.getPathForFile(file) || ipcRenderer.invoke('attachments:stage', target, file.name, new Uint8Array(await file.arrayBuffer()))
 }
+
+/** The warm start is read once per page load (`app.warmStartView`). */
+let warmStartTaken = false
 
 const api = {
   platform: process.platform,
@@ -537,13 +547,17 @@ const api = {
       ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
     readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
-    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
-      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    readFileInWorkspace: (filePath: string, threadId: string, expectedRoot?: string): Promise<FileText & { workspaceRoot?: string }> =>
+      ipcRenderer.invoke('fs:readFile', filePath, undefined, threadId, undefined, { expectedRoot }),
+    readFileDetails: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileText> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root, true),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string, details?: boolean): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root, details),
     /** A preview's size and write time (`mtimeMs` absent from an older daemon), without reading it. */
     assetStamp: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<{ size: number; mtimeMs?: number }> =>
       ipcRenderer.invoke('fs:assetStamp', filePath, projectId, threadId, root),
-    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
+    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string, expectedRoot?: string): Promise<void> =>
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root, expectedRoot),
     /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
     listDrives: (): Promise<{ home: string; drives: Array<{ path: string; label: string; volume?: string }> }> => ipcRenderer.invoke('fs:listDrives'),
     search: (
@@ -572,6 +586,15 @@ const api = {
     // Reads name their folder by scope, like the mutations: the thread when it is the thread's own worktree, else the project.
     status: (scope: GitScope): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', scope),
+    /** The branches thread cards name, from Git's files: no Git process. */
+    heads: (request: GitHeadsRequest): Promise<GitHeadsResult> =>
+      ipcRenderer.invoke('git:heads', request),
+    /** Mousse changed these threads' branches (made a worktree, renamed its branch). */
+    onHeadsChanged: (cb: (event: GitHeadsChangedEvent) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: GitHeadsChangedEvent): void => cb(payload)
+      ipcRenderer.on('git:headsChanged', handler)
+      return () => ipcRenderer.removeListener('git:headsChanged', handler)
+    },
     log: (limit: number | undefined, scope: GitScope): Promise<GitCommit[]> =>
       ipcRenderer.invoke('git:log', limit, scope),
     branches: (scope: GitScope): Promise<GitBranchInfo> =>
@@ -925,7 +948,7 @@ const api = {
     resetWorktreeFolder: (): Promise<{ status: import('../shared/storage').WorktreeFolderStatus }> => storageInvoke('storage:resetWorktreeFolder')
   },
   workspace: {
-    getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
+    getStatus: (threadId: string, fresh?: boolean): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId, fresh),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
     /**
@@ -994,6 +1017,16 @@ const api = {
     }
   },
   threads: {
+    /** What the thread runs in the background besides its subagents (the composer's status row). */
+    backgroundWork: (threadId: string): Promise<ThreadBackgroundWork> => ipcRenderer.invoke('threads:backgroundWork', threadId),
+    /** Stops one item of it by id (`PROVIDER_BACKGROUND_ID` for the provider's own work); false when it was not running. */
+    stopBackground: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke('threads:stopBackground', threadId, id),
+    /** The daemon's whole picture of a thread's background work, each time it changes. */
+    onBackgroundWork: (cb: (work: ThreadBackgroundWork) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, work: ThreadBackgroundWork) => cb(work)
+      ipcRenderer.on('threads:backgroundWork', handler)
+      return () => ipcRenderer.removeListener('threads:backgroundWork', handler)
+    },
     /**
      * A file attached in a thread's composer as a path on this computer: where it is, or, for a pasted one, a
      * temporary copy under the thread's folder (`new` before the thread is made).
@@ -1029,6 +1062,9 @@ const api = {
     /** One image of a message that arrived without its bytes. */
     messageImage: (threadId: string, messageId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
       ipcRenderer.invoke('threads:messageImage', threadId, messageId, index),
+    /** One image of a queued message that arrived without its bytes (a queue list sends large ones by name). */
+    queueImage: (threadId: string, queueItemId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
+      ipcRenderer.invoke('threads:queueImage', threadId, queueItemId, index),
     /** Deletes an archived thread and its subagent threads for good; a thread that is not archived is refused. */
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>
@@ -1079,8 +1115,9 @@ const api = {
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
-    search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
-      ipcRenderer.invoke('threads:search', query, limit),
+    /** `perThread`: which threads match, one message hit each, from this computer only (the sidebar's filter). */
+    search: (query: string, limit?: number, options?: { perThread?: boolean }): Promise<ThreadSearchResponse> =>
+      ipcRenderer.invoke('threads:search', query, limit, options),
     /** Saves that moved only these threads' `updatedAt` (`threads.touched`), throttled by the service. */
     onTouched: (cb: (touches: Array<{ id: string; updatedAt: string }>) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, touches: Array<{ id: string; updatedAt: string }>) => cb(touches)
@@ -1093,6 +1130,12 @@ const api = {
         Array.isArray(data) ? cb(data) : cb(data.threads, data.version)
       ipcRenderer.on('threads:updated', handler)
       return () => ipcRenderer.removeListener('threads:updated', handler)
+    },
+    /** One thread's change (`threads.row`): its row, or the id of a thread that left the list, with the list version. */
+    onRow: (cb: (row: ThreadRowPayload) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, row: ThreadRowPayload) => cb(row)
+      ipcRenderer.on('threads:row', handler)
+      return () => ipcRenderer.removeListener('threads:row', handler)
     },
     onTitleGenerationFailed: (
       cb: (payload: { threadId: string; error: string }) => void
@@ -1407,16 +1450,26 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
-    windowsGitSetup: (): Promise<WindowsGitSetup> => ipcRenderer.invoke('app:windowsGitSetup'),
-    onWindowsGitSetupChanged: (cb: (setup: WindowsGitSetup) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, setup: WindowsGitSetup) => cb(setup)
-      ipcRenderer.on('app:windowsGitSetupChanged', handler)
-      return () => ipcRenderer.removeListener('app:windowsGitSetupChanged', handler)
+    installGit: (): Promise<boolean> => ipcRenderer.invoke('app:installGit'),
+    gitSetup: (): Promise<GitSetup> => ipcRenderer.invoke('app:gitSetup'),
+    onGitSetupChanged: (cb: (setup: GitSetup) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, setup: GitSetup) => cb(setup)
+      ipcRenderer.on('app:gitSetupChanged', handler)
+      return () => ipcRenderer.removeListener('app:gitSetupChanged', handler)
+    },
+    /**
+     * What this window's profile showed last time, to show until the service answers (display only). Synchronous, so
+     * the window's first frame shows it; answered once per page load, then null.
+     */
+    warmStartView: (): WarmStartView | null => {
+      if (warmStartTaken) return null
+      warmStartTaken = true
+      return (ipcRenderer.sendSync('app:warmStartView') as WarmStartView | null) ?? null
     },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
-    getFilesRoot: (threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('app:getFilesRoot', threadId),
+    getFilesRoot: (threadId?: string | null, fresh?: boolean): Promise<string> =>
+      ipcRenderer.invoke('app:getFilesRoot', threadId, fresh),
     restart: (): Promise<void> => ipcRenderer.invoke('app:restart'),
     navigateMainView: (view: MainView): Promise<void> =>
       ipcRenderer.invoke('app:navigateMainView', view),
@@ -1484,7 +1537,15 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, change: { profileId?: string }) => cb(change)
       ipcRenderer.on('netEngine:changed', handler)
       return () => ipcRenderer.removeListener('netEngine:changed', handler)
-    }
+    },
+    /** A `mousse://pair` link reached Mousse: take it with `takePairLink`. */
+    onPairLink: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('netEngine:pairLink', handler)
+      return () => ipcRenderer.removeListener('netEngine:pairLink', handler)
+    },
+    /** The `mousse://pair` link waiting for a window, once (null when none). */
+    takePairLink: (): Promise<string | null> => ipcRenderer.invoke('netEngine:takePairLink')
   },
   /** In-app updates from GitHub Releases (src/main/updates). */
   updates: {

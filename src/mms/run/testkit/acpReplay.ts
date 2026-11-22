@@ -33,6 +33,12 @@ export interface ReplayAcpProcess {
   onUpdate?: (update: unknown, sessionId?: string) => void
 }
 
+interface OpenCall {
+  method: string
+  resolve: (result: unknown) => void
+  reject: (error: unknown) => void
+}
+
 function withoutCwd(params: unknown): unknown {
   if (!params || typeof params !== 'object') return params
   const { cwd: _cwd, ...rest } = params as Record<string, unknown>
@@ -47,6 +53,8 @@ export function replayAcpProcess(transport: ReplayTransport): AcpConnectionFacto
       abort.signal.addEventListener('abort', () => reject(abort.signal.reason), { once: true })
     })
     closed.catch(() => undefined)
+    /** Requests sent and not yet answered, oldest first. */
+    const open: OpenCall[] = []
     const process: ReplayAcpProcess = {
       // Already exited: the service's close() never signals a real pid.
       child: { exitCode: 0, signalCode: null, kill: () => true },
@@ -61,20 +69,30 @@ export function replayAcpProcess(transport: ReplayTransport): AcpConnectionFacto
           request: async (method, params) => {
             abort.signal.throwIfAborted()
             transport.send({ kind: 'request', method, params: withoutCwd(params) })
-            const settle = async (): Promise<unknown> => {
-              for (;;) {
+            let resolve!: (result: unknown) => void
+            let reject!: (error: unknown) => void
+            const settled = new Promise<unknown>((res, rej) => { resolve = res; reject = rej })
+            // A close settles the call first; the abandoned read must not surface as unhandled.
+            settled.catch(() => undefined)
+            const call: OpenCall = { method, resolve, reject }
+            open.push(call)
+            // Every open call reads until it is answered. Whichever reader takes a frame handles it the same way: an
+            // answer goes to the oldest open call, as an agent answers a running prompt before one sent into it.
+            void (async () => {
+              while (open.includes(call)) {
                 const frame = (await transport.receive()) as AcpInbound | undefined
                 if (abort.signal.aborted) throw abort.signal.reason
                 if (!frame) throw new ReplayMismatchError(`Transcript ended before ${method} settled`)
                 if (frame.kind === 'update') process.onUpdate?.(frame.update)
-                else if (frame.kind === 'response') return frame.result
-                else if (frame.kind === 'error') throw new Error(frame.message)
+                else if (frame.kind === 'response') open.shift()?.resolve(frame.result)
+                else if (frame.kind === 'error') open.shift()?.reject(new Error(frame.message))
                 else throw new ReplayMismatchError(`Unknown inbound frame ${JSON.stringify(frame)}`)
               }
-            }
-            const settled = settle()
-            // A close settles the call first; the abandoned read must not surface as unhandled.
-            settled.catch(() => undefined)
+            })().catch((error: unknown) => {
+              const at = open.indexOf(call)
+              if (at >= 0) open.splice(at, 1)
+              reject(error)
+            })
             return Promise.race([settled, closed])
           },
           notify: async (method, params) => {
