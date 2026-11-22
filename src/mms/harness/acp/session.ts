@@ -574,6 +574,11 @@ export class AcpSessions {
   private readonly turning = new Set<AcpProcess>()
   /** Per thread, the session a turn that did not finish left resumable, until `commitInterrupted` fingerprints it. */
   private readonly interrupted = new Map<string, string>()
+  /**
+   * Per thread, the session whose process a stop ended on purpose (`interrupt`): the stopped turn's history still
+   * commits to it (`commitConversation`), so the next turn resumes it on a new process.
+   */
+  private readonly stoppedForResume = new Map<string, string>()
   private stopped = false
   private liveHost: LiveProcessHost | null = null
   private readonly prompter: PermissionPrompter
@@ -1153,7 +1158,9 @@ export class AcpSessions {
   /** Record only the canonical history that the owning turn durably committed. */
   commitConversation(threadId: string, history: string): void {
     const saved = this.options.store.saved(threadId)
-    if (!saved || !this.sessions.has(threadId)) return
+    const stopped = this.stoppedForResume.get(threadId)
+    this.stoppedForResume.delete(threadId)
+    if (!saved || !(this.sessions.has(threadId) || (stopped !== undefined && stopped === saved.sessionId))) return
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
   }
 
@@ -1199,7 +1206,10 @@ export class AcpSessions {
     await active.prompting
     // The agent may still count its task as running after the cancel's reply: its process ends,
     // and the thread's next turn reopens the saved session on a new one.
-    if (this.options.quirks.xaiExtensions) closeAcpConnection(active)
+    if (this.options.quirks.xaiExtensions) {
+      if (active.threadId && active.sessionId) this.stoppedForResume.set(active.threadId, active.sessionId)
+      closeAcpConnection(active)
+    }
     return 'interrupted'
   }
 
@@ -1319,6 +1329,7 @@ export class AcpSessions {
     const { label, store, questions, quirks } = this.options
     input.signal?.throwIfAborted()
     this.interrupted.delete(input.threadId)
+    this.stoppedForResume.delete(input.threadId)
     const historyKey = this.historyKey(input.history ?? '')
     const instanceId = input.instanceId ?? this.options.defaultInstanceId
     // A native session belongs to the instance that opened it; another instance starts fresh.
