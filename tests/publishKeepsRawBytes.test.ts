@@ -14,7 +14,7 @@ import type { RestoreKind } from '../src/mms/actions/restoreCommands'
 import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { PublishService, type PublishResult } from '../src/mms/actions/PublishService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
-import { CRASH_CHILD_REQUIRE } from './fixtures/gitFoundation'
+import { CRASH_CHILD_REQUIRE, KILL_CRASH_CHILD } from './fixtures/gitFoundation'
 import { pressed } from './support/userRequest'
 
 process.env.GIT_CONFIG_GLOBAL = '/dev/null'
@@ -86,7 +86,7 @@ function restoreFromNotice(notice: string, ref: string, top: string, path: strin
  * `phase` `before`/`after`, that exits around its `change-publish` `git_applied` record, with `script` run for `when`.
  */
 async function publishCrashingAt(f: { owner: string; workspace: string; cwd: string }, when: string, operationId: string, crash: { phase: 'git' | 'before' | 'after'; script?: string } = { phase: 'git' }): Promise<void> {
-  const bin = launcher(when, crash.script ?? 'kill -9 $PPID; exit 1')
+  const bin = launcher(when, crash.script ?? `${KILL_CRASH_CHILD}; exit 1`)
   const configPath = join(root, `crash-${count}.json`)
   writeFileSync(configPath, JSON.stringify({ kind: 'publish', phase: crash.phase, thread: f.owner, repo: f.cwd, source: f.workspace, target: 'main', options: { operationId } }))
   const runner = join(root, `publish-crash-${count}.mjs`)
@@ -94,7 +94,7 @@ async function publishCrashingAt(f: { owner: string; workspace: string; cwd: str
   const home = join(root, `home-${count}`)
   mkdirSync(home)
   const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: home, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', timeout: 30_000 })
-  if (crash.phase === 'git' || crash.script?.includes('kill -9')) expect(child.signal, child.stderr).toBe('SIGKILL')
+  if (crash.phase === 'git' || crash.script?.includes(KILL_CRASH_CHILD)) expect(child.signal, child.stderr).toBe('SIGKILL')
   else expect(child.status, child.stderr).toBe(86)
 }
 
@@ -226,7 +226,7 @@ describe('Publish keeps raw bytes Git converts in the person checkout', () => {
     writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
     rmSync(join(f.workspace, 'gone.txt'))
     // Mousse stops (the computer turns off) as Git's fast-forward is about to start.
-    const bin = launcher(`*" merge --ff-only "*`, `kill -9 $PPID; exit 1`)
+    const bin = launcher(`*" merge --ff-only "*`, `${KILL_CRASH_CHILD}; exit 1`)
     const configPath = join(root, `crash-${count}.json`)
     writeFileSync(configPath, JSON.stringify({ kind: 'publish', phase: 'git', thread: f.owner, repo: f.cwd, source: f.workspace, target: 'main', options: { operationId: 'publish-crash' } }))
     const runner = join(root, `publish-crash-${count}.mjs`)
@@ -495,7 +495,7 @@ describe('Publish over files Git converts: sparse checkouts, long paths and file
     const original = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
     writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
     // The published version is staged as the fast-forward starts; Mousse stops right after Git succeeds.
-    await publishCrashingAt(f, `*" merge --ff-only "*`, 'publish-skipped', { phase: 'git', script: `${stageBlob(f.cwd, 'base.txt', 'published\n')}; '${realGit}' "$@"; kill -9 $PPID; exit 1` })
+    await publishCrashingAt(f, `*" merge --ff-only "*`, 'publish-skipped', { phase: 'git', script: `${stageBlob(f.cwd, 'base.txt', 'published\n')}; '${realGit}' "$@"; ${KILL_CRASH_CHILD}; exit 1` })
     expect(existsSync(join(f.cwd, 'base.txt'))).toBe(false)
     const head = git(f.cwd, 'rev-parse', 'HEAD'), index = readFileSync(join(f.cwd, '.git', 'index'))
 
@@ -515,7 +515,7 @@ describe('Publish over files Git converts: sparse checkouts, long paths and file
     const f = fixture()
     const original = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
     writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
-    await publishCrashingAt(f, `*" merge --ff-only "*`, 'publish-skipped-failing', { phase: 'git', script: `${stageBlob(f.cwd, 'base.txt', 'published\n')}; '${realGit}' "$@"; kill -9 $PPID; exit 1` })
+    await publishCrashingAt(f, `*" merge --ff-only "*`, 'publish-skipped-failing', { phase: 'git', script: `${stageBlob(f.cwd, 'base.txt', 'published\n')}; '${realGit}' "$@"; ${KILL_CRASH_CHILD}; exit 1` })
     // Git cannot write the file during recovery either.
     const failing = launcher(`*" cat-file --filters "*`, 'exit 1')
     const [settled] = await withPath(failing, () => new PublishService(f.owner).recoverPending(f.workspace, f.cwd))

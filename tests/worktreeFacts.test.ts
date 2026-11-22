@@ -173,9 +173,10 @@ it('Git checks the checkout itself when only safe.directory can trust it', async
   git(repo.main, 'worktree', 'add', '-q', '-b', 'wt', path)
   // Git's own switch for treating every owner as someone else's: trust can only come from safe.directory.
   process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = '1'
-  // Production strips inherited Git test switches. Pass this one to the real Git process only for this test.
+  // Production strips inherited Git test switches. Pass this one to the real Git process only for this test, and keep
+  // the machine's system config out: CI images trust every folder there (`safe.directory = *`).
   const normalEnv = gitPrograms.repoProgramEnv
-  vi.spyOn(gitPrograms, 'repoProgramEnv').mockImplementation((env) => ({ ...normalEnv(env), GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' }))
+  vi.spyOn(gitPrograms, 'repoProgramEnv').mockImplementation((env) => ({ ...normalEnv(env), GIT_TEST_ASSUME_DIFFERENT_OWNER: '1', GIT_CONFIG_NOSYSTEM: '1' }))
   const config = join(root, 'global.gitconfig')
   writeFileSync(config, '')
   process.env.GIT_CONFIG_GLOBAL = config
