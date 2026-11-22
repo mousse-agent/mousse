@@ -227,7 +227,12 @@ jobs:
           restore-keys: voice-engine-${{ runner.os }}-${{ runner.arch }}-rust-1.96.0-
       # The CI Static checks job typechecks the same commit, and publishing waits for it.
       - run: npm run dist:win:prep
+      # Setup unpacks the app with the Nsis7z 19.00 plugin, which cannot read 7-Zip's ARM64 filter;
+      # the 7-Zip electron-builder packs with picks that filter for arm64 programs, and Setup then
+      # installs no Mousse.exe. The x86 BCJ filter is one that plugin reads. x64 keeps the default.
       - run: npx electron-builder ${{ matrix.builder-args }} --publish never
+        env:
+          ELECTRON_BUILDER_7Z_FILTER: ${{ matrix.arch == 'arm64' && 'BCJ' || '' }}
       # Unsigned, like the rest of the Windows build for now.
       - name: Check the package carries the SSH helper
         run: |
@@ -252,6 +257,7 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'mousse-install'
           $p = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$dir" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "The installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $dir 'Mousse.exe'))) { throw 'The installer did not install Mousse.exe' }
           $cli = Join-Path $dir 'mousse-cli.exe'
           if (-not (Test-Path $cli)) { throw 'The installer did not make mousse-cli.exe' }
           $bytes = [IO.File]::ReadAllBytes($cli)
