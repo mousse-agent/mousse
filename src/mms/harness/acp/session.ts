@@ -580,7 +580,7 @@ export class AcpSessions {
    * Per thread, the session whose process a stop ended on purpose (`interrupt`): the stopped turn's history still
    * commits to it (`commitConversation`), so the next turn resumes it on a new process.
    */
-  private readonly stoppedForResume = new Map<string, string>()
+  private readonly stoppedForResume = new Map<string, { sessionId: string; process: AcpProcess }>()
   private stopped = false
   private liveHost: LiveProcessHost | null = null
   private readonly prompter: PermissionPrompter
@@ -1042,7 +1042,7 @@ export class AcpSessions {
         this.clearBackgroundState(active)
         this.failContinuation(active, new Error(`${label} exited`))
         // A process that ended by itself leaves nothing resumable for the stopped turn.
-        if (!active.closedForResume && active.threadId && active.sessionId && this.stoppedForResume.get(active.threadId) === active.sessionId)
+        if (!active.closedForResume && active.threadId && this.stoppedForResume.get(active.threadId)?.process === active)
           this.stoppedForResume.delete(active.threadId)
         if (active.threadId && this.sessions.get(active.threadId) === active) this.sessions.delete(active.threadId)
       }
@@ -1165,7 +1165,7 @@ export class AcpSessions {
     const saved = this.options.store.saved(threadId)
     const stopped = this.stoppedForResume.get(threadId)
     this.stoppedForResume.delete(threadId)
-    if (!saved || !(this.sessions.has(threadId) || (stopped !== undefined && stopped === saved.sessionId))) return
+    if (!saved || !(this.sessions.has(threadId) || stopped?.sessionId === saved.sessionId)) return
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
   }
 
@@ -1213,7 +1213,7 @@ export class AcpSessions {
     // and the thread's next turn reopens the saved session on a new one. Marked before the prompt ends, so the
     // stopped turn's commit finds it whether it runs before or after the close.
     const xai = this.options.quirks.xaiExtensions
-    if (xai && active.threadId) this.stoppedForResume.set(active.threadId, active.sessionId!)
+    if (xai && active.threadId) this.stoppedForResume.set(active.threadId, { sessionId: active.sessionId!, process: active })
     await active.connection.agent.notify(methods.agent.session.cancel, { sessionId: active.sessionId! })
     await active.prompting
     if (xai && !active.connection.signal.aborted) {
