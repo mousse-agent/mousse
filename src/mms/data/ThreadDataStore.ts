@@ -3147,8 +3147,9 @@ export class ThreadDataStore extends EventEmitter {
     this.indexDirty.clear()
     if (!targets.length) return
     this.indexUpdate = this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).then(() => undefined, (error: unknown) => {
-      // Skipped while the index worker backs off after crashing; the client has logged that once.
-      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
+      // Skipped while the index worker backs off after crashing; the client has logged that once. One that ends after
+      // the profile began closing (its folder may be gone) is expected: the next start's reconcile catches it up.
+      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || this.sweepStopped) return
       console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
     })
   }
@@ -3206,7 +3207,8 @@ export class ThreadDataStore extends EventEmitter {
         const live = await this.databaseThreads(() => this.sweepStopped)
         if (this.sweepStopped || (!live.length && !this.threadDbStore)) return
         this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
-          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
+          // A reconcile cut off by the profile closing runs again at the next start.
+          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || this.sweepStopped) return
           console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
         })
       } finally {
