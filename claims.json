@@ -48,19 +48,6 @@
       "expiresAt": "2026-11-21T18:19:01.797Z"
     },
     {
-      "task": "fix-acp-out-of-turn-requests",
-      "session": "agibook-9bfa6e",
-      "machine": "agibook",
-      "branch": "fix-acp-out-of-turn-requests",
-      "paths": [
-        "src/mms/harness/acp/permissions.ts",
-        "src/mms/harness/acp/session.ts",
-        "src/mms/harness/acp/xai.ts"
-      ],
-      "claimedAt": "2026-11-22T10:38:47.087Z",
-      "expiresAt": "2026-11-22T12:38:47.087Z"
-    },
-    {
       "task": "fix/gemini-response-metadata-tokens",
       "session": "agibook-42220f",
       "machine": "agibook",
