@@ -48,17 +48,6 @@
       "expiresAt": "2026-11-21T18:19:01.797Z"
     },
     {
-      "task": "fix/gemini-response-metadata-tokens",
-      "session": "agibook-42220f",
-      "machine": "agibook",
-      "branch": "fix/gemini-response-metadata-tokens",
-      "paths": [
-        "src/mms/harness/acp/session.ts"
-      ],
-      "claimedAt": "2026-11-22T11:02:17.978Z",
-      "expiresAt": "2026-11-22T13:02:17.978Z"
-    },
-    {
       "task": "git-spawn-off-daemon-loop",
       "session": "Animatrix-2dabf9",
       "machine": "Animatrix",
