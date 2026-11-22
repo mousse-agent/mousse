@@ -160,6 +160,8 @@ describe('the list the sidebar shows', () => {
     expect(shown.activity.d1).toBe('processing')
     expect(shown.threads.filter((entry) => entry.id === 'd1')).toHaveLength(1)
     expect([...shown.unmade]).toEqual(['d1'])
+    const admitted = withPendingRows([...listed, draft('d1')], [row], { d1: 'processing' }, 'd1')
+    expect(admitted.unmade.has('d1')).toBe(false)
     const started = withPendingRows([...listed, { ...draft('d1'), startedAt: at }], [row], {}, 'd1')
     expect(started.unmade.size).toBe(0)
   })
@@ -235,7 +237,7 @@ describe('in the sidebar', () => {
   beforeEach(() => {
     const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
     const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32' } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32', git: {} } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
     usePendingThreadRows.setState({ rows: [], rowKeys: new Map() })
     useAppStore.setState({ profileId: 'default', projects: [project('p1', 'Mousse')], threads: [...listed, draft('d1')], threadActivity: {}, activeThreadId: 'd1', threadsSidebarView: 'projects', sidebarMode: 'projects', threadFeedOrder: [] })
     host = document.createElement('div')

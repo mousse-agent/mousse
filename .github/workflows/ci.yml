@@ -55,6 +55,10 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+        env:
+          # Type-aware ESLint loads both tsconfig.node.json and tsconfig.web.json in one process,
+          # which exceeds Node's default 4 GB heap ceiling on ubuntu-24.04 runners.
+          NODE_OPTIONS: --max-old-space-size=8192
 
   build:
     name: Build
@@ -212,6 +216,8 @@ jobs:
           npx vitest run
           tests/browserWindowsSandboxPermissions.test.ts
           tests/cliWindowsConsoleTty.test.ts
+          tests/gitSpawnWorker.test.ts
+          tests/claudeSubscriptionProvider.test.ts
           tests/net/editor/endpointWindows.test.ts
           tests/net/editor/windowsShell.test.ts
           tests/net/transports/ssh.test.ts

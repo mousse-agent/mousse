@@ -191,6 +191,8 @@ export interface ProviderTaskEnd {
   durationMs?: number
 }
 
+export type NamingOrigin = 'new_thread' | 'send' | 'regenerate'
+
 /**
  * One model request with no tools and no session (a chat title), run by the gateway's `oneShot`.
  * The gateway resolved and admitted the selection and owns the timeout; the driver makes exactly one
@@ -208,6 +210,8 @@ export interface OneShotSpec {
   sessionKey?: string
   /** What the request is for, so a refusal can say so; absent reads as `title`. */
   task?: OneShotTask
+  /** The action that requested thread naming, when one did. */
+  namingOrigin?: NamingOrigin
   /** Called on every event the provider sends; the gateway's inactivity timeout restarts. */
   onActivity(): void
 }

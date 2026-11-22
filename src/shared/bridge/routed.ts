@@ -89,6 +89,8 @@ export interface RoutedRow {
 
 const FOLDER = ['threadId', 'projectId'] as const
 const GEN = 'expectedJournalGeneration'
+const GIT_READ = ['workspaceGeneration', 'attempt'] as const
+const gitReadV2 = { version: 2, since: { workspaceGeneration: 2, attempt: 2 } }
 /** The key of a call that names its staged values: `{ stagedValues: { content: 'stg_…' } }`. */
 export const ROUTED_STAGED_KEY = 'stagedValues'
 
@@ -129,9 +131,14 @@ const write = (target: RoutedTarget, keys: readonly string[], extra?: Partial<Ro
  */
 export const ROUTED_SEND_WINDOW_KEY = 'window'
 
-/** Keys that only tell an owner more about the caller: one whose version of the row predates them goes without. */
+/** Optional behavior an older owner can omit while still providing its original answer. */
 export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  'orchestrator.send': [ROUTED_SEND_WINDOW_KEY]
+  'orchestrator.send': [ROUTED_SEND_WINDOW_KEY],
+  'git.status': GIT_READ,
+  'git.diff': GIT_READ,
+  'git.log': GIT_READ,
+  'git.branches': GIT_READ,
+  'git.diffStats': GIT_READ
 })
 
 /**
@@ -287,17 +294,17 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'review.file': read('folder', [...FOLDER, 'scope', 'path', 'oldPath'], {
     required: ['scope', 'path']
   }),
-  'git.status': read('folder', [...FOLDER]),
+  'git.status': read('folder', [...FOLDER, ...GIT_READ], gitReadV2),
   // How far the branch and its upstream are apart on the remote now, read on the computer that has the folder.
   'git.checkUpstream': read('folder', [...FOLDER]),
   // HEAD → working tree as hunks, with what the next commit takes. A large answer is paged.
   'git.changes': read('folder', [...FOLDER, 'paths']),
   // The reverts of the folder its copies still let the person restore.
   'git.revertedList': read('folder', [...FOLDER]),
-  'git.diff': read('folder', [...FOLDER, 'path', 'staged'], { required: ['path'] }),
-  'git.log': read('folder', [...FOLDER, 'limit']),
-  'git.branches': read('folder', [...FOLDER]),
-  'git.diffStats': read('folder', [...FOLDER]),
+  'git.diff': read('folder', [...FOLDER, 'path', 'staged', ...GIT_READ], { ...gitReadV2, required: ['path'] }),
+  'git.log': read('folder', [...FOLDER, 'limit', ...GIT_READ], gitReadV2),
+  'git.branches': read('folder', [...FOLDER, ...GIT_READ], gitReadV2),
+  'git.diffStats': read('folder', [...FOLDER, ...GIT_READ], gitReadV2),
   'git.lastCommitMessage': read('folder', [...FOLDER]),
   'files.list': read('folder', [...FOLDER, 'path']),
   'files.read': read('folder', [...FOLDER, 'path'], { required: ['path'] }),
@@ -982,6 +989,10 @@ export interface RoutedLocalRule {
  * classified deliberately: either a row above, or a rule here.
  */
 export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
+  {
+    methods: ['git.heads'],
+    reason: 'The sidebar batches IDs owned by its local profile. Remote workspaces are looked up individually on their owners.'
+  },
   {
     methods: [
       'health',

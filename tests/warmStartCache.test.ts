@@ -70,6 +70,18 @@ describe('the warm start file', () => {
     expect(next.lastActiveThread('prf_a')).toBe('t1')
   })
 
+  it('ignores branch names left by an earlier warm view', async () => {
+    const cache = new WarmStartCache(file, { fs, log })
+    showWindow(cache)
+    await cache.flush()
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.profiles[0][1].heads = { threads: { t1: { own: true, branch: 'outdated' } }, projects: {} }
+    await writeFile(file, JSON.stringify(stored))
+    const view = await new WarmStartCache(file, { fs, log }).view()
+    expect(view).toMatchObject({ activeThreadId: 't1' })
+    expect(view).not.toHaveProperty('heads')
+  })
+
   it('keeps the threads\' settled states and the projects\' icons, within their limits', async () => {
     const cache = new WarmStartCache(file, { fs, log })
     showWindow(cache)

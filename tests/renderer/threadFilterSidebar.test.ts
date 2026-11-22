@@ -44,7 +44,7 @@ const threads = [
 function preload(): unknown {
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-  return new Proxy({} as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+  return new Proxy({ git: {} } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
 }
 
 const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode'] as const

@@ -144,7 +144,8 @@ export function ChangesPanel() {
   // By its ids: `location` is a new object on most renders, and every read and listener below hangs off this scope.
   const scopeProjectId = location.projectId
   const scopeThreadId = location.workspaceThreadId
-  const gitScope = useMemo(() => gitScopeFor({ projectId: scopeProjectId, workspaceThreadId: scopeThreadId }), [scopeProjectId, scopeThreadId])
+  const generation = location.workspaceGeneration
+  const gitScope = useMemo(() => gitScopeFor({ projectId: scopeProjectId, workspaceThreadId: scopeThreadId, workspaceGeneration: generation }), [scopeProjectId, scopeThreadId, generation])
   const stateKey = threadId ?? (folderId ? `folder:${folderId}` : null)
   const threadState = useChangesStore((s) => (stateKey ? s.byThread[stateKey] : undefined))
   const viewed = useChangesStore((s) => s.viewed)

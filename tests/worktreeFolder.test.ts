@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, normalize, sep } from 'node:path'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { assertGitAllowed, decideGitCommand, GitPolicyError, gitPolicyMode } from '../src/mms/git/gitPolicy'
@@ -312,7 +312,8 @@ test('a chosen folder whose marker went missing is still the one chosen: its rep
   expect((await checkWorktreeFolder(f.folder, f.home)).id).toBe(f.entry.id)
   await f.choose(f.entry)
   expect(decideGitCommand({ cwd: made.worktreePath, args: ['add', '-A'] }).allowed).toBe(true)
-  expect((await new ThreadWorkspaceManager(f.thread('thread-two')).provision('thread-two', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Second' })).worktreePath.startsWith(f.repositoryFolder + '/')).toBe(true)
+  const next = await new ThreadWorkspaceManager(f.thread('thread-two')).provision('thread-two', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Second' })
+  expect(dirname(normalize(next.worktreePath))).toBe(f.repositoryFolder)
 })
 
 test('a worktree in a chosen folder stays the thread\'s after its repository is moved and repaired, and the record takes the new key', async () => {
@@ -398,7 +399,7 @@ test('a worktree in a chosen folder is trashed on its own drive, and a restore m
   writeFileSync(join(f.worktree, 'a.txt'), 'edited\n')
   await f.service.prepare(f.input)
   const trashed = await f.service.retire(f.path)
-  expect(trashed.trashPath!.startsWith(join(f.folder, WORKTREE_TRASH_FOLDER, 'worktrees') + '/')).toBe(true)
+  expect(normalize(trashed.trashPath!).startsWith(join(f.folder, WORKTREE_TRASH_FOLDER, 'worktrees') + sep)).toBe(true)
   expect(existsSync(f.worktree)).toBe(false)
   expect(existsSync(join(f.home, 'trash', 'worktrees'))).toBe(false)
   const before = filesOf(trashed.trashPath!)
@@ -586,7 +587,7 @@ test('agent worktrees of a dispatch go to the chosen folder and are cleaned up t
   // Cleanup renames the folder beside itself, in the chosen folder and so on its drive, before it deletes it.
   const renamed: string[] = []
   expect(await manager.cleanupValidatedAgentWorktree(info, { keepIgnored: { owner: f.thread('dispatch-owner'), deleteIgnored: true, record: (step) => { if (step.phase === 'deleting') renamed.push(step.path) } } })).toMatchObject({ success: true })
-  expect(renamed).toEqual([expect.stringMatching(/\/\.deleting-[a-f0-9]{16}$/)])
+  expect(renamed.map((path) => basename(path))).toEqual([expect.stringMatching(/^\.deleting-[a-f0-9]{16}$/)])
   expect(dirname(renamed[0]!)).toBe(join(f.repositoryFolder, 'agents'))
   expect(manager.isValidatedAgentWorktreePath(renamed[0]!)).toBe(true)
   expect(existsSync(info.path)).toBe(false)
@@ -602,8 +603,8 @@ test("a workflow's isolated agents get their worktrees in the chosen folder", as
   const owner = { profileId: 'test', threads: { getThread: () => ({ id: 'workflow-parent', projectId: 'project' }), getThreadDir: () => directory }, projects: { getProject: () => ({ id: 'project', path: f.repo }) } }
   const registrationRoot = join(f.home, 'workflow-agent-bindings', 'workspaces')
   const made = await provisionOwnedAgentWorkspace({ owner, context, idempotencyKey: 'worker', registrationRoot, scratchRoot: registrationRoot } as never)
-  expect(made.worktreePath.startsWith(join(f.repositoryFolder, 'agents') + '/')).toBe(true)
-  expect(git(made.worktreePath, ['rev-parse', '--show-toplevel'])).toBe(made.worktreePath)
+  expect(dirname(normalize(made.worktreePath))).toBe(join(f.repositoryFolder, 'agents'))
+  expect(normalize(git(made.worktreePath, ['rev-parse', '--show-toplevel']))).toBe(normalize(made.worktreePath))
 })
 
 // ---- File modes ----

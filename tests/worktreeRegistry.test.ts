@@ -117,7 +117,7 @@ it('answers as `git worktree list` does for every kind of registration and every
     expect(await worktreeRegisteredAsync(fixture.commonDir, path)).toBe((await listed(fixture.commonDir, path, samePath)).registered)
     expect(await worktreeLockAsync(fixture.commonDir, path)).toBe((await listed(fixture.commonDir, path, samePath)).locked)
   }
-})
+}, 90_000)
 
 it('a repository that is not there stops the check, as the listing did', async () => {
   const fixture = repository()

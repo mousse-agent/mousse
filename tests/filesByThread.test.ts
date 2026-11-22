@@ -2,12 +2,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { folderAccess } from '../src/mms/files/folderAccess'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
+import { FILE_WORKSPACE_BINDING_CAPABILITY } from '../src/mms/protocol/types'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, SAVE_TOO_LARGE_MESSAGE } from '../src/shared/fileAssets'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { ownedTemp } from './support/tmp'
 
 /**
  * The Files and Git panels name a thread or a project; the daemon resolves its folder. These tests talk to a
@@ -34,6 +37,7 @@ describe('files and Git reads by thread, through the daemon', () => {
     await script.connect()
   }, 30_000)
   afterEach(async () => {
+    folderAccess.reset()
     vi.restoreAllMocks()
     await window?.close()
     await script?.close()
@@ -93,6 +97,27 @@ describe('files and Git reads by thread, through the daemon', () => {
       }
     })
 
+    it('reads an explicitly browsed folder while the named project drive is stalled', async () => {
+      const p = project()
+      const threadId = mms.threads.createThread('Project drive stalled', p.id).id
+      const elsewhere = ownedTemp('mousse-browse-healthy-')
+      try {
+        writeFileSync(elsewhere.child('outside.txt'), 'healthy drive')
+        folderAccess.reset({
+          keyOf: (path) => path === p.path ? 'checkout-drive' : 'healthy-drive',
+          probe: async (path) => { if (path === p.path) await new Promise(() => undefined) },
+          commonDir: async () => null,
+          stuckAfterMs: 20
+        })
+        const scope = { threadId, projectId: p.id }
+        await expect(window.request('files.root', scope)).rejects.toMatchObject({ code: 'folder_not_answering' })
+        await expect(window.request('files.read', { ...scope, root: elsewhere.path, path: 'outside.txt' }))
+          .resolves.toMatchObject({ content: 'healthy drive' })
+      } finally {
+        await elsewhere.close()
+      }
+    })
+
     it('lists the drives and home folder for a window only', async () => {
       const places = await window.request<{ home: string; drives: Array<{ path: string; label: string }> }>('files.drives')
       expect(places.home).toBe(homedir())
@@ -122,14 +147,16 @@ describe('files and Git reads by thread, through the daemon', () => {
     it('lists, reads and saves in that folder, and keeps a path inside it', async () => {
       const p = project()
       const t = await threadWorktree(p.id)
-      await window.request('files.writeDirect', { threadId: t.threadId, path: 'inside.txt', content: 'one\ntwo\n' })
+      expect(window.hello?.capabilities).toContain(FILE_WORKSPACE_BINDING_CAPABILITY)
+      const read = await window.request<{ workspaceRoot: string }>('files.read', { threadId: t.threadId, path: 'value.txt', bindRoot: true })
+      await window.request('files.writeDirect', { threadId: t.threadId, path: 'inside.txt', expectedRoot: read.workspaceRoot, content: 'one\ntwo\n' })
       expect(readFileSync(join(t.path, 'inside.txt'), 'utf8')).toBe('one\ntwo\n')
       expect(existsSync(join(f.repo, 'inside.txt'))).toBe(false)
       const listed = await window.request<{ entries: Array<{ name: string }> }>('files.list', { threadId: t.threadId, path: '' })
       expect(listed.entries.map((entry) => entry.name)).toEqual(expect.arrayContaining(['inside.txt', 'value.txt']))
       expect((await window.request<{ content: string }>('files.read', { threadId: t.threadId, path: 'inside.txt' })).content).toBe('one\ntwo\n')
       await expect(window.request('files.read', { threadId: t.threadId, path: '../outside.txt' })).rejects.toThrow(/outside|escape/i)
-      await expect(window.request('files.writeDirect', { threadId: t.threadId, path: '../outside.txt', content: 'x' })).rejects.toThrow()
+      await expect(window.request('files.writeDirect', { threadId: t.threadId, path: '../outside.txt', expectedRoot: read.workspaceRoot, content: 'x' })).rejects.toThrow()
       expect(existsSync(join(t.path, '..', 'outside.txt'))).toBe(false)
     })
 
@@ -152,12 +179,23 @@ describe('files and Git reads by thread, through the daemon', () => {
   })
 
   describe('a save from the editor', () => {
+    it('lets an older window read thread files and refuses its unbound save', async () => {
+      const t = await threadWorktree(project().id)
+      const params = { threadId: t.threadId, path: 'value.txt' }
+      const opened = await window.request<{ content: string; workspaceRoot?: string }>('files.read', params)
+      expect(opened.workspaceRoot).toBeUndefined()
+      await expect(window.request('files.writeDirect', { ...params, content: 'legacy edit' }))
+        .rejects.toMatchObject({ code: 'workspace_binding_required' })
+      expect(readFileSync(join(t.path, params.path), 'utf8')).toBe(opened.content)
+    })
+
     it('writes what it is given, however long, with nothing to Undo', async () => {
       const p = project()
       const t = await threadWorktree(p.id)
       const big = 'line\n'.repeat(200_000)
       expect(big.length).toBeGreaterThan(512 * 1024)
-      await window.request('files.writeDirect', { threadId: t.threadId, path: 'big.txt', content: big })
+      const { workspaceRoot } = await window.request<{ workspaceRoot: string }>('files.read', { threadId: t.threadId, path: 'value.txt', bindRoot: true })
+      await window.request('files.writeDirect', { threadId: t.threadId, path: 'big.txt', expectedRoot: workspaceRoot, content: big })
       expect(readFileSync(join(t.path, 'big.txt'), 'utf8')).toBe(big)
       // The checkpointed `files.write` still keeps its own limit.
       await expect(window.request('files.write', { threadId: t.threadId, path: 'big2.txt', content: big })).rejects.toThrow(/max length/)
@@ -258,10 +296,12 @@ describe('files and Git reads by thread, through the daemon', () => {
       await expect(window.request('git.status', {})).rejects.toThrow()
       await expect(window.request('git.status', { projectId: 'no-such-project' })).rejects.toMatchObject({ code: 'project_not_found' })
       await expect(window.request('git.diffStats', { projectId: project().id, threadId: 'x' })).rejects.toThrow()
-      // A folder sent as `cwd` is not a parameter of any of them; the project decides.
+      // A legacy `cwd` is ignored, even for the drive check before the Git read.
       const p = project()
+      const waitForFolders = vi.spyOn(mms.orchestrator, 'waitForThreadFolders')
       const status = await window.request<{ status: { isRepo: boolean } }>('git.status', { projectId: p.id, cwd: f.root })
       expect(status.status.isRepo).toBe(true)
+      expect(waitForFolders).toHaveBeenCalledWith(undefined, [p.path], expect.anything(), { whenNotAnswering: 'fail' })
     })
   })
 })

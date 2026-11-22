@@ -2,8 +2,7 @@
  * A Claude Code turn that runs as one query (a bot's turn, or any turn with live queries off) is done at its result:
  * the turn returns then, and the process exits behind it. The next turn on the same chat starts once it has, so two
  * processes never write one session. A process asked to resume a session that starts another one says so in the
- * turn's report (`resumeLost`). A bot's turn starts its process while Claude Code's sign-in is read, and gives it the
- * prompt at once when the last reading said signed in, else once this one does. The service is driven against `FakeClaudeCli`.
+ * turn's report (resumeLost). Bot dispatch waits for the turn's own sign-in check. The service is driven against FakeClaudeCli.
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -110,36 +109,42 @@ function lockedTurn(): ClaudeLockedTurn {
 
 const SIGNED_IN = { loggedIn: true, authMethod: 'claude.ai' }
 const SIGNED_OUT = { loggedIn: false }
-// The app reads the sign-in when it starts and every few minutes (`last`); the turn reads it again (`now`) while its
-// process starts. A last reading that said signed in sends the prompt at once, and this turn's reading still decides
-// how the turn ends. One that said signed out refuses the turn before any process starts.
+// The turn needs its own successful reading even if the status check last saw a sign-in.
 it.each([
   { last: SIGNED_IN, now: SIGNED_IN, outcome: 'reply' },
   { last: SIGNED_IN, now: SIGNED_OUT, outcome: 'sign in' },
   { last: SIGNED_OUT, now: SIGNED_IN, outcome: 'refused before start' }
-])('a bot turn starts its process while the sign-in is read: last $last.loggedIn, now $now.loggedIn: $outcome', async ({ last, now, outcome }) => {
-  let read: ((text: string) => void) | undefined
+])('a bot waits for its sign-in check: last $last.loggedIn, now $now.loggedIn: $outcome', async ({ last, now, outcome }) => {
+  let read!: (text: string) => void
+  let began!: () => void
+  const started = new Promise<void>((resolve) => { began = resolve })
+  const deferred = new Promise<string>((resolve) => { read = resolve })
   let reading = false
-  const f = fixture(() => reading ? new Promise((resolve) => { read = resolve }) : Promise.resolve(JSON.stringify(last)))
+  const f = fixture(() => {
+    if (!reading) return Promise.resolve(JSON.stringify(last))
+    began()
+    return deferred
+  })
   await f.service.status()
   reading = true
-  // A process given no prompt exits when its input ends.
   f.cli.lingersAfterClose = false
   const turn = f.chat({ threadId: 'bot-thread', locked: lockedTurn() })
-  turn.catch(() => undefined)
+  void turn.catch(() => undefined)
   if (outcome === 'refused before start') {
     await expect(turn).rejects.toThrow(/isn't signed in/)
-    expect(f.cli.processes).toEqual([])
-    f.service.stop()
-    return
+    expect(f.cli.processes).toHaveLength(0)
+  } else {
+    await started
+    expect(f.cli.processes).toHaveLength(0)
+    read(JSON.stringify(now))
+    if (outcome === 'reply') {
+      await expect(turn).resolves.toBe('reply to 1')
+      expect(f.cli.processes[0]!.inputs).toHaveLength(1)
+      f.cli.processes[0]!.end()
+    } else {
+      await expect(turn).rejects.toMatchObject({ code: 'claude_subscription_sign_in_required' })
+      expect(f.cli.processes).toHaveLength(0)
+    }
   }
-  for (let i = 0; i < 100 && !f.cli.processes[0]?.inputs.length; i++) await new Promise((resolve) => setTimeout(resolve, 5))
-  // The prompt went before this turn's reading answered.
-  expect(f.cli.processes[0]!.inputs).toHaveLength(1)
-  expect(read).toBeDefined()
-  read!(JSON.stringify(now))
-  if (outcome === 'reply') await expect(turn).resolves.toBe('reply to 1')
-  else await expect(turn).rejects.toMatchObject({ code: 'claude_subscription_sign_in_required' })
-  f.cli.processes[0]!.end()
-  f.service.stop()
+  await f.service.stop()
 })

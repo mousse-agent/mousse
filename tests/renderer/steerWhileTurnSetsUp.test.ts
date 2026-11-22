@@ -124,6 +124,24 @@ afterEach(() => {
 })
 
 describe('a queued message sent now while the next turn is still being set up', () => {
+  it('shows an already promoted message when the thread opens and steers the next message with the shortcut', async () => {
+    const useAppStore = await store()
+    await act(async () => { useAppStore.setState({ turnStates: { 'thread-a': { phase: 'queued', turnId: 'run-4' } } as never }) })
+    await listQueue([queued('q-1', 'one', { sendsNext: true }), queued('q-2', 'two')])
+    expect(row('q-1')?.textContent).toContain('Sends next')
+    expect(row('q-1')?.querySelector<HTMLButtonElement>('.queued-message-send')?.disabled).toBe(true)
+    const input = host.querySelector<HTMLTextAreaElement>('.composer-input')!
+    await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })) })
+    expect(promoteToSteer).toHaveBeenCalledExactlyOnceWith('thread-a', 'q-2')
+  })
+
+  it('says so when its turn ended before it could join: an ordinary queued message again, that can be sent now', async () => {
+    await listQueue([queued('q-1', 'one', { steerMissed: true }), queued('q-2', 'two')])
+    expect(row('q-1')?.textContent).toContain('Not steered')
+    expect(row('q-1')?.textContent).not.toContain('Sends next')
+    expect(row('q-1')?.querySelector<HTMLButtonElement>('.queued-message-send')?.disabled).toBe(false)
+  })
+
   it('waits first in the queue, never in the finished reply, and shows in the new turn once it runs', async () => {
     await listQueue([queued('q-1', 'is it still running ?')])
     await act(async () => { row('q-1')!.querySelector<HTMLButtonElement>('.queued-message-send')!.click() })
@@ -215,10 +233,10 @@ describe('a queued message sent now while the next turn is still being set up', 
     const useAppStore = await store()
     await act(async () => { useAppStore.setState({ turnStates: { 'thread-a': { phase: 'queued', turnId: 'run-4' } } as never }) })
     await settle()
-    // The turn takes no steer yet: the message is queued and sent now by its id.
+    // The send carries the intended run while the turn is still setting up.
     orchestrator.isTurnActive = vi.fn(async () => true)
     orchestrator.steer = vi.fn(async () => false)
-    const queueItem = queued('q-7', 'use the id')
+    const queueItem = queued('q-7', 'use the id', { sendsNext: true })
     orchestrator.sendToThread = vi.fn(async () => ({ message: '', actions: [], queued: true, queueItem }))
     const input = host.querySelector<HTMLTextAreaElement>('.composer-input')!
     await act(async () => {
@@ -230,8 +248,9 @@ describe('a queued message sent now while the next turn is still being set up', 
     await listQueue([queueItem])
     await settle()
 
-    expect(orchestrator.steer).toHaveBeenCalledWith('use the id', 'thread-a')
-    expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-7')
+    expect(orchestrator.steer).not.toHaveBeenCalled()
+    expect(orchestrator.sendToThread).toHaveBeenCalledWith('thread-a', expect.objectContaining({ content: 'use the id', steer: true, steerRunId: 'run-4' }))
+    expect(promoteToSteer).not.toHaveBeenCalled()
     expect(shown()).toEqual(['Fix the bug', 'Fixed it.'])
     expect(queueRows().map((item) => item.dataset.queuedId)).toEqual(['q-7'])
     expect(row('q-7')!.textContent).toContain('Sends next')
