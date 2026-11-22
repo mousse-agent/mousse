@@ -15,39 +15,6 @@
       "expiresAt": "2026-11-22T10:41:17.871Z"
     },
     {
-      "task": "early-checkout-preparation",
-      "session": "Animatrix-09e512",
-      "machine": "Animatrix",
-      "branch": "early-checkout-preparation",
-      "paths": [
-        "src/mms/workspace",
-        "src/mms/worktree/checkoutSlotProcess.ts",
-        "src/mms/git/runGitProcess.ts",
-        "src/mms/lifecycle/WorktreeRetirementService.ts",
-        "tests/run/earlyCheckoutPreparation.test.ts",
-        "tests/pullRequestUntrustedCheckout.test.ts"
-      ],
-      "claimedAt": "2026-11-21T10:14:56.694Z",
-      "expiresAt": "2026-11-21T19:49:37.586Z"
-    },
-    {
-      "task": "faster-thread-titles",
-      "session": "Animatrix-2f9e7a",
-      "machine": "Animatrix",
-      "branch": "faster-thread-titles",
-      "paths": [
-        "src/mms/workspace",
-        "src/mms/lifecycle/ResourcePurgeService.ts",
-        "src/mms/harness/stopProcesses.ts",
-        "src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService.ts",
-        "src/mms/harness/gateway.ts",
-        "src/mms/harness/driver.ts",
-        "src/mms/orchestrator/OrchestratorService.ts"
-      ],
-      "claimedAt": "2026-11-21T05:55:00.275Z",
-      "expiresAt": "2026-11-21T18:19:01.797Z"
-    },
-    {
       "task": "fix/antigravity-status-and-subagents",
       "session": "agibook-63a2b6",
       "machine": "agibook",
@@ -101,49 +68,7 @@
         "src/mms/harness/drivers/cursor.ts"
       ],
       "claimedAt": "2026-11-22T16:34:57.715Z",
-      "expiresAt": "2026-11-22T18:34:57.715Z"
-    },
-    {
-      "task": "git-spawn-off-daemon-loop",
-      "session": "Animatrix-2dabf9",
-      "machine": "Animatrix",
-      "branch": "git-spawn-off-daemon-loop",
-      "paths": [
-        "src/mms/git",
-        "src/mms/worktree",
-        "src/mms/actions/heldBytes.ts"
-      ],
-      "claimedAt": "2026-11-21T05:08:34.813Z",
-      "expiresAt": "2026-11-21T18:56:54.704Z"
-    },
-    {
-      "task": "provider-idle-window",
-      "session": "Animatrix-b82cdb",
-      "machine": "Animatrix",
-      "branch": "provider-idle-window",
-      "paths": [
-        "src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService.ts",
-        "src/mms/harness/vendors/codex/CodexProviderService.ts",
-        "tests/claudeLiveSessions.test.ts",
-        "tests/claudeSubscriptionProvider.test.ts",
-        "tests/codexProvider.test.ts"
-      ],
-      "claimedAt": "2026-11-21T10:20:49.161Z",
-      "expiresAt": "2026-11-21T19:07:55.290Z"
-    },
-    {
-      "task": "worktree-turns-skip-start-snapshot",
-      "session": "Animatrix-d4f075",
-      "machine": "Animatrix",
-      "branch": "worktree-turns-skip-start-snapshot",
-      "paths": [
-        "src/mms/git/worktreeObjects.ts",
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "tests/run/turnHandoff.test.ts",
-        "tests/worktreeHeadFiles.test.ts"
-      ],
-      "claimedAt": "2026-11-21T06:18:08.908Z",
-      "expiresAt": "2026-11-21T19:11:01.762Z"
+      "expiresAt": "2026-11-22T22:13:31.363Z"
     }
   ]
 }
