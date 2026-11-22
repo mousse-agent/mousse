@@ -20,18 +20,14 @@
       "machine": "agibook",
       "branch": "fix/antigravity-status-and-subagents",
       "paths": [
-        "src/mms/harness/acp",
-        "src/mms/harness/drivers/acp",
-        "src/mms/harness/drivers/antigravity.ts",
-        "src/shared/subagentTools.ts",
-        "src/mms/run/mcp/attachment.ts",
+        "src/mms/harness/acp/session.ts",
+        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts",
+        "src/mms/harness/drivers/acp/adapter.ts",
         "src/renderer/chat/adapters/nativeSubagents.ts",
-        "src/renderer/chat/adapters/mousseToUI.ts",
-        "src/mms/run/transcript/TranscriptAssembler.ts",
-        "src/shared/agentActivity.ts"
+        "tests/antigravityOrchestrator.test.ts"
       ],
       "claimedAt": "2026-11-22T11:30:48.264Z",
-      "expiresAt": "2026-11-22T18:35:06.514Z"
+      "expiresAt": "2026-11-22T23:31:50.446Z"
     },
     {
       "task": "fix/mcp-server-before-boot-wakes",
