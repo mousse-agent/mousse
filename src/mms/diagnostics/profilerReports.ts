@@ -7,6 +7,8 @@ import {
   appMb,
   largestOfKind,
   memoryTable,
+  memoryTotals,
+  MEMORY_TOTAL_SCOPE,
   serviceMb,
   type AppHints,
   type ChildMemory,
@@ -20,7 +22,7 @@ import type { AppViewInfo, WindowCounters } from '../../shared/diagnostics/profi
 import type { AppWindowDetail } from './MemoryMonitor'
 import type { ThreadMemory } from './profilerService'
 
-const UNITS = "privateMb is the footprint on macOS (with GPU memory), private bytes on Windows, private memory or else the working set on Linux. CPU is percent of one core since the previous sample. detail splits a row: a window's JS heap, Blink and resource cache; each agent CLI or tool."
+const UNITS = `${MEMORY_TOTAL_SCOPE} MB fields use 1024^2 bytes. privateMb is a legacy field: desktop footprint on macOS, private bytes on Windows, platform-specific private/anonymous counters where available on Linux; never an RSS fallback. app.totalMb, appMb, serviceMb, gpuMb, largestWindowMb and trends retain the legacy alert measure (private/footprint with RSS fallback; app includes children and excludes service); do not use them as resident or private totals. Use memoryTotals or the explicit WorkingSetMb fields. CPU is percent of one core since the previous sample.`
 
 function r1(n: number): number {
   return Math.round(n * 10) / 10
@@ -57,7 +59,8 @@ export function overviewReport(status: MemoryStatus, thresholds: MemoryThreshold
     serviceUptimeMinutes: Math.round(sample.up / 60),
     activeTurns: sample.counts.activeTurns,
     processes: processRows(sample),
-    childrenSampledSecondsAgo: sample.childrenAt === undefined ? null : Math.max(0, Math.round((now - sample.childrenAt) / 1000)),
+    childrenSampledSecondsAgo: childReadingAge(sample, now),
+    memoryTotals: memoryTotals(sample),
     service: {
       mb: service,
       baselineMb: status.baselineMb,
@@ -65,7 +68,7 @@ export function overviewReport(status: MemoryStatus, thresholds: MemoryThreshold
       growthMbPerHour: status.growthMbPerHour,
       limits: { idleMb: thresholds.servicePrivateMb, severeMb: thresholds.serviceSevereMb, baselineFactor: thresholds.serviceBaselineFactor }
     },
-    app: { totalMb: appMb(sample), gpuMb: largestOfKind(sample, 'gpu'), largestWindowMb: largestOfKind(sample, 'renderer') },
+    app: { metric: 'legacy-mixed-alert-measure', totalMb: appMb(sample), gpuMb: largestOfKind(sample, 'gpu'), largestWindowMb: largestOfKind(sample, 'renderer') },
     trend: {
       everyMinutes: stepMinutes,
       serviceMb: trend.map((p) => Math.round(p.service)),
@@ -199,30 +202,37 @@ export function gpuHintsReport(sample: MemorySample, detail: AppWindowDetail | n
 
 /** `profiler_children`. */
 export function childrenReport(children: readonly ChildMemory[]) {
-  const byKind = new Map<string, { count: number; mb: number }>()
+  const byKind = new Map<string, { count: number; mb: number; unavailable: number; metrics: Set<string> }>()
   for (const child of children) {
     const kind = fixedName(child.kind)
-    const entry = byKind.get(kind) ?? { count: 0, mb: 0 }
+    const entry = byKind.get(kind) ?? { count: 0, mb: 0, unavailable: 0, metrics: new Set<string>() }
     entry.count += 1
     entry.mb += child.mb ?? 0
+    if (child.mb === null) entry.unavailable += 1
+    entry.metrics.add(child.footprint ? 'footprint' : 'working-set')
     byKind.set(kind, entry)
   }
   return {
-    processes: children.map((child) => ({ kind: fixedName(child.kind), mb: child.mb })),
-    byKind: [...byKind].map(([kind, entry]) => ({ kind, count: entry.count, mb: r1(entry.mb) })).sort((a, b) => b.mb - a.mb),
-    totalMb: r1(children.reduce((sum, child) => sum + (child.mb ?? 0), 0)),
-    note: 'mb is each process\'s footprint on macOS, its working set elsewhere; null when it could not be read. They count in the app\'s total.'
+    processes: children.map((child) => ({ kind: fixedName(child.kind), mb: child.mb, metric: child.footprint ? 'footprint' : 'working-set' })),
+    byKind: [...byKind].map(([kind, entry]) => ({ kind, count: entry.count, mb: entry.unavailable || entry.metrics.size > 1 ? null : r1(entry.mb), measuredMb: entry.metrics.size > 1 ? null : r1(entry.mb), unavailable: entry.unavailable, metric: entry.metrics.size > 1 ? 'mixed' : [...entry.metrics][0] })).sort((a, b) => (b.measuredMb ?? 0) - (a.measuredMb ?? 0)),
+    totalMb: children.some((child) => child.mb === null) || new Set(children.map((child) => Boolean(child.footprint))).size > 1 ? null : r1(children.reduce((sum, child) => sum + child.mb!, 0)),
+    note: 'metric names the measurement: footprint or working-set (RSS). Null means unavailable or incompatible measurements; measuredMb is a subtotal. Only working sets enter resident workload totals. Shared pages can count more than once; untracked descendants are excluded.'
   }
 }
 
 /** A sample's headline numbers, for `profiler_sample_now` and each point of `profiler_watch`. */
 export function samplePoint(sample: MemorySample) {
   const c = sample.counts
+  const totals = memoryTotals(sample)
   return {
     serviceMb: serviceMb(sample),
     serviceHeapMb: sample.service.heapUsed ?? null,
     ...(sample.service.cpu !== undefined ? { serviceCpuPercent: sample.service.cpu } : {}),
     appMb: appMb(sample),
+    desktopWorkingSetMb: totals.desktopWorkingSetMb,
+    workloadWorkingSetMb: totals.workloadWorkingSetMb,
+    measuredWorkingSetMb: totals.measuredWorkingSetMb,
+    unavailableChildren: totals.unavailableChildren,
     gpuMb: largestOfKind(sample, 'gpu'),
     largestWindowMb: largestOfKind(sample, 'renderer'),
     loadedThreads: c.loadedThreads,
@@ -249,13 +259,19 @@ export function pointChange(from: Point, to: Point): Record<string, number> {
   return out
 }
 
+/** Age of the child reading at the sample or report time. */
+export function childReadingAge(sample: MemorySample, now = sample.t): number | null {
+  return sample.childrenAt === undefined ? null : Math.max(0, Math.round((now - sample.childrenAt) / 1000))
+}
+
 /** `profiler_sample_now`. */
 export function sampleNowReport(sample: MemorySample, previous: MemorySample | null) {
   const point = samplePoint(sample)
   return {
     now: point,
+    memoryTotals: memoryTotals(sample),
     processes: processRows(sample),
-    childrenSampledSecondsAgo: sample.childrenAt === undefined ? null : Math.max(0, Math.round((sample.t - sample.childrenAt) / 1000)),
+    childrenSampledSecondsAgo: childReadingAge(sample),
     ...(previous ? { sincePreviousSample: { seconds: Math.round((sample.t - previous.t) / 1000), change: pointChange(samplePoint(previous), point) } } : {}),
     units: UNITS
   }
@@ -273,11 +289,11 @@ export function watchPlan(intervalSeconds: unknown, minutes: unknown): { interva
 }
 
 /** `profiler_watch`: the points, what changed from first to last, and the numbers that grew most. */
-export function watchReport(plan: { intervalSeconds: number }, points: Array<{ atSeconds: number } & Point>, stopped?: string) {
+export function watchReport(plan: { intervalSeconds: number }, points: Array<{ atSeconds: number; childrenSampledSecondsAgo?: number | null } & Point>, stopped?: string) {
   const first = points[0]
   const last = points[points.length - 1]
   const change = first && last ? pointChange(first, last) : {}
-  const { atSeconds: _a, ...changeWithoutTime } = change as Record<string, number>
+  const { atSeconds: _a, childrenSampledSecondsAgo: _childAge, ...changeWithoutTime } = change as Record<string, number>
   const grew = Object.entries(changeWithoutTime).filter(([, by]) => by > 0).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, by]) => ({ name, by }))
   return {
     intervalSeconds: plan.intervalSeconds,

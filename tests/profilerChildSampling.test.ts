@@ -36,7 +36,7 @@ describe('provider rows between detailed readings', () => {
     const f = fixture()
     for (let i = 0; i < 6; i++) {
       await f.monitor.tick()
-      expect(f.row()).toMatchObject({ detail: 'codex 42 MB' })
+      expect(f.row()).toMatchObject({ detail: expect.stringContaining('codex 42 MB') })
       expect(f.report().childrenSampledSecondsAgo).toBe((i % 5) * f.monitor.thresholds.sampleIntervalMs / 1000)
       f.now.t += f.monitor.thresholds.sampleIntervalMs
     }
@@ -55,7 +55,7 @@ describe('provider rows between detailed readings', () => {
     trackChildProcess(process.pid, 'claude')
     f.read.mockResolvedValueOnce([{ kind: 'claude', mb: 17 }])
     await f.tick()
-    expect(f.row()).toMatchObject({ detail: 'claude 17 MB' })
+    expect(f.row()).toMatchObject({ detail: expect.stringContaining('claude 17 MB') })
     expect(f.read).toHaveBeenCalledTimes(3)
     f.monitor.stop()
   })
@@ -79,7 +79,7 @@ describe('provider rows between detailed readings', () => {
     await f.tick()
     f.read.mockRejectedValueOnce(new Error('unavailable'))
     await f.monitor.tick({ children: true })
-    expect(f.row()).toMatchObject({ detail: 'codex - MB' })
+    expect(f.row()).toMatchObject({ detail: expect.stringContaining('codex - MB') })
     expect(f.report().childrenSampledSecondsAgo).toBeNull()
     untrackChildProcess(process.pid)
     f.read.mockRejectedValueOnce(new Error('still unavailable'))
@@ -95,7 +95,7 @@ describe('provider rows between detailed readings', () => {
     f.read.mockResolvedValueOnce([{ kind: 'codex', mb: null }])
     await f.tick()
     await f.monitor.tick()
-    expect(f.row()).toMatchObject({ detail: 'codex - MB' })
+    expect(f.row()).toMatchObject({ detail: expect.stringContaining('codex - MB') })
     expect(f.read).toHaveBeenCalledTimes(1)
     f.monitor.stop()
   })
@@ -107,7 +107,7 @@ describe('provider rows between detailed readings', () => {
     f.now.t += 5 * f.monitor.thresholds.sampleIntervalMs
     f.read.mockResolvedValueOnce([{ kind: 'codex', mb: 55 }])
     const expired = await f.monitor.measure()
-    expect(sampleNowReport(expired, null).processes.find((r) => r.label.startsWith('Agents and tools'))).toMatchObject({ detail: 'codex 55 MB' })
+    expect(sampleNowReport(expired, null).processes.find((r) => r.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('codex 55 MB') })
     f.read.mockResolvedValueOnce([{ kind: 'codex', mb: 66 }])
     const fresh = await f.monitor.measure({ children: true })
     expect(fresh.children?.[0].mb).toBe(66)

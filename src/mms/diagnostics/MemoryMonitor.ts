@@ -111,8 +111,9 @@ export class MemoryMonitor {
   private timer: NodeJS.Timeout | null = null
   private ticks = 0
   private running: Promise<void> | null = null
+  private forcedTick: Promise<void> | null = null
   private lastReplayMb: number | undefined
-  private childReading: { key: string; at: number; children: ChildMemory[] } | null = null
+  private childReading: { key: string; at: number; children: ChildMemory[] | null } | null = null
   private started = false
   /** Set by `stop()`: a sample that was reading then writes nothing and raises no notice. */
   private stopped = false
@@ -176,8 +177,17 @@ export class MemoryMonitor {
 
   /** One sample, the limit check and what a breach needs. Never runs twice at once. */
   tick(options: { children?: boolean } = {}): Promise<void> {
-    if (this.running) return options.children ? this.running.then(() => this.tick(options)) : this.running
-    this.running = this.runTick(options.children === true).finally(() => { this.running = null })
+    if (!options.children) return this.running ?? this.startTick(false)
+    this.forcedTick ??= this.startForcedTick().finally(() => { this.forcedTick = null })
+    return this.forcedTick
+  }
+
+  private startForcedTick(): Promise<void> {
+    return this.running ? this.running.then(() => this.startForcedTick()) : this.startTick(true)
+  }
+
+  private startTick(forceChildren: boolean): Promise<void> {
+    this.running = this.runTick(forceChildren).finally(() => { this.running = null })
     return this.running
   }
 
@@ -282,16 +292,17 @@ export class MemoryMonitor {
     const key = keyOf(tracked)
     const cached = this.childReading
     const maxAge = DETAIL_EVERY * this.thresholds.sampleIntervalMs
-    if (!force && cached?.key === key && t >= cached.at && t - cached.at < maxAge) {
+    if (!force && cached?.key === key && cached.children !== null && t >= cached.at && t - cached.at < maxAge) {
       return { children: cached.children, at: cached.at }
     }
-    // Invalidate before awaiting: failed reads must never keep old providers or measurements alive.
-    this.childReading = null
+    // A newer read owns the cache even if an older on-demand read finishes later.
+    const pending = { key, at: t, children: null }
+    this.childReading = pending
     try {
       const children = await this.readChildrenNow()
       const current = liveChildProcesses()
       if (keyOf(current) !== key) return { children: current.map(({ kind }) => ({ kind, mb: null })) }
-      this.childReading = { key, at: t, children }
+      if (this.childReading === pending) this.childReading = { key, at: t, children }
       return { children, at: t }
     } catch (error) {
       logWarn('memory', 'child memory read failed', error)
