@@ -72,14 +72,14 @@ describe('GuiMmsController while an update installs', () => {
     const home = newHome()
     const gui = new GuiMmsController({ homeDir: home })
     const gitDir = join(home, 'system-bin')
-    const findGit = vi.spyOn(nativeGit, 'findNativeGit').mockResolvedValue(undefined)
+    const findGit = vi.spyOn(nativeGit, 'nativeGitEnvironment').mockResolvedValue(undefined)
     vi.spyOn(nativeGit, 'nativeGitInstaller').mockResolvedValue({
       platform: 'linux', command: '/usr/bin/pkexec', args: [], readyMessage: 'Confirm the package install.',
       failureMessage: 'The package install failed.'
     })
     const install = vi.spyOn(nativeGit, 'installNativeGit').mockRejectedValueOnce(new Error('Canceled'))
       .mockImplementationOnce(async () => {
-        findGit.mockResolvedValue(gitDir)
+        findGit.mockResolvedValue({ PATH: `${gitDir}:/original` })
         return true
       })
     vi.spyOn(daemonHost, 'resolveDaemonHostInvocation').mockReturnValue({

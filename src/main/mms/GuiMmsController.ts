@@ -27,7 +27,7 @@ import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import { rotateStartupLogSync, STARTUP_LOG_CAP_ENV, STARTUP_LOG_FILE, STARTUP_LOG_MAX_BYTES } from '../../cli/startupLog'
 import { daemonCommand } from './daemonCommand'
 import { ensureWindowsGit, withWindowsGitPath } from './windowsGit'
-import { findNativeGit, nativeGitInstaller, installNativeGit, type NativeGitInstaller } from './nativeGit'
+import { nativeGitEnvironment, nativeGitInstaller, installNativeGit, type NativeGitInstaller } from './nativeGit'
 import type { GitSetup } from '../../shared/gitSetup'
 import {
   canonicalizeHome,
@@ -335,7 +335,7 @@ export class GuiMmsController extends EventEmitter {
     this.assertMayConnect()
     if (this.nativeInstall) return this.nativeInstall
     const installer = this.nativeInstaller
-    if (!installer || this.gitSetup?.phase !== 'required') return Promise.resolve(false)
+    if (!installer || this.gitSetupAbort || this.gitSetup?.phase !== 'required') return Promise.resolve(false)
 
     const setup = new AbortController()
     this.gitSetupAbort = setup
@@ -1326,11 +1326,11 @@ export class GuiMmsController extends EventEmitter {
       })
       gitEnv = withWindowsGitPath(env, gitPath)
       if (!gitPath && (process.platform === 'linux' || process.platform === 'darwin')) {
-        const nativeGitDir = await findNativeGit(process.platform, gitEnv, setup.signal)
-        if (!nativeGitDir) {
+        const nativeGitEnv = await nativeGitEnvironment(process.platform, gitEnv, setup.signal)
+        if (!nativeGitEnv) {
           this.nativeInstaller = await nativeGitInstaller(process.platform)
           setup.signal.throwIfAborted()
-          if (this.gitSetup?.phase !== 'required') {
+          if (this.gitSetup?.phase !== 'required' || this.gitSetup.canInstall !== Boolean(this.nativeInstaller)) {
             this.setGitSetup({
               phase: 'required',
               canInstall: Boolean(this.nativeInstaller),
@@ -1340,7 +1340,7 @@ export class GuiMmsController extends EventEmitter {
           }
           throw new Error('Git is required to start the workspace.')
         }
-        gitEnv = { ...gitEnv, PATH: [nativeGitDir, gitEnv.PATH].filter(Boolean).join(':') }
+        gitEnv = nativeGitEnv
       }
       this.nativeInstaller = undefined
       this.setGitSetup(null)

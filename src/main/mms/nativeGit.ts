@@ -12,13 +12,14 @@ async function executable(file: string): Promise<boolean> {
 }
 
 /** Find usable Git without triggering macOS's developer-tools prompt from its /usr/bin/git stub. */
-export async function findNativeGit(
+export async function nativeGitEnvironment(
   platform: 'darwin' | 'linux', env: NodeJS.ProcessEnv, signal: AbortSignal
-): Promise<string | undefined> {
+): Promise<NodeJS.ProcessEnv | undefined> {
   const path = (env.PATH ?? '').split(':').filter((dir) => isAbsolute(dir))
   const fallbacks = platform === 'darwin'
     ? ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin', '/usr/bin']
     : ['/usr/local/bin', '/usr/bin', '/bin']
+  let skippedGit = false
   for (const dir of new Set([...path, ...fallbacks])) {
     signal.throwIfAborted()
     const file = join(dir, 'git')
@@ -29,10 +30,14 @@ export async function findNativeGit(
         await run('/usr/bin/xcode-select', ['--print-path'], options)
       }
       const { stdout } = await run(file, ['--version'], options)
-      if (stdout.startsWith('git version ')) return dir
+      if (stdout.startsWith('git version ')) {
+        if (!skippedGit && path.includes(dir)) return env
+        return { ...env, PATH: [dir, env.PATH].filter(Boolean).join(':') }
+      }
     } catch {
       signal.throwIfAborted()
     }
+    skippedGit = true
   }
   return undefined
 }
