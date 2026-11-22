@@ -15,21 +15,6 @@
       "expiresAt": "2026-11-22T10:41:17.871Z"
     },
     {
-      "task": "fix/antigravity-status-and-subagents",
-      "session": "agibook-63a2b6",
-      "machine": "agibook",
-      "branch": "fix/antigravity-status-and-subagents",
-      "paths": [
-        "src/mms/harness/acp/session.ts",
-        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts",
-        "src/mms/harness/drivers/acp/adapter.ts",
-        "src/renderer/chat/adapters/nativeSubagents.ts",
-        "tests/antigravityOrchestrator.test.ts"
-      ],
-      "claimedAt": "2026-11-22T11:30:48.264Z",
-      "expiresAt": "2026-11-22T23:31:50.446Z"
-    },
-    {
       "task": "fix/mcp-server-before-boot-wakes",
       "session": "agibook-e58f50",
       "machine": "agibook",
