@@ -145,8 +145,10 @@ describe('a thread worktree starts on a temporary branch and is named in the bac
 })
 
 describe('recovering a failed worktree provision leaves branches without proof of ownership alone', () => {
-  function writeFailedProvision(dir: string, branch: string, head: string): ThreadWorkspaceManager {
+  async function writeFailedProvision(dir: string, branch: string, head: string): Promise<ThreadWorkspaceManager> {
     const manager = new ThreadWorkspaceManager(dir)
+    // The record names the repository it was made in: a cleared record must be this repository's.
+    const { repositoryId } = await manager.resolveRepositoryAsync(repo)
     const worktreePath = join(dir, 'missing-worktree')
     manager.journal.append({ operationId: 'prov-1', operationType: 'workspace-provision', state: 'planned', expectedPreState: { head, branch, retainedRef: 'refs/mousse/threads/thread-one/main', worktreePath } })
     manager.journal.append({ operationId: 'prov-1', operationType: 'workspace-provision', state: 'failed', details: { error: 'worktree add failed' } })
@@ -156,7 +158,7 @@ describe('recovering a failed worktree provision leaves branches without proof o
       workspaceId: 'repo:thread-one',
       generation: 0,
       provenance: { ownerThreadId: 'thread-one' },
-      repositoryId: 'repo',
+      repositoryId,
       conversationBranchId: 'main',
       branch,
       retainedRef: 'refs/mousse/threads/thread-one/main',
@@ -177,7 +179,7 @@ describe('recovering a failed worktree provision leaves branches without proof o
     const head = git(repo, 'rev-parse', 'HEAD')
     git(repo, 'branch', existingBranch, head)
     const refs = git(repo, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')
-    const manager = writeFailedProvision(threadDir('one'), plannedBranch, head)
+    const manager = await writeFailedProvision(threadDir('one'), plannedBranch, head)
     expect(await manager.reconcileFailedProvision(repo)).toBe(true)
     expect(manager.load()).toBeUndefined()
     expect(manager.branchRecord().owned.has(plannedBranch)).toBe(false)

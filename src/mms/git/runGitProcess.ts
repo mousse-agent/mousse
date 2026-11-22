@@ -2,8 +2,9 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { StoppedGitTree } from './stoppedGitTree'
-import { timeGitChild } from '../diagnostics/turnBoundary'
+import { timeGitChild, timeGitRun } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
+import { activeCheckoutSlot } from '../worktree/checkoutSlotProcess'
 import { cancelQueuedGit, gitChildSpawned, gitChildStartedAt, spawnGit, stopWindowsGit } from './gitSpawn'
 export { gitStopProbe, StoppedGitTree } from './stoppedGitTree'
 
@@ -112,6 +113,13 @@ async function watchSurvivors(tree: StoppedGitTree, describe: () => Record<strin
  */
 export const LISTING_MAX_BUFFER = 256 * 1024 * 1024
 
+export interface GitProcessObserver {
+  beforeSpawn(): void
+  spawned(pid: number, at: number): void
+  /** A checkout slot stopped Git, and Git and every process it started have exited. */
+  stopped?(): void
+}
+
 /**
  * Runs `git argv` without blocking and reports it as `spawnSync` would: output past `maxBuffer` (on either stream)
  * or a run past `timeout` stops Git and is an `ENOBUFS` or `ETIMEDOUT` error, with the output read so far.
@@ -119,23 +127,41 @@ export const LISTING_MAX_BUFFER = 256 * 1024 * 1024
  * `beforeStart` runs synchronously right before Git starts, with nothing awaited in between; what it throws rejects the
  * run, and Git never starts.
  */
-export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number; beforeStart?: () => void }): Promise<GitProcess> {
+export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number; beforeStart?: () => void; observer?: GitProcessObserver; preserveIndexLock?: boolean }): Promise<GitProcess> {
   const limit = options.maxBuffer ?? DEFAULT_MAX_BUFFER
   const scope = cancellation.getStore()
   const signal = scope?.signal
+  const slot = activeCheckoutSlot(options.cwd, argv)
+  if (slot) {
+    return Promise.resolve().then(async () => {
+      options.beforeStart?.()
+      signal?.throwIfAborted()
+      options.observer?.beforeSpawn()
+      // Record the slot owner before it can start Git. It stays alive through the writer's exit.
+      options.observer?.spawned(slot.pid, slot.startedAt)
+      const file = gitFile()
+      const { status, stdoutBytes, stderr, failure } = await timeGitRun(() => slot.run({
+        file, argv, cwd: options.cwd, env: gitEnvFor(options.env), input: options.input, limit
+      }, signal, () => options.observer?.stopped?.()))
+      signal?.throwIfAborted()
+      const error = failure && Object.assign(new Error(failure.message), { code: failure.code })
+      return { status, stdoutBytes, stdout: stdoutBytes.toString('utf8'), stderr, ...(error ? { error } : {}) }
+    })
+  }
   return new Promise((settle) => {
     if (signal?.aborted) {
       settle({ status: null, stdout: '', stdoutBytes: Buffer.alloc(0), stderr: '', error: Object.assign(new Error('git was not started: the work was stopped'), { code: 'ABORT_ERR' }) })
       return
     }
     // A command that may be stopped leads a process group of its own off Windows, so stopping it reaches what it started.
-    const ownGroup = (scope !== undefined || options.timeout !== undefined) && process.platform !== 'win32'
+    const ownGroup = (scope !== undefined || options.timeout !== undefined || options.observer !== undefined) && process.platform !== 'win32'
     // The lock of the private index the command works on, and whether it was already there before the command started:
     // only a lock that was not, and was made since, can be the stopped command's.
     const startedAt = Date.now()
-    const indexLock = signal && options.env.GIT_INDEX_FILE ? `${resolve(options.cwd, options.env.GIT_INDEX_FILE)}.lock` : undefined
+    const indexLock = signal && !options.preserveIndexLock && options.env.GIT_INDEX_FILE ? `${resolve(options.cwd, options.env.GIT_INDEX_FILE)}.lock` : undefined
     const lockedBefore = indexLock !== undefined && existsSync(indexLock)
     // When the command was started: its creation time must match this, so a pid reused later is never taken for it.
+    options.observer?.beforeSpawn()
     const spawnedAt = Date.now()
     const child = timeGitChild(() => spawnGit(gitFile(), argv, {
       cwd: options.cwd, env: gitEnvFor(options.env), windowsHide: true, detached: ownGroup, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
@@ -147,6 +173,18 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
     let outSize = 0
     let errSize = 0
     let error: NodeJS.ErrnoException | undefined
+    // The process may still be starting on the Git worker: its pid, and when it really started, are known once it has.
+    // Until then the observer's record says the writer is starting, which keeps recovery from taking it for gone.
+    if (options.observer) {
+      const observer = options.observer
+      void gitChildSpawned(child).then(() => {
+        if (!child.pid || settled) return
+        try { observer.spawned(child.pid, gitChildStartedAt(child, spawnedAt)) } catch (failure) {
+          error ??= failure as NodeJS.ErrnoException
+          child.kill()
+        }
+      })
+    }
     // The time limit counts from when Git started: background Git may first wait for its disk (see `spawnGit`).
     let timer: NodeJS.Timeout | undefined
     const timeLimit = options.timeout

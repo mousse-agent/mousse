@@ -3223,10 +3223,12 @@ export function registerGuiIpc(
 
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false) => {
-      const reply = await guiMms.request<FileText>('files.read', {
-        ...filesScope(projectId, threadId), ...await browsedRoot(root), ...canonicalFileParams(details, threadId), path: filePath
-      })
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, view: boolean | { expectedRoot?: string } = false) => {
+      const params = { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath }
+      // A thread's editor binds the read to the workspace it opened; a details read also names the file's canonical path.
+      if (view && typeof view === 'object') return guiMms.readThreadEditorFile({ ...params, ...canonicalFileParams(true, threadId) }, view.expectedRoot)
+      const details = view === true
+      const reply = await guiMms.request<FileText>('files.read', { ...params, ...canonicalFileParams(details, threadId) })
       return details ? reply : reply.content
     }
   )
@@ -3261,17 +3263,20 @@ export function registerGuiIpc(
       content: string,
       projectId?: string,
       threadId?: string | null,
-      root?: string
+      root?: string,
+      expectedRoot?: string
     ) => {
       // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
       if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
-      await guiMms.request('files.writeDirect', {
+      const params = {
         ...filesScope(projectId, threadId),
         ...await browsedRoot(root),
         path: filePath,
         content,
         expectedProfileId: guiMms.getWindowBinding()?.profileId
-      })
+      }
+      if (threadId && !root) await guiMms.writeThreadEditorFile(params, expectedRoot)
+      else await guiMms.request('files.writeDirect', params)
     }
   )
 

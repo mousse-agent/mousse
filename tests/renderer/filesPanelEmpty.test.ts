@@ -13,8 +13,8 @@ import { ownedTemp } from '../support/tmp'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock('@monaco-editor/react', () => ({
-  default: ({ value, onChange }: { value: string; onChange: (value: string) => void }) =>
-    createElement('textarea', { className: 'editor-stub', value, onChange: (event) => onChange(event.currentTarget.value) })
+  default: ({ value, onChange, options }: { value: string; onChange: (value: string) => void; options: { readOnly?: boolean; ariaLabel?: string } }) =>
+    createElement('textarea', { className: 'editor-stub', value, readOnly: options.readOnly, 'aria-label': options.ariaLabel, onChange: (event) => onChange(event.currentTarget.value) })
 }))
 vi.mock('../../src/renderer/components/editors/MarkdownDocumentEditor', () => ({ MarkdownDocumentEditor: () => null }))
 // The tree stub offers one file to open and shows which folder it lists.
@@ -61,7 +61,18 @@ beforeEach(() => {
       }
     },
     workspace: { getStatus: async () => ({}) },
-    fs: { readFile: async () => 'hello', writeFile: async () => undefined, readAsset: async () => null, listDir, listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] }) },
+    fs: {
+      readFile: async () => 'hello',
+      // A thread file's bound read, answered by the test's own `readFileDetails` or `readFile`, from the thread's folder.
+      readFileInWorkspace: async (path: string, threadId: string) => {
+        const fs = window.mousse.fs
+        const file = typeof fs.readFileDetails === 'function'
+          ? await fs.readFileDetails(path, undefined, threadId, undefined)
+          : { content: await fs.readFile(path, undefined, threadId, undefined) }
+        return { ...file, workspaceRoot: threadFolders[threadId] ?? '/repo' }
+      },
+      writeFile: async () => undefined, readAsset: async () => null, listDir, listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] })
+    },
     threads: { select: async () => undefined }
   }
   window.matchMedia = () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList
@@ -166,6 +177,19 @@ describe('Files panel without an open file', () => {
     await act(async () => useAppStore.setState({ activeThreadId: 't1' }))
     await flush()
     expect(host.querySelector('[aria-label="Close notes.txt"]')).not.toBeNull()
+  })
+
+  it('shows the contents of a thread file from a legacy service in a read-only editor', async () => {
+    useAppStore.setState({ activeThreadId: 't1', threads: [startedThread('t1')] })
+    window.mousse.fs.readFileInWorkspace = async () => ({ content: 'legacy file contents' })
+    await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
+    await flush()
+    await act(async () => tree().click())
+    await flush()
+    const editor = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="notes.txt"]')
+    expect(editor?.value).toBe('legacy file contents')
+    expect(editor?.readOnly).toBe(true)
+    expect(host.textContent).toContain('Read-only until the service is updated')
   })
 
   it('restores a browsed file on a healthy drive even while the checkout lookup is pending or fails', async () => {
