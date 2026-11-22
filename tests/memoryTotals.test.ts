@@ -17,7 +17,7 @@ describe('resident memory totals', () => {
     ['missing child row', { children: [] }, null, 1],
     ['missing child sample', { children: undefined }, null, 1],
     ['missing desktop', { app: undefined }, null, 0],
-    ['no children running', { children: [], counts: { ...base.counts, providerProcesses: 0 } }, 900, 0]
+    ['no children running', { children: undefined, counts: { ...base.counts, providerProcesses: 0 } }, 900, 0]
   ] as const)('%s', (_name, patch, total, missing) => {
     const result = memoryTotals({ ...base, ...patch })
     expect(result.workloadWorkingSetMb).toBe(total)

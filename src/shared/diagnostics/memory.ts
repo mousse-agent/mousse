@@ -339,7 +339,8 @@ export function memoryTotals(sample: MemorySample) {
   const children = sample.children ?? []
   const resident = children.filter((child) => child.mb !== null && !child.footprint)
   const unavailableChildren = children.length - resident.length + Math.max(0, sample.counts.providerProcesses - children.length)
-  const childrenSampleAvailable = sample.children !== undefined
+  // The monitor omits an empty children array, including in existing logs.
+  const childrenSampleAvailable = sample.children !== undefined || sample.counts.providerProcesses === 0
   const measuredChildrenWorkingSetMb = round1(resident.reduce((sum, child) => sum + child.mb!, 0))
   const measuredWorkingSetMb = round1(sample.service.rss + (desktopWorkingSetMb ?? 0) + measuredChildrenWorkingSetMb)
   return {
@@ -672,7 +673,7 @@ export function appHintsLine(hints: AppHints): string {
 export function memorySource(platform: string): string {
   if (platform === 'darwin') return "the footprint, as in Activity Monitor, with the GPU and IOSurface memory a process holds"
   if (platform === 'win32') return 'private bytes'
-  return 'private memory where it is known, else the working set'
+  return 'private or resident anonymous memory where available'
 }
 
 /** The issue's title and body: numbers, fixed names, the version and the OS. Nothing a person typed or named. */
