@@ -115,6 +115,16 @@
   gap: var(--space-8);
 }
 
+/* Holds the code's place while it is made, so nothing jumps when it shows. */
+.engine-preparing {
+  justify-content: center;
+  min-height: 208px;
+}
+
+.engine-preparing-percent {
+  font-variant-numeric: tabular-nums;
+}
+
 .engine-qr p {
   margin: 0;
 }

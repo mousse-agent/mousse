@@ -9,6 +9,7 @@ import { ChevronRight } from '../../lib/icons'
 import { qrSvgPath } from '../../lib/plusQr'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
 import { EnterLinkPanel, JoinedLine, JoinRoutes, SendLinkPanel } from './SendLinkParts'
@@ -61,10 +62,12 @@ export function AddEngineDeviceDialog({
   // A build without the helper offers only what the old networking still does (Add a phone).
   const engine = status && status.helper.state !== 'not_in_build' ? status : undefined
   const hasEngine = !!engine
+  // The helper answers once it runs: until then the dialog waits for it instead of asking and failing.
+  const ready = engine?.helper.state === 'running'
 
   // The code shows at once, one invitation at a time; when it runs out a new one takes its place.
   useEffect(() => {
-    if (step.kind !== 'choose' || !hasEngine || invite || approved) return
+    if (step.kind !== 'choose' || !ready || invite || approved) return
     void call<{ invitation: string; uri: string; expiresAt?: number }>('netEngine.invite', {}).then(
       (answer) => {
         if (!answer) return
@@ -72,7 +75,7 @@ export function AddEngineDeviceDialog({
         setInvite(answer.value)
       }
     )
-  }, [step.kind, hasEngine, invite, approved, call])
+  }, [step.kind, ready, invite, approved, call])
 
   // The time left, to the second.
   const expiresAt = invite?.expiresAt === undefined ? undefined : toMs(invite.expiresAt)
@@ -231,7 +234,7 @@ export function AddEngineDeviceDialog({
                   </div>
                 </div>
               ) : (
-                !error && <p className="settings-muted">Making a code…</p>
+                !error && <Preparing helper={engine.helper} ready={ready} />
               ))}
             {engine && !approval && !approved && <PasteField onText={read} />}
             {(engine || onAddPhone) && (
@@ -396,6 +399,40 @@ function Choice({ label, hint, onClick }: { label: string; hint: string; onClick
         {label}
       </button>
       <span className="engine-choice-hint">{hint}</span>
+    </div>
+  )
+}
+
+/** How far the code is, by the steps it really goes through: the helper starts, says hello, then makes the code. */
+function preparingPercent(helper: NetEngineStatus['helper'], ready: boolean): number | undefined {
+  if (ready) return 75
+  if (helper.state !== 'starting') return undefined
+  return helper.step === 'hello' ? 50 : 25
+}
+
+/** Where the code will show, while it is being made: a spinner, plain words and how far along it is. */
+function Preparing({ helper, ready }: { helper: NetEngineStatus['helper']; ready: boolean }) {
+  const waiting = ready || helper.state === 'starting' || helper.state === 'restarting'
+  const percent = preparingPercent(helper, ready)
+  const words = ready
+    ? 'Making a code'
+    : helper.state === 'restarting'
+      ? 'Trying again'
+      : waiting
+        ? 'Getting ready to connect'
+        : helper.text || 'Networking is off'
+  return (
+    <div className="engine-qr engine-preparing">
+      {waiting && <DelayedLoader label={words} delayMs={0} />}
+      <p className="settings-muted" role="status">
+        {waiting ? `${words}…` : words}
+        {percent !== undefined && <span className="engine-preparing-percent"> {percent}%</span>}
+      </p>
+      {helper.state === 'restarting' && helper.text && (
+        <p className="settings-muted" title={helper.text}>
+          {helper.text}
+        </p>
+      )}
     </div>
   )
 }

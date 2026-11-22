@@ -310,7 +310,11 @@ export class NetEngineService implements EngineDirectoryPort {
     return {
       enabled: !!this.settings()?.enabled,
       on: this.on(),
-      helper: { state: helper.state, ...(text ? { text } : {}) },
+      helper: {
+        state: helper.state,
+        ...(text ? { text } : {}),
+        ...('step' in helper && helper.step ? { step: helper.step } : {})
+      },
       ...(this.helper?.paused ? { paused: this.helper.paused } : {}),
       ...(typeof this.helper?.info.identity === 'string'
         ? { identity: this.helper.info.identity }
