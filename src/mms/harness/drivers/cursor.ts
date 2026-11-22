@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HarnessCaps } from '../../../shared/harness/types'
@@ -343,9 +343,15 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
     }
   }
 
+  const standaloneWorkspace = (threadId: string): string => {
+    const directory = join(context.stateDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
+  }
   const client: CursorTurnClient = {
     chat: (input) => sessions.chat(input),
     commitConversation: (threadId, history) => sessions.commitConversation(threadId, history),
+    standaloneWorkspace,
     configured: () => runtime.configured(),
     interrupt: (agentId) => sessions.interrupt(agentId)
   }

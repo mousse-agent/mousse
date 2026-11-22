@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
@@ -467,6 +467,13 @@ export class AntigravityProviderService {
   /** The history a turn that did not finish left: its session may be resumed from it (`AcpSessions.commitInterrupted`). */
   commitInterrupted(threadId: string, history: string): void {
     this.acp.commitInterrupted(threadId, history)
+  }
+
+  /** Per-thread private working directory for standalone ("No Project") chats. */
+  standaloneWorkspace(threadId: string): string {
+    const directory = join(this.profileDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
   }
 
   /** A turn on the thread's agent session (see `AcpSessions.chat`). */

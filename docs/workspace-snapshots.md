@@ -265,7 +265,7 @@ A whole folder cannot be snapshotted when it is a home or system folder (the fil
 
 ### Admission and turns
 
-`OrchestratorService` decides per turn (`snapshotFolderFor`): a turn that changes files (`agent`, `build`, a skill; not a read-only turn, a bot's, or a subagent's shared view) in a thread with no worktree of its own and a folder as above is recorded in the folder's store. The project's folder is the project's path; for a thread with no project it is the folder the selected runtime keeps for the thread (`ProviderAdapter.standaloneWorkspace`, implemented by Claude Code and Codex). A runtime that keeps no such folder records the conversation only, as before.
+`OrchestratorService` decides per turn (`snapshotFolderFor`): a turn that changes files (`agent`, `build`, a skill; not a read-only turn, a bot's, or a subagent's shared view) in a thread with no worktree of its own and a folder as above is recorded in the folder's store. The project's folder is the project's path; for a thread with no project it is the folder the selected runtime keeps for the thread (`ProviderAdapter.standaloneWorkspace`, implemented by Claude Code, Codex, Antigravity, ACP agents, Grok, and Cursor). A runtime that keeps no such folder records the conversation only, as before.
 
 The turn then runs exactly as a Git thread's: `recordOutsideChanges` takes the first snapshot (changes made outside Mousse become an action of the person), `beginTurn`, and `checkpointExistingTurn` at the end; interrupted checkpoints and Undo operations recover at the next turn start. `capability.checkpointable` stays false for these threads, so everything that needs an owned Git workspace (isolated subagents, workflow integration, Publish) refuses as it did before.
 
