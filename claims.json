@@ -64,15 +64,13 @@
       "task": "profiler-memory-scope",
       "session": "agibook-5c97dc",
       "machine": "agibook",
-      "branch": null,
+      "branch": "profiler-memory-scope",
       "paths": [
         "src/shared/diagnostics/memory.ts",
-        "src/mms/diagnostics",
-        "src/mms/run/mcp/appTools/profiler.ts",
         "src/renderer/components/settings/MemoryRows.tsx"
       ],
       "claimedAt": "2026-11-22T21:15:35.316Z",
-      "expiresAt": "2026-11-22T23:15:35.316Z"
+      "expiresAt": "2026-11-22T23:20:08.779Z"
     }
   ]
 }
