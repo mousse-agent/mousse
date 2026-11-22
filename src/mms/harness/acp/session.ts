@@ -12,6 +12,7 @@ import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
 import { closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
+import { answerFormElicitation } from './elicitation'
 import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
@@ -405,6 +406,8 @@ export interface AcpSessionsOptions {
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
   urlElicitation?: boolean
+  /** Interactive agent questions may arrive as form elicitations (`elicitation/create`, `mode: 'form'`). */
+  formElicitation?: boolean
   /** End a session with `session/close` (when advertised) before its process is killed. */
   closeSessions?: boolean
   /** Bumped when the launch settings change; a process from an older one is not reused. */
@@ -511,12 +514,34 @@ export class AcpSessions {
           return writeWorkspaceFile(questions, scope, request, label)
         }
       } : {}),
-      // A sign-in link the agent sends as a URL elicitation goes to the sign-in; nothing else is answered.
-      ...(this.options.urlElicitation ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
-        const url = (request as { mode?: unknown; url?: unknown }).mode === 'url' ? (request as { url?: unknown }).url : undefined
-        if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
-        onAuthUrl(url)
-        return { action: 'accept' }
+      // URL elicitations carry sign-in links; form elicitations carry interactive questions for the thread's widget.
+      ...((this.options.urlElicitation || this.options.formElicitation) ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
+        const mode = (request as { mode?: unknown }).mode
+        if (mode === 'url' && this.options.urlElicitation) {
+          const url = (request as { url?: unknown }).url
+          if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
+          onAuthUrl(url)
+          return { action: 'accept' }
+        }
+        if (mode === 'form' && this.options.formElicitation) {
+          if (active?.refuseTools) {
+            active.refuseTools('a question')
+            return { action: 'cancel' }
+          }
+          if (!inTurn()) {
+            stopIdle()
+            return { action: 'cancel' }
+          }
+          const callId = (request as { toolCallId?: unknown }).toolCallId
+          const awaiting = typeof callId === 'string' && callId ? active?.turnToolAwaiting : undefined
+          awaiting?.(callId as string, true)
+          try {
+            return await answerFormElicitation(questions, scope, request)
+          } finally {
+            awaiting?.(callId as string, false)
+          }
+        }
+        return { action: 'decline' }
       } } : {}),
       ...(quirks.xaiExtensions ? xaiHandlers({
         questions,

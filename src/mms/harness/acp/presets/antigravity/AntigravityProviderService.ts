@@ -155,6 +155,9 @@ export class AntigravityProviderService {
       quirks: ANTIGRAVITY_QUIRKS,
       // Antigravity's own option labels; it asks for every tool.
       classifyOption: keepOption,
+      // Advertise ACP form elicitation so `agy` routes `ask_question` through Mousse's question widget instead of dumping markdown choices in chat.
+      formElicitation: true,
+      clientCapabilities: () => ({ elicitation: { form: {} } }),
       connect: options.connect ?? antigravityConnectionFactory({
         profileDir: this.profileDir,
         profileHome,
