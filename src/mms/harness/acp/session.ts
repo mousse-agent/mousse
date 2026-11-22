@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
+import { recordSubagentCall, subagentToolName, toolResultText } from '../../../shared/subagentTools'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -15,6 +16,7 @@ import { closeAcpConnection, type AcpClientHandlers, type AcpConnection, type Ac
 import { answerFormElicitation } from './elicitation'
 import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
+import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { AGENT_DEFAULT_MODEL, agentModels, agentModes, modelOptions, planModeId, type ModelControl } from './models'
 import {
@@ -43,6 +45,50 @@ function subagentActivity(rawInput: unknown, title: string | undefined) {
     ...(agentType ? { agentType } : {}),
     ...(prompt ? { prompt } : {})
   }
+}
+
+/** Extracts text from an ACP `tool_call_update`'s `rawOutput` or `content` blocks (for subagent call records). */
+function extractToolOutputText(event: { rawOutput?: unknown; content?: unknown }): string | undefined {
+  const { rawOutput, content } = event
+  if (typeof rawOutput === 'string' && rawOutput.trim()) return rawOutput
+  if (rawOutput && typeof rawOutput === 'object') {
+    if (Array.isArray(rawOutput)) {
+      const joined = toolResultText(rawOutput)
+      if (joined) return joined
+    } else {
+      const obj = rawOutput as Record<string, unknown>
+      if (Array.isArray(obj.content)) {
+        const joined = toolResultText(obj.content)
+        if (joined) return joined
+      }
+      if (typeof obj.delegationId === 'string' || typeof obj.childThreadId === 'string' || typeof obj.started === 'boolean') {
+        try {
+          return JSON.stringify(obj)
+        } catch {
+          // Ignore unserializable rawOutput
+        }
+      }
+      for (const key of ['output', 'text', 'stdout', 'result', 'message'] as const) {
+        if (typeof obj[key] === 'string' && (obj[key] as string).trim()) return obj[key] as string
+      }
+      try {
+        return JSON.stringify(rawOutput)
+      } catch {
+        // Ignore unserializable rawOutput
+      }
+    }
+  }
+  if (Array.isArray(content)) {
+    const parts: string[] = []
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue
+      const b = block as { type?: unknown; text?: unknown; content?: { type?: unknown; text?: unknown } }
+      if (typeof b.text === 'string' && b.text) parts.push(b.text)
+      else if (b.content && typeof b.content.text === 'string' && b.content.text) parts.push(b.content.text)
+    }
+    if (parts.length) return parts.join('')
+  }
+  return undefined
 }
 
 /**
@@ -900,7 +946,7 @@ export class AcpSessions {
     let text = ''
     let thinking = ''
     let turnUsage: AcpTurnUsage | undefined
-    const toolTitles = new Map<string, string>()
+    const openTools = new Map<string, { title: string; name?: string; rawInput?: unknown }>()
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let steerFailure: unknown
@@ -982,36 +1028,60 @@ export class AcpSessions {
       watchSilence()
       noteCommands(current, update)
       if (!update || typeof update !== 'object') return
-      const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; rawInput?: unknown; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
+      const event = update as { sessionUpdate?: string; content?: unknown; toolCallId?: string; title?: string; name?: string; status?: string; rawInput?: unknown; rawOutput?: unknown; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
+      const textContent = event.content && typeof event.content === 'object' && !Array.isArray(event.content) ? event.content as { type?: string; text?: string } : undefined
       // The agent works on the prompt that carries drained steers: they are read now, before what it writes.
       // An update that may be a cancelled prompt's late one does not count: the carrying prompt's reply reads them then.
       if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) {
         worked = true
         readCarried()
       }
-      if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
-        text += event.content.text ?? ''
+      if (event.sessionUpdate === 'agent_message_chunk' && textContent?.type === 'text') {
+        text += textContent.text ?? ''
         input.onText(text)
       }
       // Agents such as Antigravity say what they are doing between tool calls as thoughts, not as message text.
-      if (event.sessionUpdate === 'agent_thought_chunk' && event.content?.type === 'text' && event.content.text) {
-        thinking += event.content.text
+      if (event.sessionUpdate === 'agent_thought_chunk' && textContent?.type === 'text' && textContent.text) {
+        thinking += textContent.text
         input.onThinking?.(thinking)
       }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
         const subagent = isAcpSubagentTool(event.name)
         const activity = subagent ? subagentActivity(event.rawInput, event.title) : undefined
+        const record = subagentToolName(event.name) ? (recordSubagentCall(event.name, event.rawInput, {}) ?? undefined) : undefined
         const title = activity ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
-        toolTitles.set(event.toolCallId, title)
+        openTools.set(event.toolCallId, { title, name: event.name, rawInput: event.rawInput })
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}) })
+        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
-      if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && toolTitles.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed')
-        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: toolTitles.get(event.toolCallId)! })
+      if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed') {
+        const tracked = openTools.get(event.toolCallId)!
+        if (event.rawInput !== undefined && tracked.rawInput === undefined) tracked.rawInput = event.rawInput
+        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title })
+      }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
-        input.onTool?.({ phase: 'complete', callId: event.toolCallId, title: event.title ?? toolTitles.get(event.toolCallId) ?? `${label} tool`, status: event.status as 'completed' | 'failed' })
-        toolTitles.delete(event.toolCallId)
+        const tracked = openTools.get(event.toolCallId)
+        openTools.delete(event.toolCallId)
+        const toolName = tracked?.name ?? event.name
+        const rawInput = tracked?.rawInput ?? event.rawInput
+        const outputText = extractToolOutputText(event)
+        const record = subagentToolName(toolName)
+          ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
+          : undefined
+        const served = toolName ? mousseServerToolOf(toolName) : undefined
+        const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
+          ? { output: outputText }
+          : undefined
+        input.onTool?.({
+          phase: 'complete',
+          callId: event.toolCallId,
+          title: event.title ?? tracked?.title ?? `${label} tool`,
+          ...(toolName ? { toolName } : {}),
+          status: event.status as 'completed' | 'failed',
+          ...(record ? { record } : {}),
+          ...(followUpOutput ? { activity: followUpOutput } : {})
+        })
       }
       if (event.sessionUpdate === 'config_option_update' && event.configOptions) {
         const updated = quirks.modelConfigId ? modelOptions({ configOptions: event.configOptions }) : agentModels({ configOptions: event.configOptions }).models
@@ -1338,7 +1408,7 @@ export class AcpSessions {
         attachments = steerImageBlocks(steers)
         if (text) text += '\n\n'
       }
-      for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
+      for (const [callId, tracked] of openTools) input.onTool?.({ phase: 'complete', callId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}), status: 'unfinished' })
       if (turnUsage) input.onUsage?.(turnUsage)
       return text
     } catch (error) {
