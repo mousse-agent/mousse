@@ -8,7 +8,8 @@ import type { LaunchedHelper } from './process'
 export type HelperStatus =
   | { state: 'off' }
   | { state: 'not_in_build'; text: string }
-  | { state: 'starting' }
+  /** `step`: `launch` while the process starts, `hello` while it says who it is. */
+  | { state: 'starting'; step?: 'launch' | 'hello' }
   | { state: 'running'; generation: number; paused?: string; text?: string }
   | { state: 'restarting'; inMs: number; text?: string; reason?: string }
   | { state: 'mismatch'; text: string }
@@ -121,7 +122,7 @@ export class HelperSupervisor {
   private async cycle(): Promise<void> {
     const generation = ++this.generation
     this.timer = undefined
-    this.set({ state: 'starting' })
+    this.set({ state: 'starting', step: 'launch' })
     let launched: LaunchedHelper
     try {
       launched = await this.deps.launch()
@@ -142,6 +143,7 @@ export class HelperSupervisor {
     const startedAt = this.now()
     const current = { generation, launched } as NonNullable<typeof this.current>
     this.current = current
+    this.set({ state: 'starting', step: 'hello' })
     void launched.exited.then(({ code, signal, stderr }) =>
       this.exited(generation, startedAt, lastWords(stderr) || `exited ${code ?? signal}`)
     )

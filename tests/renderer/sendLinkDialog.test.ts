@@ -196,6 +196,23 @@ async function dialog(d: ReturnType<typeof daemon>, props: Record<string, unknow
   }
 }
 
+describe('Add device while networking starts', () => {
+  it('waits with how far it is, no error, and shows the code once the helper runs', async () => {
+    const d = daemon({ on: false, helper: { state: 'starting', step: 'launch' } })
+    const update = await dialog(d)
+    expect(d.called('netEngine.invite')).toEqual([])
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    expect(text()).toContain('Getting ready to connect… 25%')
+
+    await update({ helper: { state: 'starting', step: 'hello' } })
+    expect(text()).toContain('50%')
+
+    await update({ on: true, helper: { state: 'running' } })
+    expect(d.called('netEngine.invite')).toEqual([{}])
+    expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
+  })
+})
+
 describe('Send link (§5.1)', () => {
   it('shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
     const d = daemon()
