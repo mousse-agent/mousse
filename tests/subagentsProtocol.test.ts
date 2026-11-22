@@ -36,7 +36,7 @@ it('advertises subagents.list and the GUI refuses a daemon without it', async ()
 it('lists a parent’s subagents and announces the change to clients and the GUI bridge', async () => {
   f = await lifecycleHarness()
   const { thread: parent } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Parent' })
-  expect(await f.rpc.request('subagents.list', { threadId: parent.id })).toEqual({ threadId: parent.id, subagents: [] })
+  expect(await f.rpc.request('subagents.list', { threadId: parent.id })).toEqual({ threadId: parent.id, subagents: [], removed: [] })
   await expect(f.rpc.request('subagents.list', { threadId: parent.id, extra: 1 })).rejects.toThrow()
 
   const events: ProtocolEvent[] = []
@@ -71,7 +71,7 @@ it('lists a parent’s subagents and announces the change to clients and the GUI
   expect(subagents[0]).toMatchObject({ childThreadId: accepted.childThreadId, latestDelegationId: accepted.delegationId, workspace: 'isolated' })
   expect(subagents[0].title).toBe('API reviewer')
   // The child is not a subagent of anything else.
-  expect(await f.rpc.request('subagents.list', { threadId: accepted.childThreadId })).toEqual({ threadId: accepted.childThreadId, subagents: [] })
+  expect(await f.rpc.request('subagents.list', { threadId: accepted.childThreadId })).toEqual({ threadId: accepted.childThreadId, subagents: [], removed: [] })
 
   // A child's question appearing and clearing, and its rename, each announce the parent again.
   const updatesFor = (parentThreadId: string) => events.filter((event) => event.type === 'subagents.updated' && (event.data as { parentThreadId: string }).parentThreadId === parentThreadId).length
@@ -183,4 +183,23 @@ it('boot repair gives older children their lineage, discards a child whose creat
   expect(services.threads.getThread(orphan.id)).toBeUndefined()
   expect(services.threads.getThread(parent.id)).toBeDefined()
   expect(services.threads.lifecycleStore.require(older.id).parentTaskId).toBeUndefined()
+})
+
+it('a subagent whose thread was deleted is listed apart, with its task outcome and the start of its result', async () => {
+  const { parent, child, engine } = await parentWithChild()
+  engine.markStarting(child.childRunId)
+  engine.markRunning(child.childRunId)
+  engine.markTerminal(child.childRunId, 'completed', undefined, { resultText: 'Found two bugs:\n\nthe retry loop and the cache key.' })
+  await f!.services.trashThread(child.childThreadId)
+  await f!.services.deleteThreadForGood(child.childThreadId, { human: true, discard: true })
+  expect(f!.services.threads.lifecycleStore.require(child.childThreadId).state).toBe('purged')
+
+  const listed = await f!.rpc.request<{ subagents: SubagentSummary[]; removed: SubagentSummary[] }>('subagents.list', { threadId: parent.id })
+  // Clients that list subagents never see it among the live ones.
+  expect(listed.subagents).toEqual([])
+  expect(listed.removed).toHaveLength(1)
+  expect(listed.removed[0]).toMatchObject({ childThreadId: child.childThreadId, removed: true, state: 'done', title: '' })
+  expect(listed.removed[0].tasks).toEqual([
+    expect.objectContaining({ delegationId: child.delegationId, outcome: 'done', summary: 'Found two bugs: the retry loop and the cache key.' })
+  ])
 })

@@ -61,8 +61,8 @@ export interface PiLaunchInput {
   engineEnv?: Readonly<Record<`MOUSSE_PI_${string}`, string>>
   /**
    * A bot turn (Bot Phase 1 §5.9): the environment is built from nothing (`lockedEnv`) instead of
-   * the instance's, with the instance's own key variable and configured ids as its secrets, and the
-   * bot marker set after the drops.
+   * the instance's, with configured ids as its extra variables and the bot marker set after the
+   * drops. The provider key arrives through the private catalogue bridge.
    */
   locked?: PiLockedLaunch
   /** Where the instance's own provider key is read from: Mousse's environment unless a test passes one. */
@@ -139,7 +139,7 @@ export function piLaunch(input: PiLaunchInput): PiLaunch {
   let env: NodeJS.ProcessEnv
   if (input.locked) {
     // Nothing of the instance's or Mousse's environment but the allowlist (`lockedEnv`), then the
-    // instance's own key and ids.
+    // configured ids. The provider key arrives through the private catalogue bridge, not the environment.
     env = lockedEnv({
       platform: input.locked.platform ?? process.platform,
       base: input.env.env,
@@ -147,7 +147,7 @@ export function piLaunch(input: PiLaunchInput): PiLaunch {
       provider: input.provider,
       credential: input.locked.credential,
       home,
-      secrets: { ...ownKeys, ...extra },
+      secrets: extra,
       scratch: input.locked.scratch
     })
   } else {

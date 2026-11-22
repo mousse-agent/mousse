@@ -456,7 +456,7 @@ describe('the command table', () => {
     expect(new Set(COMMANDS.map((command) => command.id)).size).toBe(COMMANDS.length)
     const unbound = COMMANDS.filter((command) => command.defaultBinding === null).map((command) => command.id)
     // Palette-only commands and Deny (a slip of the hand must not deny) ship without a key.
-    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'theme.builtIn', 'automations.open', 'usage.open'])
+    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'theme.builtIn', 'window.reload', 'automations.open', 'usage.open'])
     for (const command of COMMANDS) {
       for (const platform of ['win32', 'darwin']) {
         const binding = defaultBindingFor(command.id, platform)
@@ -478,13 +478,6 @@ describe('the command table', () => {
       expect(bindings.get(resolveBinding('CommandOrControl+F', platform)!)).toEqual(['chat.findInThread'])
       // The defaults clash with nothing, and use the chords reserved for them without a warning.
       expect(findConflicts({}, platform)).toEqual([])
-    }
-  })
-
-  it('still warns when another command is moved onto the Files chords', () => {
-    for (const chord of ['CommandOrControl+P', 'CommandOrControl+Shift+F']) {
-      const conflicts = findConflicts({ 'thread.new': chord }, 'win32')
-      expect(conflicts.map((conflict) => conflict.kind).sort()).toEqual(['command', 'reserved'])
     }
   })
 
@@ -560,6 +553,21 @@ describe('the command table', () => {
     // Unbound is its default already: nothing is stored.
     expect(normalizeShortcuts({ 'approval.deny': null }, 'win32')).toEqual({})
     expect(normalizeShortcuts({ 'approval.deny': 'Ctrl+Alt+Enter' }, 'win32')).toEqual({ 'approval.deny': 'Ctrl+Alt+Enter' })
+  })
+
+  it('starts and finishes dictation with Ctrl+Shift+Space (Cmd+Shift+Space on a Mac), from the composer too', () => {
+    const space = (mods: Partial<KeyInput>): KeyInput => ({ key: ' ', code: 'Space', ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, ...mods })
+    expect(defaultBindingFor('composer.dictate', 'win32')).toBe('CommandOrControl+Shift+Space')
+    expect(getCommand('composer.dictate').category).toBe('Composer')
+    expect(resolveCommand(space({ ctrlKey: true }), {}, context({ inTextInput: true, inComposer: true }), everythingRegistered)).toBe('composer.dictate')
+    expect(resolveCommand(space({ metaKey: true }), {}, context({ platform: 'darwin' }), everythingRegistered)).toBe('composer.dictate')
+    // A terminal and the browser page keep the chord.
+    expect(resolveCommand(space({ ctrlKey: true }), {}, context({ inTerminal: true }), everythingRegistered)).toBeNull()
+    expect(getCommand('composer.dictate').guest).toBe('deny')
+    // Rebindable from Settings → Shortcuts.
+    expect(resolve('Ctrl+Alt+D', context(), { 'composer.dictate': 'CommandOrControl+Alt+D' })).toBe('composer.dictate')
+    expect(findConflicts({}, 'win32')).toEqual([])
+    expect(findConflicts({}, 'darwin')).toEqual([])
   })
 
   it('switches the send mode with Ctrl+Shift+Enter (Cmd+Shift+Enter on a Mac), a key no other command has', () => {

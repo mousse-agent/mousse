@@ -50,3 +50,40 @@ it('persists ACP replies and accepted steer in canonical context and forwards it
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+it('persists tokensUsed and tokensPerSecond in responseMetadata for Antigravity Gemini turns', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-acp-metadata-'))
+  const workspace = join(home, 'workspace')
+  mkdirSync(workspace)
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  await main.start()
+  try {
+    main.settings.set({ provider: { llmProvider: 'antigravity', model: 'gemini-4-neon' } })
+    vi.spyOn(main.antigravity, 'chat').mockImplementation(async (input) => {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      input.onText('Gemini response')
+      input.onUsage?.({ input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917, hasOutput: true })
+      return 'Gemini response'
+    })
+    const project = main.projects.openProject(workspace)
+    const thread = main.threads.createThread('Gemini metadata check', project.id, workspace)
+    await main.orchestrator.send({ content: 'hello', mode: 'agent' }, false, { threadId: thread.id })
+    const persisted = main.threads.loadThreadData(thread.id)
+    const assistant = persisted.messages.find((message) => message.role === 'assistant' && message.content === 'Gemini response')
+    expect(assistant?.responseMetadata?.modelName).toBe('gemini-4-neon')
+    expect(assistant?.responseMetadata?.tokensUsed).toBe(10917)
+    expect(assistant?.responseMetadata?.tokensPerSecond).toBeGreaterThan(0)
+    expect(persisted.llmContext?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'assistant',
+        provider: 'antigravity',
+        usage: expect.objectContaining({ input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917 })
+      })
+    ]))
+  } finally {
+    await main.stop()
+    vi.restoreAllMocks()
+    rmSync(home, { recursive: true, force: true })
+  }
+})

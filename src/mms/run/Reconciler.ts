@@ -1,7 +1,7 @@
 import { heartbeatToleranceMs } from './CommandPolicy'
 import type { Row } from './db/rows'
 import { RunStoreError } from './db/RunStoreError'
-import { wakeThreads, type CapabilitiesFor, type WakeReport } from './delegation/wake'
+import { wakeThreads, type AwaitsAnswer, type CapabilitiesFor, type WakeReport } from './delegation/wake'
 import type { EffectOutbox } from './EffectOutbox'
 import type { RunStore } from './RunStore'
 import { strandedQueuedRuns } from './strandedRuns'
@@ -58,6 +58,7 @@ export class Reconciler {
   private readonly now: () => string
   private readonly heartbeatMs: number
   private readonly capabilitiesFor: CapabilitiesFor | undefined
+  private readonly awaitsAnswer: AwaitsAnswer | undefined
   private readonly credentials: { pruneExpired(): number } | undefined
   private timer: ReturnType<typeof setInterval> | null = null
 
@@ -69,6 +70,8 @@ export class Reconciler {
     heartbeatMs?: number
     /** Rule 4: capabilities of the adapter serving a thread (steer delivery for wakes). */
     capabilitiesFor?: CapabilitiesFor
+    /** Rule 4: whether a thread waits on a person's answer (agent notes wait for it). */
+    awaitsAnswer?: AwaitsAnswer
     /** Phase 5: Mousse MCP credentials, pruned once per pass (SPEC §15.1, 24 h idle expiry). */
     credentials?: { pruneExpired(): number }
   }) {
@@ -78,6 +81,7 @@ export class Reconciler {
     this.now = options.now ?? (() => new Date(options.store.db.clock()).toISOString())
     this.heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
     this.capabilitiesFor = options.capabilitiesFor
+    this.awaitsAnswer = options.awaitsAnswer
     this.credentials = options.credentials
   }
 
@@ -94,7 +98,7 @@ export class Reconciler {
       staleRuns: this.rule('stale_runs', [], () => this.staleRuns(now)),
       forcedInterrupts: this.rule('forced_interrupts', [], () => this.forcedInterrupts(now)),
       wakes: this.rule('wakes', { wakes: [], steers: [], cancelled: [], restored: [] }, () =>
-        wakeThreads(this.store, this.outbox, this.capabilitiesFor, now)),
+        wakeThreads(this.store, this.outbox, this.capabilitiesFor, now, this.awaitsAnswer)),
       ...this.rule('queued_starts', { queuedStarts: [], strandedCancelled: [] }, () => this.queuedStarts(now)),
       outcomeUnknownTools: this.rule('tools_on_terminal_runs', [], () => this.toolsOnTerminalRuns(now)),
       ...(credentials ? { prunedCredentials: this.rule('prune_credentials', 0, () => credentials.pruneExpired()) } : {})

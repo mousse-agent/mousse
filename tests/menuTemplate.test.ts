@@ -30,7 +30,7 @@ describe('the application menu template', () => {
       ['thread.newPrivate', 'New private thread', 'CommandOrControl+Shift+N'],
       ['thread.next', 'Next thread', 'Ctrl+Tab'],
       ['thread.previous', 'Previous thread', 'Ctrl+Shift+Tab'],
-      ['threads.search', 'Search threads', 'CommandOrControl+Shift+O'],
+      ['threads.search', 'Search everything', 'CommandOrControl+Shift+O'],
       ['run.stop', 'Stop run', 'CommandOrControl+Shift+Backspace']
     ])
     expect(submenu(template, 'View').filter((item) => item.id).map((item) => [item.id, item.accelerator])).toEqual([

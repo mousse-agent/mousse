@@ -10,6 +10,7 @@ import { withPermission } from '../../src/shared/bots/personal/escalation'
 import { claudeLockedSandbox } from '../../src/mms/harness/claude/locked'
 import { addedPermissions, BOT_APP_TOOLS, BOT_DEFAULT_APP_TOOLS, botStarterManifest, canonicalManifest, describeManifest, intersectManifest, isAbsolutePath, isOwnBotAppTool, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
+import { grantedPermissions } from '../../src/mms/bots/chat/projection'
 
 const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   tools: ['read', 'edit'],
@@ -17,7 +18,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   mcp: [{ serverId: 'github', tool: 'create_issue' }],
   skills: ['release-notes'],
   workspace: null,
-  budget: { maxActiveMs: 15 * 60_000 },
+  budget: { maxToolCalls: 50 },
   audience: 'owner',
   ...patch
 })
@@ -28,7 +29,7 @@ describe('botManifestDigest', () => {
     const b = manifest({
       tools: ['edit', 'read', 'edit'],
       mcp: [{ serverId: 'github', tool: 'create_issue' }, { serverId: 'github', tool: 'create_issue' }],
-      budget: { maxActiveMs: 15 * 60_000, maxTurns: undefined }
+      budget: { maxToolCalls: 50, maxTurns: undefined }
     })
     expect(botManifestDigest(a)).toBe(botManifestDigest(b))
     expect(botManifestDigest(a)).toMatch(/^[a-f0-9]{64}$/)
@@ -38,16 +39,26 @@ describe('botManifestDigest', () => {
   it('changes with any permission or limit', () => {
     const base = botManifestDigest(manifest())
     expect(botManifestDigest(manifest({ tools: ['read'] }))).not.toBe(base)
-    expect(botManifestDigest(manifest({ budget: { maxActiveMs: 10 * 60_000 } }))).not.toBe(base)
+    expect(botManifestDigest(manifest({ budget: { maxToolCalls: 40 } }))).not.toBe(base)
     expect(botManifestDigest(manifest({ mcp: [{ serverId: 'gitlab', tool: 'create_issue' }] }))).not.toBe(base)
+  })
+
+  it('a grant approved with a work time keeps its digest, and a revision without one is a subset of it', () => {
+    const old = manifest({ budget: { maxActiveMs: 60 * 60_000, maxToolCalls: 50 } })
+    // The same canonical form as when it was approved: work time first, then the other limits.
+    expect(JSON.stringify(canonicalManifest(old).budget)).toBe(JSON.stringify({ maxActiveMs: 60 * 60_000, maxToolCalls: 50 }))
+    expect(botManifestDigest(old)).not.toBe(botManifestDigest(manifest()))
+    expect(manifestSubset(manifest(), old)).toBe(true)
+    expect(manifestSubset(old, manifest())).toBe(true)
+    expect(describeManifest(old).map((line) => line.text)).not.toContainEqual(expect.stringMatching(/work/))
   })
 })
 
 describe('the subset rule', () => {
-  const granted = manifest({ budget: { maxActiveMs: 15 * 60_000, maxTurns: 40 } })
+  const granted = manifest({ budget: { maxToolCalls: 50, maxTurns: 40 } })
 
   it('a narrower revision runs without asking', () => {
-    const narrower = manifest({ tools: ['read'], mcp: [], skills: [], budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
+    const narrower = manifest({ tools: ['read'], mcp: [], skills: [], budget: { maxToolCalls: 20, maxTurns: 10 } })
     expect(manifestSubset(narrower, granted)).toBe(true)
     expect(addedPermissions(narrower, granted)).toEqual([])
     expect(manifestSubset(granted, granted)).toBe(true)
@@ -58,14 +69,14 @@ describe('the subset rule', () => {
       tools: ['read', 'edit', 'write'],
       mcp: [{ serverId: 'github', tool: 'create_issue' }, { serverId: 'github', tool: 'merge_pr' }],
       skills: ['release-notes', 'changelog'],
-      budget: { maxActiveMs: 30 * 60_000, maxTurns: 40 }
+      budget: { maxToolCalls: 80, maxTurns: 40 }
     })
     expect(manifestSubset(wider, granted)).toBe(false)
     expect(addedPermissions(wider, granted).map((line) => line.text)).toEqual([
       'Create and overwrite files in its files folder',
       'Use the MCP tool `merge_pr`',
       'Use the skill *changelog*',
-      'Up to 30 minutes of work per run'
+      'Up to 80 tool calls per run'
     ])
   })
 
@@ -76,7 +87,7 @@ describe('the subset rule', () => {
   })
 
   it('dropping a limit the grant has is wider, never a subset', () => {
-    const unlimited = manifest({ budget: { maxActiveMs: 15 * 60_000 } })
+    const unlimited = manifest({ budget: { maxToolCalls: 50 } })
     expect(manifestSubset(unlimited, granted)).toBe(false)
     expect(addedPermissions(unlimited, granted).map((line) => line.text)).toEqual(['No limit on model requests (retries included)'])
   })
@@ -88,7 +99,7 @@ describe('the subset rule', () => {
       'Edit files in its files folder',
       'Use the MCP tool `create_issue`',
       'Use the skill *release-notes*',
-      'Up to 15 minutes of work per run'
+      'Up to 50 tool calls per run'
     ])
   })
 })
@@ -127,7 +138,7 @@ describe('manifestProblem', () => {
     expect(manifestProblem(valid())).toBeUndefined()
     expect(manifestProblem(valid({ tools: ['powershell' as never] }))).toMatch(/built-in tool/)
     expect(manifestProblem(valid({ workspace: { roots: ['relative/path'], access: 'write' } }))).toMatch(/absolute/)
-    expect(manifestProblem(valid({ budget: { maxActiveMs: 0 } }))).toMatch(/maxActiveMs/)
+    expect(manifestProblem(valid({ budget: { maxTurns: 0 } }))).toMatch(/maxTurns/)
     expect(manifestProblem(valid({ audience: 'others' as never }))).toMatch(/other people/)
   })
 })
@@ -153,20 +164,19 @@ describe('round-1 review fixes', () => {
       expect(manifestProblem(valid({ appTools: [tool] })), tool).toContain(`the Mousse tool ${tool}`)
   })
 
-  it('limits are whole numbers, and work time is at most a day', () => {
-    expect(manifestProblem(valid({ budget: { maxActiveMs: 1.5 } }))).toMatch(/whole number/)
-    expect(manifestProblem(valid({ budget: { maxActiveMs: 60_000, maxTurns: 2.5 } }))).toMatch(/whole number/)
-    expect(manifestProblem(valid({ budget: { maxActiveMs: 25 * 60 * 60_000 } }))).toMatch(/24 hours/)
-    expect(manifestProblem(valid({ budget: { maxActiveMs: 60_000, maxUsd: 0.5 } }))).toBeUndefined()
+  it('limits are whole numbers, and no limit is required', () => {
+    expect(manifestProblem(valid({ budget: { maxTurns: 2.5 } }))).toMatch(/whole number/)
+    expect(manifestProblem(valid({ budget: { maxUsd: 0.5 } }))).toBeUndefined()
+    expect(manifestProblem(valid({ budget: {} }))).toBeUndefined()
   })
 
   it('intersectManifest keeps only what both name, with the lower limits', () => {
-    const granted = manifest({ budget: { maxActiveMs: 60 * 60_000, maxTurns: 100 } })
-    const revision = manifest({ tools: ['read', 'write'], skills: [], workspace: { roots: ['/home/me/proj/site', '/etc'], access: 'write' }, budget: { maxActiveMs: 5 * 60_000 } })
+    const granted = manifest({ budget: { maxToolCalls: 60, maxTurns: 100 } })
+    const revision = manifest({ tools: ['read', 'write'], skills: [], workspace: { roots: ['/home/me/proj/site', '/etc'], access: 'write' }, budget: { maxToolCalls: 5 } })
     expect(intersectManifest(revision, granted)).toEqual({
       tools: ['read'], appTools: [], mcp: [{ serverId: 'github', tool: 'create_issue' }], skills: [],
       workspace: null,
-      budget: { maxActiveMs: 5 * 60_000, maxTurns: 100 },
+      budget: { maxToolCalls: 5, maxTurns: 100 },
       audience: 'owner'
     })
   })
@@ -185,7 +195,7 @@ describe('a stored workspace (an older build\'s file access) grants nothing', ()
     const authored = two({ roots: ['/a', '/b'], access: 'write', rootAccess: { '/a': 'read' } })
     expect(canonicalManifest(authored).workspace).toEqual({ roots: ['/a', '/b'], access: 'read', rootAccess: { '/b': 'write' } })
     expect(botManifestDigest(withPermission(authored, { tool: 'read' }))).toBe(botManifestDigest(authored))
-    expect(describeManifest(authored).map((line) => line.text)).toEqual(['Read files in its files folder', 'Edit files in its files folder', 'Up to 15 minutes of work per run'])
+    expect(describeManifest(authored).map((line) => line.text)).toEqual(['Read files in its files folder', 'Edit files in its files folder', 'Up to 50 tool calls per run'])
   })
 
   it('"run commands" is one line, not tied to a folder, and an Allow adds only it', () => {
@@ -205,10 +215,17 @@ describe('round 2: the locked Claude sandbox writes only to folders granted for 
   })
 })
 
+// The Tells you setting is gone, but grants approved before then still list its tool.
+it('a grant an older build approved with telling_set still reads as well formed and lists nothing for it', () => {
+  const old = { ...botStarterManifest(), appTools: [...botStarterManifest().appTools, 'telling_set'] }
+  expect(manifestProblem(old)).toBeUndefined()
+  expect(grantedPermissions(old)).toEqual(grantedPermissions(botStarterManifest()))
+})
+
 describe('default app tools (Bot Phase 1 §5.10)', () => {
-  it('every new bot gets the web, its schedules, profile, depth, model, escalate, run_report and the five memory tools', () => {
+  it('every new bot gets the web, its schedules, profile, depth, model, escalate, run_report, the five memory tools and its open items', () => {
     expect([...BOT_DEFAULT_APP_TOOLS].sort()).toEqual([
-      'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'escalate', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
+      'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'escalate', 'item_list', 'item_save', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
       'run_report', 'set_depth', 'set_profile', 'use_model', 'web_fetch', 'web_search'
     ])
     for (const tool of BOT_MEMORY_TOOLS) {
@@ -224,10 +241,10 @@ describe('default app tools (Bot Phase 1 §5.10)', () => {
     for (const tool of ['web_search', 'web_fetch', 'consult']) expect(isOwnBotAppTool(tool), tool).toBe(false)
   })
 
-  it('the starter grant is file tools without a folder, the default app tools and 15 minutes', () => {
+  it('the starter grant is file tools without a folder, the default app tools and no limits', () => {
     const starter = botStarterManifest()
     expect(manifestProblem(starter)).toBeUndefined()
-    expect(starter).toMatchObject({ tools: ['read', 'list', 'search', 'edit', 'write'], workspace: null, mcp: [], skills: [], budget: { maxActiveMs: 60 * 60_000 } })
+    expect(starter).toMatchObject({ tools: ['read', 'list', 'search', 'edit', 'write'], workspace: null, mcp: [], skills: [], budget: {} })
     expect(starter.appTools).toEqual([...BOT_DEFAULT_APP_TOOLS])
   })
 })

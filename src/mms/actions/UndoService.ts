@@ -75,6 +75,11 @@ export class UndoService {
     this.journal = new ThreadJournal(threadDirectory)
   }
 
+  /** The name a branch has now after Mousse renamed the thread's branch, for the notice of what Git work stays. */
+  private branchRenamedTo(): (branch: string) => string {
+    return new ThreadWorkspaceManager(this.threadDirectory).branchRecord().renamedTo
+  }
+
   /**
    * Takes back the latest action's code by a three-way merge of the files (docs/workspace-snapshots.md): from the
    * action's end snapshot, onto the files as they are now, towards its start snapshot. Redo is the same step on the
@@ -121,7 +126,7 @@ export class UndoService {
       // The files as they are now, including edits made since the action: they are part of the merge, so they stay.
       const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
       const ours = await takeSnapshotAsync(workspacePath, { reason: `before ${kind}`, threadId, operationId })
-      const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, label, turnBehind(all, target))
+      const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, label, turnBehind(all, target), this.branchRenamedTo())
       const restored = await restoreChangeAsync(workspacePath, { reason: `${kind} turn ${target.turnId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: kind === 'redo' ? 'before the Undo' : 'at the start of the turn', keep: { owner: this.threadDirectory, action: label } }, (expectedTree, expectedExactTree) => {
         const intent: UndoIntent = { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext), ours: ours.sha, expectedTree, ...(expectedExactTree ? { expectedExactTree } : {}), ...(gitNotice ? { gitNotice } : {}) }
         this.journal.append({ operationId, operationType: kind, state: 'prepared', expectedPreState: { preUndoSha: ours.sha, actionId: target.id }, details: intent })
@@ -171,10 +176,13 @@ export class UndoService {
 
   /** Called before another turn and by explicit operation recovery. The restore is never replayed: the files tell whether it landed. */
   async recoverPending(workspacePath: string, restoreContext: RestoreActionContext, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
+    const interrupted = (entry: { operationType: string; state: string }) => ['undo', 'redo', 'change-undo', 'change-redo'].includes(entry.operationType) && ['prepared', 'git_applied', 'context_pending'].includes(entry.state)
+    // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
+    if (!this.journal.unsettled().some(interrupted)) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'context-recovery', async () => {
-      for (const record of this.journal.latestByOperation().values()) {
-        if (!['undo', 'redo', 'change-undo', 'change-redo'].includes(record.operationType) || !['prepared', 'git_applied', 'context_pending'].includes(record.state)) continue
-        const entries = this.journal.list().filter((item) => item.operationId === record.operationId)
+      for (const record of this.journal.unsettled()) {
+        if (!interrupted(record)) continue
+        const entries = this.journal.history(record.operationId)
         const prepared = entries.find((item) => item.state === 'prepared')
         const intent = prepared?.details as UndoIntent | undefined
         if (!intent?.target) throw new Error('Undo recovery intent is missing.')
@@ -189,7 +197,7 @@ export class UndoService {
           }
           const target = { ...intent.target, state: 'undone' as const, compensationActionId: intent.compensationId }
           // An intent written before this line was recorded has it built again from the turn.
-          const gitNotice = intent.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, intent.kind === 'redo' ? 'Redo' : 'Undo', turnBehind(this.actions.list(), intent.target))
+          const gitNotice = intent.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, intent.kind === 'redo' ? 'Redo' : 'Undo', turnBehind(this.actions.list(), intent.target), this.branchRenamedTo())
           const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt, [gitNotice ?? '', coverageNotice(intent.target.git?.coverageGaps, await namedGapsAsync(workspacePath, applied.startSha, applied.end.sha, applied.end.coverageGaps)) ?? ''].filter(Boolean).join(' ') || undefined)
           const receipts = new ChangeReceiptService(this.threadDirectory)
           const known = receipts.list().find((item) => item.operationId === record.operationId)

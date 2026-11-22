@@ -18,6 +18,8 @@ import {
   createRetainingGitWorktreeAdapter
 } from './profiles/migration/adapters'
 import { ProfileHost } from './profiles/ProfileHost'
+import { startsAtLogin } from './netEngine/loginStart'
+import { startupPhase } from './startup/startupTiming'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
 import { registerEditorTunnelMethods, registerNetMethods } from './net/registerMethods'
@@ -32,7 +34,9 @@ import { registerBotDeviceMethods } from './bots/deviceMethods'
 import { BotDefinitionError } from './bots/definitions/BotDefinitionStore'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerAutomationMethods } from './automations/registerMethods'
+import { registerComputerUseMethods } from './computerUse/registerMethods'
 import { registerSecretMethods } from './secrets/registerMethods'
+import { registerBugReportMethods } from './bugReports/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -47,6 +51,8 @@ import { createManagedBrowserInstaller } from './browser/install'
 import { bundledBrowserWorkerModule } from './browser/workerModulePath'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
 import { registerSpeechHostMethods } from './speech/registerSpeechHostMethods'
+import { registerNetEngineMethods, registerNetEngineSshServe } from './netEngine/registerMethods'
+import { SshRemote } from './netEngine/ssh/remote'
 
 export type { MmsOptions } from './MmsOptions'
 
@@ -61,6 +67,10 @@ export class MousseMainService extends MmsProfileServices {
   private installationStopped = false
   private installationStopOperation?: Promise<void>
   private profileHost: ProfileHost | null = null
+  /** Checks give the engines of profiles an SSH add reaches their helper (a fake one, or a test build). */
+  netEngineLauncher?: (engine: import('./netEngine/NetEngineService').NetEngineService) => void
+  /** B's side of Add over SSH for this installation (1b §3.4). */
+  private sshRemoteNow?: SshRemote
   private integrationDomains: IntegrationDomainRegistration | null = null
   private readonly domainCleanupSubscriptions: Array<() => void> = []
 
@@ -97,26 +107,27 @@ export class MousseMainService extends MmsProfileServices {
     const home = canonicalizeHome(options?.homeDir ?? process.env.MOUSSE_HOME ?? join(homedir(), '.mousse'))
     // Installation identity only. Profile bind/switch never changes this.
     process.env.MOUSSE_HOME = home
-    const owner = options?.requireOwnership === false ? null : acquireMmsOwnerLease(home, {
+    const owner = options?.requireOwnership === false ? null : startupPhase('create.ownerLease', () => acquireMmsOwnerLease(home, {
       kind: options?.ownerKind ?? (options?.headless ? 'cli' : 'gui'),
       version: options?.version ?? process.env.npm_package_version,
-      build: options?.build
-    })
+      build: options?.build,
+      token: options?.ownerToken
+    }))
     let providers: ProviderAuthService | undefined
     let service: MousseMainService | undefined
     try {
       const installation = createInstallationPaths(home)
       providers = new ProviderAuthService(installation.authJson)
-      await providers.init()
+      await startupPhase('create.providers', () => providers!.init())
 
       const manager = ProfileManager.open(installation)
       const migration = new ProfileMigrationService(installation, manager)
-      migration.run({
+      startupPhase('create.profileMigration', () => migration.run({
         adapters: {
           credentials: createControlStoreCredentialAdapter(),
           gitWorktrees: createRetainingGitWorktreeAdapter()
         }
-      })
+      }))
       if (!manager.isInitialized()) manager.initializeFresh()
 
       const defaultId = manager.getDefaultProfileId()
@@ -125,29 +136,34 @@ export class MousseMainService extends MmsProfileServices {
       const profileConfig = MousseConfigStore.loadProfile(defaultPaths.root, installationConfig)
       const domains = new DomainHandlerRegistry()
 
-      service = new MousseMainService(
+      const providerAuth = providers
+      service = startupPhase('create.services', () => new MousseMainService(
         profileConfig,
         options,
         owner,
         defaultPaths.root,
-        providers,
+        providerAuth,
         domains,
         home,
         defaultId,
         true
-      )
+      ))
       const host = new ProfileHost({
         providerAuth: providers,
         domains,
         // One installation store for every profile: the default profile already reads through it.
         installationConfig,
         options: { ...options, homeDir: home },
-        configureServices: (profile) => service!.configureProfileBrowser(profile)
+        configureServices: (profile) => {
+          service!.configureProfileBrowser(profile)
+          // A profile's networking switch is said in `endpoints.json`, which `mousse-helper pipe` reads.
+          profile.netEngine.onSwitched = () => service!.sshEndpointsChanged()
+        },
+        onProfilesChanged: () => service!.sshEndpointsChanged()
       })
       host.attachDefault(service, defaultId)
       service.profileHost = host
-      registerProfileDomain(domains, service)
-      service.registerPlatformDomains()
+      startupPhase('create.domains', () => { registerProfileDomain(domains, service!); service!.registerPlatformDomains() })
       await service.initialize()
       return service
     } catch (error) {
@@ -176,8 +192,67 @@ export class MousseMainService extends MmsProfileServices {
     if (!host) return
     for (const record of host.manager.list()) {
       if (record.status !== 'active' || record.id === this.profileId) continue
-      const services = await host.getProfileServices(record.id)
-      await services.start()
+      const services = await startupPhase(`profile.${record.id.slice(0, 8)}.open`, () => host.getProfileServices(record.id))
+      await startupPhase(`profile.${record.id.slice(0, 8)}.start`, () => services.start())
+    }
+  }
+
+  /**
+   * Called once the daemon published its readiness. The start's deferred passes, and the network engines and their
+   * helpers, start now, in the background: readiness never waited for them.
+   */
+  afterReady(): void {
+    // The start's slow passes (lifecycle recovery, the restart's runtime pass, the search index's first sweep) run now.
+    if (this.profileHost) this.profileHost.startAfterReadyWork()
+    else this.startAfterReadyWork()
+    void this.profileHost?.startNetworkedProfiles()
+    void this.sshRemote()
+      ?.afterReady()
+      .catch((error) => console.warn('SSH add setup did not finish', error instanceof Error ? error.message : String(error)))
+  }
+
+  /** B's side of Add over SSH: profiles, their engines and the request journal of this installation. */
+  sshRemote(): SshRemote | undefined {
+    const host = this.profileHost
+    if (!host) return undefined
+    // Profiles an SSH add made start here; the others started with the daemon.
+    const made = new Set<string>()
+    this.sshRemoteNow ??= new SshRemote({
+      home: host.manager.getInstallationPaths().homeDir,
+      profiles: () =>
+        host.manager.list().map((record) => ({
+          id: record.id,
+          label: record.displayName,
+          root: host.manager.getPaths(record.id).root,
+          active: record.status === 'active'
+        })),
+      engine: async (id) => {
+        const services = await this.getProfileServices(id)
+        if (made.delete(id)) await services.start()
+        this.netEngineLauncher?.(services.netEngine)
+        return services.netEngine
+      },
+      createProfile: async (label) => {
+        // A label another profile has gets a slug of its own (the label stays as the other computer typed it).
+        const taken = new Set(host.manager.list().map((record) => record.slug))
+        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 56) || 'profile'
+        let slug = base
+        for (let n = 2; taken.has(slug); n++) slug = base + '-' + n
+        const id = host.manager.create({ displayName: label, slug }).id
+        made.add(id)
+        return id
+      },
+      startsAtLogin: () => startsAtLogin()
+    })
+    return this.sshRemoteNow
+  }
+
+  /** A profile came or went, or its networking switch changed: `endpoints.json` follows, once SSH add is set up. */
+  sshEndpointsChanged(): void {
+    try {
+      this.sshRemoteNow?.writeEndpoints()
+    } catch (error) {
+      console.warn('endpoints.json was not rewritten', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -187,6 +262,7 @@ export class MousseMainService extends MmsProfileServices {
     if (this.installationStopped) return Promise.resolve()
     if (this.installationStopOperation) return this.installationStopOperation
     const operation = (async () => {
+      this.sshRemoteNow?.close()
       const results = await Promise.allSettled([this.profileHost?.stopAll(), super.stop(options), this.browserSetup.shutdown(options)])
       const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
       // An unsuccessful drain still owns the installation. Releasing the lease
@@ -221,8 +297,17 @@ export class MousseMainService extends MmsProfileServices {
       }
       return services
     }
-    registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
+    registerNetMethods(
+      this.domains,
+      async profileId => (await profile(profileId)).net,
+      async profileId => {
+        const services = await profile(profileId)
+        return { peers: services.peers, engine: { isEngine: (node) => services.netEngine.isEngine(node), setPolicy: (node, change) => services.netEngine.setPolicy(node, change) } }
+      }
+    )
     registerEditorTunnelMethods(this.domains, async profileId => (await profile(profileId)).net)
+    registerNetEngineMethods(this.domains, async profileId => (await profile(profileId)).netEngine)
+    registerNetEngineSshServe(this.domains, () => this.sshRemote())
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     this.domainCleanupSubscriptions.push(
       registerSpeechHostMethods(this.domains, async profileId => (await profile(profileId)).speechRelay)
@@ -255,7 +340,8 @@ export class MousseMainService extends MmsProfileServices {
           if (!engine.botIds().includes(botId)) throw new BotDefinitionError('bot_not_found', 'This bot is gone.')
         },
         store: services.botDeviceAccess,
-        devices: async () => services.botReach?.devices()
+        devices: async () => services.botReach?.devices(),
+        changed: (botId) => engine.reachChanged(botId)
       }
     })
     // Each bot's own browser, as its owner sees it (`bots.browser.*`).
@@ -263,6 +349,8 @@ export class MousseMainService extends MmsProfileServices {
       const services = await profile(profileId)
       return services.personalBots ? services.botBrowsers : null
     })
+    // Settings → Computer use: whether Cua Driver is here, and its installer.
+    registerComputerUseMethods(this.domains, async (profileId) => (await profile(profileId)).orchestrator.computerUse())
     registerAutomationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {
@@ -303,10 +391,15 @@ export class MousseMainService extends MmsProfileServices {
           useSaved: (threadId, requestId) => services.secretRequests.useSaved(threadId, requestId),
           decline: (threadId, requestId) => services.secretRequests.decline(threadId, requestId)
         },
+        pasted: { vault: services.secretVault, homeFor: botId => {
+          if (!services.personalBots) throw new Error('Bots are not available.')
+          return services.personalBots.service.secretHome(botId)
+        } },
         list: () => services.secretVault.list(),
         delete: (name) => services.secretVault.delete(name)
       }
     })
+    registerBugReportMethods(this.domains, async (profileId) => (await profile(profileId)).bugReports)
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
@@ -359,7 +452,7 @@ export class MousseMainService extends MmsProfileServices {
     const runtime: BrowserRuntimePort = {
       capabilities: (context) => {
         if (context.profileId !== services.profileId) return undefined
-        const target = context.source === 'gui' ? services.platform.browser.selectedTarget(context.threadId) : { backend: 'managed-chromium' as const }
+        const target = context.source === 'gui' ? services.platform.browser.targetFor(context) : { backend: 'managed-chromium' as const }
         return services.platform.browser.sessions.listThreadSessions({ profileId: context.profileId, threadId: context.threadId })
           .find((session) => session.backend === target?.backend && session.runId === context.runId && session.lifecycle !== 'closed' && session.lifecycle !== 'disconnected')?.capabilities
       },
@@ -375,7 +468,7 @@ export class MousseMainService extends MmsProfileServices {
       resolveTarget: (context) => {
         if (context.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
         if (context.source !== 'gui') return { backend: 'managed-chromium' }
-        const selected = services.platform.browser.selectedTarget(context.threadId)
+        const selected = services.platform.browser.targetFor(context)
         if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'No available in-app browser tab is connected. Open a browser tab and retry.' })
         return selected
       },

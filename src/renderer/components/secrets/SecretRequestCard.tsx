@@ -6,6 +6,7 @@ export interface SecretRequestCardProps {
   request: SecretRequestView
   /** In the transcript, in the turn that asked (rather than over the composer). */
   inline?: boolean
+  botName?: string
   /** Save securely. Rejects with a message to show; the typed value is cleared once it resolves. */
   onSave(value: string, keep: SecretKeep): Promise<void>
   onUseSaved(): Promise<void>
@@ -17,7 +18,7 @@ export interface SecretRequestCardProps {
  * sent once, to this computer's daemon; it is never put in the composer, the thread or a notice, and the field is
  * cleared as soon as it is saved.
  */
-export function SecretRequestCard({ request, inline, onSave, onUseSaved, onDecline }: SecretRequestCardProps) {
+export function SecretRequestCard({ request, inline, botName, onSave, onUseSaved, onDecline }: SecretRequestCardProps) {
   const [value, setValue] = useState('')
   const [shown, setShown] = useState(false)
   const [keep, setKeep] = useState<SecretKeep>(DEFAULT_SECRET_KEEP)
@@ -71,6 +72,10 @@ export function SecretRequestCard({ request, inline, onSave, onUseSaved, onDecli
       </div>
       <div className="composer-question-modal-body">
         <p className="composer-question-prompt" id={reasonId}>{request.reason}</p>
+        {request.binding && <p className="composer-question-reason">
+          For {request.binding.service ?? request.binding.host}, read only. {botName ?? 'The bot'} can't see it or send it anywhere else.
+          {!request.binding.service && <> Mousse can't tell what this service's reads do.</>}
+        </p>}
         {(request.link || request.format) && (
           <p className="secret-request-meta">
             {request.format && <span>Expected: {request.format}</span>}
@@ -129,7 +134,7 @@ export function SecretRequestCard({ request, inline, onSave, onUseSaved, onDecli
             </button>
           ))}
         </div>
-        <p className="composer-question-reason secret-request-keep-line" id={keepLineId}>{secretKeepLine(keep)}</p>
+        <p className="composer-question-reason secret-request-keep-line" id={keepLineId}>{secretKeepLine(keep, request.binding ? { bound: botName ?? 'The bot' } : undefined)}</p>
         {error && <p className="secret-request-error" role="alert">{error}</p>}
       </div>
       <div className="composer-question-modal-footer" data-mousse-decision="">

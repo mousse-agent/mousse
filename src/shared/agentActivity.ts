@@ -75,7 +75,11 @@ export type AgentActivityItem = ActivityBase &
     | {
         kind: 'subagent'
         agentType?: string
+        /** The model the call asked the subagent to run on ("sonnet"), when it named one. */
+        model?: string
         description?: string
+        /** The task delegated to the subagent, when the provider reports it. */
+        prompt?: string
         nativeId?: string
         background?: boolean
         durationMs?: number
@@ -84,6 +88,11 @@ export type AgentActivityItem = ActivityBase &
   )
 
 export type ActivityKind = AgentActivityItem['kind']
+
+/** Legacy and current names reported by ACP agents for a subagent launch. */
+export function isAcpSubagentTool(toolName: unknown): toolName is 'start_subagent' | 'invoke_subagent' {
+  return toolName === 'start_subagent' || toolName === 'invoke_subagent'
+}
 
 /**
  * What a provider knows about a call. The assembler fills `id`, `callId`, `status` and the
@@ -525,9 +534,13 @@ function todosOf(value: unknown): ActivityTodoItem[] | undefined {
 }
 
 function serverOf(toolName: string): string | undefined {
-  if (!toolName.startsWith('mcp__')) return undefined
-  const split = toolName.indexOf('__', 'mcp__'.length)
-  return split === -1 ? undefined : toolName.slice('mcp__'.length, split)
+  if (toolName.startsWith('mcp__')) {
+    const split = toolName.indexOf('__', 'mcp__'.length)
+    return split === -1 ? undefined : toolName.slice('mcp__'.length, split)
+  }
+  if (toolName.startsWith('mcp_mousse-relay_')) return 'mousse-relay'
+  if (toolName.startsWith('mcp_mousse_')) return 'mousse'
+  return undefined
 }
 
 /**
@@ -641,10 +654,12 @@ function typedDraft(
     case 'Task': {
       const agentType = str(input.subagent_type)
       const description = str(input.description)
+      const model = str(input.model)
       return {
         ...base,
         kind: 'subagent',
         ...(agentType ? { agentType } : {}),
+        ...(model ? { model } : {}),
         ...(description ? { description: clip(description.replace(/\s+/g, ' ').trim(), ACTIVITY_DESCRIPTION_CHARS) } : {}),
         ...(input.run_in_background === true ? { background: true } : {})
       }
@@ -714,10 +729,11 @@ export function boundActivity<T extends ActivityDraft | AgentActivityItem>(item:
       const capped = capHead(next.text, ACTIVITY_GENERIC_CAP_BYTES)
       return capped.truncated ? ({ ...next, text: capped.text } as T) : item
     }
-    case 'subagent':
-      return next.description !== undefined && next.description.length > ACTIVITY_DESCRIPTION_CHARS
-        ? ({ ...next, description: clip(next.description, ACTIVITY_DESCRIPTION_CHARS) } as T)
-        : item
+    case 'subagent': {
+      const description = next.description === undefined ? undefined : clip(next.description, ACTIVITY_DESCRIPTION_CHARS)
+      const prompt = next.prompt === undefined ? undefined : capHead(next.prompt, ACTIVITY_GENERIC_CAP_BYTES).text
+      return description !== next.description || prompt !== next.prompt ? ({ ...next, description, prompt } as T) : item
+    }
     case 'generic':
       return next.input ? ({ ...next, input: capRecord(next.input) } as T) : item
     default:

@@ -1,18 +1,20 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
+import { COMPUTER_TOOL_NAMES } from '../../computerUse'
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
-import { DEFAULT_BOT_ACTIVE_MS, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
+import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
+import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
+import { BOT_ITEM_TOOLS } from './items'
+import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
  * dialog uses (PR 6 §4). Browser-safe: the digest itself is computed in the daemon.
  */
 
-const BUDGET_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
-
-/** The longest work time one activation may be given: a day. */
-export const MAX_BOT_ACTIVE_MS = 24 * 60 * 60_000
+/** The limits an owner may set on a bot's runs. Work time is not one: it has no limit (`BotBudget.maxActiveMs`). */
+const BUDGET_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
 
 /**
  * The bot's own app tools (Bot Phase 1 §5.10): its schedules, its name and description, how much
@@ -20,7 +22,7 @@ export const MAX_BOT_ACTIVE_MS = 24 * 60 * 60_000
  * so they are not permissions: every bot has them, they never raise an ask, and About never lists them.
  */
 export const BOT_OWN_APP_TOOLS: readonly string[] = [
-  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS,
+  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS,
   // An automation run's report on its own run (the Automations inbox); only a scheduled run has one to give.
   'run_report'
 ]
@@ -41,30 +43,20 @@ export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', '
 export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop']
 
 /**
- * The grant's Mousse app tools a bot's subagent may have, when the grant holds them: the web and the bot's own browser.
- * The rest are the bot's and its work's alone: its own tools (schedules, its name and depth, its model, memory, asks),
- * the automation tools, and the owner's threads. The built-ins, the files folder, MCP tools and skills are the work's,
- * unchanged.
+ * The grant's Mousse app tools a bot's subagent may have, when the grant holds them: what a thread's subagent may use.
+ * The web, the bot's own browser, the computer and the owner's threads (as the work holds them: reading, and acting when
+ * the work may); Mousse's profiler comes without a grant (`compileBotThread`). The rest are the bot's and its work's
+ * alone, as they are a thread's own agent's: its own tools (schedules, its name and depth, its model, memory, asks) and
+ * the automation tools, which a thread's subagent is refused too. The built-ins, the files folder, MCP tools and skills
+ * are the work's, unchanged.
  */
-export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser']
-
-/** Subagents one piece of a bot's work runs at once: a bot's own run slots. */
-export const MAX_BOT_SUBAGENTS_AT_ONCE = 3
-
-/** Subagents one piece of a bot's work may start in all, across its turns: the threads a bot may have at work at once. */
-export const MAX_BOT_SUBAGENTS_PER_WORK = 10
-
-/**
- * Subagents one bot's work may start in a day (the last 24 hours), across all its work, schedules and reminders: three
- * pieces of work's worth, so a schedule that runs often can't start ten every time. Pictures are 20 a day, asks 10.
- */
-export const MAX_BOT_SUBAGENTS_PER_DAY = 30
+export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser', 'computer', 'threads']
 
 /**
  * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
- * commands), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
+ * commands, using the computer), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
  */
-export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch']
+export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch', 'computer']
 
 /**
  * The bot's listing of its owner's MCP servers (`mcp_servers`): each server set up for the whole profile, by name and a
@@ -72,6 +64,13 @@ export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'w
  * it is always on and never grantable, in both lanes: the chat needs it to ask for the right server.
  */
 export const BOT_MCP_LIST_TOOL = 'mcp_servers'
+
+/**
+ * What runs now for the bot's folders (`running_list`): its background commands, and servers and commands there, with
+ * their addresses. It reads and starts nothing, so it is never grantable and every bot turn has it (chat, work, consults
+ * and subagents), as a thread's agent has it on every turn.
+ */
+export const BOT_RUNNING_TOOL = 'running_list'
 
 /**
  * Making a picture (#1088): offered only to a bot whose owner picked a model in Runs on's Images row, in chat and in
@@ -110,6 +109,20 @@ export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
  */
 export const BOT_CARD_TOOL = 'show_card'
 
+/**
+ * Drafting a Mousse bug report (`report_bug`): the owner sees the draft in the report dialog and files it or not, so it
+ * grants nothing and is always on, like cards, on a bot's main turns; never a consult or a subagent. Settings → General's
+ * Report button switch turns it off for bots and threads alike.
+ */
+export const BOT_REPORT_BUG_TOOL = 'report_bug'
+
+/**
+ * Messages to the owner's other bots (`bot_list`, `bot_send`, `botMessages.ts`): the message is information to the bot
+ * that gets it and gives it no permission, so like memory the tools are always on and never grantable. A chat turn and
+ * work the owner asked for get them; a scheduled run, a consult and a subagent never do.
+ */
+export const BOT_MESSAGE_TOOLS: readonly string[] = [BOT_LIST_TOOL, BOT_SEND_TOOL]
+
 /** Every new bot's app tools: the web, and its own tools. */
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
@@ -127,39 +140,58 @@ export const BOT_BROWSER_PERMISSION = 'browser'
 export const BOT_BROWSER_TOOLS: readonly BrowserAutomationTool[] = BROWSER_AUTOMATION_TOOLS.filter((tool) => tool !== 'browser_request_human')
 
 /**
- * The automation tools (`automation_*`, v4): a bot granted them builds drafts the owner turns on, and lists, changes
- * and pauses the owner's automations. They are permissions: the first use asks the owner.
+ * "Use the computer": see and operate apps on this computer through Cua Driver (`src/shared/computerUse.ts`), one
+ * permission for both computer tools. A thread the bot started gets them only while the bot holds it.
+ */
+export const BOT_COMPUTER_PERMISSION = 'computer'
+
+/** The computer tools a bot with "use the computer" gets. */
+export const BOT_COMPUTER_TOOLS: readonly string[] = COMPUTER_TOOL_NAMES
+
+/**
+ * The automation tools (`automation_*`, v4): a bot builds drafts the owner turns on, and lists, changes and pauses the
+ * owner's automations. Every bot has them unless its owner switched them off in About (`BOT_AUTOMATIONS_SWITCH`), so
+ * nothing asks for them; a grant an older build approved may still list them by name, which adds nothing.
  */
 export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause']
 
 /**
  * "Use your threads": one permission, asked for once, for the owner's ordinary threads in this profile. The grant names
  * it alone; `compileBotThread` turns it into the thread tools a turn may use (`BOT_THREAD_READ_TOOLS` in every lane but a
- * consult, `BOT_THREAD_ACT_TOOLS` only in a chat turn the owner's own message started). A thread the bot starts runs in
+ * consult, `BOT_THREAD_ACT_TOOLS` in a run and a chat turn the owner's message or tapped answer started). A thread the bot starts runs in
  * Full access, and a message it sends runs in that thread's own mode, so the card says so (`askText`).
  */
 export const BOT_THREADS_PERMISSION = 'threads'
 
-/** What a bot with "use your threads" may do in its work as well as its chat: list, search, read and wait on threads. */
-export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait']
-
 /**
- * What changes threads: start one, message one, stop one's turn, archive or unarchive one, hide one it started from the
- * owner's sidebar or show it again. Only a chat turn the owner's own message started gets them, so nothing a bot read in
- * its work, a reminder or a schedule starts or steers a thread.
+ * What a bot with "use your threads" may do in its work as well as its chat: list, search, read and wait on threads (here
+ * and on the owner's other computers that let agents work there), read their terminals, a thread's queue, its Git status
+ * and diffs, and list the owner's computers.
  */
-export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide']
+export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'queue_list', 'git_status', 'git_diff', 'list_computers']
 
 /**
- * "Use the profiler": one permission, asked for once, for Mousse's own profiler (Settings → Labs → Profiler). The grant
- * names it alone; `compileBotThread` turns it into the profiler tools of a main turn (`BOT_PROFILER_TOOLS` in work,
- * `BOT_PROFILER_CHAT_TOOLS` in the chat; never a consult or a subagent). Each call is still held to the Labs switches.
+ * What changes threads: start one, message one, steer or stop one's turn, archive or unarchive one, hide one it started
+ * from the owner's sidebar or show it again, fork one and hand a fork's work back, change what waits in a thread's queue,
+ * and answer an approval in a thread (only while the owner lets agents answer approvals). A run (work, a reminder, a wake,
+ * a schedule), a chat turn the owner's message or tapped answer started, and the bot's first message get them; a turn
+ * another bot's message started does not.
+ */
+export const BOT_THREAD_ACT_TOOLS: readonly string[] = [
+  'thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide', 'thread_update', 'thread_steer', 'thread_fork', 'thread_merge_back',
+  'queue_enqueue', 'queue_edit', 'queue_remove', 'queue_reorder', 'queue_promote_to_steer', 'approval_respond'
+]
+
+/**
+ * Mousse's own profiler (Settings → Labs → Profiler): every bot has its tools on a main turn and its subagents
+ * (`BOT_PROFILER_TOOLS` in work, `BOT_PROFILER_CHAT_TOOLS` in the chat; never a consult), with no ask. Each call is still
+ * held to the Labs switches. `profiler` names the group: it was a permission once (`BOT_DROPPED_PERMISSIONS`).
  */
 export const BOT_PROFILER_PERMISSION = 'profiler'
 
 /**
- * The profiler tools a bot with the profiler gets: every read and sample tool. Never `profiler_heap_summary`, which
- * pauses the service: no bot is offered it, asks for it or can be granted it.
+ * The profiler tools a bot gets: every read and sample tool. Never `profiler_heap_summary`, which pauses the service: no
+ * bot is offered it, asks for it or can be granted it.
  */
 export const BOT_PROFILER_TOOLS: readonly ProfilerToolName[] = PROFILER_TOOL_NAMES.filter((tool) => tool !== 'profiler_heap_summary')
 
@@ -168,10 +200,59 @@ export const BOT_PROFILER_CHAT_TOOLS: readonly ProfilerToolName[] = BOT_PROFILER
 
 const PROFILER_TOOL_SET: ReadonlySet<string> = new Set(BOT_PROFILER_TOOLS)
 
-/** Whether `name` is one of the profiler tools a bot can hold under "use the profiler". */
-export function isBotProfilerTool(name: string): boolean {
-  return PROFILER_TOOL_SET.has(name)
-}
+/**
+ * Mousse's look: the theme tools (`theme_read`, `theme_set`) on every main turn, chat or work (never a consult or a
+ * subagent), with no ask. The bot switches themes, saves colors, CSS and a wallpaper, with the checks a thread's agent
+ * has. `themes` names the group: it was a permission once.
+ */
+export const BOT_THEMES_PERMISSION = 'themes'
+
+/** The theme tools every bot's main turn gets. */
+export const BOT_THEME_TOOLS: readonly string[] = ['theme_read', 'theme_set']
+
+const THEME_TOOL_SET: ReadonlySet<string> = new Set(BOT_THEME_TOOLS)
+
+/**
+ * Scheduled work in the owner's threads: the scheduled-job tools a thread's agent has (`schedule_*`), jobs that run a
+ * turn in one of the owner's threads, or start a new thread in a project, at a time, with no ask. The bot sees and
+ * changes only the jobs it made. Listing in every main turn; making, changing, pausing and running a job only in a turn
+ * that may act on the owner's threads (`threadsActOf`). Never a consult or a subagent. `schedules` names the group: it
+ * was a permission once.
+ */
+export const BOT_SCHEDULES_PERMISSION = 'schedules'
+
+/** What every bot reads of its scheduled jobs in every main turn. */
+export const BOT_SCHEDULE_READ_TOOLS: readonly string[] = ['schedule_list']
+
+/** What makes, changes, pauses, runs and removes its jobs, in a turn that may act. */
+export const BOT_SCHEDULE_ACT_TOOLS: readonly string[] = ['schedule_create', 'schedule_update', 'schedule_pause', 'schedule_run', 'schedule_delete']
+
+/**
+ * Secrets the owner gives: `secret_request` (the owner types a secret into a private card in the bot's chat, never into
+ * the chat itself, and the bot gets only its name), `secret_run` (a command of the bot's work, from its files folder,
+ * with the secret as an environment variable or a private file) and `secret_fetch`, with no ask. A command also needs
+ * "run commands", so the chat, which hands commands to work, never runs one. Never a consult or a subagent. `secrets`
+ * names the group: it was a permission once.
+ */
+export const BOT_SECRETS_PERMISSION = 'secrets'
+
+/** The secret tools of a main turn. */
+export const BOT_SECRET_TOOLS: readonly string[] = ['secret_request', 'secret_run', 'secret_fetch']
+
+/**
+ * Quick actions: `create_quick_action` (a button in the owner's Actions list that sends a message or runs a command when
+ * the owner presses it), on main turns, with no ask. `quick_actions` names the group: it was a permission once.
+ */
+export const BOT_QUICK_ACTIONS_PERMISSION = 'quick_actions'
+
+/** The quick-action tools of a main turn. */
+export const BOT_QUICK_ACTION_TOOLS: readonly string[] = ['create_quick_action']
+
+/**
+ * The task list of the turn's own thread (`create_task`, `list_tasks`, `update_task`): a checklist the agent keeps for
+ * itself. It acts on nothing else, so like memory it is always on and never grantable, in every turn but a consult.
+ */
+export const BOT_TASK_TOOLS: readonly string[] = ['create_task', 'list_tasks', 'update_task']
 
 /** Every thread tool a bot can hold, all under "use your threads". */
 export const BOT_THREAD_TOOLS: readonly string[] = [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]
@@ -184,34 +265,85 @@ export function isBotThreadTool(name: string): boolean {
 }
 
 /**
- * The Mousse app tools a bot may be granted: ones that read the web, its own browser, the bot's
- * own tools, the automation tools, and the owner's threads and Mousse's profiler as one permission each. Every other app tool starts, wakes,
- * writes or reads other threads (delegation, forks, queues, merge-backs), acts in the owner's name, or asks a person,
- * so it would run work outside the grant. Consults (6c-2) are the way a bot uses its own threads. The skill tools come
- * with granted skills.
+ * The permissions that each stand for a group of app tools: the grant names the permission alone, and
+ * `compileBotThread` turns it into the tools a turn may use. None is a tool's own name.
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION])
+export const BOT_GROUP_PERMISSIONS: ReadonlySet<string> = new Set([BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION])
+
+/**
+ * The Mousse app tools a bot may be granted: ones that read the web, its own browser, the bot's own tools, the
+ * automation tools, the computer and the owner's threads (on this computer and the others that let agents work there) as
+ * one permission each. Delegation is not one: a bot's work has subagents of its own (`BOT_SUBAGENT_TOOLS`), held to the
+ * grant. Consults (6c-2) are the way a bot uses its own threads. The skill tools come with skills.
+ */
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, ...BOT_GROUP_PERMISSIONS])
+
+/**
+ * Group permissions every bot now has without asking: the profiler, Mousse's look, scheduled jobs, secrets and quick
+ * actions. `compileBotThread` gives their tools to the turns that may have them whatever the grant says.
+ */
+export const BOT_DROPPED_PERMISSIONS: ReadonlySet<string> = new Set([
+  BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION
+])
+
+/**
+ * Names bots are no longer granted: `telling_set` (the Tells you setting, gone) and the permissions every bot now has
+ * (`BOT_DROPPED_PERMISSIONS`). A grant an older build approved may still list one: it reads as well formed and gives
+ * nothing beyond what every bot has, and its digest stays the same, so no bot is asked to approve again.
+ */
+export const BOT_RETIRED_APP_TOOLS: ReadonlySet<string> = new Set(['telling_set', ...BOT_DROPPED_PERMISSIONS])
+
+/**
+ * What every bot has by default and its owner can switch off for it in About, as the ids of those switches: all of the
+ * owner's MCP servers, one server (`BOT_MCP_SERVER_SWITCH` and its installation id, so an edit of the server keeps its
+ * switch), every skill, and the automation tools. A switch turned off is kept beside the grant
+ * (`BotStore.keepDisabledPermission`); the grant and its digest never change.
+ */
+export const BOT_MCP_SWITCH = 'default:mcp'
+export const BOT_MCP_SERVER_SWITCH = 'default:mcp:'
+export const BOT_SKILLS_SWITCH = 'default:skills'
+export const BOT_AUTOMATIONS_SWITCH = 'default:automations'
+
+/** Whether `id` is one of the switches of what every bot has by default. */
+export function isBotDefaultSwitch(id: string): boolean {
+  return id === BOT_MCP_SWITCH || id === BOT_SKILLS_SWITCH || id === BOT_AUTOMATIONS_SWITCH || (id.startsWith(BOT_MCP_SERVER_SWITCH) && id.length > BOT_MCP_SERVER_SWITCH.length)
+}
 
 /**
  * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
- * tools, the browser's, threads' and profiler's tools in place of their permissions, the skill tools, consult, the front desk's work and reminder
- * tools, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
+ * tools, each group permission's tools in place of the permission, the skill tools, consult, the front desk's work and reminder
+ * tools, the task list, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
  */
 const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
-  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION),
+  'schedule_done',
+  ...[...BOT_APP_TOOLS].filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
   ...BOT_BROWSER_TOOLS,
+  ...BOT_COMPUTER_TOOLS,
+  ...BOT_THEME_TOOLS,
   ...BOT_THREAD_TOOLS,
   ...BOT_PROFILER_TOOLS,
+  ...BOT_SCHEDULE_READ_TOOLS,
+  ...BOT_SCHEDULE_ACT_TOOLS,
+  ...BOT_SECRET_TOOLS,
+  ...BOT_QUICK_ACTION_TOOLS,
+  ...BOT_TASK_TOOLS,
   ...BOT_WORK_TOOLS,
+  'work_wait',
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
+  ...BOT_ITEM_TOOLS,
   BOT_MCP_LIST_TOOL,
+  BOT_RUNNING_TOOL,
   BOT_IMAGE_TOOL,
   BOT_APPLET_TOOL,
   BOT_QUESTION_TOOL,
   BOT_QUESTION_ANSWER_TOOL,
   BOT_CARD_TOOL,
-  'list_skills', 'load_skill', 'escalate', 'consult'
+  BOT_REPORT_BUG_TOOL,
+  ...BOT_MESSAGE_TOOLS,
+  'list_skills', 'load_skill', 'escalate', 'consult',
+  // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.
+  BOT_CATALOGUE_TOOL, BOT_USE_TOOL
 ])
 
 /** Whether a bot's turn can ever be offered the Mousse app tool `name` (`BOT_OFFERABLE_APP_TOOLS`). */
@@ -222,14 +354,39 @@ export function botMayBeOffered(name: string): boolean {
 const OWN_APP_TOOLS: ReadonlySet<string> = new Set(BOT_OWN_APP_TOOLS)
 const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 
+/** Each tool of a group other than the browser, threads, the profiler and themes, by its group's name. */
+const GROUPED_TOOLS: ReadonlyMap<string, string> = new Map([
+  ...[...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS].map((tool) => [tool, BOT_SCHEDULES_PERMISSION] as const),
+  ...BOT_SECRET_TOOLS.map((tool) => [tool, BOT_SECRETS_PERMISSION] as const),
+  ...BOT_QUICK_ACTION_TOOLS.map((tool) => [tool, BOT_QUICK_ACTIONS_PERMISSION] as const),
+  ...BOT_COMPUTER_TOOLS.map((tool) => [tool, BOT_COMPUTER_PERMISSION] as const)
+])
+
+const TASK_TOOL_SET: ReadonlySet<string> = new Set(BOT_TASK_TOOLS)
+
 /**
- * The permission an app tool falls under: every browser tool is "use the browser" (`browser`), so
- * an ask for `browser_act` is the same one ask; every thread tool is "use your threads" (`threads`); every profiler tool a
- * bot can hold is "use the profiler" (`profiler`); any other tool is its own (the heap summary too, which no bot holds).
+ * Whether a bot's thread lists `name` only while the turn holds it: the tools of a group (the owner's threads, the
+ * computer, the profiler, themes, scheduled jobs, secrets, quick actions) and the task list. A turn holds them only
+ * where `compileBotThread` gave them (never a consult; a subagent only what a thread's subagent may use).
+ */
+export function isBotTurnHeldTool(name: string): boolean {
+  return THREAD_TOOL_NAMES.has(name) || PROFILER_TOOL_SET.has(name) || THEME_TOOL_SET.has(name) || GROUPED_TOOLS.has(name) || TASK_TOOL_SET.has(name)
+}
+
+/**
+ * The permission or group an app tool falls under: every browser tool is "use the browser" (`browser`), so
+ * an ask for `browser_act` is the same one ask; every thread tool is "use your threads" (`threads`); the computer tools
+ * are `computer`. The groups every bot has without asking keep their names (`BOT_DROPPED_PERMISSIONS`): every profiler
+ * tool a bot can hold is `profiler`, both theme tools `themes`, the scheduled-job tools `schedules`, the secret tools
+ * `secrets` and `create_quick_action` is `quick_actions`. Any other tool is its own (the heap summary too, which no bot
+ * holds).
  */
 export function botGrantTool(tool: string): string {
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
   if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
+  if (THEME_TOOL_SET.has(tool)) return BOT_THEMES_PERMISSION
+  const grouped = GROUPED_TOOLS.get(tool)
+  if (grouped) return grouped
   return THREAD_TOOL_NAMES.has(tool) ? BOT_THREADS_PERMISSION : tool
 }
 
@@ -240,7 +397,7 @@ export function isOwnBotAppTool(tool: string): boolean {
 
 /**
  * A new bot's grant (Bot Phase 1 §5.3.1): the file tools, which reach only its files folder; the web and its own tools;
- * an hour per activation. Pressing Create bot approves it.
+ * no limits. Pressing Create bot approves it.
  */
 export function botStarterManifest(): BotManifest {
   return {
@@ -249,7 +406,7 @@ export function botStarterManifest(): BotManifest {
     mcp: [],
     skills: [],
     workspace: null,
-    budget: { maxActiveMs: DEFAULT_BOT_ACTIVE_MS },
+    budget: {},
     audience: 'owner'
   }
 }
@@ -275,15 +432,16 @@ const sorted = <T>(values: readonly T[], key: (value: T) => string): T[] => {
 
 /**
  * The manifest with every list deduplicated and sorted and every absent limit dropped, so two
- * manifests that grant the same things have the same canonical JSON (and digest).
+ * manifests that grant the same things have the same canonical JSON (and digest). An old grant's work time stays as it
+ * was, though nothing reads it: dropping it would change the digest its activations were made under.
  */
 export function canonicalManifest(manifest: BotManifest): BotManifest {
-  const budget: BotBudget = { maxActiveMs: manifest.budget.maxActiveMs }
+  const budget: BotBudget = manifest.budget.maxActiveMs !== undefined ? { maxActiveMs: manifest.budget.maxActiveMs } : {}
   for (const key of BUDGET_KEYS) if (manifest.budget[key] !== undefined) budget[key] = manifest.budget[key]
   return {
     tools: sorted(manifest.tools, (tool) => tool),
     appTools: sorted(manifest.appTools, (tool) => tool),
-    mcp: sorted(manifest.mcp, mcpIdentity).map((pair) => ({ serverId: pair.serverId, tool: pair.tool })),
+    mcp: sorted(manifest.mcp, mcpIdentity).map((pair) => ({ serverId: pair.serverId, tool: pair.tool, ...(pair.level === 'asks_first' ? { level: pair.level } : {}) })),
     skills: sorted(manifest.skills, (skill) => skill),
     workspace: workspaceOf(foldersOf(manifest.workspace)),
     budget,
@@ -298,7 +456,7 @@ export function manifestProblem(value: unknown): string | undefined {
   const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 256)
   if (!Array.isArray(manifest.tools) || !manifest.tools.every((tool) => typeof tool === 'string' && isNeutralTool(tool))) return 'A built-in tool is not one Mousse knows.'
   if (!strings(manifest.appTools)) return 'An app tool name is invalid.'
-  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool))
+  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
   if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'
@@ -318,12 +476,11 @@ export function manifestProblem(value: unknown): string | undefined {
   if (!budget || typeof budget !== 'object') return 'The limits are missing.'
   for (const key of BUDGET_KEYS) {
     const limit = budget[key]
-    if (limit === undefined && key !== 'maxActiveMs') continue
+    if (limit === undefined) continue
     if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) return `The limit ${key} must be a positive number.`
     // Counts and times are whole numbers; only the spend is in dollars.
     if (key !== 'maxUsd' && !Number.isSafeInteger(limit)) return `The limit ${key} must be a whole number.`
   }
-  if ((budget.maxActiveMs as number) > MAX_BOT_ACTIVE_MS) return 'A bot can work at most 24 hours per run.'
   if (manifest.audience !== 'owner') return 'Bots for other people are not available yet.'
   return undefined
 }
@@ -365,7 +522,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   const tools = new Set(granted.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
   const appTools = new Set(granted.appTools)
-  for (const tool of wanted.appTools) if (!appTools.has(tool)) lines.push(appToolLine(tool))
+  for (const tool of wanted.appTools) if (!appTools.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
   const skills = new Set(granted.skills)
@@ -383,7 +540,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
 export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
   const lines: BotPermissionLine[] = []
   for (const tool of manifest.tools) lines.push(toolLine(tool))
-  for (const tool of manifest.appTools) lines.push(appToolLine(tool))
+  for (const tool of manifest.appTools) if (!BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   for (const pair of manifest.mcp) lines.push(mcpLine(pair))
   for (const skill of manifest.skills) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
   for (const key of BUDGET_KEYS) if (manifest.budget[key] !== undefined) lines.push(budgetLine(key, manifest.budget[key]))
@@ -414,11 +571,11 @@ function toolLine(tool: NeutralTool): BotPermissionLine {
   return { kind: 'tool', text: FILE_TOOLS.has(tool) ? `${TOOL_WORDS[tool]} in its files folder` : TOOL_WORDS[tool] }
 }
 
-/** An app tool in plain words: the browser, the owner's threads and the profiler by what they are, any other tool by its name. */
+/** An app tool in plain words: the browser, the computer and the owner's threads by what they are, any other tool by its name. */
 function appToolLine(tool: string): BotPermissionLine {
   if (tool === BOT_BROWSER_PERMISSION) return { kind: 'app_tool', text: 'Use the browser' }
+  if (tool === BOT_COMPUTER_PERMISSION) return { kind: 'app_tool', text: 'Use the computer' }
   if (tool === BOT_THREADS_PERMISSION) return { kind: 'app_tool', text: 'Use your threads' }
-  if (tool === BOT_PROFILER_PERMISSION) return { kind: 'app_tool', text: 'Use the profiler' }
   return { kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` }
 }
 
@@ -428,16 +585,11 @@ function mcpLine(pair: { serverId: string; tool: string }): BotPermissionLine {
 
 function budgetLine(key: (typeof BUDGET_KEYS)[number], limit: number | undefined): BotPermissionLine {
   if (limit === undefined) return { kind: 'budget', text: `No limit on ${BUDGET_WORDS[key]}` }
-  if (key === 'maxActiveMs') {
-    const minutes = Math.round(limit / 60_000)
-    return { kind: 'budget', text: minutes >= 1 ? `Up to ${minutes} minute${minutes === 1 ? '' : 's'} of work per run` : `Up to ${Math.round(limit / 1000)} seconds of work per run` }
-  }
   if (key === 'maxUsd') return { kind: 'budget', text: `Up to $${limit} per run` }
   return { kind: 'budget', text: `Up to ${limit} ${BUDGET_WORDS[key]} per run` }
 }
 
 const BUDGET_WORDS: Record<(typeof BUDGET_KEYS)[number], string> = {
-  maxActiveMs: 'work time',
   maxTurns: 'model requests (retries included)',
   maxToolCalls: 'tool calls',
   maxInputTokens: 'input tokens',
@@ -475,7 +627,7 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
     const names = new Set(allowed.map(key))
     return values.filter((value) => names.has(key(value)))
   }
-  const budget: BotBudget = { maxActiveMs: Math.min(wanted.budget.maxActiveMs, granted.budget.maxActiveMs) }
+  const budget: BotBudget = {}
   for (const key of BUDGET_KEYS) {
     const a = wanted.budget[key]
     const b = granted.budget[key]
@@ -485,7 +637,7 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
   return {
     tools: within(wanted.tools, granted.tools, (tool) => tool),
     appTools: within(wanted.appTools, granted.appTools, (tool) => tool),
-    mcp: within(wanted.mcp, granted.mcp, mcpIdentity),
+    mcp: within(wanted.mcp, granted.mcp, mcpIdentity).map(pair => ({ ...pair, ...(granted.mcp.find(g => mcpIdentity(g) === mcpIdentity(pair))?.level === 'asks_first' ? { level: 'asks_first' as const } : {}) })),
     skills: within(wanted.skills, granted.skills, (skill) => skill),
     workspace: null,
     budget,

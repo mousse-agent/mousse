@@ -1,11 +1,10 @@
 import { useEffect } from 'react'
-import { Automations, CircleGauge, House, Search, Settings, type LucideIcon } from '../lib/icons'
+import { Automations, CircleGauge, House, SearchEverything, Settings, type LucideIcon } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { openPalette } from '../commands/paletteActions'
 import { activeRailPage, sidebarProfileShown, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
 import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
 import { useAppStore } from '../stores/appStore'
-import { useChatsStore } from '../stores/chatsStore'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import '../styles/navigation-rail.css'
@@ -25,10 +24,10 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   // The sidebar's footer shows the profile; while the sidebar is closed (a hover peek included) the rail does.
   const profileShown = useAppStore((s) => !sidebarProfileShown(s))
-  const profileReady = useAppStore((s) => s.profileReady)
-  // In the Chats tab, Search finds agent chats.
-  const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
-  const searchThreadsTitle = useShortcutTitle('Search threads', 'threads.search')
+  // The profile shows from the warm start (showWarmView) until the window's own binding is known.
+  const profileShownEarly = useAppStore((s) => s.profileReady || Boolean(s.warmView?.profile))
+  // One search on every tab: threads, archived threads, bots, chats and messages.
+  const searchTitle = useShortcutTitle('Search everything', 'threads.search')
 
   const activePage = activeRailPage({ scheduledOpen, usageOpen, settingsOpen })
   const reviewPending = useStorageReviewPending()
@@ -43,12 +42,13 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [activePage])
 
+  // Every item is one `rail-item` with its name in data-mousse-item; the open page's item has aria-current="page".
   const shortcut = (page: RailPage, label: string, Icon: LucideIcon) => {
     const active = activePage === page
     const notice = page === 'settings' && reviewPending
     const title = notice ? 'Settings · new cleanup rules to review in Storage' : label
     return (
-      <button type="button" className={`navigation-rail-button${active ? ' active' : ''}`}
+      <button type="button" className="navigation-rail-button" data-mousse="rail-item" data-mousse-item={page}
         aria-label={label} title={active ? 'Back to threads · Esc' : title} aria-current={active ? 'page' : undefined}
         onClick={() => void toggleRailPage(page)}>
         <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
@@ -57,26 +57,19 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
     )
   }
 
-  const search = async () => {
-    if (!chatsMode) return openPalette('messages')
-    // The chat search is in the sidebar, which a rail page covers.
-    await leaveRailPage()
-    if (activeRailPage(useAppStore.getState()) === null) useChatsStore.setState({ searchOpen: true })
-  }
-
   return (
     <nav data-mousse="rail" className="navigation-rail" aria-label="Mousse navigation"
       onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onPointerDown={onPointerDown}>
       {/* The workspace: active while no rail page is open; a click there leaves the open page. */}
-      <button type="button" className={`navigation-rail-button${activePage === null ? ' active' : ''}`}
+      <button type="button" className="navigation-rail-button" data-mousse="rail-item" data-mousse-item="home"
         aria-label="Home" title="Home" aria-current={activePage === null ? 'page' : undefined}
         onClick={() => void leaveRailPage()}>
         <House size={18} strokeWidth={1.8} aria-hidden="true" />
       </button>
-      <button type="button" className="navigation-rail-button"
-        aria-label={chatsMode ? 'Search chats' : 'Search threads'} title={chatsMode ? 'Search chats' : searchThreadsTitle}
-        onClick={() => void search()}>
-        <Search size={18} strokeWidth={1.8} aria-hidden="true" />
+      <button type="button" className="navigation-rail-button" data-mousse="rail-item" data-mousse-item="search"
+        aria-label="Search everything" title={searchTitle}
+        onClick={() => openPalette('messages')}>
+        <SearchEverything size={18} strokeWidth={1.8} aria-hidden="true" />
       </button>
       {shortcut('automations', 'Automations', Automations)}
       {/* Pinned to the bottom; the empty space above it is still rail, so hovering it peeks. */}
@@ -84,7 +77,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
         <DownloadsIndicator variant="rail" />
         {shortcut('usage', 'Subscription usage', CircleGauge)}
         {shortcut('settings', 'Settings', Settings)}
-        {profileReady && <div className="navigation-rail-profile" data-shown={profileShown} inert={!profileShown} aria-hidden={!profileShown || undefined}>
+        {profileShownEarly && <div className="navigation-rail-profile" data-shown={profileShown} inert={!profileShown} aria-hidden={!profileShown || undefined}>
           <ProfileSwitcher variant="rail" onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
         </div>}
       </div>

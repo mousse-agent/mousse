@@ -100,21 +100,133 @@ export function markdownToSpeechText(markdown: string): string {
   return paragraphs.join('\n\n')
 }
 
+// ---------------------------------------------------------------------------------------------
+// Sentences and cuts
+// ---------------------------------------------------------------------------------------------
+
+/** Words (lowercase, without their final period) whose period never ends a sentence. */
+const ABBREVIATIONS = new Set(['e.g', 'i.e', 'vs', 'cf', 'approx'])
+/** Titles whose period never ends a sentence when they are capitalized; `30 ms.` still does. */
+const TITLES = new Set(['Mr', 'Mrs', 'Ms', 'Dr', 'Prof'])
+/** A sentence mark with its closing quotes or brackets, before a space or the end of the text. */
+const SENTENCE_MARK = /[.!?…]+["'’”)\]]*(?=\s|$)/g
+
 /**
- * Splits text into pieces of at most `maxChars`, preferring paragraph, then sentence, then word
- * boundaries. `maxChars` may be a function of the piece's index, so pieces can grow. Sentences
- * longer than `splitAt` are cut at words first; by default that is the smaller of the first two
- * limits.
+ * True when the mark at `at` ends a sentence. A single period after a known abbreviation ("e.g.",
+ * "Dr.") never does. After "etc." or a word with dots in it ("a.m.", "notes.md"), it does only
+ * before a capital letter or the end of the text.
  */
-export function splitSpeechChunks(text: string, maxChars: number | ((index: number) => number), splitAt?: number): string[] {
-  const limitAt = (index: number): number => Math.max(1, Math.floor(typeof maxChars === 'number' ? maxChars : maxChars(index)))
-  const smallest = splitAt ?? (typeof maxChars === 'number' ? limitAt(0) : Math.min(limitAt(0), limitAt(1)))
+export function endsSentence(text: string, at: number, mark: string): boolean {
+  if (!mark.startsWith('.') || mark.startsWith('..')) return true
+  const word = /([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)$/.exec(text.slice(0, at))?.[1]
+  if (!word) return true
+  const lower = word.toLowerCase()
+  if (ABBREVIATIONS.has(lower) || TITLES.has(word)) return false
+  if (lower !== 'etc' && !word.includes('.')) return true
+  const next = text.slice(at + mark.length).trimStart()
+  return next === '' || /^["'“‘(]?[A-Z]/.test(next)
+}
+
+/** The sentences of one paragraph. Decimals, file names and versions keep their dots. */
+export function splitSentences(paragraph: string): string[] {
+  const sentences: string[] = []
+  let start = 0
+  for (const match of paragraph.matchAll(SENTENCE_MARK)) {
+    if (!endsSentence(paragraph, match.index, match[0])) continue
+    const end = match.index + match[0].length
+    const sentence = paragraph.slice(start, end).trim()
+    if (sentence) sentences.push(sentence)
+    start = end
+  }
+  const rest = paragraph.slice(start).trim()
+  if (rest) sentences.push(rest)
+  return sentences
+}
+
+/** A cut at a comma or similar leaves at least this much of the sentence on each side. */
+const MIN_CLAUSE_CHARS = 20
+/** Places after a comma, semicolon, colon or dash. */
+const CLAUSE_MARKS = /[,;:](?=\s)|\s[-–]\s|—\s?/g
+/** Places before a word that starts a clause. */
+const CONJUNCTIONS = /\s(?=(?:and|but|or|so|because|which|while|when|where|whereas|although|though|unless|until|since|then|if)\s)/gi
+
+/** Of the places in `ats`, the one whose first part is nearest `target`, the longer on a tie. */
+function nearest(sentence: string, ats: number[], target: number): number | null {
+  let best: number | null = null
+  let bestDistance = Infinity
+  for (const at of ats) {
+    const distance = Math.abs(sentence.slice(0, at).trim().length - target)
+    if (distance <= bestDistance) {
+      best = at
+      bestDistance = distance
+    }
+  }
+  return best
+}
+
+/**
+ * Where to cut `sentence` so that its first part is at most `max` characters: after a comma,
+ * semicolon, colon or dash, else before a conjunction such as "and" or "because", each leaving at
+ * least 20 characters on both sides. Among several places, the first part nearest `target` wins.
+ * Null when there is no such place.
+ */
+function clauseCut(sentence: string, max: number, target: number): number | null {
+  const fits = (at: number): boolean => {
+    const head = sentence.slice(0, at).trim().length
+    return head <= max && head >= MIN_CLAUSE_CHARS && sentence.slice(at).trim().length >= MIN_CLAUSE_CHARS
+  }
+  for (const pattern of [CLAUSE_MARKS, CONJUNCTIONS]) {
+    const ats = [...sentence.matchAll(pattern)].map((match) => match.index + match[0].length).filter(fits)
+    if (ats.length > 0) return nearest(sentence, ats, target)
+  }
+  return null
+}
+
+/** Places before a word that usually starts a phrase. */
+const PHRASE_STARTS =
+  /\s(?=(?:the|a|an|to|of|in|on|at|for|with|from|by|into|about|after|before|during|without|that|this|these|those|its|their|his|her|our|your|my|who|what|how|why)\s)/gi
+
+/** A cut before a phrase word is taken only this close to the target length. */
+const PHRASE_SLACK = 15
+
+/**
+ * A cut at a clause when there is one, else before a word that starts a phrase ("the", "of") within
+ * `PHRASE_SLACK` of `target`, else between the words nearest `target`, else at `max`.
+ */
+function cutAt(sentence: string, max: number, target: number): number {
+  const clause = clauseCut(sentence, max, target)
+  if (clause !== null) return clause
+  const spaces = (pattern: RegExp): number[] =>
+    [...sentence.matchAll(pattern)].map((match) => match.index).filter((at) => at > 0 && sentence.slice(0, at).trim().length <= max)
+  const phrases = spaces(PHRASE_STARTS).filter((at) => {
+    const head = sentence.slice(0, at).trim().length
+    return head >= MIN_CLAUSE_CHARS && Math.abs(head - target) <= PHRASE_SLACK
+  })
+  return nearest(sentence, phrases.length > 0 ? phrases : spaces(/\s+/g), target) ?? max
+}
+
+// ---------------------------------------------------------------------------------------------
+// Provider chunks
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Splits text into pieces of at most `maxChars`, preferring paragraph, then sentence, then clause,
+ * then word boundaries. Paragraph breaks inside a piece are kept.
+ */
+export function splitSpeechChunks(text: string, maxChars: number): string[] {
+  const limit = Math.max(1, Math.floor(maxChars))
   const pieces: string[] = []
   for (const paragraph of text.split(/\n{2,}/)) {
-    const trimmed = paragraph.trim()
-    if (!trimmed) continue
-    const sentences = trimmed.match(/[^.!?]+(?:[.!?]+["')\]]*|$)\s*/g) ?? [trimmed]
-    for (const sentence of sentences) pieces.push(...splitLongPiece(sentence.trim(), smallest))
+    const sentences = splitSentences(paragraph.trim())
+    if (sentences.length === 0) continue
+    for (let sentence of sentences) {
+      while (sentence.length > limit) {
+        const at = cutAt(sentence, limit, limit)
+        pieces.push(sentence.slice(0, at).trim())
+        sentence = sentence.slice(at).trim()
+      }
+      if (sentence) pieces.push(sentence)
+    }
     pieces.push('\n\n')
   }
   pieces.pop()
@@ -122,12 +234,12 @@ export function splitSpeechChunks(text: string, maxChars: number | ((index: numb
   const chunks: string[] = []
   let current = ''
   for (const piece of pieces) {
-    if (!piece.trim()) {
+    if (piece === '\n\n') {
       if (current) current += '\n\n'
       continue
     }
     const joined = current ? (current.endsWith('\n\n') ? current + piece : `${current} ${piece}`) : piece
-    if (joined.length <= limitAt(chunks.length)) {
+    if (joined.length <= limit) {
       current = joined
       continue
     }
@@ -138,113 +250,104 @@ export function splitSpeechChunks(text: string, maxChars: number | ((index: numb
   return chunks
 }
 
-/** The first local segment is short so audio starts within about two seconds. */
+// ---------------------------------------------------------------------------------------------
+// Local segments
+// ---------------------------------------------------------------------------------------------
+
+/** Where a segment sits in its sentences: it may start or end partway through one. */
+export interface SentenceCut {
+  /** The segment continues a sentence the previous segment started. */
+  startsMidSentence: boolean
+  /** The sentence goes on in the next segment. */
+  endsMidSentence: boolean
+}
+
+export interface SpeechSegment extends SentenceCut {
+  text: string
+}
+
+/** The first local segment packs whole sentences up to this, so audio starts within about two seconds. */
 export const FIRST_SEGMENT_CHARS = 40
+/**
+ * A first sentence longer than `FIRST_SEGMENT_CHARS` is cut at a clause near that length, or
+ * kept whole when it has no clause break and fits in this.
+ */
+export const FIRST_SENTENCE_CHARS = 66
 /** A shorter first segment still sizes the next ones as if it were this long. */
 const MIN_FIRST_SEGMENT_CHARS = 30
-/** Later segments grow from this size to the largest one; it is also where sentences are cut at words. */
+/** Later segments grow from this size to the largest one. */
 const SEGMENT_CHARS = 100
 export const MAX_SEGMENT_CHARS = 220
 const SEGMENT_GROWTH = 1.25
 const RAMP_GROWTH = 1.5
-/** A cut at a comma or similar leaves at least this much of the sentence on each side. */
-const MIN_CLAUSE_CHARS = 20
 
-/** Offsets in `text` where a sentence or a paragraph ends. */
-function sentenceEnds(text: string): number[] {
-  const ends: number[] = []
-  for (const match of text.matchAll(/[.!?]+["')\]]*(?=\s|$)|\n{2,}/g)) {
-    ends.push(match[0].startsWith('\n') ? match.index : match.index + match[0].length)
-  }
-  if (ends.at(-1) !== text.length) ends.push(text.length)
-  return ends
+interface Sentence {
+  text: string
+  startsMidSentence: boolean
 }
 
-/**
- * Splits off the start of `text`, at most `max` characters, and returns it with the rest. Whole
- * sentences are taken while they fit (a paragraph break ends a sentence). When the next one does
- * not fit and what was taken is shorter than `max / 2`, such as a "Sure." opener, that sentence is
- * taken too and cut: at the last comma, semicolon, colon or dash that leaves at least 20 characters
- * on each side, else at the last space before `max`. The rest of that sentence starts the rest.
- */
-export function takeLeading(text: string, max: number): [head: string, rest: string] {
-  const trimmed = text.trim()
-  if (trimmed.length <= max) return [trimmed, '']
-  const split = (at: number): [string, string] => [trimmed.slice(0, at).trim(), trimmed.slice(at).trim()]
-  let fit = 0
-  let next = trimmed.length
-  for (const end of sentenceEnds(trimmed)) {
-    if (trimmed.slice(0, end).trimEnd().length > max) {
-      next = end
-      break
-    }
-    fit = end
-  }
-  if (fit > 0 && trimmed.slice(0, fit).trim().length >= max / 2) return split(fit)
-
-  let clause = -1
-  // One character past `max`, so a comma that ends exactly at `max` still sees the space after it.
-  for (const match of trimmed.slice(fit, max + 1).matchAll(/[,;:](?=\s)|—/g)) {
-    const at = fit + match.index + match[0].length
-    if (at > max || trimmed.slice(0, at).trim().length < MIN_CLAUSE_CHARS) continue
-    if (trimmed.slice(at, next).trim().length < MIN_CLAUSE_CHARS) continue
-    clause = at
-  }
-  if (clause > 0) return split(clause)
-  // A cut between words ends with a comma, so the voice keeps the sentence going instead of
-  // closing it; one character is kept free for it.
-  for (let at = max - 1; at > fit; at--) {
-    if (/\s/.test(trimmed[at])) {
-      const [head, rest] = split(at)
-      return [/[.!?:;,—]["')\]]*$/.test(head) ? head : `${head},`, rest]
-    }
-  }
-  return split(fit > 0 ? fit : max - 1)
-}
+/** Ends a cut-off part with a comma unless it has punctuation, so the voice keeps the sentence going. */
+const keepGoing = (text: string): string => (/[.!?…,;:—–-]["'’”)\]]*$/.test(text) ? text : `${text},`)
 
 /**
- * Cuts text into the segments a local model voices one at a time. Each segment is spoken in one
- * pass, so paragraph breaks inside it become sentence ends instead of newlines.
+ * Cuts text into the segments a local model voices one at a time, each spoken in one pass. A
+ * paragraph's last sentence ends with punctuation, so paragraph breaks become sentence ends.
  *
- * The first segment is at most `FIRST_SEGMENT_CHARS`, so the first audio is ready soon. Each later
- * segment k may be `min(MAX_SEGMENT_CHARS, 100 × 1.25^k, L0 × 1.5^k)` long, where L0 is the first
- * segment's length (at least 30): growing by 1.5× at most keeps synthesis ahead of playback from the
- * first clip on. Segments whose limit is under 100 are cut with `takeLeading` too; from the first
- * limit of 100 on, the rest is split as before, cutting sentences over 100 characters at words.
+ * Whole sentences stay together whenever they fit. The first segment takes whole sentences up to
+ * `FIRST_SEGMENT_CHARS`; a longer first sentence, or a short opener such as "Sure." followed by a
+ * long one, is cut at the clause nearest that length within `FIRST_SENTENCE_CHARS`, else kept
+ * whole when it fits there, else cut between words near that length. Each later segment k may be `min(MAX_SEGMENT_CHARS, 100 × 1.25^k,
+ * L0 × 1.5^k)` long, where L0 is the first segment's length (at least 30): growing by 1.5× at most
+ * keeps synthesis ahead of playback from the first clip on. Only a sentence longer than its
+ * segment is cut, at a clause when it has one, else between words; a cut part ends with a comma,
+ * never a period, and says so in `endsMidSentence`.
  */
-export function splitSpeechSegments(text: string): string[] {
-  const segments: string[] = []
-  let [head, rest] = takeLeading(text, FIRST_SEGMENT_CHARS)
-  if (head) segments.push(head)
-  const first = Math.max(head.length, MIN_FIRST_SEGMENT_CHARS)
-  const limit = (index: number): number =>
-    Math.min(MAX_SEGMENT_CHARS, SEGMENT_CHARS * SEGMENT_GROWTH ** index, first * RAMP_GROWTH ** index)
-  let index = 1
-  while (rest && limit(index) < SEGMENT_CHARS) {
-    ;[head, rest] = takeLeading(rest, Math.floor(limit(index)))
-    segments.push(head)
-    index++
+export function splitSpeechSegments(text: string): SpeechSegment[] {
+  const sentences: Sentence[] = []
+  for (const paragraph of text.split(/\n{2,}/)) {
+    const inParagraph = splitSentences(paragraph.replace(/\s+/g, ' ').trim())
+    inParagraph.forEach((sentence, index) =>
+      sentences.push({ text: index === inParagraph.length - 1 ? endWithPunctuation(sentence) : sentence, startsMidSentence: false })
+    )
   }
-  const start = index
-  if (rest) segments.push(...splitSpeechChunks(rest, (offset) => limit(start + offset), SEGMENT_CHARS))
-  return segments.map((segment) =>
-    segment
-      .split(/\n{2,}/)
-      .map((paragraph) => endWithPunctuation(paragraph.trim()))
-      .join(' ')
-  )
-}
 
-function splitLongPiece(piece: string, limit: number): string[] {
-  if (piece.length <= limit) return piece ? [piece] : []
-  const out: string[] = []
-  let rest = piece
-  while (rest.length > limit) {
-    let cut = rest.lastIndexOf(' ', limit)
-    if (cut <= 0) cut = limit
-    out.push(rest.slice(0, cut).trim())
-    rest = rest.slice(cut).trim()
+  const segments: SpeechSegment[] = []
+  let first = MIN_FIRST_SEGMENT_CHARS
+  const limit = (index: number): number =>
+    Math.floor(Math.min(MAX_SEGMENT_CHARS, SEGMENT_CHARS * SEGMENT_GROWTH ** index, first * RAMP_GROWTH ** index))
+  let next = 0
+  while (next < sentences.length) {
+    const index = segments.length
+    const pack = index === 0 ? FIRST_SEGMENT_CHARS : limit(index)
+    const startsMidSentence = sentences[next].startsMidSentence
+    let body = ''
+    const joined = (part: string): string => (body ? `${body} ${part}` : part)
+    while (next < sentences.length && joined(sentences[next].text).length <= pack) body = joined(sentences[next++].text)
+
+    let endsMidSentence = false
+    const sentence = sentences[next]
+    // Takes the part of the sentence before `at`; the rest starts the next segment.
+    // A dash at the cut is dropped; the comma that ends the part takes its place.
+    const take = (at: number): void => {
+      body = joined(keepGoing(sentence.text.slice(0, at).trim().replace(/\s*[-–—]$/, '')))
+      sentences[next] = { text: sentence.text.slice(at).trim(), startsMidSentence: true }
+      endsMidSentence = true
+    }
+    if (sentence && index === 0 && body.length < FIRST_SEGMENT_CHARS / 2) {
+      // An opener alone would make a tiny first clip that the next one cannot keep up with, so it
+      // takes the next sentence along, or the start of it.
+      const offset = body ? body.length + 1 : 0
+      const room = FIRST_SENTENCE_CHARS - offset - 1
+      const clause = clauseCut(sentence.text, room, FIRST_SEGMENT_CHARS - offset)
+      if (clause !== null) take(clause)
+      else if (offset + sentence.text.length <= FIRST_SENTENCE_CHARS) body = joined(sentences[next++].text)
+      else take(cutAt(sentence.text, room, FIRST_SEGMENT_CHARS - offset))
+    } else if (sentence && !body) {
+      // One character is kept free for the comma that ends the cut part.
+      take(cutAt(sentence.text, pack - 1, pack - 1))
+    }
+    segments.push({ text: body, startsMidSentence, endsMidSentence })
+    if (index === 0) first = Math.max(body.length, MIN_FIRST_SEGMENT_CHARS)
   }
-  if (rest) out.push(rest)
-  return out.filter(Boolean)
+  return segments
 }

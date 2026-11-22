@@ -1,0 +1,7 @@
+/* A bot's browser full screen: the side panel takes the chat pane's place in the centre pane, the browser alone (no tab
+   strip, no edge to drag), until it leaves full screen. The chat stays mounted behind it. */
+.chat-workspace:has(> .bot-side-slide.is-fullscreen) > .bot-chat-pane { display: none; }
+.bot-side-slide.is-fullscreen { flex: 1 1 0; }
+.bot-side-slide.is-fullscreen > .bot-side { flex: 1 1 0; }
+.bot-side-slide.is-fullscreen .bot-side-header,
+.bot-side-slide.is-fullscreen .bot-side-resize { display: none; }

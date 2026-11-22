@@ -64,10 +64,10 @@ describe('the mark on a cut-off turn', () => {
     ['agent', 'Stopped', 'An agent in another thread stopped this turn.'],
     ['daemon_restart', 'Interrupted', 'Mousse restarted during this turn.'],
     ['crash', 'Interrupted', 'Mousse quit during this turn.']
-  ] as const)('cause %s reads "%s" after the time, with why in its tooltip', (cause, word, title) => {
+  ] as const)('cause %s reads "%s after" the time, with why in its tooltip', (cause, word, title) => {
     show([...turn('r1', 0), stopLine('r1', { cause }, 7, cause === 'user' || cause === 'agent' ? TURN_STOPPED_TEXT : RESTART_INTERRUPTED_TEXT)])
-    expect(headers()).toEqual([`Worked for 7s · ${word}`])
-    expect(marks()).toEqual([{ word, title }])
+    expect(headers()).toEqual([`${word} after 7s`])
+    expect(marks()).toEqual([{ word: `${word} after 7s`, title }])
     // The line itself shows nothing of its own.
     expect(host.textContent).not.toContain(TURN_STOPPED_TEXT)
     expect(host.textContent).not.toContain(RESTART_INTERRUPTED_TEXT)
@@ -75,15 +75,15 @@ describe('the mark on a cut-off turn', () => {
 
   it('a crash that may have run tools names them in the tooltip', () => {
     show([...turn('r1', 0), stopLine('r1', { cause: 'crash', tools: ['bash'] }, 8, RESTART_INTERRUPTED_TEXT)])
-    expect(marks()).toEqual([{ word: 'Interrupted', title: 'Mousse quit during this turn. May have run: bash' }])
+    expect(marks()).toEqual([{ word: 'Interrupted after 7s', title: 'Mousse quit during this turn. May have run: bash' }])
   })
 
-  it('screen readers get the reason as text inside the mark, which find in thread skips with the header', () => {
+  it('screen readers get the reason as text inside the line, which find in thread skips with the header', () => {
     show([...turn('r1', 0), stopLine('r1', { cause: 'crash', tools: ['bash'] }, 8, RESTART_INTERRUPTED_TEXT)])
     const mark = host.querySelector<HTMLElement>('[data-turn-end]')!
     const reason = mark.querySelector('.sr-only')
     expect(reason?.textContent).toBe(': Mousse quit during this turn. May have run: bash')
-    expect(mark.textContent).toBe('Interrupted: Mousse quit during this turn. May have run: bash')
+    expect(mark.textContent).toBe('Interrupted after 7s: Mousse quit during this turn. May have run: bash')
     expect(reason?.closest('[data-find-ignore]')).not.toBeNull()
   })
 
@@ -101,23 +101,24 @@ describe('the mark on a cut-off turn', () => {
       ...turn('wall', 80),
       { id: 's-wall', role: 'system', content: 'Paused: waiting for the owner.', timestamp: at(88) }
     ])
-    expect(headers().length).toBe(5)
+    // Five turns; the steered one has a line for each part ("Worked for", then "Continued for").
+    expect(headers().length).toBe(6)
     expect(marks()).toEqual([])
   })
 
   it('the latest turn\'s mark gives way while its "Run interrupted" notice shows, and comes back after', () => {
     const thread = [...turn('r1', 0), stopLine('r1', { cause: 'user' }, 7), ...turn('r2', 20, 3), stopLine('r2', { cause: 'daemon_restart' }, 24, RESTART_INTERRUPTED_TEXT)]
     show(thread, { phase: 'stopped' })
-    expect(headers()).toEqual(['Worked for 7s · Stopped', 'Worked for 3s'])
+    expect(headers()).toEqual(['Stopped after 7s', 'Worked for 3s'])
     show(thread, { phase: 'idle' })
-    expect(headers()).toEqual(['Worked for 7s · Stopped', 'Worked for 3s · Interrupted'])
+    expect(headers()).toEqual(['Stopped after 7s', 'Interrupted after 3s'])
   })
 
   it('reads lines written before the field by their text', () => {
     show([...turn('r1', 0), stopLine(undefined, undefined, 8), ...turn('r2', 20, 3), stopLine(undefined, undefined, 24, RESTART_INTERRUPTED_TEXT)])
     expect(marks()).toEqual([
-      { word: 'Stopped', title: 'You stopped this turn before it finished.' },
-      { word: 'Interrupted', title: 'Mousse restarted during this turn.' }
+      { word: 'Stopped after 8s', title: 'You stopped this turn before it finished.' },
+      { word: 'Interrupted after 3s', title: 'Mousse restarted during this turn.' }
     ])
   })
 
@@ -125,12 +126,12 @@ describe('the mark on a cut-off turn', () => {
     show(turn('r1', 0))
     expect(headers()).toEqual(['Worked for 7s'])
     show([...turn('r1', 0), stopLine('r1', { cause: 'user' }, 7)])
-    expect(headers()).toEqual(['Worked for 7s · Stopped'])
+    expect(headers()).toEqual(['Stopped after 7s'])
   })
 
   it('a marker written after newer turns lands on its own turn, by its run id', () => {
     show([...turn('r1', 0), ...turn('r2', 20, 3), stopLine('r1', { cause: 'crash' }, 30, RESTART_INTERRUPTED_TEXT)])
-    expect(headers()).toEqual(['Worked for 7s · Interrupted', 'Worked for 3s'])
+    expect(headers()).toEqual(['Interrupted after 7s', 'Worked for 3s'])
   })
 
   it('an unchanged marker keeps its turn and the memoised row', () => {
@@ -143,7 +144,7 @@ describe('the mark on a cut-off turn', () => {
     // Only the last turn changes: its reply grows.
     show([...thread.slice(0, -1), { ...thread.at(-1)!, content: 'Reply r2, longer' }])
     expect(counts.TurnRow).toBe(1)
-    expect(headers()).toEqual(['Worked for 7s · Stopped', 'Worked for 3s'])
+    expect(headers()).toEqual(['Stopped after 7s', 'Worked for 3s'])
   })
 })
 
@@ -158,7 +159,7 @@ describe('the time of a stopped turn', () => {
 
   it.each(['user', 'agent'] as const)('a turn stopped by cause %s runs to its Stop line, not to where its last message started', (cause) => {
     show(stoppedTurn(cause))
-    expect(headers()).toEqual(['Worked for 15s · Stopped'])
+    expect(headers()).toEqual(['Stopped after 15s'])
   })
 
   it('shows the same time after a restart as when it was stopped', () => {
@@ -171,14 +172,14 @@ describe('the time of a stopped turn', () => {
       // Stop at 15 s: the reply ends and Mousse writes its Stop line.
       vi.setSystemTime(start + 15_000)
       show(stoppedTurn())
-      expect(headers()).toEqual(['Worked for 15s · Stopped'])
+      expect(headers()).toEqual(['Stopped after 15s'])
       // A restart: the window opens the thread again from what was saved.
       act(() => root.unmount())
       root = createRoot(host)
       shown = []
       vi.setSystemTime(start + 3_600_000)
       show(stoppedTurn())
-      expect(headers()).toEqual(['Worked for 15s · Stopped'])
+      expect(headers()).toEqual(['Stopped after 15s'])
     } finally {
       vi.useRealTimers()
     }
@@ -186,7 +187,7 @@ describe('the time of a stopped turn', () => {
 
   it('a line a boot wrote after a crash, long after the turn, does not stretch its time', () => {
     show([...stoppedTurn().slice(0, -1), stopLine('r1', { cause: 'crash' }, 3_600, RESTART_INTERRUPTED_TEXT)])
-    expect(headers()).toEqual(['Worked for 3s · Interrupted'])
+    expect(headers()).toEqual(['Interrupted after 3s'])
   })
 
   it('a finished turn keeps the time its saved messages give', () => {

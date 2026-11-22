@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { onRetiredBareRoute, type ExecutionBinding } from '../../shared/harness/types'
+import { onRetiredBareRoute, type ExecutionBinding, type TurnOrigin } from '../../shared/harness/types'
 import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
@@ -8,13 +8,17 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
+import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
+import { RemoteExpiryRecords } from './delegation/remoteExpiry'
+import { RunTimeLimitRecords } from './runTimeLimits'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
 import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
 import { QueueCommands } from './QueueCommands'
+import { enqueueMessage, type EnqueueMessageInput } from '../queue/ThreadMessageQueue'
 import type { Answerer } from './approvalRights'
 import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
@@ -22,6 +26,7 @@ import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
+import { OpenQuestions } from './OpenQuestions'
 import { ThreadApprovals, type BootRecovery } from './ThreadApprovals'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
@@ -71,6 +76,10 @@ export type RunCommand =
        * repeated `clientRequestId` with other text is refused instead of answered with another message's run.
        */
       prompt?: string
+      /** A Steer target supplied by the caller must match the receipt on retry. */
+      explicitSteerRunId?: string
+      /** Recoverable queue payload of a person's Steer, written with the send's receipt. */
+      steer?: { runId: string; message: Omit<EnqueueMessageInput, 'threadId' | 'runId' | 'clientRequestId' | 'steerOnStart'> }
       /**
        * SPEC §17.3: the send denies the thread's saved approval requests with `feedback` as the
        * reason, inside its own admission, and hands the whole delivery group to the run it creates.
@@ -93,8 +102,6 @@ export type RunCommand =
        * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
        */
       agentOrigin?: { hops: number }
-      /** A person's leftover steer queued as a turn of its own (`RunOutcome.sentByPerson`). */
-      sentByPerson?: true
       /**
        * The run delivers settle notices (SPEC §15.1): it carries the count of agent messages in a row of the runs the
        * notices are about and adds none of its own. It is not an agent's message.
@@ -172,10 +179,14 @@ export type CommandResult =
       runId: string
       sequence: number
       replayed: boolean
+      steerItemId?: string
+      steerDeliveredRunId?: string
       /** A send that ended the thread's pause in its transaction: the paused run, and the resume item it had (SPEC §5). */
       endedPause?: { runId: string; resumeItemId?: string }
       /** A send with `queueBehindPause` that found the thread paused: the paused run, whose pause it left in place. */
       heldByPause?: { runId: string }
+      /** A steer that reached the run after its provider's turn was over: it runs as the next turn instead (set by the orchestrator). */
+      followUp?: true
     }
   | { status: 'rejected'; reason: string; sequence: number; replayed?: boolean }
   | {
@@ -273,6 +284,11 @@ export interface DelegationRequest {
   model?: string
   role?: string
   workspace: 'isolated' | 'shared'
+  /**
+   * A read-only child (`delegate_task` `readOnly`): it works in the parent's folder (`workspace: 'shared'`) with the
+   * read-only tools only. Absent: the child has every tool its parent has, in either workspace.
+   */
+  readOnly?: boolean
   wake: DelegationWake
   title?: string
   /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
@@ -298,6 +314,8 @@ export interface RemoteDelegationTarget {
   instanceId: string | null
   model: string | null
   deadlineAt: string | null
+  /** The minutes of running time the task may use (`maxMinutes`); null for no limit. */
+  limitMinutes?: number | null
   /** The far thread, for a follow-up on a subagent that already has one. */
   remoteThreadId?: string | null
 }
@@ -323,6 +341,8 @@ export interface ForkThreadRequest {
    * fork starts from the source's current HEAD. Recorded in the transfer payload as `seedFrom`.
    */
   seedFrom?: 'checkpoint' | 'current_head'
+  /** A side chat (`ThreadLineage.relationship: 'side'`): the fork lives in the source's side panel, not in any list. */
+  sideChat?: boolean
 }
 
 /**
@@ -373,7 +393,7 @@ export function narrowestAccess(tasks: ReadonlyArray<Pick<DelegationRecord, 'acc
 /** A thread the engine asks its host to create: a delegated child or a fork. */
 export type ThreadCreation =
   | { kind: 'delegation'; request: DelegationRequest }
-  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string }
+  | { kind: 'fork'; threadId: string; sourceThreadId: string; sourceRunId: string; title?: string; sideChat?: boolean }
 
 /** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
 export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -385,7 +405,7 @@ export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(
 
 /**
  * What the engine needs from the thread owner to create threads and child turns (it does not own
- * thread storage, transcripts or turn payloads). Every callback is synchronous. `createThread`
+ * thread storage, transcripts or turn payloads). `createThread`
  * runs before the engine's transaction (thread storage is not the run database); when that
  * transaction fails the engine calls `deleteThread` to remove the orphan.
  */
@@ -401,6 +421,10 @@ export interface DelegationHost {
   buildChildTurnPayload(input: { childThreadId: string; childRunId: string; prompt: string; request: DelegationRequest }): unknown
   /** Whether the fork point after `sourceRunId` has a code checkpoint (`ForkPointSeed`). */
   forkPointSeed?(sourceThreadId: string, sourceRunId: string): ForkPointSeed
+  /** Pins a selected code checkpoint before the transfer is published. */
+  pinForkCheckpoint?(threadId: string, sourceThreadId: string, sourceRunId: string): Promise<boolean>
+  publishFork?(threadId: string): void
+  discardFork?(threadId: string): Promise<void>
   /**
    * The subagents of `parentThreadId` already titled `title` (compared normalized, trashed ones
    * excluded), as child thread ids. Read under the parent's mutex, after the retry replay.
@@ -435,6 +459,8 @@ export const RESTART_TRANSCRIPTS_THREAD_ID = '__restart_transcripts__'
 const RESTART_TRANSCRIPT_PENDING = 'restart.transcript_pending'
 /** The thread's transcript says the restart cut the run off. */
 const RESTART_TRANSCRIPT_WRITTEN = 'restart.transcript_written'
+/** Turn origins whose runs a thread turn does not continue after a restart: their own runner owns them. */
+const NOT_CONTINUABLE_ORIGINS: ReadonlySet<TurnOrigin> = new Set(['bot', 'workflow', 'definition'])
 
 /** The outcome of a run whose binding names the retired bare pi route (PR 4). */
 const RETIRED_ROUTE_OUTCOME = Object.freeze({
@@ -472,13 +498,24 @@ export class RunEngine extends EventEmitter {
   readonly delegations: Delegations
   /** Remote subagents' tasks and the runs on other computers that do them (issue #469). */
   readonly remoteSubagents: RemoteSubagentRecords
+  /** The expiry each remote subagent's thread there must have (
+emote_expiry). */
+  readonly remoteExpiry: RemoteExpiryRecords
+  /** Running-time limits of runs on this computer (
+un_time_limits). */
+  readonly runTimeLimits: RunTimeLimitRecords
+  /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160). */
+  readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
+  /** Questions agents asked without waiting (`ask_user` with `wait: false`). */
+  readonly openQuestions: OpenQuestions
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
   /** Fork and merge-back transfers (SPEC §16.2). */
   readonly transfers: ContextTransfers
   private delegationHost: DelegationHost | null = null
+  private readonly creatingForks = new Set<string>()
   /** Aborts the local execution of a claimed effect (the effect worker's `cancelInFlight`). */
   private inFlightCanceller: ((effectId: string) => boolean) | null = null
   private readonly pid: number
@@ -507,7 +544,11 @@ export class RunEngine extends EventEmitter {
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
+    this.remoteExpiry = new RemoteExpiryRecords(opts.store)
+    this.runTimeLimits = new RunTimeLimitRecords(opts.store)
+    this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
+    this.openQuestions = new OpenQuestions(opts.store)
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
@@ -951,7 +992,9 @@ export class RunEngine extends EventEmitter {
         strandedQueued.push(run.runId)
       }
       // SPEC §17.6: what waited for a provider in the dead process can only continue the thread now.
-      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => (this.bindingForRun(runId)?.policy.origin ?? 'interactive') !== 'interactive')
+      // A bot's, a workflow's and an agent definition's runs belong to their own runner, which a thread turn does not
+      // continue; every other run's request parks for the person.
+      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => NOT_CONTINUABLE_ORIGINS.has(this.bindingForRun(runId)?.policy.origin ?? 'interactive'))
       for (const requestId of approvals.continued) {
         const record = this.approvals.get(requestId)
         if (!record) continue
@@ -1642,12 +1685,15 @@ export class RunEngine extends EventEmitter {
    * accepts `seedFrom: 'current_head'`), create the fork thread (host callback, before the
    * transaction) and then, in one transaction, its `fork` lineage and a `pending` fork transfer
    * whose payload records the seed choice (`seedFrom`). A failed transaction deletes the new
-   * thread. Nothing reaches a provider until the fork's first message consumes the transfer.
+   * thread and retires its pin. The checkpoint is pinned before the transfer becomes visible to the fork's first turn.
    */
   forkThread(input: ForkThreadRequest): Promise<ForkAccepted> {
-    return this.mutex.withLock(input.sourceThreadId, () => {
+    return this.mutex.withLock(input.sourceThreadId, async () => {
       const replayed = this.replayFork(input)
-      if (replayed) return replayed
+      if (replayed) {
+        this.delegationHost?.publishFork?.(replayed.threadId)
+        return replayed
+      }
       const host = this.delegationHost
       if (!host) fail('internal', 'No thread host is attached to the run engine.')
       const source = this.forkSourceRun(input.sourceThreadId, input.atRunOrdinal)
@@ -1658,39 +1704,67 @@ export class RunEngine extends EventEmitter {
           `Run ${source.ordinal} of thread ${input.sourceThreadId} has no code checkpoint to fork from; pass seedFrom 'current_head' to fork from the source's current code.`
         )
       const seedFrom = point === 'missing' ? 'current_head' : point
-      const { threadId } = host.createThread({
-        kind: 'fork',
-        sourceThreadId: input.sourceThreadId,
-        sourceRunId: source.runId,
-        title: input.title
-      })
-      return this.withCreatedThread(host, threadId, () => this.store.db.transaction((): ForkAccepted => {
-        this.delegations.createLineage({
-          threadId,
-          parentThreadId: input.sourceThreadId,
-          parentRunId: source.runId,
-          relationship: 'fork'
-        })
-        const transfer = this.transfers.create({
-          type: 'fork',
+      const pendingId = randomUUID()
+      let threadId: string = pendingId
+      let created = false
+      this.creatingForks.add(pendingId)
+      let accepted: ForkAccepted
+      try {
+        threadId = host.createThread({
+          kind: 'fork',
+          threadId: pendingId,
           sourceThreadId: input.sourceThreadId,
-          targetThreadId: threadId,
-          sourceRunOrdinal: source.ordinal,
-          payload: { sourceRunOrdinal: source.ordinal, sourceRunId: source.runId, seedFrom }
+          sourceRunId: source.runId,
+          title: input.title,
+          ...(input.sideChat ? { sideChat: true } : {})
+        }).threadId
+        created = true
+        const pinned = seedFrom === 'checkpoint' && !input.sideChat && await host.pinForkCheckpoint?.(threadId, input.sourceThreadId, source.runId)
+        accepted = this.store.db.transaction((): ForkAccepted => {
+          this.delegations.createLineage({
+            threadId,
+            parentThreadId: input.sourceThreadId,
+            parentRunId: source.runId,
+            relationship: 'fork'
+          })
+          const transfer = this.transfers.create({
+            type: 'fork',
+            sourceThreadId: input.sourceThreadId,
+            targetThreadId: threadId,
+            sourceRunOrdinal: source.ordinal,
+            payload: { sourceRunOrdinal: source.ordinal, sourceRunId: source.runId, seedFrom, ...(pinned ? { pinnedCheckpoint: true } : {}) }
+          })
+          const accepted = { threadId, transferId: transfer.transferId, sourceRunId: source.runId }
+          this.store.putReceipt({
+            clientRequestId: input.clientRequestId,
+            threadId: input.sourceThreadId,
+            commandKind: 'thread.fork',
+            status: 'accepted',
+            result: { ...accepted, sequence: this.store.maxSeq(input.sourceThreadId) },
+            createdAt: this.now()
+          })
+          this.store.db.checkpoint('fork.beforeCommit')
+          return { ...accepted, replayed: false }
         })
-        const accepted = { threadId, transferId: transfer.transferId, sourceRunId: source.runId }
-        this.store.putReceipt({
-          clientRequestId: input.clientRequestId,
-          threadId: input.sourceThreadId,
-          commandKind: 'thread.fork',
-          status: 'accepted',
-          result: { ...accepted, sequence: this.store.maxSeq(input.sourceThreadId) },
-          createdAt: this.now()
-        })
-        this.store.db.checkpoint('fork.beforeCommit')
-        return { ...accepted, replayed: false }
-      }))
+      } catch (error) {
+        try {
+          if (host.discardFork) await host.discardFork(threadId)
+          else if (created) this.removeThread(host, threadId)
+        } catch (cleanupError) {
+          console.warn('An unfinished fork could not be discarded', { threadId, error: cleanupError })
+        }
+        throw error
+      } finally {
+        this.creatingForks.delete(pendingId)
+      }
+      host.publishFork?.(threadId)
+      return accepted
     })
+  }
+
+  /** Startup recovery can overlap a new fork waiting for its repository lease. */
+  isCreatingFork(threadId: string): boolean {
+    return this.creatingForks.has(threadId)
   }
 
   private replayFork(input: ForkThreadRequest): ForkAccepted | null {
@@ -1909,7 +1983,7 @@ export class RunEngine extends EventEmitter {
     const { threadId, clientRequestId } = command
     const receipt = store.getReceipt(clientRequestId)
     if (receipt) {
-      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind || !samePrompt(command, receipt))
+      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind || !matchesSendReceipt(command, receipt))
         return {
           status: 'rejected',
           reason: 'client_request_id_conflict',
@@ -2005,8 +2079,7 @@ export class RunEngine extends EventEmitter {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
         ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
-        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {}),
-        ...(command.sentByPerson && !command.actor && !command.agentOrigin ? { sentByPerson: true as const } : {})
+        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
       }
       const run = store.createRun({
         threadId: command.threadId,
@@ -2051,15 +2124,31 @@ export class RunEngine extends EventEmitter {
           runId: run.runId,
           ...(command.prompt !== undefined ? { length: command.prompt.length } : {})
         })
+      const steerItem = command.steer && enqueueMessage([], {
+        ...command.steer.message,
+        threadId: command.threadId,
+        runId: run.runId,
+        clientRequestId: command.clientRequestId,
+        steerOnStart: { runId: command.steer.runId }
+      }).item
+      if (steerItem) {
+        // The database is profile-local, and the queue lock and stable item id protect replay within the thread.
+        new QueueCommands(store.db).insertPending(JSON.stringify(['enqueue_steer', command.threadId, command.clientRequestId]), {
+          op: 'enqueue_steer', threadId: command.threadId, itemId: steerItem.id, item: steerItem,
+          admissionStopGeneration: currentStopGeneration(store, command.threadId),
+          cancelRunIds: [], releaseInboxIds: []
+        })
+      }
       const sequence = store.maxSeq(command.threadId)
       this.putReceipt(command, 'accepted', {
         runId: run.runId,
         sequence,
         ...(endedPause ? { endedPause } : {}),
         ...(heldByPause ? { heldByPause } : {}),
-        ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {})
+        ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {}),
+        ...(steerItem ? { steerRunId: command.steer!.runId, steerItemId: steerItem.id } : {})
       })
-      return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}), ...(heldByPause ? { heldByPause } : {}) }
+      return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(steerItem ? { steerItemId: steerItem.id } : {}), ...(endedPause ? { endedPause } : {}), ...(heldByPause ? { heldByPause } : {}) }
     })
   }
 
@@ -2312,11 +2401,13 @@ function promptDigest(prompt: string): string {
   return createHash('sha256').update(prompt, 'utf8').digest('hex')
 }
 
-/** A repeated send carries the text it was first sent with. Receipts and sends without a text are not compared. */
-function samePrompt(command: RunCommand, receipt: ReceiptRecord): boolean {
-  if (command.kind !== 'send' || command.prompt === undefined) return true
-  const stored = (receipt.result as { promptDigest?: unknown } | null)?.promptDigest
-  return typeof stored !== 'string' || stored === promptDigest(command.prompt)
+/** A repeated send keeps its text and any explicit Steer target. An omitted target reuses the receipt. */
+function matchesSendReceipt(command: RunCommand, receipt: ReceiptRecord): boolean {
+  if (command.kind !== 'send') return true
+  const stored = receipt.result as { promptDigest?: unknown; steerRunId?: unknown } | null
+  if (command.explicitSteerRunId !== undefined && typeof stored?.steerRunId === 'string' && command.explicitSteerRunId !== stored.steerRunId)
+    return false
+  return command.prompt === undefined || typeof stored?.promptDigest !== 'string' || stored.promptDigest === promptDigest(command.prompt)
 }
 
 function replay(receipt: ReceiptRecord): CommandResult {
@@ -2325,6 +2416,8 @@ function replay(receipt: ReceiptRecord): CommandResult {
     sequence?: number
     reason?: string
     activeRunId?: string | null
+    steerItemId?: string
+    steerDeliveredRunId?: string
     endedPause?: { runId: string; resumeItemId?: string }
     heldByPause?: { runId: string }
   }
@@ -2335,6 +2428,8 @@ function replay(receipt: ReceiptRecord): CommandResult {
       runId: stored.runId ?? '',
       sequence,
       replayed: true,
+      ...(stored.steerItemId ? { steerItemId: stored.steerItemId } : {}),
+      ...(stored.steerDeliveredRunId ? { steerDeliveredRunId: stored.steerDeliveredRunId } : {}),
       ...(stored.endedPause ? { endedPause: stored.endedPause } : {}),
       ...(stored.heldByPause ? { heldByPause: stored.heldByPause } : {})
     }

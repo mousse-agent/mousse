@@ -127,7 +127,7 @@ beforeEach(async () => {
   frames = []
   const useAppStore = await store()
   useAppStore.setState({
-    profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false,
+    profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false, newChatAnimations: true,
     activeThreadId: 'thread-a',
     transcriptPending: false,
     threads: [
@@ -138,10 +138,12 @@ beforeEach(async () => {
       started('thread-e'),
       started('thread-f'),
       started('thread-slow'),
+      started('thread-starting'),
       started('thread-cleared'),
       started('thread-unreachable'),
       { id: 'thread-draft', name: 'New Chat', createdAt: now, updatedAt: now, order: 0 }
     ] as never,
+    turnStates: {},
     messages: [message('a-1', 'First thread')] as never
   })
   host = document.createElement('div')
@@ -158,6 +160,17 @@ afterEach(() => {
 })
 
 describe('switching threads', () => {
+  it('opens a starting thread while its transcript request is still pending', async () => {
+    const useAppStore = await store()
+    useAppStore.setState({ turnStates: { 'thread-starting': { threadId: 'thread-starting', turnId: 'run-starting', phase: 'queued', updatedAt: now } } })
+    await mount()
+    await switchTo('thread-starting')
+    expect(shownThread()).toEqual({ thread: 'thread-starting', messages: '' })
+    expect(useAppStore.getState().transcriptPending).toBe(true)
+    expect(host.querySelector('.chat--empty')).toBeNull()
+    expect(host.querySelector('.composer-input')).not.toBeNull()
+  })
+
   it('shows a started thread outside the cache with its messages in the first paint that shows it', async () => {
     await mount()
     expect(host.querySelector('.chat')?.classList.contains('chat--empty')).toBe(false)
@@ -215,21 +228,6 @@ describe('switching threads', () => {
     expect(frames.filter((frame) => frame.empty || frame.logo || frame.settings)).toEqual([])
   })
 
-  it('goes straight to a cached thread with no waiting frame', async () => {
-    await mount()
-    await switchTo('thread-b')
-    await deliverView('thread-b', [message('b-1', 'Second thread')])
-
-    // thread-a is cached from when it was left. It shows once the frame that marks its row has been drawn.
-    await switchTo('thread-a')
-    const useAppStore = await store()
-    await vi.waitFor(() => expect(useAppStore.getState().openingThreadId).toBeNull())
-    await settle()
-    expect(useAppStore.getState().transcriptPending).toBe(false)
-    expect(useAppStore.getState().messages.map((entry) => entry.id)).toEqual(['a-1'])
-    expect(frames.filter((frame) => frame.empty || frame.logo)).toEqual([])
-  })
-
   it('answers a click on a cached thread in its own frame, then shows the thread with its messages', async () => {
     await mount()
     await switchTo('thread-e')
@@ -273,6 +271,37 @@ describe('switching threads', () => {
     expect((await store()).getState().transcriptPending).toBe(false)
     expect(host.querySelector('.chat--empty')).not.toBeNull()
     expect(host.querySelector('.chat-empty-logo')).not.toBeNull()
+  })
+
+  it('switches the new chat between the moving logo and wave and a still logo', async () => {
+    await mount()
+    await switchTo('thread-draft')
+    const useAppStore = await store()
+    expect(host.querySelector('.ambient-glow')).not.toBeNull()
+    expect(host.querySelector('.empty-logo-liquid')).not.toBeNull()
+
+    act(() => useAppStore.setState({ newChatAnimations: false }))
+    expect(host.querySelector('[role="img"][aria-label="Mousse"] svg')).not.toBeNull()
+    expect(host.querySelector('.ambient-glow')).toBeNull()
+    expect(host.querySelector('.empty-logo-liquid')).toBeNull()
+
+    act(() => useAppStore.setState({ newChatAnimations: true }))
+    expect(host.querySelector('.ambient-glow')).not.toBeNull()
+    expect(host.querySelector('.empty-logo-liquid')).not.toBeNull()
+  })
+
+  it('opens a working thread again when its first view failed and its row is already selected', async () => {
+    threads.select = vi.fn(async () => undefined).mockRejectedValueOnce(new Error('service gone'))
+    await mount()
+    await switchTo('thread-unreachable')
+    const useAppStore = await store()
+    act(() => useAppStore.getState().setThreadActivity({ 'thread-unreachable': 'processing' }))
+    expect(shownThread()).toEqual({ thread: 'thread-unreachable', messages: '' })
+
+    await switchTo('thread-unreachable')
+    expect(threads.select).toHaveBeenCalledTimes(2)
+    await deliverView('thread-unreachable', [message('unreachable-1', 'First message')])
+    expect(shownThread()).toEqual({ thread: 'thread-unreachable', messages: 'unreachable-1' })
   })
 
   it('stops waiting when the select fails', async () => {

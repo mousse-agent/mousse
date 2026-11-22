@@ -10,6 +10,8 @@ import { writeTerminalRun } from '../terminal'
 import {
   TERMINAL_RUN_STATUSES,
   stoppedByPerson,
+  waitsForAnswer,
+  isQuietNoteRow,
   isRetiredInboxRow,
   isWakeTurnPayload,
   type ChildResultPayload,
@@ -17,10 +19,22 @@ import {
   type InboxRecord,
   type WakeTurnPayload
 } from '../types'
-import { formatWakeNotice } from './notice'
+import { formatWakeNotice, type PlannedNotice } from './notice'
+import { isQuestionAnswerRow } from '../OpenQuestions'
 
 /** Provider capabilities of the adapter that serves a thread's selected model; null when unknown. */
 export type CapabilitiesFor = (threadId: string) => ProviderCapabilities | null
+
+/** Whether a thread waits on a person's answer to a question or an approval. */
+export type AwaitsAnswer = (threadId: string) => boolean
+
+/**
+ * The rows that may be delivered now. While the thread waits on a person's answer, agent notes and monitor events stay pending: a live
+ * provider settles the request when it takes a steer, and a note never answers one. They go after the answer.
+ */
+function deliverableRows(rows: InboxRecord[], awaitsAnswer: boolean): InboxRecord[] {
+  return awaitsAnswer ? rows.filter((row) => !waitsForAnswer(row)) : rows
+}
 
 export interface WakeReport {
   /** Wake runs created for idle threads. */
@@ -207,7 +221,11 @@ function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord
  * to pending (`restoreUndeliveredRows`). Then, for every thread with `pending` inbox rows:
  * - no active run and no wake run already queued (its `turn.start` pending, deferred while the
  *   thread is busy, or claimed) → one `wake` run with a `turn.start` effect for all of the
- *   thread's pending rows, which become `delivered` by that effect;
+ *   thread's pending rows, which become `delivered` by that effect; never for notes sent with
+ *   `attention: none` alone (`isQuietNoteRow`), which wait for a turn something else starts;
+ * - while the thread waits on a person's answer (`awaitsAnswer`), agent notes stay pending in every case below;
+ * - an active run, for a person's answers to the thread's open questions → one `turn.steer` with them, on a provider
+ *   that steers natively or by restarting its reply (`steeredRows`);
  * - an active run that takes native steer, while every row wants `wake: 'always'` → one
  *   `turn.steer` with the formatted notice, rows `delivered` by that steer;
  * - otherwise the rows stay pending and the rule fires again on a later pass. This includes an
@@ -220,26 +238,33 @@ export function wakeThreads(
   store: RunStore,
   outbox: EffectOutbox,
   capabilitiesFor: CapabilitiesFor | undefined,
-  now: string
+  now: string,
+  awaitsAnswer?: AwaitsAnswer,
+  /** Only this thread's rows (a turn's settle wakes its own thread at once); every thread's when absent. */
+  onlyThreadId?: string
 ): WakeReport {
   const inbox = new Inbox(store)
   const delegations = new Delegations(store, inbox)
   const restored = store.db.transaction(() => restoreUndeliveredRows(store, outbox, now))
   const report: WakeReport = { wakes: [], steers: [], cancelled: cancelAcknowledgedWakes(store, outbox, now), restored }
   for (const threadId of inbox.listThreadsWithPending()) {
+    if (onlyThreadId !== undefined && threadId !== onlyThreadId) continue
     try {
       store.db.transaction(() => {
         const pending = inbox.listPending(threadId)
         // A row of a kind no longer written never wakes or steers: it is settled here instead.
         const retired = pending.filter(isRetiredInboxRow)
         if (retired.length) inbox.markAcknowledged(retired.map((row) => row.inboxId))
-        const rows = pending.filter((row) => !isRetiredInboxRow(row))
+        const rows = deliverableRows(pending.filter((row) => !isRetiredInboxRow(row)), awaitsAnswer?.(threadId) ?? false)
         if (rows.length === 0) return
         // A paused thread is busy for wakes: the rows wait, and the resume item carries them (SPEC §14.3).
         if (store.getPausedRun(threadId)) return
         const active = store.getActiveRun(threadId)
         if (!active) {
           if (hasQueuedWake(store, threadId)) return
+          // A note sent with `attention: none` waits for the thread's next turn: it never starts one, and it rides with
+          // a wake that something else starts.
+          if (rows.every(isQuietNoteRow)) return
           // The wake carries on the work that delegated: a chain of agent messages is not reset by it (SPEC §15.1).
           const carriedHops = inheritedAgentHops(store, threadId, 'wake')
           const run = store.createRun({
@@ -263,22 +288,22 @@ export function wakeThreads(
         // A run that is being stopped takes no steer (its executor would drop it); the rows wait for the wake.
         if (active.outcome?.stopRequested) return
         const caps = capabilitiesFor?.(threadId) ?? null
-        // Only native steer joins the live turn without cancelling in-flight work.
-        if (!caps || steerStrategy(caps, active) !== 'native') return
-        if (!rows.every((row) => wantsSteer(row, delegations))) return
-        const text = formatWakeNotice(rows)
+        if (!caps) return
+        const steering = steeredRows(rows, steerStrategy(caps, active), delegations)
+        if (steering.length === 0) return
+        const text = formatWakeNotice(steering)
         const effect = outbox.enqueue({
           threadId,
           runId: active.runId,
           kind: 'turn.steer',
-          payload: { runId: active.runId, threadId, text, inboxIds: rows.map((row) => row.inboxId) }
+          payload: { runId: active.runId, threadId, text, inboxIds: steering.map((row) => row.inboxId) }
         })
-        inbox.markDelivered(rows.map((row) => row.inboxId), effect.effectId)
+        inbox.markDelivered(steering.map((row) => row.inboxId), effect.effectId)
         store.appendEvent({
           threadId,
           runId: active.runId,
           type: 'reconcile.wake_steer',
-          payload: { effectId: effect.effectId, inboxIds: rows.map((row) => row.inboxId) }
+          payload: { effectId: effect.effectId, inboxIds: steering.map((row) => row.inboxId) }
         })
         report.steers.push(effect.effectId)
       })
@@ -288,6 +313,84 @@ export function wakeThreads(
     }
   }
   return report
+}
+
+/**
+ * The rows that join a live run now. Only native steer joins it without cancelling in-flight work, so notices steer
+ * only then, all together or not at all. A person's answer to an open question is the person's own words: it joins the
+ * run as their steer would, also on a provider that steers by restarting its reply (the restart waits for a running
+ * tool), and it does not wait for notices that cannot steer.
+ */
+function steeredRows(rows: InboxRecord[], strategy: ReturnType<typeof steerStrategy>, delegations: Delegations): InboxRecord[] {
+  if (strategy === 'native' && rows.every((row) => wantsSteer(row, delegations))) return rows
+  if (strategy === 'native' || strategy === 'interrupt_restart') return rows.filter(isQuestionAnswerRow)
+  return []
+}
+
+/** Notices handed to a running turn with a Mousse tool's result (`deliverAtToolBoundary`). */
+export interface BoundaryDelivery {
+  /** The `turn.steer` effect recorded as done that owns the rows: a failed or cut-off run gives them back. */
+  effectId: string
+  text: string
+  inboxIds: string[]
+}
+
+/**
+ * Boundary delivery (docs/plans/tool-api.md §2.2): on a provider that steers by restarting its reply
+ * (`interrupt_restart`), a run that is busy calling Mousse tools gets its pending notices with the
+ * result of its next Mousse tool call, instead of only when the run ends. The rows are delivered by a
+ * `turn.steer` effect recorded as done and read by the run (`steerTakenBy`), as a native steer's are:
+ * acknowledged when the run completes, pending again when it fails or is cut off
+ * (`restoreUndeliveredRows`), released when the call's result never reached the model
+ * (`releaseToolBoundary`). Like a native steer, it takes every pending row or none (`wantsSteer`).
+ * Nothing is delivered to a run that is not the thread's active one, is being stopped, or steers
+ * natively (that run gets its notices from rule 4). One transaction.
+ */
+export function deliverAtToolBoundary(
+  store: RunStore,
+  outbox: EffectOutbox,
+  input: {
+    threadId: string
+    runId: string
+    caps: ProviderCapabilities | null
+    /** Drops rows not worth delivering any more (a question nobody can answer now). */
+    prepare?: (rows: InboxRecord[]) => InboxRecord[]
+    /** The thread waits on a person's answer: agent notes stay pending until it comes (`deliverableRows`). */
+    awaitsAnswer?: boolean
+    plan: (rows: readonly InboxRecord[]) => PlannedNotice
+  }
+): BoundaryDelivery | null {
+  const { threadId, runId, caps } = input
+  if (!caps) return null
+  return store.db.transaction(() => {
+    const active = store.getActiveRun(threadId)
+    if (!active || active.runId !== runId || active.outcome?.stopRequested) return null
+    if (steerStrategy(caps, active) !== 'interrupt_restart') return null
+    const inbox = new Inbox(store)
+    const pending = deliverableRows(inbox.listPending(threadId).filter((row) => !isRetiredInboxRow(row)), input.awaitsAnswer ?? false)
+    const rows = input.prepare ? input.prepare(pending) : pending
+    if (rows.length === 0) return null
+    const delegations = new Delegations(store, inbox)
+    if (!rows.every((row) => wantsSteer(row, delegations))) return null
+    const planned = input.plan(rows)
+    const inboxIds = rows.map((row) => row.inboxId)
+    const effect = outbox.recordDone({ threadId, runId, kind: 'turn.steer', payload: { runId, threadId, text: planned.text, inboxIds, boundary: true } })
+    inbox.markDelivered(inboxIds, effect.effectId)
+    inbox.markSteerTaken(inboxIds, effect.effectId)
+    inbox.recordNoticeVisibility(rows, planned.items)
+    store.appendEvent({ threadId, runId, type: 'reconcile.boundary_delivery', payload: { effectId: effect.effectId, inboxIds } })
+    return { effectId: effect.effectId, text: planned.text, inboxIds }
+  })
+}
+
+/** The tool result that carried a boundary delivery never reached the model: its rows are pending again, not counted as an attempt. */
+export function releaseToolBoundary(store: RunStore, delivery: Pick<BoundaryDelivery, 'effectId' | 'inboxIds'>): string[] {
+  const inbox = new Inbox(store)
+  return store.db.transaction(() => {
+    const moved = inbox.release(delivery.inboxIds, delivery.effectId)
+    for (const id of moved) inbox.patchPayload(id, { steerTakenBy: null })
+    return moved
+  })
 }
 
 /** Rows without a delegation (notices) steer; a child result follows its delegation. */

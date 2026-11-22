@@ -64,3 +64,27 @@ describe('cliLaunch', () => {
     expect(inv.argsPrefix).toEqual(['/tmp/mousse/out/cli/index.js'])
   })
 })
+
+describe('the CLI a startup entry runs', () => {
+  it('is the launcher in Contents/Resources of a macOS app, not the app binary that would open a window', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { resolveCliPathForInstall } = await import('../src/cli/cliLaunch')
+    const app = join(mkdtempSync(join(tmpdir(), 'mac-app-')), 'Mousse.app', 'Contents')
+    try {
+      mkdirSync(join(app, 'MacOS'), { recursive: true })
+      mkdirSync(join(app, 'Resources'), { recursive: true })
+      const execPath = join(app, 'MacOS', 'Mousse')
+      writeFileSync(execPath, '')
+      // Without the launcher, the binary is all there is.
+      expect(resolveCliPathForInstall('--cli', { execPath, platform: 'darwin' })).not.toContain('Resources')
+      writeFileSync(join(app, 'Resources', 'mousse-cli'), '')
+      expect(resolveCliPathForInstall('--cli', { execPath, platform: 'darwin' })).toBe(
+        join(app, 'Resources', 'mousse-cli')
+      )
+    } finally {
+      rmSync(join(app, '..', '..'), { recursive: true, force: true })
+    }
+  })
+})

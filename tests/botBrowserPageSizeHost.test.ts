@@ -102,9 +102,10 @@ describe('the bounds of the size a view asks for', () => {
   it.each([
     ['a tall split view on a 1.5 screen', { width: 790, height: 1070, scale: 1.5 }, { width: 790, height: 1070, scale: 1.5 }],
     ['narrower and shorter than any page', { width: 120, height: 90, scale: 1 }, { width: 320, height: 240, scale: 1 }],
-    ['larger than any page', { width: 4000, height: 3000, scale: 1 }, { width: 1920, height: 2160, scale: 1 }],
+    ['larger than any page', { width: 4000, height: 3000, scale: 1 }, { width: 3840, height: 2160, scale: 1 }],
+    ['a full-screen view on a 1.25 screen keeps its ratio', { width: 1700, height: 940, scale: 1.25 }, { width: 1700, height: 940, scale: 1.25 }],
     ['a 3x screen: at most 2', { width: 600, height: 800, scale: 3 }, { width: 600, height: 800, scale: 2 }],
-    ['a picture over 1920 across: the ratio comes down, in quarters', { width: 1400, height: 600, scale: 2 }, { width: 1400, height: 600, scale: 1.25 }],
+    ['a picture over 3840 across: the ratio comes down, in quarters', { width: 2800, height: 600, scale: 2 }, { width: 2800, height: 600, scale: 1.25 }],
     ['a ratio below 1 (zoomed out)', { width: 800, height: 600, scale: 0.8 }, { width: 800, height: 600, scale: 1 }],
     ['no size: the default', {}, DEFAULT]
   ])('%s', (_name, asked, page) => {

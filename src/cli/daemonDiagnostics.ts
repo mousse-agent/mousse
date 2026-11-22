@@ -1,4 +1,5 @@
 import { join } from 'path'
+import { setErrorReferenceSink, type ErrorReferenceEntry } from '../shared/errors'
 import { setDiagSink } from '../mms/log/diag'
 import { RotatingFileLog } from '../mms/log/rotatingFileLog'
 
@@ -30,6 +31,17 @@ function describeFailure(error: unknown): string {
   }
 }
 
+/**
+ * A child program's output pipe that failed to start reading (`read ENOTCONN`, seen on Windows while the service
+ * starts several programs at once). Node raises it on the pipe with no listener, so it lands here; the program's own
+ * call still ends (it closes or fails), so the service only logs it instead of shutting down.
+ */
+export function isChildPipeReadFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const { code, syscall } = error as NodeJS.ErrnoException
+  return code === 'ENOTCONN' && syscall === 'read' && /\bcreateSocket\b[\s\S]*\bChildProcess\.spawn\b/.test(error.stack ?? '')
+}
+
 export function createProcessFailureHandlers(deps: ProcessFailureHandlerDeps): ProcessFailureHandlers {
   let crashing = false
   return {
@@ -37,6 +49,10 @@ export function createProcessFailureHandlers(deps: ProcessFailureHandlerDeps): P
       deps.logLine(`[error:daemon] unhandledRejection: ${describeFailure(reason)}`)
     },
     onUncaughtException(error) {
+      if (isChildPipeReadFailure(error)) {
+        deps.logLine(`[warn:daemon] child program pipe failed, kept running: ${describeFailure(error)}`)
+        return
+      }
       deps.logLine(`[error:daemon] uncaughtException: ${describeFailure(error)}`)
       if (crashing) return
       crashing = true
@@ -58,6 +74,15 @@ export function createProcessFailureHandlers(deps: ProcessFailureHandlerDeps): P
   }
 }
 
+/**
+ * The daemon.log line for a generic failure's `Reference: <id>`, so the id a person reports can be found: the id,
+ * the error code, the method and the redacted causes (`errorCauseText`), never a secret.
+ */
+export function errorReferenceLine(entry: ErrorReferenceEntry): string {
+  const fields = JSON.stringify({ code: entry.code, ...(entry.operation ? { operation: entry.operation } : {}) })
+  return `[error:reference] ${entry.reference} ${fields}${entry.cause ? ` :: ${entry.cause}` : ''}`
+}
+
 export interface DaemonDiagnostics {
   log: RotatingFileLog
   dispose: () => void
@@ -74,6 +99,11 @@ export function installDaemonDiagnostics(opts: {
   const log = new RotatingFileLog({ path: join(opts.homeDir, DAEMON_LOG_RELATIVE_PATH) })
   const stamp = (line: string): string => `${new Date().toISOString()} ${line}`
   setDiagSink((_level, line) => log.write(stamp(line)))
+  setErrorReferenceSink((entry) => {
+    const line = errorReferenceLine(entry)
+    console.error(line)
+    log.write(stamp(line))
+  })
 
   const handlers = createProcessFailureHandlers({
     logLine: (line) => {
@@ -96,6 +126,7 @@ export function installDaemonDiagnostics(opts: {
       process.off('uncaughtException', handlers.onUncaughtException)
       process.off('exit', onExit)
       setDiagSink(null)
+      setErrorReferenceSink(null)
       log.flushSync()
     }
   }

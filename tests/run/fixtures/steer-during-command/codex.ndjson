@@ -13,10 +13,6 @@
 {"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-1","status":"inProgress","error":null}}}}
 {"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"npm test","cwd":"/w","processId":"4242","status":"inProgress","commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null}}}}
 {"dir":"cue","frame":{"action":"steer","text":"Use pnpm, not npm"}}
-{"dir":"cue","frame":{"action":"held"}}
-{"dir":"in","frame":{"method":"item/commandExecution/outputDelta","params":{"threadId":"thr-1","turnId":"turn-1","itemId":"cmd-1","delta":"12 passed\n"}}}
-{"dir":"cue","frame":{"action":"held"}}
-{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"npm test","cwd":"/w","processId":"4242","status":"completed","commandActions":[],"aggregatedOutput":"12 passed\n","exitCode":0,"durationMs":20000}}}}
 {"dir":"out","frame":{"id":6,"method":"turn/interrupt","params":{"threadId":"thr-1","turnId":"turn-1"}}}
 {"dir":"in","frame":{"id":6,"result":{}}}
 {"dir":"in","frame":{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-1","status":"interrupted","error":null}}}}

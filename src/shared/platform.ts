@@ -6,6 +6,7 @@ import type { BrowserSetupMethod } from './browser/setup'
 import type { BrowserAccessMethod } from './browser/access'
 import type { ChatNetworkMethod } from './chatsNetwork'
 import type { NetLocalMethod } from './net/local'
+import type { NetEngineLocalMethod } from './netEngine/local'
 import type { BridgeHubLocalMethod } from './bridge/types'
 import type { BridgeActivityMethod } from './bridge/deviceActivity'
 import type { SpacesLocalMethod } from './spaces/local'
@@ -18,12 +19,16 @@ import type { AutomationsMethod } from './automations'
 import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
 import type { SecretMethod } from './secretRequests'
+import type { ComputerUseMethod } from './computerUse'
+import type { BugReportMethod } from './bugReports'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
-  | ChatNetworkMethod | NetLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
+  | ChatNetworkMethod | NetLocalMethod | NetEngineLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
   | BotsPersonalV2Method | BotDeviceMethod | BotsBrowserMethod | BrowserViewMethod
   | AutomationsMethod
   | SecretMethod
+  | ComputerUseMethod
+  | BugReportMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'
   | 'workflows.duplicate' | 'workflows.importBundle' | 'workflows.exportBundle'
@@ -38,7 +43,7 @@ export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRu
   | 'skills.importPackage' | 'skills.exportPackage'
   | 'mcp.create' | 'mcp.update' | 'mcp.read' | 'mcp.enable' | 'mcp.delete'
   | 'mcp.testConnection' | 'mcp.beginAuth' | 'mcp.cancelAuth' | 'mcp.revokeAuth'
-  | 'runs.resumeNow' | 'runs.cancelPause' | 'threads.goal' | 'threads.setHidden'
+  | 'orchestrator.sendAccepted' | 'runs.resumeNow' | 'runs.cancelPause' | 'threads.goal' | 'threads.setHidden'
 
 export type PlatformRequestErrorShape = import('./errors').AppErrorShape
 

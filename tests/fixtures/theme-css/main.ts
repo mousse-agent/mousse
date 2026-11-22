@@ -123,6 +123,19 @@ async function main() {
     await execute('qa.frames(2)')
     const afterDecision = await execute('(async () => { qa.decision(false); await Promise.resolve(); return qa.look() })()')
     const decision = { before: beforeDecision, during: duringDecision, after: afterDecision }
+    // A guarded page turns the theme's CSS off and keeps its colors; a decision on it still pauses everything.
+    const guardedDuring = await execute('(async () => { qa.guarded(true); await Promise.resolve(); return qa.look() })()')
+    const guardedDecision = await execute('(async () => { qa.decision(true); await Promise.resolve(); const look = qa.look(); qa.decision(false); return look })()')
+    const guardedAfter = await execute('(async () => { qa.guarded(false); await Promise.resolve(); return qa.look() })()')
+    const guarded = { during: guardedDuring, decision: guardedDecision, after: guardedAfter }
+    // A theme with no CSS and no colors (one that only has a wallpaper) still pauses; no theme never does.
+    await execute('qa.clear()')
+    await execute('qa.plainTheme(true)')
+    const plainDuring = await execute<boolean>('(async () => { qa.decision(true); await Promise.resolve(); return qa.look().paused })()')
+    const plainAfter = await execute<boolean>('(async () => { qa.decision(false); await Promise.resolve(); return qa.look().paused })()')
+    await execute('qa.plainTheme(false)')
+    const offDuring = await execute<boolean>('(async () => { qa.decision(true); await Promise.resolve(); const paused = qa.look().paused; qa.decision(false); return paused })()')
+    const plain = { during: plainDuring, after: plainAfter, off: offDuring }
     // The control: the same CSS unchecked must reach the leak server, or the test could not see a leak.
     await execute('qa.clear()')
     requested.length = 0
@@ -131,7 +144,7 @@ async function main() {
     await execute('qa.frames(5)')
     await delay(800)
     const control = { requested: [...requested], leakHits: [...leakHits] }
-    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ theme, decision, control, pageErrors: await execute('qa.errors()') }))
+    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ theme, decision, guarded, plain, control, pageErrors: await execute('qa.errors()') }))
   } finally {
     window.destroy()
     server.close()

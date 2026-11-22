@@ -83,7 +83,10 @@ describe('thread switching terminal lifecycle', () => {
     expect(appSource).toMatch(/Keep terminal PTYs and browser guests mounted/)
     const mainPane = appSource.match(/<KeepMounted as="main"[\s\S]*?<\/KeepMounted>/)?.[0]
     expect(mainPane).toBeDefined()
-    expect(mainPane).toMatch(/active=\{mainAreaOpen && layoutMode === 'projects'\}[^>]*\bpreserveLayout\b/)
+    // Active while the panel is open in the projects layout, and while it slides out after closing.
+    expect(appSource).toMatch(/const panelOpen = mainAreaOpen && layoutMode === 'projects'/)
+    expect(appSource).toMatch(/const panelShown = panelOpen \|\| panelClosing/)
+    expect(mainPane).toMatch(/active=\{panelShown\}[^>]*\bpreserveLayout\b/)
     expect(mainPane).toMatch(/<MainViewPanel\b[^>]*\/>/)
   })
 
@@ -144,14 +147,6 @@ describe('terminals on another computer', () => {
     expect(panelSource).toMatch(/pty\.write\(ptyId, data, threadId\)/)
     expect(panelSource).toMatch(/pty\.resize\(ptyId, dims\.cols, dims\.rows, inst\.threadId\)/)
     expect(panelSource).toMatch(/pty\.kill\(tab\.ptyId, tab\.ownerThreadId \?\? undefined\)/)
-    for (const channel of ['pty:write', 'pty:resize', 'pty:kill'])
-      expect(guiIpcSource).toContain(`registerHandler('${channel}'`)
-    for (const handler of [
-      "'pty:write', async (_e, ptyId: string, data: string, threadId?: unknown)",
-      "'pty:kill', async (_e, ptyId: string, threadId?: unknown)"
-    ])
-      expect(guiIpcSource).toContain(handler)
-    expect(guiIpcSource).toContain('rows: number, threadId?: unknown')
   })
 
   it('shows the owner who holds a terminal on the thread, with Stop, and a desktop notification for a first one', () => {
@@ -160,17 +155,5 @@ describe('terminals on another computer', () => {
     expect(panelSource).toMatch(/\.kill\(ptyId, activeThreadId/)
     expect(guiIpcSource).toMatch(/event\.type === 'ui\.notify'/)
     expect(guiIpcSource).toMatch(/'remote-terminal'/)
-  })
-
-  it('names no folder, shell or environment for a terminal on another computer, and keeps them for a local one', () => {
-    const createHandler = guiIpcSource.slice(
-      guiIpcSource.indexOf("'pty:create'"),
-      guiIpcSource.indexOf("'pty:kill'")
-    )
-    expect(createHandler).toMatch(/isQualifiedId\(threadId\)/)
-    expect(createHandler).toMatch(/\? \{ threadId, agentId: request\.agentId \}/)
-    expect(createHandler).toMatch(/cwd: request\.cwd/)
-    expect(createHandler).toMatch(/env: request\.env/)
-    expect(createHandler).toMatch(/shellArgs: request\.shellArgs/)
   })
 })

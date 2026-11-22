@@ -18,6 +18,13 @@ export interface MessageRequest {
   at: number
 }
 
+export interface SubagentRequest {
+  /** The call that started the subagent: its card in the transcript carries this id. */
+  toolCallId: string
+  seq: number
+  at: number
+}
+
 export interface PendingRequestFocus {
   threadId: string
   seq: number
@@ -26,16 +33,25 @@ export interface PendingRequestFocus {
 
 interface ChatNavigationState {
   message: MessageRequest | null
+  /**
+   * A runtime's own subagent to show (it has no thread to open). It stays set while the transcript
+   * lands its turn, so the folded group and the card it is in open themselves when they mount.
+   */
+  subagent: SubagentRequest | null
   pendingRequest: PendingRequestFocus | null
   /**
    * Scrolls the transcript to the message and briefly highlights it. The message may be in a thread
    * that is still opening: select the thread first, then call this.
    */
   scrollToMessage(messageId: string): void
+  /** Scrolls the open thread's transcript to a runtime's own subagent card, opens it and focuses it. */
+  revealSubagent(toolCallId: string): void
   /** Shows the thread's waiting request (a permission request in the transcript) once the thread is open. */
   focusPendingRequest(threadId: string): void
   /** The transcript took the message request `seq` (or gave up on it). */
   settleMessage(seq: number): void
+  /** The transcript showed the subagent request `seq` (or gave up on it). */
+  settleSubagent(seq: number): void
   /** The chat took the focus request `seq` (or gave up on it). */
   settlePendingRequest(seq: number): void
 }
@@ -44,15 +60,25 @@ let seq = 0
 
 export const useChatNavigationStore = create<ChatNavigationState>((set, get) => ({
   message: null,
+  subagent: null,
   pendingRequest: null,
   scrollToMessage(messageId) {
     set({ message: { messageId, seq: ++seq, at: Date.now() } })
+  },
+  revealSubagent(toolCallId) {
+    const request = { toolCallId, seq: ++seq, at: Date.now() }
+    set({ subagent: request })
+    // Cards open themselves while a request waits, so one no transcript takes must not wait for a later card.
+    setTimeout(() => get().settleSubagent(request.seq), CHAT_NAVIGATION_TIMEOUT_MS)
   },
   focusPendingRequest(threadId) {
     set({ pendingRequest: { threadId, seq: ++seq, at: Date.now() } })
   },
   settleMessage(done) {
     if (get().message?.seq === done) set({ message: null })
+  },
+  settleSubagent(done) {
+    if (get().subagent?.seq === done) set({ subagent: null })
   },
   settlePendingRequest(done) {
     if (get().pendingRequest?.seq === done) set({ pendingRequest: null })
@@ -67,6 +93,21 @@ export function isStale(request: { at: number }, now = Date.now()): boolean {
 /** See `ChatNavigationState.scrollToMessage`. */
 export function scrollToMessage(messageId: string): void {
   useChatNavigationStore.getState().scrollToMessage(messageId)
+}
+
+/** See `ChatNavigationState.revealSubagent`. */
+export function revealSubagent(toolCallId: string): void {
+  useChatNavigationStore.getState().revealSubagent(toolCallId)
+}
+
+/**
+ * The waiting subagent request that names one of `toolCallIds`, by its `seq`, else null. A card or a
+ * folded group of cards opens once for each new `seq`.
+ */
+export function useSubagentRevealSeq(toolCallIds: readonly string[]): number | null {
+  return useChatNavigationStore((state) =>
+    state.subagent && toolCallIds.includes(state.subagent.toolCallId) ? state.subagent.seq : null
+  )
 }
 
 /** See `ChatNavigationState.focusPendingRequest`. */

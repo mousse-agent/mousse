@@ -6,13 +6,9 @@
 
 /* The larger view: the browser's tab and its controls. */
 .watched-browser-pane { flex: 1 1 0; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); background: rgba(var(--surface-base-rgb), .25); }
-.watched-browser-bar { display: flex; align-items: center; gap: 4px; padding: 10px 12px; border-bottom: 1px solid rgba(var(--accent-pale-rgb), .1); }
-.watched-browser-bar > button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--text-secondary); flex-shrink: 0; }
-.watched-browser-bar > button:hover:not(:disabled) { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
-.watched-browser-bar > button:disabled { opacity: .4; }
-.watched-browser-bar > .watched-browser-control { width: auto; padding: 0 11px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: rgba(var(--accent-rgb), .16); border: 1px solid rgba(var(--accent-rgb), .3); }
-.watched-browser-address { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; margin: 0 4px; padding: 0 10px; height: 30px; border-radius: 8px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 8%, transparent); }
-.watched-browser-address input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text-primary); font-size: 12px; outline: none; }
+/* Its bar is the thread browser's (.browser-toolbar, .browser-url-form); who has it is the switch beside the address. */
+.watched-browser-bar > .watched-browser-control { width: 28px; padding: 0; justify-content: center; border-radius: var(--ui-row-radius, 6px); }
+.watched-browser-bar > .watched-browser-control:hover:not(:disabled) { background: var(--ui-hover); }
 /* The page is still loading: a quiet moving line under the address, in place of a wait. */
 .watched-browser-address { position: relative; overflow: hidden; }
 .watched-browser-address.is-loading::after {
@@ -28,10 +24,10 @@
 }
 @keyframes watched-browser-loading { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 @media (prefers-reduced-motion: reduce) { .watched-browser-address.is-loading::after { animation: none; width: 100%; opacity: .5; } }
-/* The page is laid out at the stage's size, so its picture fills it. While a new size is on its way (or
-   another window sets it) the whole picture still shows, as large as fits. */
-.watched-browser-stage { flex: 1; min-height: 0; overflow: auto; padding: 14px; container-type: size; display: flex; align-items: flex-start; justify-content: center; }
-.watched-browser-stage .watched-browser-frame { flex: none; width: min(100cqw, 100cqh * var(--watched-frame-aspect, 1.6)); box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), .16), 0 6px 24px rgba(0, 0, 0, .25); }
+/* The page is laid out at the stage's size, so its picture fills it edge to edge, as a page fills a browser. While a
+   new size is on its way (or another window sets it) the whole picture still shows, as large as fits. */
+.watched-browser-stage { flex: 1; min-height: 0; overflow: auto; container-type: size; display: flex; align-items: flex-start; justify-content: center; }
+.watched-browser-stage .watched-browser-frame { flex: none; width: min(100cqw, 100cqh * var(--watched-frame-aspect, 1.6)); border-radius: 0; }
 /* Held here: the page takes every pointer, touch and key; the app neither selects, pans nor drags. */
 .watched-browser-frame.is-held { cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; }
 /* Keys land in a field over the page, where the person last pressed (an IME's candidates show there). */

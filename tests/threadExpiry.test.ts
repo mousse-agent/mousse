@@ -1,7 +1,8 @@
 /**
- * Thread expiry end to end (issue #672): an expired thread is deleted for good, with its worktree, and
- * never shows in Recently deleted; its branch and the commits on it stay. The expiry's purge authority
- * holds only for a thread whose own expiry passed, and the protocol checks the times it is given.
+ * Thread expiry end to end (issue #672): an expired thread is archived, as Archive does, and nothing of it is
+ * deleted: its worktree, files and branch stay, and once its expiry is removed it can be unarchived and used again.
+ * A delete an earlier expiry started is still finished. The expiry's purge authority holds only for a thread whose
+ * own expiry passed, and the protocol checks the times it is given.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -50,7 +51,7 @@ describe('thread expiry', () => {
     return path
   }
 
-  it('deletes an expired thread and its worktree for good, keeps its branch, and lists it nowhere', async () => {
+  it('archives an expired thread, keeps its worktree, files and branch, and removes the expiry', async () => {
     const repo = repository()
     const project = mms.projects.openProject(repo)
     const thread = mms.threads.createThread('Expiring work', project.id, repo, { worktreeEnabled: true, started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
@@ -66,24 +67,39 @@ describe('thread expiry', () => {
     expect(mms.orchestrator.isExpired(thread.id)).toBe(true)
     await mms.threadExpiry.pass()
 
-    expect(mms.threads.getThread(thread.id)).toBeUndefined()
-    expect(mms.threads.lifecycleStore.get(thread.id)?.state).toBe('purged')
-    expect(existsSync(workspace.worktreePath)).toBe(false)
-    // The branch and its commit stay in the repository.
+    const archived = mms.threads.getThread(thread.id)
+    expect(archived?.settledAt).toBeTruthy()
+    expect(archived?.expiresAt).toBeUndefined()
+    expect(mms.orchestrator.isExpired(thread.id)).toBe(false)
+    expect(mms.threads.lifecycleStore.get(thread.id)?.state ?? 'active').toBe('active')
+    // Nothing of it is deleted: the worktree with its uncommitted file, and the branch with its commit.
+    expect(existsSync(join(workspace.worktreePath, 'scratch.txt'))).toBe(true)
     expect(execFileSync('git', ['rev-parse', `refs/heads/${workspace.branch}`], { cwd: repo, encoding: 'utf8' }).trim()).toBe(committed)
-    const inventory = (await gui('threads.inventory')) as { lifecycles: Array<{ taskId: string }> }
-    expect(inventory.lifecycles.map((record) => record.taskId)).not.toContain(thread.id)
+    // Unarchived, it takes messages again.
+    await gui('threads.settle', { threadId: thread.id, settled: false })
+    expect(mms.threads.getThread(thread.id)?.settledAt).toBeUndefined()
+    await expect(gui('threads.setExpiry', { threadId: thread.id, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })).resolves.toBeTruthy()
   }, 120_000)
 
-  it('deletes a subagent a cut-short delete left in the trash with its expiring thread', async () => {
+  it('archives an expired thread that is already archived without moving its archive time', async () => {
+    const thread = mms.threads.createThread('Archived early', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+    await gui('threads.settle', { threadId: thread.id, settled: true })
+    const settledAt = mms.threads.getThread(thread.id)?.settledAt
+    mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
+    await mms.threadExpiry.pass()
+    expect(mms.threads.getThread(thread.id)).toMatchObject({ settledAt })
+    expect(mms.threads.getThread(thread.id)?.expiresAt).toBeUndefined()
+  }, 60_000)
+
+  it('leaves a subagent a person put in the trash as it is when its root expires', async () => {
     const root = mms.threads.createThread('Root', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
     const child = mms.threads.createThread('Helper', undefined, undefined, { started: true, ownerThreadId: root.id, lineage: { parentThreadId: root.id, rootThreadId: root.id, relationship: 'subagent' } })
     await mms.trashThread(child.id)
     expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('trashed')
     mms.threads.updateThreadMeta(root.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
     await mms.threadExpiry.pass()
-    expect(mms.threads.lifecycleStore.get(root.id)?.state).toBe('purged')
-    expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('purged')
+    expect(mms.threads.getThread(root.id)?.settledAt).toBeTruthy()
+    expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('trashed')
   }, 60_000)
 
   it('finishes an expiry delete a crash cut short at the next start, instead of putting it back in Archived', async () => {
@@ -118,6 +134,20 @@ describe('thread expiry', () => {
     expect(mms.threads.getThread(created.thread.id)?.expiresAt).toBeUndefined()
     const child = mms.threads.createThread('Helper', undefined, undefined, { lineage: { parentThreadId: created.thread.id, rootThreadId: created.thread.id, relationship: 'subagent' } })
     await expect(gui('threads.setExpiry', { threadId: child.id, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })).rejects.toMatchObject({ code: 'invalid_params' })
+  }, 60_000)
+
+  // Issue #685: a subagent on another computer expires with its root; a change here is queued for that computer.
+  it('queues a change of the root\'s expiry for its subagents on other computers', async () => {
+    const root = mms.threads.createThread('Root', undefined, undefined, { started: true })
+    const child = mms.threads.createThread('Mac helper', undefined, undefined, { lineage: { parentThreadId: root.id, rootThreadId: root.id, relationship: 'subagent' } })
+    const engine = (mms.orchestrator as unknown as { runEngine: import('../src/mms/run/RunEngine').RunEngine }).runEngine
+    engine.remoteExpiry.track({ childThreadId: child.id, rootThreadId: root.id, node: 'node-mac', expiresAt: null, stopsRun: false })
+    engine.remoteExpiry.setRemoteThread(child.id, 'far-thread-1')
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString()
+    await gui('threads.setExpiry', { threadId: root.id, expiresAt, stopsRun: true })
+    expect(engine.remoteExpiry.get(child.id)).toMatchObject({ state: 'pending', expiresAt, stopsRun: true, generation: 2 })
+    await gui('threads.setExpiry', { threadId: root.id, expiresAt: null })
+    expect(engine.remoteExpiry.get(child.id)).toMatchObject({ state: 'pending', expiresAt: null, stopsRun: false, generation: 3 })
   }, 60_000)
 
   it('refuses a message to an expired thread', async () => {

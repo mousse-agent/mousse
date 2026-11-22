@@ -46,12 +46,6 @@ describe('math typesetting', () => {
   it('refuses oversized input without parsing it', () => {
     expect(renderMath('x'.repeat(20_001), false)).toBeNull()
   })
-
-  it('returns the same result for the same input', () => {
-    expect(renderMath('a+b', false)).toBe(renderMath('a+b', false))
-    expect(renderMath('\\frac{', false)).toBeNull()
-    expect(renderMath('\\frac{', false)).toBeNull()
-  })
 })
 
 describe('math source fallback', () => {

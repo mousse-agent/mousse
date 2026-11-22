@@ -60,7 +60,7 @@ afterEach(() => {
 })
 
 const settle = () => act(async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve() })
-const button = (name: string) => [...host.querySelectorAll('button')].find((entry) => entry.textContent === name)
+const button = (name: string) => [...host.querySelectorAll('button')].find((entry) => entry.textContent === name || entry.getAttribute('aria-label') === name)
 const methods = () => calls.map((call) => call.method)
 
 describe('a thread agent\'s browser without a window, in its Browser panel', () => {

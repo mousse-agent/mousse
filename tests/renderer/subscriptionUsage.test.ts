@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ProviderUsage, ProvidersUsageResponse } from '../../src/shared/providerAuth'
 import { SubscriptionUsageView } from '../../src/renderer/components/SubscriptionUsagePage'
-import { DelayedLoader, LOADER_DELAY_MS } from '../../src/renderer/components/ui/DelayedLoader'
+import { DelayedLoader } from '../../src/renderer/components/ui/DelayedLoader'
 import { ALL_COMPUTERS, THIS_COMPUTER, usageRows, usageSelection, type ComputerUsage } from '../../src/renderer/lib/subscriptionUsage'
 import { formatCountdown, nextResetGain, resetsLabel, resetsTooltip, resetTooltip, resetTypeLabel, summarizeAccounts, totalResets } from '../../src/renderer/lib/subscriptionUsage'
 import { activeAccountsLabel } from '../../src/renderer/components/UsageAccountsView'
@@ -26,7 +26,7 @@ const claude: ProviderUsage = {
 }
 const response = (providers: ProviderUsage[] = [claude]): ProvidersUsageResponse => ({ providers, fetchedAt: '2026-11-05T11:58:00Z' })
 const view = (patch: Partial<ComponentProps<typeof SubscriptionUsageView>> = {}) => renderToStaticMarkup(createElement(SubscriptionUsageView, {
-  usage: response(), loading: false, failed: false, now: NOW, onBack: noop, onRefresh: noop, onManage: noop, ...patch
+  usage: response(), loading: false, failed: false, now: NOW, onRefresh: noop, onManage: noop, ...patch
 }))
 const windows = (html: string) => [...html.matchAll(/data-testid="usage-window" data-remaining="([^"]+)"/g)].map((match) => match[1])
 
@@ -113,7 +113,7 @@ describe('the Usage page', () => {
   it('shows only the delayed loader before the first reading, with no words', () => {
     const html = view({ usage: null, loading: true })
     expect(html).toContain('data-testid="usage-loading"')
-    expect(text(html)).toBe('Subscription usage')
+    expect(text(html)).toBe('')
   })
 
   it('keeps the last reading after a failed refresh, says from when, and offers Retry', () => {
@@ -253,7 +253,7 @@ describe('resets available', () => {
       { id: 'c', label: 'c@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 90 }] }
     ]
     expect(totalResets(accounts)).toBe(3)
-    const html = view({ now, usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts }]) })
+    const html = view({ now, usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], proxy: { address: '127.0.0.1:8317', key: 'saved' }, accounts }]) })
     expect(text(html)).toContain('3 resets across accounts')
     expect(text(html)).toContain('a@example.com 2 resets')
     expect(html.match(/data-testid="usage-resets"/g)).toHaveLength(2)
@@ -291,7 +291,7 @@ describe('what the next reset gives back', () => {
   it('the summary says "+24% in 44m", or "no change soon"', () => {
     const one = (left: number, minutes: number) => ({ id: 'x', label: 'x@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: left, resetsAt: new Date(Date.now() + minutes * 60_000 + 30_000).toISOString() }] })
     const pair = (lefts: [number, number]) => [{ ...one(lefts[0], 44), id: 'a' }, { ...one(lefts[1], 300), id: 'b' }]
-    const card = (accounts: ProviderUsage['accounts']) => view({ now: Date.now(), usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts }]) })
+    const card = (accounts: ProviderUsage['accounts']) => view({ now: Date.now(), usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], proxy: { address: '127.0.0.1:8317', key: 'saved' }, accounts }]) })
     expect(text(card(pair([52, 70])))).toContain('+24% in 44m')
     expect(text(card(pair([100, 100])))).toContain('no change soon')
   })
@@ -378,12 +378,12 @@ describe('limits a provider reported earlier, or read through a proxy', () => {
     expect(usageReadAtLabel('bad', NOW)).toBeUndefined()
   })
 
-  it('names the source beside the provider, and an unavailable proxy is one line, not an error', () => {
-    const proxy: ProviderUsage = { id: 'claude-subscription', label: 'Claude Subscription', status: 'unavailable', windows: [], source: 'via local proxy', message: 'Limits unavailable (proxy)' }
-    const html = view({ usage: response([proxy]) })
-    expect(text(html)).toContain('Claude Subscription · via local proxy')
-    expect(text(html)).toContain('Limits unavailable (proxy)')
-    expect(html).not.toContain('settings-status-bad')
+  it('Claude shows only with the numbers its CLI API proxy read: without the proxy, or with a proxy that read none, it has no card or row', () => {
+    const claude: ProviderUsage = { id: 'claude-subscription', label: 'Claude Subscription', status: 'available', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 40 }] }
+    const unread: ProviderUsage = { id: 'claude-subscription', label: 'Claude Subscription', status: 'unavailable', windows: [], source: 'via local proxy', proxy: { address: '127.0.0.1:8317', key: 'saved' }, message: 'Limits unavailable (proxy)' }
+    expect(text(view({ usage: response([claude]) }))).not.toContain('Claude Subscription')
+    expect(text(view({ usage: response([unread]) }))).not.toContain('Claude Subscription')
+    expect(windows(view({ usage: response([{ ...claude, proxy: { address: '127.0.0.1:8317', key: 'saved' } }]) }))).toEqual(['40'])
   })
 })
 
@@ -457,7 +457,6 @@ describe('several computers', () => {
 
 describe('the delayed loader', () => {
   it('renders nothing until the delay has passed, so quick loads never flash it', () => {
-    expect(LOADER_DELAY_MS).toBe(160)
     const html = renderToStaticMarkup(createElement(DelayedLoader, { label: 'Loading usage' }))
     expect(html).not.toContain('role="status"')
     expect(text(html)).toBe('')

@@ -78,10 +78,15 @@ function invisible(text: string): GuardResult | undefined {
   return INVISIBLE.test(text) ? { ok: false, reason: 'invisible', message: 'It has hidden or direction-changing characters. Write it in plain text.' } : undefined
 }
 
+// A cheap negative check for the usual prose row. Every credential shape below has
+// one of these prefixes, labels, address separators or long token pieces.
+const MAY_HAVE_CREDENTIAL = /[A-Za-z0-9+/_=-]{16,}|eyJ|xox[abprs]-|-----BEGIN|:\/\/|hooks\.slack\.com\/services\/|discord(?:app)?\.com\/api\/webhooks\/|\b(?:password|passwd|pwd|passcode|api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]/i
+
 type Span = readonly [start: number, end: number]
 
 /** Where `text` holds something that looks like a password, key or token, sorted and merged. */
 function credentialSpans(text: string): Span[] {
+  if (!MAY_HAVE_CREDENTIAL.test(text)) return []
   const spans: Array<[number, number]> = []
   const urls = [...text.matchAll(URLS)].map((url): Span => [url.index, url.index + url[0].length])
   for (const { pattern, label, line } of CREDENTIALS)
@@ -140,15 +145,31 @@ export type PackTextResult = { ok: true; text: string } | Extract<GuardResult, {
 export function guardPackText(text: string, who: string, marker: string): PackTextResult {
   const refused = invisible(text) ?? (who === 'owner' ? undefined : instruction(text))
   if (refused && !refused.ok) return refused
+  return { ok: true, text: maskMemoryCredentials(text, marker) }
+}
+
+export const MEMORY_SECRET_MARKER = '[held back: looks like a secret]'
+
+/** Mask credentials without refusing instructions or hidden text in explicitly requested history. */
+export function maskMemoryCredentials(text: string, marker = MEMORY_SECRET_MARKER): string {
   const spans = credentialSpans(text)
-  if (!spans.length) return { ok: true, text }
+  if (!spans.length) return text
   let out = ''
   let at = 0
   for (const [start, end] of spans) {
     out += text.slice(at, start) + marker
     at = end
   }
-  return { ok: true, text: out + text.slice(at) }
+  return out + text.slice(at)
+}
+
+/** SQLite search groups: ordinary (1), eligible guarded (2), or hidden-only match (0). */
+export function classifyMemorySearchText(text: string, terms: readonly string[], allWords: boolean): number {
+  const visibleText = maskMemoryCredentials(text, '')
+  if (visibleText === text) return 1
+  const words = new Set(visibleText.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
+  const matches = terms.map((term) => words.has(term))
+  return (allWords ? matches.every(Boolean) : matches.some(Boolean)) ? 2 : 0
 }
 
 const WEEKDAY = '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)'

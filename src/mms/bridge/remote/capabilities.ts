@@ -19,7 +19,7 @@ export const BRIDGE_REMOTE_METHODS = {
   'threads.rename': { capability: 'write', mutating: true },
   'threads.pin': { capability: 'write', mutating: true },
   'threads.settle': { capability: 'write', mutating: true },
-  // The thread menu's Regenerate title and Delete after: the same handlers as a window here. Delete itself is not
+  // The thread menu's Regenerate title and Archive after: the same handlers as a window here. Delete itself is not
   // exposed: only the computer that runs a thread deletes it.
   'threads.regenerateTitle': { capability: 'write', mutating: true },
   'threads.setExpiry': { capability: 'write', mutating: true },
@@ -41,7 +41,9 @@ export const BRIDGE_REMOTE_METHODS = {
   'queue.reorder': { capability: 'chat', mutating: true },
   'queue.promoteToSteer': { capability: 'chat', mutating: true },
   // Disk usage totals by project, thread and kind: ids, names and byte counts only, never a path. Cached; a remote caller cannot force a rescan.
-  'storage.usage': { capability: 'read', mutating: false }
+  'storage.usage': { capability: 'read', mutating: false },
+  // Token and cost totals from the coding agents' logs on that computer: agents, models and numbers, never a path or log line.
+  'usage.history': { capability: 'read', mutating: false, ephemeral: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean; ephemeral?: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
 /**

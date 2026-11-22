@@ -1,11 +1,13 @@
+import { normalizeErrorReportSettings } from '../../shared/bugReports'
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
-import { BOTS_HERE_SHAPE, botSettingsWrite, CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
+import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings, normalizeBranchNamingSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import { upgradeSelection } from '../../shared/modelSelection'
+import { TITLE_PROMPT_MAX } from '../../shared/threadTitleText'
 
 function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<T>): T {
   const result = { ...base }
@@ -46,6 +48,13 @@ function withInstance<T extends { instanceId?: unknown; model?: unknown; effort?
   return (typeof rest.model === 'string' ? upgradeSelection(stored as typeof stored & { model: string }) : stored) as T
 }
 
+/** The title settings with their prompt trimmed and capped; a blank or non-text prompt is dropped. */
+function withTitlePrompt(title: MousseSettings['title']): MousseSettings['title'] {
+  const { prompt, ...rest } = title
+  const kept = typeof prompt === 'string' ? prompt.trim().slice(0, TITLE_PROMPT_MAX) : ''
+  return kept ? { ...rest, prompt: kept } : rest
+}
+
 /** A selection without a reasoning level or name. */
 function withoutLevel<T extends object>(selection: T): T {
   if (!selection || typeof selection !== 'object') return selection
@@ -65,6 +74,8 @@ function namesProviderOnly(selection: { llmProvider?: unknown; instanceId?: unkn
 
 function normalizeSettings(settings: MousseSettings): MousseSettings {
   const defaults = getDefaultSettings()
+  // Bot quiet hours were removed: a value an older version stored, or an older window sends, is ignored.
+  if (settings.notifications) delete (settings.notifications as { quietHours?: unknown }).quietHours
   const integrations = settings.integrations as MousseSettings['integrations'] & {
     tools?: { enabled?: unknown; enabledTools?: unknown; knownTools?: unknown }
   }
@@ -96,10 +107,10 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     runs: normalizeRunSettings(settings.runs),
     experimental: normalizeExperimentalSettings(settings.experimental),
     storage: normalizeStorageSettings(settings.storage),
-    // What bots may do on this computer, as the installation holds it (already read through `normalizeBotSettings`).
-    bots: normalizeBotSettings(settings.bots),
+    branches: normalizeBranchNamingSettings(settings.branches),
+    errorReports: normalizeErrorReportSettings(settings.errorReports),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
-    ...(settings.title ? { title: withInstance(settings.title) } : {}),
+    ...(settings.title ? { title: withTitlePrompt(withInstance(settings.title)) } : {}),
     // The bot's depth sets the level, so a bot model keeps none.
     ...(settings.botModel ? { botModel: withoutLevel(withInstance(settings.botModel)) } : {}),
     integrations: {
@@ -149,7 +160,7 @@ export class SettingsStore {
       typeof settings.appearance?.acrylic !== 'boolean' ||
       typeof settings.appearance?.acrylicIntensity !== 'number' ||
       typeof settings.appearance?.renderMath !== 'boolean' ||
-      typeof settings.appearance?.threadProjectColors !== 'boolean'
+      settings.appearance?.threadProjectColors !== normalized.appearance.threadProjectColors
     if (needsAppearanceMigrate) {
       this.config.applySettingsPatch({ appearance: normalized.appearance })
       this.shouldPersistUsername = true
@@ -176,11 +187,8 @@ export class SettingsStore {
   }
 
   set(update: MousseSettingsUpdate): MousseSettings {
-    // What bots may do on this computer is the installation's: the switches the update names, checked before anything
-    // is written (anything else is refused and nothing in the update is saved), and put over the switches held now.
-    const { bots, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
-    const botsHere = Object.hasOwn(update, 'bots') ? botSettingsWrite(bots) : undefined
-    if (Object.hasOwn(update, 'bots') && !botsHere) throw new Error(BOTS_HERE_SHAPE)
+    // `bots` (the removed "What bots may do here" switches) is ignored when an older window or script still sends it.
+    const { bots: _retired, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
     // A theme's CSS over the limit is refused, never cut, and nothing in the update is saved.
     const themes = (partial.appearance as { userThemes?: unknown } | undefined)?.userThemes
     if (Array.isArray(themes)) {
@@ -213,6 +221,8 @@ export class SettingsStore {
       ...(namesModel(update) && !update.effort ? { effort: '' } : {})
     })
     if (partial.title) normalized.title = cleared(normalized.title, partial.title)
+    // A cleared title prompt is written blank for the same reason.
+    if (partial.title && Object.hasOwn(partial.title, 'prompt')) normalized.title = { ...normalized.title, prompt: normalized.title.prompt ?? '' }
     // The bot model keeps no level, so only its instance is cleared.
     if (partial.botModel && namesProviderOnly(partial.botModel)) normalized.botModel = { ...normalized.botModel, instanceId: '' }
     const skillModels = Object.entries(partial.integrations?.skills?.model ?? {})
@@ -221,11 +231,7 @@ export class SettingsStore {
       for (const [skillId, update] of skillModels) if (model[skillId] && update) model[skillId] = cleared(model[skillId]!, update)
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
-    // Saved whole or not at all: the switches go last, and a failure anywhere puts back what was already written.
-    this.config.atomically(() => {
-      if (!botsHere || Object.keys(partial).length) this.config.applySettingsPatch(normalized)
-      if (botsHere) this.config.setBotsHere(botsHere)
-    })
+    this.config.applySettingsPatch(normalized)
     for (const listener of savedListeners) {
       try { listener() } catch (error) { console.warn('[SettingsStore] a settings listener failed', error) }
     }

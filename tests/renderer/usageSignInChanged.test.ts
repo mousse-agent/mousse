@@ -29,6 +29,7 @@ let host: HTMLElement | undefined
 
 beforeEach(() => {
   localStorage.clear()
+  localStorage.setItem('mousse.usage.tab', 'limits')
   localStorage.setItem('mousse.usage.section.attention', 'open')
   current = signedOut
   usageSlots.mockClear()
@@ -69,7 +70,7 @@ describe('a sign-in change', () => {
     await settle()
     expect(usageSlots).toHaveBeenCalledTimes(2)
     expect(document.querySelector('[data-testid="usage-attention-row"]')).toBeNull()
-    expect(document.querySelector('.usage-provider .settings-group-title')?.textContent).toBe('ChatGPT subscription')
+    expect(document.querySelector('.usage-provider .settings-group-title')?.textContent).toBe('OpenAI · ChatGPT subscription')
     // It arrives with the page's fade, not by jumping in.
     expect(document.querySelector('.usage-provider')?.className).toContain('usage-enter')
   })

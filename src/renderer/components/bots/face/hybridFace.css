@@ -1,0 +1,26 @@
+/* The hybrid face (HybridFace.tsx): body pictures that cross-fade, and flat eyes over them. Only transforms,
+   opacity and the lid's clip change, each as one short transition; nothing loops. */
+.bot-face-hybrid { position: relative; display: inline-block; line-height: 0; }
+.hf-stage { position: absolute; inset: 0; display: block; transform-origin: 50% 92%; }
+
+/* A new body fades in over the old one, which fades out once the new one is fully there: never a gap. */
+.hf-layer { position: absolute; inset: 0; display: block; opacity: 0; transition: opacity 0.16s linear; }
+.hf-layer[data-shown] { opacity: 1; }
+.hf-layer[data-old] { opacity: 0; transition: opacity 0.18s linear 0.14s; }
+
+/* The mouse's nose and whiskers: their own picture, in two halves turned with the eyes from the face's top-left corner. */
+.hf-features { position: absolute; inset: 0; display: block; pointer-events: none; }
+.hf-half { position: absolute; inset: 0; display: block; transform-origin: 0 0; }
+
+.hf-eyes { position: absolute; inset: 0; display: block; opacity: 0; transition: opacity 0.16s linear; pointer-events: none; }
+.hf-eyes[data-shown] { opacity: 1; }
+/* Paused: the body and its eyes fade as one picture, as the 3D face does (face.css fades its canvas). */
+.bot-face-hybrid.bot-face-live[data-state="paused"]:not([data-resting]) .hf-stage { opacity: 0.6; }
+.bot-face-hybrid.bot-face-live[data-state="paused"]:not([data-resting]) .bot-face-canvas { opacity: 1; }
+
+.hf-eye { position: absolute; display: block; transition: transform 0.24s cubic-bezier(0.3, 0.7, 0.3, 1); }
+.hf-look, .hf-lid, .hf-open, .hf-blink { position: absolute; inset: 0; display: block; }
+.hf-lid { transition: clip-path 0.24s ease; }
+.hf-open { transition: transform 0.13s ease-out, opacity 0.1s linear; }
+.hf-eye svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; overflow: visible; }
+.hf-arc { transition: opacity 0.12s linear; }

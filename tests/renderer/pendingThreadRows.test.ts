@@ -22,6 +22,7 @@ vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSideba
 
 const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useReadAloudStore } = await import('../../src/renderer/readAloud/readAloudStore')
 const {
   addPendingThreadRow, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, pendingThreadRow, pruneRowKeys, servedPendingRows, typedAfterSend, usePendingThreadRows, withPendingRows
 } = await import('../../src/renderer/lib/pendingThreadRows')
@@ -159,6 +160,8 @@ describe('the list the sidebar shows', () => {
     expect(shown.activity.d1).toBe('processing')
     expect(shown.threads.filter((entry) => entry.id === 'd1')).toHaveLength(1)
     expect([...shown.unmade]).toEqual(['d1'])
+    const admitted = withPendingRows([...listed, draft('d1')], [row], { d1: 'processing' }, 'd1')
+    expect(admitted.unmade.has('d1')).toBe(false)
     const started = withPendingRows([...listed, { ...draft('d1'), startedAt: at }], [row], {}, 'd1')
     expect(started.unmade.size).toBe(0)
   })
@@ -234,7 +237,7 @@ describe('in the sidebar', () => {
   beforeEach(() => {
     const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
     const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32' } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'win32', git: {} } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
     usePendingThreadRows.setState({ rows: [], rowKeys: new Map() })
     useAppStore.setState({ profileId: 'default', projects: [project('p1', 'Mousse')], threads: [...listed, draft('d1')], threadActivity: {}, activeThreadId: 'd1', threadsSidebarView: 'projects', sidebarMode: 'projects', threadFeedOrder: [] })
     host = document.createElement('div')
@@ -252,8 +255,62 @@ describe('in the sidebar', () => {
 
   const rows = () => [...host.querySelectorAll<HTMLButtonElement>('.threads-sidebar-tree .threads-sidebar-thread')]
   const titles = () => rows().map((row) => row.textContent)
+  const visibleThread = () => host.querySelector('[role="tabpanel"]:not([hidden]) .threads-sidebar-thread[data-thread-id="a"]')!
   const addRow = (over: { reuses?: boolean } = {}) =>
     act(() => { addPendingThreadRow(rowFor('Plan the release', { shown: draft('d1'), threads: useAppStore.getState().threads, ...over })!) })
+
+  it.each(['projects', 'threads'] as const)('stops the working spinner in %s when Sidebar animations are off', async (view) => {
+    const cancel = vi.fn()
+    const animate = vi.fn(() => ({ cancel }))
+    Object.defineProperty(HTMLElement.prototype, 'animate', { value: animate, configurable: true })
+    try {
+      await act(async () => useAppStore.setState({ threadsSidebarView: view, activeThreadId: 'a', threadActivity: { a: 'processing' } }))
+      const row = visibleThread()
+      const spinner = row.querySelector('.turning.icon-spin')
+      expect(spinner).not.toBeNull()
+      expect(animate.mock.contexts).toContain(spinner)
+
+      act(() => useAppStore.setState({ sidebarAnimations: false }))
+      expect(row.querySelector('.turning.icon-spin')).toBeNull()
+      expect(cancel).toHaveBeenCalled()
+      expect(row.textContent).toContain('Working')
+
+      act(() => useAppStore.setState({ sidebarAnimations: true }))
+      expect(row.querySelector('.turning.icon-spin')).not.toBeNull()
+    } finally {
+      Reflect.deleteProperty(HTMLElement.prototype, 'animate')
+    }
+  })
+
+  it.each(['projects', 'threads'] as const)('keeps only the read-aloud playback button in %s when Sidebar animations are off', async (view) => {
+    const previousSpeech = useReadAloudStore.getState()
+    try {
+      await act(async () => {
+        useAppStore.setState({ threadsSidebarView: view, activeThreadId: 'a' })
+        useReadAloudStore.setState({
+          threadId: 'a',
+          status: 'playing',
+          levels: () => [0.2, 0.4, 0.6, 0.8],
+          togglePause: () => useReadAloudStore.setState(({ status }) => ({ status: status === 'playing' ? 'paused' : 'playing' }))
+        })
+      })
+      const speech = visibleThread().parentElement!
+      expect(speech.querySelector('.speech-wave')).not.toBeNull()
+
+      act(() => useAppStore.setState({ sidebarAnimations: false }))
+      expect(speech.querySelector('.speech-wave')).toBeNull()
+      act(() => speech.querySelector<HTMLButtonElement>('button[aria-label="Pause reading aloud"]')!.click())
+      expect(useReadAloudStore.getState().status).toBe('paused')
+      expect(speech.querySelector('.speech-wave')).toBeNull()
+      act(() => speech.querySelector<HTMLButtonElement>('button[aria-label="Resume reading aloud"]')!.click())
+      expect(useReadAloudStore.getState().status).toBe('playing')
+
+      act(() => useAppStore.setState({ sidebarAnimations: true }))
+      expect(speech.querySelector('.speech-wave')).not.toBeNull()
+    } finally {
+      act(() => useReadAloudStore.setState(previousSpeech))
+    }
+  })
 
   it('paints the row on the click, then the made thread in the same element, with no second row and no move', () => {
     addRow()
@@ -261,7 +318,7 @@ describe('in the sidebar', () => {
     expect(pending.dataset.threadId).toBe('pending:k1')
     expect(pending.textContent).toContain('Plan the release')
     expect(pending.classList.contains('active')).toBe(true)
-    expect(pending.querySelector('.threads-sidebar-status-spinner')).not.toBeNull()
+    expect(pending.querySelector('.threads-sidebar-card-status-working')).not.toBeNull()
     // Nothing to act on before the thread exists.
     act(() => pending.click())
     expect(actions.selectThread).not.toHaveBeenCalled()
@@ -307,14 +364,18 @@ describe('in the sidebar', () => {
     expect(host.querySelector('[data-thread-id^="pending:"]')).toBeNull()
   })
 
-  it('offers nothing on the reused empty thread until the service starts it, and takes no drop', () => {
+  it('opens the reused empty thread, and offers nothing else on it until the service starts it, and takes no drop', () => {
     addRow({ reuses: true })
     const row = rows()[0]!
     expect(row.dataset.threadId).toBe('d1')
+    // Left for another thread while its worktree is made, it opens again from its row.
+    act(() => useAppStore.setState({ activeThreadId: 'a' }))
+    act(() => row.click())
+    expect(actions.selectThread).toHaveBeenCalledWith('d1')
     expect(row.draggable).toBe(false)
     expect(row.parentElement!.querySelector('.threads-sidebar-thread-actions')).toBeNull()
     act(() => { row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
-    expect(host.querySelector('input')).toBeNull()
+    expect(host.querySelector('.threads-sidebar-rename-input')).toBeNull()
     act(() => { row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })) })
     expect(document.querySelector('[role="menu"]')).toBeNull()
     // A thread dragged onto it does not drop there.

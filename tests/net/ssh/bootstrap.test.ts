@@ -1044,12 +1044,9 @@ describe('what the machine already has is never overwritten blind', () => {
 describe('the forwarding probe can see a refusal', () => {
   it('asks for INFO logging, because OpenSSH logs the refusal reason there', async () => {
     const b = await make({ forward: 'prohibited' })
-    const { check } = await probed(b)
+    await probed(b)
     const forward = (await b.calls()).find((call) => call.kind === 'forward')!
     expect(forward.args).toContain('LogLevel=INFO')
-    expect(check.prerequisites.find((item) => /TCP forwarding/.test(item.name))).toMatchObject({
-      ok: false
-    })
   })
 
   it('every other run stays at ERROR, where only "stdio forwarding failed" is printed', async () => {

@@ -1,5 +1,5 @@
 /**
- * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause` and `schedule_run` through the registry's
+ * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run` and `schedule_delete` through the registry's
  * central check (docs/run-engine/SPEC.md §15.1), over a real scheduled-job store: the `scheduled.agentJobs` setting, that only a turn a person started may create or start jobs, that an agent sees and
  * changes only the jobs its own thread made, what a job records of its creator, that an agent can never raise a job's
  * limits, the total cap, the lifetime and the cadence floor, Run now's refusals, and that every change is recorded.
@@ -9,18 +9,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
-import { McpToolError, type AgentScheduleHost, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import type { AgentScheduleHost, McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { AGENT_JOB_LIMIT_DEFAULTS } from '../../src/mms/scheduled/agentJobLimits'
 import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { ScheduledJob, Thread } from '../../src/shared/types'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-27T00:00:00.000Z'
 const DAY = 24 * 60 * 60 * 1000
 const thread = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, name: `Thread ${id}`, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1', ...patch }) as Thread
-const TOOLS = ['schedule_create', 'schedule_list', 'schedule_pause', 'schedule_run', 'schedule_update']
+const TOOLS = ['schedule_create', 'schedule_delete', 'schedule_list', 'schedule_pause', 'schedule_run', 'schedule_update']
 /** What the profile allows until a person changes it. */
 const { maxActive: MAX_ACTIVE, minIntervalMinutes: MIN_INTERVAL, lifetimeDays: LIFETIME_DAYS } = AGENT_JOB_LIMIT_DEFAULTS
 const CREATE = { name: 'Nightly report', prompt: 'Write the nightly report', schedule: { kind: 'interval', minutes: 30 } }
@@ -52,7 +52,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     const state = {
       /** Whether the person allowed the caller's thread (Allow on its first ask); read at every call. */
       allowed: true,
-      /** Whether a person started the calling run (`startedByPerson`); the real rule is tested against a daemon. */
+      /** Whether the calling run holds `person` (`personHeld`); the real rule is tested against a daemon. */
       person: true,
       limits: { permissionCeiling: 'full' as PermissionMode },
       /** The limits on agent jobs a person set (`scheduled.agentJob*`): read at every call. */
@@ -73,16 +73,19 @@ describe('the schedule tools (SPEC §15.1)', () => {
       list: vi.fn(() => jobs.listJobs()),
       get: vi.fn((id: string) => jobs.getJob(id)),
       validate: vi.fn((): { selection?: never; threadId?: string } => ({})),
-      startedByPerson: vi.fn(() => state.person),
       limits: vi.fn(() => state.limits),
       create: vi.fn((input: Parameters<ScheduledJobStore['createJob']>[0]) => jobs.createJob(input)),
       update: vi.fn((id: string, patch: Partial<ScheduledJob>) => jobs.updateJob(id, patch)),
       pause: vi.fn((id: string, reason?: string) => jobs.pauseJob(id, reason)),
+      remove: vi.fn((id: string) => jobs.deleteJob(id)),
       trigger: vi.fn((id: string) => jobs.triggerJob(id)),
       wake: woke
     } satisfies AgentScheduleHost
     const recordAgentAction = vi.fn()
+    const personHeld = vi.fn((_caller: { threadId: string; runId: string }) => state.person)
     const fake = fakeAppToolHost({
+      personHeld,
+      subagentThread: (id) => fx!.engine.delegations.getLineage(id)?.relationship === 'subagent',
       threadMeta: (id) => threads.get(id),
       botRole: (id) => (botThreads.has(id) ? 'activation' : undefined),
       readOnlyThread: (id) => readOnly.has(id),
@@ -95,7 +98,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: callerRun.runId, ...extra })
     const call = (name: string, args: Record<string, unknown> = {}, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call(name, args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     const result = async (promise: Promise<{ text: string }>) => JSON.parse((await promise).text)
     /** A job made by a call of `caller`, as stored. */
     const create = async (extra: Record<string, unknown> = {}) => (await result(call('schedule_create', { ...CREATE, ...extra }))).job as { id: string }
@@ -105,7 +108,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     /** A job another thread's agent made. */
     const otherJob = (extra: Partial<Parameters<ScheduledJobStore['createJob']>[0]> = {}) =>
       jobs.createJob({ name: 'By another agent', prompt: 'Do it', schedule: { kind: 'manual' }, createdBy: { threadId: 'someone-else', runId: 'r' }, ...extra })
-    return { fx, jobs, state, threads, botThreads, readOnly, schedules, woke, recordAgentAction, registry, request, turns, callerRun, call, as, denied, result, create, stored, personJob, otherJob, ...fake }
+    return { fx, jobs, state, threads, botThreads, readOnly, schedules, personHeld, woke, recordAgentAction, registry, request, turns, callerRun, call, as, denied, result, create, stored, personJob, otherJob, ...fake }
   }
 
   describe('the first ask and the listing', () => {
@@ -124,7 +127,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect(JSON.parse((await call('schedule_create', { ...CREATE, clientRequestId: 'second' })).text).job).toMatchObject({ name: CREATE.name })
     })
 
-    it('lists the five tools for a host that has scheduled jobs', async () => {
+    it('lists the six tools for a host that has scheduled jobs', async () => {
       const { registry } = await world()
       expect(registry.listForThread('caller', 'default').map((tool) => tool.name).filter((name) => name.startsWith('schedule_')).sort()).toEqual(TOOLS)
     })
@@ -155,7 +158,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       state.person = false
       const name = label.split(' ')[0]
       const error = await denied(call(name, args(job.id)))
-      expect(error, label).toBeInstanceOf(McpToolError)
+      expect(error?.refused, label).toMatchObject({ code: 'lacks_capability', lacks: 'person' })
       expect(error!.code).toBe('mousse_scope_denied')
       expect(error!.message).toMatch(/only for a turn a person started/)
       expect(stored(job.id)).toEqual(before)
@@ -166,14 +169,14 @@ describe('the schedule tools (SPEC §15.1)', () => {
     })
 
     it('asks the owner who started the run, with the caller as it is', async () => {
-      const { call, create, schedules, callerRun } = await world()
+      const { create, personHeld, callerRun } = await world()
       await create()
-      expect(schedules.startedByPerson).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }))
+      expect(personHeld).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }))
     })
 
     it('refuses when the owner cannot say, and when it throws', async () => {
-      const { call, denied, schedules, jobs } = await world()
-      schedules.startedByPerson.mockImplementation(() => { throw new Error('the run engine is closed') })
+      const { call, denied, personHeld, jobs } = await world()
+      personHeld.mockImplementation(() => { throw new Error('the run engine is closed') })
       expect((await denied(call('schedule_create', CREATE)))!.code).toBe('mousse_scope_denied')
       expect(jobs.listJobs()).toEqual([])
     })
@@ -198,7 +201,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       // A's run (source schedule: not a person's) tries to start B, and B's run would try A.
       state.person = false
       for (const target of [b.id, a.id]) {
-        await expect(call('schedule_run', { jobId: target })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+        expect(await refusalIn(call('schedule_run', { jobId: target }))).toMatchObject({ code: 'mousse_scope_denied' })
       }
       expect(woke).toHaveBeenCalledTimes(1)
       expect(jobs.getJob(b.id)?.nextRunAt).toBeNull()
@@ -209,7 +212,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const { call, state, jobs, create } = await world()
       await create({ schedule: { kind: 'manual' } })
       state.person = false
-      for (let attempt = 0; attempt < 3; attempt += 1) await expect(call('schedule_create', { ...CREATE, name: `Child ${attempt}` })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      for (let attempt = 0; attempt < 3; attempt += 1) expect(await refusalIn(call('schedule_create', { ...CREATE, name: `Child ${attempt}` }))).toMatchObject({ code: 'mousse_scope_denied' })
       expect(jobs.listJobs()).toHaveLength(1)
     })
   })
@@ -337,7 +340,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('a refusal from the profile\'s checks reaches the agent and makes nothing', async () => {
       const { call, schedules, jobs } = await world()
       schedules.validate.mockImplementation(() => { throw new Error('The model is hidden') })
-      expect(await call('schedule_create', CREATE)).toMatchObject({ isError: true, text: 'The model is hidden' })
+      expect(refusalOf(await call('schedule_create', CREATE))).toMatchObject({ message: 'The model is hidden' })
       expect(jobs.listJobs()).toEqual([])
     })
 
@@ -350,10 +353,6 @@ describe('the schedule tools (SPEC §15.1)', () => {
   })
 
   describe('bounds on cost and lifetime', () => {
-    it('the defaults are ten active jobs, fifteen minutes and seven days', () => {
-      expect(AGENT_JOB_LIMIT_DEFAULTS).toEqual({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 })
-    })
-
     it('a job ends after the default lifetime unless a person extends it', async () => {
       const { create, stored } = await world()
       const before = Date.now()
@@ -544,7 +543,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const before = stored(theirs.id)
       const real = await denied(call(name, { jobId: theirs.id, ...args }))
       const missing = await denied(call(name, { jobId: 'no-such-job', ...args }))
-      expect(real).toBeInstanceOf(McpToolError)
+      expect(real?.refused.code).toBe('scope_denied')
       expect(real!.code).toBe('mousse_scope_denied')
       expect(real!.message.replace(theirs.id, 'X')).toBe(missing!.message.replace('no-such-job', 'X'))
       expect(schedules.update).not.toHaveBeenCalled()
@@ -807,7 +806,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const job = await create({ schedule: { kind: 'manual' } })
       jobs.updateJob(job.id, { pendingOccurrence: { occurrenceKey: 'k', threadId: 't', runId: 'r', state: 'queued' } })
       const { runNowRefusal } = await import('../../src/mms/scheduled/runNowRefusal')
-      expect((await call('schedule_run', { jobId: job.id })).text).toBe(runNowRefusal(jobs.getJob(job.id)!))
+      expect(refusalOf(await call('schedule_run', { jobId: job.id }))?.message).toBe(runNowRefusal(jobs.getJob(job.id)!))
     })
 
     it('never brings back a one-time job that ran, or a job that ran out of time', async () => {
@@ -824,6 +823,154 @@ describe('the schedule tools (SPEC §15.1)', () => {
 
   })
 
+  describe('schedule_delete', () => {
+    /** A live run of `threadId` (a subagent's thread or another thread) whose calls go through the registry. */
+    const liveCaller = async (w: Awaited<ReturnType<typeof world>>, threadId: string, runId?: string) => {
+      if (runId) {
+        w.fx.engine.markStarting(runId)
+        w.fx.engine.markRunning(runId)
+      } else runId = (await w.fx.runningRun(threadId)).runId
+      w.turns.register(appTurn({ threadId, runId }))
+      return (name: string, args: Record<string, unknown> = {}) => w.registry.call(name, args, w.request({ threadId, runId: runId! }))
+    }
+    const ids = async (w: Awaited<ReturnType<typeof world>>) => (await w.result(w.call('schedule_list'))).jobs.map((entry: { id: string }) => entry.id)
+
+    it('removes a job the thread made: it leaves the store and the list, and the thread records it with the job\'s name', async () => {
+      const w = await world()
+      const job = await w.create({ name: 'Watch the build' })
+      const kept = await w.create({ name: 'Keep me' })
+      const removed = await w.result(w.call('schedule_delete', { jobId: job.id }))
+      expect(removed).toMatchObject({ removed: true, job: { id: job.id, name: 'Watch the build' } })
+      expect(w.jobs.getJob(job.id)).toBeUndefined()
+      expect(await ids(w)).toEqual([kept.id])
+      const [target, actor, action, details] = w.recordAgentAction.mock.calls.at(-1)!
+      expect(target).toMatchObject({ threadId: 'caller' })
+      expect(actor).toMatchObject({ kind: 'agent', threadId: 'caller' })
+      expect(action).toBe('scheduled_job_deleted')
+      expect(details).toMatchObject({ jobId: job.id, jobName: 'Watch the build', summary: expect.stringContaining('Watch the build') })
+    })
+
+    it('needs no person\'s turn, so a job bound to its thread can remove itself when its work is done', async () => {
+      const w = await world()
+      const job = await w.create({ threadId: 'caller' })
+      w.state.person = false
+      expect((await w.result(w.call('schedule_delete', { jobId: job.id }))).removed).toBe(true)
+      expect(w.jobs.getJob(job.id)).toBeUndefined()
+    })
+
+    it('a subagent\'s thread can hold a job (a person\'s turn there made it); its parent sees it in the list and removes it, and both threads record that', async () => {
+      const w = await world()
+      const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
+      w.threads.set(child.childThreadId, thread(child.childThreadId))
+      // Made through the tools by the subagent, after the person allowed it.
+      const made = w.jobs.createJob({ ...CREATE, schedule: { kind: 'manual' }, createdBy: { threadId: child.childThreadId, runId: child.childRunId } })
+      const listed = (await w.result(w.call('schedule_list'))).jobs
+      expect(listed).toEqual([expect.objectContaining({ id: made.id, createdByYou: false, createdBySubagent: child.childThreadId })])
+      // Listed for removal, not handed over: the parent still cannot change it.
+      expect((await w.denied(w.call('schedule_pause', { jobId: made.id })))!.code).toBe('mousse_scope_denied')
+      w.recordAgentAction.mockClear()
+      expect((await w.result(w.call('schedule_delete', { jobId: made.id }))).removed).toBe(true)
+      expect(w.jobs.getJob(made.id)).toBeUndefined()
+      expect(w.recordAgentAction.mock.calls.map(([target, , action]) => [target.threadId, action])).toEqual([
+        ['caller', 'scheduled_job_deleted'],
+        [child.childThreadId, 'scheduled_job_deleted']
+      ])
+    })
+
+    it('a subagent of a person\'s turn creates and starts no job: `person` never passes down (§1.3)', async () => {
+      const w = await world()
+      const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
+      w.threads.set(child.childThreadId, thread(child.childThreadId))
+      const asChild = await liveCaller(w, child.childThreadId, child.childRunId)
+      expect(w.state.person).toBe(true)
+      expect(await w.denied(asChild('schedule_create', CREATE))).toMatchObject({ refused: { code: 'lacks_capability', lacks: 'person' } })
+      expect(w.registry.listForThread(child.childThreadId).map((tool) => tool.name)).not.toContain('schedule_create')
+      expect(w.schedules.askFirst).not.toHaveBeenCalled()
+      expect(w.schedules.create).not.toHaveBeenCalled()
+      // Its parent, allowed, still adds one at once.
+      expect((await w.create()).id).toEqual(expect.any(String))
+    })
+
+    it('a subagent removes the job it made, as its parent would, and never its parent\'s', async () => {
+      const w = await world()
+      const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
+      w.threads.set(child.childThreadId, thread(child.childThreadId))
+      const asChild = await liveCaller(w, child.childThreadId, child.childRunId)
+      const own = w.jobs.createJob({ ...CREATE, schedule: { kind: 'manual' }, createdBy: { threadId: child.childThreadId, runId: child.childRunId } })
+      const parents = await w.create({ name: 'The parent\'s' })
+      for (const id of [parents.id, 'missing']) {
+        const error = await w.denied(asChild('schedule_delete', { jobId: id }))
+        expect(error?.refused.code, id).toBe('scope_denied')
+        expect(error!.code).toBe('mousse_scope_denied')
+      }
+      expect(JSON.parse((await asChild('schedule_delete', { jobId: own.id })).text).removed).toBe(true)
+      expect(w.jobs.listJobs().map((job) => job.id)).toEqual([parents.id])
+    })
+
+    // Who made the job, as seen from the caller: only its own thread and subagents below it are the caller's.
+    it.each([
+      ['its own thread', 'caller', true],
+      ['its subagent', 'child', true],
+      ['a subagent of its subagent', 'grandchild', true],
+      ['a person (no creator)', undefined, false],
+      ['another thread', 'someone-else', false],
+      ['a fork of its thread (a fork is not a subagent)', 'fork-1', false],
+      ['its parent thread', 'parent', false]
+    ] as const)('a job made by %s (creator %s): removable %s', async (_label, creator, removable) => {
+      const w = await world()
+      const child = await w.fx.delegate(w.callerRun.runId, 'call-a')
+      w.fx.engine.markStarting(child.childRunId)
+      w.fx.engine.markRunning(child.childRunId)
+      const grandchild = await w.fx.delegate(child.childRunId, 'call-b')
+      w.fx.engine.delegations.createLineage({ threadId: 'fork-1', parentThreadId: 'caller', parentRunId: w.callerRun.runId, relationship: 'fork' })
+      w.fx.engine.delegations.createLineage({ threadId: 'caller', parentThreadId: 'parent', parentRunId: w.callerRun.runId, relationship: 'fork' })
+      const threadOf: Record<string, string> = { caller: 'caller', child: child.childThreadId, grandchild: grandchild.childThreadId, 'someone-else': 'someone-else', 'fork-1': 'fork-1', parent: 'parent' }
+      const job = w.jobs.createJob({ name: 'A job', prompt: 'Do it', schedule: { kind: 'manual' }, ...(creator ? { createdBy: { threadId: threadOf[creator], runId: 'r' } } : {}) })
+      if (removable) {
+        expect((await w.result(w.call('schedule_delete', { jobId: job.id }))).removed).toBe(true)
+        expect(w.jobs.getJob(job.id)).toBeUndefined()
+        return
+      }
+      const error = await w.denied(w.call('schedule_delete', { jobId: job.id }))
+      expect(error!.code).toBe('mousse_scope_denied')
+      expect(error!.message).toMatch(/removes only the jobs it made and the ones its subagents made/)
+      // Refused in the same words as a job that does not exist.
+      expect((await w.denied(w.call('schedule_delete', { jobId: 'missing' })))!.message).toBe(error!.message.replace(job.id, 'missing'))
+      expect(w.jobs.getJob(job.id)).toBeDefined()
+      expect(w.schedules.remove).not.toHaveBeenCalled()
+    })
+
+    it('a repeat, a retry with the same clientRequestId and a job someone removed in between say it is gone, and change nothing else', async () => {
+      const w = await world()
+      const job = await w.create({ name: 'Once' })
+      const other = await w.create({ name: 'Other' })
+      expect((await w.result(w.call('schedule_delete', { jobId: job.id, clientRequestId: 'del-1' }))).removed).toBe(true)
+      const records = w.recordAgentAction.mock.calls.length
+      expect(await w.result(w.call('schedule_delete', { jobId: job.id, clientRequestId: 'del-1' }))).toMatchObject({ removed: true, alreadyRemoved: true, replayed: true, job: { id: job.id, name: 'Once' } })
+      expect(await w.result(w.call('schedule_delete', { jobId: job.id }))).toMatchObject({ removed: true, alreadyRemoved: true, job: { id: job.id, name: 'Once' } })
+      // Another thread learns nothing about a job it never had.
+      const asSecond = await liveCaller(w, 'second')
+      expect((await w.denied(asSecond('schedule_delete', { jobId: job.id })))!.code).toBe('mousse_scope_denied')
+      // The person deletes the other job while the agent's call is between its check and the removal.
+      w.schedules.remove.mockImplementationOnce((id: string) => {
+        w.jobs.deleteJob(id)
+        return w.jobs.deleteJob(id)
+      })
+      expect(await w.result(w.call('schedule_delete', { jobId: other.id }))).toMatchObject({ removed: true, alreadyRemoved: true })
+      expect(w.recordAgentAction.mock.calls.length).toBe(records)
+      expect(w.jobs.listJobs()).toEqual([])
+    })
+
+    it('says when a run of the job had started or waits in its thread\'s queue, since that run still finishes', async () => {
+      const w = await world()
+      const job = await w.create({ threadId: 'caller' })
+      w.jobs.updateJob(job.id, { pendingOccurrence: { occurrenceKey: 'k', threadId: 'caller', runId: 'r', state: 'queued' } })
+      expect((await w.result(w.call('schedule_delete', { jobId: job.id }))).runInProgress).toMatch(/still runs/)
+      const idle = await w.create()
+      expect((await w.result(w.call('schedule_delete', { jobId: idle.id }))).runInProgress).toBeUndefined()
+    })
+  })
+
   describe('the central check', () => {
     it('refuses a caller whose run is no longer the thread\'s active run, before any host call', async () => {
       const { call, fx: f, callerRun, schedules } = await world()
@@ -835,7 +982,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('a read-only subagent cannot call any of them', async () => {
       const { call, readOnly, schedules } = await world()
       readOnly.add('caller')
-      for (const name of TOOLS) await expect(call(name, { ...CREATE, jobId: 'x' }), name).rejects.toMatchObject({ code: 'mousse_read_only' })
+      for (const name of TOOLS) expect(await refusalIn(call(name, { ...CREATE, jobId: 'x' })), name).toMatchObject({ code: 'mousse_read_only' })
       expect(schedules.create).not.toHaveBeenCalled()
     })
   })

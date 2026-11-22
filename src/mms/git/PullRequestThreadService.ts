@@ -23,7 +23,7 @@ import { acquireRepositoryLease } from './RepositoryLease'
 import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
 import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
 import { gitRunError, runGitProcess } from './runGitProcess'
-import { rethrowGitPolicyError, type UserAction } from './gitPolicy'
+import { rethrowGitPolicyError, withOwnedBranches, type UserAction } from './gitPolicy'
 import { getMousseHomeDir } from '../data/paths'
 import { unregisterDeletedAsync, worktreeRegisteredAsync } from '../lifecycle/verifiedDelete'
 import { verifiedCleanupAsync } from '../worktree/verifiedCleanup'
@@ -279,7 +279,7 @@ export class PullRequestThreadService {
       throw new PullRequestThreadError('pull_request_workspace_failed', `Could not create the worktree for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
     }
     try {
-      thread = this.deps.threads.updateThreadMeta(thread.id, { pullRequest: linkFromDetail(detail) })
+      thread = this.deps.threads.updateThreadMeta(thread.id, { pullRequest: linkFromDetail(detail) }, { pullRequestInfo: detail })
       if (this.deps.prepareThread) thread = this.deps.prepareThread(thread)
     } catch (error) {
       await this.discard(thread.id, project, topLevel, made)
@@ -365,7 +365,8 @@ export class PullRequestThreadService {
           // HEAD and history at the fetched head, and an index of that head's tree): it goes with the thread, as the branch
           // and the fetched commits do. Any other copy stays its project's.
           if (typeof cleaned === 'object') await attempt(['update-ref', '--no-deref', '-d', cleaned.release.ref, cleaned.release.sha])
-          await attempt(['branch', '-D', workspace.branch])
+          // This start made the branch (`worktree add -b` on a name it found free), whatever prefix the person chose.
+          await withOwnedBranches([workspace.branch], () => attempt(['branch', '-D', workspace.branch]))
           await attempt(['update-ref', '--no-deref', '-d', workspace.retainedRef])
           try {
             // The folder provisioning made for the worktree; only removed when it is empty.

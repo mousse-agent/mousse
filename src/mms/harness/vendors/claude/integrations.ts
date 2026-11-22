@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import type { McpServerConfig, MousseIntegrationsSettings, SkillDescriptor } from '../../../../shared/integrations'
+import type { McpServerConfig, MousseIntegrationsSettings, SkillDescriptor, SkillsRegistrySnapshot } from '../../../../shared/integrations'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import { resolveEffectiveMcpServers, resolveEffectiveSkills } from '../../../integrations/catalog/EffectiveIntegrationResolver'
@@ -49,7 +49,7 @@ export interface ClaudeTurnIntegrations {
 }
 
 export interface ClaudeIntegrationSource {
-  resolve(projectPath?: string): Promise<ClaudeTurnIntegrations>
+  resolve(projectPath?: string, skillsSnapshot?: SkillsRegistrySnapshot): Promise<ClaudeTurnIntegrations>
 }
 
 /** Name of the generated plugin; Claude lists its skills as `mousse:<skill>`. */
@@ -130,7 +130,7 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     env?: () => NodeJS.ProcessEnv
   }) {}
 
-  async resolve(projectPath?: string): Promise<ClaudeTurnIntegrations> {
+  async resolve(projectPath?: string, skillsSnapshot?: SkillsRegistrySnapshot): Promise<ClaudeTurnIntegrations> {
     const settings = this.deps.settings.get().integrations
     // A Claude Subscription thread is the main agent, as on every other chat provider.
     const actor: IntegrationActor = { kind: 'main' }
@@ -144,7 +144,8 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     }
 
     try {
-      const snapshot = await this.deps.skillsRegistry.discover({ projectPath })
+      // Use the project's prepared snapshot even when Claude's cwd is a separate worktree.
+      const snapshot = skillsSnapshot ?? await this.deps.skillsRegistry.discover({ projectPath, stale: true })
       const skills = resolveEffectiveSkills({ snapshot, settings: settings.skills, actor }).filter((skill) => !claudeLoadsSkill(skill, this.deps.env?.()))
       if (skills.length > 0) result.pluginPath = await this.buildPlugin(skills, result.warnings)
     } catch (error) {
@@ -185,32 +186,41 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
         continue
       }
       if (server.status === 'missing-env' || (server.missingEnvVars?.length ?? 0) > 0) {
+        const bound = server.missingEnvVars?.find(ref => ref.startsWith('secret:') && this.deps.secrets.canUseSecretRef?.(ref.slice(7)) === false)
+        if (bound) {
+          try { this.deps.secrets.resolveEnv('${' + bound + '}') }
+          catch (error) { result.warnings.push(`MCP server ${server.name} was not attached: ${message(error)}`); continue }
+        }
         result.warnings.push(`MCP server ${server.name} is missing environment: ${(server.missingEnvVars ?? []).join(', ')}`)
         continue
       }
-      let entry: ClaudeUserMcpServer
-      if (server.transport === 'stdio') {
-        if (!server.command) {
-          result.warnings.push(`MCP server ${server.name} has no command.`)
-          continue
+      try {
+        let entry: ClaudeUserMcpServer
+        if (server.transport === 'stdio') {
+          if (!server.command) {
+            result.warnings.push(`MCP server ${server.name} has no command.`)
+            continue
+          }
+          const env = resolveValues(server.env)
+          entry = { type: 'stdio', command: server.command, ...(server.args?.length ? { args: server.args } : {}), ...(env ? { env } : {}) }
+        } else {
+          if (!server.url) {
+            result.warnings.push(`MCP server ${server.name} has no URL.`)
+            continue
+          }
+          const headers = resolveValues(server.headers)
+          entry = { type: server.transport, url: server.url, ...(headers ? { headers } : {}) }
         }
-        const env = resolveValues(server.env)
-        entry = { type: 'stdio', command: server.command, ...(server.args?.length ? { args: server.args } : {}), ...(env ? { env } : {}) }
-      } else {
-        if (!server.url) {
-          result.warnings.push(`MCP server ${server.name} has no URL.`)
-          continue
-        }
-        const headers = resolveValues(server.headers)
-        entry = { type: server.transport, url: server.url, ...(headers ? { headers } : {}) }
+        const name = claim(server)
+        result.mcpServers[name] = entry
+        if (server.enabledTools?.length || server.deniedTools?.length)
+          result.toolRules[`mcp__${name}__`] = {
+            ...(server.enabledTools?.length ? { enabled: server.enabledTools } : {}),
+            ...(server.deniedTools?.length ? { denied: server.deniedTools } : {})
+          }
+      } catch (error) {
+        result.warnings.push(`MCP server ${server.name} was not attached: ${message(error)}`)
       }
-      const name = claim(server)
-      result.mcpServers[name] = entry
-      if (server.enabledTools?.length || server.deniedTools?.length)
-        result.toolRules[`mcp__${name}__`] = {
-          ...(server.enabledTools?.length ? { enabled: server.enabledTools } : {}),
-          ...(server.deniedTools?.length ? { denied: server.deniedTools } : {})
-        }
     }
   }
 

@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { NodeId } from '../../shared/net'
 import type { NetStatus } from '../../shared/net/local'
+import type { NetEngineStatus } from '../../shared/netEngine/local'
 import type { Thread } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { lastSeenLabel, type Device } from './netDevices'
@@ -104,9 +105,16 @@ export function refreshComputers(): Promise<void> {
   const profile = useAppStore.getState().profileId
   reading = (async () => {
     try {
-      const status = await request<NetStatus>('net.status', {})
-      const routed = routedThreadsOn(status)
-      const listed = routed && status.enabled && status.self && status.keystore === 'unlocked'
+      // A daemon without the new networking answers no `netEngine.status`; with it on, its computers are listed
+      // whether v1 is on or not.
+      const [status, engine] = await Promise.all([
+        request<NetStatus>('net.status', {}),
+        request<NetEngineStatus>('netEngine.status', {}).catch(() => undefined)
+      ])
+      const engineOn = engine?.on === true
+      const routed = routedThreadsOn(status) || engineOn
+      const listed =
+        (routedThreadsOn(status) && status.enabled && status.self && status.keystore === 'unlocked') || engineOn
       const nodes = listed ? (await request<{ nodes: Device[] }>('bridge.nodes', {})).nodes : []
       // A profile switch during the read: the answer is for the other profile.
       if (useAppStore.getState().profileId !== profile) return
@@ -139,6 +147,10 @@ function start(): () => void {
   window.addEventListener('focus', refresh)
   // Net reports a change whenever a device connects or drops.
   const offNet = window.mousse?.net?.onUpdated?.(refresh)
+  // So does the new networking, for the profile it belongs to.
+  const offEngine = window.mousse?.netEngine?.onChanged?.((change) => {
+    if (!change.profileId || change.profileId === useAppStore.getState().profileId) refresh()
+  })
   // The list belongs to one profile.
   const offProfile = useAppStore.subscribe((state, previous) => {
     if (state.profileId === previous.profileId) return
@@ -149,6 +161,7 @@ function start(): () => void {
     clearInterval(timer)
     window.removeEventListener('focus', refresh)
     offNet?.()
+    offEngine?.()
     offProfile()
   }
 }

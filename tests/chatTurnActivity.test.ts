@@ -30,7 +30,7 @@ describe('a turn right after sending', () => {
   it.each(['submitted', 'streaming'] as const)('shows a live line under the timer while %s', (status) => {
     const html = render([user], status)
     const working = html.indexOf('Working · ')
-    const starting = html.indexOf('Thinking…')
+    const starting = html.indexOf('Starting…')
     expect(working).toBeGreaterThan(-1)
     expect(starting).toBeGreaterThan(working)
     // The line sits where the answer's first row will, so the handover does not move it.
@@ -40,14 +40,15 @@ describe('a turn right after sending', () => {
   it('shows no live line once the turn settled', () => {
     const html = render([user], 'ready')
     expect(html).not.toContain('data-turn-progress')
-    expect(html).not.toContain('Thinking…')
+    expect(html).not.toContain('Starting…')
   })
 
-  it('streams the thought in its own row, which is the live line: no second one under it', () => {
+  it('heads the one live row with the thought being written, and shows it nowhere else', () => {
     const html = render([user, thought('t1', 'Looking for the start script', 'input-available')], 'streaming')
-    expect(text(html)).toContain('Looking for the start script')
-    expect(text(html)).not.toContain('Thinking Looking')
-    expect(html).not.toContain('data-turn-progress')
+    expect(text(html).split('Looking for the start script').length - 1).toBe(1)
+    expect(html.split('data-turn-live').length - 1).toBe(1)
+    expect(html).toMatch(/class="turn-live-headline">Looking for the start script</)
+    expect(html).toMatch(/data-turn-progress="thinking"[\s\S]*Thinking…/)
   })
 })
 
@@ -68,28 +69,36 @@ const edit = (id: string, path: string): UIMessage =>
 const reply = (id: string, said: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text: said }] })
 
 describe('a tool call group', () => {
-  it('is titled with its latest thought, then what its calls did', () => {
-    const html = render(
-      [
-        user,
-        thought('t1', 'Find the start script', 'output-available'),
-        read('r1', 'package.json'),
-        command('c1'),
-        read('r2', 'scripts/start.js'),
-        command('c2'),
-        thought('t2', 'The app is starting; watch the log', 'output-available'),
-        read('r3', 'logs/app.log'),
-        command('c3')
-      ],
-      'streaming'
-    )
-    // The latest thought says why the calls ran; what they did follows it.
+  const startRun = [
+    thought('t1', 'Find the start script', 'output-available'),
+    read('r1', 'package.json'),
+    command('c1'),
+    read('r2', 'scripts/start.js'),
+    command('c2'),
+    thought('t2', 'The app is starting; watch the log', 'output-available'),
+    read('r3', 'logs/app.log'),
+    command('c3')
+  ]
+
+  it('is drawn only once its run ends: until then the live row is the run', () => {
+    const html = render([user, ...startRun], 'streaming')
+    // The run is the live row: its latest thought heads it, and no group line repeats it.
+    expect(html).toMatch(/class="turn-live-headline">The app is starting; watch the log</)
+    expect(text(html).split('The app is starting; watch the log').length - 1).toBe(1)
+    expect(text(html)).not.toContain('6 actions')
+    expect(html).not.toContain('an-tool-chrome')
+  })
+
+  it('is titled with the headline its run last showed, then what its calls did', () => {
+    const html = render([user, ...startRun, reply('a1', 'It runs.')], 'streaming')
+    // The latest thought before the run's last call is what the live row last showed: it stays the title.
     expect(text(html)).toContain('The app is starting; watch the log · 6 actions')
+    expect(text(html)).not.toContain('Find the start script ·')
   })
 
   it('splits at narration: the calls on each side are a group of their own, the narration prose between them', () => {
     const html = render(
-      [user, read('r1', 'a.ts'), read('r2', 'b.ts'), reply('n1', 'Now the fix.'), edit('e1', 'a.ts'), edit('e2', 'b.ts')],
+      [user, read('r1', 'a.ts'), read('r2', 'b.ts'), reply('n1', 'Now the fix.'), edit('e1', 'a.ts'), edit('e2', 'b.ts'), reply('a1', 'Fixed.')],
       'streaming'
     )
     const flat = text(html)
@@ -99,6 +108,19 @@ describe('a tool call group', () => {
     expect(flat.indexOf('Now the fix.')).toBeLessThan(flat.indexOf('Edited 2 files'))
     // The narration is the reply's prose, not a row of the activity.
     expect(html).toMatch(/data-find-text[^>]*>[\s\S]*Now the fix\./)
+  })
+
+  it("shows the thinking icon when a thought is its title, and the tools' icon when its calls are", () => {
+    /** The markup of the tool row whose line holds `title`, from the row's start to the title: its icon. */
+    const rowOf = (html: string, title: string) => {
+      const chunk = html.split('an-tool-chrome').find((part) => part.includes(title)) ?? ''
+      return chunk.slice(0, chunk.indexOf(title))
+    }
+    const titled = render([user, thought('t1', 'Find the start script', 'output-available'), command('c1'), command('c2'), reply('a1', 'Up.')], 'streaming')
+    expect(rowOf(titled, 'Find the start script')).toContain('thinking-icon')
+    const counted = render([user, command('c1'), command('c2'), reply('a1', 'Up.')], 'streaming')
+    expect(rowOf(counted, 'Ran 2 commands')).not.toBe('')
+    expect(rowOf(counted, 'Ran 2 commands')).not.toContain('thinking-icon')
   })
 
   it('is titled with its latest thought when it holds only thoughts', () => {
@@ -137,8 +159,8 @@ describe('a finished turn', () => {
     const html = render(turn, 'streaming')
     expect(rows(html)).toEqual([
       'Checking the start script first.',
-      // The thought came after the command: it says what is next, so the group keeps its count.
-      'Ran 1 command',
+      // The thought came after the command: it says what is next, so the lone call keeps its own title.
+      'Ran npm start',
       'The app starts on port 3000.',
       'Nothing else to check',
       'Thinking…'

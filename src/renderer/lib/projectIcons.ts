@@ -22,6 +22,11 @@ const shown = new Map<string, IconProject>()
 const listeners = new Set<() => void>()
 /** Set when the daemon or the app does not serve icons (an older one): every project shows its folder. */
 let unsupported = false
+/**
+ * Set while the window shows its warm start (`seedProjectIcons`): its profile is not known yet, so nothing is read.
+ * The projects asked for meanwhile are read when it ends, if their icon was not kept.
+ */
+let readsHeld = false
 
 function notify(): void {
   for (const listener of listeners) listener()
@@ -45,6 +50,31 @@ export function setProjectIconReaderForTests(reader: IconReader | undefined): vo
   entries.clear()
   shown.clear()
   unsupported = false
+  readsHeld = false
+}
+
+/**
+ * The icons the warm start kept, as if read just now: the projects show them from the first frame, and are read
+ * again only when their icon choice changes or they get old. A project kept without an icon shows its folder. Reads
+ * are held until `releaseProjectIconReads`.
+ */
+export function seedProjectIcons(projects: readonly IconProject[], icons: Readonly<Record<string, unknown>> | undefined, now = Date.now()): void {
+  readsHeld = true
+  if (!icons) return
+  for (const project of projects) {
+    if (!canShowProjectIcon(project) || !Object.prototype.hasOwnProperty.call(icons, project.id)) continue
+    const icon = icons[project.id]
+    entries.set(project.id, { key: projectIconKey(project), icon: isIcon(icon) ? icon : null, fetchedAt: now })
+    shown.set(project.id, project)
+  }
+  notify()
+}
+
+/** The window's profile is known: the icons asked for while it was not are read now (`seedProjectIcons`). */
+export function releaseProjectIconReads(): void {
+  if (!readsHeld) return
+  readsHeld = false
+  for (const project of shown.values()) ensureProjectIcon(project)
 }
 
 /** Coming back to the window reads again the icons that are old, so a changed favicon shows up. */
@@ -69,6 +99,7 @@ export function canShowProjectIcon(project: IconProject | undefined): project is
 export function ensureProjectIcon(project: IconProject, now = Date.now()): void {
   if (unsupported || !canShowProjectIcon(project)) return
   shown.set(project.id, project)
+  if (readsHeld) return
   const key = projectIconKey(project)
   const entry = entries.get(project.id)
   if (entry?.pending) return

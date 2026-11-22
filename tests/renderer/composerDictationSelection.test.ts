@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatComposer, type ChatComposerProps } from '../../src/renderer/components/ChatComposer'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import { runCommand } from '../../src/renderer/commands/commandRegistry'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -158,5 +159,48 @@ describe('the composer while recording', () => {
     expect(press(button('Finish recording')!)).toBe(true)
     expect(dictation.stop).toHaveBeenCalledTimes(1)
     expect(dictation.cancel).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the dictation shortcut', () => {
+  it('starts dictation over the selection, and pressed again while recording finishes it', () => {
+    render('fix the parser bug')
+    box().focus()
+    box().setSelectionRange(8, 14) // "parser"
+    expect(dictate().title).toBe('Dictate · ⌘⇧Space')
+    let ran = false
+    act(() => {
+      ran = runCommand('composer.dictate', 'key')
+    })
+    expect(ran).toBe(true)
+    expect(dictation.start).toHaveBeenCalledTimes(1)
+    box().setSelectionRange(0, 0)
+    finish('lexer')
+    expect(value).toBe('fix the lexer bug')
+  })
+
+  it('while recording, the key is Done: the text goes in, nothing is thrown away', () => {
+    dictation.recording = true
+    render('fix the bug')
+    expect(host.querySelector<HTMLButtonElement>('button[aria-label="Finish recording"]')!.title).toBe('Done · insert the text · ⌘⇧Space')
+    let ran = false
+    act(() => {
+      ran = runCommand('composer.dictate', 'key')
+    })
+    expect(ran).toBe(true)
+    expect(dictation.stop).toHaveBeenCalledTimes(1)
+    expect(dictation.start).not.toHaveBeenCalled()
+    expect(dictation.cancel).not.toHaveBeenCalled()
+  })
+
+  it('does nothing where the microphone is not offered: a running reply', () => {
+    function Running() {
+      const props: ChatComposerProps = { input: '', onInputChange: () => {}, attachedFiles: [], onAttachedFilesChange: () => {}, voiceMessages: [], onVoiceMessagesChange: () => {}, enabledSkills: [], loading: true, onSend: () => {} }
+      return createElement(ChatComposer, props)
+    }
+    act(() => root.render(createElement(Running)))
+    expect(dictate()).toBeNull()
+    expect(runCommand('composer.dictate', 'key')).toBe(false)
+    expect(dictation.start).not.toHaveBeenCalled()
   })
 })

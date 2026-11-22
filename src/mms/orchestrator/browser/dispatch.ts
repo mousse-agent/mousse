@@ -108,7 +108,7 @@ export async function dispatchBrowserTool(input: {
   if (forged) return { text: forged, isError: true, dispatched: false }
   const decision = authorizer.authorize(input.binding.execution, input.binding.policy, {
     toolId: input.name,
-    classification: browserToolEffect(input.name),
+    classification: browserToolEffect(input.name, args),
     capability: browserToolCapability(input.name),
     requestDigest: digestToolArguments(args),
     description: input.name

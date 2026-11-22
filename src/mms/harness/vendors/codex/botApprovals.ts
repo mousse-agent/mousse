@@ -2,7 +2,6 @@ import { isAbsolute, resolve } from 'node:path'
 import type { BotAuthority, BotCheck, NormalisedCall } from '../../../../shared/bots/personal/authority'
 import { checkMessage } from '../../../../shared/bots/personal/walls'
 import type { NativeToolTable } from '../../../../shared/harness/tools'
-import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/mcp/attachment'
 
 /**
  * A bot's turn on Codex (Bot Phase 1): Codex runs in its asking mode (`untrusted` approvals, no
@@ -91,15 +90,15 @@ export const CODEX_BOT_USER_MCP_UNREADABLE = 'Mousse could not read your Codex M
 
 /**
  * The thread config of a bot turn that switches off every MCP server of the user's own Codex setup
- * (`readCodexUserSetup`): their tools would run under Codex's rules, never the bot's. Mousse's own
- * server stays. Undefined when the setup could not be read or names a server that cannot be
- * addressed in a config key: the turn is then refused.
+ * (`readCodexUserSetup`): their tools would run under Codex's rules, never the bot's. Reserved names
+ * are disabled too; an attached-name collision is refused before building this config. Undefined
+ * when the setup could not be read or names a server that cannot be addressed in a config key:
+ * the turn is then refused.
  */
 export function codexBotMcpOverrides(servers: readonly string[] | null): Record<string, boolean> | undefined {
   if (servers === null) return undefined
   const overrides: Record<string, boolean> = {}
   for (const name of servers) {
-    if (name === MOUSSE_MCP_SERVER_NAME || name === MOUSSE_RELAY_SERVER_NAME) continue
     if (!/^[A-Za-z0-9_-]+$/.test(name)) return undefined
     overrides[`mcp_servers.${name}.enabled`] = false
   }

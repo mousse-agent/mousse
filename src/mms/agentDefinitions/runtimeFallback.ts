@@ -3,6 +3,7 @@ import type {
   AgentRuntimeAttemptUsage,
   AgentRuntimeFallbackPolicy
 } from '../../shared/agents/execution'
+import { countLimited, NO_COUNT_LIMIT } from '../../shared/agents/defaults'
 import { AppError } from '../../shared/errors'
 import type { AgentFallbackRetryCategory, AgentModelCapabilityProfile } from '../../shared/agents/types'
 
@@ -30,8 +31,9 @@ export function remainingBudget(
   elapsedMs: number
 ): AgentExecutionBudget {
   const remaining: AgentExecutionBudget = {
-    maxTurns: Math.max(0, budget.maxTurns - used.turns),
-    maxToolCalls: Math.max(0, budget.maxToolCalls - used.toolCalls),
+    // No limit stays none.
+    maxTurns: countLimited(budget.maxTurns) ? Math.max(0, budget.maxTurns - used.turns) : NO_COUNT_LIMIT,
+    maxToolCalls: countLimited(budget.maxToolCalls) ? Math.max(0, budget.maxToolCalls - used.toolCalls) : NO_COUNT_LIMIT,
     maxElapsedMs: budget.maxElapsedMs > 0 ? Math.max(0, budget.maxElapsedMs - elapsedMs) : 0
   }
   if (budget.maxInputTokens !== undefined) {

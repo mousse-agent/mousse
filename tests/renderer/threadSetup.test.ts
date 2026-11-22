@@ -36,6 +36,34 @@ describe("the sidebar's New thread", () => {
   })
 })
 
+describe("the sidebar's New thread while a send is starting the project's empty thread", () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('opens a fresh empty thread instead of the one the send is starting, before the service lists it started', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { usePendingThreadRows, addPendingThreadRow, pendingThreadRow, dropPendingThreadRows } = await import('../../src/renderer/lib/pendingThreadRows')
+    const { createAndSelectProjectThread } = await import('../../src/renderer/lib/threadActions')
+    const empty = { id: 'empty', name: 'New Chat', projectId: 'p', createdAt: '', updatedAt: '', order: 0 } as never
+    useAppStore.setState({ profileId: 'default', threads: [empty], activeThreadId: 'empty', projects: [{ id: 'p', name: 'p', path: '/p', createdAt: '', order: 0 }] })
+    usePendingThreadRows.setState({ rows: [], rowKeys: new Map() })
+    const create = vi.fn(async () => ({ ...(empty as object), id: 'made' }))
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) } } })
+    // Sent from the empty thread, which the send uses: the service has not listed it started yet (its worktree is still made).
+    const row = pendingThreadRow({ profileId: 'default', text: 'Plan it', attached: false, shown: empty, reuses: true, workspace: { projectId: 'p' }, threads: [empty] })!
+    addPendingThreadRow(row)
+    await createAndSelectProjectThread('p')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().activeThreadId).toBe('made')
+
+    // A send that stopped before it started leaves the empty thread as it was: New thread opens it again.
+    dropPendingThreadRows([row.key])
+    useAppStore.setState({ threads: [empty], activeThreadId: null })
+    await createAndSelectProjectThread('p')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().activeThreadId).toBe('empty')
+  })
+})
+
 describe("the sidebar's New thread when the remembered model can no longer be used", () => {
   const opus = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
   afterEach(() => { vi.unstubAllGlobals() })
@@ -122,5 +150,62 @@ describe("the sidebar's New thread before the project's provider listing has loa
     await page.createAndSelectProjectThread('p')
     expect(page.create).toHaveBeenCalledTimes(1)
     expect(page.useAppStore.getState().activeThreadId).toBe('made')
+  })
+})
+
+describe('New thread opens in the project last picked for a new thread', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('follows the last project picked, and starts with none once that project is gone', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { useProviderSnapshotsStore } = await import('../../src/renderer/lib/providerSnapshots')
+    const { createAndSelectProjectThread, createAndSelectThread } = await import('../../src/renderer/lib/threadActions')
+    const project = { id: 'p', name: 'p', path: '/p', createdAt: '', order: 0 }
+    useAppStore.setState({ threads: [], activeThreadId: null, projects: [project], lastNewThreadProjectId: null })
+    useProviderSnapshotsStore.setState({ scopes: {} })
+    let made = 0
+    const create = vi.fn(async (_name?: string, projectId?: string) => ({ id: `t${++made}`, name: '', projectId, createdAt: '', updatedAt: '', order: 0, startedAt: 'x' }) as never)
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) }, providers: { snapshots: vi.fn(async () => []) } } })
+
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith()
+    // A project's New thread (or a project picked in the new chat's composer) is remembered.
+    await createAndSelectProjectThread('p')
+    expect(useAppStore.getState().lastNewThreadProjectId).toBe('p')
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith(undefined, 'p', { rememberedChoices: true })
+    // Choosing no project for a new chat is remembered as well.
+    useAppStore.getState().setLastNewThreadProjectId(null)
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith()
+    // A removed project is not opened.
+    useAppStore.setState({ lastNewThreadProjectId: 'p', projects: [] })
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith()
+  })
+})
+
+describe("the sidebar's New thread in a project of another computer", () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('opens a draft here whose composer runs on that computer, in that project', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { createAndSelectProjectThread } = await import('../../src/renderer/lib/threadActions')
+    const draft = { id: 'draft', name: 'New Chat', createdAt: '', updatedAt: '', order: 0 } as never
+    useAppStore.setState({
+      profileId: 'default',
+      threads: [],
+      activeThreadId: null,
+      composerWorkspaceDrafts: {},
+      projects: [{ id: 'mac:p', name: 'mac-proj', path: '/Users/me/mac-proj', createdAt: '', order: 0, node: 'mac' }]
+    })
+    const create = vi.fn(async () => draft)
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) } } })
+    await createAndSelectProjectThread('mac:p')
+    // This computer is never asked to make a thread in that computer's project; the send makes it there.
+    expect(create).toHaveBeenCalledWith()
+    const state = useAppStore.getState()
+    expect(state.activeThreadId).toBe('draft')
+    expect(state.composerWorkspaceDrafts.draft).toMatchObject({ projectId: 'mac:p', node: 'mac' })
   })
 })

@@ -3,7 +3,8 @@ import { useAppStore } from '../stores/appStore'
 import type { AppearanceSettings, ThemeId } from '../../shared/settings'
 import { glassTokensFromIntensity, normalizeAppearance } from '../../shared/settings'
 import { buildAccentCssVars } from '../../shared/accentPalette'
-import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearVsCodeColors, injectTokenColors, clearTokenColors } from '../../shared/vscodeTheme'
+import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearVsCodeColors, cssVarName, injectTokenColors, clearTokenColors } from '../../shared/vscodeTheme'
+import { accentGrayTint, tintGray } from '../lib/grayTint'
 
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
@@ -13,10 +14,12 @@ import { setReplyPacing } from '../lib/replyPacingSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { setThreadPathInTitleBar } from '../lib/threadPathSetting'
+import { setReplyPreviews } from '../lib/replyPreviewSetting'
 import { setContextRingInComposer } from '../lib/contextRingSetting'
 import { setAnimationSpeed } from '../lib/motion'
 import { applyFrostedComposer } from '../lib/frostedComposer'
-import { applyThemeCss } from '../lib/themeCss'
+import { applyThemeCss, setUserThemeActive } from '../lib/themeCss'
+import { showWallpaper } from '../lib/wallpaper'
 import { activeUserTheme, type UserTheme } from '../../shared/themes/userThemes'
 
 const FIXED_SURFACE_VARS = [
@@ -80,6 +83,28 @@ function applyFixedSurfaces(theme: ThemeId): void {
   if (!fixed) return
   for (const [name, value] of Object.entries(fixed)) {
     root.style.setProperty(name, value)
+  }
+}
+
+/**
+ * Mousse Dark's grays lean very slightly toward the accent (grayTint.ts), so they follow it: its fixed surfaces and its
+ * editor colours, which the steps above have just set neutral. Everything built on them (the pane, the composer, cards,
+ * popovers) is a mix of these and leans with them. A user theme keeps its own colours.
+ */
+const ACCENT_TINTED_THEMES: ReadonlySet<ThemeId> = new Set<ThemeId>(['blacksphere-plus'])
+
+function applyGrayTint(theme: ThemeId, accent: string, userTheme: boolean): void {
+  const tint = ACCENT_TINTED_THEMES.has(theme) && !userTheme ? accentGrayTint(accent) : null
+  if (!tint) return
+  const root = document.documentElement
+  const names = [
+    ...Object.keys(FIXED_SURFACE_THEMES[theme] ?? {}),
+    ...Object.keys(BLACKSPHERE_COLORS).flatMap((key) => [cssVarName(key), `--theme-vscode-${key.replace(/\./g, '-')}`])
+  ]
+  for (const name of names) {
+    if (/foreground/i.test(name)) continue
+    const value = root.style.getPropertyValue(name)
+    if (value) root.style.setProperty(name, tintGray(value, tint))
   }
 }
 
@@ -192,14 +217,17 @@ function applyLayoutTokens(theme: ThemeId): void {
 }
 
 /**
- * A user theme over its base: its color tokens and CSS as one adopted sheet after the app's (`applyThemeCss`, which
- * also pauses it while a decision is on screen), and `data-user-theme` on the root. No theme takes it off.
+ * A user theme over its base: its color tokens and CSS as one adopted sheet after the app's (`applyThemeCss`), its
+ * wallpaper behind the chat (`showWallpaper`), and `data-user-theme` on the root. While a decision is on screen all of
+ * it pauses (`setUserThemeActive`). No theme takes it off.
  */
 function applyUserTheme(theme: UserTheme | undefined): void {
   const root = document.documentElement
   if (theme) root.setAttribute('data-user-theme', theme.id)
   else root.removeAttribute('data-user-theme')
+  setUserThemeActive(Boolean(theme))
   applyThemeCss(theme?.css ?? '', { tokens: theme?.colors ?? {} })
+  showWallpaper(useAppStore.getState().profileId, theme?.wallpaper)
 }
 
 function applyAppearance(appearance: AppearanceSettings): void {
@@ -207,10 +235,12 @@ function applyAppearance(appearance: AppearanceSettings): void {
   const userTheme = activeUserTheme(normalized)
   applyTheme(normalized.theme)
   clearFixedSurfaces()
-  applyAccent(userTheme?.accent || normalized.accentColor)
+  const accent = userTheme?.accent || normalized.accentColor
+  applyAccent(accent)
   applyFixedSurfaces(normalized.theme)
   applyLightSurfaces(normalized.theme)
   applyVsCodeTheme(normalized.theme)
+  applyGrayTint(normalized.theme, accent, Boolean(userTheme))
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
   applyFontSettings(normalized)
@@ -220,13 +250,14 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyUserTheme(userTheme)
 }
 
-/** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path and the context ring. */
+/** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path, reply previews and the context ring. */
 function applyChatDisplay(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
   setRenderMath(normalized.renderMath)
   setReplyPacing(normalized.replyPacing)
   setTurnChangedFiles(normalized.turnChangedFiles)
   setThreadPathInTitleBar(normalized.threadPathInTitleBar)
+  setReplyPreviews(normalized.replyPreviews)
   setContextRingInComposer(normalized.contextRingInComposer)
 }
 

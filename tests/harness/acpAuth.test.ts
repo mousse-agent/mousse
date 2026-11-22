@@ -112,10 +112,10 @@ describe('ACP agent sign-in', () => {
     expect((await runtime.auth({ force: true })).state).not.toBe('signed_in')
   })
 
-  it.each([true, false])('advertises URL elicitation, and terminal sign-in only where a PTY runs (PTY: %s)', async (ptyRuns) => {
+  it.each([true, false])('advertises URL and form elicitation, and terminal sign-in only where a PTY runs (PTY: %s)', async (ptyRuns) => {
     const { runtime, initialized } = setup({ authMethods: [], signedIn: () => true }, { available: () => ptyRuns })
     await runtime.handshake!(new AbortController().signal)
-    expect(initialized[0]).toMatchObject({ clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, auth: { terminal: ptyRuns }, elicitation: { url: {} } } })
+    expect(initialized[0]).toMatchObject({ clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, auth: { terminal: ptyRuns }, elicitation: { url: {}, form: {} } } })
   })
 
   it('drops methods that are not ACP (env_var drafts) and keeps no account subject', async () => {

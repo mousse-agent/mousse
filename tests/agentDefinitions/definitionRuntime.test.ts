@@ -95,7 +95,9 @@ describe('definitionRuntime', () => {
         return { text: 'fallback', history: [], usage: { inputTokens: 7, outputTokens: 2, costUsd: 0.01 } }
       }
     })
-    const result = await run(new AgentExecutionService({ runtime: createDefinitionRuntime(p.value) }))
+    const resolved = definition()
+    resolved.settings.limits.maxTurns = 32
+    const result = await run(new AgentExecutionService({ runtime: createDefinitionRuntime(p.value) }), resolved)
     expect(result.status).toBe('completed')
     expect(result.usage).toMatchObject({ inputTokens: 47, outputTokens: 7, totalTokens: 54 })
     expect(result.usage.costUsd).toBeCloseTo(0.03)

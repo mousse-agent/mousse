@@ -8,4 +8,6 @@ export interface ThreadToastPayload {
   projectName?: string
   /** A subagent asked; the toast is about its parent. */
   subagent?: boolean
+  /** A side chat asked; the toast is about the thread whose panel shows it. */
+  sideChat?: boolean
 }

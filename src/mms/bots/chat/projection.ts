@@ -1,18 +1,24 @@
+import type { AloneRequest } from '../actions/BotAlone'
+import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
+import { readableActionTitle, type ActionRow } from '../actions/BotActions'
+import type { BotActionCard } from '../../../shared/bots/personal/chat'
+import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
+import { unattendedChatTurn } from '../activation/unattended'
+import { replyPreviewText } from '../../../shared/threadPreview'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
+import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotTaskItem, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
-import { askFingerprint, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
-import { BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
-import { BOT_OFF_HERE_MARK, BOT_OFF_HERE_NOTE, switchedOff, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
+import { askFingerprint, BOT_BUDGET_WALL_KEYS, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
-import type { BotMcpWhere } from '../mcp/BotMcp'
-import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
+import { installationOf, type BotMcpWhere } from '../mcp/BotMcp'
+import { outOfSightRow, workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
 import { plainChoices, type BotChatQuestion } from '../../../shared/bots/personal/questions'
 import { cardFileName, plainCards, type BotCard, type BotChatCard } from '../../../shared/bots/personal/cards'
 import { MAX_BOT_CHAT_ATTACHMENTS } from '../../../shared/bots/personal/methods'
@@ -20,7 +26,13 @@ import { replyApplets } from './replyApplets'
 import { takeToolImages } from './toolImages'
 import { takeReplyCards } from './replyCards'
 import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/wakes'
+import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TITLE } from '../../../shared/bots/personal/memory'
+
+function isServiceLine(id: string): boolean {
+  return ['bm_asks_first_', 'bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
+}
 import type { AppletReference } from '../../../shared/applets'
+import { BOT_USAGE_WINDOW_MS, botContextSummary, turnUsageSummary } from '../activation/turnUsage'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -31,8 +43,7 @@ import type { AppletReference } from '../../../shared/applets'
 
 /**
  * The starter grant (§5.3.1, `botStarterManifest`): files in the bot's own files folder, the web,
- * its own tools (`BOT_DEFAULT_APP_TOOLS`) and an hour of work per activation, and nothing
- * outside. Pressing Create bot approves it.
+ * its own tools (`BOT_DEFAULT_APP_TOOLS`), no limits, and nothing outside. Pressing Create bot approves it.
  */
 export function starterManifest(): BotManifest {
   return canonicalManifest(botStarterManifest())
@@ -84,7 +95,19 @@ function oneLine(text: string, max = 120): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
+/**
+ * What each run of a schedule does, in its own words on one line, for About. A fixed line ("Say exactly: …") has none:
+ * its label already says it.
+ */
+function scheduleDoes(prompt: string | undefined): string | undefined {
+  const text = prompt?.replace(/\s+/g, ' ').trim()
+  if (!text || text.startsWith('Say exactly: ')) return undefined
+  return text.length > 240 ? `${text.slice(0, 239).trimEnd()}…` : text
+}
+
 export interface PostInput {
+  /** Journal provenance only: the chat keeps the original author and text. */
+  external?: boolean
   botId: string
   author: 'owner' | 'bot'
   kind: BotMessageKind
@@ -108,11 +131,17 @@ export interface PostInput {
    * message of a dispatch also takes the cards its turn made (`show_card`), and a question's bubble its question's card.
    */
   cards?: BotCard[]
+  /** A service notice that stays in chat without its own notification. */
+  quiet?: true
+  /** A notice the chat shows once in a row: the same text as the chat's latest message is not posted again. */
+  unlessLatest?: true
   /**
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
    */
   hidden?: true
+  /** Trusted job facts from the scheduler, used only by the post-time telling classifier. */
+  scheduleLine?: { say: string; ownerAsked?: boolean }
 }
 
 /**
@@ -199,24 +228,30 @@ export class BotChatProjection {
 
   constructor(private readonly options: {
     store: BotStore
+    asksFirst?(): boolean
+    aloneItems?(botId: string): BotPermissionItem[]
+    /** About → Can use's switches of what every bot has by default (MCP and each server, skills, automation tools). */
+    defaultItems?(botId: string): BotPermissionItem[]
+    aloneAsk?(botId: string, activationId: string, request: AloneRequest): { title: string; details: { summary: string; items: string[] } } | undefined
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
+    classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
-    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
+    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean; name?: string; prompt?: string }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
      * read yet (nothing is shown gone then).
      */
     mcpWhere?(serverId: string): BotMcpWhere | undefined
-    /** What this computer lets bots do (Settings → What bots may do here), for About → Can use. Absent: everything. */
-    computerLimit?(): BotComputerLimit
     /** When a question's first follow-up is due, its bubble shown at `shownAt` (`BotEngine.firstFollowUpAt`); null for none. */
     followUpAt?(question: BotQuestionRow, shownAt: string): string | null
     /** The threads the bot started, hidden ones too, and how each stands (`BotEngine.launchedThreads`). */
     launched?(botId: string): BotLaunchedThread[]
     /** The bot's background commands running now. */
     watchers?(botId: string): BotWatcherItem[]
+    /** The checklist kept on these threads (its chat's, then its work's), in that order; never throws. */
+    tasks?(threadIds: string[]): BotTaskItem[]
   }) {}
 
   private get store(): BotStore {
@@ -262,6 +297,10 @@ export class BotChatProjection {
     const { row, inserted } = this.store.db.transaction(() => {
       const existing = this.store.message(id) ?? (input.clientRequestId ? this.store.messageByRequest(input.clientRequestId) : undefined)
       if (existing) return { row: existing, inserted: false }
+      if (input.unlessLatest) {
+        const latest = this.store.lastMessage(input.botId)
+        if (latest && latest.author === input.author && latest.kind === input.kind && latest.text === input.text) return { row: latest, inserted: false }
+      }
       const at = this.store.now()
       // A question's bubble is journaled with its card and its answers as text, so the chat pack, search and Forget see
       // them. A nudge of it (a later row carrying it) is journaled as its own fixed line: a copy would outlive a forget.
@@ -297,7 +336,8 @@ export class BotChatProjection {
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
         sourceKey: `bm:${id}`,
-        who: input.author === 'owner' ? 'owner' : input.kind === 'error' ? 'mousse' : 'bot',
+        who: input.external ? 'tool' : input.author === 'owner' ? 'owner' : input.kind === 'error' || isServiceLine(id) ? 'mousse' : 'bot',
+        ...(input.external ? { external: true } : {}),
         text: shown.journal || (input.error?.text ?? ''),
         json: {
           v: 1,
@@ -310,11 +350,15 @@ export class BotChatProjection {
           ...(input.questionId ? { questionId: input.questionId } : {})
         }
       })
+      // A row the chat never shows (an event's line, `outOfSightRow`) is kept for the bot's memory and its guards only:
+      // it tells nobody and reaches no window.
+      const tell = input.quiet || outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
+      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
     const message = this.toMessage(row)
     // Emitted once the row is durable: inside a caller's transaction, after its commit.
-    if (inserted) this.store.db.afterCommit(() => this.emitMessage(this.toMessage(this.store.message(row.id) ?? row), row.botId))
+    if (inserted && !outOfSightRow(row.kind, row.id)) this.store.db.afterCommit(() => this.emitMessage(this.toMessage(this.store.message(row.id) ?? row), row.botId))
     return message
   }
 
@@ -335,7 +379,19 @@ export class BotChatProjection {
     }
   }
 
+  /** A lightweight row-kind check for telling priority; no card or message reads. */
+  isActionMessage(row: Pick<BotMessageRow, 'id'>): boolean {
+    return row.id.startsWith('bm_action_')
+  }
+
   toMessage(row: BotMessageRow): BotChatMessage {
+    const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
+    const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
+    const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
+    const action = this.isActionMessage(row) ? this.actionForMessage(row.id) : undefined
+    const sentAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT ran_at FROM bot_actions WHERE message_id = ? AND status = 'done'", row.id) : undefined
+    const expiredAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT activation_id FROM bot_actions WHERE message_id = ? AND status = 'expired'", row.id) : undefined
+    const expiredRun = expiredAction ? this.store.activation(String(expiredAction.activation_id)) : undefined
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
     // A question's bubble, or a nudge of it (any other bot row that carries it): its words, then its answers as plain text
@@ -345,6 +401,10 @@ export class BotChatProjection {
     const cards = row.author === 'bot' ? chatCards(row.cards) : []
     const plain = [plainCards(cards), asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''].filter(Boolean).join('\n\n')
     return {
+      ...(reminder && expiresAt && expiresAt > this.store.now() && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { expiresAt, ...(snoozed ? { snoozedUntil: snoozed.dueAt } : {}) } } : {}),
+      ...(typeof sentAction?.ran_at === 'string' ? { actionSentAt: sentAction.ran_at } : {}),
+      ...(action ? { action } : {}),
+      ...(expiredRun?.trigger.kind === 'schedule' ? { expiredActionSchedule: expiredRun.trigger.scheduleId } : {}),
       seq: row.seq,
       id: row.id,
       at: row.at,
@@ -352,7 +412,9 @@ export class BotChatProjection {
       kind: row.kind,
       // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
       // A wake's line too: it says why the bot speaks unasked.
-      ...(row.kind === 'notice' && (row.id.startsWith('bm_permission_') || row.id.startsWith(WAKE_LINE_PREFIX)) ? { systemLine: true as const } : {}),
+      ...(row.kind === 'notice' && isServiceLine(row.id) ? { systemLine: true as const } : {}),
+      // A fold's line says what happened on hover (docs/plans/bot-context.md §14).
+      ...(row.kind === 'notice' && row.id.startsWith(BOT_FOLD_LINE_PREFIX) ? { systemTitle: BOT_FOLD_LINE_TITLE } : {}),
       text: plain ? (row.text ? `${row.text}\n\n${plain}` : plain) : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
       ...(cards.length ? { cards } : {}),
@@ -371,6 +433,56 @@ export class BotChatProjection {
       ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {}),
       ...(row.author === 'owner' && row.clientRequestId ? { clientRequestId: row.clientRequestId } : {}),
       ...(row.author === 'bot' && row.ownerReaction ? { reaction: row.ownerReaction.emoji } : {})
+    }
+  }
+
+  private actionForMessage(messageId: string): BotActionCard | undefined {
+    // Only the two known nudge ids refer back to an existing review; they never create actions.
+    messageId = messageId.replace(/_n[12]$/, '')
+    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, created_at, ran_at, answered_at, target_json, result_json FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { created_at: string }) | undefined
+    if (!row) return undefined
+    const storedMetadata = JSON.parse(row.card_json ?? '{}')
+    const metadata = storedMetadata && typeof storedMetadata === 'object' && !Array.isArray(storedMetadata) ? storedMetadata : {}
+    const forgotten = row.args_digest === '[forgotten]' && row.args_json === '"[forgotten]"'
+    const args: unknown = forgotten ? null : JSON.parse(row.args_json)
+    const hiddenPaths: string[][] = []
+    const visit = (value: unknown, path: string[]): void => {
+      if (!value || typeof value !== 'object') return
+      const object = value as Record<string, unknown>
+      if (object.$mousse === 'hidden') { hiddenPaths.push(path); return }
+      if (object.$mousse === 'literal') {
+        // The wrapper escapes this object's namespace only. Its children may still contain real markers.
+        if (object.value && typeof object.value === 'object')
+          for (const [key, item] of Object.entries(object.value)) visit(item, [...path, key])
+        return
+      }
+      for (const [key, item] of Object.entries(value)) visit(item, [...path, key])
+    }
+    visit(args, [])
+    const result = forgotten
+      ? (metadata.toolReportedError === true || metadata.toolReportedError === 1 ? { text: '', toolReportedError: true } : undefined)
+      : row.result_json ? JSON.parse(row.result_json) : undefined
+    const previous = row.status === 'open' && !forgotten ? this.store.all(`SELECT status, ran_at, answered_at, created_at, target_json, result_json FROM bot_actions WHERE bot_id = ? AND args_digest = ?
+      AND rowid < (SELECT rowid FROM bot_actions WHERE id = ?) AND status IN ('done', 'uncertain', 'failed') ORDER BY rowid DESC`, row.bot_id, row.args_digest, row.id)
+      .find(candidate => {
+        const target = JSON.parse(String(candidate.target_json))
+        const current = JSON.parse(row.target_json)
+        return target.server === current.server && target.tool === current.tool &&
+          (candidate.status !== 'failed' || JSON.parse(String(candidate.result_json ?? '{}')).toolReportedError === true)
+      }) : undefined
+    const previousAt = previous?.ran_at ?? previous?.answered_at ?? previous?.created_at
+    const validAt = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value))
+    const at = [metadata.settledAt, row.ran_at, row.answered_at].find(validAt)
+    return {
+      actionId: row.id, digest: row.args_digest, askedAt: row.created_at,
+      title: typeof metadata.title === 'string' ? metadata.title : readableActionTitle(JSON.parse(row.target_json).tool),
+      serverName: typeof metadata.serverName === 'string' ? metadata.serverName : 'Your service', args,
+      hasHiddenValues: !forgotten && metadata.hasHiddenValues === true, hiddenPaths,
+      ...(forgotten ? { forgotten: true as const } : {}),
+      status: row.status as BotActionCard['status'],
+      ...(previous && typeof previousAt === 'string' ? { previous: { status: previous.status as 'done' | 'uncertain' | 'failed', at: previousAt } } : {}),
+      ...(at ? { at } : {}),
+      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {})
     }
   }
 
@@ -393,15 +505,21 @@ export class BotChatProjection {
     const mcp = 'mcp' in escalation.permission ? escalation.permission.mcp : undefined
     const tools = mcp ? mcpAskTools(mcp) : []
     const more = mcp?.unusable ? `${mcp.unusable} more of ${mcp.name ? `${mcp.name}'s` : 'its'} tools can't be used by a bot.` : undefined
+    const asks = this.options.asksFirst?.() && mcp && tools.some(tool => {
+      const where = this.options.mcpWhere?.(mcp.serverId)
+      const server = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
+      return asksFirstFor({ tool, serverName: [server?.name ?? mcp.name ?? '', server?.installationId ?? installationOf(mcp.serverId)], readOnlyHint: server?.tools.find(t => t.tool === tool)?.readOnlyHint })
+    })
     return {
       askId: escalation.id,
       title: text.title,
-      note: text.note,
+      note: asks ? 'Tools that may send or change things ask before each use. Tools that say they only read do not ask.' : this.options.asksFirst?.() && mcp?.changes === 'unknown' ? 'Mousse decides which calls ask at each use. Tools that say they only read do not ask.' : text.note,
       ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
-      kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
+      kind: isSpecialAsk(escalation.permission) && escalation.permission.ask === 'export_memory' ? 'export_memory' : 'permission',
       ...(tools.length ? { details: { summary: `${tools.length} ${mcp?.added ? 'new ' : ''}tool${tools.length === 1 ? '' : 's'}`, items: tools, ...(more ? { more } : {}) } } : {}),
       ...(mcp && !tools.length && escalation.status === 'open' ? { loading: true as const } : {}),
+      ...('ask' in escalation.permission && escalation.permission.ask === 'let_alone' ? this.options.aloneAsk?.(escalation.botId, escalation.activationId, escalation.permission) : {}),
       ...this.limitOutcome(escalation),
       ...this.permissionOutcome(escalation)
     }
@@ -485,57 +603,78 @@ export class BotChatProjection {
     const error: BotError | undefined = registry?.error?.error ?? (stuck[0] ? { text: stuck[0][1].text, action: { kind: 'pick_model', label: 'Pick a model' } } : undefined)
     // Only asks whose card is posted: a chat turn's asks show once its message is complete.
     const asks = this.store.openAsks(definition.id).filter((ask) => ask.messageId !== null)
-    const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant'])
+    // A chat turn no person started or waits on (a wake-up, a thread's notice or message, another bot's message) is out of
+    // sight: no typing, no working line. Only what it says shows, as any reply.
+    const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant']).filter((row) => !unattendedChatTurn(row))
     const live = liveRows.length
     // The chat and its work are apart: the chat's turn has the status line and Stop, work its own line.
     const chatTurn = liveRows.find((row) => row.lane === 'chat' && row.status === 'running')
     // Work that waits to go on keeps its line (with Stop): held while it waits, waiting its turn once allowed.
-    const work: BotWorkItem[] = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
+    const workRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
       .filter((row) => row.lane === 'run' && (row.status !== 'blocked' || workWaits(row)))
       .sort((a, b) => (a.status === 'queued' ? 1 : 0) - (b.status === 'queued' ? 1 : 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+    const work: BotWorkItem[] = workRows
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        status: row.status === 'queued' || row.endReason === 'room_allowed' || row.endReason === 'question_answered' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
-        // Held for the owner's answer to the question it asked them: an older app shows "held", a new one "waiting on you".
-        ...(row.status === 'blocked' && row.endReason === 'question' ? { waitsFor: 'answer' as const } : {}),
+        ...workWaitLine(row, { store: () => this.store }),
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {}),
         // A model the owner asked for this work alone, not the bot's usual one: named on its line.
         ...(row.trigger.kind === 'work' && row.trigger.model?.name ? { model: { name: row.trigger.model.name, detail: workModelDetail(row.trigger.model) } } : {}),
         ...this.runningSubagents(row.id)
       }))
-    // Questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
+    // Posted chat questions and questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
+    const approval = this.store.get(`SELECT m.text, a.card_json, a.target_json FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
+      LEFT JOIN bot_messages m ON m.id = a.message_id
+      WHERE a.bot_id = ? AND a.status = 'open' AND w.status = 'blocked' AND w.end_reason = 'approval'
+      ORDER BY a.rowid LIMIT 1`, definition.id)
+    // The legacy message begins with a raw tool id. Reuse the review's stored display names for the sidebar.
+    const approvalMetadata = approval && this.options.asksFirst?.() === true ? JSON.parse(String(approval.card_json ?? '{}')) ?? {} : undefined
+    const approvalLabel = approvalMetadata
+      ? `${typeof approvalMetadata.actionTitle === 'string' ? approvalMetadata.actionTitle : typeof approvalMetadata.title === 'string' ? approvalMetadata.title : readableActionTitle(JSON.parse(String(approval!.target_json)).tool)} · ${typeof approvalMetadata.serverName === 'string' ? approvalMetadata.serverName : 'Your service'}`
+      : String(approval?.text ?? 'Send this action?').split('\n')[0]
     const waitingOn = this.store.waitingQuestions(definition.id)
+    const chatQuestions = this.store.openChatQuestions(definition.id)
+    const needsOwner = !paused && (asks.length + waitingOn.length + chatQuestions.length > 0
+      || parkedNeedsOwner(this.store.activationsIn(definition.id, ['blocked']), { store: () => this.store }))
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
+    // Its checklist: what its chat keeps, then what its work keeps while that work goes on.
+    const taskThreads = [registry?.homeThreadId, ...workRows.map((row) => row.threadId)].filter((id): id is string => Boolean(id))
+    const tasks = taskThreads.length ? this.options.tasks?.(taskThreads) ?? [] : []
     const managing = threads.filter(launchedActive)
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live + managing.length })
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + Number(Boolean(approval)) + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
     const last = this.store.lastMessage(definition.id)
     const ended = this.store.lastEndedActivation(definition.id)
+    const replied = last?.author === 'bot' && last.text ? last : this.store.lastBotReply(definition.id)
+    const lastReply = replied?.text ? replyPreviewText(replied.text) : undefined
     const stateText = state === 'paused'
       ? pausedHere
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
-        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine(waitingOn[0]!.spec.question, 80)}`)
+        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : approval ? `${this.options.asksFirst?.() === true ? 'Waiting for you' : 'Wants to send'}: ${oneLine(approvalLabel, 80)}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])?.spec.question ?? 'Your answer is needed', 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : managing.length ? managingLine(managing) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
       id: definition.id,
       name: definition.name,
       description: definition.description,
+      ...(definition.promptDefault ? { promptEdited: true as const } : {}),
       look: normalizeBotLook(definition.look),
       state,
+      ...(needsOwner ? { needsOwner: true as const } : {}),
       stateText,
       ...(offline ? { waiting: 'internet' as const } : {}),
       ...(error ? { error } : {}),
       // A message of cards alone reads as its first card's plain text.
       ...(last ? { last: { text: oneLine(last.text || last.error?.text || plainCards(last.cards) || last.attachments?.map((file) => file.name).join(', ') || '', 200), at: last.at, author: last.author } } : {}),
+      ...(lastReply ? { lastReply } : {}),
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),
@@ -543,7 +682,8 @@ export class BotChatProjection {
       ...(chatTurn ? { chat: { activationId: chatTurn.id, ...(chatTurn.offline ? { offline: true as const } : {}) } } : {}),
       ...(work.length ? { work } : {}),
       ...(threads.length ? { threads } : {}),
-      ...(watchers.length ? { watchers } : {})
+      ...(watchers.length ? { watchers } : {}),
+      ...(tasks.length ? { tasks } : {})
     }
   }
 
@@ -574,56 +714,48 @@ export class BotChatProjection {
   /** About this bot: what it can use beyond the starter grant, its runs, and its waiting reminders. */
   detail(definition: BotDefinition, now: number): BotDetail {
     const grant = this.store.activeGrant(definition.id)
-    const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
-      { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}) }
-    ))
-    const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).map((reminder) => (
-      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
+    const lastRuns = this.store.lastScheduleRuns(definition.id)
+    const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => {
+      const last = lastRuns.get(schedule.scheduleId)
+      const does = scheduleDoes(schedule.prompt)
+      return {
+        id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}),
+        ...(schedule.name ? { name: schedule.name } : {}), ...(does ? { does } : {}),
+        ...(last ? { lastAt: last.endedAt, lastOutcome: last.status === 'done' ? 'ok' as const : last.status === 'failed' ? 'failed' as const : 'stopped' as const } : {})
+      }
+    })
+    const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).filter((reminder) => !reminder.workId).map((reminder) => (
+      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
     return {
       summary: this.summary(definition, now),
       permissions: grant ? [
+        ...(this.options.defaultItems?.(definition.id) ?? []),
+        ...(this.options.aloneItems?.(definition.id) ?? []),
         ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
         ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
       ] : [],
       runs,
-      reminders
+      reminders,
+      ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS))),
+      ...((context) => (context ? { context } : {}))(botContextSummary(this.store.lastTurnUsage(definition.id, 'chat')))
     }
   }
 
   /**
-   * Each permission of `manifest` beyond the starter grant, as About → Can use lists it. The owner's MCP tools are one
-   * line per server ("Use your GitHub tools"). One that gives nothing now says what is true (gone from Mousse, switched
-   * off, changed since it was allowed, MCP turned off, or switched off on this computer) and is marked so; Remove is there
-   * as an option, not as the fix.
+   * Each permission of `manifest` beyond the starter grant, as About → Can use lists it. The owner's MCP servers are not
+   * among them: every bot has them unless switched off, and their switches are About's own (`defaultItems`), one per
+   * server, whatever an older grant names of them.
    */
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
-    const limit = this.options.computerLimit?.()
-    return grantedPermissions(manifest).map((permission): BotPermissionItem => {
+    return grantedPermissions(manifest).flatMap((permission): BotPermissionItem[] => {
+      if ('mcp' in permission) return []
       const id = permissionId(permission)
       const allowed = this.store.allowedAsk(botId, id)
       const grantedAt = allowed?.answeredAt ?? approvedAt
-      if ('mcp' in permission) {
-        const where = this.options.mcpWhere?.(permission.mcp.serverId)
-        const live = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
-        const asked = allowed && 'mcp' in allowed.permission ? allowed.permission.mcp.name : undefined
-        const name = live?.name ?? (where?.state === 'off' ? where.name : undefined) ?? asked ?? 'an MCP server'
-        const title = `use your ${name} tools`
-        const tools = mcpAskTools(permission.mcp)
-        if (where?.state === 'gone') return { id, title, note: `${name} isn't set up in Mousse any more, so this gives nothing now. You can remove it.`, grantedAt, gone: true as const, mark: 'Gone from Mousse' }
-        if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
-        if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
-        if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
-        const shown = tools.slice(0, 6).join(', ')
-        const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''
-        return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }
-      }
       const text = askText(permission, { budget: starterManifest().budget })
-      // Kept in the grant, but this computer has it switched off: it gives nothing here until it is switched on.
-      const off = limit ? switchedOff(limit, permission) : undefined
-      if (limit && off) return { id, title: text.title, note: BOT_OFF_HERE_NOTE, grantedAt, mark: BOT_OFF_HERE_MARK, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
       // About's tooltip says what it gives in full, as the card's does ("use your threads": full access).
-      return { id, title: text.title, note: text.tip ?? text.note, grantedAt, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
+      return [{ id, title: text.title, note: text.tip ?? text.note, grantedAt, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }]
     })
   }
 }
@@ -639,21 +771,21 @@ export function askFingerprintOf(request: BotAskRequest): string {
 }
 
 /**
- * What `manifest` grants beyond the starter grant, one request per permission. A stored `workspace` ("use files on this
- * computer", removed) grants nothing, so it is never listed.
+ * What `manifest` grants beyond the starter grant and what every bot has, one request per permission. A stored
+ * `workspace` ("use files on this computer", removed) grants nothing, so it is never listed; nor are skills and the
+ * automation tools an older grant names, which every bot has unless switched off (About's own switches).
  */
 export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[] {
   const starter = starterManifest()
   const items: BotPermissionRequest[] = []
   for (const tool of manifest.tools) if (!starter.tools.includes(tool)) items.push({ tool })
-  // The bot's own tools are never permissions: About never lists them.
-  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool)) items.push({ tool })
-  for (const skill of manifest.skills) items.push({ skill })
+  // The bot's own tools are never permissions, and a retired one gives nothing: About never lists them.
+  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool) && !BOT_RETIRED_APP_TOOLS.has(tool) && !BOT_AUTOMATION_APP_TOOLS.includes(tool)) items.push({ tool })
   // The owner's MCP tools: one permission per server, whose tools the grant keeps one by one.
   const servers = new Map<string, string[]>()
   for (const pair of manifest.mcp) servers.set(pair.serverId, [...(servers.get(pair.serverId) ?? []), pair.tool])
   for (const [serverId, tools] of servers) items.push({ mcp: { serverId, tools: [...tools].sort() } })
-  for (const key of ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const) {
+  for (const key of BOT_BUDGET_WALL_KEYS) {
     const held = manifest.budget[key]
     const base = starter.budget[key]
     if (held !== undefined && (base === undefined || held > base)) items.push({ budget: { key, ...(base !== undefined ? { amount: held - base } : {}) } })

@@ -1,7 +1,9 @@
-import { spawn } from 'node:child_process'
 import { createHash, randomUUID, type Hash } from 'node:crypto'
 import { readFrozenEntryAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { gitEnv, guardedAsync } from './git'
+import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { cancelQueuedGit, gitChildSpawned, spawnGit, withGitDiskAdmission } from '../git/gitSpawn'
 
 /**
  * Which files on disk a restore can remove without a copy: those whose bytes are exactly what Git writes back from their
@@ -62,36 +64,44 @@ interface Streamed { stopped: boolean; stderr: string }
  * outlives the run.
  */
 async function streamGitAsync(top: string, args: string[], input: string, onData: (chunk: Buffer) => void, env?: NodeJS.ProcessEnv, deadline?: number): Promise<Streamed> {
-  const argv = await guardedAsync(top, args, { stdin: input, ...(env ? { env } : {}) })
-  const group = deadline !== undefined && process.platform !== 'win32'
-  return await new Promise<Streamed>((settle, fail) => {
-    const child = spawn('git', argv, { cwd: top, env: gitEnv(top, env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) })
-    const errors: Buffer[] = []
-    let failed: Error | undefined
-    let stopped = false
-    const stopAll = (): void => {
-      if (child.pid === undefined) return
-      // Git first, so it never reports the filters it started as failed; then everything else in its group.
-      if (group) { child.kill('SIGKILL'); try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ } }
-      else if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => child.kill('SIGKILL'))
-      else child.kill('SIGKILL')
-    }
-    const timer = deadline === undefined ? undefined : setTimeout(() => { stopped = true; stopAll() }, Math.max(0, deadline - Date.now()))
-    child.stdout.on('data', (chunk: Buffer) => { if (stopped) return; try { onData(chunk) } catch (error) { failed ??= error as Error; child.kill() } })
-    child.stderr.on('data', (chunk: Buffer) => { if (errors.length < 64) errors.push(chunk) })
-    child.on('error', (error) => { if (timer) clearTimeout(timer); fail(error) })
-    // Stopped: the group is gone, so its output closes at once. A program that left the group is not waited for long.
-    child.on('exit', () => { if (stopped) setTimeout(() => settle({ stopped, stderr: Buffer.concat(errors).toString('utf8').trim() }), 250).unref() })
-    child.on('close', (code) => {
-      if (timer) clearTimeout(timer)
-      const stderr = Buffer.concat(errors).toString('utf8').trim()
-      if (failed) fail(failed)
-      else if (stopped) settle({ stopped, stderr })
-      else if (code === 0) settle({ stopped, stderr })
-      else fail(new Error(`Command failed: git ${argv.join(' ')}\n${stderr}`))
+  const signal = deadline === undefined ? undefined : AbortSignal.timeout(Math.max(0, deadline - Date.now()))
+  return await withGitDiskAdmission(top, async () => {
+    const argv = await guardedAsync(top, args, { stdin: input, ...(env ? { env } : {}) })
+    signal?.throwIfAborted()
+    const group = deadline !== undefined && process.platform !== 'win32'
+    return await new Promise<Streamed>((settle, fail) => {
+      const child = timeGitChild(() => spawnGit(gitFile(), argv, { cwd: top, env: gitEnvFor(gitEnv(top, env)), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) }))
+      const errors: Buffer[] = []
+      let failed: Error | undefined
+      let stopped = false
+      // The process may still be starting on the Git worker: its pid is known once it has.
+      const stopAll = (): void => { if (!cancelQueuedGit(child)) void gitChildSpawned(child).then(stopStarted) }
+      const stopStarted = (): void => {
+        if (child.pid === undefined) return
+        // Git first, so it never reports the filters it started as failed; then everything else in its group.
+        if (group) { child.kill('SIGKILL'); try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ } }
+        else child.kill('SIGKILL')
+      }
+      const timer = deadline === undefined ? undefined : setTimeout(() => { stopped = true; stopAll() }, Math.max(0, deadline - Date.now()))
+      child.stdout.on('data', (chunk: Buffer) => { if (stopped) return; try { onData(chunk) } catch (error) { failed ??= error as Error; child.kill() } })
+      child.stderr.on('data', (chunk: Buffer) => { if (errors.length < 64) errors.push(chunk) })
+      child.on('error', (error) => { if (timer) clearTimeout(timer); fail(error) })
+      // Stopped: the group is gone, so its output closes at once. A program that left the group is not waited for long.
+      child.on('exit', () => { if (stopped && process.platform !== 'win32') setTimeout(() => settle({ stopped, stderr: Buffer.concat(errors).toString('utf8').trim() }), 250).unref() })
+      child.on('close', (code) => {
+        if (timer) clearTimeout(timer)
+        const stderr = Buffer.concat(errors).toString('utf8').trim()
+        if (failed) fail(failed)
+        else if (stopped) settle({ stopped, stderr })
+        else if (code === 0) settle({ stopped, stderr })
+        else fail(new Error(`Command failed: git ${argv.join(' ')}\n${stderr}`))
+      })
+      child.stdin.on('error', () => undefined)
+      child.stdin.end(input)
     })
-    child.stdin.on('error', () => undefined)
-    child.stdin.end(input)
+  }, signal).catch((error: unknown) => {
+    if (signal?.aborted && error === signal.reason) return { stopped: true, stderr: '' }
+    throw error
   })
 }
 

@@ -343,6 +343,14 @@ export class RunStore {
     return rows.length ? toRun(rows[0]) : null
   }
 
+  /** Ids of every run that is working now (`starting|running|finalizing`), in every thread of the profile. */
+  activeRunIds(): string[] {
+    return this.db
+      .statement(`SELECT run_id FROM runs WHERE status IN ('starting','running','finalizing')`)
+      .all()
+      .map((row) => String(row.run_id))
+  }
+
   /**
    * The thread's `paused` run (SPEC §5), or null. A paused run is not active: the thread accepts a
    * person's message. At most one exists; more than one is an invariant violation and raises `conflict`.
@@ -407,6 +415,21 @@ export class RunStore {
 
     const row = this.db.statement('SELECT * FROM run_attempts WHERE attempt_id = ?').get(attemptId)
     return row ? toAttempt(row) : null
+  }
+
+  /** The thread that ran each of these agent sessions (a Claude Code session, a Codex thread), where one did. */
+  threadsForSessions(sessionIds: readonly string[]): Map<string, string> {
+    const found = new Map<string, string>()
+    if (sessionIds.length === 0) return found
+    const rows = this.db
+      .statement(
+        `SELECT DISTINCT json_extract(a.provider_ref, '$.sessionId') AS session_id, r.thread_id AS thread_id
+           FROM run_attempts a JOIN runs r ON r.run_id = a.run_id
+          WHERE json_extract(a.provider_ref, '$.sessionId') IN (${sessionIds.map(() => '?').join(', ')})`
+      )
+      .all(...sessionIds)
+    for (const row of rows) found.set(String(row.session_id), String(row.thread_id))
+    return found
   }
 
   listAttempts(runId: string): AttemptRecord[] {
@@ -482,6 +505,17 @@ export class RunStore {
         )
       return record
     })
+  }
+
+  /** Records provider acceptance before dropping the queue row that identifies this send. */
+  recordSteerDelivery(threadId: string, requestId: string, itemId: string, runId: string): void {
+    this.db.statement(
+      `UPDATE receipts SET result = json_set(result, '$.steerDeliveredRunId', ?)
+       WHERE client_request_id = ? AND thread_id = ? AND command_kind = 'send' AND status = 'accepted'
+         AND json_extract(result, '$.steerRunId') = ?
+         AND (json_extract(result, '$.steerItemId') = ? OR json_extract(result, '$.steerItemId') IS NULL)
+         AND json_extract(result, '$.steerDeliveredRunId') IS NULL`
+    ).run(runId, requestId, threadId, runId, itemId)
   }
 
   /** Appends to the thread's event log and returns the new `seq`. */

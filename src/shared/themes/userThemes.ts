@@ -1,4 +1,5 @@
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from './cssSafety'
+import { isWallpaperId, WALLPAPER_UPLOAD_MAX_BASE64, type WallpaperImageType } from './wallpaperImage'
 
 /**
  * A theme a person or an agent made: a built-in theme to start from, color tokens over it and optional CSS. Saved in
@@ -17,6 +18,52 @@ export interface UserTheme {
   colors: Record<string, string>
   /** Extra CSS, at most `THEME_CSS_MAX_LENGTH` characters. Rules that could load anything are dropped when it is applied (`sanitizeThemeCss`). */
   css: string
+  /** An image behind the chat, kept by the daemon in the profile's wallpaper store; absent: none. */
+  wallpaper?: ThemeWallpaper
+}
+
+/** How the wallpaper fills the chat: cover crops it to fill, contain shows all of it. */
+export type WallpaperFit = 'cover' | 'contain'
+export const WALLPAPER_FITS: readonly WallpaperFit[] = ['cover', 'contain']
+/** Which part of the image stays in view when it is cropped (`cover`), or where it sits (`contain`). */
+export type WallpaperPosition = 'center' | 'top' | 'bottom' | 'left' | 'right' | 'top left' | 'top right' | 'bottom left' | 'bottom right'
+export const WALLPAPER_POSITIONS: readonly WallpaperPosition[] = ['center', 'top', 'bottom', 'left', 'right', 'top left', 'top right', 'bottom left', 'bottom right']
+/** The most a person can dim the wallpaper by, in percent; the window may dim it more to keep text readable. */
+export const WALLPAPER_MAX_DIM = 90
+export const WALLPAPER_DEFAULT_DIM = 40
+
+/**
+ * A theme's wallpaper: which stored image (the sha-256 of its bytes, never a path) and how it shows. Its type and size
+ * are what the daemon read from the image when it was stored, for display only.
+ */
+export interface ThemeWallpaper {
+  id: string
+  type: WallpaperImageType
+  width: number
+  height: number
+  fit: WallpaperFit
+  position: WallpaperPosition
+  /** 0 to `WALLPAPER_MAX_DIM`. */
+  dim: number
+}
+
+/** A stored or written wallpaper, or undefined when it does not name a stored image. Bad display fields get defaults. */
+export function normalizeThemeWallpaper(raw: unknown): ThemeWallpaper | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const value = raw as Record<string, unknown>
+  if (!isWallpaperId(value.id)) return undefined
+  const type: WallpaperImageType = value.type === 'image/png' || value.type === 'image/jpeg' || value.type === 'image/webp' ? value.type : 'image/png'
+  const side = (n: unknown): number => (typeof n === 'number' && Number.isInteger(n) && n > 0 && n <= 16_384 ? n : 0)
+  const dim = typeof value.dim === 'number' && Number.isFinite(value.dim) ? Math.round(Math.min(WALLPAPER_MAX_DIM, Math.max(0, value.dim))) : WALLPAPER_DEFAULT_DIM
+  return {
+    id: value.id,
+    type,
+    width: side(value.width),
+    height: side(value.height),
+    fit: (WALLPAPER_FITS as readonly unknown[]).includes(value.fit) ? value.fit as WallpaperFit : 'cover',
+    position: (WALLPAPER_POSITIONS as readonly unknown[]).includes(value.position) ? value.position as WallpaperPosition : 'center',
+    dim
+  }
 }
 
 export type UserThemeBase = 'dark' | 'light' | 'blacksphere-plus' | 'solarized-dark' | 'github-dark' | 'high-contrast'
@@ -44,6 +91,17 @@ export interface UserThemeFile {
   accent?: string
   colors?: Record<string, string>
   css?: string
+  /** The wallpaper, carried in the file: a WebP display copy as base64 (older builds ignore it). */
+  wallpaper?: UserThemeFileWallpaper
+}
+
+export interface UserThemeFileWallpaper {
+  type: 'image/webp'
+  /** Base64 of the image, at most `WALLPAPER_UPLOAD_MAX_BYTES` bytes. */
+  data: string
+  fit: WallpaperFit
+  position: WallpaperPosition
+  dim: number
 }
 
 const TOKEN_NAME = /^--[a-z][a-z0-9-]{0,62}$/
@@ -122,8 +180,13 @@ export function normalizeUserTheme(raw: unknown): UserTheme | null {
     accent: normalizeAccent(value.accent),
     colors: normalizeColors(value.colors),
     // Never cut: CSS over the limit is refused where it is written (settings, theme_set, import, the editor).
-    css: typeof value.css === 'string' ? value.css : ''
+    css: typeof value.css === 'string' ? value.css : '',
+    ...withWallpaper(normalizeThemeWallpaper(value.wallpaper))
   }
+}
+
+function withWallpaper(wallpaper: ThemeWallpaper | undefined): { wallpaper?: ThemeWallpaper } {
+  return wallpaper ? { wallpaper } : {}
 }
 
 /** The stored list: valid themes only, each id once, at most `USER_THEME_LIMITS.themes`. */
@@ -141,8 +204,9 @@ export function normalizeUserThemes(raw: unknown): UserTheme[] {
   return out
 }
 
-/** The file a theme exports as. */
-export function userThemeFile(theme: UserTheme): UserThemeFile {
+/** The file a theme exports as; `image` is its wallpaper's display copy as base64, when it has one that could be read. */
+export function userThemeFile(theme: UserTheme, image?: string): UserThemeFile {
+  const wallpaper = theme.wallpaper
   return {
     kind: USER_THEME_FILE_KIND,
     version: USER_THEME_FILE_VERSION,
@@ -150,12 +214,16 @@ export function userThemeFile(theme: UserTheme): UserThemeFile {
     base: theme.base,
     ...(theme.accent ? { accent: theme.accent } : {}),
     ...(Object.keys(theme.colors).length ? { colors: theme.colors } : {}),
-    ...(theme.css ? { css: theme.css } : {})
+    ...(theme.css ? { css: theme.css } : {}),
+    ...(wallpaper && image ? { wallpaper: { type: 'image/webp' as const, data: image, fit: wallpaper.fit, position: wallpaper.position, dim: wallpaper.dim } } : {})
   }
 }
 
+/** The largest theme file read, in bytes: the CSS limit and a wallpaper with room to spare. */
+export const USER_THEME_FILE_MAX_BYTES = 6 * 1024 * 1024
+
 /** A theme read from an exported file, with a new id that none of `taken` uses; an error says what is wrong. */
-export function parseUserThemeFile(text: string, taken: Iterable<string>): { theme: UserTheme } | { error: string } {
+export function parseUserThemeFile(text: string, taken: Iterable<string>): { theme: UserTheme; wallpaper?: UserThemeFileWallpaper } | { error: string } {
   let raw: unknown
   try {
     raw = JSON.parse(text)
@@ -168,36 +236,59 @@ export function parseUserThemeFile(text: string, taken: Iterable<string>): { the
   const name = normalizeName(value.name)
   if (!name) return { error: 'The theme has no name.' }
   if (typeof value.css === 'string' && value.css.length > USER_THEME_LIMITS.css) return { error: themeCssTooLong(value.css.length) }
-  const theme = normalizeUserTheme({ ...value, id: userThemeIdFor(name, taken), name })
-  return theme ? { theme } : { error: 'This file is not a Mousse theme.' }
+  // A file never names a stored image: its wallpaper travels as bytes, stored on import (`wallpaperImportBytes`).
+  const theme = normalizeUserTheme({ ...value, wallpaper: undefined, id: userThemeIdFor(name, taken), name })
+  if (!theme) return { error: 'This file is not a Mousse theme.' }
+  const wallpaper = fileWallpaper(value.wallpaper)
+  return wallpaper ? { theme, wallpaper } : { theme }
+}
+
+function fileWallpaper(raw: unknown): UserThemeFileWallpaper | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const value = raw as Record<string, unknown>
+  if (typeof value.data !== 'string' || !value.data || value.data.length > WALLPAPER_UPLOAD_MAX_BASE64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value.data)) return undefined
+  // The id is a stand-in: only the display fields are kept from it.
+  const shown = normalizeThemeWallpaper({ ...value, id: '0'.repeat(64) })
+  return shown ? { type: 'image/webp', data: value.data, fit: shown.fit, position: shown.position, dim: shown.dim } : undefined
 }
 
 /** The color tokens a theme usually sets, with what each one paints. Listed in the guide and offered in the editor. */
 export const THEME_TOKENS: ReadonlyArray<{ name: string; use: string }> = [
-  { name: '--surface-base', use: 'window background' },
-  { name: '--surface-strong', use: 'sidebar and raised panels' },
+  { name: '--surface-base', use: 'the window: title bar, rail, sidebar and the edges around the chat pane, one color (with acrylic, the glass tint)' },
+  { name: '--surface-strong', use: 'raised panels' },
+  { name: '--pane-surface', use: 'the rounded chat pane in the middle (a thread or a bot\'s chat); its fades, bubbles and composer follow it' },
   { name: '--surface-soft', use: 'hovered rows, inputs' },
   { name: '--surface-elevated', use: 'menus and popovers' },
   { name: '--text-primary', use: 'main text' },
   { name: '--text-secondary', use: 'secondary text' },
   { name: '--border', use: 'borders and dividers' },
+  { name: '--specular-top', use: 'the edge light on every raised surface (composer, popovers, selected tabs and rows, the profile button, avatars, the chat pane\'s edge): a 1px ring at its brightest along the top' },
+  { name: '--specular-mid', use: 'that ring halfway down the sides' },
+  { name: '--specular-end', use: 'that ring at the bottom edge' },
+  { name: '--selected-row-fill-edge', use: 'the selected sidebar row\'s fill (a thread, a bot or a chat): a horizontal band, this at its ends' },
+  { name: '--selected-row-fill-mid', use: 'that band at its middle, which drifts slowly left and right' },
+  { name: '--selected-row-ring-edge', use: 'the selected sidebar row\'s 1px edge at its ends (its lower half fades into the sidebar)' },
+  { name: '--selected-row-ring-mid', use: 'that edge at the band\'s middle' },
   { name: '--accent', use: 'accent (prefer the theme\'s accent field, which also sets its shades)' }
 ]
 
 /** Stable selectors theme CSS may rely on. `tests/themeSelectors.test.ts` fails when one disappears from the app. */
 export const THEME_SELECTORS: ReadonlyArray<{ selector: string; part: string }> = [
   { selector: '[data-mousse="rail"]', part: 'navigation rail (far left)' },
+  { selector: '[data-mousse="rail-item"]', part: 'every item on the rail, one look; data-mousse-item names it (home, search, automations, downloads, usage, settings, profile); the open page\'s item has aria-current="page", one whose menu is open aria-expanded="true"' },
   { selector: '[data-mousse="sidebar"]', part: 'threads and projects sidebar' },
   { selector: '[data-mousse="titlebar"]', part: 'title bar' },
-  { selector: '[data-mousse="chat-header"]', part: 'the open thread\'s path and back/forward in the title bar; a chat\'s header in Chats' },
-  { selector: '[data-mousse="chat"]', part: 'an open thread\'s chat pane' },
+  { selector: '[data-mousse="chat-header"]', part: 'the open thread\'s path and back/forward in the title bar; a chat\'s or a bot\'s header in Chats and on a bot\'s thread' },
+  { selector: '[data-mousse="chat"]', part: 'an open thread\'s chat pane, or a bot\'s chat' },
   { selector: '[data-mousse="transcript"]', part: 'the scrolling list of messages' },
-  { selector: '[data-mousse="user-message"]', part: 'one message bubble the person sent' },
-  { selector: '[data-mousse="assistant-message"]', part: 'one reply from the agent' },
+  { selector: '[data-mousse="user-message"]', part: 'one message bubble the person sent (in a thread or to a bot), or one a bot or agent sent into a thread' },
+  { selector: '[data-mousse="assistant-message"]', part: 'one reply from the agent, or one message of a bot in its chat' },
   { selector: '[data-mousse="composer"]', part: 'the message box' },
   { selector: '[data-mousse="project-icon"]', part: 'a project\'s icon (an image, or a wrapper around its folder glyph or initials)' },
   { selector: '[data-mousse="side-card"]', part: 'the thread details card' },
-  { selector: '[data-mousse="settings"]', part: 'the Settings page (themed on Appearance only)' }
+  { selector: '[data-mousse="panel"]', part: 'the panel area on the right (browser, terminal, files, changes)' },
+  { selector: '[data-mousse="settings"]', part: 'the Settings page (themed on Appearance only)' },
+  { selector: '[data-mousse="wallpaper"]', part: 'the theme\'s wallpaper layer behind the chat (present only while a wallpaper shows)' }
 ]
 
 /** The short styling guide the theme tools give an agent. */
@@ -207,9 +298,12 @@ export function themeStylingGuide(): string {
     `The page root is html[data-theme="<base>"]; while a user theme is on it also has data-user-theme="<id>".`,
     'Tokens (set them in colors; in css they need !important, because Mousse sets them inline):',
     ...THEME_TOKENS.map((token) => `  ${token.name}: ${token.use}`),
+    'The background: when a person asks to color the background, the sidebar, the title bar or "behind the pane", set --surface-base. It colors the whole window around the chat pane as one, on every page. Leave the frame\'s parts out of css; give one part its own color (css on its selector) only when the person asks for parts in different colors.',
     'Stable selectors (other class names change without notice):',
     ...THEME_SELECTORS.map((entry) => `  ${entry.selector}: ${entry.part}`),
-    'Where a person decides something (an approval, an ask, a host key) and on Settings pages other than Appearance, the theme is off.',
+    'Wallpaper: set userTheme.wallpaper = { path: "<absolute path of a PNG, JPEG or WebP on this computer>", fit, position, dim }. Mousse checks the image, keeps its own copy and shows a screen-sized copy behind the chat, dimmed by the theme\'s background color (more than dim when text needs it to stay readable). With acrylic on, the wallpaper is see-through so the window\'s glass shows; css does not need to change its opacity. Leave path out to change only fit, position or dim; null removes it. Never put an image in css as a data: address.',
+    'While a wallpaper shows, html has data-wallpaper and var(--mousse-wallpaper) holds it, so css can reuse it elsewhere: [data-mousse="sidebar"] { background: var(--mousse-wallpaper) center / cover; }. Text on it must stay readable.',
+    'The theme never goes off as a whole: its colors and wallpaper show everywhere. Only its css is off where a person decides something (an approval, a permission, a host key) or where access is set up (Settings pages other than Appearance, the Automations page, a bot\'s About panel, the permission menu, the agent editor, an automation draft), so color the window with tokens, not css.',
     `Rules: nothing may load from outside. The only url() allowed is a quoted data: address, url("data:..."); @import, image-set(), src(), attr() and every other url() are dropped, declaration by declaration; invalid CSS is dropped by the browser rule by rule. CSS over ${THEME_CSS_MAX_LENGTH.toLocaleString('en-US')} characters is refused. Keep text readable (4.5:1 contrast) and do not hide controls.`
   ].join('\n')
 }

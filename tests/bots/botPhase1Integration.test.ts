@@ -145,7 +145,7 @@ function world(): World {
     schedules: book
   }
   engine = new BotEngine(host)
-  scheduler.setBotRunner({ runOccurrence: (input) => engine.runScheduledOccurrence(input) })
+  scheduler.setBotRunner({ findOccurrence: (input) => engine.findScheduledOccurrence(input), runOccurrence: (input) => engine.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => engine.maintain(now))
   const own = botTools(() => ({ host: engine.tools, activity }))
   const remembered = botMemoryTools(() => ({
@@ -252,7 +252,7 @@ describe('Bot Phase 1, composed', () => {
     const d1 = w.store.dispatch(w.store.listActivations(botId)[0]!.id, 1)!
     expect(w.store.get('SELECT child_pid, exit_at FROM bot_dispatches WHERE client_request_id = ?', d1.clientRequestId)).toMatchObject({ child_pid: expect.any(Number), exit_at: expect.any(Number) })
     // About never lists the bot's own tools.
-    expect(w.engine.service.get(botId).permissions).toEqual([])
+    expect(w.engine.service.get(botId).permissions.filter((item) => !item.builtIn)).toEqual([])
 
     // The owner's chat: the message row belongs to the activation it starts, so its pack leaves it out.
     w.clock.now += 60_000
@@ -317,7 +317,7 @@ describe('Bot Phase 1, composed', () => {
     expect(lastBot(botId)).toMatchObject({ kind: 'run_report', text: 'Tonight: risotto. I could not run the command.' })
     // Allow: the next run may run commands, and About lists it.
     await w.engine.service.answer(botId, cards[0]!.ask!.askId, 'allow')
-    expect(w.engine.service.get(botId).permissions.map((item) => item.title)).toEqual(['run commands'])
+    expect(w.engine.service.get(botId).permissions.filter((item) => !item.builtIn).map((item) => item.title)).toEqual(['run commands'])
   })
 
   it('forgetting in the chat leaves no forgotten text in the chip that is stored', async () => {
@@ -440,7 +440,7 @@ describe('a saved preference reaches every turn', () => {
   const followsCore = (prepared: PreparedBotTurn) => {
     expect(prepared.preamble).toContain(`About the owner:\n[m1 · 7 Nov 2026] ${WISH}`)
     expect(prepared.preamble).toContain('Core memory is what the owner told you and your own standing notes. Follow it in every message and report')
-    expect(prepared.instructions).toContain('Follow its core memory every time, in chat replies and in reports')
+    expect(prepared.instructions).toContain('Follow its core memory every time, in chat replies, reports and wake-ups')
   }
 
   it('the next chat message, a reply, work, a work reminder and a schedule all carry it; a forget takes it out', async () => {

@@ -1,5 +1,5 @@
 /* A new thread's settings sit outside the composer card: the project above its top-left edge, where it runs
-   and Private / Delete after below it. The rows span the composer's width (both live in .chat-input-area),
+   and Private / Archive after below it. The rows span the composer's width (both live in .chat-input-area),
    keep a fixed height so the empty-thread layout does not jump, and leave once the thread starts. */
 .new-thread-row {
   display: flex;

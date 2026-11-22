@@ -5,7 +5,7 @@ description: Wrap up repository work only when the user explicitly asks to end t
 
 # End session
 
-Use this skill only after an explicit request to end the session. Read [the shared team policy](../../../docs/team-workflow.md). Use the outcome already requested. Do not ask again for commit/push/merge authority already given for this task.
+Use this skill only after an explicit request to end the session. Do not read all of [the shared team policy](../../../docs/team-workflow.md); read the section a step names when you reach that step: "Decide what needs tracking" (scope), "Testing scope", "Review and merge", "Failures and interruptions", "Local availability after merge", "Cleanup after merge", and "Writing PRs and issues". Use the outcome already requested. Do not ask again for commit/push/merge authority already given for this task.
 
 Determine whether the work is local-only or intended for the shared codebase before publishing. For local PR testing, temporary integrations, or experiments, preserve the local result and report its location and verification. Do not create issues or PRs, push, or post GitHub handoffs unless explicitly requested. A request to end the session does not by itself promote local work into a shared deliverable. Apply the publishing steps below only to shared work or the specific publication requested.
 
@@ -14,7 +14,7 @@ For shared work, if the user only says "end session," briefly offer WIP handoff,
 ## Inspect before publishing
 
 - Run `node scripts/team-status.mjs --fetch` from the repository root. Identify this task's issue, branch, PR, diff, and relevant checks. Inspect unexpected changes and resolve ownership ambiguity before staging them.
-- Review the task diff; stage explicit paths or hunks. Preserve unrelated edits. If there is no useful change, report that fact; create no empty commit or PR and delete nothing automatically.
+- Review the whole task diff: `git diff --stat` against the base first, then each changed file's diff in turn (skip generated files and lockfiles unless they are the change). The stat is a map, not the review. Stage explicit paths or hunks. Preserve unrelated edits. If there is no useful change, report that fact; create no empty commit or PR and delete nothing automatically.
 - Use focused checks for the changed behavior and directly affected areas, and verify acceptance criteria directly. Session wrap-up alone is not a reason to run the full test suite; it is only for very large changes that affect multiple modules, as described in the shared policy. Reuse passing verification for unchanged code instead of repeating it. Documentation-only changes normally need diff and consistency review, not application tests. State failures and checks not run. WIP that fails its relevant tests may be pushed to its task branch without a PR; it must not be presented as ready to merge.
 - Commit useful task changes, push the task branch, and verify the published commit. Reuse an existing PR rather than opening a duplicate.
 
@@ -30,7 +30,7 @@ Open or update a non-draft PR written as described in "Writing PRs and issues" i
 
 ### Ready to merge
 
-Proceed only with user authorization for this merge. Re-fetch and inspect the current PR head, base, required checks, reviews, and unresolved conversations. The relevant local tests must have passed on the current code and focused verification must cover the current changes. Do not trigger or wait for the manual full-suite CI run as an extra merge gate unless explicitly requested. Follow actual GitHub rules and the shared review policy; never force or administratively bypass a failed requirement.
+Proceed only with user authorization for this merge. Right before merging, refresh every gate: `git fetch`, then read the current PR head, base, required checks, reviews, and unresolved conversations (not a copy from earlier in the session). The relevant local tests must have passed on the current code and focused verification must cover the current changes. Do not trigger or wait for the manual full-suite CI run as an extra merge gate unless explicitly requested. Follow actual GitHub rules and the shared review policy; never force or administratively bypass a failed requirement.
 
 Merge using an enabled repository merge method and guard against merging a newly changed head (for example, `gh pr merge --match-head-commit SHA` with the chosen method). If any gate fails, leave the PR open and explain the blocker.
 

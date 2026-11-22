@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileGitSync } from '../git/gitSpawn'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { access, mkdir, realpath } from 'node:fs/promises'
@@ -40,7 +40,12 @@ import { WorkspaceResolver } from './WorkspaceResolver'
 import { PROJECT_FOLDER_WORKFLOW_REASON, threadPlacement } from './threadPlacement'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { addWorktree, worktreeCheckoutPlan } from '../worktree/worktreeCheckout'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
+import { timeGitSync } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { gitCommonDirAsync } from '../lifecycle/canonicalPath'
+import { findListedWorktreeAsync } from '../lifecycle/worktreeRegistry'
 
 export interface WorkflowWorkspaceOwner {
   profileId: string
@@ -101,7 +106,7 @@ const occupancyTails = new Map<string, Promise<unknown>>()
 
 /** Only for {@link isWorkflowRevisionCurrent}, which the workflow engine asks synchronously. */
 function gitSync(cwd: string, args: string[]): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return timeGitSync(() => execFileGitSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim()
 }
 
 /** Git without blocking the daemon: the same check, command and answer as `execFileSync`. */
@@ -161,9 +166,16 @@ function liveBinding(
   return { thread, project }
 }
 
+/**
+ * Whether Git lists a worktree at `worktreePath` in the repository of `gitTopLevel`. Read from Git's registrations
+ * (`worktreeRegistry`): a worktree that is there costs its own registration, not one real path per worktree of the
+ * repository. A checkout whose `.git` cannot be read is asked of Git as before.
+ */
 async function listedWorktree(gitTopLevel: string, worktreePath: string): Promise<boolean> {
-  const listed = await git(gitTopLevel, ['worktree', 'list', '--porcelain'])
   const wanted = await canonicalPath(worktreePath)
+  const commonDir = await gitCommonDirAsync(gitTopLevel)
+  if (commonDir) return Boolean(await findListedWorktreeAsync(commonDir, wanted, pathsEqual))
+  const listed = await git(gitTopLevel, ['worktree', 'list', '--porcelain'])
   for (const line of listed.split(/\r?\n/)) {
     if (line.startsWith('worktree ') && await pathsEqual(line.slice(9), wanted)) return true
   }
@@ -327,13 +339,16 @@ export async function resolveOwnedThreadWorkspace(
 }
 
 /**
- * Whether the branch a thread's workspace records is the thread's own: `mousse/<slug>`, named once when its worktree was
- * made, or for a thread made before that, `mousse/thread/<thread>/<conversation branch>`. Another thread's id-named branch,
- * and a branch outside `mousse/`, are never its own. With an active conversation branch (`activated`), any of the thread's
- * id-named branches counts, and so does the Git branch a fork made before snapshots recorded, which the checkout may still be on.
+ * Whether the branch a thread's workspace records is the thread's own: one the thread's journal shows Mousse made for
+ * its worktree, under its current name (`recorded`, see `threadBranchRecord`), whatever its prefix; or by the older rule,
+ * any `mousse/<name>`, or `mousse/thread/<thread>/<conversation branch>` for a thread made before branches were named.
+ * Another thread's id-named branch is never its own, nor is a branch outside `mousse/` that the journal does not name.
+ * With an active conversation branch (`activated`), any of the thread's id-named branches counts, and so does the Git
+ * branch a fork made before snapshots recorded, which the checkout may still be on.
  */
-export function isThreadOwnBranch(branch: string, threadId: string, conversationBranchId: string, activated?: { gitBranch?: string }): boolean {
+export function isThreadOwnBranch(branch: string, threadId: string, conversationBranchId: string, activated?: { gitBranch?: string }, recorded?: ReadonlySet<string>): boolean {
   if (activated?.gitBranch && branch === activated.gitBranch) return true
+  if (recorded?.has(branch) && !isIdNamedMousseBranch(branch)) return true
   if (!isMousseBranchName(branch)) return false
   if (!isIdNamedMousseBranch(branch)) return true
   return activated ? branch.startsWith(`mousse/thread/${threadId}/`) : branch === `mousse/thread/${threadId}/${conversationBranchId}`
@@ -357,13 +372,17 @@ async function validateThreadWorkspaceMetadata(
     .find((branch) => branch.id === branchId && branch.lifecycle === 'active')
   // Activating a conversation branch no longer switches Git branches, so the checkout stays on the thread's own; forks made
   // before snapshots recorded a Git branch of their own, which the checkout may still be on.
-  const ownBranch = isThreadOwnBranch(metadata.branch, threadId, branchId, activated)
+  // The journal is read only for a branch the older rule does not cover (a renamed branch, a prefix the person chose).
+  const ownBranch = isThreadOwnBranch(metadata.branch, threadId, branchId, activated) || isThreadOwnBranch(metadata.branch, threadId, branchId, activated, manager.branchRecord(metadata).owned)
   const expectedRef = activated?.retainedRef ?? `refs/mousse/threads/${threadId}/${branchId}`
   // A worktree made in a worktree folder the person chose is named after the thread's branch there (`worktreeLayout`).
   const inChosenFolder = Boolean(chosenFolderPlace(metadata.worktreePath)) && isThreadWorktreePlace(metadata.worktreePath, { home: getMousseHomeDir(), repositoryId: repository.repositoryId, threadId })
   const ownedPath = inChosenFolder || (activated
     ? await pathInside(dirname(expectedPath), metadata.worktreePath)
-    : await pathsEqual(metadata.worktreePath, expectedPath))
+    : await pathsEqual(metadata.worktreePath, expectedPath) ||
+      isThreadWorktreePlace(await canonicalPath(metadata.worktreePath), {
+        home: await canonicalPath(getMousseHomeDir()), repositoryId: repository.repositoryId, threadId, conversationBranchId: branchId
+      }))
   if (
     metadata.threadId !== threadId ||
     metadata.repositoryId !== repository.repositoryId ||
@@ -788,7 +807,7 @@ async function createAgentWorktree(input: {
     if (branchExists) {
       throw new DomainRpcError('unknown_effect', 'Workflow agent branch exists without its owned record')
     } else {
-      await git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await addWorktree({ cwd: input.thread.workspacePath, worktreePath: identity.path, add: ['-b', identity.branch, identity.path, baseSha], plan: await worktreeCheckoutPlan(input.thread.gitTopLevel) })
       // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
       const moved = await moveFilesToSnapshotAsync(identity.path, await git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.sha, { owner: input.thread.threadDirectory, action: 'Starting the agent worktree' })
       const notice = movedFilesNotice(moved)

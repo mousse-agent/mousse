@@ -1,6 +1,7 @@
 import { createAndSelectProjectThread, selectThread } from '../lib/threadActions'
 import { scrollToMessage } from '../stores/chatNavigationStore'
 import { useAppStore, type PaletteMode } from '../stores/appStore'
+import { useChatsStore } from '../stores/chatsStore'
 import type { PaletteItem } from './paletteItems'
 import { runCommand } from './commandRegistry'
 import { loadEarlierUntil } from '../components/EarlierMessagesBar'
@@ -31,7 +32,7 @@ export function closePalette({
   then?.()
 }
 
-/** Opens the palette; `messages` (Search threads) puts message hits first. */
+/** Opens the palette; `messages` opens it as Search everything, with what was found first and commands last. */
 export function openPalette(mode: PaletteMode = 'all'): void {
   opener = typeof document === 'undefined' ? null : (document.activeElement as FocusTarget | null)
   useAppStore.getState().setPaletteOpen(true, mode)
@@ -68,6 +69,10 @@ export function chooseCommandPaletteItem(item: PaletteItem): void {
   dismissPalette(() => {
     if (item.kind === 'command') runCommand(item.id, 'palette')
     else if (item.kind === 'thread') void selectThread(item.id)
+    else if (item.kind === 'bot') void useChatsStore.getState().openBot(item.id)
+    else if (item.kind === 'chat') void useChatsStore.getState().openChat(item.id)
+    // A hit in a bot's or a chat's own thread opens that chat, in the Chats tab.
+    else if (item.kind === 'message' && item.place) void (item.place.kind === 'bot' ? useChatsStore.getState().openBot(item.place.id) : useChatsStore.getState().openChat(item.place.id))
     else if (item.kind === 'message') void openMessage(item.threadId, item.id)
     else if (item.threadId) void selectThread(item.threadId)
     else void createAndSelectProjectThread(item.id)

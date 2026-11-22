@@ -1,4 +1,6 @@
+import { normalizeErrorReportSettings, type ErrorReportSettings } from './bugReports'
 import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/profiler'
+import { normalizeDriverPath } from './computerUse'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
 import { normalizeGoalTurnLimit } from './threadGoal'
@@ -8,6 +10,7 @@ import type { ModelOverride } from './providerInstances'
 import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
+import { normalizeBranchPrefix, type BranchNamingMode } from './mousseBranches'
 import type { ShortcutOverrides } from './commands'
 import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
 import { normalizeUserThemes, type UserTheme } from './themes/userThemes'
@@ -45,6 +48,8 @@ export interface AgentModelOption {
   group?: string
 }
 
+export type ThreadProjectColorStyle = 'off' | 'outline' | 'fill' | 'gradient'
+
 export interface AppearanceSettings {
   /** The built-in theme in use: the active user theme's base while one is on. */
   theme: ThemeId
@@ -65,8 +70,10 @@ export interface AppearanceSettings {
   interfaceFont: FontChoice
   /** Font for monospace text: code, diffs, the file editor and terminals. */
   codeFont: FontChoice
-  /** Tint each thread in the Threads tab with its project's color. */
-  threadProjectColors: boolean
+  /** How cards in the Threads tab show their project's color. */
+  threadProjectColors: ThreadProjectColorStyle
+  /** Thread link cards and the Bots list show the latest reply under each title, on one muted line. */
+  replyPreviews: boolean
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
@@ -147,6 +154,11 @@ export interface NotificationSettings {
    * sent in, or that was opened here in the last seven days, notifies.
    */
   allRemoteThreads: boolean
+  /**
+   * Notify for threads a personal bot keeps out of the sidebar (`Thread.hidden`), and their subagents, like any
+   * thread. Absent means off: such a thread raises no banner, sound, toast or Needs me count until it is shown.
+   */
+  botThreads?: boolean
   /** The channels chosen for each event. A channel not chosen yet is on. */
   events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
   /**
@@ -314,7 +326,7 @@ export interface AgentAccessSettings {
   /** An agent may answer a pending approval on another thread. */
   answerApprovals: boolean
   /**
-   * "Let agents start subagents on your other devices". Off, the default, refuses every remote subagent
+   * "Let agents work on your other devices" (named "Subagents on other devices" before). Off, the default, refuses every remote subagent
    * whatever `computers` lists; the list is kept, so turning it back on restores the same computers.
    */
   remoteSubagents: boolean
@@ -324,6 +336,13 @@ export interface AgentAccessSettings {
    * chosen here.
    */
   computers: string[]
+  /**
+   * Computer use (Settings → Computer use): threads' agents may see and operate apps on this computer through Cua
+   * Driver. On unless turned off; a bot still needs "use the computer" (`src/shared/computerUse.ts`).
+   */
+  computerUse: boolean
+  /** The Cua Driver the person chose; absent: Mousse looks on the PATH and in the installer's folder. */
+  computerDriver?: string
 }
 
 const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
@@ -353,7 +372,9 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   return {
     answerApprovals: raw?.answerApprovals === true,
     remoteSubagents: raw?.remoteSubagents === true,
-    computers
+    computers,
+    computerUse: raw?.computerUse !== false,
+    ...((driver) => (driver ? { computerDriver: driver } : {}))(normalizeDriverPath(raw?.computerDriver))
   }
 }
 
@@ -369,16 +390,27 @@ export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
   newThreadWorktree: boolean
-  /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
+  /** When a new private thread archives itself (`Thread.expiresAt`); `never`: it does not. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** How many turns Mousse starts for a thread's goal (`/goal`) before it stops; Continue allows as many again. */
   goalTurnLimit: number
+  /**
+   * Keep this computer from sleeping while a run of a thread, a subagent or a bot is working, and for a short grace
+   * after the last one ends. The screen may still turn off. Absent counts as on.
+   */
+  keepAwake: boolean
   /**
    * How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2). `strict`: on
    * a provider that reports a tool only when it starts, a steer held for a tool waits for the provider's own turn to
    * end, or Send now. Absent or `best_effort`: it goes in shortly after the tool. No UI sets it.
    */
   steerRelease?: Record<string, SteerRelease>
+  /**
+   * Whether the title bar's New thread asks for the project first, in a grid of projects, instead of opening a blank
+   * thread in the last project at once. A new profile starts with it on; a profile already in use when the picker came
+   * starts with it off (`settleNewThreadPickerDefault`). Absent counts as on.
+   */
+  newThreadPicker?: boolean
 }
 
 export type SteerRelease = 'best_effort' | 'strict'
@@ -393,6 +425,7 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
     : []
   return {
     ...(release.length ? { steerRelease: Object.fromEntries(release) } : {}),
+    ...(typeof raw?.newThreadPicker === 'boolean' ? { newThreadPicker: raw.newThreadPicker } : {}),
     resumeAfterUsageLimit: raw?.resumeAfterUsageLimit === true,
     usageLimitPauseCap:
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
@@ -400,128 +433,51 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
     newThreadWorktree: raw?.newThreadWorktree !== false,
     privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never',
-    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit)
+    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit),
+    keepAwake: raw?.keepAwake !== false
   }
 }
 
 /**
- * Features that are still being tried out, each off until turned on.
+ * Features that are still being tried out, each off until turned on (Mousse ID (legacy) is the exception: on until
+ * turned off).
  *
  * `subagentWorktrees`: Mousse gives every subagent it starts a worktree of its own, made when the subagent starts from the
  * parent's current HEAD, on a `mousse/` branch, whatever the main agent asked for. Off: the main agent chooses, as it
  * always has (`workspace` isolated or shared). Either way a subagent's work is reported, never merged.
  */
 export interface ExperimentalSettings {
+  botAsksFirstOff: boolean
   subagentWorktrees: boolean
+  /**
+   * Mousse ID (legacy), on unless turned off: today's Mousse ID sign-in, hosted relay and phone requests through
+   * Mousse Plus. Off, this profile's networking sends nothing to Mousse Plus and runs on LAN, SSH, tunnels and
+   * self-hosted relays only, as while the new networking engine and Plus are built and tried.
+   */
+  plusLegacy: boolean
+  /**
+   * Performance (Settings → Labs), off unless turned on: moving bot faces are a body picture drawn once per state with
+   * flat 2D eyes animated over it, instead of the whole face drawn in 3D every frame.
+   */
+  hybridBotFaces: boolean
+  sidebarAnimations: boolean
+  newChatAnimations: boolean
+  shimmerAnimations: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
 
 export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
-  return { subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
-}
-
-/**
- * What bots may do on this computer (Settings → Agents → What bots may do here): a ceiling over every bot's grant, kept
- * once for the whole installation (the top-level `bots` key of the installation's `mousse.conf`), so every profile's
- * bots are held to it and every profile's Settings shows it. It is never sent to or set from another computer
- * (`settings.*` methods are not routed). A switch that is off gives no bot that permission here, whatever its grant
- * holds, and no bot can ask for it.
- */
-export interface BotComputerLimit {
-  /** "Run commands" (`shell`). */
-  shell: boolean
-  /** "Use the browser" (the bot's own browser). */
-  browser: boolean
-  /**
-   * "Use your threads": a bot may read the owner's threads, start threads (which run in Full access) and message them.
-   * Off, no bot here holds it whatever its grant says, which is what keeps a computer where bots must not run commands
-   * that way: a thread a bot starts runs commands without asking.
-   */
-  threads: boolean
-}
-
-export interface BotSettings {
-  here: BotComputerLimit
-  /**
-   * The stored setting could not be read (the settings file was unreadable and replaced, or the setting is malformed):
-   * every switch reads off until the owner sets them again. Settings says so beside the switches.
-   */
-  unreadable?: true
-}
-
-/** Every switch of What bots may do here, in the order Settings shows them: what a stored value must hold, and the only keys a write may name. */
-export const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'browser', 'threads']
-
-/**
- * Switches added after the setting was first saved: a stored value without one of them was written before it existed,
- * so it reads as on (its default), never as unreadable. Present and not a boolean still fails closed.
- */
-const BOT_SWITCHES_ADDED_LATER: ReadonlySet<keyof BotComputerLimit> = new Set(['threads'])
-
-/** The Use your threads switch's tooltip: what a bot can do through a thread, whatever the other switches say. */
-export const BOTS_THREADS_TIP =
-  'A thread a bot starts runs with full access, so it can run commands and change files even with Run commands off. Switch this off to keep bots from that here.'
-
-/** Settings' one line beside the switches while the stored setting can't be read (`BotSettings.unreadable`). */
-export const BOTS_UNREADABLE_LINE = "All off: the saved setting couldn't be read. Switch on what bots may use."
-
-/**
- * The Run commands switch's tooltip: where a bot's commands run without a sandbox they are held to nothing (docs/bots.md,
- * Run commands), so the switch says so, and that it is what closes that on this computer.
- */
-export const BOTS_SHELL_TIP =
-  'Where a bot’s commands run without a sandbox (on Windows, with Pi, and with Claude Code on Linux without bubblewrap and socat), a bot that may run commands can read and change anything your account can, Mousse’s own data included. Switch this off to close that here.'
-
-/** Why a write of What bots may do here was refused: it names one or more of the switches, each on or off. */
-export const BOTS_HERE_SHAPE = `What bots may do here takes { here: { … } } naming one or more of ${BOT_SWITCH_KEYS.join(', ')}, each true or false. Nothing was changed.`
-
-/**
- * The switches a settings update changes for What bots may do here: `{ here: { … } }` naming one or more known switches,
- * each a boolean, and nothing else, or undefined (refused). Each window and the CLI send only the switch they change, and
- * the service puts it over the switches it holds (`MousseConfigStore.setBotsHere`), so a window whose copy is older
- * never turns back a switch another one changed. A switch added later is written the same way.
- */
-export function botSettingsWrite(value: unknown): Partial<BotComputerLimit> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const keys = Object.keys(value)
-  if (keys.length !== 1 || keys[0] !== 'here') return undefined
-  const here = (value as { here: unknown }).here
-  if (!here || typeof here !== 'object' || Array.isArray(here)) return undefined
-  const named = Object.entries(here as Record<string, unknown>)
-  if (!named.length || !named.every(([key, on]) => (BOT_SWITCH_KEYS as readonly string[]).includes(key) && typeof on === 'boolean')) return undefined
-  return Object.fromEntries(named) as Partial<BotComputerLimit>
-}
-
-/**
- * The switches, when `value` is an object holding each as a boolean; undefined otherwise. A switch added after the
- * setting was first saved (`threads`) reads as on when it is missing, since the value was written before it existed. A
- * switch that was removed (`files`, "Use files on this computer") is ignored when an older build stored it.
- */
-export function botComputerLimitOf(value: unknown): BotComputerLimit | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const here = value as Record<string, unknown>
-  const read = (key: keyof BotComputerLimit): boolean | undefined =>
-    typeof here[key] === 'boolean' ? here[key] as boolean : here[key] === undefined && BOT_SWITCHES_ADDED_LATER.has(key) ? true : undefined
-  const switches = Object.fromEntries(BOT_SWITCH_KEYS.map((key) => [key, read(key)])) as Record<keyof BotComputerLimit, boolean | undefined>
-  if (BOT_SWITCH_KEYS.some((key) => switches[key] === undefined)) return undefined
-  return switches as BotComputerLimit
-}
-
-/**
- * The stored setting (the raw top-level `bots` value) as the daemon reads it. Missing (an install that never set it):
- * every switch on, so existing installs keep what they had. Present but not `{ here: { shell, browser, threads } }`
- * with booleans (`threads` may be missing: it was added later), or marked unreadable (written after an unreadable settings
- * file was replaced): every switch off. A ceiling that can't be read fails closed.
- */
-export function normalizeBotSettings(raw: unknown): BotSettings {
-  if (raw === undefined) return { here: { shell: true, browser: true, threads: true } }
-  const shut: BotSettings = { here: { shell: false, browser: false, threads: false }, unreadable: true }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return shut
-  const stored = raw as Record<string, unknown>
-  if (stored.unreadable !== undefined) return shut
-  const here = botComputerLimitOf(stored.here)
-  return here ? { here } : shut
+  return {
+    botAsksFirstOff: raw?.botAsksFirstOff === true,
+    subagentWorktrees: raw?.subagentWorktrees === true,
+    plusLegacy: raw?.plusLegacy !== false,
+    hybridBotFaces: raw?.hybridBotFaces === true,
+    sidebarAnimations: raw?.sidebarAnimations !== false,
+    newChatAnimations: raw?.newChatAnimations !== false,
+    shimmerAnimations: raw?.shimmerAnimations !== false,
+    profiler: normalizeProfilerSettings(raw?.profiler)
+  }
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
@@ -562,6 +518,28 @@ export function normalizeStorageSettings(raw?: Partial<StorageSettings> | null):
   return { worktreeFolder: current, previousWorktreeFolders: previous }
 }
 
+/**
+ * How a thread's worktree branch is named (Settings → Storage → Branches). The worktree is always made at once on
+ * `<prefix>/<random id>`; the title model then names it in the background, unless the thread is private.
+ * `static`: `<prefix>/<slug>`. `semantic`: the model picks a kind (`feat/`, `fix/`, …) instead of the prefix.
+ * `custom`: the model names the whole branch, following `instructions`.
+ */
+export interface BranchNamingSettings {
+  mode: BranchNamingMode
+  /** Without a trailing slash; empty for no prefix. */
+  prefix: string
+  instructions: string
+}
+
+/** The longest naming instructions kept. */
+export const BRANCH_NAMING_INSTRUCTIONS_MAX = 2000
+
+export function normalizeBranchNamingSettings(raw?: Partial<BranchNamingSettings> | null): BranchNamingSettings {
+  const mode = raw?.mode === 'semantic' || raw?.mode === 'custom' ? raw.mode : 'static'
+  const instructions = typeof raw?.instructions === 'string' ? raw.instructions.slice(0, BRANCH_NAMING_INSTRUCTIONS_MAX) : ''
+  return { mode, prefix: normalizeBranchPrefix(raw?.prefix ?? undefined), instructions }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -576,6 +554,10 @@ export interface MousseSettings {
   runs: RunSettings
   experimental: ExperimentalSettings
   storage: StorageSettings
+  /** Settings → Storage → Branches: how thread worktree branches are named. */
+  branches: BranchNamingSettings
+  /** Settings → General → Error reports: the Report button and `report_bug`, and whose account files them. */
+  errorReports: ErrorReportSettings
   provider: {
     llmProvider: LlmProviderId
     /** The model as its agent lists it; the reasoning level is `effort` (absent = the model's default). */
@@ -598,6 +580,8 @@ export interface MousseSettings {
     effort?: string
     /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
     instanceId?: string
+    /** The person's own instructions for the title model (`titleSystemPrompt`); absent or blank for none. */
+    prompt?: string
   }
   /**
    * The model bots run on when a bot's own choice is automatic (Bot Phase 1 §5.6). Blank values are
@@ -608,8 +592,6 @@ export interface MousseSettings {
     model: string
     instanceId?: string
   }
-  /** What bots may do on this computer (`BotComputerLimit`). */
-  bots: BotSettings
   agents: {
     enabled: Record<AgentTypeId, boolean>
     /** Default provider for in-app Mousse subagents; blank inherits the main model. */
@@ -628,7 +610,9 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-export type MousseSettingsUpdate = DeepPartial<MousseSettings>
+export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'experimental'> & {
+  experimental?: Partial<ExperimentalSettings>
+}
 
 export interface ThemeOption {
   id: ThemeId
@@ -766,7 +750,7 @@ export type FrostedComposerSlider = 'frostedComposerOpacity' | 'frostedComposerB
 /** Slider bounds and defaults for the frosted composer. */
 export const FROSTED_COMPOSER_RANGES: Readonly<Record<FrostedComposerSlider, { min: number; max: number; step: number; default: number }>> = {
   frostedComposerOpacity: { min: 20, max: 95, step: 1, default: 60 },
-  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 16 },
+  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 6 },
   frostedComposerSaturation: { min: 1, max: 1.6, step: 0.02, default: 1.12 }
 }
 
@@ -971,7 +955,8 @@ export function getDefaultSettings(): MousseSettings {
       replyPacing: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
-      threadProjectColors: true,
+      threadProjectColors: 'fill',
+      replyPreviews: false,
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
@@ -993,6 +978,8 @@ export function getDefaultSettings(): MousseSettings {
     runs: normalizeRunSettings(),
     experimental: normalizeExperimentalSettings(),
     storage: normalizeStorageSettings(),
+    branches: normalizeBranchNamingSettings(),
+    errorReports: normalizeErrorReportSettings(),
     provider: {
       llmProvider: '',
       model: ''
@@ -1005,7 +992,6 @@ export function getDefaultSettings(): MousseSettings {
       llmProvider: '',
       model: ''
     },
-    bots: normalizeBotSettings(undefined),
     agents: {
       enabled: {
         mousse: true,
@@ -1058,7 +1044,7 @@ export function getDefaultSettings(): MousseSettings {
  * Migrates legacy theme ids (`*-acrylic`) into theme + acrylic boolean.
  */
 export function normalizeAppearance(
-  raw: Partial<AppearanceSettings> & { theme?: string } | null | undefined
+  raw: (Omit<Partial<AppearanceSettings>, 'threadProjectColors'> & { threadProjectColors?: ThreadProjectColorStyle | boolean; theme?: string }) | null | undefined
 ): AppearanceSettings {
   const defaults = getDefaultSettings().appearance
   if (!raw || typeof raw !== 'object') {
@@ -1113,7 +1099,11 @@ export function normalizeAppearance(
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
-      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+      raw.threadProjectColors === false ? 'off'
+        : raw.threadProjectColors === true ? 'fill'
+          : raw.threadProjectColors === 'off' || raw.threadProjectColors === 'outline' || raw.threadProjectColors === 'fill' || raw.threadProjectColors === 'gradient'
+            ? raw.threadProjectColors : defaults.threadProjectColors,
+    replyPreviews: typeof raw.replyPreviews === 'boolean' ? raw.replyPreviews : defaults.replyPreviews,
     threadPathInTitleBar:
       typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,

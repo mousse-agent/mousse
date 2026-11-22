@@ -20,7 +20,7 @@ import { SqliteExecutionLedger } from '../../../src/mms/net/store/executions'
 import { openSecureChannel } from '../../../src/mms/net/link/secureChannel'
 import { fingerprint, generateSelfSignedCert } from '../../../src/mms/net/link/selfSignedCert'
 import { encodeEnvelope } from '../../../src/mms/net/sync/codec'
-import { NetSyncSession } from '../../../src/mms/net/sync/session'
+import { NetSyncSession, type SyncSessionOptions } from '../../../src/mms/net/sync/session'
 import { DurableRpcDispatcher } from '../../../src/mms/net/sync/rpcDispatcher'
 import { SubscriptionReceiver } from '../../../src/mms/net/sync/subscription'
 import { SyncSupervisor } from '../../../src/mms/net/sync/supervisor'
@@ -122,6 +122,8 @@ async function sessions(
     direct?: boolean
     clock?: Clock
     readerCapabilities?: SessionCapability[]
+    /** LAN listener ports each side tells (`lan.port.v1`), and where each hears the other's. */
+    lan?: Partial<Record<'a' | 'b', Pick<SyncSessionOptions, 'lanPort' | 'onPeerLanPort'>>>
   } = {}
 ) {
   const pair = memoryPair()
@@ -173,14 +175,16 @@ async function sessions(
     blobs: p.aBlobs,
     rpc: options.rpc,
     clock: options.clock,
-    onAuthenticated: () => direct?.markAuthenticated(aRaw)
+    onAuthenticated: () => direct?.markAuthenticated(aRaw),
+    ...options.lan?.a
   })
   const b = new NetSyncSession({
     channel: bChannel,
     identity: p.bIdentity,
     store: p.bStore,
     capabilities: options.readerCapabilities ?? ['streams.v1', 'rpc.v1', 'blobs.v1'],
-    clock: options.clock
+    clock: options.clock,
+    ...options.lan?.b
   })
   resources.push(
     () => a.close(),
@@ -944,6 +948,31 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
         internals(session).negotiatedCaps.filter((cap) => cap === 'snapshot.stale.v1')
       ).toHaveLength(1)
   })
+  it('tells its LAN listener port only to a peer that offers lan.port.v1', async () => {
+    // A build from before `lan.port` closes a session on it as an unknown message type, so it is never sent one.
+    const heard = { a: vi.fn(), b: vi.fn() }
+    const older = await sessions(await profiles(), {
+      lan: { a: { lanPort: () => 40_001, onPeerLanPort: heard.a } }
+    })
+    const log = frames(older.a)
+    await Promise.all([older.a.opened, older.b.opened])
+    expect(log.sent.map((frame) => frame.t)).not.toContain('lan.port')
+    expect(older.b.state()).toBe('open')
+
+    const p = await profiles(),
+      both = await sessions(p, {
+        lan: {
+          a: { lanPort: () => 40_001, onPeerLanPort: heard.a },
+          b: { lanPort: () => 40_002, onPeerLanPort: heard.b }
+        }
+      })
+    await Promise.all([both.a.opened, both.b.opened])
+    await vi.waitFor(() => {
+      expect(heard.a).toHaveBeenCalledWith(40_002, expect.objectContaining({ node: p.bIdentity.self()!.node }))
+      expect(heard.b).toHaveBeenCalledWith(40_001, expect.objectContaining({ node: p.aIdentity.self()!.node }))
+    })
+    expect(heard.a).toHaveBeenCalledTimes(1)
+  })
   it('stops a chunk part way when its space is archived, so the archive drains and the reader is not left waiting', async () => {
     const p = await profiles()
     appendLarge(p, 20, 40 * 1024)
@@ -1610,16 +1639,7 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     await rejected
     expect(session.state()).toBe('closed')
   })
-  it('tears down an authenticated session when its verified roster revokes the peer', async () => {
-    const p = await profiles(),
-      connection = await sessions(p)
-    await Promise.all([connection.a.opened, connection.b.opened])
-    p.aIdentity.revoke(p.bIdentity.self()!.node)
-    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
-    await vi.waitFor(() => expect(connection.b.state()).toBe('closed'))
-    expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster())
-  })
-  it('closes a session with revoked once the live roster has dropped the peer', async () => {
+  it('tears down an authenticated session with revoked when its verified roster revokes the peer', async () => {
     const p = await profiles(),
       connection = await sessions(p),
       closed: Array<Error | undefined> = []
@@ -1627,7 +1647,9 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     connection.a.onClosed((error) => closed.push(error))
     p.aIdentity.revoke(p.bIdentity.self()!.node)
     await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
+    await vi.waitFor(() => expect(connection.b.state()).toBe('closed'))
     expect(closed).toEqual([expect.objectContaining({ code: 'revoked' })])
+    expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster())
   })
   it('refuses a revoked peer with revoked, not bad_delegation, once its delegation is dropped', async () => {
     const p = await profiles(),

@@ -1,0 +1,227 @@
+/* The shared specular: one edge light for every raised surface, in place of borders and inset lines. A 1px ring,
+   brightest along the top (--specular-top), faint halfway down (--specular-mid) and gone at the bottom
+   (--specular-end); the stops are theme tokens set in polish.css. Loaded last so it wins over the surfaces' own
+   border colours.
+
+   Left out on purpose: the thread side card (as on master), the selected sidebar row (its own band, at the end of
+   this file), and the surfaces that already draw their own ::after (the empty-state composer's rim, toast cards). */
+
+:where(
+  .app .chat-input-area .composer:not(.chat--empty *),
+  .app .agent-chat-composer,
+  .app .threads-sidebar-tab.active,
+  .settings-seg button.on,
+  .ui-tab.active,
+  .composer-run-menu-segment.selected,
+  .composer-permission-mode.selected,
+  .model-picker-speed-option.selected,
+  .app .profile-sidebar-trigger,
+  .threads-context-menu,
+  .composer-workspace-menu,
+  .profile-menu,
+  .profile-row-menu,
+  .row-menu,
+  .composer-model-menu,
+  .composer-mode-menu,
+  .composer-model-variant-panel,
+  .model-picker-panel,
+  .ui-select-list,
+  .downloads-popover,
+  .context-usage-popover,
+  .font-picker-pop,
+  .thread-search-dialog,
+  .chat-find-bar,
+  .settings-nav-item.active,
+  .composer-command-suggestion.selected,
+  .app .header-toggle-active,
+  .profile-avatar,
+  .chat-avatar[class*='chat-color-']:not(.group),
+  .composer-idle-chip,
+  .changes-primary,
+  .changes-secondary,
+  .changes-chip,
+  .workspace-loading-retry
+) {
+  position: relative;
+}
+
+:is(
+  .app .chat-input-area .composer:not(.chat--empty *),
+  .app .agent-chat-composer,
+  .app .threads-sidebar-tab.active,
+  .settings-seg button.on,
+  .ui-tab.active,
+  .composer-run-menu-segment.selected,
+  .composer-permission-mode.selected,
+  .model-picker-speed-option.selected,
+  .app .profile-sidebar-trigger,
+  .threads-context-menu,
+  .composer-workspace-menu,
+  .profile-menu,
+  .profile-row-menu,
+  .row-menu,
+  .composer-model-menu,
+  .composer-mode-menu,
+  .composer-model-variant-panel,
+  .model-picker-panel,
+  .ui-select-list,
+  .downloads-popover,
+  .context-usage-popover,
+  .font-picker-pop,
+  .thread-search-dialog,
+  .chat-find-bar,
+  .settings-nav-item.active,
+  .composer-command-suggestion.selected,
+  .app .header-toggle-active,
+  .profile-avatar,
+  .chat-avatar[class*='chat-color-']:not(.group),
+  .composer-idle-chip,
+  .changes-primary,
+  .changes-secondary,
+  .changes-chip,
+  .workspace-loading-retry
+)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: var(--specular-ring);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+
+/* The ring is the edge: no border line under it. High contrast keeps its borders. */
+html:not([data-theme='high-contrast']) :is(
+  .app .chat-input-area .composer:not(.chat--empty *),
+  .app .agent-chat-composer,
+  .app .threads-sidebar-tab.active,
+  .settings-seg button.on,
+  .ui-tab.active,
+  .composer-run-menu-segment.selected,
+  .composer-permission-mode.selected,
+  .model-picker-speed-option.selected,
+  .app .profile-sidebar-trigger,
+  .threads-context-menu,
+  .composer-workspace-menu,
+  .profile-menu,
+  .profile-row-menu,
+  .row-menu,
+  .composer-model-menu,
+  .composer-mode-menu,
+  .composer-model-variant-panel,
+  .model-picker-panel,
+  .ui-select-list,
+  .downloads-popover,
+  .context-usage-popover,
+  .font-picker-pop,
+  .thread-search-dialog,
+  .chat-find-bar,
+  .settings-nav-item.active,
+  .composer-command-suggestion.selected,
+  .app .header-toggle-active,
+  .profile-avatar,
+  .chat-avatar[class*='chat-color-']:not(.group),
+  .composer-idle-chip,
+  .changes-primary,
+  .changes-secondary,
+  .changes-chip,
+  .workspace-loading-retry
+) {
+  border-color: transparent;
+}
+
+/* The selected sidebar row (a thread, a bot or a chat): a soft horizontal band of light and a 1px edge with the
+   same band, its lower half fading into the sidebar so the bottom edge is the dimmer one. The band's middle drifts
+   slowly left and right; it holds still with motion reduced or off. No border, shadow or glint. High contrast keeps
+   its plain selected fill. */
+:root {
+  --selected-row-fill-edge: rgba(255, 255, 255, 0.04);
+  --selected-row-fill-mid: rgba(255, 255, 255, 0.095);
+  --selected-row-ring-edge: rgba(255, 255, 255, 0.02);
+  --selected-row-ring-mid: rgba(255, 255, 255, 0.2);
+}
+
+/* On a light sidebar the band is a shade instead of a light. */
+html[data-theme='light'] {
+  --selected-row-fill-edge: rgba(20, 16, 30, 0.035);
+  --selected-row-fill-mid: rgba(20, 16, 30, 0.075);
+  --selected-row-ring-edge: rgba(20, 16, 30, 0.02);
+  --selected-row-ring-mid: rgba(20, 16, 30, 0.16);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] {
+    --selected-row-fill-edge: rgba(20, 16, 30, 0.035);
+    --selected-row-fill-mid: rgba(20, 16, 30, 0.075);
+    --selected-row-ring-edge: rgba(20, 16, 30, 0.02);
+    --selected-row-ring-mid: rgba(20, 16, 30, 0.16);
+  }
+}
+
+html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true']) {
+  position: relative;
+  border-color: transparent;
+  outline-color: transparent;
+  box-shadow: none;
+  background: linear-gradient(90deg,
+    var(--selected-row-fill-edge) 0% 25%, var(--selected-row-fill-mid) 50%, var(--selected-row-fill-edge) 75% 100%)
+    30% 0 / 200% 100% no-repeat;
+  animation: selected-row-band calc(5s * var(--ui-motion-scale, 1)) steps(75) infinite alternate;
+}
+
+html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true'])::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 1px;
+  border-radius: inherit;
+  background:
+    linear-gradient(180deg, transparent 0% 45%, color-mix(in srgb, var(--surface-strong) 75%, transparent) 100%) 0 0 / 100% 100% no-repeat,
+    linear-gradient(90deg,
+      var(--selected-row-ring-edge) 0% 25%, var(--selected-row-ring-mid) 50%, var(--selected-row-ring-edge) 75% 100%)
+      30% 0 / 200% 100% no-repeat;
+  box-shadow: none;
+  opacity: 1;
+  filter: none;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  pointer-events: none;
+  animation: selected-row-band-edge calc(5s * var(--ui-motion-scale, 1)) steps(75) infinite alternate;
+}
+
+@keyframes selected-row-band {
+  from { background-position: 30% 0; }
+  to { background-position: 70% 0; }
+}
+
+@keyframes selected-row-band-edge {
+  from { background-position: 0 0, 30% 0; }
+  to { background-position: 0 0, 70% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true']) {
+    animation: none;
+    background-position: 50% 0;
+  }
+
+  html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true'])::after {
+    animation: none;
+    background-position: 0 0, 50% 0;
+  }
+}
+
+html:not([data-theme='high-contrast']) :is(.app[data-shimmer-motion='off'], [data-motion='off'] .app) :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true']) {
+  animation: none;
+  background-position: 50% 0;
+}
+
+html:not([data-theme='high-contrast']) :is(.app[data-shimmer-motion='off'], [data-motion='off'] .app) :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true'])::after {
+  animation: none;
+  background-position: 0 0, 50% 0;
+}

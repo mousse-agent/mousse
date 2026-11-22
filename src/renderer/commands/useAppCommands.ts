@@ -1,12 +1,14 @@
 import { useEffect } from 'react'
 import type { MousseSettingsUpdate } from '../../shared/settings'
+import { botThreadShownNow } from '../lib/botThread'
 import { applySideCardToggle, deriveSideCardState, nextSideCardToggleState } from '../components/sideCard/sideCardLogic'
 import { openThreadRenameDialog } from '../components/ThreadRenameDialog'
+import { showToast } from '../components/ui/Toast'
 import { openRailPage } from '../lib/railPages'
 import { mainAreaAvailable } from '../lib/mainAreaAvailable'
+import { reloadWindow } from '../services/reloadWindow'
 import { SURFACE_CHOICES, openSurface } from '../lib/surfaces'
 import {
-  addProjectAndStartThread,
   archiveOpenThread,
   createAndSelectPrivateThread,
   createAndSelectThread,
@@ -55,10 +57,10 @@ export function useAppCommands(): void {
     () => void archiveOpenThread().catch(logFailure('Archiving the thread')),
     () => Boolean(openStartedThread() && !openStartedThread()!.settledAt)
   )
-  useCommand('project.open', () => void addProjectAndStartThread().catch(logFailure('Adding the project')))
+  useCommand('project.open', () => useAppStore.getState().setNewProjectOpen(true))
   useCommand('sideCard.toggle', () => {
     const state = useAppStore.getState()
-    const { visible, mode } = deriveSideCardState(state)
+    const { visible, mode } = deriveSideCardState({ ...state, botThreadShown: botThreadShownNow() })
     // In a narrow window the card is an overlay: the command opens or closes it, and leaves the switch alone.
     if (mode === 'overlay') applySideCardToggle(nextSideCardToggleState(visible, state, mode))
     else state.setSideCardOn(!state.sideCardOn)
@@ -76,6 +78,9 @@ export function useAppCommands(): void {
   useCommand('terminal.open', () => openSurface('terminal'))
   // The built-in theme under the user theme stays on; only the user theme's colors and CSS go.
   useCommand('theme.builtIn', () => void window.mousse.settings.set({ appearance: { userTheme: '' } } as MousseSettingsUpdate).catch(logFailure('Turning off the custom theme')))
+  useCommand('window.reload', () => void reloadWindow().then((outcome) => {
+    if (outcome === 'unsaved') showToast({ message: 'Save or close unsaved files first', tone: 'attention', key: 'window.reload' })
+  }))
   useCommand('settings.open', () => void openRailPage('settings'))
   useCommand('automations.open', () => void openRailPage('automations'))
   useCommand('usage.open', () => void openRailPage('usage'))

@@ -35,6 +35,12 @@ export interface MarkdownDocumentEditorProps {
   validationMessages?: MarkdownValidationMessage[]
   variableSuggestions?: MarkdownVariableSuggestion[]
   autoFocus?: boolean
+  /** Draw the Source/Preview switch above the document. Off when the owner puts its own switch elsewhere. */
+  showViewTabs?: boolean
+  /** Wrap long source lines. */
+  wordWrap?: boolean
+  /** Show the source editor's minimap. */
+  minimap?: boolean
   className?: string
   'aria-label'?: string
 }
@@ -64,6 +70,9 @@ export function MarkdownDocumentEditor({
   validationMessages = [],
   variableSuggestions = [],
   autoFocus = false,
+  showViewTabs = true,
+  wordWrap = false,
+  minimap = true,
   className,
   'aria-label': ariaLabel = 'Markdown document'
 }: MarkdownDocumentEditorProps) {
@@ -239,14 +248,14 @@ export function MarkdownDocumentEditor({
       style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, minWidth: 0 }}
       aria-label={ariaLabel}
     >
-      <MarkdownViewTabs
+      {showViewTabs && <MarkdownViewTabs
         viewMode={activeView}
         sourceTabId={sourceTabId}
         previewTabId={previewTabId}
         sourcePanelId={sourcePanelId}
         previewPanelId={previewPanelId}
         onViewModeChange={setView}
-      />
+      />}
       {validationMessages.length > 0 ? (
         <ul className="panel-error" aria-label="Markdown validation">
           {validationMessages.map((message, index) => (
@@ -259,8 +268,8 @@ export function MarkdownDocumentEditor({
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'grid', position: 'relative' }}>
         <div
           id={sourcePanelId}
-          role="tabpanel"
-          aria-labelledby={sourceTabId}
+          role={showViewTabs ? 'tabpanel' : undefined}
+          aria-labelledby={showViewTabs ? sourceTabId : undefined}
           aria-hidden={isPreview}
           className="files-monaco-editor"
           style={{
@@ -284,22 +293,22 @@ export function MarkdownDocumentEditor({
               automaticLayout: false,
               bracketPairColorization: { enabled: true },
               matchBrackets: 'always',
-              minimap: { enabled: true },
+              minimap: { enabled: minimap },
               lineNumbers: 'on',
               scrollBeyondLastLine: false,
               fontFamily: codeFont,
               fontSize: 13,
               tabSize: 2,
               detectIndentation: true,
-              wordWrap: 'off',
+              wordWrap: wordWrap ? 'on' : 'off',
               ariaLabel: `${ariaLabel} source`
             }}
           />
         </div>
         <div
           id={previewPanelId}
-          role="tabpanel"
-          aria-labelledby={previewTabId}
+          role={showViewTabs ? 'tabpanel' : undefined}
+          aria-labelledby={showViewTabs ? previewTabId : undefined}
           aria-hidden={!isPreview}
           style={{
             gridArea: '1 / 1',

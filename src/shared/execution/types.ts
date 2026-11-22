@@ -30,6 +30,12 @@ export interface ExecutionContext {
   readonly policySnapshotId: string
   readonly source: ExecutionSource
   readonly cancellationId: string
+  /**
+   * The browser grant of the person-started task tree the run is in (docs/plans/tool-api.md §2.6), and whether this agent
+   * holds a tab lease in it (`browser.act`). Only the root's agent may take a free in-app tab; every other agent gets
+   * its own.
+   */
+  readonly browserGrant?: { readonly grantId: string; readonly rootThreadId: string; readonly lease: boolean }
 }
 
 export interface ExecutionPolicyLayer {

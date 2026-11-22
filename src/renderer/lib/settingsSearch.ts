@@ -4,7 +4,7 @@ import { shortcutAnchor, shortcutRowTitle } from '../commands/shortcutEditing'
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
-export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'connections', 'storage', 'activity', 'labs'] as const
+export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'computer', 'connections', 'storage', 'activity', 'labs'] as const
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number]
 
 /**
@@ -30,6 +30,7 @@ export interface SettingsSearchEntry {
 /** Every setting the search finds. Rows that exist once per item (a provider, a shortcut, a device) are found by their page. */
 export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Color theme', section: 'appearance', anchor: 'appearance-theme', keywords: ['appearance', 'dark', 'light', 'high contrast', 'custom theme', 'import theme'] },
+  { title: 'Wallpaper', section: 'appearance', anchor: 'appearance-wallpaper', keywords: ['image', 'picture', 'photo', 'backdrop', 'theme'] },
   { title: 'Custom CSS', section: 'appearance', anchor: 'appearance-custom-css', keywords: ['theme', 'css', 'stylesheet', 'custom theme'] },
   { title: 'Accent color', section: 'appearance', anchor: 'appearance-accent', keywords: ['colour', 'appearance'] },
   { title: 'Thread path in title bar', section: 'appearance', anchor: 'appearance-thread-path', keywords: ['breadcrumb', 'back', 'forward', 'history', 'navigation', 'subagent', 'parent'] },
@@ -39,6 +40,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
+  { title: 'Reply previews', section: 'appearance', anchor: 'appearance-reply-previews', keywords: ['sidebar', 'last message', 'latest reply', 'preview', 'threads', 'bots'] },
   { title: 'Conversation', section: 'chat', anchor: 'chat-conversation', keywords: ['transcript', 'replies'] },
   { title: 'Chat width', section: 'chat', anchor: 'chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
   { title: 'Render math', section: 'chat', anchor: 'chat-render-math', keywords: ['latex', 'equations'] },
@@ -52,13 +54,20 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Finished', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'when a thread finishes', 'completion sound', 'toast', 'system notification', 'done'] },
   { title: 'Needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'when a thread needs you', 'question', 'approval', 'toast', 'sound'] },
   { title: 'Stopped', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'when a thread stops', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
+  { title: 'Keep computer awake', section: 'general', anchor: 'general-keep-awake', keywords: ['sleep', 'awake', 'power', 'caffeinate', 'suspend', 'idle', 'battery'] },
   { title: 'Goal turn limit', section: 'general', anchor: 'general-goal-turns', keywords: ['goal', '/goal', 'turns', 'continue', 'keep working', 'limit', 'autonomous'] },
-  { title: 'Delete private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto delete', 'timer', 'incognito', 'chats'] },
+  { title: 'Pick a project for new threads', section: 'general', anchor: 'general-new-thread-picker', keywords: ['new thread', 'project picker', 'picker', 'grid', 'choose project', 'one click'] },
+  { title: 'Archive private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto archive', 'auto delete', 'timer', 'incognito', 'chats'] },
   { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },
+  { title: 'Notify for bot threads', section: 'general', anchor: 'general-bot-thread-notifications', keywords: ['notifications', 'bots', 'hidden', 'sidebar'] },
   { title: 'Updates', section: 'general', anchor: 'general-updates', keywords: ['version', 'check for updates', 'about', 'upgrade'] },
+  { title: 'Error reports', section: 'general', anchor: 'general-error-reports', keywords: ['bug report', 'report an error', 'feedback'] },
+  { title: 'Report button', section: 'general', anchor: 'general-report-button', keywords: ['error reports', 'bug report', 'feedback', 'github issue'] },
+  { title: 'File with gh', section: 'general', anchor: 'general-report-with-gh', keywords: ['error reports', 'bug report', 'github account', 'anonymous'] },
+  { title: 'Your reports', section: 'general', anchor: 'general-your-reports', keywords: ['error reports', 'bug reports', 'revoke', 'filed issues'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
-  { title: 'Phones', section: 'connections', anchor: 'account-phones', keywords: ['mobile', 'pair'], needs: { anchor: 'account-mousse-id', reason: 'Phones appear once you sign in to Mousse ID.' } },
+  { title: 'Add a phone', section: 'connections', anchor: 'account-phones', keywords: ['phones', 'mobile', 'pair'] },
   { title: 'Activity', section: 'activity', anchor: 'account-activity', keywords: ['heatmap', 'line edits'] },
   { title: 'Token usage', section: 'activity', anchor: 'account-token-usage', keywords: ['tokens'] },
 
@@ -77,6 +86,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Models', section: 'agents', anchor: 'agents-models', keywords: ['model', 'default model', 'thread titles', 'bot model'] },
   { title: 'Default model', section: 'agents', anchor: 'agents-default-model', keywords: ['reasoning', 'effort', 'speed', 'fast'] },
   { title: 'Thread titles', section: 'agents', anchor: 'agents-title-model', keywords: ['title model', 'naming', 'chat titles'] },
+  { title: 'Title prompt', section: 'agents', anchor: 'agents-title-prompt', keywords: ['title instructions', 'naming prompt', 'thread titles'] },
   { title: 'Bot model', section: 'agents', anchor: 'agents-bot-model', keywords: ['bot model', 'bots', 'personal bots'] },
   { title: 'Context', section: 'agents', anchor: 'agents-context', keywords: ['compaction', 'prompt cache'] },
   { title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction', keywords: ['compaction', 'tokens', 'summarize'] },
@@ -85,12 +95,11 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Access', section: 'agents', anchor: 'agents-access', keywords: ['agent access', 'other threads'] },
   { title: 'Answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions', 'agents may answer approvals'] },
   { title: 'Subagents', section: 'agents', anchor: 'agents-subagents', keywords: ['subagent'] },
-  { title: 'Subagents on other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'let agents start subagents on your other devices'] },
+  { title: 'Let agents work on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'subagents on other devices', 'let agents start subagents on your other devices'] },
   { title: 'Worktree per subagent', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch', 'give each subagent its own worktree'] },
-  { title: 'What bots may do here', section: 'agents', anchor: 'agents-bots-here', keywords: ['bots', 'personal bots', 'bot permissions', 'this computer', 'limit'] },
-  { title: 'Run commands', section: 'agents', anchor: 'agents-bots-shell', keywords: ['bots', 'shell', 'terminal', 'commands'] },
-  { title: 'Use the browser', section: 'agents', anchor: 'agents-bots-browser', keywords: ['bots', 'bot browser'] },
-  { title: 'Use your threads', section: 'agents', anchor: 'agents-bots-threads', keywords: ['bots', 'bot threads', 'start thread', 'full access'] },
+  { title: 'Cua Driver', section: 'computer', anchor: 'computer-driver', keywords: ['computer use', 'cua', 'install', 'version', 'desktop', 'screen'] },
+  { title: 'Driver', section: 'computer', anchor: 'computer-driver-path', keywords: ['computer use', 'cua driver', 'path', 'choose', 'executable'] },
+  { title: 'Agents can use this computer', section: 'computer', anchor: 'computer-agents', keywords: ['computer use', 'desktop', 'apps', 'click', 'type', 'bots', 'permission'] },
   { title: 'Secrets', section: 'agents', anchor: 'agents-secrets', keywords: ['secret', 'secrets', 'api key', 'token', 'password', 'credential', 'saved keys', 'revoke'] },
   { title: 'Automations', section: 'agents', anchor: 'agents-automations', keywords: ['automations agents add', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },
   { title: 'At most', section: 'agents', anchor: 'agents-automations-active', keywords: ['automations', 'limits', 'active', 'most active automations'] },
@@ -114,24 +123,30 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Reduce background noise', section: 'speech', anchor: 'speech-noise', keywords: ['dictation', 'microphone'], needs: { anchor: 'speech-dictation', reason: 'Reduce background noise appears once you choose a dictation model.' } },
   { title: 'Vocabulary', section: 'speech', anchor: 'speech-vocabulary', keywords: ['dictation', 'names', 'spelling'], needs: { anchor: 'speech-dictation', reason: 'Vocabulary appears once you choose a dictation model that uses it, such as Parakeet.' } },
 
-  { title: 'Device name', section: 'connections', anchor: 'devices-name', keywords: ['computer name'] },
-  { title: 'Networking', section: 'connections', anchor: 'devices-networking', keywords: ['network', 'connection'] },
   { title: 'Let my other devices work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', 'computers', "let my other devices work on this device's threads"] },
-  { title: 'Share bots with other devices', section: 'connections', anchor: 'devices-bots', keywords: ['bots', 'phone', 'mobile', 'sharing', 'personal bots', 'mousse bot'] },
-  { title: 'Passphrase', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'network keys'] },
-  { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['pair', 'add device', 'computers'] },
+  { title: 'Share bots with other devices', section: 'connections', anchor: 'devices-bots', keywords: ['bots', 'phone', 'mobile', 'sharing', 'personal bots', 'mousse bot'], needs: { anchor: 'devices-list', reason: 'Appears while devices paired before this version are connected.' } },
+  { title: 'Unlock to reach older devices', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'passphrase', 'network keys'], needs: { anchor: 'devices-list', reason: 'Appears only while the passphrase is needed after a restart.' } },
+  { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['networking', 'network', 'pair', 'add device', 'qr', 'scan', 'link', 'computers'] },
+  { title: 'Mousse Plus', section: 'connections', anchor: 'devices-plus', keywords: ['plus', 'relay', 'sign in', 'hosts'] },
+  { title: 'Reach this computer', section: 'connections', anchor: 'devices-engine-reach', keywords: ['same network', 'wi-fi', 'lan', 'tailscale', 'port forward', 'tunnel', 'relay', 'internet'] },
   { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },
   { title: 'Tailscale Serve', section: 'connections', anchor: 'devices-tailscale-serve' },
-  { title: 'Connection add-ons', section: 'connections', anchor: 'devices-addons', keywords: ['tunnel', 'relay', 'ssh'] },
-  { title: 'Connection checks', section: 'connections', anchor: 'devices-checks', keywords: ['diagnostics', 'features'] },
 
   { title: 'Disk usage', section: 'storage', anchor: 'storage-usage', keywords: ['space', 'size'] },
   { title: 'Cleanup', section: 'storage', anchor: 'storage-cleanup', keywords: ['clean up', 'free space'] },
   { title: 'Worktree folder', section: 'storage', anchor: 'storage-worktree-folder', keywords: ['drive', 'location'] },
+  { title: 'Worktree branch naming', section: 'storage', anchor: 'storage-branch-naming', keywords: ['branch', 'prefix', 'git', 'name'] },
+  { title: 'Branch prefix', section: 'storage', anchor: 'storage-branch-prefix', keywords: ['branch', 'git', 'mousse/'] },
+  { title: 'Naming instructions', section: 'storage', anchor: 'storage-branch-instructions', keywords: ['branch', 'git', 'custom'] },
   { title: STORAGE_RULE_COPY.inactive.title, section: 'storage', anchor: 'storage-inactive', keywords: ['cleanup', 'retention'] },
   { title: STORAGE_RULE_COPY.merged.title, section: 'storage', anchor: 'storage-merged', keywords: ['cleanup'] },
   { title: STORAGE_RULE_COPY.captures.title, section: 'storage', anchor: 'storage-captures', keywords: ['browser data', 'screenshots'] },
 
+  { title: 'Mousse ID (legacy)', section: 'labs', anchor: 'labs-plus-legacy', keywords: ['mousse id', 'mousse plus', 'account', 'relay', 'hosted relay', 'phone', 'networking', 'experimental'] },
+  { title: 'Performance', section: 'labs', anchor: 'labs-hybrid-bot-faces', keywords: ['bots', 'bot faces', 'gpu', '2d', 'hybrid', 'rendering', 'experimental'] },
+  { title: 'Sidebar animations', section: 'labs', anchor: 'labs-sidebar-animations', keywords: ['performance', 'gpu', 'motion', 'threads'] },
+  { title: 'New chat animations', section: 'labs', anchor: 'labs-new-chat-animations', keywords: ['performance', 'gpu', 'motion', 'logo', 'wave'] },
+  { title: 'Shimmer animations', section: 'labs', anchor: 'labs-shimmer-animations', keywords: ['performance', 'gpu', 'motion', 'loading', 'activity'] },
   { title: 'Profiler', section: 'labs', anchor: 'labs-profiler', keywords: ['memory', 'ram', 'cpu', 'diagnostics', 'leak', 'performance', 'experimental'] },
   { title: 'Memory', section: 'labs', anchor: 'labs-profiler-memory', keywords: ['ram', 'diagnostics', 'report', 'leak', 'processes'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Memory notices', section: 'labs', anchor: 'labs-memory-notices', keywords: ['ram', 'diagnostics', 'notification'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },

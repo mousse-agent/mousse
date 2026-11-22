@@ -15,6 +15,7 @@ import { TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { Reconciler } from '../../src/mms/run/Reconciler'
+import { refusalOf, refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor } from './phase6Fixture'
 
 /** The server and bearer a turn's bridge attaches, with the turn token Claude's hook stamps on each call. */
@@ -130,7 +131,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
         seen.unknown = (await raw.json() as { result?: { content: Array<{ text: string }>; isError?: boolean } }).result
         return 'Delegated the survey.'
       }
-      if (input.prompt.startsWith('Subagent')) {
+      if (input.prompt.startsWith('<mousse_notice kind="subagent_result"')) {
         seen.wakeStatus = (await callTool(mcp, 'task_status', { delegationId: seen.started.delegationId })).value
         return 'The survey is in.'
       }
@@ -170,8 +171,8 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     expect(delegation).toMatchObject({ parentThreadId: parent.id, parentRunId: response.runId, provider: 'pi:openai', modeCeiling: 'plan' })
     expect(engine.delegations.getLineage(delegation.childThreadId)).toMatchObject({ parentThreadId: parent.id, parentRunId: response.runId, relationship: 'subagent' })
     expect(seen.firstStatus).toMatchObject({ delegationId: delegation.delegationId, childThreadId: delegation.childThreadId, status: 'running' })
-    expect(seen.broader.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_ceiling_exceeded, data: { reason: 'mousse_ceiling_exceeded' } })
-    expect(seen.unknown).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('"nope"') }] })
+    expect(refusalOfResponse(seen.broader.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'ceiling_exceeded', retry: 'never' } })
+    expect(refusalOf({ isError: seen.unknown.isError, text: seen.unknown.content?.[0]?.text })?.message).toContain('"nope"')
     expect(engine.delegations.listForParentThread(parent.id)).toHaveLength(1)
 
     // The pi child ran in plan mode (its ceiling) without an MCP attachment (in-process ToolHost).
@@ -239,8 +240,8 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     return { seen, asked, parent, engine }
   }
 
-  it.each(['ask', 'accept_edits'] as const)('under %s, the retired integrate_delegation is not offered: nothing is asked and nothing merged', async (mode) => {
-    const { seen, asked } = await integrateUnder(mode)
+  it('under ask, the retired integrate_delegation is not offered: nothing is asked and nothing merged', async () => {
+    const { seen, asked } = await integrateUnder('ask')
     expect(asked).toEqual([])
     expect(JSON.stringify(seen.integrate?.body)).toContain('mousse_unknown_tool')
   }, 30_000)

@@ -38,8 +38,10 @@ import { ATTACHMENT_LINES_ROOM, isLongPaste, longPasteFile, pastedTextBlock, pas
 import { PastedTextPreview } from './PastedTextPreview'
 import { formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import type { ChatReference } from '../../shared/chatReferences'
-import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
+import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseChatReference, parseReferenceDragData } from '../../shared/chatReferences'
+import { ownFileDrop, startDragOut } from '../lib/fileDragOut'
 import { ChatReferencePill } from './ReferencePill'
+import { threadIdsInText } from '../lib/threadReference'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
@@ -62,6 +64,8 @@ import {
   type ComposerQuoteDetail
 } from '../lib/composerQuotes'
 
+import { admitAttachments, type ChipStatus } from '../lib/attachmentPreparation'
+
 export interface AttachedFile {
   id: string
   file: File
@@ -72,6 +76,8 @@ export interface AttachedFile {
   label?: string
   /** A long text paste kept as a file: it can be opened, and put back into the box as text. */
   pastedText?: boolean
+  /** An image sent as its path, not inline: its original beside a smaller copy, or one that can't go inline. */
+  asPath?: boolean
 }
 
 /** What the chip and the message call an attached file. */
@@ -111,6 +117,8 @@ export interface ChatComposerProps {
   onAddReference?: (reference: ChatReference) => void | Promise<void>
   onRemoveReference?: (id: string) => void
   onReferenceError?: (message: string) => void
+  /** Why a pasted thread link may not go in this chat, else null; a refused paste is not inserted. */
+  pastedThreadRefusal?: (threadId: string) => string | null
   enabledSkills: SkillDescriptor[]
   /**
    * The model picker and context ring (see `ComposerFooter`). A thread's composer has them; a bot's
@@ -163,13 +171,22 @@ export interface ChatComposerProps {
   /** Buttons of the caller's own in the footer, left of Attach (see `ComposerFooter`). */
   extraActions?: ReactNode
   /**
-   * The thread whose send mode (Queue or Steer, `lib/sendMode.ts`) Enter follows while a reply runs; the mode
-   * button left of send shows and switches it. Absent (a bot's chat, which never steers): Enter queues and there is
+   * The thread whose composer Enter follows the profile's send mode in (Queue or Steer, `lib/sendMode.ts`) while a
+   * reply runs; the mode button left of send shows and switches it for every thread. Absent (a bot's chat, which never steers): Enter queues and there is
    * no button.
    */
   sendModeThreadId?: string
   /** The most characters a message carries: text pasted past it goes on the message as a text file. */
   messageLimit?: number
+  /** What getting each attached image ready came to, by attachment id (`useAttachmentPreparation`): shown on its chip. */
+  attachmentStatus?: ReadonlyMap<string, ChipStatus>
+  /** Why Send is held (an attachment still being prepared, or one that can't be sent); Send stays disabled with this tooltip. */
+  sendBlocked?: string | null
+  /**
+   * Files attached here are checked as they come (`admitAttachments`): one the message can't take is not attached, and
+   * `onRefused` gets a line naming it. `remote`: the thread runs on another computer, which takes images only.
+   */
+  attachRules?: { remote: boolean; onRefused: (line: string) => void }
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 120
@@ -189,9 +206,14 @@ interface MentionSearchState {
 }
 
 /** Caret of a text box, or -1 while a range is selected. */
-/** A kept-mounted pane that is not the one in view is inert; its composer must not answer shortcuts. */
+/**
+ * A kept-mounted pane that is not the one in view is inert; its composer must not answer shortcuts. A side chat's
+ * composer answers only while focus is in that side chat: the thread's own composer keeps every other key.
+ */
 function isShown(input: HTMLElement | null): boolean {
-  return !input?.closest('[inert]')
+  if (input?.closest('[inert]')) return false
+  const sideChat = input?.closest('[data-side-chat]')
+  return !sideChat || sideChat.contains(document.activeElement)
 }
 
 function readCaret(node: HTMLTextAreaElement): number {
@@ -211,6 +233,7 @@ export function ChatComposer({
   onAddReference,
   onRemoveReference = () => {},
   onReferenceError = () => {},
+  pastedThreadRefusal,
   enabledSkills,
   run,
   slashCommands = true,
@@ -232,7 +255,10 @@ export function ChatComposer({
   sendModeThreadId,
   dictateWhileStoppable = false,
   extraActions,
-  messageLimit = Infinity
+  messageLimit = Infinity,
+  attachmentStatus,
+  sendBlocked = null,
+  attachRules
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -256,13 +282,7 @@ export function ChatComposer({
     const height = Math.max(64, Math.min(200, inputElement.scrollHeight))
     inputElement.style.removeProperty('height')
     inputElement.style.setProperty('--draft-input-height', `${height}px`)
-    // The backdrop paints the visible text: it wraps at the textarea's width, scrollbar excluded,
-    // and follows its scroll.
-    const backdrop = backdropRef.current
-    if (backdrop) {
-      backdrop.style.marginRight = `${inputElement.offsetWidth - inputElement.clientWidth}px`
-      backdrop.scrollTop = inputElement.scrollTop
-    }
+    if (backdropRef.current) backdropRef.current.scrollTop = inputElement.scrollTop
   }, [])
   useLayoutEffect(() => { resizeDraft() }, [input, resizeDraft])
   useEffect(() => {
@@ -327,6 +347,13 @@ export function ChatComposer({
     dictationRangeRef.current = node ? { start: node.selectionStart, end: node.selectionEnd, value: node.value } : null
     dictation.start()
   }
+  // The dictation key starts recording where the microphone button is offered and finishes it (Done) while recording.
+  const dictationOffered = !stoppable || dictateWhileStoppable
+  useCommand(
+    'composer.dictate',
+    () => (isRecording ? dictation.stop() : startDictation()),
+    () => !disabled && isShown(composerInputRef.current) && (isRecording || (dictationOffered && !recordingPending && !transcribing))
+  )
   const [pendingReferences, setPendingReferences] = useState(0)
   // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
   useComposerNotice(pendingReferences > 0 ? { tone: 'info', title: 'Attaching reference…' } : null)
@@ -407,6 +434,7 @@ export function ChatComposer({
     !transcribing &&
     pendingReferences === 0 &&
     !disabled &&
+    !sendBlocked &&
     skillsPickerQuery === null
 
   useEffect(() => {
@@ -474,8 +502,11 @@ export function ChatComposer({
   const addFiles = useCallback(
     (files: Array<File | Omit<AttachedFile, 'id'>>) => {
       if (!files.length) return
-      const next: AttachedFile[] = files.map((entry) => {
-        const attached = entry instanceof File ? { file: entry } : entry
+      const entries = files.map((entry) => (entry instanceof File ? { file: entry } : entry))
+      const admitted = attachRules ? admitAttachments(attachedFiles, entries, { remote: attachRules.remote }) : { accepted: entries }
+      if (admitted.refusal) attachRules?.onRefused(admitted.refusal)
+      if (!admitted.accepted.length) return
+      const next: AttachedFile[] = admitted.accepted.map((attached) => {
         return {
           ...attached,
           id: crypto.randomUUID(),
@@ -485,7 +516,7 @@ export function ChatComposer({
       onAttachedFilesChange([...attachedFiles, ...next])
       return next
     },
-    [attachedFiles, onAttachedFilesChange]
+    [attachedFiles, onAttachedFilesChange, attachRules]
   )
 
   const removeFile = (id: string) => {
@@ -554,6 +585,13 @@ export function ChatComposer({
     const files = collectFilesFromDataTransfer(event.clipboardData)
     if (files.length === 0) {
       const text = event.clipboardData?.getData('text/plain') ?? ''
+      // A thread link (Copy reference) is pasted as text, unless this chat may not point at that thread.
+      const refused = pastedThreadRefusal ? threadIdsInText(text).map(pastedThreadRefusal).find(Boolean) : null
+      if (refused) {
+        event.preventDefault()
+        onReferenceError(refused)
+        return
+      }
       const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
       if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) return
       event.preventDefault()
@@ -887,23 +925,35 @@ export function ChatComposer({
     }
   }
 
+  const takeReference = (reference: ChatReference) => {
+    if (!onAddReference) return
+    setPendingReferences((count) => count + 1)
+    void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
+      onReferenceError(error instanceof Error ? error.message : String(error))
+    }).finally(() => setPendingReferences((count) => count - 1))
+  }
+
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     if (disabled) return
     const reference = onAddReference ? parseReferenceDragData(event.dataTransfer) : null
     if (reference && onAddReference) {
       event.preventDefault()
       event.stopPropagation()
-      setPendingReferences((count) => count + 1)
-      void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
-        onReferenceError(error instanceof Error ? error.message : String(error))
-      }).finally(() => setPendingReferences((count) => count - 1))
+      takeReference(reference)
       return
     }
     const files = Array.from(event.dataTransfer.files)
-    if (files.length) {
-      event.preventDefault()
-      addFiles(files)
+    if (!files.length) return
+    event.preventDefault()
+    // A file this window drags out (a file tree row, a chip) means here what the window's own drag meant.
+    const own = ownFileDrop(files)
+    if (own?.kind === 'ignore') return
+    if (own?.kind === 'reference') {
+      const parsed = parseChatReference({ ...own.reference, id: own.reference.id ?? `${own.reference.kind}:${crypto.randomUUID()}` })
+      if (parsed) takeReference(parsed)
+      return
     }
+    addFiles(files)
   }
 
   return (
@@ -921,9 +971,11 @@ export function ChatComposer({
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
             {/* An attached image opens a preview that steps through the other attached images. */}
-            <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl ? [{ id, url: previewUrl, filename: file.name }] : []))}>
+            <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl && !attachmentStatus?.get(id)?.noPreview ? [{ id, url: previewUrl, filename: file.name }] : []))}>
               {attachedFiles.map((attached) => {
-                const { id, file, previewUrl, path, pastedText } = attached
+                const { id, file, path, pastedText } = attached
+                // An image that can't be read here shows as a file chip, not a broken thumbnail.
+                const previewUrl = attachmentStatus?.get(id)?.noPreview ? undefined : attached.previewUrl
                 return (
                   <FileAttachment
                     key={id}
@@ -936,7 +988,16 @@ export function ChatComposer({
                     onOpen={pastedText ? () => void previewPastedText(id) : undefined}
                     onInsertText={pastedText ? () => void insertPastedText(id) : undefined}
                     className={pastedText ? 'max-w-[280px]' : undefined}
+                    status={attachmentStatus?.get(id)}
                     onRemove={() => removeFile(id)}
+                    onDragStart={(event) => startDragOut(event, {
+                      name: file.name,
+                      threadId: mentionScope?.threadId,
+                      projectId: mentionScope?.projectId,
+                      ...(path ? { item: { kind: 'attachment' as const, path, name: file.name } } : { composerFile: file }),
+                      // Dropped back on the composer, it is already attached.
+                      inApp: { kind: 'ignore' }
+                    })}
                   />
                 )
               })}
@@ -1134,6 +1195,7 @@ export function ChatComposer({
         stoppable={stoppable}
         disabled={disabled}
         canSend={canSend}
+        sendBlocked={sendBlocked}
         isRecording={isRecording}
         recordingPending={recordingPending}
         transcribing={transcribing}

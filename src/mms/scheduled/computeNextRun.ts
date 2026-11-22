@@ -127,7 +127,8 @@ function nextCronRun(expr: string, base: Date): Date | null {
 
   const limit = base.getTime() + CRON_SEARCH_YEARS * 366 * 24 * 60 * 60 * 1000
   while (candidate.getTime() <= limit) {
-    if (matchesCron(fields, candidate)) return new Date(candidate.getTime())
+    // Local setters can move a time in the second pass of a repeated hour back into its first pass.
+    if (candidate.getTime() > base.getTime() && matchesCron(fields, candidate)) return new Date(candidate.getTime())
     const before = candidate.getTime()
     if (!fields[3]!.has(candidate.getMonth() + 1)) {
       candidate.setMonth(candidate.getMonth() + 1, 1)
@@ -186,11 +187,14 @@ export function nextOccurrenceAfter(schedule: JobSchedule, occurrenceAt: string,
   return computeNextRun(schedule, null, now)
 }
 
+/** Missed counts at this limit are a lower bound, not an exact number. */
+export const MISSED_OCCURRENCES_CAP = 1000
+
 /**
  * How many occurrences of a schedule fell from the one due at `from` (itself one) until `now`, at most `cap`: the
  * repeats a computer that was off missed, which collapse into one run.
  */
-export function occurrencesSince(schedule: JobSchedule, from: string, now: Date, cap = 1000): number {
+export function occurrencesSince(schedule: JobSchedule, from: string, now: Date, cap = MISSED_OCCURRENCES_CAP): number {
   if (schedule.kind !== 'interval' && schedule.kind !== 'cron') return 1
   if (schedule.kind === 'interval') {
     const every = (schedule.minutes ?? 1) * 60_000

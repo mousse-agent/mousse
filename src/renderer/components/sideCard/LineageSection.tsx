@@ -5,7 +5,10 @@ import { useSubagents } from '../../hooks/useSubagents'
 import { useNativeSubagents } from '../../hooks/useNativeSubagents'
 import { ChevronRight } from '../../lib/icons'
 import { openThread } from '../../lib/openThread'
+import { useProviderSnapshotsStore } from '../../lib/providerSnapshots'
+import { revealSubagent } from '../../stores/chatNavigationStore'
 import { ComputerBadgeView } from '../ComputerBadge'
+import { useThreadRefMenu } from '../ThreadRefMenu'
 import { Collapse } from '../ui/Collapse'
 import { SubagentAvatar, useThreadProviderId } from '../SubagentAvatar'
 import { subagentBadgeTone, subagentIconId } from '../subagentStatus'
@@ -78,13 +81,17 @@ function LineageRow({ subagent, now, inheritedProvider, onOpen, onReveal, onStop
   const running = isRunningSubagent(subagent)
   // A native subagent runs inside the thread's own process: only the thread's Stop ends it.
   const stoppable = running && !subagent.native
-  const model = lineageModelLabel(subagent)
+  const model = subagent.native ? (subagent.nativeLabel ?? null) : lineageModelLabel(subagent)
+  // A subagent with a thread of its own: right-click copies its reference. A native one has none.
+  const refMenu = useThreadRefMenu(subagent.native ? undefined : subagent.computer?.ref ?? subagent.childThreadId)
   return (
     <li className="lineage-item">
+      {refMenu.menu}
       <button
         type="button"
         className={`lineage-row${running ? ' is-working' : ''}`}
         title={name}
+        {...refMenu.bind}
         // A remote subagent opens on its computer, where its turns run and its questions are answered.
         onClick={() => (subagent.native ? onReveal?.(subagent.childThreadId) : onOpen(subagent.computer?.ref ?? subagent.childThreadId))}
       >
@@ -172,22 +179,14 @@ export function LineageList({ subagents, now, inheritedProvider, open, onOpenPar
   )
 }
 
-/** Brings a native subagent's card into view in the conversation and opens it. */
-function revealNativeSubagent(callId: string): void {
-  const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(callId) : callId.replace(/["\\]/g, '\\$&')
-  const card = document.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`)
-  if (!card) return
-  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  card.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
-  card.querySelector<HTMLButtonElement>('button.subagent-card')?.focus({ preventScroll: true })
-}
-
 /** Lists the subagents the selected thread started. */
 export function LineageSection({ threadId }: SideCardSectionContext) {
   const subagents = useSubagents(threadId)
   const native = useNativeSubagents(threadId)
   const entries = useMemo<LineageEntry[]>(() => (native.length ? [...subagents, ...native.map(nativeLineageEntry)] : subagents), [subagents, native])
   const inheritedProvider = useThreadProviderId(threadId)
+  // Model names come from the providers' lists: a list that loads later renames the rows.
+  useProviderSnapshotsStore((state) => state.scopes)
   // Remembering which thread the choices belong to resets the list on a thread change
   // without an effect.
   const [openState, setOpenState] = useState<{ threadId: string | null; parts: LineageOpenParts }>({ threadId: null, parts: LINEAGE_CLOSED })
@@ -207,6 +206,7 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
   return (
     <SideCardSection
       title={lineageTitle(entries)}
+      // The section was called Lineage; its saved collapse choice keeps that key.
       collapseKey="Lineage"
       threadId={threadId}
       action={
@@ -234,7 +234,8 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
         open={open}
         onOpenPart={(part, value) => setOpenState({ threadId, parts: { ...open, [part]: value } })}
         onOpen={(id) => void openThread(id)}
-        onReveal={revealNativeSubagent}
+        // The transcript lands the card's turn, opens a folded group around it and opens the card.
+        onReveal={revealSubagent}
         onStop={(childThreadId) => void stopThreadNow(childThreadId)}
       />
     </SideCardSection>

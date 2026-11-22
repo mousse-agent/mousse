@@ -12,6 +12,7 @@ import { createTurnActions, TurnActionsContext, type TurnActions } from '../../s
 import { chatStatusFromPhase, errorTitle, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import type { ChatImageAttachment, ChatMessage } from '../../src/shared/types'
 import { RunInterruptedNotice } from '../../src/renderer/chat/components/MousseAgentChatShell'
+import { useBugReportStore } from '../../src/renderer/stores/bugReportStore'
 import type { TimelineStep } from '../../src/renderer/chat/components/agent-elements/types/timeline'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -136,10 +137,13 @@ describe('an error in the transcript', () => {
     expect(onRetry).toHaveBeenCalledOnce()
   })
 
-  it('has no box and no button without a retry', () => {
+  it('has no box and, without a retry, only Report, which the Report button setting hides', () => {
     render(createElement(ErrorMessage, { message: 'Rate limited' }))
-    expect(host.querySelector('button')).toBeNull()
+    expect([...host.querySelectorAll('button')].map((item) => item.textContent)).toEqual(['Report'])
     expect(host.innerHTML).not.toMatch(/bg-red|border-red/)
+    act(() => useBugReportStore.getState().setSettings({ enabled: false }))
+    expect(host.querySelector('button')).toBeNull()
+    act(() => useBugReportStore.getState().setSettings({ enabled: true }))
   })
 
   const turn = (id: string, prompt: string): UIMessage[] => [
@@ -202,7 +206,7 @@ describe('a failed turn', () => {
     expect(text()).toContain('Provider error')
     expect(host.querySelector('.an-error-text')!.textContent).toBe('400 · messages.3.content.0: tool_use ids were found without tool_result blocks')
     const meta = host.querySelector('.an-error-meta')!
-    expect(meta.textContent).toBe('Reference 1ecec6b5-2610-41b1-80f9-099a6f0732cc' + 'Retry')
+    expect(meta.textContent).toBe('Reference 1ecec6b5-2610-41b1-80f9-099a6f0732cc' + 'Retry' + 'Report')
     expect(meta.querySelector('button[aria-label="Retry"]')).not.toBeNull()
     expect(text()).not.toContain('Something went wrong')
   })
@@ -210,7 +214,7 @@ describe('a failed turn', () => {
   it('moves the reference of a generic failure under its message', () => {
     render(createElement(ErrorMessage, { title: 'Request failed', message: 'Something went wrong. Please try again or report this error. Reference: 02fb3fb4-25fb', onRetry: vi.fn() }))
     expect(host.querySelector('.an-error-text')!.textContent).toBe('Something went wrong. Please try again or report this error.')
-    expect(host.querySelector('.an-error-meta')!.textContent).toBe('Reference 02fb3fb4-25fbRetry')
+    expect(host.querySelector('.an-error-meta')!.textContent).toBe('Reference 02fb3fb4-25fbRetryReport')
   })
 
   it('titles a failure by what refused it', () => {

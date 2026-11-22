@@ -723,7 +723,9 @@ describe('blocking a device on a computer', () => {
       maxPermissionMode: 'accept_edits',
       terminal: false,
       editor: false,
-      bots: true
+      bots: true,
+      agentReach: 'launched',
+      work: true
     })
 
     await a.request('bridge.policy', { node: one.node, maxPermissionMode: 'full', terminal: true })
@@ -732,7 +734,9 @@ describe('blocking a device on a computer', () => {
       maxPermissionMode: 'full',
       terminal: true,
       editor: false,
-      bots: true
+      bots: true,
+      agentReach: 'launched',
+      work: true
     })
     // The editor switch is its own: it changes neither of the others, and nothing else changes it.
     await a.request('bridge.policy', { node: one.node, editor: true })
@@ -741,23 +745,31 @@ describe('blocking a device on a computer', () => {
       maxPermissionMode: 'full',
       terminal: true,
       editor: true,
-      bots: true
+      bots: true,
+      agentReach: 'launched',
+      work: true
     })
     // Bots on this computer is its own too: off for one device only, and nothing else moves.
     await a.request('bridge.policy', { node: one.node, bots: false })
     expect((await device(one.node)).policy).toMatchObject({ maxPermissionMode: 'full', terminal: true, editor: true, bots: false })
     await a.request('bridge.policy', { node: one.node, bots: true })
+    // What its agents may change here is its own as well.
+    await a.request('bridge.policy', { node: one.node, agentReach: 'all' })
+    expect((await device(one.node)).policy).toMatchObject({ maxPermissionMode: 'full', terminal: true, editor: true, bots: true, agentReach: 'all' })
     expect((await device(two.node)).policy).toEqual({
       blocked: false,
       maxPermissionMode: 'accept_edits',
       terminal: false,
       editor: false,
-      bots: true
+      bots: true,
+      agentReach: 'launched',
+      work: true
     })
     await expect(
       a.request('bridge.policy', { node: one.node, editor: 'yes' })
     ).rejects.toMatchObject({ code: 'bad_request' })
     await expect(a.request('bridge.policy', { node: one.node, bots: 'no' })).rejects.toMatchObject({ code: 'bad_request' })
+    await expect(a.request('bridge.policy', { node: one.node, agentReach: 'everything' })).rejects.toMatchObject({ code: 'bad_request' })
 
     // Unknown devices, this computer and unknown modes are refused; nothing is written for them.
     await expect(

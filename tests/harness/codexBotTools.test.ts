@@ -200,7 +200,8 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
     for (const list of [without, withShell]) {
       expect(list.length).toBeGreaterThan(0)
       expect(list.filter((name) => !Object.hasOwn(CODEX_BOT_ACCOUNTED_TOOLS, name)), `tools nobody has accounted for (${model!.id})`).toEqual([])
-      expect(list.filter((name) => /view_image|image_gen|spawn_agents_on_csv|browser|computer|memor|goal|sleep|request_permissions|send_message_to_user/.test(name))).toEqual([])
+      // A v2-subagent model's own message to the person (0.170.0) is accounted for above; nothing else of these.
+      expect(list.filter((name) => name !== 'functions.send_message_to_user_async' && /view_image|image_gen|spawn_agents_on_csv|browser|computer|memor|goal|sleep|request_permissions|send_message_to_user/.test(name))).toEqual([])
     }
     expect(without.filter((name) => COMMANDS.test(name))).toEqual([])
     expect(withShell.filter((name) => COMMANDS.test(name)).length).toBeGreaterThan(0)

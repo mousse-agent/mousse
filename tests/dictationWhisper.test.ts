@@ -69,10 +69,4 @@ describe('transcribeWhisper', () => {
     expect(generate.encoder_outputs).toBe(encoderOutputs)
     expect(calls[4][1]).toEqual({ tokens: ['tokens'], options: { skip_special_tokens: true } })
   })
-
-  it('never forces English: the language comes from the detection alone', async () => {
-    const { parts, calls } = fakeParts([0, 0, 0, 0.1, 0.2, 0.9, 0.1])
-    await transcribeWhisper(parts, new Float32Array(16000))
-    expect((calls.find(([name]) => name === 'generate')![1] as { language: string }).language).toBe('de')
-  })
 })

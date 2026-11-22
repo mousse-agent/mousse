@@ -1,5 +1,7 @@
+import type { ScheduledMissedRuns, TellMe } from '../../types'
 import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
+import type { BotMessageSender } from './botMessages'
 import type { BotEscalationSummary } from './escalation'
 import type { BotLook } from './look'
 import type { PermissionMode } from '../../permissionMode'
@@ -16,7 +18,7 @@ export interface BotManifest {
   /** Mousse app tools, by their app-tool name. */
   appTools: string[]
   /** The user's MCP tools, server-qualified. */
-  mcp: Array<{ serverId: string; tool: string }>
+  mcp: Array<{ serverId: string; tool: string; level?: 'asks_first' }>
   /** Skill ids. */
   skills: string[]
   /**
@@ -65,8 +67,11 @@ export function foldersOf(workspace: BotWorkspace | null): Array<[string, 'read'
 }
 
 export interface BotBudget {
-  /** Active work time per activation (required; enforced on every runtime). */
-  maxActiveMs: number
+  /**
+   * Work time per activation, no longer used: work time has no limit. A grant approved before keeps it only so its
+   * digest, and the activations made under it, still hold; nothing reads it.
+   */
+  maxActiveMs?: number
   /** Model requests per run, retries included (only on runtimes with hard budgets). */
   maxTurns?: number
   maxToolCalls?: number
@@ -178,8 +183,8 @@ export interface BotCustomSlot {
 export const BOT_BASE_SLOT_NAMES = ['talk', 'work', 'light', 'medium', 'hard', 'images', 'image'] as const
 /** A custom slot's name: a letter, then letters, digits, `-` or `_`; at most 24 characters, lower case. */
 export const BOT_CUSTOM_SLOT_NAME = /^[a-z][a-z0-9_-]{0,23}$/
-/** The most custom slots a bot keeps. */
-export const MAX_BOT_CUSTOM_SLOTS = 12
+/** The most custom slots a bot keeps: a ceiling no owner reaches, there only to stop a runaway. */
+export const MAX_BOT_CUSTOM_SLOTS = 1000
 /** The longest custom slot description. */
 export const MAX_BOT_CUSTOM_SLOT_DESCRIPTION = 200
 
@@ -231,10 +236,17 @@ export interface BotDefinition {
   owner: { kind: 'person'; id: 'self' }
   /** Reserved for bot servers (Phase 3). */
   placement: { kind: 'this_computer' }
-  /** The bot's own working instructions; starts as the description. */
+  /** The bot's own working instructions; starts as the description, and the owner's prompt edit in About sets both. */
   role: string
+  /**
+   * The description and role from before the owner first edited the prompt in About: Reset to default puts them back.
+   * Absent: never edited, or reset since.
+   */
+  promptDefault?: { description: string; role: string }
+  /** When the owner last edited or reset the prompt in About (ISO): replies written before it may follow older words. */
+  promptChangedAt?: string
   main: BotThreadSpec
-  /** Context threads it consults (6c-2); at most 8. */
+  /** Context threads it consults (6c-2); at most `MAX_BOT_CONTEXT_THREADS`. */
   context: BotThreadSpec[]
   permissions: BotManifest
   /** Manual activation always. Schedules live in `bots.db` (`bot_schedules`), not on the definition. */
@@ -264,7 +276,7 @@ export interface BotDefinitionV1 {
   name: string
   role: string
   main: BotThreadSpecV1
-  /** Context threads it consults (6c-2); at most 8. */
+  /** Context threads it consults (6c-2); at most `MAX_BOT_CONTEXT_THREADS`. */
   context: BotThreadSpecV1[]
   permissions: BotManifest
   /** Manual activation always; schedules on the bot itself (6d). */
@@ -289,8 +301,8 @@ export interface BotSchedule {
   prompt: string
 }
 
-/** Most schedules one bot may have. */
-export const MAX_BOT_SCHEDULES = 8
+/** Most schedules one bot may have: a ceiling no owner reaches, there only to stop a bot that adds them in a loop. */
+export const MAX_BOT_SCHEDULES = 1000
 
 /**
  * What started an activation: the Bots tab or a schedule occurrence. Activations saved by older
@@ -312,8 +324,13 @@ export interface BotOwnerTurn {
 }
 
 export type BotActivationTrigger =
-  | { kind: 'manual'; input: string; owner?: BotOwnerTurn }
-  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
+  /**
+   * `fromBot`: the turn was started by a message from another of the owner's bots (`bot_send`), never by the owner: who
+   * sent it and which turn in a row without the owner it is. `fast`: a notice that starts without waiting for others to
+   * settle (a thread the bot started waits on it, `NOTICE_SETTLE_MS`).
+   */
+  | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender; fast?: true }
+  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string; missed?: ScheduledMissedRuns; removedTelling?: { tellMe: TellMe }; completed?: { why: string; name: string; tellMe?: TellMe; removed?: true } }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
    * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
@@ -332,15 +349,20 @@ export interface BotWorkModelName {
   effort?: string
 }
 
-/** The default active time of one activation: an hour. */
-export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000
-/** The default active time before it became an hour: grants that still hold it are upgraded (`BotEngine.upgradeWorkTime`). */
-export const OLD_DEFAULT_BOT_ACTIVE_MS = 15 * 60_000
-/** Most context threads one bot may have. */
-export const MAX_BOT_CONTEXT_THREADS = 8
-/** Most activations one bot keeps queued; the oldest is dropped beyond this. */
-export const MAX_QUEUED_ACTIVATIONS = 20
-/** The smallest active-time slice a dispatch starts with; less than this left is a budget wall. */
+/**
+ * The longest one turn of a bot's work runs before it goes on in a fresh turn of the same thread, as at its runtime's
+ * step cap (`BotEngine.continueAfterTurnCap`, not counted with those). Not a limit on the work, which goes on for as
+ * many windows as it needs: it keeps each turn's timer, supervisor and runtime wall time finite.
+ */
+export const BOT_TURN_WINDOW_MS = 5 * 60 * 60_000
+/** Most context threads one bot may have: a ceiling no owner reaches, there only to stop a runaway. */
+export const MAX_BOT_CONTEXT_THREADS = 1000
+/**
+ * Most activations one lane of a bot keeps waiting: a ceiling no real bot reaches, there only to stop a loop that queues
+ * work. What waits is never dropped; a new one beyond it is refused, and its owner told (`BotEngine.refuseOverQueue`).
+ */
+export const MAX_QUEUED_ACTIVATIONS = 10_000
+/** A slice of a turn's window: a steer or a subagent needs at least two of them left in the turn to start. */
 export const ACTIVE_TIME_CHUNK_MS = 15_000
 
 export type BotActivationStatus = 'queued' | 'running' | 'waiting_grant' | 'paused' | 'blocked' | 'done' | 'failed' | 'cancelled'
@@ -444,3 +466,10 @@ export interface BotPermissionLine {
   kind: 'tool' | 'app_tool' | 'mcp' | 'skill' | 'workspace' | 'budget'
   text: string
 }
+
+/**
+ * MCP calls that run alone return to asking when these rolling limits are reached.
+ * Service reads use the same limits and are refused without a held card.
+ */
+export const BOT_ALONE_HOURLY_CALLS = 20
+export const BOT_ALONE_DAILY_CALLS = 100

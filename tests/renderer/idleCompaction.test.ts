@@ -107,21 +107,26 @@ describe('when the Full/Compact chip shows', () => {
   })
 })
 
-function provider(): ProviderWithStatus {
+function provider(contextUsage: 'reported' | 'none' = 'reported'): ProviderWithStatus {
   return {
     id: 'claude-subscription',
     label: 'Claude Code',
     models: [{ id: 'opus', label: 'Opus 5.5' }],
-    caps: { toolControl: 'exact', autoPermissionMode: true, contextUsage: 'reported' } as ProviderWithStatus['caps']
+    caps: { toolControl: 'exact', autoPermissionMode: true, contextUsage } as ProviderWithStatus['caps']
   }
 }
 
-function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; setting?: IdleCompactionSetting; compacting?: boolean; loading?: boolean; contextHidden?: boolean } = {}) {
+/** What the daemon sends for a runtime that reports no context (an ACP agent, Cursor): an empty gauge, its cache and Mousse's estimate. */
+function estimatedUsage(tokens: number, idleMs: number): ContextUsageSnapshot {
+  return { percent: 0, used: 0, limit: 0, modelName: null, source: 'estimated', categories: [], promptCache: { lastRequestAt: Date.now() - idleMs }, historyEstimate: tokens }
+}
+
+function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; setting?: IdleCompactionSetting; compacting?: boolean; loading?: boolean; contextHidden?: boolean; noGauge?: boolean } = {}) {
   const onCompactNow = vi.fn()
   const onContextOpenChange = vi.fn()
   const props: ComposerFooterProps = {
     run: {
-      providers: [provider()],
+      providers: [provider(options.noGauge ? 'none' : 'reported')],
       selectedProviderId: 'claude-subscription',
       selectedModelId: 'opus',
       modelMenuOpen: false,
@@ -192,6 +197,32 @@ describe('the composer chip', () => {
     render(usage(182_000, 2 * HOUR, HOUR))
     expect(chipButton()?.textContent).toBe('Full · 182K')
     expect(document.querySelector('.composer-context-anchor')).not.toBeNull()
+  })
+})
+
+describe('the composer chip on a runtime that reports no context (ACP agents, Cursor)', () => {
+  it('offers Compact now after an hour idle, sized by the estimate, with no ring', () => {
+    const { onCompactNow } = render(estimatedUsage(120_000, HOUR + 5 * MINUTE), { noGauge: true })
+    expect(chipButton()?.textContent).toBe('Full · ≈120K')
+    expect(document.querySelector('.composer-context-anchor')).toBeNull()
+    act(() => chipButton()!.click())
+    expect(document.querySelector('.composer-idle-menu-head')?.textContent).toBe('Idle 1h 5m')
+    act(() => menuRows()[0]!.click())
+    expect(onCompactNow).toHaveBeenCalledOnce()
+  })
+
+  it('stays away while idle less than an hour, on a short history, with the setting off, and on a bot thread', () => {
+    render(estimatedUsage(120_000, 30 * MINUTE), { noGauge: true })
+    expect(chipButton()).toBeNull()
+    render(estimatedUsage(39_000, 2 * HOUR), { noGauge: true })
+    expect(chipButton()).toBeNull()
+    render(estimatedUsage(120_000, 2 * HOUR), { noGauge: true, setting: 'off' })
+    expect(chipButton()).toBeNull()
+    render(estimatedUsage(120_000, 2 * HOUR), { noGauge: true, contextHidden: true })
+    expect(chipButton()).toBeNull()
+    // Compacting… shows there too.
+    render(estimatedUsage(120_000, 2 * HOUR), { noGauge: true, compacting: true })
+    expect(chipButton()?.textContent).toBe('Compacting…')
   })
 })
 

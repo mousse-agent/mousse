@@ -32,11 +32,12 @@ export interface BotChipCall {
 
 /** What a call does, for its words and how it rolls up. */
 type ChipKind =
-  | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
+  | 'search' | 'fetch' | 'service_read' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
-  | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch'
-  | 'threads_look' | 'profiler' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
-  | 'subagent' | 'subagent_wait' | 'subagent_look'
+  | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch' | 'bot_send' | 'bot_look'
+  | 'threads_look' | 'profiler' | 'themes_look' | 'theme' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
+  | 'thread_steer' | 'thread_fork' | 'thread_merge' | 'approval' | 'queue' | 'jobs' | 'secret' | 'secret_run' | 'quick_action'
+  | 'subagent' | 'subagent_wait' | 'subagent_look' | 'computer'
 
 interface Classified {
   kind: ChipKind
@@ -128,6 +129,12 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
       const query = str(args.query)
       return { kind: 'search', icon: 'search', live: 'searching the web', ...(query ? { detail: shortChipText(query, 30) } : {}) }
     }
+    case 'computer_tools':
+      return { kind: 'computer', icon: 'web', live: 'using the computer' }
+    case 'computer_use': {
+      const action = str(args.tool)
+      return { kind: 'computer', icon: 'web', live: 'using the computer', ...(action ? { detail: shortChipText(action, 30) } : {}) }
+    }
     case 'web_fetch': {
       const domain = domainOf(args.url)
       return { kind: 'fetch', icon: 'web', live: 'reading a page', ...(domain ? { detail: domain } : {}) }
@@ -184,17 +191,50 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'work_models': return { kind: 'work_look', icon: 'think', live: 'looking at your models' }
     case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
     case 'wake': return { kind: 'wake', icon: 'schedule', live: 'setting a wake-up' }
+    // Messages to the owner's other bots: each one sent is a chip; a look at who they are is not.
+    case 'bot_send': return { kind: 'bot_send', icon: 'think', live: 'telling another bot' }
+    case 'bot_list': return { kind: 'bot_look', icon: 'think', live: 'looking at your other bots' }
     case 'watch_start': return { kind: 'watch', icon: 'schedule', live: 'starting a background command' }
     case 'watch_stop': return { kind: 'unwatch', icon: 'schedule', live: 'stopping a background command' }
     case 'watch_list': return { kind: 'work_look', icon: 'think', live: 'checking its background work' }
+    case 'running_list': return { kind: 'work_look', icon: 'think', live: 'checking what is running' }
     case 'reminder_cancel': return { kind: 'unremind', icon: 'schedule', live: 'cancelling a reminder' }
     case 'reminder_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its reminders' }
     // The owner's threads ("use your threads"): what it read rolls up into one chip; each start, message and stop is its
     // own chip, with the thread to open.
     case 'thread_list':
     case 'thread_search':
-    case 'thread_read': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
+    case 'thread_read':
+    case 'queue_list':
+    case 'git_status':
+    case 'git_diff':
+    case 'list_computers': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
+    case 'terminal_read': return { kind: 'threads_look', icon: 'read', live: 'reading a terminal' }
     case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
+    // Steering, forking, handing a fork back and answering an approval: each its own chip, with the thread to open.
+    case 'thread_steer': return { kind: 'thread_steer', icon: 'think', live: 'steering a thread' }
+    case 'thread_fork': return { kind: 'thread_fork', icon: 'think', live: 'forking a thread' }
+    case 'thread_merge_back': return { kind: 'thread_merge', icon: 'think', live: 'handing a fork back' }
+    case 'approval_respond': return { kind: 'approval', icon: 'think', live: 'answering an approval' }
+    // A thread's queue: every change rolls up into one chip.
+    case 'queue_enqueue':
+    case 'queue_edit':
+    case 'queue_remove':
+    case 'queue_reorder':
+    case 'queue_promote_to_steer': return { kind: 'queue', icon: 'think', live: "changing a thread's queue" }
+    // The owner's scheduled jobs ("schedule work in your threads"): the list is a look, every change one chip.
+    case 'schedule_list': return { kind: 'schedules', icon: 'schedule', live: 'checking your scheduled jobs' }
+    case 'schedule_create':
+    case 'schedule_update':
+    case 'schedule_pause':
+    case 'schedule_run':
+    case 'schedule_delete': return { kind: 'jobs', icon: 'schedule', live: 'changing your scheduled jobs' }
+    // Secrets ("use secrets you give it"): asking shows the card; a command with one is its own chip.
+    case 'secret_request': return { kind: 'secret', icon: 'ask', live: 'asking you for a secret' }
+    // The vault supplies this activity only after validation and admission, like an MCP server label.
+    case 'service_read': return { kind: 'service_read', icon: 'read', live: 'reading from', detail: shortChipText(str(args.service) ?? 'a service', 40) }
+    case 'secret_run': return { kind: 'secret_run', icon: 'think', live: 'running a command with a secret' }
+    case 'create_quick_action': return { kind: 'quick_action', icon: 'edit', live: 'adding a quick action' }
     // Mousse's profiler ("use the profiler"): every read and sample rolls up into one chip.
     case 'profiler_overview':
     case 'profiler_service_breakdown':
@@ -203,6 +243,9 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'profiler_children':
     case 'profiler_sample_now':
     case 'profiler_watch': return { kind: 'profiler', icon: 'read', live: "checking Mousse's memory" }
+    // Mousse's look ("change how Mousse looks"): reading the themes, and changing them.
+    case 'theme_read': return { kind: 'themes_look', icon: 'read', live: 'looking at your themes' }
+    case 'theme_set': return { kind: 'theme', icon: 'edit', live: 'changing how Mousse looks' }
     case 'thread_create': {
       const title = str(args.title)
       return { kind: 'thread_start', icon: 'think', live: 'starting a thread', ...(title ? { detail: shortChipText(title, 40) } : {}) }
@@ -235,6 +278,13 @@ export function chipForCall(tool: string, input: unknown, ctx: BotChipContext = 
   return { icon: classified.icon, text: classified.live, ...(classified.detail ? { highlight: classified.detail } : {}), live: true }
 }
 
+/**
+ * The live chip of a call that has no words of its own (a tool `classify` does not name, a card that is its own chip):
+ * the bot is doing something else now, so what it did before no longer stands. Never the tool's name. It is live only:
+ * such a call settles to no chip.
+ */
+export const WORKING_LIVE_CHIP: BotChip = { icon: 'think', text: 'working', live: true }
+
 /** A few distinct values in one highlight: "a.com", "a.com, b.com", "a.com +2". */
 function listed(values: readonly string[]): string | undefined {
   const distinct = [...new Set(values)]
@@ -261,7 +311,15 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     }
     case 'remember': {
       const text = str(input.text) ?? str(result.text)
-      return text ? { icon: 'memory', text: 'remembered', highlight: shortChipText(text) } : { icon: 'memory', text: 'remembered something' }
+      const absorbed = Array.isArray(result.absorbed) ? result.absorbed.flatMap((entry) => {
+        const text = str(record(entry).text)
+        return text ? [shortChipText(text)] : []
+      }) : []
+      return text ? {
+        icon: 'memory', text: 'remembered',
+        highlight: `${shortChipText(text)}${absorbed.length ? ` · put away ${absorbed.length}` : ''}`,
+        ...(absorbed.length ? { title: `Put away:\n${absorbed.join('\n')}` } : {})
+      } : { icon: 'memory', text: 'remembered something' }
     }
     // Never the forgotten text: the chip is stored with the message (`chips_json`), and the owner asked for it to go.
     case 'forget': return { icon: 'memory', text: 'forgot something you asked me to' }
@@ -274,7 +332,9 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
       const effort = str(model.effort)
       return {
         icon: 'think',
-        text: result.status === 'queued' ? 'will start' : 'started',
+        text: result.replayed
+          ? (result.status === 'ended' ? 'already ended' : result.status === 'queued' ? 'already queued' : 'already on it')
+          : result.status === 'queued' ? 'will start' : 'started',
         ...(highlight ? { highlight } : {}),
         ...(name ? { title: workModelDetail({ name, entry: str(model.entry) ?? '', ...(effort ? { effort } : {}) }) } : {})
       }
@@ -299,6 +359,11 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     // A background command shows as a card on the message instead.
     case 'watch': return null
     case 'unwatch': return { icon: 'schedule', text: 'stopped a background command' }
+    // A message to another of the owner's bots: "told · Alpha".
+    case 'bot_send': {
+      const to = str(result.to)
+      return to ? { icon: 'think', text: 'told', highlight: shortChipText(to, 40) } : null
+    }
     // A wake: what it waits for ("when acme/app#12 merges") or its time.
     case 'wake': {
       const label = str(result.waitsFor) ?? str(result.when)
@@ -310,14 +375,20 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     case 'thread_send':
     case 'thread_stop':
     case 'thread_archive':
-    case 'thread_hide': {
+    case 'thread_hide':
+    case 'thread_steer':
+    case 'thread_fork':
+    case 'thread_merge':
+    case 'approval': {
       const threadId = str(result.threadId)
       if (!threadId) return null
       const title = str(result.title)
       const text = kind === 'thread_start' ? (result.hidden === true ? 'started hidden thread' : 'started thread')
         : kind === 'thread_send' ? 'messaged' : kind === 'thread_stop' ? 'stopped'
-          : kind === 'thread_hide' ? (result.hidden === false ? 'showed in sidebar' : 'hid from sidebar')
-            : result.archived === false ? 'unarchived' : 'archived'
+          : kind === 'thread_steer' ? 'steered' : kind === 'thread_fork' ? 'forked into' : kind === 'thread_merge' ? 'handed fork back to'
+            : kind === 'approval' ? (result.decision === 'allow' ? 'approved in' : 'answered approval in')
+              : kind === 'thread_hide' ? (result.hidden === false ? 'showed in sidebar' : 'hid from sidebar')
+                : result.archived === false ? 'unarchived' : 'archived'
       // The first line of what it sent there, which the chip shows on hover.
       const said = str(result.sent)
       return { icon: 'think', text, ...(title ? { highlight: shortChipText(title, 40) } : {}), thread: threadId, ...(said ? { said: shortChipText(said, 160) } : {}) }
@@ -345,6 +416,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'search': return chip('searched the web', n === 1 ? details[0] : String(n))
     case 'fetch': return chip(n === 1 ? 'read a page' : `read ${n} pages`, listed(details))
     case 'browse': return chip('used the browser', listed(details))
+    case 'computer': return chip('used the computer')
     case 'read': return chip('read files', listed(details))
     case 'change': return chip('changed files', listed(details))
     case 'save': return chip(n === 1 ? 'saved a file' : `saved ${n} files`, listed(details))
@@ -353,9 +425,17 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'consult': return chip('looked into', listed(details))
     case 'skill': return chip(details.length ? 'used a skill' : 'looked at its skills', listed(details))
     case 'tool': return chip(details.length ? 'used a tool' : 'ran a command', listed(details))
+    case 'service_read': return chip('read from', listed(details))
     case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
     case 'threads_look': return chip('read your threads')
     case 'profiler': return chip("checked Mousse's memory and CPU")
+    case 'themes_look': return chip('looked at your themes')
+    case 'theme': return chip('changed how Mousse looks')
+    case 'queue': return chip("changed a thread's queue")
+    case 'jobs': return chip('changed your scheduled jobs')
+    case 'secret': return chip('asked you for a secret')
+    case 'secret_run': return chip('ran a command with a secret')
+    case 'quick_action': return chip(n === 1 ? 'added a quick action' : `added ${n} quick actions`)
     case 'thread_wait': return chip(n === 1 ? 'waited on a thread' : `waited on threads · ${n}`)
     case 'subagent': {
       const titles = [...new Set(details)]
@@ -376,11 +456,11 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
 }
 
 /** Kinds whose every successful call is its own chip. */
-const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'watch', 'unwatch', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive', 'thread_hide'])
+const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'watch', 'unwatch', 'bot_send', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive', 'thread_hide'])
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */
-const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'subagent_wait', 'subagent_look'])
+const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'bot_look', 'subagent_wait', 'subagent_look'])
 
 /**
  * The settled chips of one dispatch: grouped by kind, with counts and a short highlight (a domain,

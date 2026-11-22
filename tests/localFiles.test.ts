@@ -1,8 +1,8 @@
 /**
  * A file or folder of this computer that a bot's chat names (src/main/localFiles.ts): shown selected in its folder,
- * opened (a folder), saved as a copy where the person picks, copied to the clipboard as a picture. Each takes only an
- * existing one by its absolute path; a copy and a picture take a file only.
- * Real files on disk; Electron's shell, dialog and clipboard are stand-ins.
+ * opened (a folder), or saved as a copy where the person picks. Each takes only an existing one by its absolute
+ * path; a copy takes a file only.
+ * Real files on disk; Electron's shell and dialog are stand-ins.
  */
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,13 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const electron = vi.hoisted(() => ({
   shell: { showItemInFolder: vi.fn(), openPath: vi.fn() },
-  dialog: { showSaveDialog: vi.fn() },
-  clipboard: { writeImage: vi.fn() },
-  nativeImage: { createFromPath: vi.fn() }
+  dialog: { showSaveDialog: vi.fn() }
 }))
 vi.mock('electron', () => electron)
 
-const { copyImageFile, openLocalPath, saveFileCopy, showFileInFolder } = await import('../src/main/localFiles')
+const { openLocalPath, saveFileCopy, showFileInFolder } = await import('../src/main/localFiles')
 
 let folder: string
 let picture: string
@@ -27,18 +25,18 @@ beforeEach(() => {
   writeFileSync(picture, Buffer.from([137, 80, 78, 71, 1, 2, 3]))
   mkdirSync(join(folder, 'pictures.png'))
   electron.shell.openPath.mockReset().mockResolvedValue('')
-  for (const mock of [electron.shell.showItemInFolder, electron.dialog.showSaveDialog, electron.clipboard.writeImage, electron.nativeImage.createFromPath]) mock.mockReset()
+  for (const mock of [electron.shell.showItemInFolder, electron.dialog.showSaveDialog]) mock.mockReset()
 })
 afterEach(() => rmSync(folder, { recursive: true, force: true }))
 
-// Everything but an existing file or folder by its absolute path is refused, and nothing is shown, opened, saved or copied.
+// Everything but an existing file or folder by its absolute path is refused, and nothing is shown, opened or saved.
 const nowhere: Array<[string, () => unknown]> = [
   ['a relative path', () => 'chip-clouds-boy.png'],
   ['a file that is not there', () => join(folder, 'gone.png')],
   ['a path with a NUL', () => `${picture}\0.png`],
   ['not a string', () => ({ path: picture })]
 ]
-// What takes a file only refuses a folder too.
+// Saving a copy takes a file only, and refuses a folder too.
 const refused: Array<[string, () => unknown]> = [...nowhere, ['a folder', () => join(folder, 'pictures.png')]]
 
 describe('showFileInFolder', () => {
@@ -105,27 +103,5 @@ describe('saveFileCopy', () => {
   })
   it('says a folder is a folder', async () => {
     await expect(saveFileCopy(join(folder, 'pictures.png'), null, folder)).rejects.toThrow('That is a folder, not a file.')
-  })
-})
-
-describe('copyImageFile', () => {
-  it('puts a picture on the clipboard', async () => {
-    const image = { isEmpty: () => false }
-    electron.nativeImage.createFromPath.mockReturnValue(image)
-    await copyImageFile(picture)
-    expect(electron.nativeImage.createFromPath).toHaveBeenCalledWith(picture)
-    expect(electron.clipboard.writeImage).toHaveBeenCalledWith(image)
-  })
-  it('refuses a file that is not a picture, and one the clipboard cannot read as one', async () => {
-    const notes = join(folder, 'notes.md')
-    writeFileSync(notes, '# Notes')
-    await expect(copyImageFile(notes)).rejects.toThrow('Only a picture can be copied as an image.')
-    electron.nativeImage.createFromPath.mockReturnValue({ isEmpty: () => true })
-    await expect(copyImageFile(picture)).rejects.toThrow("This picture can't be copied.")
-    expect(electron.clipboard.writeImage).not.toHaveBeenCalled()
-  })
-  it.each(refused)('refuses %s', async (_what, path) => {
-    await expect(copyImageFile(path())).rejects.toThrow()
-    expect(electron.clipboard.writeImage).not.toHaveBeenCalled()
   })
 })

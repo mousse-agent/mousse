@@ -13,7 +13,7 @@ import type { ProviderUsage } from '../../src/shared/providerAuth'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const providers: ProviderUsage[] = [
-  { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 58 }] },
+  { id: 'claude-subscription', label: 'Claude subscription', status: 'available', proxy: { address: '127.0.0.1:8317', key: 'saved' }, windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 58 }] },
   { id: 'vercel-ai-gateway', label: 'Vercel AI Gateway', authType: 'api_key', status: 'available', windows: [], credit: { balanceUsd: 12.4, usedUsd: 37.6 } },
   { id: 'codex:chatgpt-subscription', label: 'ChatGPT subscription', status: 'unavailable', windows: [], signedOut: true, message: 'Signed out' },
   { id: 'xai', label: 'Grok (xAI)', instanceId: 'pi:xai', authType: 'oauth', status: 'error', windows: [], problem: 'session_expired', message: 'Grok session expired.' },
@@ -39,7 +39,7 @@ function render(patch: Partial<Parameters<typeof SubscriptionUsageView>[0]> = {}
   const onReconnect = vi.fn()
   act(() => root!.render(createElement(SubscriptionUsageView, {
     usage: { providers, fetchedAt: '2026-11-09T12:00:00Z' }, loading: false, failed: false, now: Date.parse('2026-11-09T12:00:00Z'),
-    onBack: () => {}, onRefresh: () => {}, onManage: () => {}, onReconnect, ...patch
+    onRefresh: () => {}, onManage: () => {}, onReconnect, ...patch
   })))
   return { onReconnect }
 }
@@ -49,7 +49,7 @@ const all = (selector: string) => [...document.querySelectorAll<HTMLElement>(sel
 describe('the three sections', () => {
   it('a subscription card, Other usage and Needs attention collapsed to their header rows, and the header chip counts', () => {
     render()
-    expect(all('.usage-provider').map((card) => card.querySelector('.settings-group-title')?.textContent)).toEqual(['Claude subscription'])
+    expect(all('.usage-provider').map((card) => card.querySelector('.settings-group-title')?.textContent)).toEqual(['Anthropic · Claude subscription'])
     expect(q('[data-testid="usage-section-usage-other"] .usage-section-head')?.textContent).toContain('Other usage· 2')
     expect(q('[data-testid="usage-section-usage-attention"] .usage-section-head')?.textContent).toContain('Needs attention· 2')
     expect(all('[data-testid="usage-other-row"]')).toHaveLength(0)
@@ -73,11 +73,13 @@ describe('the three sections', () => {
     expect(all('[data-testid="usage-other-row"]')).toHaveLength(2)
   })
 
-  it('the header chip opens Needs attention and brings it into view, things to fix only', () => {
+  it('the header chip opens Needs attention and brings it into view, things to fix only', async () => {
     render()
     act(() => q('[data-testid="usage-attention-chip"]')!.click())
+    // It scrolls on the next frame, once the Limits tab is showing.
+    await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)) })
     expect(all('[data-testid="usage-attention-row"]').map((row) => row.textContent)).toEqual([
-      'ChatGPT subscriptionSigned outReconnect',
+      'OpenAI · ChatGPT subscriptionSigned outReconnect',
       'Grok (xAI)Session expiredReconnect'
     ])
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
@@ -114,12 +116,12 @@ describe('providers still on their way', () => {
     ]
     render({ usage: { providers: waiting, fetchedAt: '2026-11-09T12:00:00Z' }, loading: true, loadingIds: new Set(waiting.map((provider) => provider.id)) })
     expect(all('[data-testid="usage-card-loading"]')).toHaveLength(1)
-    expect(all('[data-testid="usage-row-loading"]').map((row) => row.textContent)).toEqual(['Vercel AI Gateway', 'ChatGPT subscription'])
+    expect(all('[data-testid="usage-row-loading"]').map((row) => row.textContent)).toEqual(['Vercel AI Gateway', 'OpenAI · ChatGPT subscription'])
     expect(document.body.textContent).not.toContain('No usage reported')
   })
 
   it('sign-ins still being read show skeleton cells under the usual columns', () => {
-    const claude: ProviderUsage = { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts: [
+    const claude: ProviderUsage = { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], proxy: { address: '127.0.0.1:8317', key: 'saved' }, accounts: [
       { id: 'a', label: 'a@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 50 }] },
       { id: 'b', label: 'b@example.com', windows: [], pending: true }
     ] }

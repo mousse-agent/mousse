@@ -114,6 +114,7 @@ describe('syncThread', () => {
     const fx = memoryFixture()
     const full = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
@@ -165,6 +166,34 @@ describe('crash catch-up', () => {
     expect(fx.store.getState('ada', 'cursor:run-1')).toEqual({ n: 3, lastId: 'a1' })
   })
 
+  it('reads only the threads written since their last copy, so startup does not read every bot conversation', async () => {
+    const fx = memoryFixture()
+    const refs = botThreadsForCatchUp([
+      { threadId: 'quiet', botId: 'ada', role: 'activation', activationId: 'act-1' },
+      { threadId: 'busy', botId: 'ada', role: 'activation', activationId: 'act-2' },
+      { threadId: 'json', botId: 'ada', role: 'activation', activationId: 'act-3' }
+    ])
+    const t = threads()
+    // A stamp per thread stands for its files on disk; 'json' has none (a thread still in JSON files).
+    const stamps = new Map([['quiet', 'q1'], ['busy', 'b1']])
+    const journal = createBotJournal({ store: fx.store, readThread: t.readThread, transcriptStamp: (id) => stamps.get(id), listThreads: () => refs })
+    t.data.set('quiet', [assistant('q', 'Done earlier.')])
+    t.data.set('busy', [assistant('b', 'Started.')])
+    t.data.set('json', [assistant('j', 'Old format.')])
+    for (const ref of refs) journal.syncNow(ref)
+    // Mousse stopped; while it was off only 'busy' was written.
+    t.data.set('busy', [assistant('b', 'Started.'), assistant('b2', 'Finished while you were away.', 1)])
+    stamps.set('busy', 'b2')
+    t.reads.length = 0
+    await journal.catchUp()
+    expect(t.reads.sort()).toEqual(['busy', 'json'])
+    expect(fx.store.journal('ada').map((row) => row.text)).toContain('Finished while you were away.')
+    // A copy after a dispatch still reads the thread whatever its stamp.
+    t.reads.length = 0
+    await journal.syncThread(refs[0]!)
+    expect(t.reads).toEqual(['quiet'])
+  })
+
   it('nothing is lost: owner and bot messages, run reports, asks, answers, tool calls and model changes are all in the journal', async () => {
     const fx = memoryFixture()
     const { t, journal } = setup(fx)
@@ -208,6 +237,7 @@ describe('review round 2', () => {
     const fx = memoryFixture()
     const full = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
@@ -296,4 +326,44 @@ describe('a subagent of the bot\'s work', () => {
     await journal.syncThread({ botId: 'ada', threadId: 'sub-1', lane: 'run', activationId: 'act-1' })
     expect(kinds(fx)).toEqual([])
   })
+})
+
+describe('scheduled progress and Forget', () => {
+  it.each(['citation', 'copied text'])('capture and older progress rows cannot retain a forgotten %s', async (kind) => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    const text = 'Waiting for the clinic about "the diagnosis"\nand the next appointment.'
+    const seq = fx.message({ botId: 'ada', id: 'owner', author: 'owner', text })
+    const note = kind === 'citation' ? `Waiting for the clinic (j${seq}).` : text
+    t.data.set('run', [toolCall('report', 'mcp__mousse__run_report', { level: 'quiet', summary: 'Nothing new.', leftOff: note })])
+    await journal.syncThread({ botId: 'ada', threadId: 'run', lane: 'run', activationId: 'a1' })
+    const call = fx.store.journal('ada').find((row) => row.kind === 'tool_call')!
+    expect(JSON.stringify(call)).not.toContain('leftOff')
+    expect(call.text).not.toContain('clinic')
+    fx.store.saveProgress('ada', 's1', 'a1', note)
+    fx.store.saveProgress('ada', 's1', 'a2', note + ' Still pending.')
+    fx.store.saveProgress('ada', 's2', 'b1', 'Unrelated task is pending.')
+    fx.store.forget('ada', { refs: [`j${seq}`], by: 'owner_ui' })
+    expect(fx.store.progress('ada', 's1')).toBeUndefined()
+    expect(fx.store.search('ada', { query: 'clinic' })).toEqual([])
+    expect(fx.store.journal('ada').filter((row) => row.json?.op === 'progress' && row.json?.scheduleId === 's1' && !row.redactedAt)).toEqual([])
+    expect(fx.store.progress('ada', 's2')).toBe('Unrelated task is pending.')
+  })
+})
+
+it('capture ignores system packs and compaction or handoff metadata', async () => {
+  const fx = memoryFixture()
+  const { t, journal } = setup(fx)
+  const pack = '<bot_memory>Where I left off: waiting for the clinic.</bot_memory>'
+  // Hand-authored transcript boundary cases. Runtime native context is separate from messages.
+  t.data.set('run', [
+    { id: 'system-pack', role: 'system', content: pack, timestamp: at(0) },
+    { id: 'compaction', role: 'assistant', kind: 'context_compaction', content: pack, timestamp: at(1) },
+    { id: 'handoff', role: 'assistant', kind: 'context_handoff', content: pack, timestamp: at(2) },
+    user('request', 'Check inbox.'),
+    assistant('reply', 'Nothing new.')
+  ])
+  await journal.syncThread({ botId: 'ada', threadId: 'run', lane: 'run', activationId: 'a1' })
+  expect(fx.store.journal('ada').map((row) => row.text)).toEqual(['Check inbox.', 'Nothing new.'])
+  expect(fx.store.search('ada', { query: 'clinic' })).toEqual([])
 })

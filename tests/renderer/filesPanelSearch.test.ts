@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react'
+import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppStore } from '../../src/renderer/stores/appStore'
@@ -15,6 +15,7 @@ vi.mock('../../src/renderer/components/FileTree', () => ({
   FileTree: () => createElement('div', { className: 'file-tree' }, createElement('button', { type: 'button', className: 'file-tree-row tree-stub' }, 'tree'))
 }))
 
+const { MainViewTabs } = await import('../../src/renderer/components/MainViewTabs')
 const { FilesPanel } = await import('../../src/renderer/components/FilesPanel')
 
 let root: Root
@@ -37,6 +38,7 @@ const disk: Record<string, FileEntry[]> = {
 }
 
 beforeEach(() => {
+  useAppStore.setState({ openedSurfaceKinds: ['files'], mainView: 'files' })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -49,7 +51,7 @@ beforeEach(() => {
     app: { getFilesRoot: async () => filesRoot, getActiveProjectPath: async () => projectFolder },
     workspace: { getStatus: async () => ({}) },
     fs: {
-      listDir, search, readFile: async () => 'hello', writeFile: async () => undefined, readAsset: async () => null,
+      listDir, search, readFile: async () => 'hello', readFileInWorkspace: async () => ({ content: 'hello', workspaceRoot: '/repo' }), writeFile: async () => undefined, readAsset: async () => null,
       listDrives: async () => ({ home: '/home/me', drives: [{ path: '/', label: '/' }] })
     },
     threads: { select: async () => undefined }
@@ -84,7 +86,7 @@ const type = async (value: string) => {
 }
 
 async function renderPanel() {
-  await act(async () => root.render(createElement(FilesPanel)))
+  await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
   await flush()
 }
 
@@ -130,7 +132,8 @@ describe('searching a folder that is not a project', () => {
 
     await key(input(), { key: 'Enter' })
     await flush()
-    expect(host.querySelector('[role="tab"]')?.textContent).toContain('notes.md')
+    expect(host.querySelector('.main-view-tab-select[title="notes.md"]')?.textContent).toContain('notes.md')
+    await act(async () => host.querySelector<HTMLButtonElement>('.main-view-tab-select[title="Files"]')!.click())
     // The results stay for the next pick.
     expect(rows()).toHaveLength(2)
   })

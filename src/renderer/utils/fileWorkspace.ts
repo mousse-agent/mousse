@@ -18,7 +18,7 @@ export interface AutosaveAttempt {
 export function normalizeWorkspacePath(filePath: string, workspaceRoot = ''): string {
   const slash = (value: string) => value.replace(/\\/g, '/')
   const normalizeSegments = (value: string): string => {
-    const prefix = /^[A-Za-z]:\//.exec(value)?.[0] ?? (value.startsWith('/') ? '/' : '')
+    const prefix = /^(?:[A-Za-z]:\/|\/\/[^/]+\/[^/]+(?:\/|$))/.exec(value)?.[0] ?? (value.startsWith('/') ? '/' : '')
     const rest = prefix ? value.slice(prefix.length) : value
     const segments: string[] = []
     for (const segment of rest.split('/')) {
@@ -32,7 +32,7 @@ export function normalizeWorkspacePath(filePath: string, workspaceRoot = ''): st
   const path = normalizeSegments(slash(filePath.trim()))
   const root = workspaceRoot ? normalizeSegments(slash(workspaceRoot.trim())).replace(/\/$/, '') : ''
   if (!root) return path.replace(/^\.\//, '')
-  const caseInsensitive = /^[A-Za-z]:\//.test(root)
+  const caseInsensitive = /^(?:[A-Za-z]:\/|\/\/)/.test(root)
   const comparablePath = caseInsensitive ? path.toLowerCase() : path
   const comparableRoot = caseInsensitive ? root.toLowerCase() : root
   if (comparablePath === comparableRoot) return '.'

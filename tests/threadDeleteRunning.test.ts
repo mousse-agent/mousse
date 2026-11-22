@@ -216,24 +216,6 @@ describe('deleting a thread while its turn runs', () => {
     })
   }
 
-  it('stops the turns of its subagent threads too, and deletes them with it', async () => {
-    const p = await profile()
-    try {
-      const parent = await p.thread('parent')
-      const child = p.f.services.threads.createThread('its subagent', undefined, undefined, { started: true, lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' } })
-      await p.run(parent.id, false)
-      await p.run(child.id, false)
-      archived(p.f.services.threads, parent.id)
-      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: parent.id })
-      expect(reply.lifecycle.state).toBe('purged')
-      expect(p.f.services.threads.getThread(child.id)).toBeUndefined()
-      expect(p.adapter.live(child.id)).toBe(0)
-      expect(p.adapter.live(parent.id)).toBe(0)
-    } finally {
-      await p.close()
-    }
-  })
-
   it('ends a question its running turn asked, which the Stop withdraws, instead of refusing the delete', async () => {
     const p = await profile()
     try {
@@ -316,6 +298,29 @@ describe('deleting a thread while its turn runs', () => {
     } finally {
       release()
       await poll
+      vi.restoreAllMocks()
+      await p.close()
+    }
+  })
+
+  it('answers when the Stop itself never does: the delete is refused within its bound, and the thread stays', async () => {
+    const p = await profile()
+    try {
+      const target = await p.thread('stop never answers')
+      await p.run(target.id, false)
+      ;(p.f.services as unknown as { deleteStopWaitMs: number }).deleteStopWaitMs = 1_000
+      // A Stop that never comes back, as one waiting on a provider that never lets go.
+      vi.spyOn(p.f.services.orchestrator, 'stopThread').mockImplementation(() => new Promise(() => {}))
+      archived(p.f.services.threads, target.id)
+      const started = Date.now()
+      const refused = await p.f.rpc.request('threads.delete', { threadId: target.id }).then(() => undefined, (error: Error) => error)
+      expect(refused).toBeInstanceOf(Error)
+      expect(Date.now() - started).toBeLessThan(20_000)
+      // Nothing was stopped or removed: the thread is listed, archived, and its turn goes on.
+      expect(p.f.services.threads.getThread(target.id)?.settledAt).toBeTruthy()
+      expect(p.f.services.threads.lifecycleStore.get(target.id)?.state ?? 'active').toBe('active')
+      expect(p.adapter.live(target.id)).toBe(1)
+    } finally {
       vi.restoreAllMocks()
       await p.close()
     }

@@ -18,7 +18,8 @@ export interface SettleNoticeItem {
   event: SettleNoticeEvent
   /**
    * With `ended`: the status the work ended with (a run status), `removed` when the message left the thread's queue
-   * before it ran, or `deleted` when the thread was deleted.
+   * before it ran, `deleted` when the thread was deleted, or `unreachable` when the thread is on another computer that
+   * stopped answering this one's reads (it refused this device, stopped sharing, is too old) and Mousse stopped watching.
    */
   status?: string
   /** The run the notice is about, when there is one. */

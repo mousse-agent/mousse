@@ -16,7 +16,7 @@ import {
 import { subagentToolName } from '../../../shared/subagentTools'
 import { parseProviderToolCall } from '../../../shared/toolCallDisplay'
 import type { ChatMessage, TurnPhase } from '../../../shared/types'
-import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../mcp/attachment'
+import { mousseServerToolOf } from '../mcp/attachment'
 import type {
   StreamingLlmTextEvent,
   StreamingLlmThinkingEvent,
@@ -75,7 +75,8 @@ export const WAIT_TOOL_NAMES: ReadonlySet<string> = new Set(['TaskOutput', 'thre
 
 /** A wait tool (`WAIT_TOOL_NAMES`), by its own name or as the Mousse MCP server's tool. */
 function isWaitTool(name: string): boolean {
-  return WAIT_TOOL_NAMES.has(name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) ? name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) : name)
+  const served = mousseServerToolOf(name)
+  return WAIT_TOOL_NAMES.has(served?.server === 'mousse' ? served.tool : name)
 }
 
 /** A foreground call a held steer waits for (`TranscriptAssembler.foregroundTools`). */
@@ -118,7 +119,7 @@ function shownToolName(message: ChatMessage): string {
       return 'subagent'
   }
   const raw = toolNameOf(message)
-  const mcp = raw.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
+  const mcp = raw.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/) ?? raw.match(/^mcp_(mousse-relay|mousse)_(.+)$/)
   if (mcp) return mcpDisplayName(mcp[2]!)
   // A provider that names the server apart (Codex): `server` with the tool's own name.
   if (activity?.kind === 'generic' && activity.server) return mcpDisplayName(raw)

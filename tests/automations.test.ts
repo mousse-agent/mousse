@@ -438,3 +438,25 @@ describe('the first-creation ask', () => {
     expect(index.items[0]!.attention!.text).toMatch(/^Reviewer wants to check PR #42 for new review comments every 30 min$/i)
   })
 })
+
+it('C11 a held schedule stays live and shows why later occurrences are skipped', () => {
+  const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [{ id: 'held', status: 'blocked', endReason: 'approval', at: PAST }] }
+  const scheduled = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' }, botSkip: { at: PAST, reason: 'bot_waiting_for_owner' } })
+  const item = buildAutomationIndex(sources({ jobs: [scheduled], bots: { b: pip } })).items[0]!
+  expect(item.active).toMatchObject({ state: 'running', detail: 'Later runs skipped: the bot is waiting for your answer' })
+  expect(item.last).toBeUndefined()
+})
+
+it.each([false, true])('C11 an answered run never asks for another answer, previous skip=%s', skipped => {
+  const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [{ id: 'held', status: 'blocked', endReason: 'approval_answered', at: PAST }] }
+  const scheduled = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' }, ...(skipped ? { botSkip: { at: PAST, reason: 'bot_waiting_for_owner' as const } } : {}) })
+  const item = buildAutomationIndex(sources({ jobs: [scheduled], bots: { b: pip } })).items[0]!
+  expect(item.active).toMatchObject({ state: 'running', detail: 'Carrying on with your answer' })
+})
+
+it.each(['withdrawn', 'expired'])('C6 a request that was %s does not claim an owner answer', status => {
+  const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [{ id: 'held', status: 'blocked', endReason: `approval_${status}`, at: PAST }] }
+  const scheduled = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+  const item = buildAutomationIndex(sources({ jobs: [scheduled], bots: { b: pip } })).items[0]!
+  expect(item.active).toMatchObject({ state: 'running', detail: `Carrying on after the request ${status === 'withdrawn' ? 'was withdrawn' : 'expired'}` })
+})

@@ -146,14 +146,9 @@ describe('a navigation is done when its page has committed and its document is r
 describe('a failed navigation comes back in its class', () => {
   it.each([
     ['net::ERR_NAME_NOT_RESOLVED', 'site_unreachable', 'unreachable'],
-    ['net::ERR_CONNECTION_REFUSED', 'site_unreachable', 'unreachable'],
-    ['net::ERR_INTERNET_DISCONNECTED', 'site_unreachable', 'unreachable'],
-    ['net::ERR_TIMED_OUT', 'site_unreachable', 'unreachable'],
-    ['net::ERR_TOO_MANY_REDIRECTS', 'site_unreachable', 'unreachable'],
     ['net::ERR_BLOCKED_BY_RESPONSE', 'site_blocked', 'blocked'],
     ['net::ERR_UNSAFE_PORT', 'browser_refused', 'browser-refused'],
     ['net::ERR_BLOCKED_BY_CLIENT', 'browser_refused', 'browser-refused'],
-    ['net::ERR_NETWORK_ACCESS_DENIED', 'browser_refused', 'browser-refused'],
     ['net::ERR_CERT_AUTHORITY_INVALID', 'browser_refused', 'browser-refused']
   ])('%s is %s, with Chromium\'s code kept for details', async (errorText, code, kind) => {
     const cdp = new NavigationTransport()

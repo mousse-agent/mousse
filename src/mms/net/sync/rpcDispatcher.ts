@@ -1,14 +1,17 @@
 import { createHash } from 'node:crypto'
 import type { NodeCapability, NodeDelegation, NodeId, Roster, RpcId } from '../../../shared/net'
 import { NetError, isNetErrorCode } from '../../../shared/net/errors'
-import type {
-  Clock,
-  ExecutionLedger,
-  ExecutionRecord,
-  RpcContext,
-  RpcDispatcher,
-  RpcMethod,
-  SyncSession
+import {
+  isEngineCaller,
+  type Clock,
+  type EngineCaller,
+  type ExecutionLedger,
+  type RpcCaller,
+  type ExecutionRecord,
+  type RpcContext,
+  type RpcDispatcher,
+  type RpcMethod,
+  type SyncSession
 } from '../contracts'
 import type { NetDatabase } from '../store/database'
 import { canonicalJson, MAX_DISPLAY_JSON_NODES } from './codec'
@@ -37,7 +40,10 @@ const isOmittedResult = (value: unknown): value is OmittedResult =>
 /** Durable request aliases share the execution ledger's database/transaction manager. */
 export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
   private registry = new Map<string, RpcMethod>()
-  private running = new Map<string, { controller: AbortController; caller: NodeId }>()
+  private running = new Map<
+    string,
+    { controller: AbortController; caller: NodeId; done: Promise<void> }
+  >()
   private lastPruneAt = Number.NEGATIVE_INFINITY
   private resultPublisher?: (
     result: unknown,
@@ -58,6 +64,11 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         peer: SyncSession['peer'],
         capability: NodeCapability
       ): void
+      /**
+       * The whole policy for an engine caller (a pairing over the engine session): its grant, the engine
+       * allowlist and the per-node policy. Without it engine callers are refused.
+       */
+      authorizeEngine?(method: RpcMethod, caller: EngineCaller, capability: NodeCapability): void
     }
   ) {
     options.db.database.exec(
@@ -139,10 +150,10 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     if (this.resultPublisher) throw new NetError('conflict')
     this.resultPublisher = publish
   }
-  authorizedMethod(name: string, peer: SyncSession['peer']): RpcMethod {
+  authorizedMethod(name: string, peer: RpcCaller): RpcMethod {
     return this.authorize(name, peer)
   }
-  originalRequest(id: RpcId, peer: SyncSession['peer'], method: string): RpcId | undefined {
+  originalRequest(id: RpcId, peer: RpcCaller, method: string): RpcId | undefined {
     const alias = this.alias(id, peer)
     if (!alias) return undefined
     if (alias.method !== method) throw new NetError('conflict')
@@ -222,7 +233,9 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     const terminalEffects: Array<() => void> = []
     const abort = (): void => controller.abort()
     context.signal.addEventListener('abort', abort, { once: true })
-    this.running.set(id, { controller, caller: context.caller.node })
+    let settle!: () => void
+    const done = new Promise<void>((resolve) => (settle = resolve))
+    this.running.set(id, { controller, caller: context.caller.node, done })
     try {
       this.authorize(name, context.caller, capability)
       method.authorize?.(params, context)
@@ -312,19 +325,38 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     } finally {
       context.signal.removeEventListener('abort', abort)
       this.running.delete(id)
+      settle()
     }
   }
-  async result(id: RpcId, peer: SyncSession['peer']): Promise<unknown> {
+  /**
+   * The settled result of an earlier request. An engine caller that lost its connection asks again with
+   * `wait`: a request still running in this process is waited on up to `wait.deadlineAt`, then the caller
+   * is authorized again. A request with no live execution here (the daemon restarted) answers
+   * `outcome_uncertain` at once. v1 callers never wait.
+   */
+  async result(
+    id: RpcId,
+    peer: RpcCaller,
+    wait?: { deadlineAt: number; signal?: AbortSignal }
+  ): Promise<unknown> {
     const alias = this.alias(id, peer)
     if (!alias) throw new NetError('outcome_uncertain')
     this.authorize(alias.method, peer, alias.capability)
     // The method's own test of who may still have the result: the parameters it checked at the call are not kept.
     this.registry.get(alias.method)?.authorizeResult?.(alias.execution as ExecutionRecord['id'], peer)
+    const live = this.running.get(alias.execution)
+    if (live && wait && isEngineCaller(peer)) {
+      await waitFor(live.done, wait.deadlineAt - this.options.clock.now(), wait.signal)
+      this.authorize(alias.method, peer, alias.capability)
+      this.registry
+        .get(alias.method)
+        ?.authorizeResult?.(alias.execution as ExecutionRecord['id'], peer)
+    }
     const record = this.options.executions.get(alias.execution as ExecutionRecord['id'])
     if (!record) throw new NetError('outcome_uncertain')
     return this.terminal(record)
   }
-  async cancel(id: RpcId, peer: SyncSession['peer']): Promise<void> {
+  async cancel(id: RpcId, peer: RpcCaller): Promise<void> {
     const alias = this.alias(id, peer)
     // A cancelled unsent request may never have been admitted. Cancel is idempotent.
     if (!alias) return
@@ -347,7 +379,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
   }
   private alias(
     id: RpcId,
-    peer: SyncSession['peer']
+    peer: RpcCaller
   ):
     | { method: string; payload_hash: string; execution: string; capability?: NodeCapability }
     | undefined {
@@ -359,11 +391,13 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       | { method: string; payload_hash: string; execution: string; capability?: NodeCapability }
       | undefined
   }
-  private authorize(
-    name: string,
-    peer: SyncSession['peer'],
-    capability?: NodeCapability
-  ): RpcMethod {
+  private authorize(name: string, peer: RpcCaller, capability?: NodeCapability): RpcMethod {
+    if (isEngineCaller(peer)) {
+      const method = this.registry.get(name)
+      if (!method || !this.options.authorizeEngine) throw new NetError('forbidden')
+      this.options.authorizeEngine(method, peer, capability ?? method.capability)
+      return method
+    }
     const method = this.registry.get(name),
       identity = this.options.identity,
       self = identity.self()
@@ -417,6 +451,21 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       )
     throw new NetError('outcome_uncertain')
   }
+}
+
+/** Resolves when `done` settles, after `ms`, or when `signal` aborts, whichever comes first. */
+function waitFor(done: Promise<void>, ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, ms)
+    signal?.addEventListener('abort', finish, { once: true })
+    void done.then(finish)
+  })
 }
 
 /** Whether a value fits one wire message's node bound (`MAX_JSON_NODES`), so it can be sent inline. */

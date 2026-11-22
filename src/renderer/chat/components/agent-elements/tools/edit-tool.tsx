@@ -299,10 +299,10 @@ function EditLine({
   const { at, recovered = false } = useToolRowInfo();
   const text = (
     <>
-      <span className={cn("font-[450] shrink-0 whitespace-nowrap", isFailed && !recovered && "text-red-400")}>{label}</span>
+      <span className={cn("font-normal shrink-0 whitespace-nowrap", isFailed && !recovered && "text-red-400")}>{label}</span>
       {name &&
         (isFileName ? (
-          <span className="an-edit-row-name min-w-0 truncate font-mono font-medium text-[13px] text-an-foreground">{name}</span>
+          <span className="an-edit-row-name min-w-0 truncate font-mono font-medium text-[13px] text-an-foreground/80">{name}</span>
         ) : (
           <span className="an-edit-row-count shrink-0 whitespace-nowrap">{name}</span>
         ))}
@@ -315,7 +315,7 @@ function EditLine({
         <button
           type="button"
           className={cn(
-            "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-base leading-[22px] text-muted-foreground rounded-sm",
+            "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-[14px] leading-[22px] text-an-foreground-muted rounded-sm",
             "focus-visible:outline-none focus-visible:bg-an-foreground/10",
             canOpen ? "cursor-pointer" : "cursor-default",
           )}
@@ -335,15 +335,17 @@ function EditLine({
           {!isPending && <Stat added={added} removed={removed} />}
           {isFailed && recovered && <RecoveredFailureMark />}
           {canOpen && (
-            <IconChevronRight
-              aria-hidden="true"
-              className="an-edit-row-chevron ui-collapse-chevron shrink-0 size-[18px] -ml-1 text-muted-foreground"
-              data-open={open || undefined}
-            />
+            <span className="an-row-chevron-box -ml-1">
+              <IconChevronRight
+                aria-hidden="true"
+                className="an-edit-row-chevron ui-collapse-chevron an-row-chevron"
+                data-open={open || undefined}
+              />
+            </span>
           )}
         </button>
         {actions && (
-          <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-line:opacity-100 group-has-[:focus-visible]/edit-line:opacity-100">
+          <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-line:opacity-100">
             {actions}
           </span>
         )}

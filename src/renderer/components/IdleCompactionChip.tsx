@@ -8,6 +8,8 @@ export interface IdleCompactionChipProps {
   /** `suggest`: the cache went cold, so the next send re-reads `historyTokens`; `compacting`: Compact now runs. */
   state: 'suggest' | 'compacting'
   historyTokens: number
+  /** `historyTokens` is Mousse's estimate (the runtime reports no context): shown as "≈182K". */
+  estimated?: boolean
   /** "Cache expired 1h 12m ago" or "Idle 1h 12m", over the menu. */
   cacheText: string
   /** "≈$0.91" when the thread pays per token. */
@@ -20,7 +22,7 @@ export interface IdleCompactionChipProps {
  * history. It stays on Full (the send works as always) and offers Compact now, which starts at once and
  * runs while the person types; it then reads "Compacting…" until the compaction ends.
  */
-export function IdleCompactionChip({ state, historyTokens, cacheText, costText, onCompact }: IdleCompactionChipProps) {
+export function IdleCompactionChip({ state, historyTokens, estimated = false, cacheText, costText, onCompact }: IdleCompactionChipProps) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -57,7 +59,7 @@ export function IdleCompactionChip({ state, historyTokens, cacheText, costText, 
     </span>
   }
 
-  const history = shortTokens(historyTokens)
+  const history = `${estimated ? '≈' : ''}${shortTokens(historyTokens)}`
   const close = () => { setOpen(false); buttonRef.current?.focus() }
   const keys = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape') {

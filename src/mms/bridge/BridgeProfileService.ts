@@ -24,7 +24,8 @@ import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource, readerListsKey, readerOfListsKey } from './remote/MmsListsSource'
-import { accountDevices, createBotReach } from './remote/botReach'
+import { copyLimits } from './copyLimits'
+import { createBotReach, keepMakerInReach } from './remote/botReach'
 import type { BotReachPort } from '../protocol/botReachPort'
 import type { BotDeviceChoice } from '../../shared/bots/personal/deviceAccess'
 import { remoteListMethods } from './remote/RemoteLists'
@@ -35,6 +36,7 @@ import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
+import { PeerDirectory } from './peers'
 import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
@@ -55,6 +57,8 @@ export class BridgeProfileService {
   readonly currentIdentity: SpaceCurrentIdentity
   readonly threads: ThreadStreamAdapter
   readonly artifacts: BridgeArtifacts
+  /** The other computers Bridge reaches, over v1 (while on) and engine pairings. */
+  readonly peers: PeerDirectory
   readonly hub: BridgeHub
   /** Sends the actions of a thread on another of the user's computers to that computer (behind `netBridgeThreads`). */
   readonly router: ThreadRouter
@@ -91,9 +95,12 @@ export class BridgeProfileService {
       nativeAdapters?: ReadonlyMap<string, NativeBotComposition>
       /** Tests only: scripted bot runtimes. Production never sets this. */
       trustedQaAdapters?: ReadonlyMap<string, BotRuntimeAdapter>
+      /** The profile's peer directory; without one only v1 is reached. */
+      peers?: PeerDirectory
     }
   ) {
     const { services, runtime: rt, net } = options
+    this.peers = options.peers ?? new PeerDirectory({ net, engine: () => undefined })
     raiseStreamListenerLimits(services)
     // "Share bots with other devices": the lists and the bot methods ask on every push and call.
     const botsSharing: BotsSharingPort = {
@@ -116,22 +123,37 @@ export class BridgeProfileService {
       access: (botId) => access.get(botId).access,
       choices: () => access.choices(),
       deviceOn: (node) => rt.policy.get(node as NodeId).bots,
-      // A blocked device reads nothing here, so it does not hold a bot back from the streams every device may read.
-      devices: () => accountDevices(rt.identity)?.filter((node) => !rt.policy.isBlocked(node)),
+      // A blocked device, or one not connected here, reads nothing here, so it does not hold a bot back from the
+      // streams every device may read.
+      devices: () =>
+        this.peers
+          .accountDevices()
+          ?.filter((node) => !rt.policy.isBlocked(node) && this.peers.connected(node)),
       changes: [
         (listener) => access.onChange(listener),
         (listener) => rt.policy.onChange(() => listener()),
-        (listener) => rt.identity.onRosterChanged(() => listener())
+        (listener) => rt.connections.onChange(() => listener()),
+        (listener) => rt.identity.onRosterChanged(() => listener()),
+        (listener) => this.peers.onChange(listener)
       ]
     })
     const botReach: BotReachPort = {
       ...reach,
       devices: async () => {
-        const view = (await net.request('bridge.nodes', {})) as {
-          nodes: Array<{ node: NodeId; name?: string; kind?: string; self?: boolean; revoked?: boolean; policy?: { bots?: boolean } }>
+        const view = (await this.peers.nodes()) as {
+          nodes: Array<{
+            node: NodeId
+            name?: string
+            kind?: string
+            self?: boolean
+            revoked?: boolean
+            connection?: string
+            policy?: { bots?: boolean }
+          }>
         }
+        // Only the devices connected here are offered.
         return view.nodes
-          .filter((entry) => !entry.self && !entry.revoked)
+          .filter((entry) => !entry.self && !entry.revoked && entry.connection === 'connected')
           .map((entry): BotDeviceChoice => ({
             node: entry.node,
             name: cleanDeviceName(entry.name || 'Unnamed device'),
@@ -144,7 +166,7 @@ export class BridgeProfileService {
     // A device that leaves the account leaves every bot's list of chosen devices; read once now for any that left while
     // this computer was off.
     const dropRemoved = (): void => {
-      const present = accountDevices(rt.identity)
+      const present = this.peers.accountDevices()
       if (!present) return
       try {
         access.dropDevices((node) => present.includes(node as NodeId))
@@ -154,18 +176,20 @@ export class BridgeProfileService {
     }
     dropRemoved()
     const offRoster = rt.identity.onRosterChanged(() => dropRemoved())
+    const offPeers = this.peers.onChange(() => dropRemoved())
     // A message from a device that lost the bot, still waiting for its turn, is not delivered.
     const offWithdraw = reach.onChange(() => {
       const chat = services.personalBots?.service
       if (!chat) return
       // A device that left the account, or is blocked here, reaches no bot whatever each bot's choice says. When the
       // account's devices can't be read, only the two settings decide: a message is not dropped on a guess.
-      const present = accountDevices(rt.identity)?.filter((node) => !rt.policy.isBlocked(node))
+      const present = this.peers.accountDevices()?.filter((node) => !rt.policy.isBlocked(node))
       const left = (node: string): boolean => present !== undefined && !present.includes(node as NodeId)
       void this.track(chat.withdrawQueued((botId, node) => left(node) || !reach.canReach(botId, node))).catch(() => undefined)
     })
     this.disposers.add(() => {
       offRoster()
+      offPeers()
       offWithdraw()
       reach.close()
       if (services.botReach === botReach) services.botReach = undefined
@@ -309,15 +333,16 @@ export class BridgeProfileService {
         const reader = readerOfListsKey(threadId)
         return reader ? { reader: reader as NodeId, subject: LISTS_STREAM_THREAD_ID } : undefined
       },
-      isSubscribed: (stream, holder) => net.streamSubscribed(stream, holder as NodeId | undefined),
+      // Served to v1 sessions and engine pairings alike, through the peer directory.
+      isSubscribed: (stream, holder) => this.peers.isSubscribed(stream, holder as NodeId | undefined),
       isTurnActive: (threadId) => services.orchestrator.isTurnActive(threadId),
-      onDelta: (stream, data, key) => net.publishDelta(stream, data, key),
-      onDeltaDiscard: (stream, matches) => net.discardDeltas(stream, matches),
+      onDelta: (stream, data, key) => this.peers.publishDelta(stream, data, key),
+      onDeltaDiscard: (stream, matches) => this.peers.discardDeltas(stream, matches),
       onRecord: (stream, record) => {
-        void this.track(net.publish(stream, record))
+        void this.track(this.peers.publish(stream, record))
       },
       onError: (_thread, error, stream) => {
-        void this.track(net.failStream(stream, error instanceof NetError ? error.code : 'internal'))
+        void this.track(this.peers.failStream(stream, error instanceof NetError ? error.code : 'internal'))
       }
     })
     this.remote = new RemoteApi(
@@ -370,14 +395,8 @@ export class BridgeProfileService {
       staging,
       streams: routedStreamsPort(this.threads),
       // A device that has been away from this computer for ten minutes has its terminals ended.
-      connected: (node) => {
-        try {
-          return net.session(node).state() === 'open'
-        } catch {
-          return false
-        }
-      },
-      deviceName: (node) => deviceNameOf(rt.identity, node),
+      connected: (node) => this.peers.online(node),
+      deviceName: (node) => this.peers.name(node, 'another computer'),
       // The first terminal a device opens: a desktop notification in the windows of this computer (none, for a
       // computer with no window, which has the audit row).
       onFirstTerminal: ({ name, threadId }) =>
@@ -430,7 +449,7 @@ export class BridgeProfileService {
       name: (node) => deviceLabelOf(rt.identity, node),
       // Read again when a person answers: a device that was revoked, or lost Works on threads, is not allowed here.
       stillAsking: async (node) => {
-        const view = (await net.request('bridge.nodes', {})) as {
+        const view = (await this.peers.nodes()) as {
           nodes: Array<{ node: NodeId; caps: string[]; revoked?: boolean }>
         }
         const found = view.nodes.find((entry) => entry.node === node)
@@ -494,13 +513,9 @@ export class BridgeProfileService {
       refusal: () => botsSharing.refusal(),
       // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
       deviceLimit: botDeviceLimitFrom(rt.policy),
-      // Which bots the calling device reaches; a bot it made stays within its reach.
+      // Which bots the calling device reaches; a bot it made stays within its reach, unless a choice was saved for it.
       reach,
-      madeBy: (botId, node) => {
-        const held = access.get(botId).access
-        if (reach.canReach(botId, node) || !reach.deviceOn(node)) return
-        access.set(botId, { mode: 'chosen', nodes: [...(held.mode === 'chosen' ? held.nodes : []), node] })
-      }
+      madeBy: keepMakerInReach(access, reach, (botId) => services.personalBots?.reachChanged(botId))
     }))
       rt.rpc.register({
         ...method,
@@ -513,13 +528,41 @@ export class BridgeProfileService {
       store: this.threads.store,
       clock: this.clock,
       session: (node) => net.session(node),
+      client: (node) => this.peers.client(node),
+      engine: {
+        isEngine: (node) => this.peers.isEngine(node),
+        bind: (stream, node) => this.peers.bind(stream, node),
+        verifyStream: (stream) => this.peers.verifyStream(stream),
+        resolveResult: (value, client, target, rpc, method, signal) =>
+          this.artifacts.resolveRouted(value, client, target, rpc, method, signal, this.peers)
+      },
       resolveResult: (...args) => this.artifacts.resolveResult(...args)
     })
+    // The copies of other computers' threads and lists on disk are tidied once the Bridge has started, in the
+    // background (`BridgeHub.tidyCopies`): a start never waits for it.
+    const tidy = setTimeout(
+      () => void this.track(this.hub.tidyCopies().catch(() => 0)),
+      copyLimits().sweepDelayMs
+    )
+    tidy.unref?.()
+    this.disposers.add(() => clearTimeout(tidy))
     this.router = new ThreadRouter({
       services,
       net,
+      peers: this.peers,
+      enabled: () => this.bridgeThreadsOn(),
       hub: this.hub,
-      signal: this.routerStop.signal
+      signal: this.routerStop.signal,
+      resolveArtifact: (node, session, value, rpc, method, signal) =>
+        this.artifacts.resolveRouted(
+          value,
+          session,
+          node,
+          rpc,
+          method,
+          signal,
+          this.peers.isEngine(node) ? this.peers : undefined
+        )
     })
     services.threadRouter = this.router
     this.disposers.add(() => {
@@ -545,7 +588,8 @@ export class BridgeProfileService {
       services,
       client: this.router.client,
       computers: () => (this.router.enabled() ? this.router.pairedComputers() : undefined),
-      online: (node) => this.router.isOnline(node)
+      online: (node) => this.router.isOnline(node),
+      self: () => rt.identity.self()?.node
     })
     services.orchestrator.setRemoteComputers(computersPort)
     this.disposers.add(() => services.orchestrator.setRemoteComputers(undefined))
@@ -566,11 +610,14 @@ export class BridgeProfileService {
     // This computer's own threads go to the front of a group in front of the other computers' rows too.
     const floor = (projectId: string | undefined): number | undefined => this.lists.frontFloor(projectId)
     services.threads.remoteFloor = floor
-    // A device this computer blocks (or unblocks) is dropped from (or read into) the lists at once.
+    // A device this computer blocks (or unblocks), connects or disconnects, is dropped from (or read into) the lists at
+    // once, cached rows and all.
     const offPolicy = rt.policy.onChange(() => void this.lists.reconcile())
+    const offConnections = rt.connections.onChange(() => void this.lists.reconcile())
     this.lists.start()
     this.disposers.add(() => {
       offPolicy()
+      offConnections()
       if (services.threads.remoteFloor === floor) services.threads.remoteFloor = undefined
       if (services.remoteLists === this.lists) services.remoteLists = undefined
       this.lists.close()
@@ -594,7 +641,7 @@ export class BridgeProfileService {
       ownsRequest: (...args) => this.hub.ownsRequest(...args),
       canonicalRequest: (...args) => this.hub.canonicalRequest(...args),
       onPublished: (stream, record) => {
-        void this.track(net.publish(stream, record))
+        void this.track(this.peers.publish(stream, record))
       }
     })
     const concrete =
@@ -678,15 +725,17 @@ export class BridgeProfileService {
             ...this.staging.callers()
           ])
           const closed: StreamId[] = []
+          // Engine pairings are never on the v1 roster: one that is serving keeps what it holds.
+          const keeps = granted && ((node: NodeId) => granted(node) || this.peers.serving(node))
           for (const node of nodes) {
-            if (granted?.(node)) continue
+            if (keeps?.(node)) continue
             closed.push(...this.threads.closePrivate({ reader: node }))
             this.routes.pages.dropCaller(node)
             this.staging.dropCaller(node)
           }
           // The shells they opened here end with the permission that opened them: the owner's switch going off
           // (no `granted`) or a computer losing "Works on threads" (or being revoked).
-          if (granted) this.routes.terminals.endExcept('access_lost', granted)
+          if (keeps) this.routes.terminals.endExcept('access_lost', keeps)
           else this.routes.terminals.end('setting_off')
           return closed
         }
@@ -720,8 +769,8 @@ export class BridgeProfileService {
           this.currentIdentity.observeHistoryRoster(signed)
         },
         canReceive: (descriptor, peer) => {
-          const feature = descriptor.kind.startsWith('space.') ? 'netSpaces' : 'netBridge'
-          if (!this.options.net.featureEnabled(feature)) return false
+          if (descriptor.kind.startsWith('space.') ? !this.options.net.featureEnabled('netSpaces') : !this.bridgeOn())
+            return false
           if (descriptor.kind.startsWith('space.')) return session.canReceive!(descriptor, peer)
           return descriptor.kind === 'node.artifact'
             ? this.artifacts.canReceive(descriptor, peer)
@@ -738,7 +787,7 @@ export class BridgeProfileService {
       onSessionOpened: (session: SyncSession) => {
         if (
           !this.stopped &&
-          this.options.net.featureEnabled('netBridge') &&
+          this.bridgeOn() &&
           session.peer.user === this.options.runtime.identity.self()?.user
         ) {
           const node = session.peer.node
@@ -766,17 +815,62 @@ export class BridgeProfileService {
           this.bots.activate()
           this.spaces.local.resume()
         }
-        if (!this.activated && this.options.net.featureEnabled('netBridge')) {
-          this.activated = true
-          // A device blocked while Bridge was off, or before a restart, is cleaned up after now.
-          this.routes.cleanUpBlockedDevices()
-          void this.track(this.dispatch.recover())
-        }
+        this.activateBridge()
       },
       beginDisable: () => this.beginDisable(),
       close: () => this.close(),
       activeCount: () => this.activeCount()
     }
+  }
+
+  /** Bridge is on: v1 with its Bridge feature, or the engine. */
+  bridgeOn(): boolean {
+    return this.options.net.featureEnabled('netBridge') || this.peers.engineOn()
+  }
+  /** Threads route to other computers: v1 with both flags, or the engine. */
+  bridgeThreadsOn(): boolean {
+    return (
+      (this.options.net.featureEnabled('netBridge') &&
+        this.options.net.featureEnabled('netBridgeThreads')) ||
+      this.peers.engineOn()
+    )
+  }
+  /** Bridge's start once it is on (v1's activation or the engine's start); runs once per runtime. */
+  activateBridge(): void {
+    if (this.activated || this.stopped || !this.bridgeOn()) return
+    this.activated = true
+    // A device blocked while Bridge was off, or before a restart, is cleaned up after now.
+    this.routes.cleanUpBlockedDevices()
+    void this.track(this.dispatch.recover())
+  }
+  /** An engine pairing's client is ready: the Hub reattaches, then the router and the lists hear of it. */
+  peerOnline(node: NodeId): void {
+    if (this.stopped || !this.bridgeOn()) return
+    void this.track(
+      this.hub
+        .reconnect(node)
+        .catch(() => undefined)
+        .then(() => {
+          this.router.nodeOnline(node)
+          this.lists.nodeOnline(node)
+          this.peers.changed()
+        })
+    )
+  }
+  /** An engine pairing's last client closed. */
+  peerOffline(node: NodeId): void {
+    if (this.stopped) return
+    this.lists.nodeOffline(node)
+    this.peers.changed()
+  }
+  /** Everything held here for one computer ends: its private streams, pages, staged values and terminals. */
+  releaseNode(node: NodeId): void {
+    if (this.stopped) return
+    this.threads.closePrivate({ reader: node })
+    this.routes.pages.dropCaller(node)
+    this.staging.dropCaller(node)
+    this.routes.terminals.endExcept('access_lost', (other) => other !== node)
+    this.peers.changed()
   }
 
   onClose(dispose: () => void | Promise<void>): () => void {
@@ -798,7 +892,12 @@ export class BridgeProfileService {
   activityAbout<M extends BridgeActivityMethod>(method: M, value: unknown): unknown {
     if (this.stopped) throw new NetError('cancelled')
     const params = validateActivityParams(method, value)
-    const sources = { services: this.options.services, runtime: this.options.runtime, now: this.clock.now() }
+    const sources = {
+      services: this.options.services,
+      runtime: this.options.runtime,
+      now: this.clock.now(),
+      name: (node: NodeId) => this.peers.name(node, 'another computer')
+    }
     if (method === 'bridge.activity')
       return deviceActivityOf(sources, (params as BridgeActivityParams['bridge.activity']).node)
     if (method === 'bridge.clearDeviceRules')

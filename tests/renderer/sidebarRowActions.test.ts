@@ -55,7 +55,7 @@ const projectsApi = {
 function preload(): unknown {
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = (known: Record<string, unknown> = {}) => new Proxy(known, { get: (target, key: string) => target[key] ?? call(key) })
-  return new Proxy({ platform: 'win32', threads: group(threadsApi), projects: group(projectsApi) } as Record<string, unknown>, {
+  return new Proxy({ platform: 'win32', threads: group(threadsApi), projects: group(projectsApi), git: {} } as Record<string, unknown>, {
     get: (target, key: string) => target[key] ?? group()
   })
 }
@@ -122,10 +122,10 @@ describe('naming', () => {
     expect(html).not.toMatch(/Settle|Recent chats|New chat/)
   })
 
-  it('lists a thread whose project was removed under Other threads', () => {
+  it('lists a thread whose project was removed under No project', () => {
     setStore({ projects: [project('p1', 'Mousse')], threads: [thread('a', 'Fix tests', { projectId: 'gone' })], threadsSidebarView: 'projects', sidebarMode: 'projects' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
-    expect(html).toContain('<span class="threads-sidebar-project-name">Other threads</span>')
+    expect(html).toContain('<span class="threads-sidebar-project-name">No project</span>')
     expect(html).not.toContain('No project ·')
   })
 })
@@ -159,13 +159,24 @@ describe('rename', () => {
     expect(document.activeElement).toBe(row('a'))
   })
 
-  it('starts with a double-click on the title of a thread or a project', () => {
+  it('starts with a double-click on a thread title', () => {
     show([thread('a', 'Fix tests')])
     openProject()
     act(() => { host.querySelector('.threads-sidebar-thread-name')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
     expect(host.querySelector<HTMLInputElement>('.threads-sidebar-rename-input')?.value).toBe('Fix tests')
-    key(host.querySelector('.threads-sidebar-rename-input')!, { key: 'Escape' })
+  })
+
+  it('leaves a project as it is on a double-click, which opens and closes it, and starts from its menu', () => {
+    show([thread('a', 'Fix tests')])
+    // A double-click is two clicks and a dblclick: the project opens and closes, and no rename starts.
+    click(projectToggle())
+    click(projectToggle())
     act(() => { host.querySelector('.threads-sidebar-project-name')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    expect(host.querySelector('.threads-sidebar-project-rename')).toBeNull()
+    expect(projectToggle().getAttribute('aria-expanded')).toBe('false')
+
+    act(() => { projectToggle().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })) })
+    click(menuItem('Rename'))
     expect(host.querySelector<HTMLInputElement>('.threads-sidebar-project-rename')?.value).toBe('Mousse')
   })
 })
@@ -196,7 +207,7 @@ describe('the row menu', () => {
     click(more)
     expect(menuLabels()).toEqual(fromRightClick)
     // A thread in use is archived first: no Delete.
-    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Delete after'])
+    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Copy reference', 'Archive after'])
     expect(more.getAttribute('aria-expanded')).toBe('true')
     expect(document.activeElement).toBe(menuItem('Pin'))
   })
@@ -211,7 +222,7 @@ describe('the row menu', () => {
     key(document.activeElement!, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(menuItem('Regenerate title'))
     key(document.activeElement!, { key: 'End' })
-    expect(document.activeElement).toBe(menuItem('Delete after'))
+    expect(document.activeElement).toBe(menuItem('Archive after'))
     key(document.activeElement!, { key: 'Home' })
     expect(document.activeElement).toBe(menuItem('Pin'))
     key(document.activeElement!, { key: 'Escape' })
@@ -223,6 +234,19 @@ describe('the row menu', () => {
     show([thread('a', 'Fix tests')])
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
     expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Change icon…', 'Git', 'Remove project…'])
+  })
+
+  it('Copy reference puts the thread\'s link on the clipboard and closes the menu', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    show([thread('a', 'Fix tests')])
+    openProject()
+    click(host.querySelector('[aria-label="More actions for Fix tests"]')!)
+    click(menuItem('Copy reference'))
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('mousse://thread/a')
+    expect(menu()).toBeNull()
+    expect(toast()).toBeNull()
   })
 })
 
@@ -241,7 +265,7 @@ describe('archive and delete', () => {
     show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     click(host.querySelector('[aria-label="More actions for Old work"]')!)
-    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Delete…', 'Delete all archived…'])
+    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Copy reference', 'Delete…', 'Delete all archived…'])
     click(menuItem('Delete…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Delete “Old work”?')

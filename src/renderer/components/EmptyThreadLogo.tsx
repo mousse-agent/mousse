@@ -37,18 +37,46 @@ const POUR_MS = 1100
 const draftKey = (state: ReturnType<typeof useAppStore.getState>) => state.activeThreadId ?? '__blank__'
 const draftLength = (state: ReturnType<typeof useAppStore.getState>) => (state.composerDrafts[draftKey(state)] ?? '').length
 
+/** The pour waiting or playing. Every logo shares it, so a send pours once however often the empty view comes and goes. */
+let currentPour: { cancel: () => void; copy?: HTMLElement } | undefined
+
+/** Stops the pour waiting or playing and removes its copy. Returns whether there was one. */
+function stopPour(): boolean {
+  const pour = currentPour
+  currentPour = undefined
+  if (!pour) return false
+  pour.cancel()
+  pour.copy?.remove()
+  return true
+}
+
 /**
  * Plays the pour on a copy of the logo, pinned where the logo was: a send empties the draft and then, a moment
  * later, the empty view (and the logo with it) goes away. If the logo is still on screen after a short wait,
- * the draft was only cleared and nothing plays. Returns a cancel.
+ * the draft was only cleared and nothing plays. A new pour replaces the one before it.
  */
-function pourAfterSend(logo: HTMLElement): () => void {
+function pourAfterSend(logo: HTMLElement): void {
+  stopPour()
+  if (!useAppStore.getState().newChatAnimations) return
   const rect = logo.getBoundingClientRect()
   const copy = logo.cloneNode(true) as HTMLElement
   const timers: ReturnType<typeof setTimeout>[] = []
+  const clearTimers = () => timers.splice(0).forEach(clearTimeout)
+  const unsubscribe = useAppStore.subscribe((state) => { if (!state.newChatAnimations) stopPour() })
+  const pour: { cancel: () => void; copy?: HTMLElement } = {
+    cancel: () => { clearTimers(); unsubscribe() }
+  }
+  currentPour = pour
   const check = (wait: number, last: boolean) => timers.push(setTimeout(() => {
-    if (logo.isConnected) { if (last) cancel(); return }
-    cancel()
+    if (typeof document === 'undefined' || document !== logo.ownerDocument || !document.body) {
+      stopPour()
+      return
+    }
+    if (logo.isConnected) {
+      if (last && currentPour === pour) stopPour()
+      return
+    }
+    clearTimers()
     copy.classList.add('empty-logo-pour-copy')
     copy.setAttribute('data-pouring', '')
     copy.setAttribute('aria-hidden', 'true')
@@ -56,16 +84,15 @@ function pourAfterSend(logo: HTMLElement): () => void {
     copy.querySelector('[data-tilting]')?.removeAttribute('data-tilting')
     Object.assign(copy.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` })
     document.body.appendChild(copy)
+    pour.copy = copy
     // The fill drains as the pour plays.
     requestAnimationFrame(() => copy.querySelector<HTMLElement>('.empty-logo-liquid')?.style.setProperty('--empty-logo-fill', '0'))
-    setTimeout(() => copy.remove(), scaleMotionMs(POUR_MS))
+    timers.push(setTimeout(stopPour, scaleMotionMs(POUR_MS)))
   }, wait))
-  const cancel = () => timers.splice(0).forEach(clearTimeout)
   check(0, false)
   check(60, false)
   check(200, false)
   check(400, true)
-  return cancel
 }
 
 /** Starts the swirl's sway at the ambient glow's current point in its loop (ambient-glow.css). Read once. */
@@ -86,9 +113,9 @@ function useGlowPhase(ref: RefObject<HTMLElement | null>, start: boolean): void 
  * and a send pours: liquid surges, bubbles rise and the swirl bobs. Private chats add the sunglasses.
  * With Animation speed Off or reduced motion it is still: no draw-in, a fill level without a wave.
  */
-export function EmptyThreadLogo({ label, incognito }: { label: string; incognito: boolean }) {
+export function EmptyThreadLogo({ label, incognito, drawnAtStart = false }: { label: string; incognito: boolean; drawnAtStart?: boolean }) {
   const still = useMotionScale() === 0
-  const [drawn, setDrawn] = useState(still)
+  const [drawn, setDrawn] = useState(still || drawnAtStart)
   const length = useAppStore(draftLength)
   const rootRef = useRef<HTMLDivElement>(null)
   const tiltRef = useRef<HTMLDivElement>(null)
@@ -105,12 +132,13 @@ export function EmptyThreadLogo({ label, incognito }: { label: string; incognito
   // A send empties the draft of the chat on screen (a thread switch is not a send).
   useEffect(() => {
     if (still) return
-    let cancel: (() => void) | undefined
+    // The empty view came back while a send was on its way (it can, for a moment, as the thread starts): its
+    // copy would sit beside this logo, so the pour moves here and plays once this logo goes away.
+    if (stopPour() && rootRef.current) pourAfterSend(rootRef.current)
     const unsubscribe = useAppStore.subscribe((state, previous) => {
       if (state.activeThreadId !== previous.activeThreadId) return
       if (draftLength(previous) === 0 || draftLength(state) > 0 || !rootRef.current) return
-      cancel?.()
-      cancel = pourAfterSend(rootRef.current)
+      pourAfterSend(rootRef.current)
     })
     // A pending pour outlives the logo: the send is what unmounts it.
     return unsubscribe

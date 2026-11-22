@@ -198,9 +198,12 @@ describe('pushes other than text while a reply streams', () => {
   })
 
   it('a turn-state push renders the line under Working only', async () => {
+    // Words show as they come (not paced): the reply being written is on screen, and the live row has nothing to add.
+    setReplyPacing(false)
     await mount()
     const useAppStore = await store()
-    expect(progressLine()?.dataset.turnProgress).toBe('writing')
+    expect(progressLine()).toBeNull()
+    expect(host.querySelector<HTMLElement>('[data-turn-live]')!.hidden).toBe(true)
     // The service sends every thread's turn and then the one that changed, both new objects.
     const push = (state: TurnState) => () => {
       useAppStore.getState().setTurnSnapshot(turns(state))
@@ -255,9 +258,9 @@ describe('pushes other than text while a reply streams', () => {
       ({ ...activity(parent), sub })
     await mount({ view: 'projects', threads: [...listed(), subagent], activity: tree('processing') })
     const useAppStore = await store()
-    const status = (threadId: string) => host.querySelector(`.threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-status-spinner, .threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-status-icon`)
-    const working = (threadId: string) => status(threadId)?.classList.contains('threads-sidebar-status-spinner')
-    const waiting = (threadId: string) => status(threadId)?.getAttribute('aria-label') === 'Agent is waiting'
+    const status = (threadId: string) => host.querySelector(`.threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-card-status`)
+    const working = (threadId: string) => status(threadId)?.classList.contains('threads-sidebar-card-status-working')
+    const waiting = (threadId: string) => status(threadId)?.classList.contains('threads-sidebar-card-status-waiting')
     // Subagents sit under their parent, not beside it.
     expect(host.querySelector('.threads-sidebar-thread[data-thread-id="sub"]')).toBeNull()
     expect(working('live-thread')).toBe(true)
@@ -288,7 +291,7 @@ describe('a thought being written', () => {
   const thought = (content: string): ChatMessage =>
     ({ id: 'th', role: 'system', kind: 'thinking', content: '', timestamp: at(21), thinking: { content, status: 'processing' } })
 
-  it('a streamed delta of the thought renders its row only: no sidebar row, the chat or the transcript', async () => {
+  it('a streamed delta of the thought renders the live row only: no sidebar row, the chat or the transcript', async () => {
     const thinking = [...transcript().slice(0, -1), thought('**Reading the logs**\n\nThe first run')]
     await mount({ messages: thinking, turn: turn({ phase: 'thinking', step: { kind: 'reasoning' } }) })
     const useAppStore = await store()
@@ -300,9 +303,11 @@ describe('a thought being written', () => {
     })
     expectTranscriptAndRowsStill(delta)
     expect(delta.counts.ThreadsSidebar ?? 0).toBe(0)
-    expect(delta.counts.ThinkingTool).toBe(1)
+    expect(delta.counts.TurnProgressRow).toBe(1)
+    expect(delta.counts.ThinkingTool ?? 0).toBe(0)
     expect(useAppStore.getState().messages).toBe(before)
-    expect(host.textContent).toContain('failed on the cache step')
+    expect(host.querySelector('.turn-live-headline')?.textContent).toBe('Reading the logs')
+    expect(host.querySelector<HTMLElement>('.turn-live-thought')?.title).toBe('The first run failed on the cache step')
   })
 })
 
@@ -312,17 +317,17 @@ describe('the shared clock', () => {
   it('turns 5m into 6m a minute later, and renders only what shows a time', async () => {
     // Only the interval and the date are fake: React and `settle` keep their real timeouts.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
-    // Five minutes after the threads' last update; one thread deletes itself in 30 minutes.
+    // Five minutes after the threads' last update; one thread archives itself in 30 minutes.
     vi.setSystemTime(Date.parse(at(1)) + 5 * 60_000)
     const expiring = { ...thread('other-a', 'Finished one'), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() } as Thread
     await mount({ threads: [thread('live-thread', 'Streaming now'), expiring, thread('other-b', 'Quiet one')] })
     const expiry = () => card('other-a')?.querySelector('.thread-expiry-icon')?.getAttribute('title')
     expect(card('other-b')?.querySelector('.threads-sidebar-card-age')?.textContent).toBe('5m')
-    expect(expiry()).toBe('Deletes in 30 minutes')
+    expect(expiry()).toBe('Archives in 30 minutes')
 
     const tick = await counted(() => { vi.advanceTimersByTime(60_000) })
     expect(card('other-b')?.querySelector('.threads-sidebar-card-age')?.textContent).toBe('6m')
-    expect(expiry()).toBe('Deletes in 29 minutes')
+    expect(expiry()).toBe('Archives in 29 minutes')
     // The clock renders the statuses and the expiry mark, not the rows, the list or the chat.
     expect(tick.counts['SidebarStatus:other-b']).toBeGreaterThan(0)
     expect(tick.rows).toEqual({})

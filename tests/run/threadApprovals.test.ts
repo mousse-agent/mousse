@@ -287,26 +287,52 @@ describe('saved approval requests: the store and the question service', () => {
       expect(f.questions.listPendingForThread('t')).toEqual([])
     })
 
-    it('a request with no timeout while a person runs the turn; an unattended origin keeps the ten minutes', async () => {
+    it('a request has no default timeout, whoever started the turn: a person\'s, a scheduled run\'s and a bot\'s still wait a day later', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       const f = fixture()
       await running(f.engine, 'person', 'req-1')
       await running(f.engine, 'job', 'req-2')
+      await running(f.engine, 'bot', 'req-3')
       f.origins.set('job', 'schedule')
+      f.origins.set('bot', 'bot')
       const person = ask(f, 'person')
       const job = ask(f, 'job', tag({ tool: BASH('make') }))
+      const bot = ask(f, 'bot', tag({ tool: BASH('make deploy') }))
 
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1)
-      await job.promise
-      expect(job.outcome.error?.message).toBe('User did not answer in time.')
-      expect(f.engine.approvals.get(job.requestId)).toMatchObject({ status: 'cancelled', cancelReason: 'timed_out' })
-      expect(f.questions.settle(job.requestId, { permission: 'allow' }, USER)).toEqual({ ok: false, reason: 'cancelled', cancelReason: 'timed_out' })
-      // The person's request is still waiting a day later, answerable, and nobody was notified again.
       await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000)
-      expect(f.engine.approvals.get(person.requestId)!.status).toBe('pending')
+      for (const request of [person, job, bot]) {
+        expect(f.engine.approvals.get(request.requestId)!.status).toBe('pending')
+        expect(request.outcome.error).toBeUndefined()
+      }
+      expect(f.questions.settle(job.requestId, { permission: 'allow' }, USER)).toMatchObject({ ok: true })
+      await job.promise
+      expect(job.outcome.value).toEqual({ permission: 'allow' })
+      expect(f.questions.settle(bot.requestId, { permission: 'reject' }, USER)).toMatchObject({ ok: true })
+      await bot.promise
+      expect(bot.outcome.value).toEqual({ permission: 'reject' })
       expect(f.questions.settle(person.requestId, { permission: 'allow' }, USER)).toMatchObject({ ok: true })
       await person.promise
       expect(person.outcome.value).toEqual({ permission: 'allow' })
+    })
+
+    it('a plain question has no default timeout either, but its caller\'s deadline still ends it', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const f = fixture()
+      await running(f.engine, 'job', 'req-1')
+      f.origins.set('job', 'schedule')
+      const outcomes: Array<{ value?: unknown; error?: Error }> = [{}, {}]
+      const open = f.questions.requestAnswers(prompt(), 'job').then((value) => { outcomes[0]!.value = value }, (error: Error) => { outcomes[0]!.error = error })
+      const bounded = f.questions.requestAnswers(prompt(), 'job', { timeoutMs: 60 * 60 * 1000 }).then((value) => { outcomes[1]!.value = value }, (error: Error) => { outcomes[1]!.error = error })
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 1)
+      await bounded
+      expect(outcomes[1]!.error?.message).toBe('User did not answer in time.')
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000)
+      expect(outcomes[0]).toEqual({})
+      const [waiting] = f.questions.listPendingForThread('job')
+      expect(waiting).toBeDefined()
+      f.questions.dismissAllForThread('job')
+      await open
+      expect(outcomes[0]!.error).toBeDefined()
     })
 
     it('an explicit timeout applies to a saved request too', async () => {
@@ -659,6 +685,23 @@ describe('saved approval requests: the store and the question service', () => {
       expect(rules(f)).toHaveLength(1)
       expect(eventTypes(f, 'approval.rule_applied')).toHaveLength(0)
       f.unattended.delete('t')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+    })
+
+    it('a native helper\'s request asks the person in the hosting thread, names the helper, and no rule answers it or is offered', async () => {
+      const f = await asking()
+      await allowAlways(f, BASH('npm test'))
+      const shown: PendingUserQuestions[] = []
+      f.questions.on('pending', (payload: PendingUserQuestions) => shown.push(payload))
+      const helper = request(f, BASH('npm test'), { helper: { agentId: 'helper-1' } })
+      expect(helper.asked).toBe(true)
+      expect(helper.optionIds).toEqual(['allow', 'reject'])
+      expect(shown.at(-1)).toMatchObject({ requestId: helper.requestId, helper: { agentId: 'helper-1' } })
+      expect(f.questions.listPendingForThread('t').at(-1)).toMatchObject({ requestId: helper.requestId, helper: { agentId: 'helper-1' } })
+      expect(eventTypes(f, 'approval.rule_applied')).toHaveLength(0)
+      f.questions.dismissAllForThread('t')
+      await helper.promise
+      // The run's own identical request is still answered by its rule.
       expect((await probe(f, BASH('npm test'))).asked).toBe(false)
     })
 
@@ -1366,16 +1409,28 @@ describe('approval requests across a daemon restart', () => {
       expect(seen(adapter).some((text) => text.includes('The user approved'))).toBe(true)
     })
 
-    it('an unattended run\'s request keeps its timeout across a restart: boot closes it instead of leaving a scheduled thread waiting for ever', async () => {
-      const { threadId, requestIds } = await crashWhileAsking([BASH('make')], { origin: 'schedule' })
-      const second = boot()
-      expect(second.boot.approvals).toEqual({ continued: [], cancelled: requestIds, undelivered: [] })
-      expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'cancelled', cancelReason: 'timed_out' })
-      expect(second.questions.listPendingForThread(threadId)).toEqual([])
-      // Nothing holds the thread: a scheduled prompt runs.
-      const result = await second.orch.send('check the build', false, { threadId, clientRequestId: 'job-1', source: 'schedule', origin: 'schedule', preemptQuestions: false })
-      expect(result.queued).toBeUndefined()
-    })
+    for (const origin of ['schedule', 'delegated'] as const) {
+      it(`a ${origin} run's request does not expire across a restart: it waits for the person like any other`, async () => {
+        const { threadId, runId, requestIds } = await crashWhileAsking([BASH('make')], { origin })
+        const adapter = scripted(() => 'ok')
+        const second = boot(adapter)
+        expect(second.boot.approvals).toEqual({ continued: requestIds, cancelled: [], undelivered: [] })
+        expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'pending', decision: null, answerPath: 'continue', runId })
+        expect(second.questions.listPendingForThread(threadId)).toEqual([expect.objectContaining({ requestId: requestIds[0] })])
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        expect(adapter.turns).toEqual([])
+      })
+    }
+
+    for (const origin of ['bot', 'workflow', 'definition'] as const) {
+      it(`a ${origin} run's request is closed at boot as its turn ended, not as timed out: its own runner owns the run`, async () => {
+        const { threadId, requestIds } = await crashWhileAsking([BASH('make')], { origin })
+        const second = boot()
+        expect(second.boot.approvals).toEqual({ continued: [], cancelled: requestIds, undelivered: [] })
+        expect(second.engine.approvals.get(requestIds[0]!)).toMatchObject({ status: 'cancelled', cancelReason: 'turn_ended' })
+        expect(second.questions.listPendingForThread(threadId)).toEqual([])
+      })
+    }
 
     it('an agent\'s answer never starts a restart continuation: that is the user\'s click', async () => {
       const { threadId, runId, requestIds } = await crashWhileAsking([BASH('npm test')])
@@ -1539,34 +1594,7 @@ describe('approval requests across a daemon restart', () => {
     expect(daemon.engine.approvals.get(pending!.requestId)).toMatchObject({ status: 'answered', answeredBy: { kind: 'user', via: 'bridge' }, deliveredAt: expect.any(String), continuationRunId: null })
   })
 
-  describe('scheduled runs keep their contract (they ask like any turn, time out, and never answer for the user)', () => {
-    /** Runs one turn whose script asks for an approval, and reports whether the question service armed its ten-minute timer. */
-    const timerArmed = async (origin: 'schedule' | undefined): Promise<boolean> => {
-      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
-      let daemon!: Phase6Daemon
-      const adapter = scripted(async (input) => {
-        const waiting = daemon.questions.requestAnswers(prompt(), input.threadId, { approval: tag({ tool: BASH('npm test') }) }).catch(() => undefined)
-        const armed = setTimeoutSpy.mock.calls.some(([, delay]) => delay === 10 * 60 * 1000)
-        daemon.questions.dismissAllForThread(input.threadId)
-        await waiting
-        return armed ? 'armed' : 'unarmed'
-      })
-      daemon = boot(adapter, 1)
-      const thread = daemon.store.createThread('Timer')
-      daemon.orch.setThreadModelOverride(thread.id, PI)
-      const response = await daemon.orch.send('go', false, { threadId: thread.id, clientRequestId: 'go-1', ...(origin ? { origin, source: origin } : {}) })
-      setTimeoutSpy.mockRestore()
-      return response.message === 'armed'
-    }
-
-    it('a scheduled turn\'s approval keeps the ten-minute timeout', async () => {
-      expect(await timerArmed('schedule')).toBe(true)
-    })
-
-    it('a person\'s turn has no timeout', async () => {
-      expect(await timerArmed(undefined)).toBe(false)
-    })
-
+  describe('scheduled runs keep their contract (they ask like any turn, wait for the person, and never answer for the user)', () => {
     it('a scheduled send leaves a waiting approval alone and queues behind it', async () => {
       let daemon!: Phase6Daemon
       const adapter = scripted(async (input) => {

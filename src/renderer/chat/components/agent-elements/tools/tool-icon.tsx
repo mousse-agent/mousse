@@ -10,6 +10,9 @@ import {
   Wrench,
 } from "../../../../lib/icons";
 import { parseMcpToolType, toolRegistry } from "./tool-registry";
+import { useOffscreenPause } from "../../../../lib/offscreenMotion";
+import { mousseToolOf } from "./mousse-tools";
+import { MousseToolIcon } from "./mousse-tool-icon";
 import "./tool-icon.css";
 
 /**
@@ -48,24 +51,27 @@ const TOOL_ICONS: Record<string, IconType> = {
   "tool-Subagent": RowSubagent,
 };
 
-/** The icon for a tool part's type (`tool-Bash`, `tool-mcp__server__name`). */
+/** The icon for a tool part's type (`tool-Bash`, `tool-mcp__server__name`); Mousse's own tools show its logo. */
 export function toolIconFor(type: string | undefined): IconType {
   if (!type) return Wrench;
   const own = TOOL_ICONS[type];
   if (own) return own;
+  if (mousseToolOf(type)) return MousseToolIcon;
   if (parseMcpToolType(type)) return Wrench;
   return toolRegistry[type]?.icon ?? Wrench;
 }
 
 /**
- * A tool row's icon in its state: running, it pulses gently (opacity only, still with motion off); done, it is still
- * and dimmed; failed, it takes the danger colour (tool-icon.css).
+ * A tool row's icon in its state: running, it pulses gently (opacity only, still with motion off, and held still while
+ * no one can see it: lib/offscreenMotion.ts); done, it is still and dimmed; failed, it takes the danger colour
+ * (tool-icon.css).
  */
 export function ToolStateIcon({ state, children }: { state: ToolIconState; children: ReactNode }) {
   // A failure the agent got past only dims the icon toward the danger colour (with the row's small ×).
   const { recovered } = useToolRowInfo();
+  const pause = useOffscreenPause<HTMLSpanElement>(state === "running");
   return (
-    <span className="an-tool-icon" data-state={state === "failed" && recovered ? "recovered" : state} aria-hidden="true">
+    <span ref={pause} className="an-tool-icon" data-state={state === "failed" && recovered ? "recovered" : state} aria-hidden="true">
       {children}
     </span>
   );

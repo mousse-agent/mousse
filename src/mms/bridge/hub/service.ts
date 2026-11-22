@@ -7,6 +7,8 @@ import {
   validateStreamDescriptor
 } from '../../../shared/net'
 import type {
+  Envelope,
+  EventId,
   NetErrorCode,
   NodeDelegation,
   NodeId,
@@ -14,6 +16,7 @@ import type {
   RpcId,
   StreamDescriptor,
   StoredRecord,
+  StreamId,
   Signed
 } from '../../../shared/net'
 import type {
@@ -39,11 +42,19 @@ import { canonicalJson, decodeEnvelope, MAX_DISPLAY_JSON_NODES } from '../../net
 import { systemClock } from '../../net/clock'
 import { ThreadDisplayProjection, type ThreadDisplayUpdate } from '../remote'
 import { HUB_METHODS, validateHubParams } from './validation'
-import { verifyDispatchResult } from '../dispatch/result'
+import { verifyDispatchResult, verifyEngineDispatchResult } from '../dispatch/result'
 import type { NetIdentityService } from '../../net/identity/NetIdentityService'
 import { decodeBase64 } from '../../net/identity/crypto'
 import type { BridgeDisplayPosition } from '../../../shared/bridge'
 import { DispatchInputJournal } from './inputs'
+import { streamBoundElsewhere } from '../../netEngine/store'
+import type { BridgeClient } from '../peers'
+import { engineTwin, openPrivateThread, routedResult } from './engine'
+import { copyLimits } from '../copyLimits'
+
+/** How long a usage history read on another computer may take: its first read of many logs runs for minutes. */
+const USAGE_HISTORY_DEADLINE_MS = 10 * 60_000
+
 interface Request extends BridgeHubRequestStatus {
   caller: NodeId
   user: string
@@ -103,7 +114,11 @@ interface Attachment {
   caught: boolean
   /** Set on a private attachment: it is reopened the same way after a reconnect. */
   options?: HubAttachOptions
+  /** The first record of the snapshot being displayed, kept once that snapshot is complete. */
+  begin?: { epoch: number; seq: number; id: EventId }
 }
+/** Where a display snapshot starts: the first record a copy must keep. */
+type SnapshotStart = { epoch: number; seq: number; id: EventId }
 export interface BridgeHubOptions {
   db: NetDatabase
   identity: IdentityService
@@ -111,6 +126,34 @@ export interface BridgeHubOptions {
   store: StreamStore
   clock?: Clock
   session(target: NodeId): SyncSession
+  /**
+   * The client an attachment reads through (`directory.client(node)`): a v1 session, or an engine pairing's
+   * client. Without it attachments use `session`.
+   */
+  client?(target: NodeId): BridgeClient
+  /**
+   * Engine pairings (Phase 1a). Their streams are bound to the pairing (`net_engine_streams`) in the transaction
+   * that writes the descriptor, and their records are taken on the pinned channel's word (`verifyStream`), not v1
+   * author checks. Requests to them go through `client` as the routed twins of the Hub's methods (`./engine`), and
+   * never through `session`.
+   */
+  engine?: {
+    isEngine(node: NodeId): boolean
+    bind(stream: StreamId, node: NodeId): void
+    verifyStream(stream: StreamId): void
+    /**
+     * Reads a result an engine pairing sent as an artifact (`artifacts.resolveRouted`); `method` is the name the
+     * request was sent as. Without it such a result is refused.
+     */
+    resolveResult?(
+      value: unknown,
+      client: BridgeClient,
+      target: NodeId,
+      rpc: RpcId,
+      method: string,
+      signal?: AbortSignal
+    ): Promise<unknown>
+  }
   resolveResult?(
     value: unknown,
     session: SyncSession,
@@ -152,6 +195,9 @@ function dropStagedData(request: { method: string; params: unknown }): void {
 /** A private attachment also takes the records only a private stream has (Git progress, terminal output). */
 const projectionTypes = (options?: HubAttachOptions): readonly string[] =>
   options?.open ? BRIDGE_ROUTED_EVENT_TYPES : []
+/** Lets other work run between two steps of background work. */
+const pause = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)))
 /** Trusted local caller journal. A sent mutation is never resubmitted by recovery. */
 export class BridgeHub {
   private readonly clock: Clock
@@ -185,6 +231,15 @@ export class BridgeHub {
   private readonly listeners = new Set<(status: BridgeHubRequestStatus) => void>()
   private stopped = false
   private lastSweepAt = Number.NEGATIVE_INFINITY
+  /**
+   * Records whose author signature was checked, by the digest of their bytes, oldest first. A stream read again (a
+   * second window, a reconnect, a new snapshot) is not checked again; a change of roster forgets them all.
+   */
+  private readonly verified = new Set<string>()
+  private readonly offRoster: () => void
+  /** Copies to drop records from, each up to the start of its newest complete snapshot; one step at a time. */
+  private readonly drops = new Map<StreamId, SnapshotStart>()
+  private dropping?: Promise<void>
   constructor(readonly options: BridgeHubOptions) {
     this.clock = options.clock ?? systemClock
     for (const [key, maximum] of [
@@ -205,6 +260,7 @@ export class BridgeHub {
     this.inputs = new DispatchInputJournal(this, (target) =>
       this.session(target, 'bridge.dispatch')
     )
+    this.offRoster = options.identity.onRosterChanged(() => this.verified.clear())
   }
   onChanged(listener: (status: BridgeHubRequestStatus) => void): () => void {
     if (this.listeners.size >= 64) return fail('rate_limited')
@@ -255,6 +311,10 @@ export class BridgeHub {
   }
   private session(target: NodeId, method: BridgeMethod): SyncSession {
     this.guard()
+    if (this.isEngine(target))
+      throw new NetError('profile_unsupported', 'Not supported for this device.', {
+        details: { reason: 'not_supported' }
+      })
     const self = this.self(HUB_METHODS[method].capability),
       session = this.options.session(target)
     if (session.state() !== 'open') return fail('peer_offline')
@@ -265,6 +325,47 @@ export class BridgeHub {
     )
       return fail('bad_delegation')
     return session
+  }
+  private isEngine(node: NodeId): boolean {
+    return this.options.engine?.isEngine(node) === true
+  }
+  /**
+   * The client a request to an engine pairing is sent through, held to the same capability of this profile as a
+   * v1 request; v1's session and delegation checks do not apply to an engine id.
+   */
+  private engineClient(target: NodeId, method: BridgeMethod): BridgeClient {
+    this.guard()
+    this.self(HUB_METHODS[method].capability)
+    const client = this.options.client?.(target)
+    if (!client || client.state() !== 'open') return fail('peer_offline')
+    return client
+  }
+  /** Where a request goes: an engine pairing's client and the routed twin, or the checked v1 session. */
+  private link(
+    target: NodeId,
+    method: BridgeMethod
+  ): { client: BridgeClient; method: string; params(params: unknown): unknown } {
+    if (!this.isEngine(target))
+      return { client: this.session(target, method), method, params: (params) => params }
+    const twin = engineTwin(method)
+    return { client: this.engineClient(target, method), ...twin }
+  }
+  /** The target of a new request: an engine pairing that answers `method`, or a v1 device of the roster. */
+  private checkTarget(target: NodeId, method: BridgeMethod): void {
+    if (this.isEngine(target)) engineTwin(method)
+    else this.current(target)
+  }
+  /**
+   * The client a private attachment reads through. An engine pairing's comes from the directory and is not held
+   * to v1's delegation checks; any other is the checked v1 session.
+   */
+  private attachClient(target: NodeId): BridgeClient {
+    if (!this.isEngine(target)) return this.session(target, 'bridge.thread.open')
+    this.guard()
+    this.self(HUB_METHODS['bridge.thread.open'].capability)
+    const client = this.options.client?.(target)
+    if (!client || client.state() !== 'open') return fail('peer_offline')
+    return client
   }
   private original(id: RpcId): RpcId {
     return (this.options.db.database
@@ -400,10 +501,12 @@ export class BridgeHub {
     this.guard()
     if (!isId('node', target) || !Object.hasOwn(HUB_METHODS, method)) return fail('bad_request')
     const self = this.self(HUB_METHODS[method].capability)
-    this.current(target)
+    this.checkTarget(target, method)
     if (target === self.node) return fail('bad_request')
-    const validated = validateHubParams(method, params),
-      digest = hash({ method, params: validated }),
+    const validated = validateHubParams(method, params)
+    // What an engine pairing cannot take (a send naming v1's staged images) is refused before it is journaled.
+    if (this.isEngine(target)) engineTwin(method).params(validated)
+    const digest = hash({ method, params: validated }),
       id = options.id ?? newId('rpc'),
       idem = options.idem ?? (HUB_METHODS[method].mutating ? id : null),
       deadlineMs = options.deadlineMs ?? 10000
@@ -562,10 +665,10 @@ export class BridgeHub {
     queryOnly: boolean,
     signal: AbortSignal
   ): Promise<unknown> {
-    const session = this.session(request.target, request.method)
+    const link = this.link(request.target, request.method)
     if (request.state === 'failed') return fail(request.error ?? 'internal')
     if (request.state === 'completed')
-      return this.resolve(request.wireResult, session, request, signal)
+      return this.resolve(request.wireResult, link.client, request, signal)
     const first = request.state === 'prepared' && !queryOnly
     if (first)
       this.options.db.transaction(() => {
@@ -577,18 +680,18 @@ export class BridgeHub {
     let terminalCommitted = false
     try {
       const value = first
-        ? await session.rpc(request.method, request.params, {
+        ? await link.client.rpc(link.method, link.params(request.params), {
             id: request.id,
             ...(request.idem ? { idem: request.idem } : {}),
             deadlineMs: request.deadlineMs,
             signal
           })
-        : await session.rpcResult(request.id, {
+        : await link.client.rpcResult(request.id, {
             deadlineMs: Math.min(request.deadlineMs, 30000),
             signal
           })
       if (canonicalJson(value).length > 64 * 1024) return fail('too_large')
-      this.session(request.target, request.method)
+      this.link(request.target, request.method)
       this.options.db.transaction(() => {
         request.state = 'completed'
         request.wireResult = value
@@ -599,7 +702,7 @@ export class BridgeHub {
         this.options.db.checkpoint('bridge.hub.result.beforeCommit')
       })
       terminalCommitted = true
-      return await this.resolve(value, session, request, signal)
+      return await this.resolve(value, link.client, request, signal)
     } catch (error) {
       if (
         error instanceof NetError &&
@@ -620,11 +723,13 @@ export class BridgeHub {
   }
   private async resolve(
     value: unknown,
-    session: SyncSession,
+    client: BridgeClient,
     request: Request,
     signal?: AbortSignal
   ): Promise<unknown> {
     if (signal?.aborted) return fail('cancelled')
+    if (this.isEngine(request.target)) return this.resolveEngine(value, client, request, signal)
+    const session = client as SyncSession
     const kind =
       value && typeof value === 'object'
         ? (
@@ -660,6 +765,43 @@ export class BridgeHub {
     }
     return result
   }
+  /**
+   * A result from an engine pairing. An artifact is read through the engine's resolver; a dispatch result is
+   * checked against the request it answers, its proof being the pinned channel it came on
+   * (`verifyEngineDispatchResult`); any other is a routed reply, followed through its pages, a refusal thrown.
+   */
+  private async resolveEngine(
+    value: unknown,
+    client: BridgeClient,
+    request: Request,
+    signal?: AbortSignal
+  ): Promise<unknown> {
+    const link = this.link(request.target, request.method)
+    let result = value
+    if ((value as { kind?: unknown } | null)?.kind === 'bridge.artifact.result.v1') {
+      const resolve = this.options.engine?.resolveResult
+      if (!resolve) return fail('forbidden')
+      result = await resolve(value, client, request.target, request.id, link.method, signal)
+    }
+    if (request.method !== 'bridge.dispatch') result = await routedResult(result, client, signal)
+    this.link(request.target, request.method)
+    if (signal?.aborted) return fail('cancelled')
+    if (canonicalJson(result, MAX_DISPLAY_JSON_NODES).length > 25 * 1024 * 1024) return fail('too_large')
+    if (request.method !== 'bridge.dispatch') return result
+    const signed = result as Signed
+    if (!signed || typeof signed.payload !== 'string') return fail('bad_request')
+    const body = JSON.parse(Buffer.from(decodeBase64(signed.payload)).toString('utf8')) as {
+      execution: string
+    }
+    const params = request.params as BridgeDispatchInput
+    return verifyEngineDispatchResult(signed, {
+      rpc: request.id,
+      execution: body.execution,
+      repoId: params.repoId,
+      baseCommit: params.baseCommit,
+      requestHash: hash(params)
+    })
+  }
   async cancel(id: RpcId): Promise<void> {
     let request: Request
     try {
@@ -680,8 +822,7 @@ export class BridgeHub {
       this.save(request)
     })
     this.active.get(request.id)?.controller.abort()
-    const session = this.session(request.target, request.method)
-    await session.rpcCancel(request.id)
+    await this.link(request.target, request.method).client.rpcCancel(request.id)
   }
   async call<M extends BridgeMethod>(
     target: NodeId,
@@ -714,7 +855,7 @@ export class BridgeHub {
     this.guard()
     if (!isId('node', target)) return Promise.reject(new NetError('bad_request'))
     const self = this.self(HUB_METHODS[method].capability)
-    this.current(target)
+    this.checkTarget(target, method)
     if (target === self.node) return Promise.reject(new NetError('bad_request'))
     const validated = validateHubParams(method, params),
       deadlineMs = options.deadlineMs ?? 10000
@@ -744,16 +885,16 @@ export class BridgeHub {
       abort = () => controller.abort()
     signal?.addEventListener('abort', abort, { once: true })
     const promise = (async () => {
-      const session = this.session(target, method)
-      const value = await session.rpc(method, validated, {
+      const link = this.link(target, method)
+      const value = await link.client.rpc(link.method, link.params(validated), {
         id,
         ...(request.idem ? { idem: request.idem } : {}),
         deadlineMs,
         signal: controller.signal
       })
       if (canonicalJson(value).length > 64 * 1024) return fail('too_large')
-      this.session(target, method)
-      return this.resolve(value, session, request, controller.signal)
+      this.link(target, method)
+      return this.resolve(value, link.client, request, controller.signal)
     })().finally(() => {
       signal?.removeEventListener('abort', abort)
       this.active.delete(id)
@@ -770,6 +911,10 @@ export class BridgeHub {
   /** The other computer's cached disk usage: totals by project, thread and kind. */
   storage(target: NodeId): Promise<unknown> {
     return this.call(target, 'storage.usage', {})
+  }
+  /** The other computer's usage history, read from its own agents' logs; a first read there can take minutes. */
+  usageHistory(target: NodeId, request: BridgeRemoteParams['usage.history']): Promise<unknown> {
+    return this.call(target, 'usage.history', request, { deadlineMs: USAGE_HISTORY_DEADLINE_MS })
   }
   get(ref: BridgeEntityRef): Promise<unknown> {
     return this.call(ref.nodeId, 'threads.get', { threadId: ref.entityId })
@@ -912,7 +1057,7 @@ export class BridgeHub {
       listener: DisplayListener = { update, error, ...(delta ? { delta } : {}), ...(catchUp ? { catchUp } : {}) },
       existing = this.attachments.get(key)
     if (existing) {
-      this.session(ref.nodeId, 'bridge.thread.open')
+      this.attachClient(ref.nodeId)
       existing.listeners.add(listener)
       notifyCatchUp(listener, false)
       try {
@@ -960,14 +1105,17 @@ export class BridgeHub {
             threadId: ref.entityId
           })) as BridgeThreadOpenResult)
       const opened = raw as BridgeThreadOpenResult,
-        session = this.session(ref.nodeId, 'bridge.thread.open')
+        engine = this.isEngine(ref.nodeId),
+        session = this.attachClient(ref.nodeId)
       this.guard()
       if (
         !opened ||
         Object.keys(opened).sort().join(',') !== 'descriptor,head' ||
         !validateStreamDescriptor(opened.descriptor) ||
         opened.descriptor.kind !== 'node.thread' ||
-        opened.descriptor.authority !== ref.nodeId ||
+        // An engine pairing names its own node, which this computer does not know it by: the stream's
+        // authority here is the pairing it is bound to.
+        (!engine && opened.descriptor.authority !== ref.nodeId) ||
         !opened.head ||
         Object.keys(opened.head).sort().join(',') !== 'epoch,seq' ||
         !Number.isSafeInteger(opened.head.epoch) ||
@@ -976,25 +1124,31 @@ export class BridgeHub {
         opened.head.seq < 0
       )
         return fail('forbidden')
-      const known = this.options.store.getStream(opened.descriptor.id)
-      if (known && !same(known, opened.descriptor)) return fail('conflict')
+      const descriptor: StreamDescriptor = engine
+        ? { ...opened.descriptor, authority: ref.nodeId }
+        : opened.descriptor
+      const known = this.options.store.getStream(descriptor.id)
+      if (known && !same(known, descriptor))
+        // One binding per stream: another pairing, or v1, already reads it.
+        throw engine && known.authority !== ref.nodeId ? streamBoundElsewhere() : new NetError('conflict')
       this.options.db.transaction(() => {
         const row = this.options.db.database
           .prepare('SELECT descriptor FROM net_bridge_hub_threads WHERE target=? AND entity=?')
           .get(ref.nodeId, this.attachmentEntity(ref, options))
-        if (row && !same(JSON.parse(row.descriptor as string), opened.descriptor))
+        if (row && !same(JSON.parse(row.descriptor as string), descriptor))
           return fail('conflict')
-        if (!known) this.options.store.createStream(opened.descriptor, opened.head.epoch)
-        this.options.db.charge(1, Buffer.byteLength(json(opened.descriptor)))
+        if (!known) this.options.store.createStream(descriptor, opened.head.epoch)
+        if (engine) this.options.engine!.bind(descriptor.id, ref.nodeId)
+        this.options.db.charge(1, Buffer.byteLength(json(descriptor)))
         this.options.db.database
           .prepare(
             'INSERT INTO net_bridge_hub_threads VALUES(?,?,?) ON CONFLICT(target,entity) DO UPDATE SET descriptor=excluded.descriptor'
           )
-          .run(ref.nodeId, this.attachmentEntity(ref, options), json(opened.descriptor))
+          .run(ref.nodeId, this.attachmentEntity(ref, options), json(descriptor))
       })
       const attachment: Attachment = {
         ref: { ...ref },
-        descriptor: opened.descriptor,
+        descriptor,
         projection: new ThreadDisplayProjection(ref.entityId, projectionTypes(options)),
         pending: Promise.resolve(),
         queued: 0,
@@ -1009,7 +1163,7 @@ export class BridgeHub {
         notifyCatchUp(listener, false)
         await this.rebuild(attachment)
         if (attachment.stopped) return fail('cancelled')
-        attachment.subscription = session.subscribe(opened.descriptor.id, {
+        attachment.subscription = session.subscribe(descriptor.id, {
           onRecord: (record) => this.enqueue(attachment, record),
           // After the records queued before it have been displayed.
           onCaughtUp: () => {
@@ -1060,7 +1214,7 @@ export class BridgeHub {
               }
             }
           })
-        return { descriptor: opened.descriptor, close: () => this.release(ref, listener, options) }
+        return { descriptor, close: () => this.release(ref, listener, options) }
       } catch (e) {
         this.detach(ref, options)
         throw e
@@ -1089,13 +1243,13 @@ export class BridgeHub {
     const descriptor = JSON.parse(row.descriptor as string) as StreamDescriptor
     if (!this.options.store.getStream(descriptor.id)) return false
     const projection = new ThreadDisplayProjection(ref.entityId, projectionTypes(options))
-    const reader = this.options.store.openSnapshot(descriptor.id)
+    const reader = this.openFromSnapshot(descriptor.id),
+      reading = this.reading()
     try {
       for (;;) {
         const page = reader.next(1024 * 1024, 64)
         for (const record of page.records) {
-          this.verifyRecord(record, descriptor)
-          const value = projection.accept(decodeEnvelope(record.envelope).envelope)
+          const value = projection.accept(this.checkRecord(record, descriptor, reading))
           if (value) update(value)
         }
         if (page.done) break
@@ -1128,7 +1282,14 @@ export class BridgeHub {
     const pending = { owner, cancelled: false }
     this.ownerPending.set(key, pending)
     try {
-      const attachment = await this.attach(ref, update, error)
+      // An engine pairing serves no shared display stream (`bridge.thread.open`): the thread is read from the
+      // private stream the pairing opens for this computer.
+      const attachment = await this.attach(
+        ref,
+        update,
+        error,
+        this.isEngine(ref.nodeId) ? this.enginePrivateThread(ref) : undefined
+      )
       if (pending.cancelled || this.stopped) {
         attachment.close()
         return fail('cancelled')
@@ -1137,6 +1298,17 @@ export class BridgeHub {
       return { descriptor: attachment.descriptor }
     } finally {
       this.ownerPending.delete(key)
+    }
+  }
+  private enginePrivateThread(ref: BridgeEntityRef): HubAttachOptions {
+    validateHubParams('bridge.thread.open', { threadId: ref.entityId })
+    return {
+      room: 'thread',
+      open: async () =>
+        (await openPrivateThread(
+          this.engineClient(ref.nodeId, 'bridge.thread.open'),
+          ref.entityId
+        )) as { descriptor: StreamDescriptor; head: { epoch: number; seq: number } }
     }
   }
   detachFor(owner: string, ref: BridgeEntityRef): void {
@@ -1201,8 +1373,35 @@ export class BridgeHub {
     }
   }
   verifyRecord(record: StoredRecord, descriptor: StreamDescriptor): void {
+    this.checkRecord(record, descriptor)
+  }
+  /**
+   * Who reads, checked once for a whole replay rather than for each of its records (`checkRecord`), and only
+   * if a record needs it.
+   */
+  private reading(): () => { user: string } {
+    let self: { user: string } | undefined
+    return () => (self ??= this.self('read'))
+  }
+  /**
+   * Checks a stored record before it is displayed, and returns its envelope. An author signature is checked once:
+   * a record with the same bytes is taken on that check while the roster stays as it was.
+   */
+  private checkRecord(
+    record: StoredRecord,
+    descriptor: StreamDescriptor,
+    reading: () => { user: string } = () => this.self('read')
+  ): Envelope {
     const env = decodeEnvelope(record.envelope).envelope,
-      self = this.self('read')
+      self = reading()
+    // A stream read from an engine pairing: its records were taken on the pinned channel's word, and are read
+    // again only while the stream is bound to a pairing that is still serving.
+    if (this.isEngine(descriptor.authority)) {
+      if (descriptor.kind !== 'node.thread' || env.stream !== descriptor.id || env.minor > 0)
+        return fail('forbidden')
+      this.options.engine!.verifyStream(descriptor.id)
+      return env
+    }
     if (
       descriptor.kind !== 'node.thread' ||
       env.stream !== descriptor.id ||
@@ -1212,7 +1411,151 @@ export class BridgeHub {
       env.minor > 0
     )
       return fail('forbidden')
+    const limit = copyLimits().verifiedRecords
+    const key = createHash('sha256').update(record.envelope).update(record.sig).digest('base64url')
+    if (this.verified.delete(key)) {
+      this.verified.add(key)
+      return env
+    }
     this.options.identity.verifyAuthor(env.author, record.envelope, record.sig, env.ts, 'history')
+    if (limit > 0) {
+      this.verified.add(key)
+      while (this.verified.size > limit) this.verified.delete(this.verified.values().next().value!)
+    }
+    return env
+  }
+  /**
+   * Where the newest complete display snapshot of a stream starts: its `thread.snapshot.begin`, if the newest
+   * `thread.snapshot.end` closes that same snapshot. Undefined when the stream has none, which is read whole.
+   */
+  private newestSnapshot(stream: StreamId): SnapshotStart | undefined {
+    const store = this.options.store
+    if (!store.lastOfType) return undefined
+    try {
+      const end = store.lastOfType(stream, 'thread.snapshot.end')
+      if (!end) return undefined
+      const begin = store.lastOfType(stream, 'thread.snapshot.begin', end.seq - 1)
+      if (!begin) return undefined
+      const closing = decodeEnvelope(end.envelope).envelope,
+        opening = decodeEnvelope(begin.envelope).envelope
+      const id = (body: unknown): unknown => (body as { snapshot?: unknown } | null)?.snapshot
+      if (begin.epoch !== end.epoch || id(opening.body) !== id(closing.body)) return undefined
+      return { epoch: begin.epoch, seq: begin.seq, id: opening.id }
+    } catch {
+      return undefined
+    }
+  }
+  /**
+   * A reader of what the copy on disk holds, from its newest complete snapshot on: a snapshot replaces everything
+   * before it, so what comes before it is not read (nor checked) again.
+   */
+  private openFromSnapshot(stream: StreamId) {
+    const from = this.newestSnapshot(stream)
+    return this.options.store.openSnapshot(stream, from ? { from } : undefined)
+  }
+  /**
+   * Once a copy's snapshot has been checked and displayed whole, the records before it go, in the background and
+   * a step at a time (`dropBefore` keeps nothing back unless that snapshot is still held).
+   */
+  private dropBefore(descriptor: StreamDescriptor, start: SnapshotStart): void {
+    if (!this.options.store.dropBefore || this.stopped || start.seq <= 1) return
+    if (descriptor.authority === this.options.identity.self()?.node) return
+    this.drops.set(descriptor.id, { ...start })
+    if (this.dropping) return
+    const run = (async () => {
+      const { dropBatchRows, dropBatchBytes, dropPauseMs } = copyLimits()
+      while (this.drops.size && !this.stopped) {
+        const [stream, keep] = this.drops.entries().next().value!
+        let dropped = 0
+        try {
+          dropped = this.options.store.dropBefore!(stream, keep, { rows: dropBatchRows, bytes: dropBatchBytes })
+        } catch {
+          // The stream is gone, or writes are suspended: the next snapshot of it tries again.
+        }
+        if (!dropped && this.drops.get(stream) === keep) this.drops.delete(stream)
+        await pause(dropPauseMs)
+      }
+    })().finally(() => {
+      this.cleanup.delete(run)
+      if (this.dropping === run) this.dropping = undefined
+    })
+    this.dropping = run
+    this.cleanup.add(run)
+  }
+  /**
+   * Tidies the copies on disk, in the background and a step at a time: drops the records no read reaches (old
+   * generations and epochs of thread display streams), then, for each copy this computer keeps of another
+   * computer's thread or lists, the records before its newest snapshot, once that snapshot's records pass the same
+   * checks as a display (signatures, and a whole snapshot whose digest matches). A copy whose newest snapshot does
+   * not pass keeps everything. Resolves once all of it is done, with how many unread rows went (the records before
+   * a snapshot go through the same steps as after a display, and are not counted).
+   */
+  async tidyCopies(): Promise<number> {
+    if (this.stopped) return 0
+    const { dropBatchRows, dropBatchBytes, dropPauseMs } = copyLimits()
+    let removed = 0
+    if (this.options.store.retireUnread)
+      for (;;) {
+        if (this.stopped) return removed
+        let count = 0
+        try {
+          count = this.options.store.retireUnread({ rows: dropBatchRows, bytes: dropBatchBytes })
+        } catch {
+          break
+        }
+        if (!count) break
+        removed += count
+        await pause(dropPauseMs)
+      }
+    const rows = this.options.db.database
+      .prepare('SELECT entity,descriptor FROM net_bridge_hub_threads')
+      .all() as Array<{ entity: string; descriptor: string }>
+    for (const row of rows) {
+      if (this.stopped) return removed
+      try {
+        const descriptor = JSON.parse(row.descriptor) as StreamDescriptor
+        if (!this.options.store.getStream(descriptor.id)) continue
+        const start = await this.checkedSnapshot(
+          descriptor,
+          row.entity.startsWith('private:') ? row.entity.slice('private:'.length) : row.entity
+        )
+        if (start) this.dropBefore(descriptor, start)
+      } catch {
+        // A copy that cannot be checked now keeps everything.
+      }
+      await pause(dropPauseMs)
+    }
+    const before = this.dropping
+    if (before) await before
+    return removed
+  }
+  /** The newest snapshot of a copy on disk, if every one of its records passes a display's checks. */
+  private async checkedSnapshot(
+    descriptor: StreamDescriptor,
+    threadId: string
+  ): Promise<SnapshotStart | undefined> {
+    const start = this.newestSnapshot(descriptor.id)
+    if (!start) return undefined
+    const reader = this.options.store.openSnapshot(descriptor.id, { from: start }),
+      reading = this.reading(),
+      projection = new ThreadDisplayProjection(threadId)
+    try {
+      for (let first = true; ; first = false) {
+        if (this.stopped) return undefined
+        const page = reader.next(1024 * 1024, 64)
+        for (const [index, record] of page.records.entries()) {
+          // The reader starts at the snapshot, or from the start when it was replaced meanwhile: then not now.
+          if (first && index === 0 && (record.epoch !== start.epoch || record.seq !== start.seq))
+            return undefined
+          const value = projection.accept(this.checkRecord(record, descriptor, reading))
+          if (value?.kind === 'snapshot') return start
+        }
+        if (page.done) return undefined
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+    } finally {
+      reader.close()
+    }
   }
   private rebuild(attachment: Attachment): Promise<void> {
     const pending = this.rebuildNow(attachment)
@@ -1225,12 +1568,14 @@ export class BridgeHub {
   }
   private async rebuildNow(attachment: Attachment): Promise<void> {
     attachment.projection.reset()
-    const reader = this.options.store.openSnapshot(attachment.descriptor.id)
+    attachment.begin = undefined
+    const reader = this.openFromSnapshot(attachment.descriptor.id),
+      reading = this.reading()
     try {
       for (;;) {
         if (attachment.stopped || this.stopped) return
         const page = reader.next(1024 * 1024, 64)
-        for (const record of page.records) await this.display(attachment, record)
+        for (const record of page.records) await this.display(attachment, record, reading)
         if (page.done) break
         await new Promise<void>((resolve) => setImmediate(resolve))
       }
@@ -1238,10 +1583,19 @@ export class BridgeHub {
       reader.close()
     }
   }
-  private async display(attachment: Attachment, record: StoredRecord): Promise<void> {
+  private async display(
+    attachment: Attachment,
+    record: StoredRecord,
+    reading?: () => { user: string }
+  ): Promise<void> {
     if (attachment.stopped || this.stopped) return
-    this.verifyRecord(record, attachment.descriptor)
-    const value = attachment.projection.accept(decodeEnvelope(record.envelope).envelope)
+    const envelope = this.checkRecord(record, attachment.descriptor, reading)
+    const value = attachment.projection.accept(envelope)
+    if (envelope.type === 'thread.snapshot.begin')
+      attachment.begin = { epoch: record.epoch, seq: record.seq, id: envelope.id }
+    else if (value?.kind === 'snapshot' && attachment.begin)
+      // A whole, checked snapshot: what the copy holds before it is not needed again.
+      this.dropBefore(attachment.descriptor, attachment.begin)
     if (value) {
       for (const listener of attachment.listeners) {
         try {
@@ -1308,6 +1662,8 @@ export class BridgeHub {
   close(): void {
     if (this.stopped) return
     this.stopped = true
+    this.offRoster()
+    this.drops.clear()
     this.inputs.close()
     this.ownerAttachments.clear()
     for (const pending of this.ownerPending.values()) pending.cancelled = true

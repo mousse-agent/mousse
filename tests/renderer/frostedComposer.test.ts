@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   FROSTED_COMPOSER_RANGES,
   clampFrostedComposer,
-  getDefaultSettings,
   normalizeAppearance
 } from '../../src/shared/settings'
 import { applyFrostedComposer, createFrostedComposerSaver } from '../../src/renderer/lib/frostedComposer'
@@ -24,21 +23,12 @@ afterEach(() => {
 })
 
 describe('frosted composer setting', () => {
-  it('is off by default at 60% opacity, 16px blur and 1.12 color boost', () => {
-    expect(getDefaultSettings().appearance).toMatchObject({
-      frostedComposer: false,
-      frostedComposerOpacity: 60,
-      frostedComposerBlur: 16,
-      frostedComposerSaturation: 1.12
-    })
-  })
-
   it('reads settings saved before it existed as the defaults', () => {
     const legacy = { theme: 'dark', accentColor: '#3b82f6', acrylic: false, acrylicIntensity: 50 } as const
     expect(normalizeAppearance(legacy)).toMatchObject({
       frostedComposer: false,
       frostedComposerOpacity: 60,
-      frostedComposerBlur: 16,
+      frostedComposerBlur: 6,
       frostedComposerSaturation: 1.12
     })
   })
@@ -57,8 +47,8 @@ describe('frosted composer setting', () => {
     expect(clampFrostedComposer('frostedComposerOpacity', 61.6)).toBe(62)
     expect(clampFrostedComposer('frostedComposerBlur', -4)).toBe(0)
     expect(clampFrostedComposer('frostedComposerBlur', '12')).toBe(12)
-    expect(clampFrostedComposer('frostedComposerBlur', '')).toBe(16)
-    expect(clampFrostedComposer('frostedComposerBlur', null)).toBe(16)
+    expect(clampFrostedComposer('frostedComposerBlur', '')).toBe(6)
+    expect(clampFrostedComposer('frostedComposerBlur', null)).toBe(6)
     expect(clampFrostedComposer('frostedComposerSaturation', 1.131)).toBe(1.14)
     expect(clampFrostedComposer('frostedComposerSaturation', 0.5)).toBe(1)
     expect(clampFrostedComposer('frostedComposerSaturation', 9)).toBe(1.6)
@@ -148,12 +138,6 @@ describe('frosted composer styles', () => {
     }
     expect(polish).toMatch(/rgba\(var\(--surface-soft-rgb\), var\(--frosted-composer-alpha/)
   })
-
-  it('keeps the transcript fade when off and ends the transcript at the composer when on', () => {
-    expect(polish).toMatch(/\n:is\(html\[data-acrylic='true'\], html\[data-frosted-composer='true'\]\) \.chat:not\(\.chat--empty\) \.an-message-list \{\n  --transcript-mask:/)
-    expect(polish).toMatch(/html\[data-frosted-composer='true'\] \.chat:not\(\.chat--empty\) \.an-message-list \{\n  --transcript-mask:[^}]*calc\(100% - var\(--chat-composer-gap\)\)/)
-    expect(polish).toMatch(/padding-bottom: var\(--chat-composer-gap\)/)
-  })
 })
 
 describe('Settings › Chat › Frosted composer', () => {
@@ -208,10 +192,10 @@ describe('Settings › Chat › Frosted composer', () => {
       .toEqual(['Opacity', 'Blur', 'Color boost'])
     expect(sliders.map((slider) => [slider.min, slider.max, slider.value])).toEqual([
       ['20', '95', '60'],
-      ['0', '40', '16'],
+      ['0', '40', '6'],
       ['1', '1.6', '1.12']
     ])
-    expect(sliders.map((slider) => slider.nextElementSibling?.textContent)).toEqual(['60%', '16px', '12%'])
+    expect(sliders.map((slider) => slider.nextElementSibling?.textContent)).toEqual(['60%', '6px', '12%'])
 
     const blur = sliders[1]
     await act(async () => {

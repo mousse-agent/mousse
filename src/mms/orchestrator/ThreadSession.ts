@@ -19,6 +19,22 @@ import type { MessageEstimate } from './contextEstimate'
 import { createNativeContext, isNativeContextBase, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
 
 /**
+ * Where a delegated `shared` child works: its parent's folder. `access: 'write'` is a general-purpose child with every
+ * tool its parent has; absent or `'read-only'` is a read-only child (`delegate_task` `readOnly`, and every `shared`
+ * child started before the two were separate).
+ */
+export interface SharedWorkspace {
+  path: string
+  parentThreadId: string
+  access?: 'read-only' | 'write'
+}
+
+/** Whether a child working in `shared` is a read-only one. */
+export function isReadOnlyShared(shared: SharedWorkspace | null | undefined): boolean {
+  return Boolean(shared) && shared!.access !== 'write'
+}
+
+/**
  * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
  * item carries its id, and what the item carried when it was promoted (its mode ceiling, the agent it came
  * from), so the entry can stand in for the item if the item is gone: a steer the turn never reads becomes a
@@ -49,6 +65,11 @@ export interface SteerEntry {
   botSteer?: string
 }
 
+/** The images a drain's steers carry, in the order they were steered: they go to the model with the joined text. */
+export function steerImages(entries: readonly SteerEntry[]): ChatImageAttachment[] {
+  return entries.flatMap((entry) => entry.images ?? [])
+}
+
 export interface ActiveTurnControl {
   abort: AbortController
   /** The Run Engine run this turn executes, so a Stop aimed at one run cannot abort a later turn of the thread. */
@@ -56,6 +77,11 @@ export interface ActiveTurnControl {
   pendingSteer: SteerEntry[]
   /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */
   carriedSteers?: Array<{ inboxIds: string[]; effectId: string; text: string; subagentNotice?: SubagentNoticeItem[] }>
+  /**
+   * The provider's turn is over: the model reads nothing more, though the turn still saves its reply and checkpoint.
+   * A steer from here on is a follow-up turn at once (first in the queue), never a steer the turn would hold unread.
+   */
+  inputClosed?: boolean
 }
 
 /** Mutable per-thread execution state owned by MMS. */
@@ -81,6 +107,11 @@ export class ThreadSession {
   admissionRunId: string | undefined
   /** A queue drain requested while the turn was still settling; run once admission is cleared. */
   drainAfterSettle = false
+  /**
+   * The provider instance a running turn is on, when the thread was switched to another one meanwhile. The turn
+   * finishes there; once it has settled its process and Mousse credentials end, unless the thread switched back.
+   */
+  switchedFromInstance: string | undefined
   /** Stop requested after admission but before the turn created its abort controller. */
   abortRequested = false
   /**
@@ -92,6 +123,11 @@ export class ThreadSession {
   /** The messages a person sent while the stopped turn still ended, in the order sent (`stopping`). */
   sentAfterStop: string[] = []
   /**
+   * Who stopped the thread's last turn: a person (their Stop, or the Stop of the thread that launched this one) or an
+   * agent. Kept while the thread shows stopped, so its end is not announced to the person who stopped it.
+   */
+  stoppedBy?: 'person' | 'agent'
+  /**
    * Queued messages sent now (Steer) while the turn was still being set up, in the order sent. They wait at the
    * front of the queue and join the turn as soon as it runs; a turn that ends before it runs leaves them to go
    * first. Cleared with the admission.
@@ -102,6 +138,8 @@ export class ThreadSession {
    * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.
    */
   setupStop: AbortController | null = null
+  /** The wait the windows were last told the queue's pending messages have (`QueuedMessage.waitsFor`). */
+  queueWaitShown: import('../../shared/types').QueuedMessageWait | null = null
   activeToolCallMessageIds = new Map<string, string>()
   /** Provider tool call id → timeline message id for the turn's calls, finished ones too (parents of later children). */
   callToMessage = new Map<string, string>()
@@ -125,11 +163,14 @@ export class ThreadSession {
   /** Project cwd for this thread (resolved path; never process.chdir). */
   projectCwd: string | null = null
   workspace: WorkspaceExecutionContext | null = null
+  /** The `workspace.workspaceNote` the agent was last told, so the next turns in the project folder do not repeat it. */
+  workspaceNoteGiven: string | null = null
   /**
-   * A delegated child with `workspace: 'shared'` (read-only roles) runs in its parent's workspace
-   * path under read-only tool access instead of provisioning its own (SPEC §14.2).
+   * A delegated child with `workspace: 'shared'` runs in its parent's workspace path instead of provisioning its own
+   * (SPEC §14.2). `access: 'write'` has every tool its parent has; any other value (a child saved before `access`
+   * existed included) is a read-only child, held to read-only tool access.
    */
-  sharedWorkspace: { path: string; parentThreadId: string } | null = null
+  sharedWorkspace: SharedWorkspace | null = null
   /**
    * A scheduled run's thread works on the project's own checkout (`workspaceBinding.policy ===
    * 'primary'`): its turns never provision a worktree.
@@ -152,6 +193,11 @@ export class ThreadSession {
 
   isTurnActive(): boolean {
     return this.activeTurn !== null && !this.activeTurn.abort.signal.aborted
+  }
+
+  /** A live turn whose model still reads steers: running, not stopped, and its provider's turn not over yet. */
+  takesSteer(): boolean {
+    return this.isTurnActive() && !this.activeTurn!.inputClosed
   }
 
   isTurnRunning(): boolean {

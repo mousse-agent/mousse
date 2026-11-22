@@ -7,6 +7,8 @@ description: Decide what to test for a change, at which level, and what not to w
 
 A PR's title says what a person now sees or gets. The tests must fail when that sentence stops being true, and must not fail for anything else. A review of 450 merged PRs (November 2026) found the suite strong at the deciding module and weak in four places: the last hop to the screen, how things look, what external programs really do, and inputs nobody listed. This skill is about those four.
 
+Read [docs/testing.md](../../../docs/testing.md) only when choosing test commands or fixtures, or when the change touches a boundary or a resource-owning test (processes, services, daemon, browser). The examples named below are pointers: read one only when you are about to copy its pattern, and do not reread an example file you have already read in this task.
+
 ## 1. Start from the claim
 
 Write the claim as the title will say it. For each part of it, name where a person would notice it broken: a file on disk, a row in a list, a button that does nothing, a message that never reaches the model. That place is the layer one test must observe. Tests below it are welcome; they do not replace it.
@@ -62,6 +64,6 @@ Usual answers to the second, and the remedy:
 
 ## 8. Before the PR
 
-Run the named files for the changed code, as AGENTS.md says. Then find the tests that depend on what you changed without importing it: search `tests/` with `rg` for the copy, class, default or list entry you changed, and run those files too. About one PR in fifteen was a follow-up repairing tests that an earlier PR broke this way.
+Run the named files for the changed code, as "Verify" in the work skill says. Then find the tests that depend on what you changed without importing it: search all of `tests/` with `rg -l` (file names only, not matching lines) for the copy, class, default or list entry you changed, and run the named tests plus the files it lists. About one PR in fifteen was a follow-up repairing tests that an earlier PR broke this way.
 
 In the PR's Verification, write for each part of the claim which test observes it, and which parts are checked by hand or not at all. "Not tested: the button's position" is an acceptable line; a CSS regex in its place is not.

@@ -27,7 +27,7 @@ import type {
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { McpRelayRuntime } from '../../shared/integrations'
+import type { McpRelayRuntime, SkillsRegistrySnapshot } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -150,6 +150,8 @@ export interface HarnessGateway {
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
+  /** The driver's runtime masks secret values in its tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean
   /**
    * The models an entry can make pictures with in Mousse's own process (#1088, a bot's Images row); none for an entry
    * that is unknown, turned off, or whose runtime makes none.
@@ -269,10 +271,18 @@ export interface HarnessGateway {
   /**
    * Ends what a thread's process still runs in the background (`ProviderAdapter.stopThread`), on
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
+   * With `instanceId`, only that instance's process ends (a turn on another instance is left alone).
    */
-  stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  stopThread(threadId: string, instanceId?: string): Promise<'stopped' | 'not_active'>
+  /**
+   * Stops one native helper of `hostThreadId`'s run on the instance that runs it (`ProviderAdapter.stopNativeHelper`).
+   * `unsupported`: that instance's runtime cannot stop a single helper.
+   */
+  stopNativeHelper?(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'>
   /** Whether any instance keeps a process for the thread between turns now (`ProviderAdapter.hasLiveProcess`). */
   hasLiveProcess?(threadId: string): boolean
+  /** Closes the process a bot's chat keeps warm on the thread, on whichever instance holds it (`ProviderAdapter.releaseBotProcess`). */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * `/compact` on the instance a thread runs on: its own compaction of the thread's native session.
    * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
@@ -305,7 +315,7 @@ export interface HarnessGateway {
   /** The same listing from what is known now, without waiting (synchronous readers). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
   /** Stops the instances' runtimes and running operations. */
-  stop(): void
+  stop(): void | Promise<void>
 }
 
 /** `HarnessGateway.bind`: the turn's mode, effort and origin, and the caller's part of its policy. */
@@ -383,6 +393,7 @@ export interface OneShotRequest {
   sessionKey?: string
   /** What the request is for (a refusal names it); absent reads as `title`. */
   task?: OneShotTask
+  namingOrigin?: NamingOrigin
   signal?: AbortSignal
 }
 
@@ -399,6 +410,7 @@ export interface ResolvedSelection {
  */
 export interface HarnessInstances {
   snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]>
+  refreshStaleModelsOnDesktopOpen(): void
   /**
    * The plan usage of every enabled, signed-in instance whose runtime reports any (`DriverRuntime.usage`),
    * for the usage page: keyed by the instance and named like it. An instance that cannot be read
@@ -407,7 +419,7 @@ export interface HarnessInstances {
    */
   usage(scope: ProviderScope, options?: { includeSignedOut?: boolean }): Promise<ProviderUsage[]>
   /** The instances the usage page lists (enabled ones with a usage reader, signed in or not), without reading any. */
-  usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true }>
+  usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true; onRequestOnly?: true }>
   /** One listed instance's usage, as `usage` reads it; undefined for an instance the page does not list. */
   usageFor(scope: ProviderScope, instanceId: string): Promise<ProviderUsage | undefined>
   /** Uses one limit-reset credit of a listed, signed-in instance whose runtime has them. */
@@ -557,6 +569,11 @@ export interface TurnAppContext {
   modeCeiling: ModeCeiling
   /** The agent access level granted to the run (SPEC §15.1); absent is `lineage`. */
   accessLevel?: AgentAccessLevel
+  /**
+   * The thread's capability revision (`ToolRegistry.capabilityRevision`): when it differs from the last turn's, the
+   * turn gets a new credential epoch, so the runtime takes the list the thread holds now.
+   */
+  capabilityRevision?: string
   /** The turn may attach the Mousse MCP server (a run engine run). */
   mcpEligible: boolean
   /**
@@ -564,6 +581,7 @@ export interface TurnAppContext {
    * MCP bearer cannot be issued is refused before the runtime starts, never run without them.
    */
   requiredTools?: readonly string[]
+  skillsSnapshot?: SkillsRegistrySnapshot
   /** The session text and turn preamble, given whether the server and the MCP relay were attached. */
   instructions(mcpAttached: boolean, relayAttached?: boolean): { sessionInstructions: string; turnPreamble: string }
   /**
@@ -622,6 +640,8 @@ export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
 export const MODEL_REFRESH_STARTUP_DELAY_MS = 2 * 60_000
 /** Model refreshes running at once (Claude Code and Codex start a CLI each). */
 const MODEL_REFRESH_CONCURRENCY = 2
+/** Coalesce nearby desktop opens, including retries of an unsuccessful refresh. */
+const DESKTOP_MODEL_REFRESH_INTERVAL_MS = 5 * 60_000
 /** Test-only: replaces `MODEL_REFRESH_INTERVAL_MS`, in milliseconds. */
 const MODEL_REFRESH_INTERVAL_ENV = 'MOUSSE_MODEL_REFRESH_INTERVAL_MS'
 /** A one-shot request ends with `timeout` after this long without a provider event. */
@@ -880,6 +900,8 @@ export class Harness implements HarnessGateway {
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
+  private readonly runtimeStops = new Map<InstanceRecord, { promise: Promise<void>; failed?: true }>()
+  private shutdown?: Promise<void>
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
    * belong to the instance, not to a runtime, so a reconfiguration or a runtime that finished its
@@ -928,6 +950,7 @@ export class Harness implements HarnessGateway {
    * schedule, a probe that saw a new program, a click) joins it instead of starting another.
    */
   private readonly modelRefreshes = new Map<string, Promise<void>>()
+  private lastDesktopModelRefresh = -Infinity
   private modelSlots = 0
   private readonly modelWaiting: Array<() => void> = []
   private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; latest: ReturnType<typeof setInterval>; intervalMs: number }
@@ -959,8 +982,12 @@ export class Harness implements HarnessGateway {
       .catch(() => {})
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
+      refreshStaleModelsOnDesktopOpen: () => this.refreshStaleModelsOnDesktopOpen(),
       usage: (scope, options) => this.usage(scope, options),
-      usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => ({ id: instanceId, label: this.displayName(this.record(instanceId, { allowDisabled: true })), ...(signedOut ? { signedOut: true as const } : {}) })),
+      usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => {
+        const record = this.record(instanceId, { allowDisabled: true })
+        return { id: instanceId, label: this.displayName(record), ...(signedOut ? { signedOut: true as const } : {}), ...(record.runtime.usageOnRequest ? { onRequestOnly: true as const } : {}) }
+      }),
       useLimitReset: async (scope, instanceId, creditId) => {
         const listed = this.usageIds(scope, false).find((entry) => entry.instanceId === instanceId)
         const record = listed && this.recordOrUndefined(instanceId)
@@ -1486,7 +1513,7 @@ export class Harness implements HarnessGateway {
       // runtime passes admission with them. The record is taken before admission, so a first attempt
       // that is refused still leaves one.
       // A caller-given count scope (a bot activation's) records every request and tool call even
-      // with no count limit, so a bot limited only by work time still shows what it did.
+      // with no count limit, so a bot with no limits still shows what it did.
       const limits = budgetLimitsOf(spec.binding.policy) ?? (spec.counters ? {} : undefined)
       const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1, ...(spec.spend ? { spend: spec.spend } : {}) }) : undefined
       let signal = spec.input.signal
@@ -1582,6 +1609,11 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  /** Whether a driver's runtime masks secrets in tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean {
+    return Boolean(driver && this.drivers.get(driver)?.masksToolResults)
+  }
+
   /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */
   private oneShotAvailable(instanceId: string): boolean {
     const entry = this.instanceMap.get(instanceId)
@@ -1618,6 +1650,7 @@ export class Harness implements HarnessGateway {
         prompt: request.prompt,
         ...(request.sessionKey ? { sessionKey: request.sessionKey } : {}),
         ...(request.task ? { task: request.task } : {}),
+        ...(request.namingOrigin ? { namingOrigin: request.namingOrigin } : {}),
         onActivity: restart
       }, signal)
       return { text: text.slice(0, Math.max(0, request.maxChars)) }
@@ -1962,16 +1995,36 @@ export class Harness implements HarnessGateway {
     return false
   }
 
-  async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
-    const results = await Promise.allSettled([...this.records.values()].map((record) => record.runtime.adapter.stopThread?.(threadId)))
+  releaseBotProcess(threadId: string): boolean {
+    let released = false
+    for (const record of this.records.values()) {
+      try {
+        if (record.runtime.adapter.releaseBotProcess?.(threadId)) released = true
+      } catch (error) {
+        console.warn("a bot's warm process could not be closed", { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return released
+  }
+
+  async stopThread(threadId: string, instanceId?: string): Promise<'stopped' | 'not_active'> {
+    const records = [...this.records.entries()].filter(([id]) => instanceId === undefined || id === instanceId).map(([, record]) => record)
+    const results = await Promise.allSettled(records.map((record) => record.runtime.adapter.stopThread?.(threadId)))
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (results.some((result) => result.status === 'fulfilled' && result.value === 'stopped')) return 'stopped'
     if (failed) throw failed.reason
     return 'not_active'
   }
 
+  async stopNativeHelper(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'> {
+    const adapter = this.recordOrUndefined(instanceId)?.runtime.adapter
+    if (!adapter?.stopNativeHelper) return 'unsupported'
+    return adapter.stopNativeHelper(hostThreadId, agentId)
+  }
+
   async compactConversation(request: NativeCompactRequest): Promise<boolean> {
-    const runtime = this.recordOrUndefined(request.instanceId)?.runtime
+    const record = this.recordOrUndefined(request.instanceId)
+    const runtime = record?.runtime
     return runtime?.compactConversation ? runtime.compactConversation(request) : false
   }
 
@@ -2008,6 +2061,13 @@ export class Harness implements HarnessGateway {
     const relayGrant = record.driver.relay && (botRelay || (app.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'))
       ? { approvals: record.driver.relay.approvals }
       : undefined
+    // What the server's tool list depends on, apart from the bearer: the caller's policy, a level other than the default,
+    // and the thread's capability revision.
+    const listParts = [
+      ...(binding.policyDigest ? [binding.policyDigest] : []),
+      ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : []),
+      ...(app.capabilityRevision ? [`caps:${app.capabilityRevision}`] : [])
+    ]
     let attachment: { url: string; token: string; tokenHash: string; relayUrl: string } | null = null
     if (app.mcpEligible && this.mcp && mcpAttachable(caps)) {
       try {
@@ -2022,8 +2082,9 @@ export class Harness implements HarnessGateway {
           // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
           // policy (a narrower grant must not keep the tool list of the last one). So is a different agent
           // access level (SPEC §15.1): a runtime caches its tool list, so it takes the new level with a new
-          // bearer. The default level adds nothing, so a profile that never sets one is unchanged.
-          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
+          // bearer. The default level adds nothing, so a profile that never sets one is unchanged. So is a new
+          // capability revision: the list the thread holds changed, and no runtime is told so mid-epoch.
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...listParts].join('|')
         })
       } catch (error) {
         console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
@@ -2038,15 +2099,16 @@ export class Harness implements HarnessGateway {
       ? { url: attachment.relayUrl, revision: botRelay ? botRelayRevision(app.bot!) : app.relay!.revision }
       : undefined
     const texts = app.instructions(attachment !== null, relay !== undefined)
-    // What the server's tool list depends on, apart from the bearer: a runtime that keeps its process for a bearer
-    // renewed in place starts a new one when this changes, since it would keep offering a tool the list dropped.
-    const tools = [...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
+    // A runtime that keeps its process for a bearer renewed in place starts a new one when this changes, since it would
+    // keep offering a tool the list dropped.
+    const tools = listParts.join('|')
     return {
       bridge: {
         mcp: attachment ? { url: attachment.url, token: attachment.token, ...(tools ? { tools } : {}), ...(relay ? { relay } : {}) } : null,
         turnToken: app.turnToken,
         sessionInstructions: texts.sessionInstructions,
         turnPreamble: texts.turnPreamble,
+        ...(app.skillsSnapshot ? { skillsSnapshot: app.skillsSnapshot } : {}),
         ...(binding.policy.tools ? { toolPolicy: binding.policy.tools } : {}),
         userMcp: record.driver.userMcp ?? 'native',
         // `never`: nobody answers, so every permission request is denied without asking.
@@ -2255,22 +2317,15 @@ export class Harness implements HarnessGateway {
     for (const record of this.retired) {
       if (record.active > 0) continue
       this.retired.delete(record)
-      let stopped: void | Promise<void> = undefined
-      try {
-        stopped = record.runtime.stop()
-      } catch (error) {
-        console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
-      }
+      const stopped = this.stopRuntime(record)
       // A removed instance's files wait for its processes to exit.
       const removal = this.removals.get(record.instanceId)
       if (stopped && removal) {
         removal.pending += 1
-        void stopped.catch((error) => console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })).finally(() => {
+        void stopped.then(() => {
           removal.pending -= 1
           this.deleteRemoved()
-        })
-      } else if (stopped) {
-        void stopped.catch(() => {})
+        }, () => undefined)
       }
     }
     this.deleteRemoved()
@@ -2453,6 +2508,7 @@ export class Harness implements HarnessGateway {
     let upgraded = false
     const run = async () => {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
+      if (this.stopped) return
       const record = this.record(instanceId, { allowDisabled: true })
       const override = record.config.binaryPath
       // Signed out in Mousse: reported as such without asking the runtime (no CLI status check).
@@ -2884,7 +2940,7 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       if (record) {
         this.records.delete(instanceId)
-        void Promise.resolve(record.runtime.stop()).catch(() => {})
+        void this.stopRuntime(record)
       }
       throw error
     }
@@ -3725,7 +3781,7 @@ export class Harness implements HarnessGateway {
    * at once). A refresh that fails is recorded on the instance, never thrown. When `when` is set,
    * the instance is checked again once its turn comes and is left alone if it no longer qualifies.
    */
-  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' }): Promise<void> {
+  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' | 'desktop' }): Promise<void> {
     const running = this.modelRefreshes.get(instanceId)
     if (running) return running
     const job = this.withModelSlot(async () => {
@@ -3795,23 +3851,33 @@ export class Harness implements HarnessGateway {
     if (this.stopped || this.modelSchedule) return
     const override = Number(process.env[MODEL_REFRESH_INTERVAL_ENV])
     const intervalMs = Number.isFinite(override) && override > 0 ? override : MODEL_REFRESH_INTERVAL_MS
-    const pass = (minAgeMs: number) => {
-      if (this.stopped) return
-      for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
-        if (!entry.enabled || entry.driver === 'pi') continue
-        // The first pass leaves a list younger than the interval alone; later ones also take lists
-        // the previous pass refreshed just under an interval ago.
-        void this.refreshModelsOf(instanceId, { minAgeMs, reason: 'schedule' }).catch((error) => console.warn('[harness] scheduled model refresh failed', { instanceId, error: errorText(error) }))
-      }
-    }
-    const interval = setInterval(() => pass(intervalMs / 2), intervalMs)
-    const startup = setTimeout(() => pass(intervalMs), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
+    // The first pass leaves lists younger than the interval alone. Later passes also pick up
+    // lists the previous pass refreshed just under an interval ago.
+    const interval = setInterval(() => this.refreshModelPass(intervalMs / 2, 'schedule'), intervalMs)
+    const startup = setTimeout(() => this.refreshModelPass(intervalMs, 'schedule'), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
     // Newest published versions, for the update button: the cache decides when a lookup is due.
     const latest = setInterval(() => this.refreshLatest(Object.keys(this.instanceMap.list())), LATEST_CHECK_INTERVAL_MS)
     interval.unref?.()
     startup.unref?.()
     latest.unref?.()
     this.modelSchedule = { interval, startup, latest, intervalMs }
+  }
+
+  /** A desktop can start while its profile and the service have been running for hours. */
+  private refreshStaleModelsOnDesktopOpen(): void {
+    const now = this.now()
+    if (now - this.lastDesktopModelRefresh < DESKTOP_MODEL_REFRESH_INTERVAL_MS) return
+    this.lastDesktopModelRefresh = now
+    this.refreshModelPass(DESKTOP_MODEL_REFRESH_INTERVAL_MS, 'desktop')
+  }
+
+  private refreshModelPass(minAgeMs: number, reason: 'schedule' | 'desktop'): void {
+    if (this.stopped) return
+    for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
+      // Pi already refreshes independently on the shared catalog's five-minute cycle.
+      if (!entry.enabled || entry.driver === 'pi') continue
+      void this.refreshModelsOf(instanceId, { minAgeMs, reason }).catch((error) => console.warn('[harness] background model refresh failed', { instanceId, reason, error: errorText(error) }))
+    }
   }
 
   /** A probe found another program than before: list its models now, when the instance qualifies. */
@@ -4099,7 +4165,32 @@ export class Harness implements HarnessGateway {
     return this.options.now?.() ?? Date.now()
   }
 
-  stop(): void {
+  private stopRuntime(record: InstanceRecord): Promise<void> | undefined {
+    const existing = this.runtimeStops.get(record)
+    if (existing) return existing.promise
+    let stopping: void | Promise<void>
+    try {
+      stopping = record.runtime.stop()
+    } catch (error) {
+      stopping = Promise.reject(error)
+    }
+    if (!stopping) return undefined
+    // Keep failures from earlier runtime retirements available for profile shutdown.
+    const stop: { promise: Promise<void>; failed?: true } = { promise: stopping }
+    this.runtimeStops.set(record, stop)
+    void stopping.then(
+      () => this.runtimeStops.delete(record),
+      (error: unknown) => {
+        stop.failed = true
+        console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
+      }
+    )
+    return stopping
+  }
+
+  stop(): Promise<void> {
+    if (this.shutdown) return this.shutdown
+    const retry = this.stopped
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
@@ -4109,16 +4200,25 @@ export class Harness implements HarnessGateway {
     }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
-    for (const record of [...this.records.values(), ...this.retired]) {
-      try {
-        void Promise.resolve(record.runtime.stop()).catch(() => {})
-      } catch {
-        /* stopping is best effort */
+    const records = new Set([...this.records.values(), ...this.retired])
+    if (retry) {
+      for (const [record, stop] of this.runtimeStops) {
+        if (!stop.failed) continue
+        this.runtimeStops.delete(record)
+        records.add(record)
       }
     }
+    for (const record of records) void this.stopRuntime(record)
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
+    const stops = [...[...this.runtimeStops.values()].map((stop) => stop.promise), ...[...this.stopBarriers.values()].flatMap((set) => [...set])]
+    this.shutdown = Promise.allSettled(stops).then((results) => {
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Provider runtimes could not be stopped')
+    })
+    void this.shutdown.catch(() => { this.shutdown = undefined })
+    return this.shutdown
   }
 }
 

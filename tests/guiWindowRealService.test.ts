@@ -5,7 +5,8 @@
  * - an answer to a read never puts back a turn older than an update that reached main before the answer;
  * - event numbers the window merely skipped (a streamed update replaced by its newer copy) are not taken for a loss.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,6 +26,7 @@ vi.mock('electron', () => ({
   dialog: {},
   clipboard: {},
   nativeTheme: { on: () => undefined },
+  screen: { on: () => undefined, getAllDisplays: () => [] },
   session: {},
   webContents: {}
 }))
@@ -35,7 +37,7 @@ import type { LocalMmsClient } from '../src/mms/protocol/client'
 import { GuiMmsController } from '../src/main/mms/GuiMmsController'
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../src/main/mms/PresentationState'
-import type { TurnState } from '../src/shared/types'
+import type { GitStatusSnapshot, TurnState } from '../src/shared/types'
 
 const WINDOW = 41
 const webContents = Object.assign(new EventEmitter(), {
@@ -126,7 +128,7 @@ afterAll(async () => {
   await gui.stop()
   await server.stop()
   await mms.stop()
-  rmSync(home, { recursive: true, force: true })
+  rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 })
   delete process.env.MOUSSE_HOME
 })
 
@@ -308,3 +310,36 @@ describe('a service restart', () => {
     expect(count('providers:serviceRestarted')).toBe(announced + 5)
   }, 60_000)
 })
+
+it('a Git Retry reaches a new status read through the window’s live client while the first read is hung', async () => {
+  const repo = join(home, 'retry-repo')
+  mkdirSync(repo)
+  execFileSync('git', ['init', '-qb', 'retry'], { cwd: repo })
+  const project = mms.projects.openProject(repo)
+  const service = mms.gitService as unknown as { readStatus(path: string): Promise<GitStatusSnapshot> }
+  const firstStatus = await service.readStatus(repo)
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting!: () => void
+  const entered = new Promise<void>((resolve) => { waiting = resolve })
+  const reader = vi.spyOn(service, 'readStatus').mockImplementationOnce(async () => {
+    waiting()
+    await gate
+    return firstStatus
+  })
+  const scope = { projectId: project.id, workspaceThreadId: null }
+  const oldRead = invoke('git:status', scope) as Promise<GitStatusSnapshot>
+  try {
+    await Promise.race([entered, oldRead.then(() => { throw new Error('The first read should still be waiting') })])
+    writeFileSync(join(repo, 'new-file'), 'present on Retry')
+    const retried = invoke('git:status', { ...scope, attempt: 1 }) as Promise<GitStatusSnapshot>
+    expect((await retried).changes.map((change) => change.path)).toContain('new-file')
+    expect(reader).toHaveBeenCalledTimes(2)
+    release()
+    expect((await oldRead).changes).toEqual([])
+  } finally {
+    release()
+    await oldRead.catch(() => undefined)
+    reader.mockRestore()
+  }
+}, 20_000)

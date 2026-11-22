@@ -1,3 +1,4 @@
+import { SecretBindings } from '../secrets/SecretBindings'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -18,6 +19,7 @@ export function createProfileSecretAdapter(options: {
   environment?: NodeJS.ProcessEnv
 }): IntegrationSecretAdapter {
   const filePath = join(options.profileRoot, 'secrets', 'refs.json')
+  const bindings = new SecretBindings(options.profileRoot)
   const environment: NodeJS.ProcessEnv = options.inheritProcessEnv ? options.environment ?? process.env : {}
 
   const readFileSecrets = (): Record<string, string> => {
@@ -39,12 +41,18 @@ export function createProfileSecretAdapter(options: {
   // ref, such as an automation's webhook signing secret (`scheduled-webhook-<id>`), reads the inherited overlay only.
   const toolSecrets: IntegrationSecretAdapter = {
     resolveEnv: (value) => value,
-    resolveSecretRef: (ref) => (isKeyName(ref) ? readFileSecrets()[ref] : undefined) ?? environment[ref]
+    resolveSecretRef: (ref) => {
+      // Refuse before resolving, including an inherited environment fallback. Daemon-only reads remain available for masking.
+      const binding = bindings.get(ref)
+      if (binding) throw new Error(`${ref} is bound to ${binding.service ?? new URL(binding.origin).host}; use secret_fetch.`)
+      return (isKeyName(ref) ? readFileSecrets()[ref] : undefined) ?? environment[ref]
+    }
   }
   return {
     resolveEnv(value: string): string {
       return resolveEnvValue(value, environment, toolSecrets)
     },
+    canUseSecretRef: (ref) => !bindings.get(ref),
     // The daemon's own lookups (a webhook's secret by its ref) read the whole store.
     resolveSecretRef(ref: string): string | undefined {
       const fromFile = readFileSecrets()[ref]
@@ -67,14 +75,24 @@ export function listProfileKeyNames(profileRoot: string): string[] {
   }
 }
 
+/** Mutations must never return parser excerpts from a file containing credentials. */
+function readSecretStoreForWrite(filePath: string): Record<string, string> {
+  if (!existsSync(filePath)) return {}
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error()
+    return parsed as Record<string, string>
+  } catch {
+    throw new Error('The secret store could not be read. Nothing was stored.')
+  }
+}
+
 export function writeProfileSecret(profileRoot: string, name: string, value: string): void {
   const dir = join(profileRoot, 'secrets')
   // Private to this account on Windows too, before any secret is written into it.
   ensurePrivateDirectory(dir)
   const filePath = join(dir, 'refs.json')
-  const current = existsSync(filePath)
-    ? (JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, string>)
-    : {}
+  const current = readSecretStoreForWrite(filePath)
   current[name] = value
   atomicWriteJsonSync(filePath, current, { mode: 0o600 })
 }
@@ -83,7 +101,7 @@ export function writeProfileSecret(profileRoot: string, name: string, value: str
 export function deleteProfileSecret(profileRoot: string, name: string): void {
   const filePath = join(profileRoot, 'secrets', 'refs.json')
   if (!existsSync(filePath)) return
-  const current = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, string>
+  const current = readSecretStoreForWrite(filePath)
   if (!Object.prototype.hasOwnProperty.call(current, name)) return
   delete current[name]
   atomicWriteJsonSync(filePath, current, { mode: 0o600 })

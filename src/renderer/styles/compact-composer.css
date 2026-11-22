@@ -159,11 +159,13 @@
   }
 }
 
+.chat-input-area .composer-input-backdrop,
 .chat-input-area .composer-input {
-  /* Let Chromium use the custom track and thumb without native arrow buttons. */
+  /* Use the same custom gutter in the textarea and its backdrop. */
   scrollbar-width: auto;
   scrollbar-color: auto;
 }
+.chat-input-area .composer-input-backdrop::-webkit-scrollbar,
 .chat-input-area .composer-input::-webkit-scrollbar {
   width: 4px;
 }

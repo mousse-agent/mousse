@@ -354,7 +354,6 @@ describe('managed Codex: models and readings', () => {
     expect(reading.subject).toMatch(/^chatgpt:.+:alice$/)
     expect(await runtime.identity!(new AbortController().signal)).toBe(reading.subject)
     await launch()
-    expect(runtime.configured()).toBeTypeOf('boolean')
     expect(server.methods()).not.toContain('account/read')
   })
 })

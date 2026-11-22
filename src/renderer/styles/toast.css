@@ -12,7 +12,7 @@
   right: 12px;
   bottom: 12px;
   z-index: var(--z-floating, 50000);
-  /* As wide as the thread side card (--side-card-width), its right edge on the same 12px gutter. */
+  /* A narrow column on a 12px gutter from the window's bottom-right corner. */
   width: min(272px, calc(100vw - 24px));
   /* `bottom` rises above bottom UI a pane registers, such as the Changes tab's footer (useToastObstruction). */
   transition: height 0.4s var(--toast-ease), bottom var(--ui-dur-slow, 0.2s) var(--toast-ease);
@@ -59,11 +59,11 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-item.is-muted .ui-toast-card {
   border-color: transparent;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  box-shadow: none;
 }
 
 .ui-toast-item.is-muted + .ui-toast-item.is-muted .ui-toast-card {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow: none;
 }
 
 /* Behind cards show only their own faint lip, not the full specular light. */
@@ -151,7 +151,10 @@ html[data-theme='light'] .ui-toaster {
   padding-bottom: 7px;
 }
 
-.ui-toast-success { --tone: var(--success); }
+/* --success is vivid so it reads at dot size; across a whole card it shouts. The toast keeps its
+   hue and lightness at part of its chroma: still green, calm against the theme. Light themes keep
+   more (below), or the faint light wash turns grey and reads as a neutral toast. */
+.ui-toast-success { --tone: oklch(from var(--success) l calc(c * var(--toast-success-chroma, 0.5)) h); }
 .ui-toast-attention { --tone: var(--status-input, var(--accent)); }
 .ui-toast-paused { --tone: var(--warning); }
 .ui-toast-error { --tone: var(--danger); }
@@ -168,12 +171,14 @@ html[data-theme='light'] .ui-toaster {
 html[data-theme='light'] .ui-toaster {
   --toast-wash-amount: 7%;
   --toast-edge-amount: 28%;
+  --toast-success-chroma: 0.7;
 }
 
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] .ui-toaster {
     --toast-wash-amount: 7%;
     --toast-edge-amount: 28%;
+    --toast-success-chroma: 0.7;
   }
 }
 

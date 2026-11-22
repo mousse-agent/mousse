@@ -2,7 +2,8 @@
 /**
  * "Working · Ns" counts from when the reply started, all through the reply: when the service's saved copy of the
  * prompt takes the place of the one shown on send (another id, a later time), when the first tool shows, and when the
- * answer lands, the time goes on from where it was. "Worked for" then reads the whole reply.
+ * answer lands, the time goes on from where it was. "Worked for" then reads the whole reply. A prompt sent here counts
+ * from the click even when the service saves it minutes later (a new thread's workspace being set up).
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -61,5 +62,21 @@ describe('the time of a reply', () => {
     expect(label()).toContain('8s')
     render([prompt('m1', 2), command('c1', 3), answer('a1', 6)], 'ready')
     expect(label()).toMatch(/Worked for 8s/)
+  })
+
+  it("counts a new thread's first turn from the click, through the minutes before the service saved its prompt", () => {
+    // Sent from a new chat: the turn has no state yet while its thread and workspace are set up.
+    render([prompt('optimistic:1', 0)], 'ready')
+    at(200)
+    expect(label()).toContain('3m 20s')
+    // The prompt is saved 210s after the click, before the turn reports running: the time goes on, then and after.
+    render([prompt('m1', 210)], 'ready')
+    at(211)
+    expect(label()).toContain('3m 31s')
+    render([prompt('m1', 210)], 'streaming')
+    at(215)
+    expect(label()).toContain('3m 35s')
+    render([prompt('m1', 210), answer('a1', 218)], 'ready')
+    expect(label()).toMatch(/Worked for 3m 3[58]s/)
   })
 })

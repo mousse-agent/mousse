@@ -33,7 +33,8 @@ CREATE TRIGGER msg_ai AFTER INSERT ON msg BEGIN INSERT INTO msg_fts(rowid, folde
 CREATE TRIGGER msg_ad AFTER DELETE ON msg BEGIN INSERT INTO msg_fts(msg_fts, rowid, folded) VALUES ('delete', old.id, old.folded); END;
 `
 
-export interface IndexTarget { threadId: string; dir: string }
+/** A thread to bring up to date in the index; `drop`: take it out (it was trashed or purged). */
+export interface IndexTarget { threadId: string; dir: string; drop?: boolean }
 export interface IndexSearchRequest {
   /** Lowercased by the caller with JavaScript's `toLowerCase`. */
   query: string
@@ -45,11 +46,13 @@ export interface IndexSearchRequest {
   limit: number
   /** Matches to skip, for a caller that needs more than one batch. */
   offset?: number
+  /** The first match of each thread only, so one thread with many matching messages does not fill the batch. */
+  perThread?: boolean
 }
 export interface IndexHit { threadId: string; messageId: string; body: string }
 
 /** What a thread's database files look like on disk; a different stamp means a write happened since. */
-function stampOf(dir: string): string {
+export function stampOf(dir: string): string {
   const parts: string[] = []
   for (const name of [THREAD_DB_FILE, `${THREAD_DB_FILE}-wal`]) {
     try {
@@ -168,8 +171,8 @@ export class ThreadIndex {
     })
   }
 
-  private updateThread(db: DatabaseSync, { threadId, dir }: IndexTarget, verify: boolean): boolean {
-    if (!existsSync(join(dir, THREAD_DB_FILE))) {
+  private updateThread(db: DatabaseSync, { threadId, dir, drop }: IndexTarget, verify: boolean): boolean {
+    if (drop || !existsSync(join(dir, THREAD_DB_FILE))) {
       this.drop(db, threadId)
       return false
     }
@@ -260,15 +263,20 @@ export class ThreadIndex {
     return this.withIndex(profileHome, (db) => {
       const threads = JSON.stringify(request.threads.map((thread, order) => ({ id: thread.id, order })))
       const scope = 'WITH scope AS (SELECT json_extract(value, \'$.id\') AS id, json_extract(value, \'$.order\') AS ord FROM json_each(?))'
-      const select = 'SELECT m.thread_id AS threadId, m.message_id AS messageId, m.body AS body'
-      const page = 'ORDER BY s.ord, m.ord, m.rid LIMIT ? OFFSET ?'
+      const columns = 'SELECT m.thread_id AS threadId, m.message_id AS messageId, m.body AS body'
+      // One row per thread: with a single min() in the query, SQLite takes the bare columns from the row that holds
+      // it, the thread's first match. `s.ord` is the same on every row of a thread.
+      const select = request.perThread ? `${columns}, min(m.ord) AS first` : columns
+      const page = request.perThread
+        ? 'GROUP BY m.thread_id ORDER BY s.ord LIMIT ? OFFSET ?'
+        : 'ORDER BY s.ord, m.ord, m.rid LIMIT ? OFFSET ?'
       const offset = request.offset ?? 0
       const rows = [...query].length >= 3
         ? db.prepare(`${scope} ${select} FROM msg_fts JOIN msg m ON m.id = msg_fts.rowid JOIN scope s ON s.id = m.thread_id WHERE msg_fts MATCH ? ${page}`)
           .all(threads, `"${query.replace(/"/g, '""')}"`, request.limit, offset)
         : db.prepare(`${scope} ${select} FROM msg m JOIN scope s ON s.id = m.thread_id WHERE instr(m.folded, ?) > 0 ${page}`)
           .all(threads, query, request.limit, offset)
-      return rows as unknown as IndexHit[]
+      return (rows as unknown as IndexHit[]).map(({ threadId, messageId, body }) => ({ threadId, messageId, body }))
     })
   }
 

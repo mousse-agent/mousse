@@ -155,6 +155,25 @@ describe('bots.chat.send', () => {
       .toEqual([['text', 'What came in today?'], ['text', 'Two invoices.'], ['run_report', 'Nothing new.']])
   })
 
+  it('the run reports of every piece that ran side by side are written at startup, however many; an older one is not', async () => {
+    const engine = f.bots as unknown as { postReply: (...args: unknown[]) => void }
+    const postReply = engine.postReply
+    engine.postReply = () => {}
+    // An older run whose report is gone (the chat was cleared, say) ended before the others were asked for.
+    const older = await f.bots.activate({ botId, input: 'Old job', clientRequestId: 'old' })
+    await runDispatch(f, older.id, 1, { text: 'Old report.' })
+    f.clock.now += 60_000
+    const runs = []
+    for (let i = 0; i < 5; i += 1) runs.push(await f.bots.activate({ botId, input: `Job ${i}`, clientRequestId: `r${i}` }))
+    for (const [i, run] of runs.entries()) await runDispatch(f, run.id, 1, { text: `Report ${i}.` })
+    engine.postReply = postReply
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    const reports = chatOf(f, botId).filter((message) => message.kind === 'run_report').map((message) => message.text)
+    expect(reports.sort()).toEqual(['Report 0.', 'Report 1.', 'Report 2.', 'Report 3.', 'Report 4.'])
+  })
+
   it('each chat row and its journal row share one transaction; the owner\'s row is journaled before any dispatch starts', async () => {
     const dispatchesAtAppend: Array<{ kind: string; started: number }> = []
     const append = f.host.journal!.appendInTx.bind(f.host.journal)
@@ -191,8 +210,8 @@ describe('bots.chat.send', () => {
     await finish(f, stopped.payload, 'interrupted', { outcome: { interruptedBy: 'user' } })
     expect(f.afterDispatch.map((entry) => entry.endedBy)).toEqual(['settled', 'wall', 'failed', 'stopped'])
     expect(f.afterDispatch.every((entry) => entry.lane === 'chat' && entry.threadId === home())).toBe(true)
-    // A chat failure says so in plain words, without the provider's message.
-    expect(chatOf(f, botId).some((message) => message.kind === 'error' && message.error?.text === 'Something went wrong, so I stopped. Try again.')).toBe(true)
+    // A chat failure says what failed in plain words, even with no message of its own.
+    expect(chatOf(f, botId).some((message) => message.kind === 'error' && message.error?.text === 'The provider failed, so I stopped. Try again.')).toBe(true)
   })
 
   it('a journal that cannot be written makes the bot stuck; nothing more runs until Resume', async () => {
@@ -364,19 +383,22 @@ describe('chat turns at their edges (review round 2)', () => {
     expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: .*\n\nNever mind, just say hi$/)
   })
 
-  it('a chat turn dropped from a full queue says so in the chat', async () => {
+  it('a chat turn refused by a full queue says so in the chat, and what already waits is kept', async () => {
     await send('First', 'q0')
     const first = chatActivation()
     // The owner's own messages join the turn that answers them; turns that can't join it (taps, another device's
-    // messages, the bot's own) wait in the queue, filled here directly.
-    for (let n = 1; n <= 21; n += 1) {
+    // messages, the bot's own) wait in the queue, filled here directly. Only a runaway fills the queue; a ceiling of
+    // three stands in for it.
+    f.host.maxQueuedActivations = 3
+    for (let n = 1; n <= 4; n += 1) {
       f.clock.now += 1
       await f.bots.enqueueChat(botId, `chat:q${n}`, `Message ${n}`)
     }
-    const dropped = f.store.activationByKey('chat:q1')!
-    expect(dropped).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    const refused = f.store.activationByKey('chat:q4')!
+    expect(refused).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(['chat:q1', 'chat:q2', 'chat:q3'].map((key) => f.store.activationByKey(key)!.status)).toEqual(['queued', 'queued', 'queued'])
     expect(chatOf(f, botId).filter((message) => message.kind === 'error')).toMatchObject([
-      { activationId: dropped.id, error: { text: 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.' } }
+      { activationId: refused.id, error: { text: 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.' } }
     ])
     expect(f.store.activation(first.id)!.status).toBe('running')
   })

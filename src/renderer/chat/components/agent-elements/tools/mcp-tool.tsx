@@ -4,6 +4,8 @@ import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import type { McpToolInfo } from "./tool-registry";
 import { Wrench } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
+import { mousseToolLabels, mousseToolOf } from "./mousse-tools";
+import { MousseToolIcon } from "./mousse-tool-icon";
 import { codeHighlighter } from "../code-highlighter";
 import { codeOnlyComponents } from "../code-block";
 
@@ -177,13 +179,20 @@ export const McpTool = memo(function McpTool({
   const { isPending, isInterrupted, isError } = getToolStatus(part, chatStatus);
   const failed = isError && !isPending;
 
+  // Mousse's own tools: its logo and what the call does, in words ("Creating a thread in Mousse").
+  const mousse = useMemo(() => {
+    const tool = mousseToolOf(part.type);
+    return tool ? mousseToolLabels(tool) : null;
+  }, [part.type]);
+
   const title = useMemo(() => {
+    if (mousse) return isPending ? mousse.running : failed ? mousse.failed : mousse.done;
     if (part.state === "input-streaming")
       return `Preparing ${mcpInfo.displayName}`;
     if (isPending) return getActiveTitle(mcpInfo);
     if (failed) return `Failed ${mcpInfo.displayName}`;
     return getCompletedTitle(mcpInfo);
-  }, [part.state, isPending, failed, mcpInfo]);
+  }, [mousse, part.state, isPending, failed, mcpInfo]);
 
   const subtitle = useMemo(() => {
     if (part.state === "input-streaming") return "";
@@ -209,7 +218,7 @@ export const McpTool = memo(function McpTool({
   if (isInterrupted) {
     return (
       <span className="text-base text-an-tool-color-muted">
-        {mcpInfo.displayName} interrupted
+        {mousse ? `Stopped ${mousse.running.charAt(0).toLowerCase()}${mousse.running.slice(1)}` : `${mcpInfo.displayName} interrupted`}
       </span>
     );
   }
@@ -217,7 +226,7 @@ export const McpTool = memo(function McpTool({
   return (
     <div className="an-tool-mcp">
       <ToolRowBase
-        icon={<Wrench size={18} />}
+        icon={mousse ? <MousseToolIcon size={18} /> : <Wrench size={18} />}
         shimmerLabel={title}
         completeLabel={title}
         isAnimating={isPending}

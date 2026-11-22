@@ -7,6 +7,7 @@ import { mmsJson } from './jsonOutput'
 import { remoteBotSummary } from './RemoteBots'
 import type { BotsSharingPort } from '../../protocol/botsSharingPort'
 import type { BotReachPort } from '../../protocol/botReachPort'
+import { copyLimits } from '../copyLimits'
 
 /**
  * The reserved display "thread" that carries a computer's sidebar lists. Real thread ids never
@@ -28,6 +29,17 @@ const LISTS_VERSION = 1
 const SETTLE_MS = 40
 /** Catches changes that reach no event (for example a thread another client deleted). */
 const RECONCILE_MS = 15_000
+/**
+ * The lists without the threads' last-update times. A running turn moves its thread's time on every save, every
+ * second or so; a change of these alone is published at most once per `listsTimesIntervalMs` (`copyLimits`),
+ * since each publish is a whole snapshot, sent to and stored by every reader.
+ */
+function withoutTimes(snapshot: ListsSnapshot): string {
+  return JSON.stringify({
+    ...snapshot,
+    threads: snapshot.threads.map(({ updatedAt: _updatedAt, ...rest }) => rest)
+  })
+}
 const PREVIEW_CHARS = 280
 const ERROR_CHARS = 280
 /** A private snapshot above this size leaves out threads archived long ago (see `trimmed`). */
@@ -381,7 +393,7 @@ export class MmsListsSource {
           settledAt: thread.settledAt,
           startedAt: thread.startedAt,
           worktreeEnabled: thread.worktreeEnabled,
-          // When it deletes itself, for the menu's Delete after (a phone keeps "stop a running turn" when it changes the time).
+          // When it archives itself, for the menu's Archive after (a phone keeps "stop a running turn" when it changes the time).
           ...(thread.expiresAt ? { expiresAt: thread.expiresAt } : {}),
           ...(thread.expiresAt && thread.expiryStopsRun ? { expiryStopsRun: true } : {}),
           ...(own
@@ -407,23 +419,39 @@ export class MmsListsSource {
 
   /**
    * Calls `changed` shortly after anything the lists show changes. Repeated signals that leave the
-   * lists as they were do not call it. Returns a function that stops watching.
+   * lists as they were do not call it, and a change that only moves threads' last-update times calls it at most
+   * once per `listsTimesIntervalMs`. Returns a function that stops watching.
    */
   watch(changed: () => void, onError?: (error: unknown) => void): () => void {
     const s = this.services
     this.watchers++
     this.chatsStale = true
     this.botsStale = true
-    let last = JSON.stringify(this.snapshot())
+    const first = this.snapshot()
+    let last = JSON.stringify(first)
+    let lastShape = withoutTimes(first)
     let pending: unknown
+    /** A change of times alone, waiting for its interval. */
+    let held: unknown
     let stopped = false
-    const check = (): void => {
-      pending = undefined
+    const check = (timesDue = false): void => {
       if (stopped) return
       try {
-        const next = JSON.stringify(this.snapshot())
+        const snapshot = this.snapshot(),
+          next = JSON.stringify(snapshot)
         if (next === last) return
+        const shape = withoutTimes(snapshot)
+        if (shape === lastShape && !timesDue) {
+          held ??= this.timers.setTimeout(() => {
+            held = undefined
+            check(true)
+          }, copyLimits().listsTimesIntervalMs)
+          return
+        }
+        if (held !== undefined) this.timers.clearTimeout(held)
+        held = undefined
         last = next
+        lastShape = shape
         changed()
       } catch (error) {
         onError?.(error)
@@ -431,7 +459,10 @@ export class MmsListsSource {
     }
     const poke = (): void => {
       if (stopped || pending !== undefined) return
-      pending = this.timers.setTimeout(check, SETTLE_MS)
+      pending = this.timers.setTimeout(() => {
+        pending = undefined
+        check()
+      }, SETTLE_MS)
     }
     const disposers: Array<() => void> = []
     const on = (target: Emitter, event: string): void => {
@@ -489,6 +520,7 @@ export class MmsListsSource {
         this.bots = undefined
       }
       if (pending !== undefined) this.timers.clearTimeout(pending)
+      if (held !== undefined) this.timers.clearTimeout(held)
       for (const dispose of disposers.splice(0)) dispose()
     }
   }

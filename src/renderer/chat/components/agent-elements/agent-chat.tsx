@@ -22,9 +22,11 @@ export function AgentChat({
   showCopyToolbar,
   lastTurnNotice,
   afterTurns,
+  beforeTurns,
   initialScrollBehavior,
   enableImagePreview,
   enableFind,
+  threadId,
   suggestions,
   emptyStatePosition = "default",
   emptySuggestionsPlacement = "input",
@@ -166,10 +168,12 @@ export function AgentChat({
           onComposerCompactChange={composerFold.onCompactChange}
           lastTurnNotice={lastTurnNotice}
           afterTurns={afterTurns}
+          beforeTurns={beforeTurns}
           showCopyToolbar={showCopyToolbar}
           initialScrollBehavior={initialScrollBehavior}
           enableImagePreview={enableImagePreview}
           enableFind={enableFind}
+          threadId={threadId}
           suppressQuestionTool={Boolean(pendingQuestion)}
         />
       )}

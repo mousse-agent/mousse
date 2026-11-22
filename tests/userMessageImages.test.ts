@@ -17,9 +17,9 @@ const message = {
 it('makes each attached image a named button', () => {
   const html = renderToStaticMarkup(createElement(UserMessage, { message }))
   expect(html).not.toContain('alt="attachment"')
-  expect(html).toMatch(/<button type="button" class="chat-user-image [^"]*" aria-label="Open error.png" title="error.png">/)
+  expect(html).toMatch(/<button type="button" class="chat-user-image [^"]*" aria-label="Open error.png" title="error.png"[^>]*>/)
   expect(html).toContain('alt="error.png"')
-  expect(html).toMatch(/<button type="button" class="chat-user-image [^"]*" aria-label="Open image 2">/)
+  expect(html).toMatch(/<button type="button" class="chat-user-image [^"]*" aria-label="Open image 2"[^>]*>/)
   expect(html).toContain('alt="Image 2"')
 })
 

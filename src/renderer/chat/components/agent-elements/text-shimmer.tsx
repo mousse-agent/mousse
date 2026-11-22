@@ -1,5 +1,7 @@
 import React from "react";
 import { cn } from "./utils/cn";
+import { useOffscreenPause } from "../../../lib/offscreenMotion";
+import { useAppStore } from "../../../stores/appStore";
 
 export type TextShimmerProps = {
   children: React.ReactNode;
@@ -18,6 +20,13 @@ function TextShimmerComponent({
   spread = 100,
   delay = 0,
 }: TextShimmerProps) {
+  // The sweep holds still while no one can see it (lib/offscreenMotion.ts).
+  const animate = useAppStore((state) => state.shimmerAnimations);
+  const pause = useOffscreenPause<HTMLElement>(animate);
+  if (!animate) {
+    return <Component className={cn("an-text-shimmer--static", className)}>{children}</Component>;
+  }
+
   const style = {
     "--an-shimmer-duration": `${duration}s`,
     "--an-shimmer-spread": `${spread}px`,
@@ -29,8 +38,10 @@ function TextShimmerComponent({
     animationTimingFunction: `steps(${Math.max(1, Math.round(duration * 15))})`,
   } as React.CSSProperties;
 
+
   return (
     <Component
+      ref={pause}
       className={cn("an-text-shimmer", "an-text-shimmer--active", className)}
       style={style}
     >

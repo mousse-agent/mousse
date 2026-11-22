@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs'
 import type { Api, Model, ModelThinkingLevel, Provider } from '@earendil-works/pi-ai'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { inCheckRun } from '../../shared/privacy/checkRun'
 
 const PI_AI_PACKAGE = '@earendil-works/pi-ai'
 const LATEST_VERSION_URL = `https://registry.npmjs.org/${PI_AI_PACKAGE}/latest`
@@ -120,7 +121,13 @@ export class PiCatalogOverlay {
   private readonly now: () => number
 
   constructor(private readonly path: string, options: PiCatalogOverlayOptions = {}) {
-    this.fetchImpl = options.fetchImpl ?? ((...args) => globalThis.fetch(...args))
+    // An owner check's run reaches no model list: only the traffic it judges leaves the computer.
+    this.fetchImpl =
+      options.fetchImpl ??
+      ((...args) =>
+        inCheckRun()
+          ? Promise.reject(new Error('Model lists are not fetched in a check run.'))
+          : globalThis.fetch(...args))
     this.now = options.now ?? Date.now
   }
 

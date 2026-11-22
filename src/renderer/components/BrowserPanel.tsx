@@ -4,17 +4,18 @@ import {
   ArrowLeft,
   ArrowRight,
   BrowserTab,
+  Bot,
   Check,
   Clean,
   Code2,
   Cookie,
   Crosshair,
-  Globe,
   Minus,
   MoreVertical,
   Plus,
   RefreshCw,
-  Smartphone
+  Smartphone,
+  User
 } from '../lib/icons'
 import { isTurnActivePhase, type BrowserElementAttachment, type BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
@@ -29,6 +30,7 @@ import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { NO_LOADED_BROWSER_TABS, nextLoadedBrowserTabs, type LoadedBrowserTabs } from '../lib/loadedBrowserTabs'
 import {
   BrowserAccessControl,
+  BrowserAccessPanel,
   BrowserDeviceToolbar,
   BrowserNotice,
   BrowserStartPage,
@@ -37,6 +39,8 @@ import {
   browserAgentState,
   type BrowserNoticeState
 } from './browser/BrowserToolbarParts'
+import { BrowserLoadErrorPage } from './browser/BrowserLoadErrorPage'
+import { isPageLoadRejection, isShownLoadFailure, type BrowserLoadFailure } from './browser/browserLoadError'
 
 const BLANK_URL = 'about:blank'
 /** How long a success notice stays under the toolbar. Errors stay until dismissed or replaced. */
@@ -261,6 +265,9 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
   const onStateRef = useRef(onState)
   const onNavStateRef = useRef(onNavState)
   const onMediaRef = useRef(onMedia)
+  // The page the tab couldn't open, shown over the guest's blank error document until a page commits.
+  const [failure, setFailure] = useState<BrowserLoadFailure | null>(null)
+  const [pageLoading, setPageLoading] = useState(false)
   zoomRef.current = tab.zoomFactor
   onReadyRef.current = onReady
   onStateRef.current = onState
@@ -305,8 +312,12 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       update()
     }
 
-    const onStartLoading = () => onNavStateRef.current(tab.id, { ...readNav(), isLoading: true })
+    const onStartLoading = () => {
+      setPageLoading(true)
+      onNavStateRef.current(tab.id, { ...readNav(), isLoading: true })
+    }
     const onStopLoading = () => {
+      setPageLoading(false)
       update()
       onNavStateRef.current(tab.id, { ...readNav(), isLoading: false })
     }
@@ -314,12 +325,19 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
     const onMediaStarted = () => onMediaRef.current(tab.id, true)
     const onMediaPaused = () => onMediaRef.current(tab.id, false)
     // A new page in the tab has stopped whatever the last one played.
-    const onNavigate = () => { onMediaPaused(); update() }
+    // did-navigate fires only for a page that committed, never for Chromium's error document.
+    const onNavigate = () => { setFailure(null); onMediaPaused(); update() }
+    const onFailLoad = (domEvent: Event) => {
+      const event = domEvent as Electron.DidFailLoadEvent
+      if (!isShownLoadFailure(event.errorCode, event.isMainFrame)) return
+      setFailure({ url: event.validatedURL, errorCode: event.errorCode, errorDescription: event.errorDescription })
+    }
 
     webview.addEventListener('dom-ready', onDomReady)
     webview.addEventListener('did-start-loading', onStartLoading)
     webview.addEventListener('did-stop-loading', onStopLoading)
     webview.addEventListener('did-navigate', onNavigate)
+    webview.addEventListener('did-fail-load', onFailLoad)
     webview.addEventListener('did-navigate-in-page', update)
     webview.addEventListener('page-title-updated', update)
     webview.addEventListener('media-started-playing', onMediaStarted)
@@ -340,6 +358,7 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       webview.removeEventListener('did-start-loading', onStartLoading)
       webview.removeEventListener('did-stop-loading', onStopLoading)
       webview.removeEventListener('did-navigate', onNavigate)
+      webview.removeEventListener('did-fail-load', onFailLoad)
       webview.removeEventListener('did-navigate-in-page', update)
       webview.removeEventListener('page-title-updated', update)
       webview.removeEventListener('media-started-playing', onMediaStarted)
@@ -356,25 +375,33 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
 
   const preset = DEVICE_PRESETS.find((item) => item.id === tab.devicePreset)
   const blank = tab.url === BLANK_URL
+  const failed = !blank && failure !== null
+  const reloadFailed = () => {
+    if (!failure) return
+    const pending = withWebview(ref.current, (wv) => wv.loadURL(failure.url), undefined)
+    // A failure that repeats replaces this page's; nothing else to report.
+    void pending?.catch(() => {})
+  }
   useEffect(() => { if (agentControlled) ref.current?.blur() }, [agentControlled])
   return (
     <KeepMounted active={active} preserveLayout
-      className={`browser-viewport${active ? ' active' : ''}${blank ? ' browser-viewport-blank' : ''}`}
+      className={`browser-viewport${active ? ' active' : ''}${blank || failed ? ' browser-viewport-blank' : ''}`}
       style={tab.deviceToolbarOpen && preset?.width ? { width: preset.width } : undefined}
     >
       {blank && <BrowserStartPage />}
+      {failed && <div style={{ display: 'contents' }} inert={agentControlled}><BrowserLoadErrorPage failure={failure} loading={pageLoading} onReload={reloadFailed} /></div>}
       <webview
         ref={ref}
         data-browser-tab-id={tab.id}
         inert={agentControlled}
-        className={`browser-webview${blank ? ' browser-webview-hidden' : ''}`}
+        className={`browser-webview${blank || failed ? ' browser-webview-hidden' : ''}`}
         src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
         data-agent-controlled={agentControlled ? '' : undefined}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
-      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control to interact" />}
+      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control in the browser menu to interact" />}
       {!blank && <AgentCursor cursor={agentCursor} zoom={tab.zoomFactor || 1} />}
     </KeepMounted>
   )
@@ -650,6 +677,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       // A newer navigation or a redirect can intentionally cancel this load.
       const failure = error as { errno?: number; code?: string; message?: string }
       if (failure.errno === -3 || failure.code === 'ERR_ABORTED' || /ERR_ABORTED|\(-3\)/.test(failure.message ?? '')) return
+      // The tab shows its own page for an address it couldn't open.
+      if (isPageLoadRejection(error)) return
       setBrowserError(error)
     })
   }
@@ -740,18 +769,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     >
       <KeepMountedStack>
       <KeepMounted active preserveLayout className="keep-mounted-pane browser-manual-surface">
-      {askingAccess && <div className="browser-agent-controls" data-mousse-decision="" role="region" aria-label="Agent browser access request">
-        <span>Allow access to all browser tabs?</span>
-        <button type="button" disabled={browserBusy} onClick={(event) => { if (isRepeatClick(event)) return; setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}>Allow</button>
-        <button type="button" disabled={browserBusy} onClick={() => { setConfirmingAccess(false); if (pendingAccess) void changeAccess(false, pendingAccess.requestId) }}>Deny</button>
-      </div>}
       {/* The thread agent's browser without a window, when it has one open: its line, and its view over the tabs. */}
       {activeThreadId && <ThreadBrowserRow threadId={activeThreadId} active={active} />}
-      {hasVisibleTabs && (agentControlled || activeControl?.owner === 'human') && <div className="browser-agent-controls" aria-label="Agent browser controls">
-        <span>{agentControlled ? 'Agent is using this tab' : 'You have control'}</span>
-        {agentControlled ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('take')}>Take control</button>
-          : <button type="button" disabled={browserBusy || !access.allowed} onClick={() => void browserControl('resume')}>Resume agent</button>}
-      </div>}
       {!hasVisibleTabs && noticeView}
       {hasVisibleTabs ? (
         <>
@@ -761,7 +780,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             <button type="button" className="browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
             <button type="button" className="browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
             <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
-              <Globe size={14} className="browser-url-icon" />
               <input className="browser-url-input" aria-label="Browser address" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
             </form>
             <button
@@ -796,6 +814,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     onPointerDown={() => setMenuOpen(false)}
                   />
                   <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu" aria-label="Browser menu">
+                    {(agentControlled || activeControl?.owner === 'human') && <>
+                      <button type="button" role="menuitem" disabled={browserBusy || (!agentControlled && !access.allowed)} onClick={() => { setMenuOpen(false); void browserControl(agentControlled ? 'take' : 'resume') }}>
+                        <span className="browser-menu-label">{agentControlled ? <User size={14} /> : <Bot size={14} />}{agentControlled ? 'Take control' : 'Resume agent'}</span>
+                      </button>
+                      <div className="browser-menu-separator" />
+                    </>}
                     <div className="browser-menu-actions" style={{ display: 'contents' }} inert={agentControlled}>
                     <button type="button" role="menuitem" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><RefreshCw size={14} />Hard reload</span>
@@ -857,6 +881,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
           />
         ))}
       </KeepMounted>
+      <BrowserAccessPanel
+        open={askingAccess}
+        agentAsking={Boolean(pendingAccess)}
+        busy={browserBusy}
+        onAllow={(event) => { if (isRepeatClick(event)) return; setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}
+        onDeny={() => { setConfirmingAccess(false); if (pendingAccess) void changeAccess(false, pendingAccess.requestId) }}
+      />
       </KeepMounted>
       </KeepMountedStack>
       {activeThreadId && <ThreadBrowserLayer threadId={activeThreadId} />}

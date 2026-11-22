@@ -1,8 +1,9 @@
 import type { NodeId } from '../../shared/net'
+import { isSubagentThread } from '../../shared/threadLineage'
 import { isThreadStarted } from '../../shared/threadTitle'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ModelOverride } from '../../shared/providerInstances'
-import { isTurnActivePhase, type NewThreadChoice, type Project, type TurnPhase } from '../../shared/types'
+import { isTurnActivePhase, type NewThreadChoice, type Project, type ThreadLineage, type TurnPhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 
 /**
@@ -19,7 +20,7 @@ export interface ComposerWorkspace {
   localProjectId?: string
   /** A private thread (`Thread.localOnly`): it runs on this computer only, so `node` is never set with it. */
   localOnly?: boolean
-  /** The new chat deletes itself this long after it is created (`Thread.expiresAt`); absent: never. */
+  /** The new chat archives itself this long after it is created (`Thread.expiresAt`); absent: never. */
   expiryMs?: number
   /** With `expiryMs`: a run still going at expiry is stopped (`Thread.expiryStopsRun`). */
   expiryStopsRun?: boolean
@@ -51,9 +52,10 @@ export function withoutPicks(workspace: ComposerWorkspace): ComposerWorkspace {
  */
 export function isNewEmptyThread(
   activeThreadId: string | null,
-  thread: { startedAt?: string; name?: string } | undefined,
+  thread: { startedAt?: string; name?: string; lineage?: ThreadLineage } | undefined,
   messageCount: number
 ): boolean {
+  if (thread && isSubagentThread(thread)) return false
   return !activeThreadId || Boolean(thread && !isThreadStarted(thread) && messageCount === 0)
 }
 
@@ -149,7 +151,7 @@ export function workspaceWithPrivate(
   workspace: ComposerWorkspace,
   localOnly: boolean,
   localProjects: readonly Pick<Project, 'id'>[],
-  /** Settings → Runs: when a new private chat deletes itself. Applied only when no expiry was picked. */
+  /** Settings → Runs: when a new private chat archives itself. Applied only when no expiry was picked. */
   privateDefaultMs?: number
 ): ComposerWorkspace {
   if (!localOnly) {

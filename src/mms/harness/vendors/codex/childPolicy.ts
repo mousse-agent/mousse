@@ -19,7 +19,7 @@ export type CodexTurnPolicy =
  * The sandbox and approval policy of one Codex turn, used for `thread/start` / `thread/resume` and
  * again for `turn/start`, so a resumed thread cannot keep an older policy.
  *
- * - A plan turn and a read-only (`shared`) child run in the read-only sandbox with the approval
+ * - A plan turn and a read-only child (`delegate_task` `readOnly`) run in the read-only sandbox with the approval
  *   policy `on-request`; Mousse answers each request that reaches it with a denial itself
  *   (`CodexProviderService.serve`), so a request never waits in a thread nobody watches.
  * - Ask before acting and Auto-accept edits run `untrusted` in the read-only sandbox (Codex's
@@ -210,6 +210,8 @@ export const CODEX_BOT_ACCOUNTED_TOOLS: Readonly<Record<string, string>> = {
   request_user_input: 'asks a person; Mousse answers a bot\'s with an error, nobody is asked',
   'functions.request_user_input': 'the same, in code mode',
   'functions.request_user_input_async': 'the same, without waiting',
+  // From 0.170.0 on models with v2 subagents it comes with the model's own tools: its feature off doesn't remove it.
+  'functions.send_message_to_user_async': 'a message to the person, in the model\'s own words, without waiting: reaches no file, command or network',
   web_search: 'OpenAI\'s hosted web search: reads no file of this computer',
   apply_patch: 'changes files: each change asks, and the bot\'s authority decides by path',
   exec_command: 'a command (only with "run commands"): asks under the bot\'s profile, runs in its sandbox',
@@ -252,7 +254,8 @@ export const CODEX_BOT_CHECKED: ReadonlyArray<{ version: string; checked: string
   { version: '0.167.1', checked: '2026-11-13' },
   { version: '0.167.2', checked: '2026-11-13' },
   { version: '0.168.0', checked: '2026-11-13' },
-  { version: '0.169.0', checked: '2026-11-13' }
+  { version: '0.169.0', checked: '2026-11-13' },
+  { version: '0.170.0', checked: '2026-11-19' }
 ]
 
 /** The versions of `CODEX_BOT_CHECKED`. */

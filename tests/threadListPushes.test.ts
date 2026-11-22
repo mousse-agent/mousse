@@ -102,13 +102,13 @@ describe('windows hear of list changes once, as pushes', () => {
     expect(pushed.version.seq).toBeGreaterThan(read.version.seq)
   })
 
-  it('tells windows when an expired thread is deleted, with no request behind it', async () => {
+  it('tells windows when an expired thread is archived, with no request behind it', async () => {
     const thread = mms.threads.createThread('Expiring', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
     await new Promise((resolve) => setTimeout(resolve, 100))
     mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
     const lists = await listsAfter(seen, () => mms.threadExpiry.pass())
     expect(lists.length).toBeGreaterThanOrEqual(1)
-    expect(lists.at(-1)!.some((entry) => entry.id === thread.id)).toBe(false)
+    expect(lists.at(-1)!.find((entry) => entry.id === thread.id)?.settledAt).toBeTruthy()
   })
 
   it('tells windows of a pin and a delete a phone made through its backend', async () => {
@@ -153,11 +153,15 @@ describe('windows hear of list changes once, as pushes', () => {
     mms.threads.saveThreadData(thread.id, { messages: [message('m1'), message('m2'), message('m3')], agents: [], tasks: [] })
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect(touches().length).toBe(1)
-    // The turn ends: its held time goes out at once.
+    expect(lists()).toBe(0)
+    const held = mms.threads.getThread(thread.id)!.updatedAt
+    // The turn ends: its held time goes out at once, and the list once, for how the run ended (`Thread.lastRun`),
+    // without moving the thread's time back to the one in its file.
     mms.orchestrator.emit('turn-completed', { threadId: thread.id })
     await vi.waitFor(() => expect(touches().length).toBe(2), { timeout: 1000 })
-    expect(touches()[1][0].updatedAt).toBe(mms.threads.getThread(thread.id)!.updatedAt)
-    expect(lists()).toBe(0)
+    expect(touches()[1][0].updatedAt).toBe(held)
+    expect(mms.threads.getThread(thread.id)).toMatchObject({ updatedAt: held, lastRun: 'done' })
+    await vi.waitFor(() => expect(lists()).toBe(1), { timeout: 1000 })
   })
 
   it('tells windows when a chat changes, once for several changes together', async () => {

@@ -5,7 +5,7 @@
  * dispatch's deadline; `settled` waits for the group, ends what is left, stops the supervisor and
  * writes `exit_at`; `reconcile` folds journals in and ends only groups verified as the recorded ones.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -253,7 +253,5 @@ describe('BotProcessRegistry', () => {
     registry.arm({ dispatchId: 'act-1:d1', activationId: 'act-1', deadlineAt: 1 })
     registry.attach('act-1:d1', { pid: 4242, pgid: 4242 })
     expect(started[0].journal.startsWith(join(s.store.directory, 'supervisor'))).toBe(true)
-    mkdirSync(s.journalDir, { recursive: true })
-    expect(existsSync(s.journalDir)).toBe(true)
   })
 })

@@ -54,6 +54,11 @@ export function contextTokens(usage: ContextUsageSnapshot): number {
   return usage.categories.reduce((sum, category) => sum + (category.label === CONTEXT_DRAFT_CATEGORY ? 0 : category.tokens), 0)
 }
 
+/** The history the next send re-reads: the measured context, or Mousse's estimate where the runtime reports none. */
+export function historyTokens(usage: ContextUsageSnapshot): number {
+  return usage.historyEstimate ?? contextTokens(usage)
+}
+
 /** "182K", "1.2M". */
 export function shortTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
@@ -88,7 +93,7 @@ export function idleCompactionChip(input: {
 }): 'compacting' | 'suggest' | null {
   if (!input.canCompact || input.setting === 'off') return null
   if (input.compacting) return 'compacting'
-  if (input.runActive || contextTokens(input.usage) < IDLE_COMPACTION_MIN_TOKENS) return null
+  if (input.runActive || historyTokens(input.usage) < IDLE_COMPACTION_MIN_TOKENS) return null
   return suggestsCompaction(input.usage, input.now, input.setting) ? 'suggest' : null
 }
 

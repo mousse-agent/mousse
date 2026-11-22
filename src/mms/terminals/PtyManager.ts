@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { resolve } from 'path'
 import * as pty from 'node-pty'
 import { WorkerHandle } from './WorkerHandle'
+import { countLineBreaks } from './terminalText'
 import {
   ProcessLifecycleController,
   createDefaultProcessTreeSignaler,
@@ -21,6 +22,14 @@ export {
 export const MAX_PTY_SCROLLBACK_CHARS = 256_000
 /** Bounded ring of sequenced output chunks for reconnect replay. */
 export const MAX_PTY_OUTPUT_RING = 2_000
+/**
+ * Terminals that ended stay readable for a while (`terminal_read`), so "why did my build fail?" works after the shell
+ * exited: the last few per thread and in all, each with the end of its output, for a few hours.
+ */
+export const MAX_EXITED_PER_THREAD = 4
+export const MAX_EXITED_TERMINALS = 16
+export const EXITED_KEEP_MS = 3 * 60 * 60 * 1000
+export const EXITED_SCROLLBACK_CHARS = 128_000
 
 export type PtySpawnFn = typeof pty.spawn
 
@@ -39,6 +48,18 @@ export interface PtySession {
   /** Interrupted after daemon restart (process not reattachable). */
   interrupted: boolean
   handle: WorkerHandle
+  /** The quick action that opened it (`PtyCreateOptions.label`); agents see it as the terminal's title. */
+  label?: string
+  /** The command it was started with, when it was not a plain shell. */
+  command?: string
+  /** The shell program. */
+  shell: string
+  /** The folder it started in. */
+  cwd: string
+  startedAt: number
+  lastOutputAt?: number
+  /** Its width now, where long lines wrap. */
+  columns: number
 }
 
 export interface PtyCreateOptions {
@@ -46,6 +67,35 @@ export interface PtyCreateOptions {
   shellArgs?: string[]
   threadId?: string
   ownership?: { assert(): void; heartbeat(): void; settled(): Promise<void> }
+  /** The quick action that opened the terminal, told to agents with what runs in it (`RunningRegistry`). */
+  label?: string
+}
+
+/** One of a thread's terminals as an agent sees it (`terminal_read`). Never anything that writes to it. */
+export interface TerminalInfo {
+  ptyId: string
+  threadId: string
+  title?: string
+  command?: string
+  shell: string
+  /** The program in the foreground now (the shell itself when nothing else runs), where the platform says. */
+  foreground?: string
+  cwd: string
+  status: 'running' | 'exited'
+  exitCode?: number | null
+  signal?: string | null
+  /** It ended because it was closed or stopped (the tab closed, the thread stopped), not by itself. */
+  stopped?: true
+  startedAt: number
+  exitedAt?: number
+  lastOutputAt?: number
+}
+
+interface ExitedTerminal {
+  info: TerminalInfo
+  scrollback: string
+  droppedLines: number
+  columns: number
 }
 
 export type TerminalSendSink = (channel: string, data: unknown) => void
@@ -82,6 +132,12 @@ export class PtyManager extends EventEmitter {
   private scrollbacks = new Map<string, string>()
   /** Per-PTY sequenced output ring for reconnect. */
   private outputRings = new Map<string, PtyOutputChunk[]>()
+  /** How many lines each terminal printed before the start of its kept scrollback. */
+  private droppedLines = new Map<string, number>()
+  /** Terminals that ended, newest last (`MAX_EXITED_*`). */
+  private exited: ExitedTerminal[] = []
+  /** Terminals of a thread that is going away: they are not kept when they end. */
+  private forgetOnExit = new Set<string>()
   private sendSink: TerminalSendSink | null = null
   /** Capability: optional UI focus intent (daemon never holds BrowserWindow). */
   private focusIntentFn: (() => void) | null = null
@@ -174,10 +230,17 @@ export class PtyManager extends EventEmitter {
       pty: instance,
       sequence: 0,
       interrupted: false,
-      handle
+      handle,
+      ...(options.label ? { label: options.label } : {}),
+      ...(command ? { command } : {}),
+      shell,
+      cwd: resolvedCwd,
+      startedAt: Date.now(),
+      columns: 120
     }
     this.sessions.set(ptyId, session)
     this.scrollbacks.set(ptyId, '')
+    this.droppedLines.set(ptyId, 0)
     this.outputRings.set(ptyId, [])
     this.lifecycle.track({
       id: ptyId,
@@ -203,7 +266,13 @@ export class PtyManager extends EventEmitter {
 
     instance.onData((data) => {
       const existing = this.scrollbacks.get(ptyId) || ''
+      const overflow = existing.length + data.length - MAX_PTY_SCROLLBACK_CHARS
+      if (overflow > 0) {
+        const dropped = overflow >= existing.length ? existing + data.slice(0, overflow - existing.length) : existing.slice(0, overflow)
+        this.droppedLines.set(ptyId, (this.droppedLines.get(ptyId) ?? 0) + countLineBreaks(dropped))
+      }
       this.scrollbacks.set(ptyId, appendBoundedScrollback(existing, data))
+      session.lastOutputAt = Date.now()
       session.sequence += 1
       const chunk: PtyOutputChunk = { sequence: session.sequence, data }
       const ring = this.outputRings.get(ptyId) ?? []
@@ -225,8 +294,10 @@ export class PtyManager extends EventEmitter {
       const exit = session.handle.recordExit(exitCode, normalizedSignal)
       // node-pty does not expose a later stdio/handle close; onExit is the close observation.
       session.handle.recordClose()
+      this.keepExited(session, exitCode, normalizedSignal)
       this.sessions.delete(ptyId)
       this.scrollbacks.delete(ptyId)
+      this.droppedLines.delete(ptyId)
       this.outputRings.delete(ptyId)
       this.lifecycle.untrackIfSettled(ptyId)
       const payload = { ptyId, agentId, threadId, exitCode, signal: normalizedSignal, exit }
@@ -314,6 +385,7 @@ export class PtyManager extends EventEmitter {
     this.lifecycle.assertAdmits('resize')
     const session = this.sessions.get(ptyId)
     session?.pty.resize(cols, rows)
+    if (session) session.columns = cols
   }
 
   kill(ptyId: string): void {
@@ -347,13 +419,94 @@ export class PtyManager extends EventEmitter {
     }
   }
 
-  /** Kill only PTYs for one thread — never global killAll on selection. */
+  /** Kill only PTYs for one thread — never global killAll on selection. The thread is going: none of them is kept. */
   killByThreadId(threadId: string): void {
+    this.exited = this.exited.filter((entry) => entry.info.threadId !== threadId)
     for (const [ptyId, session] of [...this.sessions]) {
       if (session.threadId === threadId) {
+        this.forgetOnExit.add(ptyId)
         this.kill(ptyId)
       }
     }
+  }
+
+  /** Keeps an ended terminal readable for a while (`MAX_EXITED_*`, `EXITED_KEEP_MS`). */
+  private keepExited(session: PtySession, exitCode: number, signal: string | null): void {
+    const forget = this.forgetOnExit.delete(session.id)
+    if (forget || session.threadId === '__unbound__') return
+    const scrollback = this.scrollbacks.get(session.id) ?? ''
+    const kept = scrollback.length > EXITED_SCROLLBACK_CHARS ? scrollback.slice(-EXITED_SCROLLBACK_CHARS) : scrollback
+    const droppedLines = (this.droppedLines.get(session.id) ?? 0) + countLineBreaks(scrollback.slice(0, scrollback.length - kept.length))
+    this.exited.push({
+      info: {
+        ...this.describe(session),
+        status: 'exited',
+        exitCode,
+        // node-pty reports signal 0 for an exit no signal caused.
+        signal: signal === '0' ? null : signal,
+        ...(this.stopping.has(session.id) ? { stopped: true as const } : {}),
+        exitedAt: Date.now()
+      },
+      scrollback: kept,
+      droppedLines,
+      columns: session.columns
+    })
+    this.pruneExited()
+  }
+
+  private pruneExited(): void {
+    const now = Date.now()
+    this.exited = this.exited.filter((entry) => now - (entry.info.exitedAt ?? 0) < EXITED_KEEP_MS)
+    const perThread = new Map<string, number>()
+    for (let index = this.exited.length - 1; index >= 0; index--) {
+      const threadId = this.exited[index].info.threadId
+      const count = (perThread.get(threadId) ?? 0) + 1
+      perThread.set(threadId, count)
+      if (count > MAX_EXITED_PER_THREAD) this.exited.splice(index, 1)
+    }
+    if (this.exited.length > MAX_EXITED_TERMINALS) this.exited.splice(0, this.exited.length - MAX_EXITED_TERMINALS)
+  }
+
+  private describe(session: PtySession): TerminalInfo {
+    let foreground: string | undefined
+    try {
+      // node-pty reads the terminal's foreground process name (Linux and macOS); Windows reports the shell.
+      const name = session.pty.process
+      if (typeof name === 'string' && name.trim()) foreground = name.trim().slice(0, 200)
+    } catch {
+      // Not readable now.
+    }
+    return {
+      ptyId: session.id,
+      threadId: session.threadId,
+      ...(session.label ? { title: session.label } : {}),
+      ...(session.command ? { command: session.command } : {}),
+      shell: session.shell,
+      ...(foreground ? { foreground } : {}),
+      cwd: session.cwd,
+      status: 'running',
+      startedAt: session.startedAt,
+      ...(session.lastOutputAt ? { lastOutputAt: session.lastOutputAt } : {})
+    }
+  }
+
+  /**
+   * A thread's terminals for an agent to read, running ones first, each in the order it was opened. Reads memory only:
+   * no lease, no write, nothing that waits on the terminal or on a turn.
+   */
+  terminalsOf(threadId: string): TerminalInfo[] {
+    this.pruneExited()
+    const running = [...this.sessions.values()].filter((session) => session.threadId === threadId).map((session) => this.describe(session))
+    const ended = this.exited.filter((entry) => entry.info.threadId === threadId).map((entry) => entry.info)
+    return [...running.sort((a, b) => a.startedAt - b.startedAt), ...ended.sort((a, b) => a.startedAt - b.startedAt)]
+  }
+
+  /** A terminal's kept output (running, or ended and still kept) and how many lines came before it; undefined when gone. */
+  terminalOutput(ptyId: string): { scrollback: string; droppedLines: number; columns: number } | undefined {
+    const session = this.sessions.get(ptyId)
+    if (session) return { scrollback: this.scrollbacks.get(ptyId) ?? '', droppedLines: this.droppedLines.get(ptyId) ?? 0, columns: session.columns }
+    const ended = this.exited.find((entry) => entry.info.ptyId === ptyId)
+    return ended ? { scrollback: ended.scrollback, droppedLines: ended.droppedLines, columns: ended.columns } : undefined
   }
 
   /**
@@ -381,6 +534,17 @@ export class PtyManager extends EventEmitter {
         threadId: s.threadId,
         sequence: s.sequence
       }))
+  }
+
+  /** The live terminals with their shell's pid, folder and quick action, for the running list (`RunningRegistry`). */
+  runningTerminals(): Array<{ ptyId: string; pid?: number; threadId: string; cwd: string; label?: string }> {
+    return Array.from(this.sessions.values()).map((s) => ({
+      ptyId: s.id,
+      ...(isRecordablePid(s.pty.pid) ? { pid: s.pty.pid } : {}),
+      threadId: s.threadId,
+      cwd: s.cwd,
+      ...(s.label ? { label: s.label } : {})
+    }))
   }
 
   getScrollbacks(threadId?: string): Record<string, string> {

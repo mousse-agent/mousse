@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, hkdfSync, randomBytes } from 'node:crypto'
 import type { RelayRendezvous } from './relay/protocol'
 import { HOSTED_RELAY_TRANSPORT } from './relay/hostedAudience'
 import {
@@ -8,18 +8,37 @@ import {
   type HostedNetHost,
   type HostedNetModule
 } from './hosted'
-import type { NodeInviteInput } from './enrollment/service'
+import type { NodeInviteInput, PreparedNodeJoin } from './enrollment/service'
+import {
+  LINK_INVITE_TTL_MS,
+  LINK_TTL_MS,
+  LinkOffers,
+  claimOffer,
+  formatLink,
+  lanLinkRoutes,
+  linkRoutes,
+  reachableFromOthers,
+  listId,
+  parseLink,
+  type ConnectLink,
+  type LinkAnswer
+} from './enrollment/link'
+import { hostname, networkInterfaces } from 'node:os'
+import { ACCESS_PRESETS } from '../../shared/net/accessPresets'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
 import { existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type {
   InviteId,
+  LinkClaimMessage,
+  LinkResultMessage,
   NodeCapability,
   NodeDelegation,
   NodeId,
   PresenceMessage,
   Roster,
+  Route,
   RoutesRecord,
   Signed,
   StoredRecord,
@@ -33,23 +52,37 @@ import {
   DIAL_TLS_DEADLINE_MS,
   COMPUTER_NODE_CAPABILITIES,
   NODE_CAPABILITIES,
+  forbiddenReason,
   newId,
   isId
 } from '../../shared/net'
+import {
+  needsWork,
+  ROUTED_STREAM_ACCESS,
+  STREAM_ACCESS
+} from '../../shared/net/accessClasses'
 import type {
   NetAddonActionResult,
   NetAddonRecords,
   NetDoctor,
+  BridgeAccessMine,
+  BridgeAccessThere,
+  BridgeNodeConnection,
   BridgeNodePolicy,
   EditorProbeResult,
   NetInitInput,
+  NetLinkCheck,
+  NetLinkMade,
+  NetLinkPasted,
   NetLocalMethod,
+  NetStartOverCheck,
   NetStatus
 } from '../../shared/net/local'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { routedVersions } from '../../shared/bridge/routed'
 import { bridgeRemoteMethodNames } from '../bridge/remote/capabilities'
-import type { NodePolicy } from './store/nodePolicy'
+import { remoteBotVersions } from '../bridge/remote/RemoteBots'
+import type { AgentReach, NodePolicy } from './store/nodePolicy'
 import type {
   AddonRecordStore,
   Clock,
@@ -61,6 +94,8 @@ import type {
   PeerRef,
   TunnelLink
 } from './contracts'
+import { isEngineCaller, v1Caller, type RpcCaller } from './contracts'
+import { checkNodePolicy } from './checkNodePolicy'
 import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
 import { systemClock } from './clock'
 import { NetDatabase } from './store/database'
@@ -70,6 +105,12 @@ import { SqliteBudgetLedger } from './store/budgets'
 import { SqliteOutbox } from './store/outbox'
 import { SqliteQuotaRateLedger } from './store/limits'
 import { SqliteNodePolicy } from './store/nodePolicy'
+import {
+  SqliteConnections,
+  type ConnectionEvent,
+  type ConnectionState
+} from './store/connections'
+import { SqliteLanMemory, lanAddress } from './store/lanMemory'
 import { SqliteBridgeAudit } from './store/audit'
 import { SqliteRemoteLists } from './store/remoteLists'
 import { FileBlobStore } from './store/blobs'
@@ -110,11 +151,14 @@ import { isJoinVia } from '../../shared/net/via'
 import { isListedComputer } from '../../shared/net/listedComputer'
 import {
   PHONE_ENDPOINTS_METHOD,
+  PHONE_LAN_CARRIER,
   PHONE_WEBRTC_OFFER_METHOD,
   PHONE_WEBRTC_TRANSPORT,
   PhoneWebRtcAcceptor,
   classifyAddress,
+  directHostAddresses,
   nodeDataChannelFactory,
+  phoneLanAddresses,
   normalizeAddress,
   type AcceptedWebRtc,
   type PeerConnectionFactory
@@ -150,7 +194,9 @@ const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
   maxPermissionMode: policy.maxPermissionMode,
   terminal: policy.terminal,
   editor: policy.editor,
-  bots: policy.bots
+  bots: policy.bots,
+  agentReach: policy.agentReach,
+  work: policy.work
 })
 
 interface NetConfiguration {
@@ -186,10 +232,72 @@ interface NetConfiguration {
   editorSystemSshNodes?: NodeId[]
   /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
   addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
+  /** Written by earlier builds while a join was under way; read as nothing and dropped on load. */
   preparedForJoin?: boolean
 }
 /** Transports that carry a session through a relay server rather than straight to the peer. */
 const RELAY_TRANSPORTS = new Set(['relay', HOSTED_RELAY_TRANSPORT])
+/**
+ * Where a device's last address is dialled: after the live LAN hints (-10), which are fresher, and before the signed
+ * routes (0 and up), since on the same network it is the likeliest to answer. A dead one delays the next only by the
+ * dial stagger.
+ */
+const LAST_ADDRESS_PRIORITY = -5
+/** The other computer’s own answer to a join, as `EnrollmentQuarantine` marks it. */
+const fromPeer = (error: NetError) => (error.details as { from?: unknown } | undefined)?.from === 'peer'
+/** How long a join waits for its first session with the computer it joined through. */
+const JOIN_FIRST_SESSION_WAIT_MS = 20_000
+/** Clocks further apart than this are named as the reason a join failed. */
+const JOIN_CLOCK_LIMIT_MS = 30_000
+/**
+ * The calls a device of this user's list makes on a session that is open but not connected here: the keeper and its
+ * members keep moving the role (list sync, renewals and routes travel as session messages, not calls).
+ */
+const CONTROL_METHOD = /^authority\.transfer\./
+/** The refusal of a device of this user's list that is not connected here. */
+const notConnected = () =>
+  new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
+/**
+ * The other devices of this computer's list now (not this one, none revoked), read with the pinned root key so a
+ * locked key store reads it too. Undefined when the list cannot be read; empty when this computer has none.
+ */
+function listedOwnNodes(identity: NetIdentityService): NodeId[] | undefined {
+  try {
+    const self = identity.self()
+    if (!self) return []
+    const signed = identity.roster(self.user),
+      root = identity.pinnedRootKey(self.user)
+    if (!signed || !root) return []
+    const roster = identity.verifySigned<Roster>(signed, root),
+      latest = new Map<NodeId, NodeDelegation>()
+    for (const row of roster.nodes) {
+      const delegation = identity.verifySigned<NodeDelegation>(row, root)
+      const held = latest.get(delegation.subject)
+      if (!held || delegation.keyEpoch > held.keyEpoch) latest.set(delegation.subject, delegation)
+    }
+    return [...latest.values()]
+      .filter(
+        (row) =>
+          row.subject !== self.node &&
+          !roster.revoked.some(
+            (value) => value.subject === row.subject && value.throughKeyEpoch >= row.keyEpoch
+          )
+      )
+      .map((row) => row.subject)
+  } catch {
+    return undefined
+  }
+}
+/** A stored state this build does not know shows as disconnected: not connected, and someone's choice. */
+const connectionView = (state: ConnectionState): BridgeNodeConnection =>
+  state === 'connected' || state === 'none' || state === 'held' ? state : 'disconnected'
+/** A join that succeeded; `wait`: whether to wait for the first session with `authority`. */
+interface JoinOutcome {
+  user: UserId
+  node: NodeId
+  authority: NodeId
+  wait: boolean
+}
 
 /**
  * The open session with `node` to use. Both computers may hold one, each dialed by one side; one
@@ -222,12 +330,16 @@ export interface NetRuntime {
   blobs: FileBlobStore
   /** What this computer lets each other device do here (`net_node_policy`). */
   policy: SqliteNodePolicy
+  /** Which devices of this user's own list are connected here (`net_connections`). */
+  connections: SqliteConnections
   /** What other computers did on this one, and how much they read (`bridge_audit`). */
   audit: SqliteBridgeAudit
   /** What this computer remembers of its other computers' threads: row positions, openings, last lists. */
   remoteLists: SqliteRemoteLists
   rpc: DurableRpcDispatcher
   enrollment: EnrollmentService
+  /** The connect links made here (`net_link_offers`). */
+  links: LinkOffers
   transfer: AuthorityTransferDelivery
 }
 /**
@@ -268,6 +380,8 @@ export interface NetDomainComposition {
   >
   hostedSpacePeerAuthorized?(user: UserId, node: NodeId): boolean
   spaceJoin?: SpaceJoinAdmissionPort
+  /** The Spaces this computer hosts or belongs to, which Start over refuses or names. */
+  spaces?(): Array<{ name: string; host: boolean }>
   onSessionOpened?(session: SyncSession): void
   /** A session ended (it may never have opened); the peer's other sessions, if any, are still in `session()`. */
   onSessionClosed?(session: SyncSession): void
@@ -314,8 +428,22 @@ export class NetService {
   private renewal?: { cancel(): void }
   private rosterListener?: () => void
   private policyListener?: () => void
+  private connectionsListener?: () => void
+  /** This computer's user, once it has one: read on every record pushed, so not parsed from the identity each time. */
+  private ownUserCache?: UserId
+  /** The list Mousse ID's devices were last connected from, while signed in. */
+  private accountSyncedFor?: string
   private domain?: NetDomainComposition
   private presenceStore?: PeerPresence
+  private lanMemoryStore?: SqliteLanMemory
+  /**
+   * Where a connect link's offer exchange just reached a device: a dial candidate for the first ordinary session
+   * with it, for links that add a computer and connect-only links alike. Once a session opens over a direct route,
+   * the address it opened on becomes the remembered last address and this entry goes.
+   */
+  private readonly linkCandidates = new Map<NodeId, string>()
+  /** Sessions accepted on the automatic LAN listener, and the peer's address there. */
+  private readonly lanInbound = new WeakMap<object, string>()
   private presenceTimer?: { cancel(): void }
   /** How each session was carried, for the device list; only own-device sessions are recorded. */
   private readonly sessionLinks = new WeakMap<object, PeerLink>()
@@ -333,8 +461,13 @@ export class NetService {
   private readonly shareBotsListeners = new Set<() => void>()
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
-  /** The optional Mousse ID module; absent in builds and tests that leave it out. */
-  private readonly hosted?: HostedNet
+  /**
+   * The optional Mousse ID module; absent in builds and tests that leave it out, and while Mousse ID (legacy) is
+   * off for this profile (`setPlusLegacy`).
+   */
+  private hosted?: HostedNet
+  /** Stops the running Mousse ID module's own work when Mousse ID (legacy) is turned off. */
+  private hostedStop?: AbortController
   constructor(
     private readonly options: {
       profileDir: string
@@ -342,6 +475,8 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
+      /** Mousse ID (legacy) is off for this profile at start: the module above is not run (`setPlusLegacy`). */
+      plusLegacyOff?: boolean
       /** Tests replace the `ssh` executable, the user's known_hosts file and the setup's inputs. */
       ssh?: { binary?: string; userKnownHosts?: string } & Partial<
         Omit<SshBootstrapOptions, 'binary' | 'userKnownHosts'>
@@ -379,7 +514,39 @@ export class NetService {
     }
   ) {
     this.clock = options.clock ?? systemClock
-    this.hosted = options.hosted?.create(this.hostedHost())
+    if (!options.plusLegacyOff) this.hosted = this.createHosted()
+  }
+  private createHosted(): HostedNet | undefined {
+    if (!this.options.hosted) return undefined
+    const stop = (this.hostedStop = new AbortController())
+    return this.options.hosted.create(this.hostedHost(AbortSignal.any([this.shutdownSignal.signal, stop.signal])))
+  }
+  /**
+   * Mousse ID (legacy), in Settings → Labs, on by default. Off: this profile's Net runs as a build without the
+   * Mousse ID module, so it signs in to nothing, runs no hosted relay and sends no request to Mousse Plus. The saved
+   * sign-in and hosted relay row stay on disk for when it is turned on again. LAN, SSH, Tailscale, tunnels and
+   * self-hosted relays keep working either way. Applied at once, running transports restarted.
+   */
+  async setPlusLegacy(on: boolean): Promise<void> {
+    if (!this.options.hosted || this.stopped || on === !!this.hosted) return
+    await this.serial(async () => {
+      if (this.stopped || on === !!this.hosted) return
+      if (on) this.hosted = this.createHosted()
+      else {
+        this.hostedStop?.abort()
+        this.hosted?.identityReset()
+        this.hosted = undefined
+      }
+      if (!this.transport) return
+      await this.transport.teardown()
+      this.transport = undefined
+      this.syncPhoneWebRtc()
+      if (this.config.enabled && !this.disabled)
+        await this.activateWithHosted().catch((error) => {
+          this.lastError = error instanceof NetError ? error.code : 'internal'
+        })
+    })
+    this.emit()
   }
   runtime(): NetRuntime {
     if (this.stopped) throw new NetError('cancelled')
@@ -412,6 +579,7 @@ export class NetService {
           throw new NetError('storage_corrupt')
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
           throw new NetError('storage_corrupt')
+        delete cfg.preparedForJoin
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.shareBots !== undefined && typeof cfg.shareBots !== 'boolean')
@@ -487,42 +655,55 @@ export class NetService {
       const streams = new SqliteStreamStore(db),
         executions = new SqliteExecutionLedger(db),
         blobs = new FileBlobStore(db)
+      const connections = new SqliteConnections(db, this.clock)
+      const links = new LinkOffers(db, keys, this.clock)
       const enrollment = new EnrollmentService({
         db,
         identity,
         keys,
         clock: this.clock,
-        routes: () => this.signedRoutes()
+        routes: () => this.signedRoutes(),
+        // A device that came in by a link made here waits for Allow; a raw invitation connects it at once.
+        onRedeemed: (node, invite) =>
+          links.redeemed(invite, node)
+            ? connections.set(node, 'held', 'link')
+            : connections.set(node, 'connected', 'invite'),
+        onJoined: (inviter, link) =>
+          connections.set(inviter, link ? 'held' : 'connected', link ? 'link' : 'join')
+      })
+      // A restart stops every link that can still take a new claim, with its invitation; a consumed one keeps
+      // answering. Not the keeper any more, nothing was issued here that this computer could still redeem.
+      links.cancelOpen((invite) => {
+        if (identity.self()?.isAuthority) enrollment.revokeInvite(invite)
       })
       const policy = new SqliteNodePolicy(db, this.clock)
+      // A store from before this record: every device listed now counts as connected, once, and before any session
+      // work, so nothing that worked stops. A list that cannot be read now is left for the next start; until then
+      // only the keeper's control traffic passes.
+      if (!connections.migrated()) {
+        const listed = listedOwnNodes(identity)
+        if (listed) connections.migrate(listed)
+      }
       const rpc = new DurableRpcDispatcher({
           db,
           identity,
           executions,
           clock: this.clock,
+          // Engine callers (Phase 1a pairings) are held to the engine service's own policy: no v1 gate applies.
+          authorizeEngine: (method, caller, capability) => {
+            if (!this.engineAuthorizer) throw new NetError('forbidden')
+            this.engineAuthorizer(method, caller, capability)
+          },
           authorizeMethod: (method, peer) => {
             this.assertEnabled()
             if (method.family === 'bridge' || method.family === 'routed')
               this.assertFeature('netBridge')
             else if (method.family === 'spaces') this.assertFeature('netSpaces')
-            // Read on every call, so a block takes effect on the device's next request, and
-            // on the lookup of a result it asked for earlier.
-            if (
-              (method.family === 'bridge' || method.family === 'routed') &&
-              policy.isBlocked(peer.node)
-            )
-              throw new NetError(
-                'forbidden',
-                undefined,
-                method.family === 'routed' ? { details: { reason: 'blocked' } } : undefined
-              )
-            if (method.family === 'routed') {
-              // The owner's switch is read on every call, so turning it off is also a kill switch.
-              if (this.config.workOnThreads === false)
-                throw new NetError('forbidden', undefined, { details: { reason: 'setting_off' } })
-              if (method.needsTerminal && !policy.get(peer.node).terminal)
-                throw new NetError('forbidden', undefined, { details: { reason: 'terminal_off' } })
-            }
+            // A device of this user's list that is not connected here gets the keeper's control calls only, every
+            // family and the calls with none alike; read on every call and on every lookup of a saved result.
+            if (!CONTROL_METHOD.test(method.method) && !this.connectedHere(peer))
+              throw notConnected()
+            checkNodePolicy(method, peer.node, policy, this.config)
           }
         }),
         transfer = new AuthorityTransferDelivery({ db, identity, keys })
@@ -546,7 +727,9 @@ export class NetService {
         authorize: (_params, context) => {
           if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
-        handle: async (_params, context) => this.phoneEndpoints(context.carrier)
+        // Phone routes are for v1 phones only: an engine pairing is told of none.
+        handle: async (_params, context) =>
+          isEngineCaller(context.caller) ? { endpoints: [] } : this.phoneEndpoints(context.carrier, context.caller)
       })
       rpc.register({
         method: PHONE_WEBRTC_OFFER_METHOD,
@@ -573,7 +756,7 @@ export class NetService {
           if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
         handle: async (params, context) =>
-          this.phoneWebRtcOffer((params as { sdp: string }).sdp, context.carrier, context.caller)
+          this.phoneWebRtcOffer((params as { sdp: string }).sdp, context.carrier, v1Caller(context.caller))
       })
       rpc.register({
         method: 'authority.transfer.ready',
@@ -624,8 +807,33 @@ export class NetService {
           // and says "update Mousse" for the one action that needs more. Absent: an older computer.
           routed: routedVersions(),
           // The methods a phone may call here, so it offers only the actions this computer has. Absent: an older computer.
-          remote: bridgeRemoteMethodNames()
+          remote: bridgeRemoteMethodNames(),
+          // The version of each bot method a device may call here, so it sends only keys this computer knows (a choice
+          // of reach for a bot it makes). Absent: an older computer.
+          bots: remoteBotVersions(),
+          // `bridge.access.mine` is here, so a refusal of it is a refusal, not an older build.
+          access: 1
         })
+      })
+      // What this computer lets the caller do here, for the caller's Settings, Devices. No family, so a blocked caller
+      // is told it is blocked; one not connected here is refused above, like every call that is not control traffic.
+      rpc.register({
+        method: 'bridge.access.mine',
+        capability: 'read',
+        mutating: false,
+        ephemeral: true,
+        validate: (params) => {
+          if (
+            !params ||
+            typeof params !== 'object' ||
+            Array.isArray(params) ||
+            Object.keys(params).length
+          )
+            throw new NetError('bad_request')
+          return params
+        },
+        // An engine pairing reaches it only through `authorizeEngine` (a live owner grant, the allowlist, the policy).
+        handle: async (_params, context) => this.accessMine(context.caller)
       })
       this.state = {
         db,
@@ -635,11 +843,13 @@ export class NetService {
         executions,
         blobs,
         enrollment,
+        links,
         transfer,
         budgets: new SqliteBudgetLedger(db),
         outbox: new SqliteOutbox(db),
         limits: new SqliteQuotaRateLedger(db),
         policy,
+        connections,
         audit: new SqliteBridgeAudit(db, this.clock),
         remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
@@ -721,8 +931,11 @@ export class NetService {
             this.domain?.privateStreams?.close({ reader: event.node, kind: 'terminal' }) ?? []
           )
       })
+      // Connecting or disconnecting takes effect on the open sessions, with no redial.
+      this.connectionsListener = connections.onChange((events) => this.connectionsChanged(events))
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged((user) => {
+        this.ownUserCache = undefined
         // A computer that lost "Works on threads" (or was revoked) keeps no editor tunnel either.
         this.tunnels?.reconcile()
         // A computer that lost "Works on threads" (or was revoked) keeps nothing open for it, as a block does.
@@ -735,6 +948,12 @@ export class NetService {
             }
           }) ?? []
         )
+        if (user === identity.self()?.user) {
+          // Signed in to Mousse ID, a device that joins the list is connected when it appears.
+          this.connectAccountDevices()
+          // The keeper's exception follows the role: a pair that lost it keeps nothing it has no right to.
+          this.enforceConnections()
+        }
         this.emit()
         if (this.routes) this.refreshPeers()
         this.closeRevokedWebRtc()
@@ -813,15 +1032,61 @@ export class NetService {
         )
       )
     // Signing in to Mousse ID on a computer with no network identity joins the account's network.
+    // So does a computer that can leave its network without losing anything others rely on: it
+    // joins the account's devices when there are any, since Mousse ID keeps one devices list per
+    // account. Only a computer that keeps its network signs in with its own identity.
     if (
       this.hosted &&
       ['net.plus.discover', 'net.plus.login.begin', 'net.plus.login.finish'].includes(method) &&
       ((method === 'net.plus.login.finish' && this.hosted.handlesJoin(String(params.id))) ||
-        !this.hasIdentity())
+        !this.hasIdentity() ||
+        (method !== 'net.plus.login.finish' && this.aloneOnNetwork()))
     )
       return this.track(this.hosted.joinSignIn(method, params))
-    if (!['net.init', 'bridge.join'].includes(method)) this.assertEnabled()
-    if (method.startsWith('bridge.') && method !== 'bridge.join') this.assertFeature('netBridge')
+    // Joining, and finishing or giving up a join, need no network yet. The wait for the first
+    // session runs outside the serial queue, so nothing else waits on another computer to answer.
+    if (method === 'bridge.join')
+      return this.track(
+        this.serial(() =>
+          this.join(
+            String(params.invite),
+            params.name as string | undefined,
+            params.passphrase as string | undefined,
+            params.via as string | undefined
+          )
+        ).then((joined) => this.firstSession(joined))
+      )
+    // A connect link: making one on a computer with no identity creates it; pasting one picks its case offline, and a
+    // join waits for its first session outside the queue, as above.
+    if (method === 'net.link.check') return this.linkCheck(parseLink(params.link))
+    if (method === 'net.link.make') return this.serial(() => this.linkMake(params))
+    if (method === 'net.link.paste')
+      return this.track(
+        this.serial(() => this.linkPaste(params)).then(async (done) => {
+          if (!done.joined) return done.pasted
+          const first = (await this.firstSession(done.joined)) as { connected?: boolean }
+          return { ...done.pasted, ...(first.connected === undefined ? {} : { connected: first.connected }) }
+        })
+      )
+    // With no network folder there is no join to finish or give up and nothing to start over, and
+    // none is made to find out.
+    if (
+      (method === 'net.join.retry' || method === 'net.join.abandon' || method.startsWith('net.startOver')) &&
+      !existsSync(join(this.options.profileDir, 'net', 'net.db'))
+    )
+      throw new NetError('disabled')
+    if (method === 'net.join.retry')
+      return this.track(
+        this.serial(() =>
+          this.join(undefined, undefined, params.passphrase as string | undefined)
+        ).then((joined) => this.firstSession(joined))
+      )
+    if (method === 'net.join.abandon') return this.serial(() => this.abandonJoin())
+    // Starting over needs no network either: a removed or lapsed computer may have it off.
+    if (method === 'net.startOver.check') return this.startOverCheck()
+    if (method === 'net.startOver') return this.serial(() => this.startOver())
+    if (method !== 'net.init') this.assertEnabled()
+    if (method.startsWith('bridge.')) this.assertFeature('netBridge')
     if (method === 'net.doctor') return this.doctor()
     if (method === 'net.transport.list') return this.transportList()
     if (method === 'net.transport.action.describe') {
@@ -853,10 +1118,13 @@ export class NetService {
         })
       )
     }
+    // The v1 rows alone. The daemon's `bridge.nodes` is answered by the peer directory (`mms/net/registerMethods.ts`),
+    // which adds the engine's pairings; this stays for in-process callers of the v1 view.
     if (method === 'bridge.nodes') return this.nodesView()
+    if (method === 'bridge.access.there') return this.track(this.accessThere(params.node as NodeId))
     if (method === 'net.editor.probe') return this.track(this.editorProbe(params.node as NodeId))
     if (method.startsWith('net.ssh.')) return this.track(this.sshRequest(method, params))
-    if (method.startsWith('net.plus.') && !this.hosted) throw hostedUnavailable()
+    if (method.startsWith('net.plus.') && !this.hosted) throw this.plusUnavailable()
     if (method === 'net.plus.login.cancel') return this.hosted!.cancelLogin()
     if (method === 'net.plus.enrollment.requests') return this.hosted!.enrollmentRequests()
     if (method === 'net.authority.status') {
@@ -866,7 +1134,10 @@ export class NetService {
         : { phase: 'none' }
     }
     return this.serial(async () => {
-      if (method.startsWith('net.plus.')) return this.hosted!.request(method, params)
+      if (method.startsWith('net.plus.')) {
+        if (!this.hosted) throw this.plusUnavailable()
+        return this.hosted.request(method, params)
+      }
       switch (method) {
         case 'net.transport.configure': {
           const rt = this.requireEnrolled()
@@ -953,13 +1224,6 @@ export class NetService {
               .routes
           }
         }
-        case 'bridge.join':
-          return this.join(
-            String(params.invite),
-            params.name as string | undefined,
-            params.passphrase as string | undefined,
-            params.via as string | undefined
-          )
         case 'bridge.revoke': {
           const rt = this.requireEnrolled(),
             node = params.node as NodeId
@@ -1036,27 +1300,73 @@ export class NetService {
               : { maxPermissionMode: params.maxPermissionMode as PermissionMode }),
             ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean }),
             ...(params.editor === undefined ? {} : { editor: params.editor as boolean }),
-            ...(params.bots === undefined ? {} : { bots: params.bots as boolean })
+            ...(params.bots === undefined ? {} : { bots: params.bots as boolean }),
+            ...(params.work === undefined ? {} : { work: params.work as boolean }),
+            ...(params.agentReach === undefined
+              ? {}
+              : { agentReach: params.agentReach as AgentReach })
           })
           this.emit()
           return { policy: policyView(policy) }
+        }
+        case 'bridge.connect':
+        case 'bridge.disconnect': {
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId
+          if (node === rt.identity.self()!.node) throw new NetError('bad_request')
+          // Only a device of this computer's list.
+          try {
+            this.currentNode(node)
+          } catch {
+            throw new NetError('bad_request', 'Unknown device.')
+          }
+          // A held device is connected only by Allow, which also writes what it may do here.
+          if (method === 'bridge.connect' && rt.connections.state(node) === 'held')
+            throw new NetError('conflict', 'This device waits for Allow. Use Allow (mousse-cli bridge allow) instead.', {
+              details: { reason: 'held' }
+            })
+          rt.connections.set(
+            node,
+            method === 'bridge.connect' ? 'connected' : 'disconnected',
+            'person'
+          )
+          this.emit()
+          return { connection: rt.connections.state(node) }
+        }
+        case 'bridge.allow': {
+          // A device held since a connect link: what it may do here (today's defaults) and the connection are
+          // written together, so it is never connected with no access chosen, nor the other way round.
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId
+          if (node === rt.identity.self()!.node) throw new NetError('bad_request')
+          try {
+            this.currentNode(node)
+          } catch {
+            throw new NetError('bad_request', 'Unknown device.')
+          }
+          const state = rt.connections.state(node)
+          // Allow again after its answer was lost: it already happened, and what was changed since stays.
+          const done = state === 'connected' && rt.connections.source(node) === 'allow'
+          if (state !== 'held' && !done)
+            throw new NetError('conflict', 'This device isn’t waiting for Allow.')
+          if (!done) {
+            const preset = ACCESS_PRESETS.find((row) => row.id === 'work')!
+            rt.db.transaction(() => {
+              rt.policy.set(node, { ...preset.fields })
+              rt.connections.set(node, 'connected', 'allow')
+            })
+            this.emit()
+          }
+          return {
+            connection: connectionView(rt.connections.state(node)),
+            policy: policyView(rt.policy.get(node))
+          }
         }
         case 'bridge.workOnThreads': {
           // "Let my other computers work on this computer's threads". Any computer sets it for itself; it
           // takes effect on the next routed call, so turning it off is also the kill switch.
           this.requireEnrolled()
-          if (params.enabled !== undefined) {
-            const was = this.config.workOnThreads !== false
-            this.config = { ...this.config, workOnThreads: params.enabled === true }
-            this.saveConfig()
-            // Off ends the private streams that are open, not only the next call.
-            if (was && params.enabled !== true) {
-              this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
-              // ...and the editor tunnels, which are shell access on this computer.
-              this.tunnels?.reconcile()
-            }
-            this.emit()
-          }
+          if (params.enabled !== undefined) this.setWorkOnThreads(params.enabled === true)
           return { enabled: this.config.workOnThreads !== false }
         }
         case 'bridge.shareBots': {
@@ -1124,11 +1434,18 @@ export class NetService {
     return rt
   }
   private async init(input: NetInitInput): Promise<NetStatus> {
-    const rt = this.runtime()
+    let rt = this.runtime()
+    // Keys or a journal from a join that never sent its request are dropped: this computer starts
+    // its own set of devices from nothing. A sent one waits for Retry or Give up.
+    const leftovers = this.joinLeftovers(rt)
+    if (leftovers === 'sent') throw this.unfinishedJoinError(rt)
+    if (leftovers === 'unsent') {
+      await this.setAsideNetwork('unfinished-join')
+      rt = this.runtime()
+    }
     // With no keys yet, the passphrase protects the new ones; otherwise it unlocks the existing ones.
     const creating = rt.keys.state() === 'missing'
     if (input.passphrase !== undefined && !creating) await rt.keys.unlock(input.passphrase)
-    if (!rt.identity.self() && this.config.preparedForJoin) throw new NetError('conflict')
     if (!rt.identity.self())
       await rt.identity.bootstrapAuthority(input.name ?? 'My device', creating ? input.passphrase : undefined)
     this.assertInstanceOpen()
@@ -1207,44 +1524,61 @@ export class NetService {
   hostedSpaceMembershipChanged(): void {
     this.hosted?.membershipChanged()
   }
-  /** What the Mousse ID module may use. Each entry keeps NetService's own gates and queue. */
-  private hostedHost(): HostedNetHost {
+  /** Mousse ID is left out of this build, or Mousse ID (legacy) is off for this profile. */
+  private plusUnavailable(): NetError {
+    return this.options.hosted
+      ? new NetError('profile_unsupported', 'Mousse ID (legacy) is off in Settings → Labs.')
+      : hostedUnavailable()
+  }
+  /**
+   * What the Mousse ID module may use. Each entry keeps NetService's own gates and queue. `signal` also ends when
+   * Mousse ID (legacy) is turned off; a module stopped that way no longer restarts the transports.
+   */
+  private hostedHost(signal: AbortSignal): HostedNetHost {
     return {
       clock: this.clock,
-      signal: this.shutdownSignal.signal,
+      signal,
       loadedRuntime: () => this.state,
       requireEnrolled: () => this.requireEnrolled(),
-      closed: () => this.stopped || this.disabled,
+      closed: () => this.stopped || this.disabled || signal.aborted,
       enabled: () => this.config.enabled,
       featureEnabled: (feature) => this.featureEnabled(feature),
       hostedSpacePeerAuthorized: (user, node) =>
         this.domain?.hostedSpacePeerAuthorized?.(user, node) === true,
       serial: (work) => this.serial(work),
-      emit: () => this.emit(),
+      emit: () => {
+        // Signing in connects every device of the list that has no record yet.
+        this.connectAccountDevices()
+        this.emit()
+      },
       fail: (error) => {
         this.lastError = error instanceof NetError ? error.code : 'internal'
       },
       transportRows: () => this.config.transports ?? [],
       validateTransport: (row) => this.createTransports().validate(row),
       saveHostedTransport: (row) => {
+        if (signal.aborted) return
         this.config.transports = [
           ...(this.config.transports ?? []).filter((item) => item.id !== HOSTED_RELAY_TRANSPORT),
           ...(row ? [row] : [])
         ]
         this.saveConfig()
       },
-      activate: () => this.activate(),
+      activate: async () => {
+        if (!signal.aborted) await this.activate()
+      },
       restartTransports: async () => {
+        if (signal.aborted) return
         await this.transport?.teardown()
         this.transport = undefined
         this.syncPhoneWebRtc()
         await this.activate()
       },
       reactivateIfRunning: async () => {
-        if (this.transport) await this.activate()
+        if (this.transport && !signal.aborted) await this.activate()
       },
       suspendHostedTransport: async () => {
-        await this.transport?.suspendHosted()
+        if (!signal.aborted) await this.transport?.suspendHosted()
       },
       hostedListening: () => this.transport?.hasPlusRelayListener() === true,
       directPathChanged: () => this.syncPhoneWebRtc(),
@@ -1258,18 +1592,32 @@ export class NetService {
         this.emit()
       },
       prepareJoin: async () => {
-        const rt = this.runtime()
+        let rt = this.runtime()
         if (rt.identity.self()) throw new NetError('conflict', 'This profile already has an identity.')
-        if (rt.keys.state() === 'missing') await rt.keys.initialize({ asAuthority: false })
-        this.config.preparedForJoin = true
-        this.saveConfig()
+        // The same rules as a join from a link: a sent one is finished or given up first, and an
+        // unsent one is replaced, keys and all, since these keys are announced to Mousse ID.
+        const leftovers = this.joinLeftovers(rt)
+        if (leftovers === 'sent') throw this.unfinishedJoinError(rt)
+        if (leftovers === 'unsent') {
+          await this.setAsideNetwork('unfinished-join')
+          rt = this.runtime()
+        }
+        await rt.keys.initialize({ asAuthority: false })
         if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
         if (!rt.keys.protectedAtRest()) rt.keys.protect()
         return { transportFingerprint: fingerprint(decodeBase64(rt.keys.nodeKeys().transport)) }
       },
       joinWithInvite: async (invite, name) => {
-        await this.join(invite, name)
-      }
+        await this.firstSession(await this.serial(() => this.join(invite, name, undefined, undefined, true)))
+      },
+      dropUnsentJoin: () => this.serial(() => this.dropUnsentJoin()),
+      mayJoinAccount: () => this.aloneOnNetwork(),
+      ownNode: () => (this.hasIdentity() ? this.runtime().identity.self()?.node : undefined),
+      leaveLoneNetwork: () =>
+        this.serial(async () => {
+          if (!this.aloneOnNetwork()) throw new NetError('conflict', 'This computer can no longer leave its network.')
+          await this.setAsideNetwork('joined-account')
+        })
     }
   }
   /** A network identity exists for this profile; never creates the network database. */
@@ -1277,6 +1625,26 @@ export class NetService {
     return (
       existsSync(join(this.options.profileDir, 'net', 'net.db')) && !!this.runtime().identity.self()
     )
+  }
+  /**
+   * This computer owns a network that nobody else relies on, so it may leave it to join the
+   * account's devices list: it may start over (no Space hosted, no other device holding a pass),
+   * belongs to no Space, keeps no bots in its list and is not signed in to Mousse ID. Leaving
+   * would drop it out of any Space, so a computer in one keeps its network.
+   */
+  private aloneOnNetwork(): boolean {
+    try {
+      if (!this.hasIdentity() || this.hosted?.status().configured) return false
+      const check = this.startOverCheck()
+      return (
+        check.allowed === 'alone' &&
+        check.keeper &&
+        check.spaces.length === 0 &&
+        !this.runtime().identity.listsBots()
+      )
+    } catch {
+      return false
+    }
   }
   /** This computer has an identity that was removed from its devices (see `NetIdentityService.selfRemoved`). */
   private selfRemoved(): boolean {
@@ -1294,14 +1662,119 @@ export class NetService {
    */
   private async setAsideRemovedIdentity(): Promise<void> {
     if (!this.selfRemoved()) return
+    await this.setAsideNetwork('removed')
+  }
+  /**
+   * Moves the profile's `net` folder to `net.<label>-<time>` and leaves the service with no network
+   * data, as on a computer that never had any. Nothing is deleted. Runs in the serial queue.
+   */
+  /**
+   * Called before Start over (or a dropped join) moves this profile's `net/` folder aside, with the suffix it uses.
+   * The engine service stops there and moves its own folder aside with it, since its rows live in that `net.db`.
+   */
+  onSetAside(listener: (suffix: string) => Promise<void> | void): () => void {
+    this.setAsideListeners.add(listener)
+    return () => this.setAsideListeners.delete(listener)
+  }
+  private readonly setAsideListeners = new Set<(suffix: string) => Promise<void> | void>()
+  private engineAuthorizer?: (
+    method: import('./contracts').RpcMethod,
+    caller: import('./contracts').EngineCaller,
+    capability: import('../../shared/net').NodeCapability
+  ) => void
+  /** The engine service's policy for its callers on this runtime's dispatcher; unset, engine callers are refused. */
+  setEngineAuthorizer(authorize: NetService['engineAuthorizer']): void {
+    this.engineAuthorizer = authorize
+  }
+  /**
+   * The engine's editor tunnels (Phase 1b §9.2), while its service runs: an editor connection to one of its pairings
+   * opens there, through the same local methods (`mousse-cli net ssh-proxy`) and the same host-key pinning.
+   */
+  private engineEditor?: {
+    owns(node: NodeId): boolean
+    /** Its paired computers, for the editor aliases. */
+    computers(): LiveComputer[]
+    /** The engine's tunnels and the link to `node`; throws `TunnelError('offline')` when it is not connected. */
+    link(node: NodeId): { tunnels: EditorTunnels; link: TunnelLink }
+  }
+  setEngineEditor(editor: NetService['engineEditor']): void {
+    this.engineEditor = editor
+    // Its pairings get their aliases; a service that is stopping writes nothing more.
+    if (editor && !this.stopped) this.syncEditorSsh()
+  }
+  /** The engine's pairings changed (one added, renamed or removed): the editor aliases follow. */
+  engineComputersChanged(): void {
+    if (!this.stopped) this.syncEditorSsh()
+  }
+  /**
+   * Whether v1 networking is on for this profile (switched on, with Bridge or Spaces): its Devices group shows
+   * "Work on threads" then; otherwise the engine's group shows the same switch (`netEngine.workOnThreads`).
+   */
+  v1On(): boolean {
+    return (
+      !this.stopped &&
+      !this.disabled &&
+      this.config.enabled === true &&
+      (this.config.features?.netBridge === true || this.config.features?.netSpaces === true)
+    )
+  }
+  /**
+   * "Work on threads" (`bridge.workOnThreads`, and `netEngine.workOnThreads` while v1 is off): the one setting. Off ends what is open, not only the next call: the private streams,
+   * v1's editor tunnels and, through `onWorkOnThreadsOff`, the engine's.
+   */
+  setWorkOnThreads(enabled: boolean): void {
+    const was = this.config.workOnThreads !== false
+    this.config = { ...this.config, workOnThreads: enabled }
+    this.saveConfig()
+    if (was && !enabled) {
+      this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
+      // ...and the editor tunnels, which are shell access on this computer.
+      this.tunnels?.reconcile()
+      for (const listener of this.workOffListeners) {
+        try {
+          listener()
+        } catch {
+          // The engine's own reconcile cannot stop v1's.
+        }
+      }
+    }
+    this.emit()
+  }
+  /** Turning "Work on threads" off is heard by the engine too, which ends its editor tunnels. */
+  onWorkOnThreadsOff(listener: () => void): () => void {
+    this.workOffListeners.add(listener)
+    return () => this.workOffListeners.delete(listener)
+  }
+  private readonly workOffListeners = new Set<() => void>()
+  /** "Use this computer's SSH server": the engine's tunnels end at the system's SSH server too, not the endpoint. */
+  editorUsesSystemSsh(): boolean {
+    return this.config.editorSystemSsh === true
+  }
+  /** The engine's first tunnel from a device: the same notice as v1's. */
+  editorFirstOpened(node: NodeId): void {
+    for (const listener of this.editorFirstOpen) {
+      try {
+        listener(node)
+      } catch {
+        // A notice that cannot be shown never stops a tunnel.
+      }
+    }
+  }
+  /** "Work on threads from other devices" (on unless this computer turned it off), read by `checkNodePolicy`. */
+  nodePolicyConfig(): { workOnThreads?: boolean } {
+    return { workOnThreads: this.config.workOnThreads }
+  }
+  private async setAsideNetwork(label: string): Promise<void> {
+    const suffix = `${label}-${Date.now()}`
+    for (const listener of this.setAsideListeners) await listener(suffix)
     await this.closeRuntime()
     const directory = join(this.options.profileDir, 'net')
-    let aside = `${directory}.removed-${Date.now()}`
+    let aside = `${directory}.${suffix}`
     if (existsSync(aside)) aside += `-${randomBytes(4).toString('hex')}`
     try {
       renameSync(directory, aside)
     } catch (cause) {
-      // The identity stays where it was: load it again, as it was before the sign-in.
+      // The folder stays where it was: load it again, as it was before.
       try {
         this.runtime()
         if (this.config.enabled) await this.activateWithHosted()
@@ -1311,10 +1784,34 @@ export class NetService {
       this.emit()
       throw new NetError(
         'internal',
-        `Mousse couldn’t set this computer’s old network identity aside: ${cause instanceof Error ? cause.message : String(cause)}`
+        `Mousse couldn’t set this computer’s network folder aside: ${cause instanceof Error ? cause.message : String(cause)}`
       )
     }
     this.emit()
+  }
+  /**
+   * What a join left on a computer with no identity. `sent`: a request may have reached the other
+   * computer and its answer is unknown, so its keys and claims are kept for a retry. `unsent`: keys
+   * or a journal that no request ever left; nothing exists for them anywhere else. `none`: nothing,
+   * or an identity, which is never touched here.
+   */
+  private joinLeftovers(rt: NetRuntime): 'none' | 'unsent' | 'sent' {
+    if (rt.identity.self()) return 'none'
+    const attempt = rt.enrollment.joinAttempt()
+    if (attempt?.phase === 'sent') return 'sent'
+    if (attempt?.phase === 'enrolled') return 'none'
+    return attempt || rt.keys.state() !== 'missing' ? 'unsent' : 'none'
+  }
+  /** Sets aside what a join left when no request ever left this computer. Runs in the serial queue. */
+  private async dropUnsentJoin(): Promise<void> {
+    if (this.joinLeftovers(this.runtime()) === 'unsent') await this.setAsideNetwork('unfinished-join')
+  }
+  /** Refuses a new start while a sent join waits for its answer, naming the other computer. */
+  private unfinishedJoinError(rt: NetRuntime): NetError {
+    const name = rt.enrollment.joinAttempt()?.name
+    return new NetError('conflict', 'Finish or give up the connection already under way first.', {
+      details: { reason: 'join_unfinished', ...(name === undefined ? {} : { label: name }) }
+    })
   }
   /**
    * Ends the loaded runtime and everything running on it, but not the service: the next `runtime()`
@@ -1334,6 +1831,10 @@ export class NetService {
     this.rosterListener = undefined
     this.policyListener?.()
     this.policyListener = undefined
+    this.connectionsListener?.()
+    this.connectionsListener = undefined
+    this.ownUserCache = undefined
+    this.accountSyncedFor = undefined
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     for (const session of this.sessions) session.close()
@@ -1370,6 +1871,7 @@ export class NetService {
     this.domainClosed = false
     this.tunnels = undefined
     this.presenceStore = undefined
+    this.lanMemoryStore = undefined
     this.config = defaults()
     this.lastError = undefined
     // Mousse ID's session was bound to the closed runtime; it starts again from the next one.
@@ -1546,6 +2048,41 @@ export class NetService {
           : undefined,
       identity: () => this.relayIdentity(),
       addonRecords: this.addonRecords(),
+      lanPeers: () => {
+        const self = rt.identity.self()!
+        const root = rt.identity.pinnedRootKey(self.user)!
+        const evidence = rt.identity.roster()
+        if (!evidence) return []
+        const roster = rt.identity.verifySigned<Roster>(evidence, root)
+        const nodes = new Set(
+          roster.nodes.map((row) => rt.identity.verifySigned<NodeDelegation>(row, root).subject)
+        )
+        // Beacons go to and are accepted from only devices a session with would be admitted; a revoked one has no
+        // current delegation below. Discovery reads this list again on every tick, so a record change applies there.
+        return [...nodes]
+          .filter((node) => node !== self.node && this.admitted({ node, user: self.user }))
+          .flatMap((node) => {
+            try {
+              const peer = this.currentNode(node)
+              const secret = rt.keys.agree(decodeBase64(peer.keys.agree, 32))
+              const key = (sender: NodeId) =>
+                Buffer.from(
+                  hkdfSync('sha256', secret, Buffer.alloc(0), `mousse-lan-v1:${sender}`, 32)
+                )
+              return [{ node, sendKey: key(self.node), receiveKey: key(node) }]
+            } catch {
+              return []
+            }
+          })
+      },
+      lanPort: {
+        kept: () => this.lanMemory().port(),
+        keep: (port) => this.lanMemory().keepPort(port)
+      },
+      onLanChanged: () => {
+        this.refreshPeers()
+        for (const supervisor of this.supervisors.values()) supervisor.retryAfterStateChange()
+      },
       onChanged: () => {
         if (this.stopped || this.disabled || !this.config.enabled || !this.routes) return
         try {
@@ -1574,7 +2111,9 @@ export class NetService {
           raw.destroy()
           return
         }
-        this.track(this.accept(raw, deadline, info.transport)).catch((error) => {
+        this.track(
+          this.accept(raw, deadline, info.transport, info.lan ? info.remoteAddress : undefined)
+        ).catch((error) => {
           this.lastError = error instanceof NetError ? error.code : 'internal'
           this.emit()
         })
@@ -1606,6 +2145,7 @@ export class NetService {
     this.signedRoutes()
     this.syncPhoneWebRtc()
     this.lastError = undefined
+    this.connectAccountDevices()
     this.refreshPeers()
     this.scheduleRenewal(5_000)
     this.emit()
@@ -1693,16 +2233,49 @@ export class NetService {
     return this.webrtc?.counts() ?? { pending: 0, live: 0 }
   }
   /**
-   * What a phone learns about direct paths, only over a session that came through Mousse ID
-   * (the hosted relay, or the WebRTC path itself). Everyone else learns nothing.
+   * What a phone learns about direct paths, only over a session that came through Mousse ID (the
+   * hosted relay, or the WebRTC path itself) or the automatic LAN listener. Everyone else learns
+   * nothing. The LAN addresses go only to another device of this account, so it can open its next
+   * session on the local network with no relay; WebRTC is offered only where the relay carried the
+   * session or its signalling.
    */
-  private phoneEndpoints(carrier: string | undefined): {
+  private phoneEndpoints(
+    carrier: string | undefined,
+    caller: SyncSession['peer']
+  ): {
     endpoints: []
     webrtc?: { v: 1 }
+    lan?: { v: 1; addresses: string[] }
   } {
-    if (carrier !== HOSTED_RELAY_TRANSPORT && carrier !== PHONE_WEBRTC_TRANSPORT)
-      return { endpoints: [] }
-    return this.webrtcWanted() ? { endpoints: [], webrtc: { v: 1 } } : { endpoints: [] }
+    const relayed = carrier === HOSTED_RELAY_TRANSPORT || carrier === PHONE_WEBRTC_TRANSPORT
+    if (!relayed && carrier !== PHONE_LAN_CARRIER) return { endpoints: [] }
+    const lan = this.phoneLan(caller)
+    return {
+      endpoints: [],
+      ...(relayed && this.webrtcWanted() ? { webrtc: { v: 1 as const } } : {}),
+      ...(lan.length ? { lan: { v: 1 as const, addresses: lan } } : {})
+    }
+  }
+  /** The LAN listener's private IPv4 URLs, for a device of this account other than this one. */
+  private phoneLan(caller: SyncSession['peer']): string[] {
+    try {
+      const self = this.state?.identity.self(),
+        port = this.transport?.lanPort()
+      if (!self || !port || caller.user !== self.user || caller.node === self.node) return []
+      if (
+        this.stopped ||
+        this.disabled ||
+        !this.config.enabled ||
+        !this.featureEnabled('netBridge')
+      )
+        return []
+      return phoneLanAddresses(
+        port,
+        this.options.phoneWebRtc?.hostAddresses?.() ?? directHostAddresses()
+      )
+    } catch {
+      return []
+    }
   }
   private async phoneWebRtcOffer(
     sdp: string,
@@ -1811,7 +2384,13 @@ export class NetService {
       throw error
     }
   }
-  private async accept(raw: Duplex, deadline: number, carrier?: string): Promise<void> {
+  private async accept(
+    raw: Duplex,
+    deadline: number,
+    carrier?: string,
+    /** The peer's source address, when it dialled the automatic LAN listener. */
+    lanRemote?: string
+  ): Promise<void> {
     try {
       this.assertEnabled()
       const rt = this.requireEnrolled()
@@ -1843,9 +2422,10 @@ export class NetService {
                 }
               }
             : undefined,
+          link: { claim: (request, secure) => this.answerLinkClaim(request, secure) },
           onEnrolled: () => this.markAuthenticated(raw),
           normalSession: (secure, mux, context) =>
-            this.makeSession(secure, mux, context, raw, { carrier })
+            this.makeSession(secure, mux, context, raw, { carrier, lanRemote })
         })
         this.gateways.add(gateway)
         try {
@@ -1874,6 +2454,8 @@ export class NetService {
       /** The only node this connection may authenticate as (a WebRTC ticket's node). */
       node?: NodeId
       onAuthenticated?: () => void
+      /** The peer's source address on the automatic LAN listener. */
+      lanRemote?: string
     }
   ): NetSyncSession {
     this.assertEnabled()
@@ -1888,9 +2470,22 @@ export class NetService {
     const check = (stream: StreamId): void => {
       if (!allowed(stream)) throw new NetError('disabled')
     }
-    // A device this computer blocked reads, fetches and writes none of its Bridge streams.
-    const blockedFor = (stream: StreamId, peer: { node: NodeId }): boolean =>
-      !store.getStream(stream)?.kind.startsWith('space.') && rt.policy.isBlocked(peer.node)
+    // A device this computer blocked reads, fetches and writes none of its Bridge streams. A device of this user's
+    // list that is not connected here has none of its streams, its Spaces' included (another user's device is
+    // governed by its Space membership alone).
+    // A stream whose kind is work (none is today) is not for a device that may only view and chat with bots; the
+    // class is read first, so the record-by-record check costs no query for the kinds every device reads.
+    const streamWorkOff = (stream: StreamId, peer: { node: NodeId }): boolean => {
+      const kind = store.getStream(stream)?.kind
+      if (!kind) return false
+      const own = this.domain?.privateStreams?.access(stream)
+      const access = own ? ROUTED_STREAM_ACCESS[own.kind] : STREAM_ACCESS[kind]
+      return needsWork(access) && !rt.policy.get(peer.node).work
+    }
+    const blockedFor = (stream: StreamId, peer: { node: NodeId; user: UserId }): boolean =>
+      !this.connectedHere(peer) ||
+      (!store.getStream(stream)?.kind.startsWith('space.') &&
+        (rt.policy.isBlocked(peer.node) || streamWorkOff(stream, peer)))
     // A private stream is read by its computer only, while the owner's switch for other computers is on
     // (read on every record, so turning it off is also a kill switch) and, for a terminal, the device's
     // terminal switch is on. The authority checks the reader and "Works on threads".
@@ -1963,7 +2558,24 @@ export class NetService {
       localRoutes: () => this.signedRoutes(),
       onPeerRoutes: (routes, peer) =>
         this.adoptRoutes(routes, peer.node, peer.user, peer.delegation),
-      ...(inbound?.carrier ? { carrier: inbound.carrier } : {}),
+      // Each side tells the other its LAN listener port, unsigned. The side that accepted on its own LAN listener
+      // keeps the peer's source address with that port, so it can dial back after both restart.
+      lanPort: () => this.transport?.lanPort(),
+      onPeerLanPort: (port, peer) => {
+        const remote = this.lanInbound.get(session)
+        if (remote) this.rememberAddress(peer.node, lanAddress(remote, port))
+      },
+      // Two members of this user's list open a session only once each has connected the other; the keeper and a
+      // member always do, and carry only control traffic until connected. The routes above are kept either way.
+      admitPeer: (peer) => {
+        if (!this.admitted(peer)) throw notConnected()
+      },
+      // RPC handlers tell a session on the automatic LAN listener from one on a configured listener.
+      ...(inbound?.lanRemote
+        ? { carrier: PHONE_LAN_CARRIER }
+        : inbound?.carrier
+          ? { carrier: inbound.carrier }
+          : {}),
       onAuthenticated: () => {
         if (inbound?.sameUserOnly && session.peer.user !== rt.identity.self()?.user)
           throw new NetError('forbidden')
@@ -1978,6 +2590,7 @@ export class NetService {
     })
     this.sessions.add(session)
     if (inbound) this.sessionLinks.set(session, { direction: 'in', transport: inbound.carrier })
+    if (inbound?.lanRemote) this.lanInbound.set(session, inbound.lanRemote)
     session.onClosed((error) => {
       this.sessions.delete(session)
       // Closing a carrier does not prove its async source/provider jobs settled.
@@ -2065,6 +2678,8 @@ export class NetService {
   async connectChannel(peer: PeerRef, signal: AbortSignal): Promise<SecureChannel> {
     this.assertEnabled()
     this.requireEnrolled()
+    // A device of this user's list is dialled only when a session with it would be admitted.
+    if (!this.admitted(peer)) throw notConnected()
     if (!this.routes) await this.activate()
     return this.track(
       this.routes!.connect(peer, signal).then((result) => {
@@ -2169,6 +2784,8 @@ export class NetService {
     for (const row of rt.db.database.prepare('SELECT node,signed FROM net_peer_routes').all()) {
       const node = String(row.node) as NodeId
       if (node === self.node || this.supervisors.has(node)) continue
+      // Its signed routes are kept, and never dialled until a session with it would be admitted.
+      if (!this.admitted({ node, user: self.user })) continue
       const current = roster.nodes
         .map((value) => rt.identity.verifySigned<NodeDelegation>(value, root))
         .filter((value) => value.subject === node)
@@ -2187,12 +2804,18 @@ export class NetService {
       } catch {
         continue
       }
-      if (!routes.routes.length) continue
+      if (
+        !routes.routes.length &&
+        !this.transport?.lanRoutes(node).length &&
+        !this.lastAddressRoute(node, []).length
+      )
+        continue
       const supervisor = new SyncSupervisor({
         identity: rt.identity,
         clock: this.clock,
         connect: async (signal) => {
           this.assertEnabled()
+          if (!this.admitted({ node, user: self.user })) throw notConnected()
           const latest = this.currentNode(node),
             manager = this.routes!
           const held = rt.db.database
@@ -2203,8 +2826,16 @@ export class NetService {
             parseProtocolJson(Buffer.from(String(held.signed))) as Signed,
             latest.keys.sign
           )
+          const hints = this.transport?.lanRoutes(node) ?? []
+          const remembered = this.lastAddressRoute(node, [...hints, ...fresh.routes])
           const result = await manager.connect(
-            { node, user: self.user, transportKey: latest.keys.transport, routes: fresh.routes },
+            {
+              node,
+              user: self.user,
+              transportKey: latest.keys.transport,
+              routes: [...hints, ...remembered, ...fresh.routes].slice(0, 32),
+              remembered: remembered.map((route) => route.address)
+            },
             signal
           )
           const session = this.makeSession(result.channel)
@@ -2217,6 +2848,8 @@ export class NetService {
           signal.addEventListener('abort', abort, { once: true })
           session.onClosed(() => signal.removeEventListener('abort', abort))
           await session.opened
+          // A LAN hint or a direct route (never a relay) is where the next dial starts, even with no beacons.
+          if (result.route.transport === 'direct') this.rememberAddress(node, result.route.address)
           return session
         }
       })
@@ -2265,6 +2898,116 @@ export class NetService {
     }
     // Its private streams are closed as well, not only unserved: nothing is kept open for a device that is blocked.
     this.domain?.privateStreams?.close({ reader: node })
+  }
+  /**
+   * Whether this computer serves `peer` application traffic: a device of this user's list only while connected here.
+   * Another user's device answers yes; its Space membership decides, as before.
+   */
+  private connectedHere(peer: { node: NodeId; user: UserId }): boolean {
+    const rt = this.state
+    if (!rt) return false
+    if (rt.connections.connected(peer.node)) return true
+    const own = this.ownUser()
+    return own !== undefined && peer.user !== own
+  }
+  /** Whether a session with `peer` is opened at all: connected here, or the keeper and one of its members. */
+  private admitted(peer: { node: NodeId; user: UserId }): boolean {
+    return this.connectedHere(peer) || this.keeperPair(peer.node)
+  }
+  /** This computer or `node` keeps the list (from the list itself, so the rule follows the role when it moves). */
+  private keeperPair(node: NodeId): boolean {
+    const rt = this.state,
+      self = rt?.identity.self()
+    if (!rt || !self) return false
+    try {
+      const signed = rt.identity.roster(self.user),
+        root = rt.identity.pinnedRootKey(self.user)
+      if (!signed || !root) return false
+      const keeper = rt.identity.verifySigned<Roster>(signed, root).authorityNode
+      return keeper === self.node || keeper === node
+    } catch {
+      return false
+    }
+  }
+  private ownUser(): UserId | undefined {
+    return (this.ownUserCache ??= this.state?.identity.self()?.user)
+  }
+  /** Signed in to Mousse ID (or getting back to it). */
+  private signedInToMousseId(): boolean {
+    const plus = this.hosted?.status()
+    return !!(plus?.connected || plus?.reconnecting)
+  }
+  /**
+   * Signed in to Mousse ID, every device of the list is connected here when it appears or at sign-in, except one
+   * that was disconnected. The records stay after signing out.
+   */
+  private connectAccountDevices(): void {
+    const rt = this.state
+    if (!rt || !this.signedInToMousseId()) {
+      this.accountSyncedFor = undefined
+      return
+    }
+    try {
+      // Mousse ID tells this computer of every change; the list is read again only when it changed.
+      const signed = rt.identity.roster()
+      if (!signed || signed.sig === this.accountSyncedFor) return
+      const listed = listedOwnNodes(rt.identity)
+      if (!listed) return
+      if (listed.length) rt.connections.connectUnrecorded(listed, 'account')
+      this.accountSyncedFor = signed.sig
+    } catch {
+      // A record that cannot be written now is written at the next change.
+    }
+  }
+  /** A connection record changed: it takes effect on the open sessions, with no redial. */
+  private connectionsChanged(events: readonly ConnectionEvent[]): void {
+    // An editor tunnel is shell access: one for a device that is no longer connected ends first, and cannot throw.
+    this.tunnels?.reconcile()
+    for (const event of events)
+      if (event.before === 'connected' && event.after !== 'connected')
+        this.endUnconnected(event.node)
+    this.enforceConnections()
+    if (this.routes) this.refreshPeers()
+    for (const event of events)
+      if (event.after === 'connected') this.supervisors.get(event.node)?.retryAfterStateChange()
+    this.emit()
+  }
+  /**
+   * A device stopped being connected here: what it reads here ends now (streams, private streams), and what it
+   * already started runs on; its next call is refused by the check itself.
+   */
+  private endUnconnected(node: NodeId): void {
+    for (const session of this.sessions) {
+      try {
+        if (session.state() === 'open' && session.peer.node === node)
+          void session.endServing('forbidden').catch(() => {})
+      } catch {
+        // Not authenticated yet: its hello is checked against the record.
+      }
+    }
+    this.domain?.privateStreams?.close({ reader: node })
+  }
+  /**
+   * Sessions of this user's list that would not be admitted now end, telling the peer why, and their dialling stops
+   * (their routes are kept). Run when a record changes and when the role moves.
+   */
+  private enforceConnections(): void {
+    const own = this.ownUser()
+    if (!own) return
+    for (const [node, supervisor] of this.supervisors)
+      if (!this.admitted({ node, user: own })) {
+        this.supervisors.delete(node)
+        supervisor.close('forbidden')
+      }
+    for (const session of this.sessions) {
+      let peer: SyncSession['peer']
+      try {
+        peer = session.peer
+      } catch {
+        continue
+      }
+      if (peer.user === own && !this.admitted(peer)) void session.goAway(notConnected())
+    }
   }
   /** Tells every session that serves one of these private streams that it is over. */
   private endPrivateServing(streams: readonly StreamId[]): void {
@@ -2334,7 +3077,9 @@ export class NetService {
   private deviceRefusal(node: NodeId): TunnelReason | undefined {
     const rt = this.state
     if (!rt || !this.featureEnabled('netBridge')) return 'net_off'
-    if (rt.policy.isBlocked(node)) return 'blocked'
+    // A device that is not connected here is refused as a blocked one is (the reason crosses the wire, and older
+    // computers know only these words).
+    if (rt.policy.isBlocked(node) || !rt.connections.connected(node)) return 'blocked'
     let caps: readonly NodeCapability[]
     try {
       // From the roster, not from what the session last saw: a grant taken away counts at once.
@@ -2346,6 +3091,75 @@ export class NetService {
     if (this.config.workOnThreads === false) return 'setting_off'
     if (!rt.policy.get(node).editor) return 'editor_off'
     return undefined
+  }
+  /**
+   * `bridge.access.mine`: what this computer lets `caller` do here now. Each answer is a real call's checks, run through
+   * the dispatcher's own authorization (the grant, connected here, the block, "Let my other computers work here", the
+   * per-device switches) without running anything, plus the checks a method makes in its handler: an editor
+   * connection's (`deviceRefusal`) and the bots' (Share bots and the device's Bots switch).
+   */
+  private accessMine(caller: RpcCaller): BridgeAccessMine {
+    const rt = this.requireEnrolled(),
+      policy = rt.policy.get(caller.node)
+    const passes = (method: string): boolean => {
+      try {
+        rt.rpc.authorizedMethod(method, caller)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const threads = passes('routed.threads.list')
+    return {
+      v: 1,
+      blocked: rt.policy.isBlocked(caller.node),
+      threads,
+      work: threads && passes('routed.orchestrator.send'),
+      terminal: threads && passes('routed.pty.create'),
+      // An engine pairing is not on v1's roster: its editor refusal is part of the engine's own authorization.
+      editor:
+        threads &&
+        passes('routed.editor.folder') &&
+        (isEngineCaller(caller) || this.deviceRefusal(caller.node) === undefined),
+      bots: passes('bots.chat.list') && this.sharesBots() && policy.bots,
+      maxPermissionMode: policy.maxPermissionMode,
+      agentReach: policy.agentReach
+    }
+  }
+  /** `bridge.access.there`: `bridge.access.mine` asked of `node`, with a refusal or an older build as a result. */
+  private async accessThere(node: NodeId): Promise<BridgeAccessThere> {
+    const rt = this.requireEnrolled()
+    if (node === rt.identity.self()?.node) throw new NetError('bad_request')
+    let session: SyncSession
+    try {
+      session = this.session(node)
+    } catch {
+      return { state: 'unknown', reason: 'offline' }
+    }
+    try {
+      const answer = (await session.rpc('bridge.access.mine', {}, { id: newId('rpc'), deadlineMs: 10_000 })) as BridgeAccessMine
+      if (answer?.v !== 1) return { state: 'unknown', reason: 'older' }
+      return { state: 'known', access: answer }
+    } catch (error) {
+      if (error instanceof NetError && error.code === 'forbidden') {
+        const reason = forbiddenReason(error.details)
+        if (reason === 'not_connected') return { state: 'not_connected' }
+        // A method it does not have is refused with no reason, as is a call this computer's grant does not cover there:
+        // `net.info` tells the two apart. Any other refusal is one.
+        if (reason !== undefined || (await this.knowsAccessMine(session))) return { state: 'refused' }
+        return { state: 'unknown', reason: 'older' }
+      }
+      return { state: 'unknown', reason: 'offline' }
+    }
+  }
+  /** Whether the device on `session` has `bridge.access.mine` (its `net.info` says so); false when it can't be asked. */
+  private async knowsAccessMine(session: SyncSession): Promise<boolean> {
+    try {
+      const info = await session.rpc('net.info', {}, { id: newId('rpc'), deadlineMs: 10_000 })
+      return (info as { access?: unknown } | undefined)?.access === 1
+    } catch {
+      return false
+    }
   }
   /** The first editor tunnel a device ever opens on this computer (a desktop notification for the owner). */
   onEditorFirstOpen(listener: (node: NodeId) => void): () => void {
@@ -2420,8 +3234,18 @@ export class NetService {
   private async editorLink(node: NodeId): Promise<{
     tunnels: EditorTunnels
     editor: EditorSshConfig | undefined
-    link: NetSyncSession
+    link: TunnelLink
   }> {
+    // An engine pairing: its own tunnels, with v1 on or off. The alias and the pinning are the same as v1's.
+    if (this.engineEditor?.owns(node)) {
+      const editor = this.editorSsh()
+      if (editor && !(await editor.aliasOf(node)))
+        throw new EditorSshError(
+          'unknown_computer',
+          'This computer has no editor alias for that computer yet.'
+        )
+      return { ...this.engineEditor.link(node), editor }
+    }
     this.assertFeature('netBridge')
     const rt = this.requireEnrolled(),
       tunnels = this.tunnels
@@ -2705,100 +3529,674 @@ export class NetService {
         .map((session) => session.failServingStream(stream, code))
     )
   }
+  /**
+   * Joins the devices of the computer that made `invite`. Without `invite` it retries the join this
+   * computer already sent: the same claims and keys, with a fresh proof bound to the new channel.
+   * A join that fails before its request leaves this computer is dropped at once; one that fails
+   * after keeps everything for Retry or Give up, unless the other computer refused it outright.
+   * `keepKeys`: the keys were made for this join and already shown to the other side (announced to Mousse ID, or
+   * pinned by a connect link's invitation), so they are kept. `link`: the invitation came from a connect link's offer
+   * path, answered on these addresses; they are dialled first, and the first one is where the first ordinary session
+   * is tried.
+   */
   private async join(
-    invite: string,
+    invite: string | undefined,
     name?: string,
     passphrase?: string,
-    via?: string
-  ): Promise<unknown> {
+    via?: string,
+    keepKeys = false,
+    link?: { routes: Route[] }
+  ): Promise<JoinOutcome> {
     if (via !== undefined && !isJoinVia(via)) throw new NetError('bad_request')
-    const needsProtection = inviteRequiresProtection(invite),
+    if (
+      passphrase !== undefined &&
+      (typeof passphrase !== 'string' || !passphrase.length || Buffer.byteLength(passphrase) > 4096)
+    )
+      throw new NetError('bad_request')
+    // A text that is not an invitation fails here, before anything is dropped or made.
+    const needsProtection = invite !== undefined && inviteRequiresProtection(invite, !!link)
+    let rt = this.runtime(),
+      quarantine: EnrollmentQuarantine | undefined,
+      label: string | undefined
+    const leftovers = this.joinLeftovers(rt)
+    if (invite === undefined) {
+      if (leftovers !== 'sent') throw new NetError('not_enrolled')
+      if (passphrase !== undefined && rt.keys.state() === 'locked') await rt.keys.unlock(passphrase)
+      if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+    } else if (leftovers === 'unsent' && !keepKeys) {
+      // A new link replaces a join that never sent its request.
+      await this.setAsideNetwork('unfinished-join')
       rt = this.runtime()
-    if (passphrase !== undefined) {
-      if (rt.identity.self() && !rt.enrollment.preparedNodeJoin()) throw new NetError('conflict')
-      if (
-        typeof passphrase !== 'string' ||
-        !passphrase.length ||
-        Buffer.byteLength(passphrase) > 4096
-      )
-        throw new NetError('bad_request')
-      if (rt.keys.state() === 'missing') {
-        await rt.keys.initialize({ asAuthority: false, passphrase })
-        this.config.preparedForJoin = true
-        this.saveConfig()
-      } else {
-        if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
-        rt.keys.protect(passphrase)
-      }
     }
-    if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
-    const prepared = await rt.enrollment.prepareNodeJoin(invite, name)
-    if (prepared.state !== 'enrolled') {
-      const transport = new ProfileTransports({
-        clock: this.clock,
-        profileDir: this.options.profileDir,
-        hosted: this.hosted?.transports,
-        identity: () => this.relayIdentity(prepared.node),
-        relayRendezvous: prepared.rendezvous
-      })
-      await transport.start([], (raw) => raw.destroy())
-      const manager = new RouteManagerImpl({
-        node: prepared.node,
-        transports: transport.transports(),
-        credentials: rt.keys.tlsCredentials(),
-        clock: this.clock
-      })
-      const routes = parseProtocolJson(
-        Buffer.from(prepared.routes.payload, 'base64url')
-      ) as RoutesRecord
-      try {
-        const result = await manager.connect(
-          {
-            node: prepared.authority,
-            user: prepared.user,
-            transportKey: prepared.authorityTransportKey,
-            // A remote machine set up over SSH reaches this computer through its own tunnel first.
-            routes: [
-              ...(via ? [{ transport: 'direct', address: via, priority: 0 }] : []),
-              ...routes.routes
-            ]
-          },
-          this.shutdownSignal.signal
-        )
-        const quarantine = new EnrollmentQuarantine({
-          channel: result.channel,
-          service: rt.enrollment,
-          role: 'joiner',
+    try {
+      let prepared: PreparedNodeJoin
+      if (invite === undefined) prepared = rt.enrollment.preparedNodeJoin()!
+      else {
+        if (passphrase !== undefined) {
+          if (rt.identity.self() && !rt.enrollment.preparedNodeJoin())
+            throw new NetError('conflict')
+          if (rt.keys.state() === 'missing')
+            await rt.keys.initialize({ asAuthority: false, passphrase })
+          else {
+            if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+            rt.keys.protect(passphrase)
+          }
+        } else if (needsProtection && rt.keys.state() === 'missing')
+          // The keychain protects new keys on its own; a passphrase is asked for only when it refuses.
+          await rt.keys.initialize({ asAuthority: false })
+        if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
+        try {
+          prepared = await rt.enrollment.prepareNodeJoin(invite, name, link)
+        } catch (error) {
+          if (leftovers === 'sent' && error instanceof NetError && error.code === 'conflict')
+            throw this.unfinishedJoinError(rt)
+          throw error
+        }
+      }
+      label = rt.enrollment.joinAttempt()?.name
+      if (prepared.state !== 'enrolled') {
+        const transport = new ProfileTransports({
+          clock: this.clock,
+          profileDir: this.options.profileDir,
+          hosted: this.hosted?.transports,
+          identity: () => this.relayIdentity(prepared.node),
+          relayRendezvous: prepared.rendezvous
+        })
+        await transport.start([], (raw) => raw.destroy())
+        const manager = new RouteManagerImpl({
+          node: prepared.node,
+          transports: transport.transports(),
+          credentials: rt.keys.tlsCredentials(),
           clock: this.clock
         })
-        this.gateways.add(quarantine)
+        const routes = parseProtocolJson(
+          Buffer.from(prepared.routes.payload, 'base64url')
+        ) as RoutesRecord
+        const local = prepared.link?.routes ?? []
         try {
-          await quarantine.completed
+          const result = await manager.connect(
+            {
+              node: prepared.authority,
+              user: prepared.user,
+              transportKey: prepared.authorityTransportKey,
+              // A remote machine set up over SSH reaches this computer through its own tunnel first; a link's
+              // addresses come next, and another computer answering on one fails that address alone.
+              routes: [
+                ...(via ? [{ transport: 'direct', address: via, priority: 0 }] : []),
+                ...local,
+                ...routes.routes.filter(
+                  (route) => !local.some((row) => row.address === route.address)
+                )
+              ].slice(0, 32),
+              remembered: local.map((route) => route.address)
+            },
+            this.shutdownSignal.signal
+          )
+          if (result.route.transport === 'direct' && local.length)
+            this.linkCandidates.set(prepared.authority, result.route.address)
+          quarantine = new EnrollmentQuarantine({
+            channel: result.channel,
+            service: rt.enrollment,
+            role: 'joiner',
+            clock: this.clock
+          })
+          this.gateways.add(quarantine)
+          try {
+            await quarantine.completed
+          } finally {
+            this.gateways.delete(quarantine)
+            quarantine.close()
+          }
         } finally {
-          this.gateways.delete(quarantine)
-          quarantine.close()
+          await transport.teardown()
         }
-      } finally {
-        await transport.teardown()
+      }
+      this.assertInstanceOpen()
+      this.config.enabled = true
+      this.config.features = {
+        netBridge: true,
+        netSpaces: true,
+        netBridgeThreads: this.config.features?.netBridgeThreads !== false
+      }
+      this.saveConfig()
+      // A link's first address stands in until the enrollment itself names one (or after a restart, a retry).
+      if (prepared.link?.routes.length && !this.linkCandidates.has(prepared.authority))
+        this.linkCandidates.set(prepared.authority, prepared.link.routes[0].address)
+      await this.activate()
+      this.adoptRoutes(prepared.routes, prepared.authority)
+      this.refreshPeers()
+      // With `via` the joiner may have no route back to the inviter: the inviter dials it over SSH
+      // once it approves that route, so the join does not wait for its own connection to open.
+      return { user: prepared.user, node: prepared.node, authority: prepared.authority, wait: !via }
+    } catch (error) {
+      throw await this.joinFailed(error, label, quarantine?.peerClockOffsetMs)
+    }
+  }
+  /**
+   * Cleans up after a failed join and says why in words the screen can use. A join that never sent
+   * its request is set aside; so is one the other computer refused outright, since nothing more
+   * can come of it. One whose answer is unknown is kept for Retry or Give up.
+   */
+  private async joinFailed(
+    error: unknown,
+    label: string | undefined,
+    clockOffsetMs: number | undefined
+  ): Promise<unknown> {
+    if (this.stopped) return error
+    const refused = error instanceof NetError && error.code === 'invite_invalid' && fromPeer(error)
+    let leftovers: 'none' | 'unsent' | 'sent' = 'none'
+    try {
+      leftovers = this.joinLeftovers(this.runtime())
+      if (leftovers === 'unsent' || (leftovers === 'sent' && refused))
+        await this.setAsideNetwork('unfinished-join')
+    } catch {
+      // The next join or Networking on sets it aside again.
+    }
+    const named = label === undefined ? {} : { label }
+    if (clockOffsetMs !== undefined && Math.abs(clockOffsetMs) > JOIN_CLOCK_LIMIT_MS)
+      return new NetError('clock_skew', undefined, {
+        cause: error,
+        details: { reason: 'clock', ...named }
+      })
+    if (refused)
+      return new NetError('invite_invalid', undefined, {
+        cause: error,
+        details: { reason: 'cancelled', ...named }
+      })
+    // Errors already worded here (an unfinished join) pass as they are; a failure the other
+    // computer reported, other than a refusal, reads like any other.
+    const worded = error instanceof NetError && error.details !== undefined && !fromPeer(error)
+    if (!(error instanceof NetError) || worded) return error
+    if (leftovers === 'sent')
+      return new NetError('outcome_uncertain', undefined, {
+        cause: error,
+        details: { reason: 'join_unfinished', ...named }
+      })
+    if (['route_unreachable', 'peer_offline', 'deadline_exceeded'].includes(error.code))
+      return new NetError(error.code, undefined, {
+        cause: error,
+        details: { reason: 'unreachable', ...named }
+      })
+    return error
+  }
+  /**
+   * Waits a bounded time, outside the serial queue, for the first session with the computer joined
+   * through. The join has succeeded either way; `connected` says whether that session opened.
+   */
+  private async firstSession(joined: JoinOutcome): Promise<unknown> {
+    const { wait, ...result } = joined
+    const authority = wait ? this.supervisors.get(result.authority) : undefined
+    if (!authority) return result
+    let timer: { cancel(): void } | undefined
+    const connected = await Promise.race([
+      authority.opened.then(
+        () => true,
+        () => false
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = this.clock.setTimeout(() => resolve(false), JOIN_FIRST_SESSION_WAIT_MS)
+      })
+    ])
+    timer?.cancel()
+    return { ...result, connected }
+  }
+  /** A join whose request may have reached the other computer, for Retry and Give up on the screen. */
+  private unfinishedJoin(rt: NetRuntime): Pick<NetStatus, 'unfinishedJoin'> {
+    const attempt = rt.enrollment.joinAttempt()
+    if (attempt?.phase !== 'sent') return {}
+    return {
+      unfinishedJoin: {
+        ...(attempt.name === undefined ? {} : { name: attempt.name }),
+        ...(attempt.expiresAt === undefined ? {} : { expiresAt: attempt.expiresAt })
       }
     }
-    this.assertInstanceOpen()
-    this.config.enabled = true
-    this.config.features = {
-      netBridge: true,
-      netSpaces: true,
-      netBridgeThreads: this.config.features?.netBridgeThreads !== false
+  }
+  /** Give up: whatever a join left is set aside, also a request that may have reached the other computer. */
+  private async abandonJoin(): Promise<NetStatus> {
+    if (this.joinLeftovers(this.runtime()) !== 'none') await this.setAsideNetwork('unfinished-join')
+    return this.status()
+  }
+  /**
+   * Whether Start over may run here, and what it would leave behind. Refused while this computer
+   * hosts a Space, is signed in to Mousse ID, or other devices still hold a pass in its list.
+   */
+  private startOverCheck(): NetStartOverCheck {
+    const standing = this.hasIdentity() ? this.runtime().identity.startOver() : undefined
+    if (!standing) throw new NetError('not_enrolled')
+    const spaces = this.domain?.spaces?.() ?? [],
+      hosted = spaces.filter((space) => space.host).map((space) => space.name),
+      plus = this.hosted?.status()
+    const refused = hosted.length
+      ? 'space_host'
+      : plus?.connected || plus?.reconnecting
+        ? 'mousse_id'
+        : standing.allowed
+          ? undefined
+          : 'live_devices'
+    return {
+      ...(refused ? { refused } : { allowed: standing.allowed }),
+      keeper: standing.keeper,
+      ...(hosted.length ? { hosted } : {}),
+      ...(standing.allowed ? {} : { live: standing.live }),
+      spaces: spaces.filter((space) => !space.host).map((space) => space.name)
     }
-    this.config.preparedForJoin = false
-    this.saveConfig()
-    await this.activate()
-    this.adoptRoutes(prepared.routes, prepared.authority)
+  }
+  /**
+   * Start over: the network folder is set aside, keys, list and all, and this computer is left with
+   * no network, as a fresh one. Threads, bots and the rest of the profile stay. Runs in the queue.
+   */
+  private async startOver(): Promise<NetStatus> {
+    const check = this.startOverCheck()
+    if (check.refused)
+      throw new NetError('conflict', 'This computer can’t start over now.', {
+        details: { reason: check.refused }
+      })
+    await this.setAsideNetwork('start-over')
+    return this.status()
+  }
+  /** This computer's name for a new identity: its host name. */
+  private hostName(): string {
+    const name = hostname()
+      .replace(/\.local$/i, '')
+      .trim()
+    return name ? Array.from(name).slice(0, 64).join('') : 'My computer'
+  }
+  /** A refusal of the system keychain, worded so the screen asks for a passphrase once. */
+  private passphraseNeeded(error: unknown): unknown {
+    if (!(error instanceof NetError) || error.code !== 'keystore_locked') return error
+    return new NetError('keystore_locked', 'The system keychain refused. Choose a passphrase.', {
+      cause: error,
+      details: { reason: 'passphrase' }
+    })
+  }
+  /** The name of the computer that keeps the list, for "Add computers from <keeper>". */
+  private keeperName(): string | undefined {
+    try {
+      const rt = this.requireEnrolled(),
+        roster = rt.identity.verifySigned<Roster>(
+          rt.identity.roster()!,
+          rt.identity.pinnedRootKey(rt.identity.self()!.user)!
+        )
+      return this.currentNode(roster.authorityNode).name
+    } catch {
+      return undefined
+    }
+  }
+  /**
+   * The addresses a link made here offers: the automatic LAN listener on each IPv4 interface, then the direct and
+   * tunnel routes this computer publishes, then loopback (another copy on this computer). Relay routes are left out:
+   * a computer with no pass cannot use one without a ticket.
+   */
+  private linkRoutesHere(): Route[] {
+    const port = this.transport?.lanPort(),
+      lan = port
+        ? lanLinkRoutes(
+            port,
+            Object.values(networkInterfaces()).flatMap((rows) =>
+              (rows ?? [])
+                .filter((row) => row.family === 'IPv4' && !row.internal)
+                .map((row) => row.address)
+            )
+          )
+        : []
+    let published: Route[] = []
+    try {
+      published = (
+        parseProtocolJson(Buffer.from(this.signedRoutes().payload, 'base64url')) as RoutesRecord
+      ).routes
+    } catch {
+      published = []
+    }
+    return linkRoutes(lan, published)
+  }
+  /**
+   * Makes a connect link. On a computer with no identity this creates one, named after the host, which then keeps
+   * the others connected. On the keeper the link adds a computer; on any other device of the list it only connects
+   * devices already in it. A new link stops every earlier one here that was not used.
+   */
+  private async linkMake(params: Record<string, unknown>): Promise<NetLinkMade> {
+    const passphrase = params.passphrase as string | undefined
+    let rt = this.runtime()
+    const fresh = !rt.identity.self()
+    // A fresh computer whose keychain refused comes back with a passphrase: its identity was made by the first try,
+    // and this one finishes it, so it is still the call that set this computer up to keep the others connected.
+    let created = fresh
+    if (fresh || !this.config.enabled) {
+      try {
+        await this.init({
+          name: (params.name as string | undefined) ?? this.hostName(),
+          ...(passphrase === undefined ? {} : { passphrase })
+        })
+      } catch (error) {
+        throw this.passphraseNeeded(error)
+      }
+      rt = this.runtime()
+    }
+    const self = this.requireEnrolled().identity.self()!,
+      add = self.isAuthority
+    // An invitation is issued only from protected keys; the keychain does it, or a passphrase where it refuses.
+    if (add && !rt.keys.protectedAtRest()) {
+      try {
+        rt.keys.protect(passphrase)
+      } catch (error) {
+        throw this.passphraseNeeded(error)
+      }
+      created = true
+    }
+    if (!this.routes) await this.activate()
+    const routes = this.linkRoutesHere()
+    if (!routes.length)
+      throw new NetError('route_unreachable', 'This computer has no address another computer can reach.', {
+        details: { reason: 'no_listener' }
+      })
+    // Not the keeper: nothing was issued from it to revoke.
+    const made = rt.links.make(
+      add ? 'add' : 'connect',
+      (invite) => {
+        if (rt.identity.self()?.isAuthority) rt.enrollment.revokeInvite(invite)
+      },
+      LINK_TTL_MS
+    )
+    try {
+      const link = formatLink({
+        add,
+        fingerprint: fingerprint(decodeBase64(rt.keys.nodeKeys().transport)),
+        key: made.key,
+        list: listId(rt.identity.pinnedRootKey(self.user)!),
+        offer: made.offer,
+        routes
+      })
+      this.emit()
+      const keeper = add ? undefined : this.keeperName()
+      return {
+        link,
+        add,
+        created,
+        expiresAt: made.expiresAt,
+        reachable: reachableFromOthers(routes),
+        ...(keeper === undefined ? {} : { keeper })
+      }
+    } finally {
+      made.key.fill(0)
+    }
+  }
+  /**
+   * What pasting `link` here would do, from the link and this computer's own state alone (topology table): no
+   * network call is made.
+   */
+  private linkCheck(link: ConnectLink): NetLinkCheck {
+    const refused = (reason: NonNullable<NetLinkCheck['reason']>, startOver?: NetStartOverCheck) => ({
+      row: 'refused' as const,
+      add: link.add,
+      reason,
+      ...(startOver ? { startOver } : {})
+    })
+    const rt = existsSync(join(this.options.profileDir, 'net', 'net.db')) ? this.runtime() : undefined,
+      self = rt?.identity.self()
+    if (!rt || !self) {
+      if (rt && this.joinLeftovers(rt) === 'sent') return refused('join_unfinished')
+      return link.add ? { row: 'join', add: true } : refused('connect_only')
+    }
+    const root = rt.identity.pinnedRootKey(self.user)
+    if (root && listId(root) === link.list) {
+      try {
+        if (fingerprint(decodeBase64(rt.keys.nodeKeys().transport)) === link.fingerprint)
+          return refused('own_link')
+      } catch {
+        // Locked keys: the paste itself asks for them.
+      }
+      return { row: 'connect', add: link.add }
+    }
+    if (!link.add) return refused('other_list')
+    let check: NetStartOverCheck
+    try {
+      check = this.startOverCheck()
+    } catch {
+      return refused('other_list')
+    }
+    if (check.refused) return refused(check.refused, check)
+    return { row: 'start_over', add: true, startOver: check }
+  }
+  /** Pastes a link: joins, connects, or (asked to) starts over and then joins. Runs in the serial queue. */
+  private async linkPaste(
+    params: Record<string, unknown>
+  ): Promise<{ pasted: NetLinkPasted; joined?: JoinOutcome }> {
+    const link = parseLink(params.link),
+      passphrase = params.passphrase as string | undefined
+    const check = this.linkCheck(link)
+    if (check.row === 'refused')
+      throw new NetError('conflict', 'This link can’t be used on this computer.', {
+        details: { reason: check.reason }
+      })
+    if (check.row === 'connect') return { pasted: await this.linkConnect(link) }
+    if (check.row === 'start_over') {
+      if (params.startOver !== true)
+        throw new NetError('conflict', 'This computer must start over first.', {
+          details: { reason: 'start_over' }
+        })
+      // Nothing is set aside until the other computer answers on the key the link pinned.
+      const opened = await this.dialLink(link, this.requireEnrolled().keys.tlsCredentials())
+      opened.channel.close()
+      await opened.transport.teardown()
+      await this.startOver()
+    }
+    const joined = await this.linkJoin(link, params.name as string | undefined, passphrase)
+    let name: string | undefined
+    try {
+      name = this.currentNode(joined.authority).name
+    } catch {
+      name = undefined
+    }
+    return {
+      joined,
+      pasted: {
+        row: 'join',
+        node: joined.authority,
+        ...(name === undefined ? {} : { name }),
+        connection: connectionView(this.runtime().connections.state(joined.authority))
+      }
+    }
+  }
+  /**
+   * Joins the list of the computer that made `link`: keys first (the claim binds the invitation to them), then the
+   * offer exchange, then the ordinary enrollment with the invitation it returned.
+   */
+  private async linkJoin(link: ConnectLink, name?: string, passphrase?: string): Promise<JoinOutcome> {
+    let rt = this.runtime()
+    const leftovers = this.joinLeftovers(rt)
+    if (leftovers === 'sent') throw this.unfinishedJoinError(rt)
+    if (leftovers === 'unsent') {
+      // Keys from an earlier paste are kept, so a link already claimed with them still answers this computer; a
+      // journal no request left is dropped. Keys that stay locked are set aside like any unsent join.
+      if (rt.keys.state() === 'locked' && passphrase !== undefined)
+        await rt.keys.unlock(passphrase).catch(() => {})
+      if (rt.keys.state() !== 'unlocked') {
+        await this.setAsideNetwork('unfinished-join')
+        rt = this.runtime()
+      } else if (rt.enrollment.joinAttempt()) rt.enrollment.abandonPreparedJoin()
+    }
+    if (rt.keys.state() === 'missing')
+      try {
+        await rt.keys.initialize({
+          asAuthority: false,
+          ...(passphrase === undefined ? {} : { passphrase })
+        })
+      } catch (error) {
+        throw this.passphraseNeeded(error)
+      }
+    if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+    const answer = await this.fetchFromLink(link, 'add', rt)
+    if (answer.kind !== 'invite') throw new NetError('bad_request')
+    // The address that answered goes first, for the enrollment and as the first ordinary session's candidate.
+    const routes = [
+      answer.route,
+      ...link.routes.filter((route) => route.address !== answer.route.address)
+    ]
+    return this.join(answer.invite, name ?? this.hostName(), undefined, undefined, true, { routes })
+  }
+  /**
+   * A link from a device of this computer's own list: the maker's signed routes come back on the offer path and
+   * each side connects the other unless it has a record already (a hold or a Disconnect stays). Nothing is enrolled.
+   */
+  private async linkConnect(link: ConnectLink): Promise<NetLinkPasted> {
+    const rt = this.requireEnrolled()
+    this.assertEnabled()
+    if (!this.routes) await this.activate()
+    const answer = await this.fetchFromLink(link, 'connect', rt)
+    if (answer.kind !== 'routes') throw new NetError('bad_request')
+    // The answer counts only from the device of this list whose key the link pinned.
+    const peer = this.currentNode(answer.node)
+    if (
+      answer.node === rt.identity.self()!.node ||
+      fingerprint(decodeBase64(peer.keys.transport)) !== link.fingerprint
+    )
+      throw new NetError('peer_key_mismatch')
+    this.adoptRoutes(answer.routes, answer.node)
+    if (answer.route.transport === 'direct')
+      this.linkCandidates.set(answer.node, answer.route.address)
+    rt.connections.connectUnrecorded([answer.node], 'link')
     this.refreshPeers()
-    const authority = this.supervisors.get(prepared.authority)
-    // With `via` the joiner may have no route back to the inviter: the inviter dials it over SSH
-    // once it approves that route, so the join does not wait for its own connection to open.
-    if (authority && !via) await authority.opened
-    return { user: prepared.user, node: prepared.node, authority: prepared.authority }
+    for (const supervisor of this.supervisors.values()) supervisor.retryAfterStateChange()
+    this.emit()
+    return {
+      row: 'connect',
+      node: answer.node,
+      name: peer.name,
+      connection: connectionView(rt.connections.state(answer.node))
+    }
+  }
+  /** One offer exchange: dial the link pinned to its fingerprint, claim, read the one answer. */
+  private async fetchFromLink(
+    link: ConnectLink,
+    want: 'add' | 'connect',
+    rt: NetRuntime
+  ): Promise<LinkAnswer & { route: Route }> {
+    const opened = await this.dialLink(link, rt.keys.tlsCredentials())
+    try {
+      return { ...(await claimOffer(opened.channel, link, want, this.clock)), route: opened.route }
+    } catch (error) {
+      if (error instanceof NetError && fromPeer(error) && error.code === 'invite_invalid')
+        throw new NetError('invite_invalid', 'This link was used or replaced. Make a new link.', {
+          cause: error,
+          details: { reason: 'stale' }
+        })
+      if (error instanceof NetError && fromPeer(error) && error.code === 'forbidden')
+        throw new NetError('forbidden', 'The other computer refused this link.', {
+          cause: error,
+          details: { reason: 'refused' }
+        })
+      throw error
+    } finally {
+      opened.channel.close()
+      await opened.transport.teardown()
+    }
+  }
+  /**
+   * Dials every address of `link` at once, with TLS pinned to its fingerprint and nothing else sent, and keeps the
+   * first that answers. Another computer on an address fails that address alone.
+   */
+  private async dialLink(
+    link: ConnectLink,
+    credentials: ReturnType<FileKeyStore['tlsCredentials']>
+  ): Promise<{ channel: SecureChannel; route: Route; transport: ProfileTransports }> {
+    const transport = new ProfileTransports({
+      clock: this.clock,
+      profileDir: this.options.profileDir,
+      identity: () => {
+        throw new NetError('not_enrolled')
+      }
+    })
+    await transport.start([], (raw) => raw.destroy())
+    const controllers = link.routes.map(() => new AbortController()),
+      abortAll = () => controllers.forEach((controller) => controller.abort())
+    const timer = this.clock.setTimeout(abortAll, DIAL_TLS_DEADLINE_MS * 2)
+    this.shutdownSignal.signal.addEventListener('abort', abortAll, { once: true })
+    let won: { channel: SecureChannel; route: Route } | undefined
+    const attempts = link.routes.map(async (route, index) => {
+      const signal = controllers[index].signal,
+        raw = await transport.dial(route, signal)
+      try {
+        const channel = await openSecureChannel(raw, {
+          role: 'client',
+          credentials,
+          expectedPeerFingerprint: link.fingerprint,
+          deadlineMs: DIAL_TLS_DEADLINE_MS,
+          signal
+        })
+        if (won) {
+          channel.close()
+          throw new NetError('cancelled')
+        }
+        won = { channel, route }
+        controllers.forEach((controller, other) => other !== index && controller.abort())
+        return won
+      } catch (error) {
+        raw.destroy()
+        throw error
+      }
+    })
+    try {
+      return { ...(await Promise.any(attempts)), transport }
+    } catch {
+      await transport.teardown()
+      throw new NetError('route_unreachable', 'The computer that made this link didn’t answer.', {
+        details: { reason: 'link_unreachable' }
+      })
+    } finally {
+      timer.cancel()
+      this.shutdownSignal.signal.removeEventListener('abort', abortAll)
+    }
+  }
+  /**
+   * The link's offer path on this computer: one claim on a fresh connection, answered from the offers made here.
+   * The gateway in front of it keeps the pre-auth byte and time limits.
+   */
+  private answerLinkClaim(request: LinkClaimMessage, channel: SecureChannel): LinkResultMessage {
+    const rt = this.requireEnrolled()
+    try {
+      return rt.links.claim(request, channel, {
+        self: () => {
+          const self = rt.identity.self()!
+          return { node: self.node, keeper: self.isAuthority }
+        },
+        issue: (claimer, until) => {
+          const issued = rt.enrollment.issueNodeInvite({
+            kind: 'computer',
+            caps: [...COMPUTER_NODE_CAPABILITIES],
+            joinerTransportFingerprint: claimer,
+            emptyRoutes: true,
+            // The usual ten minutes, but never past the link's own end.
+            ttlMs: LINK_INVITE_TTL_MS,
+            endsBy: until
+          })
+          return { text: issued.text, invite: issued.invite }
+        },
+        revoke: (invite) => rt.enrollment.revokeInvite(invite),
+        listed: (transportKey) => this.listedByTransportKey(transportKey),
+        connect: (node) => rt.connections.connectUnrecorded([node], 'link'),
+        routes: () => this.signedRoutes()
+      })
+    } finally {
+      this.emit()
+    }
+  }
+  /** The current, unrevoked device of this list whose transport key is `transportKey`. */
+  private listedByTransportKey(transportKey: string): NodeId | undefined {
+    const rt = this.requireEnrolled(),
+      self = rt.identity.self()!,
+      root = rt.identity.pinnedRootKey(self.user)!,
+      roster = rt.identity.verifySigned<Roster>(rt.identity.roster()!, root)
+    for (const signed of roster.nodes) {
+      const delegation = rt.identity.verifySigned<NodeDelegation>(signed, root)
+      if (delegation.keys.transport !== transportKey) continue
+      try {
+        if (this.currentNode(delegation.subject).keys.transport === transportKey)
+          return delegation.subject
+      } catch {
+        // Revoked or replaced: not listed.
+      }
+    }
+    return undefined
   }
   private async transferAuthority(node: NodeId): Promise<unknown> {
     const rt = this.requireEnrolled()
@@ -2954,13 +4352,14 @@ export class NetService {
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.protectedAtRest(),
+        ...(rt.keys.protectedByPassphrase() ? { passphraseProtected: true } : {}),
         ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
         ...(self
           ? {
               self: rt.identity.selfRemoved() ? { ...self, removed: true as const } : self,
               rosterState: rt.identity.rosterState(self.user)
             }
-          : {}),
+          : this.unfinishedJoin(rt)),
         routes: this.transport?.routes() ?? [],
         transports: this.transport?.statuses() ?? [],
         peers: [...peers.values()],
@@ -3231,7 +4630,10 @@ export class NetService {
   }
   /** The other computers of this user, for the aliases an editor opens. Phones have no folders to open. */
   private liveComputers(): LiveComputer[] {
-    const view = this.nodes() as {
+    // The engine's pairings have aliases too. With v1 off, or not enrolled there, they are the only computers.
+    const engine = this.engineEditor?.computers() ?? []
+    if (this.engineEditor && (!this.config.enabled || this.disabled)) return engine
+    let view: {
       nodes: Array<{
         node: NodeId
         name: string
@@ -3241,19 +4643,28 @@ export class NetService {
         revoked: boolean
       }>
     }
+    try {
+      view = this.nodes() as typeof view
+    } catch (error) {
+      if (this.engineEditor) return engine
+      throw error
+    }
     // The same rule as the lists of threads. Only the authority records which devices are computers, so on any
     // other computer the rest are of unknown kind, and a computer is told by the grant only computers hold.
-    return view.nodes
-      .filter(
-        (entry) =>
-          !entry.self &&
-          !entry.revoked &&
-          isListedComputer(
-            entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
-            entry.caps
-          )
-      )
-      .map((entry) => ({ node: entry.node, name: entry.name }))
+    return [
+      ...view.nodes
+        .filter(
+          (entry) =>
+            !entry.self &&
+            !entry.revoked &&
+            isListedComputer(
+              entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
+              entry.caps
+            )
+        )
+        .map((entry) => ({ node: entry.node, name: entry.name })),
+      ...engine
+    ]
   }
   /**
    * Mousse's ssh settings for editors. Reading, undoing and acknowledging the notice work while
@@ -3266,7 +4677,8 @@ export class NetService {
       method === 'net.editor.alias'
     if (setup) {
       if (this.disabled) throw new NetError('disabled')
-      this.assertEnabled()
+      // The engine's pairings get aliases with v1 networking off.
+      if (!this.engineEditor) this.assertEnabled()
     }
     const editor = this.editorSsh()
     if (!editor) {
@@ -3301,7 +4713,11 @@ export class NetService {
     })
   }
   /** `bridge.nodes`, plus the ssh route a peer offers that this computer has not approved. */
-  private async nodesView(): Promise<unknown> {
+  /**
+   * The `bridge.nodes` rows of this computer's v1 devices. `bridge.nodes` itself is answered by the peer directory,
+   * which adds these only while v1 networking is on.
+   */
+  async nodesView(): Promise<unknown> {
     const rt = this.requireEnrolled()
     const view = this.nodes() as { nodes: Array<{ node: NodeId; self: boolean }> }
     const offers = await Promise.all(
@@ -3365,6 +4781,18 @@ export class NetService {
         // What this computer lets the device do here; the device's own limits are on that device.
         policy: policyView(rt.policy.get(node.subject)),
         self: node.subject === rt.identity.self()!.node,
+        // The device that keeps the list: it signs every device's pass and its renewals.
+        keeper: node.subject === roster.authorityNode,
+        // Whether the device is connected here, and whether this computer holds its routes (so Connect can reach it).
+        connection:
+          node.subject === rt.identity.self()!.node
+            ? 'connected'
+            : connectionView(rt.connections.state(node.subject)),
+        routeHeld:
+          node.subject !== rt.identity.self()!.node &&
+          !!rt.db.database
+            .prepare('SELECT 1 FROM net_peer_routes WHERE node=?')
+            .get(node.subject),
         revoked: roster.revoked.some(
           (row) => row.subject === node.subject && row.throughKeyEpoch >= node.keyEpoch
         ),
@@ -3388,6 +4816,7 @@ export class NetService {
           live.add(delegation.subject)
       }
       this.presences().prune(live)
+      this.lanMemory().prune(live)
     } catch {
       // Presence is a convenience; pruning runs again on the next roster change.
     }
@@ -3404,6 +4833,39 @@ export class NetService {
     const db = this.runtime().db
     if (this.presenceStore?.db !== db) this.presenceStore = new PeerPresence(db, this.clock)
     return this.presenceStore
+  }
+  private lanMemory(): SqliteLanMemory {
+    const db = this.runtime().db
+    if (this.lanMemoryStore?.db !== db) this.lanMemoryStore = new SqliteLanMemory(db, this.clock)
+    return this.lanMemoryStore
+  }
+  /**
+   * Where a connect link just reached `node`, then the last address a session with it opened over: dial candidates
+   * after the live LAN hints.
+   */
+  private lastAddressRoute(node: NodeId, others: readonly Route[]): Route[] {
+    let last: string | undefined
+    try {
+      last = this.lanMemory().lastAddress(node)
+    } catch {
+      last = undefined
+    }
+    return [...new Set([this.linkCandidates.get(node), last])]
+      .filter(
+        (address): address is string =>
+          !!address && !others.some((route) => route.address === address)
+      )
+      .map((address) => ({ transport: 'direct', address, priority: LAST_ADDRESS_PRIORITY }))
+  }
+  /** Remembers where a session with one of this user's devices opened, unless it came through a relay. */
+  private rememberAddress(node: NodeId, address: string | undefined): void {
+    if (!address) return
+    try {
+      this.lanMemory().remember(node, address)
+      this.linkCandidates.delete(node)
+    } catch {
+      // A hint only: the next session writes it again.
+    }
   }
   /**
    * What this computer knows about a device beyond its roster entry: version, how it is connected
@@ -3512,7 +4974,13 @@ export class NetService {
       // Unknown method: an older daemon. Any other failure (a closed session, a timeout) leaves
       // what was known before. A phone reached over the relay answers the same way, but it
       // never publishes routes, so only a device that does can be an older daemon.
-      if (error instanceof NetError && error.code === 'forbidden' && this.publishesRoutes(node)) {
+      // A refusal that names its reason (the device has not connected this one) comes from a current daemon.
+      if (
+        error instanceof NetError &&
+        error.code === 'forbidden' &&
+        forbiddenReason(error.details) === undefined &&
+        this.publishesRoutes(node)
+      ) {
         try {
           this.presences().legacy(node)
         } catch {
@@ -3631,6 +5099,7 @@ export class NetService {
     this.presenceTimer?.cancel()
     this.rosterListener?.()
     this.policyListener?.()
+    this.connectionsListener?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     for (const session of this.sessions) session.close()

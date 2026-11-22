@@ -13,6 +13,11 @@ import { normalizeQueuedMessages } from '../../../../src/mms/queue/ThreadMessage
 import { validateRemoteParams } from '../../../../src/mms/bridge/remote/dto'
 import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX } from '../../../../src/mms/run/mcp/appTools/agentMessage'
 import { agentMessageWords } from '../../../../src/shared/agentMessageWords'
+import { registerNetMethods } from '../../../../src/mms/net/registerMethods'
+import { DomainHandlerRegistry } from '../../../../src/mms/protocol/domainRegistry'
+import type { HandlerContext } from '../../../../src/mms/protocol/handlers'
+import { NET_LOCAL_CAPABILITY, type BridgeNodePolicy } from '../../../../src/shared/net/local'
+import { newId } from '../../../../src/shared/net'
 import { cleanupAll, linked } from './routerFixture'
 
 type Loose = Record<string, any>
@@ -191,6 +196,43 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     await expect(t.dispatch('orchestrator.send', { threadId: t.qualified(id), content: 'hi', agent: mark() })).rejects.toMatchObject({ code: 'invalid_params' })
     // A phone cannot set it either: its threads.create takes exact keys.
     expect(() => validateRemoteParams('threads.create', { name: 'x', agent: mark() })).toThrow()
+  }, 120_000)
+
+  it('takes the reach a person here sets in Devices at the next call, and the device cannot set its own', async () => {
+    standInForTurns()
+    // A window of the owner, through the same validator and service as Settings → Devices → Limits.
+    const registry = new DomainHandlerRegistry()
+    registerNetMethods(registry, () => t.owner.net)
+    const window = { connection: { id: 'owner-window', clientType: 'gui', binding: { profileId: t.owner.profileId, epoch: 1 }, capabilities: new Set([NET_LOCAL_CAPABILITY]) } } as unknown as HandlerContext
+    const setReach = async (agentReach: unknown) =>
+      ((await registry.dispatch(window, 'bridge.policy', { profileId: t.owner.profileId, node: t.callerNode, agentReach })) as { policy: BridgeNodePolicy }).policy
+    const shown = async () =>
+      ((await t.owner.net.request('bridge.nodes', {})) as { nodes: Array<{ node: string; policy?: BridgeNodePolicy }> }).nodes.find((row) => row.node === t.callerNode)!.policy!
+    expect((await shown()).agentReach).toBe('launched')
+    await expect(setReach('everything')).rejects.toMatchObject({ code: 'bad_request' })
+
+    const own = t.thread('The owner\'s own')
+    const mine = await launched('Started by the agent')
+    // Nothing: even the thread its agent started is out of reach from the next call on.
+    expect(await setReach('none')).toMatchObject({ agentReach: 'none' })
+    expect((await shown()).agentReach).toBe('none')
+    expect(await refusal(call('orchestrator.send', { threadId: mine, content: 'go on', clientRequestId: 'reach-1', agent: mark() }))).toBe('agent_reach')
+    // All threads: a thread a person here started is reached at the next call.
+    expect(await setReach('all')).toMatchObject({ agentReach: 'all' })
+    const sent = await call('orchestrator.send', { threadId: own.id, content: 'hello from an agent', clientRequestId: 'reach-2', agent: mark() })
+    expect(t.owner.runEngine.getRun(sent.runId)).toMatchObject({ threadId: own.id, source: 'mcp' })
+    expect(audit.recent(3, t.callerNode)[0]).toMatchObject({ method: 'orchestrator.send', outcome: 'ok', actor: 'agent', thread: own.id })
+
+    // The device itself cannot widen or narrow it: the method is not routed, whatever name it is sent under, and a Bridge
+    // connection does not hold the local capability.
+    await setReach('none')
+    const session = t.caller.net.session(t.node)
+    for (const method of ['routed.bridge.policy', 'bridge.policy'])
+      await expect(session.rpc(method, { node: t.callerNode, agentReach: 'all' }, { id: newId('rpc'), idem: `self-${method}`, deadlineMs: 5000 })).rejects.toBeDefined()
+    await expect(t.client().call(t.node, 'bridge.policy', { node: t.callerNode, agentReach: 'all' }, { idem: 'self-client' })).rejects.toBeDefined()
+    const bridged = { connection: { id: 'bridged', clientType: 'bridge', binding: { profileId: t.owner.profileId, epoch: 1 }, capabilities: new Set(), bridgeCaller: { node: t.callerNode, user: 'usr_x', maxPermissionMode: 'full' } } } as unknown as HandlerContext
+    await expect(registry.dispatch(bridged, 'bridge.policy', { profileId: t.owner.profileId, node: t.callerNode, agentReach: 'all' })).rejects.toMatchObject({ code: 'capability_required' })
+    expect(policy.get(t.callerNode).agentReach).toBe('none')
   }, 120_000)
 
   it('refuses what a person could do: answering past a waiting question, a looser mode, a long body, the same words again', async () => {

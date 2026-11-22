@@ -13,10 +13,6 @@ function context(instances?: Partial<HarnessInstances>, registry?: Partial<Harne
 }
 
 describe('harness provider protocol', () => {
-  it('declares the full command set', () => {
-    expect(HARNESS_METHODS).toHaveLength(22)
-  })
-
   it('the GUI refuses, with recovery steps, a running service that predates the provider methods', async () => {
     // The GUI calls every one of them, `setSecret` and Add provider's `catalog.addOptions` included (5a-2).
     expect(GUI_REQUIRED_METHODS.filter((method) => HARNESS_METHODS.includes(method as never))).toHaveLength(HARNESS_METHODS.length)

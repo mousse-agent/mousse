@@ -14,10 +14,10 @@ import { ProviderIcon } from '../lib/providerIcons'
 import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown, type ContextCacheLine } from './ContextUsagePopover'
 import { IdleCompactionChip } from './IdleCompactionChip'
 import { useContextRingInComposer } from '../lib/contextRingSetting'
-import { cacheGoneCold, contextTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
+import { cacheGoneCold, historyTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
 import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
-import { useCommandBindings } from '../commands/commandRegistry'
+import { shortcutTitle, useCommandBindings } from '../commands/commandRegistry'
 import { useAppStore } from '../stores/appStore'
 
 import { STEER_BINDING, type SendMode } from '../lib/steerKey'
@@ -84,6 +84,8 @@ export interface ComposerRunProps {
   onCompactNow?: () => void
   /** A compaction the person started is running: the chip reads "Compacting…". */
   compacting?: boolean
+  /** Work is going on that Compact now must not run beside; absent: whatever Stop stops. Subagents paused on a usage limit keep Stop but are not work. */
+  workInProgress?: boolean
   /** A bot's own thread: the bot keeps its context, so there is no ring, popover or Compact chip whatever the settings. */
   contextHidden?: boolean
 }
@@ -114,6 +116,8 @@ export interface ComposerFooterProps {
   onSend?: () => void
   /** What the send button says it does, when not "Send message" / "Queue message": answering open questions, or "Deny and send" while an approval waits. */
   sendLabel?: string
+  /** Why Send is held (an attachment still being prepared, or one that can't be sent): its tooltip, and the button stays in place, disabled. */
+  sendBlocked?: string | null
   onStop?: () => void
   onStartRecording?: () => void
   /** Done: ends the recording and turns it into text. */
@@ -314,7 +318,8 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
 /**
  * The context ring and its popover, while the context's fill is known and the ring is turned on (Settings ›
  * Appearance › Composer), and left of it the Full/Compact chip once the prompt cache has gone cold. The chip
- * shows with the ring off too.
+ * shows with the ring off too, and on a runtime that reports no context (an ACP agent, Cursor), sized by
+ * Mousse's estimate of the history.
  */
 function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runActive: boolean }) {
   const ringOn = useContextRingInComposer()
@@ -331,11 +336,13 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
   useEffect(() => {
     if (!(contextShown && ringOn) && contextOpen) onContextOpenChange(false)
   }, [contextShown, ringOn, contextOpen, onContextOpenChange])
-  if (!contextShown) return null
+  // A runtime with no gauge still has a prompt cache that goes cold: the chip alone, when Mousse estimated the history.
+  const estimatedOnly = !showsContextGauge(selectedProvider) && contextUsage.historyEstimate !== undefined
+  if (!contextShown && !estimatedOnly) return null
   const cacheState = cache ? promptCacheState(cache, now) : undefined
   const canCompact = Boolean(onCompactNow)
   const chip = idleCompactionChip({ usage: contextUsage, now, setting: idleSetting, canCompact, runActive, compacting })
-  const historyTokens = contextTokens(contextUsage)
+  const history = historyTokens(contextUsage)
   const cacheLine: ContextCacheLine | undefined = cacheState && {
     text: promptCacheText(cacheState),
     tone: cacheState.kind === 'warm' ? 'warm' : cacheGoneCold(cacheState) ? 'cold' : 'unknown',
@@ -345,13 +352,14 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
     {chip && cache && cacheLine ? (
       <IdleCompactionChip
         state={chip}
-        historyTokens={historyTokens}
+        historyTokens={history}
+        estimated={estimatedOnly}
         cacheText={cacheLine.text}
-        costText={uncachedCostText(cache, historyTokens)}
+        costText={uncachedCostText(cache, history)}
         onCompact={() => onCompactNow?.()}
       />
     ) : null}
-    {ringOn ? (
+    {ringOn && contextShown ? (
       <div className="composer-context-anchor">
         <ContextUsageRing
           usage={contextUsage}
@@ -393,6 +401,7 @@ export function ComposerFooter({
   allowAttachWhileLoading = false,
   permission,
   sendLabel,
+  sendBlocked = null,
   dictateWhileStoppable = false,
   extraActions,
   sendMode
@@ -407,6 +416,7 @@ export function ComposerFooter({
   const steers = sendMode?.mode === 'steer'
   const runningTitle = steers ? `Steer · ${enterKey} — Queue · ${steerKey}` : `Queue · ${enterKey} — Steer · ${steerKey}`
   const switchBinding = bindings['composer.switchSendMode']
+  const dictateBinding = bindings['composer.dictate']
   const modeTitle = [
     steers ? 'Steer' : 'Queue',
     `${steerKey} ${steers ? 'queues' : 'steers'}`,
@@ -418,7 +428,7 @@ export function ComposerFooter({
   }
   // The send slot is Send, Queue, Stop or Stop recording. While a run goes and the box has text, Stop
   // sits left of it, so Queue and Stop are both one click and the slot never moves.
-  const stopInSlot = stoppable && !canSend
+  const stopInSlot = stoppable && !canSend && !sendBlocked
   const stopButton = (className: string) => (
     <button type="button" className={className} title={stopTitle} aria-label="Stop run" onClick={onStop} disabled={disabled}>
       <Square size={14} strokeWidth={2} fill="currentColor" />
@@ -458,7 +468,7 @@ export function ComposerFooter({
           <button
             type="button"
             className="composer-action-btn composer-recorder-done"
-            title="Done · insert the text"
+            title={shortcutTitle('Done · insert the text', dictateBinding, platform)}
             aria-label="Finish recording"
             onMouseDown={(event) => event.preventDefault()}
             onClick={onStopRecording}
@@ -478,7 +488,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
+        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={run.workInProgress ?? stoppable} /> : null}
 
         {extraActions}
 
@@ -497,7 +507,7 @@ export function ComposerFooter({
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"
-            title="Dictate"
+            title={shortcutTitle('Dictate', dictateBinding, platform)}
             aria-label="Dictate"
             aria-busy={recordingPending}
             // The box keeps focus, so its selection stays highlighted while recording.
@@ -532,7 +542,7 @@ export function ComposerFooter({
           <button
             type="button"
             className={`composer-action-btn${canSend ? ' composer-action-btn-active' : ''}`}
-            title={sendLabel ?? (loading ? runningTitle : 'Send')}
+            title={sendBlocked ?? sendLabel ?? (loading ? runningTitle : 'Send')}
             aria-label={sendLabel ?? (loading ? (steers ? 'Steer message' : 'Queue message') : 'Send message')}
             onClick={handleActionClick}
             disabled={disabled || !canSend}

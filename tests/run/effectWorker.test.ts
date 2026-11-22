@@ -38,14 +38,14 @@ describe('EffectWorker', () => {
 
   const setup = (
     executors: Partial<Record<EffectKind, EffectExecutor>>,
-    options: { timeoutMs?: number; fibres?: number; laneFibres?: Partial<EffectWorkerFibres>; pollMs?: number } = {}
+    options: { timeoutMs?: number; deadline?: false; fibres?: number; laneFibres?: Partial<EffectWorkerFibres>; pollMs?: number } = {}
   ) => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-worker-'))
     db = new ProfileDatabase({ profileHome })
     const store = new RunStore(db)
     const outbox = new EffectOutbox(store, {
       kindSpec: {
-        'turn.steer': { class: 'process_bound', timeoutMs: options.timeoutMs ?? 30_000 }
+        'turn.steer': { class: 'process_bound', timeoutMs: options.timeoutMs ?? 30_000, ...(options.deadline === false ? { deadline: false as const } : {}) }
       }
     })
     const worker = new EffectWorker({
@@ -98,6 +98,25 @@ describe('EffectWorker', () => {
     expect(calls).toBe(2)
     // The abandoned first attempt is still tracked; stop() waits for it (H5).
     hung.resolve()
+  })
+
+  it('a kind without a deadline (a turn) runs past its timeout on a renewed lease, and settles once', async () => {
+    let aborted = false
+    const { outbox, worker } = setup(
+      {
+        'turn.steer': async (_effect, ctx) => {
+          // Several timeouts long: only a deadline would cut it.
+          await new Promise((resolve) => setTimeout(resolve, 300))
+          aborted = ctx.signal.aborted
+        }
+      },
+      { timeoutMs: 60, deadline: false }
+    )
+    const effect = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
+    worker.start()
+    await waitFor(() => outbox.get(effect.effectId)!.status === 'succeeded', 'success')
+    expect(aborted).toBe(false)
+    expect(outbox.get(effect.effectId)).toMatchObject({ attempts: 1, lastError: null })
   })
 
   it('an executor that defers puts its effect back to pending later, without counting the attempt', async () => {
@@ -225,44 +244,79 @@ describe('EffectWorker', () => {
     expect(outbox.get(next.effectId)!.status).toBe('pending')
   })
 
-  it('runs a stop while every turn fibre holds a live turn, and caps concurrent turns, two of them kept for people', async () => {
+  it('starts every due turn at once, keeps one turn per thread, reaches a live turn with a Stop, and stop() waits for every turn', async () => {
     const gate = deferred()
     const started: string[] = []
+    const finished: string[] = []
     const interrupted: string[] = []
     const { store, outbox, worker } = setup({
+      // Each turn ignores its signal until the gate opens, as a turn still unwinding does.
       'turn.start': async (effect) => {
         started.push(effect.threadId)
         await gate.promise
+        finished.push(effect.threadId)
       },
       'turn.interrupt': async (effect) => {
         interrupted.push(effect.threadId)
       }
     })
-    expect(worker.fibreCounts).toEqual({ turn: 8, control: 2, replaySafe: 2 })
     worker.start()
     const send = (threadId: string, source: string) =>
       outbox.enqueue({ threadId, runId: store.createRun({ threadId, source }).runId, kind: 'turn.start' })
-    // Nine delegated subagents and wakes: background turns fill only six slots.
-    for (let i = 1; i <= 9; i++) send(`bg${i}`, i % 2 ? 'delegation' : 'wake')
-    await waitFor(() => started.length === 6, 'six background turns')
+    // Twelve threads: people's messages (window, phone, CLI) and background work (subagents, wakes, bots, schedules).
+    const sources = ['gui', 'delegation', 'wake', 'bot', 'schedule', 'remote', 'cli', 'delegation', 'resume', 'bot', 'goal', 'gui']
+    sources.forEach((source, i) => send(`t${i + 1}`, source))
+    await waitFor(() => started.length === 12, 'twelve turns', 1000)
+    expect([...started].sort()).toEqual(sources.map((_, i) => `t${i + 1}`).sort())
+    // A thirteenth thread's turn starts too; a second turn of a thread waits for that thread's first.
+    send('t13', 'delegation')
+    const second = send('t1', 'gui')
+    await waitFor(() => started.length === 13, 'the thirteenth turn', 1000)
     await new Promise((resolve) => setTimeout(resolve, 30))
-    expect(started).toHaveLength(6)
-    // A message from the window and one from a phone start at once, ahead of the three waiting.
-    send('person-gui', 'gui')
-    send('person-phone', 'remote')
-    await waitFor(() => started.length === 8, 'eight live turns')
-    expect(started.slice(6).sort()).toEqual(['person-gui', 'person-phone'])
-    const stop = outbox.enqueue({ threadId: 'bg1', kind: 'turn.interrupt' })
+    expect(started.filter((thread) => thread === 't1')).toHaveLength(1)
+    expect(outbox.get(second.effectId)!.status).toBe('pending')
+    // A Stop reaches a live turn while every turn runs.
+    const stop = outbox.enqueue({ threadId: 't2', kind: 'turn.interrupt' })
     await waitFor(() => outbox.get(stop.effectId)!.status === 'succeeded', 'the interrupt', 1000)
-    expect(interrupted).toEqual(['bg1'])
-    // A ninth turn, even a person's, waits for a turn fibre; control fibres never take it.
-    send('person-cli', 'cli')
+    expect(interrupted).toEqual(['t2'])
+    // stop() returns only once every turn it started has settled.
+    let stopped = false
+    const stopping = worker.stop().then(() => {
+      stopped = true
+    })
     await new Promise((resolve) => setTimeout(resolve, 30))
-    expect(started).toHaveLength(8)
+    expect(stopped).toBe(false)
     gate.resolve()
-    await waitFor(() => started.length === 12, 'the waiting turns')
-    // When slots free, the person's turn goes before the background turns that were waiting longer.
-    expect(started[8]).toBe('person-cli')
+    await stopping
+    expect(finished).toHaveLength(13)
+    expect(worker.inFlight()).toBe(0)
+    expect(outbox.get(second.effectId)!.status).toBe('pending')
+  })
+
+  it('starts the next turn of a thread as soon as its turn before ends', async () => {
+    const gates = new Map<string, ReturnType<typeof deferred>>()
+    const started: string[] = []
+    const { store, outbox, worker } = setup({
+      'turn.start': async (effect) => {
+        started.push(effect.runId!)
+        const gate = deferred()
+        gates.set(effect.runId!, gate)
+        await gate.promise
+      }
+    })
+    worker.start()
+    const first = store.createRun({ threadId: 't', source: 'gui' }).runId
+    outbox.enqueue({ threadId: 't', runId: first, kind: 'turn.start' })
+    const next = store.createRun({ threadId: 't', source: 'gui' }).runId
+    outbox.enqueue({ threadId: 't', runId: next, kind: 'turn.start' })
+    await waitFor(() => started.length === 1, 'the first turn')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(started).toEqual([first])
+    gates.get(first)!.resolve()
+    // Woken by the first turn's settlement, not the 60 s poll.
+    await waitFor(() => started.length === 2, 'the next turn', 1000)
+    expect(started).toEqual([first, next])
+    gates.get(next)!.resolve()
   })
 
   it('aborts in-flight executions with WorkerStoppedError on stop()', async () => {
@@ -338,12 +392,12 @@ describe('EffectWorker', () => {
         }
       },
       owner: '1:1',
-      fibres: { turn: 1, control: 1 },
+      fibres: { control: 1 },
       pollMs: 60_000
     })
     workers.push(worker)
     worker.start()
-    // A long turn holds its fibre; the answer is not queued behind it.
+    // A long turn is live; the answer is not queued behind it.
     outbox.enqueue({ threadId: 't', kind: 'turn.start' })
     const first = outbox.enqueue({ threadId: 't', kind: 'request.respond', payload: { requestId: 'req-1' } })
     await waitFor(() => outbox.get(first.effectId)!.status === 'failed', 'the failed delivery')

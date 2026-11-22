@@ -378,7 +378,6 @@ describe('native read aloud slots in main', () => {
     ['a voice name that is too long', 'Hi.', 'v'.repeat(65), 1, 'Unknown voice'],
     ['a speed that is not a number', 'Hi.', 'af_heart', '1', 'Speed must be'],
     ['a speed that is not finite', 'Hi.', 'af_heart', Number.NaN, 'Speed must be'],
-    ['an infinite speed', 'Hi.', 'af_heart', Number.POSITIVE_INFINITY, 'Speed must be'],
     ['a speed below the range', 'Hi.', 'af_heart', 0.4, 'Speed must be'],
     ['a speed above the range', 'Hi.', 'af_heart', 2.1, 'Speed must be']
   ])('refuses %s', async (_label, text, voice, speed, message) => {

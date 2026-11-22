@@ -1,6 +1,8 @@
 import type {
   EnrollRequestMessage,
   HelloMessage,
+  LinkClaimMessage,
+  LinkResultMessage,
   SpaceJoinRequestMessage,
   WireMessage
 } from '../../../shared/net'
@@ -18,6 +20,7 @@ import type { Clock, Mux, MuxMessage, SecureChannel, SyncSession } from '../cont
 import { systemClock } from '../clock'
 import { createMux } from '../link/mux'
 import type { EnrollmentService, PreparedNodeJoin } from './service'
+import { linkError } from './link'
 
 export interface GatewayNormalContext {
   initialHello: MuxMessage
@@ -44,6 +47,11 @@ export interface EnrollmentGatewayOptions {
     context: GatewayNormalContext
   ): GatewayNormalSession
   spaceJoin?: SpaceJoinAdmissionPort
+  /**
+   * The connect link's offer path: a connection whose first message is `link.claim` gets one answer and ends. No
+   * hello, no session, no Space join; the pre-auth byte and time limits of this gateway apply.
+   */
+  link?: { claim(request: LinkClaimMessage, channel: SecureChannel): LinkResultMessage }
   onEnrolled?(): void
 }
 const helloValid = (header: HelloMessage): boolean =>
@@ -78,6 +86,8 @@ export class EnrollmentGateway {
   private ackSent = false
   private requestStarted = false
   private handingOff = false
+  /** A `link.claim` was received: this connection carries nothing else. */
+  private linking = false
   private done = false
   private timer: { cancel(): void }
   private listeners: Array<() => void> = []
@@ -128,6 +138,19 @@ export class EnrollmentGateway {
   }
   private async receive(message: MuxMessage): Promise<void> {
     const h = message.header
+    if (this.linking) throw new NetError('forbidden')
+    if (!this.hello && h.t === 'link.claim' && this.options.link) {
+      this.linking = true
+      let response: LinkResultMessage
+      try {
+        response = this.options.link.claim(h, this.options.channel)
+      } catch (error) {
+        response = linkError(error)
+      }
+      await this.send(response)
+      this.finish()
+      return
+    }
     if (!this.hello) {
       if (h.t !== 'hello' || h.protoMajor !== NET_PROTO_MAJOR)
         throw new NetError('incompatible_peer')
@@ -272,6 +295,8 @@ export class EnrollmentQuarantine {
   private ackSent = false
   private sent = false
   private result?: PreparedNodeJoin
+  /** How far the other computer's clock is ahead of this one's, from its hello; join errors use it. */
+  peerClockOffsetMs?: number
   private done = false
   private timer: { cancel(): void }
   private listeners: Array<() => void> = []
@@ -340,6 +365,7 @@ export class EnrollmentQuarantine {
     if (h.t === 'hello') {
       if (this.hello || !helloValid(h) || !enrollmentOnly(h))
         throw new NetError('incompatible_peer')
+      if (Number.isSafeInteger(h.now)) this.peerClockOffsetMs = h.now - this.clock.now()
       this.options.service.verifyAuthorityHello(h, this.options.channel)
       this.hello = h
       await this.send({
@@ -364,7 +390,8 @@ export class EnrollmentQuarantine {
       return
     }
     if (h.t === 'enroll.result' && this.sent) {
-      if ('error' in h) throw new NetError(h.error.code)
+      // The other computer's own answer, which a caller can tell from a failure on this side.
+      if ('error' in h) throw new NetError(h.error.code, undefined, { details: { from: 'peer' } })
       const enrolled = this.options.service.acceptNodeJoin(
         { delegation: h.delegation, roster: h.roster },
         this.options.channel

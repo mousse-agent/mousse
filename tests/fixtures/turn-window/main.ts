@@ -405,12 +405,66 @@ async function main() {
     afterLoad.added = afterLoadAdded
     afterLoad.addedWithTurns = openedWithTurns
 
+    // 10. A turn that worked ends in a long thread (windowed) and its work folds behind one line. Following the end keeps
+    // the end; reading its work, or an older turn, keeps the row being read where it is on every frame of the fold.
+    await execute('qa.mount(60)')
+    await delay(300)
+    await execute('qa.frames(3)')
+    const backToEnd = async () => {
+      await execute('qa.jumpVisible() ? qa.clickJump() : qa.scrollTo(qa.scrollHeight())')
+      await waitFrames('qa.endGap() < 2', 60)
+      await delay(300)
+    }
+    const workTurn = async () => {
+      await backToEnd()
+      await execute('qa.addWorkTurn()')
+      await waitFrames('qa.endGap() < 2', 60)
+      await execute('qa.frames(3)')
+      return execute<number>('qa.lastTurn()')
+    }
+    type FoldRun = { start: { top: number | null; gap: number }; samples: { top: number | null; gap: number; hold: boolean }[]; windowed: boolean; folded: boolean | null; workMounted: boolean }
+    const foldFollowing = await execute<FoldRun>(`qa.foldRun('fold-${await workTurn()}-11')`)
+    const readingWork = await workTurn()
+    await leaveEnd()
+    // The reader is in the turn's work: the answer starts 500 px down, under its last steps.
+    await execute(`qa.placeSentinel('fold-${readingWork}-0', 500)`)
+    await delay(200)
+    await execute('qa.frames(3)')
+    const foldReadingWork = await execute<FoldRun>(`qa.foldRun('fold-${readingWork}-0')`)
+    const older = await workTurn()
+    await leaveEnd()
+    await execute(`qa.goToRow(${older - 3}, 0)`)
+    await delay(200)
+    await execute('qa.frames(4)')
+    const olderSentinel = await execute<{ text: string; top: number }>('qa.pickSentinel(100)')
+    const foldOlder = await execute<FoldRun>(`qa.foldRun(${JSON.stringify(olderSentinel.text)})`)
+    const fold = { following: foldFollowing, readingWork: foldReadingWork, older: { ...foldOlder, sentinel: olderSentinel.text } }
+
+    // 11. A long thread arrives as its newest part; an earlier page comes in above the turns shown while the reader reads
+    // near the top. The paragraph being read stays where it is on every frame: in a windowed list, at the very top and a
+    // few turns down; in a list of every row that the page makes windowed; and in one that stays short.
+    const prependAt = async (from: number, to: number, place: string, minTop: number, earlier: number) => {
+      await execute(`qa.mountRange(${from}, ${to})`)
+      await leaveEnd()
+      await execute(place)
+      await delay(200)
+      await execute('qa.frames(4)')
+      const sentinel = await execute<{ text: string; top: number }>(`qa.pickSentinel(${minTop})`)
+      return execute(`qa.prependRun(${earlier}, ${from}, ${JSON.stringify(sentinel.text)})`)
+    }
+    const prepend = {
+      windowedTop: await prependAt(100, 200, 'qa.scrollTo(0)', 0, 0),
+      windowedNear: await prependAt(100, 200, 'qa.goToRow(103, -60)', 100, 0),
+      becomesWindowed: await prependAt(170, 200, 'qa.scrollTo(0)', 100, 140),
+      short: await prependAt(185, 200, 'qa.scrollTo(0)', 100, 175),
+    }
+
     await execute('qa.unmount()')
     await delay(50)
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({
       small, large, opened, positions, hold, held, codeHold, codeGrowth, up, down, afterSweeps, toolCards, nested, thinking, table,
       followGaps, leftEnd, readingAfterStream, jumpFrames, jumped, streamFar, farSentinel, streamInside, turnFrames, afterTurn,
-      markerFrames, marker, interrupted, afterScripted, ten, small40, grown, afterLoad,
+      markerFrames, marker, interrupted, afterScripted, ten, small40, grown, afterLoad, fold, prepend,
       find: {
         opened: findOpened, focusFrames: findFocusFrames, farFrames: findFarFrames, far: findFar, manyFrames: findManyFrames, many: findMany,
         last: findLast, wrapFrames: findWrapFrames, wrapped: findWrapped, backFrames: findBackFrames, back: findBack, closed: findClosed,

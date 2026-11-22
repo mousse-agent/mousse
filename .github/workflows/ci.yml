@@ -55,6 +55,10 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+        env:
+          # Type-aware ESLint loads both tsconfig.node.json and tsconfig.web.json in one process,
+          # which exceeds Node's default 4 GB heap ceiling on ubuntu-24.04 runners.
+          NODE_OPTIONS: --max-old-space-size=8192
 
   build:
     name: Build
@@ -100,8 +104,15 @@ jobs:
       - name: Install browser test prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb xauth dbus-x11 unzip libnss3 libgbm1 libgtk-3-0t64 libasound2t64
+          sudo apt-get install --yes --no-install-recommends xvfb xauth dbus-x11 unzip bubblewrap socat libnss3 libgbm1 libgtk-3-0t64 libasound2t64
           node scripts/check-browser-worker-install.mjs
+      - name: Configure Claude Code subprocess isolation
+        run: |
+          # Ubuntu 24.04 requires a per-program namespace permission. Keep the
+          # host restriction enabled; only the runner's bubblewrap gets this rule.
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile mousse-ci-bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/mousse-ci-bwrap >/dev/null
+          sudo apparmor_parser -r /etc/apparmor.d/mousse-ci-bwrap
+          bwrap --unshare-user --unshare-pid --ro-bind / / --dev /dev --proc /proc -- /bin/true
       - name: Configure Linux browser sandboxes
         run: |
           # Use Chromium's supported SUID helper, including for fixture copies of
@@ -205,6 +216,8 @@ jobs:
           npx vitest run
           tests/browserWindowsSandboxPermissions.test.ts
           tests/cliWindowsConsoleTty.test.ts
+          tests/gitSpawnWorker.test.ts
+          tests/claudeSubscriptionProvider.test.ts
           tests/net/editor/endpointWindows.test.ts
           tests/net/editor/windowsShell.test.ts
           tests/net/transports/ssh.test.ts

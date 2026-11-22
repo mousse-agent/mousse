@@ -27,9 +27,10 @@ export interface DeviceActivityViewProps {
   onOpenThread(id: string): void
   onClearRule(row: DeviceRuleView): void
   onClearAll(): void
-  /** Absent when the device has no limits to edit here. */
+  /** Absent when the device has no limits to edit here, or they are edited beside its permissions. */
   onLimits?(): void
-  onBlock(blocked: boolean): void
+  /** Absent when Block sits elsewhere, as in the device's detail on Settings → Devices. */
+  onBlock?(blocked: boolean): void
 }
 
 /**
@@ -41,12 +42,12 @@ export function DeviceActivityView({ name, activity, now, open, busy, blocked, o
   return <>
     <SettingsRow
       indent
-      title="Activity on this computer"
+      title="Recent activity"
       description={activityHeadline(activity)}
       control={<>
         <button type="button" className="settings-btn" aria-expanded={open} onClick={onToggle}>{open ? 'Hide details' : 'Show details'}</button>
         {onLimits && <button type="button" className="settings-btn" disabled={busy} onClick={onLimits}>Limits…</button>}
-        <button type="button" className={blocked ? 'settings-btn' : 'settings-btn devices-block-btn'} disabled={busy} onClick={() => onBlock(!blocked)}>{blocked ? 'Unblock' : 'Block'}</button>
+        {onBlock && <button type="button" className={blocked ? 'settings-btn' : 'settings-btn devices-block-btn'} disabled={busy} onClick={() => onBlock(!blocked)}>{blocked ? 'Unblock' : 'Block'}</button>}
       </>}
     >
       {open && (
@@ -57,6 +58,7 @@ export function DeviceActivityView({ name, activity, now, open, busy, blocked, o
                 <li key={`${entry.at}-${entry.method}-${index}`}>
                   <span className="devices-activity-when">{formatAgo(entry.at, now)}</span>
                   <span className={entry.kind === 'refused' ? 'devices-activity-what refused' : 'devices-activity-what'}>{describeActivityEntry(entry)}</span>
+                  {entry.actor === 'agent' && <span className="devices-activity-who">by an agent</span>}
                   {entry.thread && <span className="devices-activity-where">in <ThreadLink id={entry.thread.id} name={entry.thread.name} onOpen={onOpenThread} /></span>}
                   {entry.project?.name && <span className="devices-activity-where">project {entry.project.name}</span>}
                 </li>
@@ -97,7 +99,7 @@ export function DeviceActivityView({ name, activity, now, open, busy, blocked, o
 export function DeviceActivityRows({ device, onLimits, onBlock }: {
   device: Device
   onLimits?: () => void
-  onBlock: (blocked: boolean) => void
+  onBlock?: (blocked: boolean) => void
 }) {
   const [activity, setActivity] = useState<DeviceActivity>()
   const [open, setOpen] = useState(false)

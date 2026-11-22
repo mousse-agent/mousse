@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { Transform } from 'node:stream'
 import type { ProviderCapabilities } from '../../adapter'
 import { ACP_BASE_CAPABILITIES } from '../capabilities'
-import { connectAcpProcess, type AcpConnectionFactory } from '../connection'
+import { connectAcpProcess, treeKilledChild, type AcpConnectionFactory } from '../connection'
 import type { AcpQuirks } from '../quirks'
 
 /**
@@ -17,14 +17,25 @@ import type { AcpQuirks } from '../quirks'
 
 export const ANTIGRAVITY_LABEL = 'Antigravity'
 
-/** The agent rejects plan mode and publishes no usage: the base ACP capabilities. */
+/**
+ * The first `agy` that folds a prompt sent during a running one into that work (1.4 queued it). Probed on 1.5.13: the
+ * running prompt answers `end_turn` as soon as the second arrives (or at its own end, when it was already finishing)
+ * and the second one carries the rest of the turn, steer included.
+ */
+export const ANTIGRAVITY_NATIVE_STEER_FROM = '1.5.0'
+
+/**
+ * The agent rejects plan mode and publishes no usage: the base ACP capabilities. `steer` stays `interrupt_restart`
+ * although a 1.5 `agy` takes a steer into the running prompt (`ANTIGRAVITY_QUIRKS.nativeSteerFrom`): `native` would let
+ * the engine push a subagent's notice into a running turn as a prompt of its own (SPEC §14.3). A person's steer goes in at once either way; how is the session's choice.
+ */
 export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = ACP_BASE_CAPABILITIES
 
 /**
  * Client fs with the workspace check, `session/resume` for saved sessions, its exact protocol
- * version, and the `model` option with the account's listed models only.
+ * version, the `model` option with the account's listed models only, and its own steer from 1.5.0.
  */
-export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true, strictProtocol: true, modelConfigId: 'model' })
+export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true, strictProtocol: true, modelConfigId: 'model', nativeSteerFrom: ANTIGRAVITY_NATIVE_STEER_FROM })
 
 /** The method `authenticate` signs in with, eagerly, before the first `session/new`. */
 export const ANTIGRAVITY_AUTH_METHOD = 'oauth-personal'
@@ -98,12 +109,41 @@ export function antigravityStdout(onAuthUrl: (url: string) => void): Transform {
   })
 }
 
+/** The environment every Antigravity launch starts from: Mousse's own, without Google credentials or agent settings. */
+export function scrubbedAntigravityEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...base }
+  // Windows treats environment keys as case-insensitive: aliases go too.
+  for (const key of Object.keys(env)) if (ISOLATED_KEYS.includes(key.toUpperCase())) delete env[key]
+  return env
+}
+
+/**
+ * Which agent runs: Google's `agy` CLI (`native`, served as `agy acp`) or the 1.1.1 ACP server
+ * (`legacy`, beside its local harness), and where it came from: a manual path in Settings, the
+ * user's own `agy` on this computer, or Mousse's own install.
+ */
+export interface AntigravityRuntimeChoice { kind: 'legacy' | 'native'; binary: string; source: 'manual' | 'user' | 'managed' }
+
+/** The first https link in a line the agent printed, when there is one. */
+function linkIn(line: string): string | undefined {
+  return /https:\/\/\S+/.exec(line)?.[0]
+}
+
+/** `agy acp` keeps its app data in `<gemini-dir>/<app-data-dir>`: the same folder the 1.1.1 server used. */
+export const ANTIGRAVITY_APP_DATA_DIR = 'antigravity-acp'
+
+/** The launch arguments of a runtime, before the user's own. */
+export function antigravityRuntimeArgs(kind: AntigravityRuntimeChoice['kind'], geminiHome: string, platform: NodeJS.Platform = process.platform): string[] {
+  if (kind === 'native') return ['acp', '--gemini-dir', geminiHome, '--app-data-dir', ANTIGRAVITY_APP_DATA_DIR]
+  return platform === 'linux' ? ['--uid='] : []
+}
+
 export interface AntigravityLaunchOptions {
   /** `<profileHome>/providers/antigravity`: the isolated home and the browser helper live here. */
   profileDir: string
   profileHome: string
-  /** The verified install or the manual agent path; undefined when there is none. */
-  binary(): string | undefined
+  /** The runtime to start; undefined when there is none. */
+  runtime(): AntigravityRuntimeChoice | undefined
   /** The user's extra launch arguments and variables. */
   args(): string[]
   env(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv
@@ -116,13 +156,13 @@ export interface AntigravityLaunchOptions {
  */
 export function antigravityConnectionFactory(options: AntigravityLaunchOptions): AcpConnectionFactory {
   return (request) => {
-    const binary = options.binary()
-    if (!binary) throw new Error('Install Google Antigravity or select its official ACP binary first')
-    const env = { ...process.env }
-    for (const key of Object.keys(env)) if (ISOLATED_KEYS.includes(key.toUpperCase())) delete env[key]
+    const runtime = options.runtime()
+    if (!runtime) throw new Error('Install Google Antigravity or select its official ACP binary first')
+    const { binary, kind } = runtime
+    const env = scrubbedAntigravityEnv(process.env)
     const geminiHome = join(options.profileDir, 'gemini-home')
     mkdirSync(geminiHome, { recursive: true, mode: 0o700 })
-    const acpDir = join(geminiHome, 'antigravity-acp')
+    const acpDir = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
     mkdirSync(acpDir, { recursive: true, mode: 0o700 })
     writeFileSync(join(acpDir, 'settings.json'), JSON.stringify({ auth: { type: ANTIGRAVITY_AUTH_METHOD } }), { mode: 0o600 })
     for (const part of [['config', 'skills'], ['antigravity-cli', 'skills']]) {
@@ -141,8 +181,10 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
       chmodSync(browserHelper, 0o700)
     }
     env.GEMINI_HOME = geminiHome
-    env.AGY_ACP_FORCE_FILE_STORAGE = '1'
-    env.ANTIGRAVITY_HARNESS_PATH = join(dirname(binary), process.platform === 'win32' ? 'localharness_external.exe' : 'localharness_external')
+    if (kind === 'legacy') {
+      env.AGY_ACP_FORCE_FILE_STORAGE = '1'
+      env.ANTIGRAVITY_HARNESS_PATH = join(dirname(binary), process.platform === 'win32' ? 'localharness_external.exe' : 'localharness_external')
+    }
     if (process.platform !== 'win32') {
       const probe = spawnSync(browserHelper, ['https://example.invalid/mousse-browser-probe'], { encoding: 'utf8', timeout: 5_000 })
       if (probe.status !== 0 || probe.stdout || probe.stderr !== `${BROWSER_MARKER}https://example.invalid/mousse-browser-probe\n`) {
@@ -157,16 +199,19 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     mkdirSync(tempDir, { recursive: true, mode: 0o700 })
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
-    const args = [...(process.platform === 'linux' ? ['--uid='] : []), ...options.args()]
-    const child = spawn(binary, args, { env: options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    const args = [...antigravityRuntimeArgs(kind, geminiHome), ...options.args()]
+    // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
+    const child = spawn(binary, args, { env: options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
     const acceptAuthUrl = (url: string) => {
       if (callbackTarget(url)) request.onAuthUrl?.(url)
     }
-    return connectAcpProcess(child, request.handlers, {
+    const connection = connectAcpProcess(child, request.handlers, {
       stdout: antigravityStdout(acceptAuthUrl),
       stderrLine: (line) => {
+        // The 1.1.1 server's line, the browser helper's, or agy's own ("Open this link in a browser…");
+        // only a Google sign-in with a loopback callback this process owns is taken (`callbackTarget`).
         const url = line.startsWith(AUTH_PREFIX) ? line.slice(AUTH_PREFIX.length)
-          : line.startsWith(BROWSER_MARKER) ? line.slice(BROWSER_MARKER.length) : undefined
+          : line.startsWith(BROWSER_MARKER) ? line.slice(BROWSER_MARKER.length) : linkIn(line)
         if (url) acceptAuthUrl(url)
       },
       onExit: () => {
@@ -174,5 +219,8 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
         void rm(tempDir, { recursive: true, force: true }).catch(() => undefined)
       }
     })
+    // The launcher starts the real agent and its local harness: closing ends all of them.
+    connection.child = treeKilledChild(child)
+    return connection
   }
 }

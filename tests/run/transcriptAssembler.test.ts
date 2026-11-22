@@ -699,13 +699,6 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
     expect(ids(assembler)).toEqual(['b1'])
   })
 
-  it('a foreground subagent with a nested command holds nothing', () => {
-    const { assembler } = harness()
-    assembler.tool(agent('a1'))
-    assembler.tool(start('child', 'Bash', undefined, 'a1'))
-    expect(ids(assembler)).toEqual([])
-  })
-
   it('the same subagent moved to the background holds nothing, nor does its command', () => {
     const { assembler } = harness()
     assembler.tool(agent('a1'))

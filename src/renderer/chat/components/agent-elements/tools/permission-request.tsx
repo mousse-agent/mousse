@@ -31,6 +31,8 @@ export type PermissionRequestData = {
   scope?: ThreadApprovalRequest["scope"];
   answeredBy?: ThreadApprovalRequest["answeredBy"];
   cancelReason?: string;
+  /** When it was answered or cancelled: the turn's time does not count the wait (`turnWaitSpans`). */
+  settledAt?: string;
 };
 
 /** The option ids of a waiting request: allow once, allow always (when offered) and deny. */
@@ -138,6 +140,7 @@ export function withPermissionRequests(
           ...(request.scope ? { scope: request.scope } : {}),
           ...(request.answeredBy ? { answeredBy: request.answeredBy } : {}),
           ...(request.cancelReason ? { cancelReason: request.cancelReason } : {}),
+          ...(request.settledAt ? { settledAt: request.settledAt } : {}),
         }),
         request.createdAt,
       ),

@@ -1,5 +1,6 @@
 import { isIP } from 'node:net'
 import {
+  isAgentReach,
   NET_LOCAL_CAPABILITY,
   NET_LOCAL_METHODS,
   type NetLocalMethod
@@ -8,7 +9,8 @@ import {
   EDITOR_TUNNEL_LOCAL_METHODS,
   type EditorTunnelLocalMethod
 } from '../../shared/net/editorProxy'
-import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError } from '../../shared/net'
+import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError, type NodeId } from '../../shared/net'
+import type { NodePolicyChange } from './store/nodePolicy'
 import { isJoinVia } from '../../shared/net/via'
 import { AppError } from '../../shared/errors'
 import { isPermissionMode } from '../../shared/permissionMode'
@@ -16,6 +18,19 @@ import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol
 
 export interface NetLocalService {
   request(method: NetLocalMethod, params: Record<string, unknown>): unknown | Promise<unknown>
+}
+
+/**
+ * Where the profile answers the Bridge methods the engine shares with v1: `bridge.nodes` from the peer directory
+ * (v1's rows while v1 is on, then the engine's pairings), and `bridge.policy` for an engine pairing from the engine
+ * service. Without it both go to NetService, as before the engine.
+ */
+export interface NetBridgeRoutes {
+  peers: { nodes(): Promise<unknown> }
+  engine: {
+    isEngine(node: NodeId): boolean
+    setPolicy(node: NodeId, change: NodePolicyChange): unknown
+  }
 }
 const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.plus.discover': ['apiOrigin'],
@@ -71,12 +86,23 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.recovery.import': ['file', 'passphrase', 'becomeAuthority'],
   'bridge.invite': ['ttlMs', 'name', 'caps'],
   'bridge.join': ['invite', 'name', 'passphrase', 'via'],
+  'net.join.retry': ['passphrase'],
+  'net.join.abandon': [],
+  'net.startOver.check': [],
+  'net.startOver': [],
+  'net.link.make': ['name', 'passphrase'],
+  'net.link.check': ['link'],
+  'net.link.paste': ['link', 'name', 'passphrase', 'startOver'],
   'bridge.nodes': [],
   'bridge.revoke': ['node'],
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach', 'work'],
+  'bridge.connect': ['node'],
+  'bridge.disconnect': ['node'],
+  'bridge.allow': ['node'],
+  'bridge.access.there': ['node'],
   'bridge.workOnThreads': ['enabled'],
   'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
@@ -247,6 +273,10 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'bridge.setCaps',
       'bridge.setKind',
       'bridge.policy',
+      'bridge.connect',
+      'bridge.disconnect',
+      'bridge.allow',
+      'bridge.access.there',
       'net.editor.probe',
       'net.authority.transfer'
     ].includes(method) &&
@@ -275,9 +305,13 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       params.maxPermissionMode === undefined &&
       params.terminal === undefined &&
       params.editor === undefined &&
-      params.bots === undefined
+      params.bots === undefined &&
+      params.agentReach === undefined &&
+      params.work === undefined
     )
       throw new DomainRpcError('invalid_params', 'Choose a limit to change')
+    if (params.work !== undefined && typeof params.work !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'work must be boolean')
     if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
       throw new DomainRpcError('invalid_params', 'blocked must be boolean')
     if (params.terminal !== undefined && typeof params.terminal !== 'boolean')
@@ -288,6 +322,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       throw new DomainRpcError('invalid_params', 'bots must be boolean')
     if (params.maxPermissionMode !== undefined && !isPermissionMode(params.maxPermissionMode))
       throw new DomainRpcError('invalid_params', 'Unknown permission mode')
+    if (params.agentReach !== undefined && !isAgentReach(params.agentReach))
+      throw new DomainRpcError('invalid_params', 'agentReach must be none, launched or all')
   }
   if (
     method === 'net.recovery.import' &&
@@ -300,6 +336,15 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'invalid_params',
       'A bounded recovery file and explicit authority selection are required'
     )
+  if (
+    (method === 'net.link.check' || method === 'net.link.paste') &&
+    (typeof params.link !== 'string' ||
+      !params.link.trim().startsWith('ml1_') ||
+      params.link.length > 4096)
+  )
+    throw new DomainRpcError('invalid_params', 'A connect link is required')
+  if (params.startOver !== undefined && typeof params.startOver !== 'boolean')
+    throw new DomainRpcError('invalid_params', 'startOver must be boolean')
   if (method === 'bridge.rename' && params.name === undefined)
     throw new DomainRpcError('invalid_params', 'A node name is required')
   if (
@@ -427,12 +472,23 @@ export function registerEditorTunnelMethods(
     })
 }
 
-function publicError(code: keyof typeof NET_ERRORS, cause?: unknown): AppError {
+/** Methods whose errors carry a reason (and for a join, the other computer's name) for the screen to word. */
+const DETAILED_METHODS: ReadonlySet<NetLocalMethod> = new Set([
+  'bridge.join',
+  'net.join.retry',
+  'net.startOver',
+  'net.link.make',
+  'net.link.paste',
+  // Why Mousse ID refused a sign-in: the account keeps one devices list (`account_network`).
+  'net.plus.login.finish'
+])
+function publicError(code: keyof typeof NET_ERRORS, cause?: unknown, details?: unknown): AppError {
   const entry = NET_ERRORS[code]
   return new AppError(
     {
       code,
       message: entry.message,
+      ...(details === undefined ? {} : { details }),
       errorInfo: { category: entry.category, retryable: entry.retryable }
     },
     cause
@@ -442,7 +498,8 @@ function publicError(code: keyof typeof NET_ERRORS, cause?: unknown): AppError {
 /** Local owner IPC only. Remote peers cannot invoke this registry through Bridge. */
 export function registerNetMethods(
   registry: DomainHandlerRegistry,
-  forProfile: (id: string) => NetLocalService | Promise<NetLocalService>
+  forProfile: (id: string) => NetLocalService | Promise<NetLocalService>,
+  routes?: (id: string) => NetBridgeRoutes | Promise<NetBridgeRoutes>
 ): void {
   for (const method of NET_LOCAL_METHODS)
     registry.register({
@@ -468,9 +525,16 @@ export function registerNetMethods(
       },
       async handle(_context, params, binding) {
         try {
+          if (routes && method === 'bridge.nodes') return await (await routes(binding!.profileId)).peers.nodes()
+          if (routes && method === 'bridge.policy') {
+            const { engine } = await routes(binding!.profileId)
+            const { node, ...change } = params as { node: NodeId } & NodePolicyChange
+            if (engine.isEngine(node)) return engine.setPolicy(node, change)
+          }
           return await (await forProfile(binding!.profileId)).request(method, params)
         } catch (error) {
-          if (error instanceof NetError) throw publicError(error.code, error)
+          if (error instanceof NetError)
+            throw publicError(error.code, error, DETAILED_METHODS.has(method) ? error.details : undefined)
           throw error
         }
       }

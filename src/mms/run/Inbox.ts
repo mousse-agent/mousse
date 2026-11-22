@@ -251,11 +251,12 @@ export class Inbox {
    * Records what the notice that delivers these rows showed (`noticeShown`: the task's whole result
    * was in it), so that acknowledging them later marks as read exactly the tasks that were shown.
    */
-  recordNoticeVisibility(rows: readonly InboxRecord[], items: ReadonlyArray<{ delegationId: string; fullyShown: boolean }>): void {
+  recordNoticeVisibility(rows: readonly InboxRecord[], items: ReadonlyArray<{ delegationId: string; fullyShown: boolean; event?: string }>): void {
     this.db.transaction(() => {
       for (const row of rows) {
         if (row.kind !== 'child_result') continue
-        const item = items.find((entry) => entry.delegationId === (row.payload as { delegationId?: string }).delegationId)
+        // An item about a question or a stop shows no result.
+        const item = items.find((entry) => !entry.event && entry.delegationId === (row.payload as { delegationId?: string }).delegationId)
         if (item) this.patchPayload(row.inboxId, { noticeShown: item.fullyShown })
       }
     })

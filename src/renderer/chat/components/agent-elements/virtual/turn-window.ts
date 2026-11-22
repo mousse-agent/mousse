@@ -195,6 +195,50 @@ export function reconcileWindow(
   return { start, end };
 }
 
+/**
+ * How far the rows `from..to-1` of `prev` moved in `next`: the number of turns that arrived above them (an earlier
+ * page of a long thread), negative when turns above them left. Read from the first of those rows whose key is in both
+ * lists; 0 when none is. A turn without a prompt is keyed by its index (`turn-<n>`), which says nothing about where it
+ * went, so it is skipped.
+ */
+export function rowShift(
+  prev: readonly string[],
+  next: readonly string[],
+  from = 0,
+  to = prev.length,
+): number {
+  let at: Map<string, number> | null = null;
+  for (let index = Math.max(0, from); index < Math.min(to, prev.length); index += 1) {
+    const key = prev[index]!;
+    if (key.startsWith("turn-")) continue;
+    at ??= new Map(next.map((nextKey, nextIndex) => [nextKey, nextIndex]));
+    const moved = at.get(key);
+    if (moved !== undefined) return moved - index;
+  }
+  return 0;
+}
+
+/**
+ * The window after turns arrived above (or left from above) the rows it mounts: the same rows at their new indexes,
+ * so the row being read stays in the document and the reading line is held by exactly what was added. A window that
+ * started right below the first row keeps that row too (it is now a middle row): a reader at the very top reads it.
+ * A window that reached the last row still does. Null when the rows did not move.
+ */
+export function shiftWindow(
+  prev: { start: number; end: number; n: number },
+  prevKeys: readonly string[],
+  nextKeys: readonly string[],
+): { start: number; end: number; n: number } | null {
+  const n = nextKeys.length;
+  if (prev.n !== prevKeys.length || prev.n <= 2 || n <= 2) return null;
+  const first = prev.start <= 1 ? 0 : prev.start;
+  const shift = rowShift(prevKeys, nextKeys, first, Math.max(prev.end, first + 1));
+  if (shift === 0) return null;
+  const start = Math.min(Math.max(first + shift, 1), n - 1);
+  const end = prev.end >= prev.n - 1 ? n - 1 : Math.min(Math.max(prev.end + shift, start), n - 1);
+  return { start, end, n };
+}
+
 export type RowItem =
   | { kind: "row"; index: number }
   | { kind: "top-spacer" }

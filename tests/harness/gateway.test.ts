@@ -1,7 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
 import { PiStubAdapter } from '../support/piStub'
@@ -65,6 +70,68 @@ const full = (source = instances(), extra: { models?: Partial<Record<ProviderDri
   const harness = testHarness({ drivers, instances: source, profileHome: home() })
   return { harness, adapters }
 }
+
+describe('provider shutdown', () => {
+  it('waits for added runtimes, including one already being retired', async () => {
+    let finishActive!: () => void
+    let finishRetired!: () => void
+    const active = new Promise<void>((resolve) => { finishActive = resolve })
+    const retiring = new Promise<void>((resolve) => { finishRetired = resolve })
+    const retire = vi.fn(() => retiring)
+    const both = vi.fn()
+    const config = instances({
+      'claude:work': { driver: 'claude', enabled: true },
+      'claude:other': { driver: 'claude', enabled: true }
+    })
+    const driver = adapterDriver(fake('claude'))
+    const harness = testHarness({
+      profileHome: home(),
+      instances: config,
+      drivers: [{ ...driver, multiInstance: true, create: (context) => ({
+        ...driver.create(context),
+        stop: () => {
+          if (context.instanceId === 'claude:work') return active
+          if (context.instanceId === 'claude:other') return retire()
+        }
+      }) }]
+    })
+    for (const instanceId of ['claude:work', 'claude:other'])
+      harness.resolveStored({ instanceId, model: 'sonnet' }, { purpose: 'turn' })
+    await harness.instances.remove('claude:other')
+    expect(retire).toHaveBeenCalledTimes(1)
+    const stopped = harness.stop().then(both)
+    finishActive()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(both).not.toHaveBeenCalled()
+    finishRetired()
+    await stopped
+    expect(both).toHaveBeenCalledTimes(1)
+  })
+})
+
+it.each(['active', 'retired'])('reports a failing %s provider runtime stop during shutdown', async (state) => {
+  const failure = new Error('Windows Job accounting failed')
+  const stop = vi.fn<() => Promise<void>>().mockRejectedValueOnce(failure).mockResolvedValue(undefined)
+  const peerStop = vi.fn(async () => {})
+  const claude = adapterDriver(fake('claude'), { runtime: { stop } })
+  const codex = adapterDriver(fake('codex'), { runtime: { stop: peerStop } })
+  const harness = testHarness({ drivers: [claude, codex], instances: instances(), profileHome: home() })
+  harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+  harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+  if (state === 'retired') {
+    await harness.instances.configure('claude', { env: { CHANGED: '1' } })
+    expect(stop).toHaveBeenCalled()
+  }
+
+  await expect(harness.stop()).rejects.toMatchObject({ errors: [failure] })
+  const beforeRetry = stop.mock.calls.length
+  expect(peerStop).toHaveBeenCalledOnce()
+  await expect(harness.stop()).resolves.toBeUndefined()
+  expect(stop).toHaveBeenCalledTimes(beforeRetry + 1)
+  await expect(harness.stop()).resolves.toBeUndefined()
+  expect(stop).toHaveBeenCalledTimes(beforeRetry + 1)
+  expect(peerStop).toHaveBeenCalledOnce()
+})
 
 describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
   it('resolves each seeded instance to its driver', () => {
@@ -392,8 +459,8 @@ describe('harness gateway: instances', () => {
     let pasted: string | undefined
     const driver = adapterDriver(fake('antigravity'), {
       runtime: {
-        // As Antigravity: the pasted-URL fallback waits before the agent prints its link, and the
-        // link is printed again on a retry.
+        // A code-first flow: the pasted-URL fallback waits before the link is printed, and the link
+        // is printed again on a retry.
         signIn: async (session) => {
           const callback = session.waitForCallbackUrl()
           const notify = session.createAuthCallbacks().notify
@@ -421,6 +488,124 @@ describe('harness gateway: instances', () => {
     expect(pasted).toBe('http://localhost:1/cb?code=abc')
     // Nothing waits any more.
     expect(await harness.instances.respondSignIn(started.operationId, { promptId: retry.promptId, kind: 'redirect_url', value: 'again' })).toBe(false)
+  })
+
+  describe('Antigravity sign-in whose Google link arrives late', () => {
+    const services: AntigravityProviderService[] = []
+    afterEach(() => { for (const service of services.splice(0)) service.stop() })
+
+    /**
+     * The real Antigravity service behind the real gateway, with only the agent process scripted:
+     * it prints Google's link when `printLink` is called and finishes `authenticate` once its
+     * loopback callback is hit, as Google's agent does.
+     */
+    async function lateLink() {
+      const callbacks: string[] = []
+      let signedIn: (() => void) | undefined
+      const server = createServer((request, response) => {
+        callbacks.push(request.url ?? '')
+        response.end('ok')
+        signedIn?.()
+      })
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const port = (server.address() as AddressInfo).port
+      const link = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&state=owned-state&redirect_uri=${encodeURIComponent(`http://127.0.0.1:${port}/`)}`
+      let onAuthUrl: ((url: string) => void) | undefined
+      const dir = home()
+      const service = new AntigravityProviderService(dir, dir, new UserQuestionService(), undefined, {
+        connect: (request) => {
+          onAuthUrl = request.onAuthUrl
+          const abort = new AbortController()
+          return {
+            child: { exitCode: 0, signalCode: null, kill: vi.fn() },
+            connection: {
+              signal: abort.signal,
+              close: () => abort.abort(new Error('ACP closed')),
+              agent: {
+                request: async (method: string) => {
+                  // A closed connection refuses every request.
+                  abort.signal.throwIfAborted()
+                  if (method === methods.agent.initialize) return { protocolVersion: PROTOCOL_VERSION }
+                  if (method === methods.agent.authenticate) {
+                    await new Promise<void>((resolve, reject) => {
+                      signedIn = resolve
+                      abort.signal.addEventListener('abort', () => reject(abort.signal.reason), { once: true })
+                    })
+                    return {}
+                  }
+                  if (method === methods.agent.session.new) return { sessionId: 's', configOptions: [{ id: 'model', type: 'select', options: [{ value: 'm', name: 'M' }] }] }
+                  return {}
+                },
+                notify: async () => {}
+              }
+            }
+          } as never
+        }
+      })
+      services.push(service)
+      // The 1.1.1 server from a manual path: it always signs in through Google.
+      vi.spyOn(service as unknown as { runtime: () => unknown }, 'runtime').mockReturnValue({ kind: 'legacy', binary: join(dir, 'agy_acp_server'), source: 'manual' })
+      const driver = adapterDriver(fake('antigravity'), { runtime: { signIn: (session, cwd) => service.login(session, cwd) } })
+      const harness = testHarness({ drivers: [adapterDriver(pi()), driver], instances: instances(), profileHome: home() })
+      const events: HarnessGatewayEvent[] = []
+      harness.instances.subscribe((event) => events.push(event))
+      const operation = () => events.flatMap((event) => (event.type === 'operation' ? [event.data] : []))
+      const prompts = () => operation().flatMap((data) => (data.phase === 'prompt' ? [data.prompt] : []))
+      /** The newest prompt that takes a pasted redirect. */
+      const paste = () => prompts().filter((prompt) => prompt.type === 'auth_url' && prompt.acceptsRedirectPaste === true).at(-1)
+      return {
+        harness, operation, prompts, paste, callbacks, link, port,
+        printLink: () => onAuthUrl!(link),
+        close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    }
+
+    it('shows starting until the link, then offers the paste under that link and forwards only its own callback', async () => {
+      const flow = await lateLink()
+      try {
+        const started = await flow.harness.instances.signIn('antigravity')
+        await waitFor(() => flow.operation().some((data) => data.phase === 'progress'))
+        // Waiting on Google: starting, with no field to paste into yet.
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(flow.operation().find((data) => data.phase === 'progress')).toMatchObject({ message: 'Starting Google sign-in…' })
+        expect(flow.prompts()).toEqual([])
+        expect(await flow.harness.instances.respondSignIn(started.operationId, { kind: 'redirect_url', value: `http://127.0.0.1:${flow.port}/?state=owned-state&code=early` })).toBe(false)
+
+        flow.printLink()
+        // Printed again (stdout and the browser helper): still the one link.
+        flow.printLink()
+        await waitFor(() => flow.paste() !== undefined)
+        expect(flow.prompts().every((prompt) => prompt.type === 'auth_url' && prompt.url === flow.link)).toBe(true)
+
+        // A redirect of another sign-in fails the loopback check; the link is shown again with the reason, still taking a paste.
+        const first = flow.paste()!
+        expect(await flow.harness.instances.respondSignIn(started.operationId, { promptId: first.promptId, kind: 'redirect_url', value: `http://127.0.0.1:${flow.port}/?state=other-state&code=stale` })).toBe(true)
+        await waitFor(() => flow.paste()!.promptId !== first.promptId)
+        expect(flow.paste()).toMatchObject({ url: flow.link, instructions: 'Redirect URL does not match this Google sign-in flow' })
+        expect(flow.callbacks).toEqual([])
+
+        expect(await flow.harness.instances.respondSignIn(started.operationId, { promptId: flow.paste()!.promptId, kind: 'redirect_url', value: `http://127.0.0.1:${flow.port}/?state=owned-state&code=one-time-code` })).toBe(true)
+        // Reported as signed in, not cancelled.
+        await waitFor(() => flow.operation().some((data) => data.phase === 'completed'))
+        expect(flow.operation().some((data) => data.phase === 'cancelled')).toBe(false)
+        expect(flow.callbacks).toEqual(['/?state=owned-state&code=one-time-code'])
+        expect(flow.prompts().some((prompt) => prompt.type !== 'auth_url')).toBe(false)
+      } finally { await flow.close() }
+    })
+
+    it('cancelled while starting, it ends without ever asking for a paste', async () => {
+      const flow = await lateLink()
+      try {
+        const started = await flow.harness.instances.signIn('antigravity')
+        await waitFor(() => flow.operation().some((data) => data.phase === 'progress'))
+        expect(await flow.harness.instances.respondSignIn(started.operationId, { kind: 'cancel' })).toBe(true)
+        await waitFor(() => flow.operation().some((data) => data.phase === 'cancelled'))
+        // A link printed by the closing agent is not shown.
+        flow.printLink()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(flow.prompts()).toEqual([])
+      } finally { await flow.close() }
+    })
   })
 
   it('runs install as an operation: an id at once, progress as events, cancel ends it', async () => {

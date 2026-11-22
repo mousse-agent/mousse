@@ -1,13 +1,23 @@
 /* Bots in the Chats tab (bot-ui §4). Only the app's own tokens; the rest is the Chats surface's CSS (chats.css). */
 
-/* The Bots row. The face stands on its own: no tile behind it. */
-.chats-sidebar-content .bot-roster { padding-top: 6px; }
-.chat-roster button.bot-roster-active > span:last-child { color: var(--text-primary); }
-/* The open bot: a subtle tint, no edge marks. A bot with unread messages: a small dot by its face. */
-.chat-roster button.bot-roster-active, .app .chat-roster button.bot-roster-active { background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised, transparent)); }
-.app .chat-roster button.bot-roster-active:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, var(--ui-raised, transparent)); }
-.bot-roster button { position: relative; }
-.bot-roster .bot-roster-unread { position: absolute; top: 4px; right: 3px; z-index: 1; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
+/* The Bots list: a row per bot, the one that spoke last first. The face stands on its own (no tile); beside it the name
+   and the time, and under them what it does now, in words coloured by state: working purple, waiting on the owner
+   amber, the rest grey. The open bot: a subtle tint, no edge marks. Unread messages: a count by the time. */
+.bot-list { display: flex; flex-direction: column; gap: 1px; padding: 2px 0 4px; }
+.bot-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 6px 8px; border-radius: 9px; text-align: left; color: var(--text-primary); }
+.bot-row > .bot-face { flex: none; }
+.bot-row:hover { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); }
+.bot-row[aria-current='true'] { background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised, transparent)); }
+.bot-row[aria-current='true']:hover { background: color-mix(in srgb, var(--accent) 12%, var(--ui-raised, transparent)); }
+.bot-row-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.bot-row-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.bot-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; line-height: 1.3; }
+.bot-row-lock { display: inline-flex; flex: none; align-self: center; margin-right: -2px; color: var(--text-secondary); }
+.bot-row-time { flex: none; font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.bot-row-unread { flex: none; align-self: center; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; color: var(--ui-on-accent, #141218); background: var(--accent); }
+.bot-row-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.35; color: var(--text-secondary); }
+.bot-row-state[data-tone='working'] { color: var(--bot-state-working, #b49cf0); }
+.bot-row-state[data-tone='needs'] { color: var(--warning, #d4b06a); }
 
 /* Header: the face with its activity sticker, the name with its presence under it (what it does is in About); one menu. */
 .bot-header-about { position: relative; flex: none; display: grid; place-items: center; color: inherit; border-radius: 9px; }
@@ -29,6 +39,29 @@
 .bot-presence > svg { flex: none; }
 .bot-conversation > .chat-conversation-header { padding-block: 12px; }
 .bot-menu-root { position: relative; margin-left: auto; }
+/* The side panel's toggle, just before the menu: the panel icons the app's other side panes use. It takes the header's free
+   space unless the checklist before it already has. */
+.bot-header-panel { display: grid; place-items: center; width: 28px; height: 28px; margin-left: auto; border-radius: 7px; color: var(--text-secondary); }
+.bot-header-panel:hover, .bot-header-panel.is-open { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
+.bot-tasks-root + .bot-header-panel, .bot-header-panel ~ .bot-menu-root { margin-left: 0; }
+/* The model button, just before the panel toggle: the provider's logo, ringed by the usage left. Filled on hover, no line. */
+.bot-model-root { position: relative; display: grid; place-items: center; margin-left: auto; }
+.bot-tasks-root + .bot-model-root { margin-left: 0; }
+.bot-model-root + .bot-header-panel { margin-left: 2px; }
+.bot-header-model { position: relative; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text-secondary); }
+.bot-header-model:hover, .bot-header-model.is-open { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
+.bot-header-model:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
+.bot-model-ring { position: absolute; inset: 0; pointer-events: none; }
+.bot-model-ring-track { fill: none; stroke: color-mix(in srgb, var(--text-secondary) 18%, transparent); }
+.bot-model-ring-fill { fill: none; stroke: var(--usage-level); stroke-linecap: round; }
+/* Its menu: the bot's model rows on the app's floating surface, as the checklist's popover (120ms out, 160ms in). */
+.bot-model-pop { position: absolute; right: 0; top: 36px; z-index: 20; box-sizing: border-box; width: min(330px, calc(100vw - 32px)); padding: 10px 12px; border-radius: var(--ui-menu-radius, 10px); background: var(--floating-surface, rgb(var(--surface-elevated-rgb))); box-shadow: var(--ui-menu-drop); color: var(--text-primary); opacity: 0; transform: translateY(-4px) scale(0.98); transform-origin: top right; transition: opacity calc(120ms * var(--ui-motion-scale)) ease, transform calc(120ms * var(--ui-motion-scale)) ease; }
+.bot-model-pop[data-shown='true'] { opacity: 1; transform: none; transition-duration: calc(160ms * var(--ui-motion-scale)); }
+.bot-model-pop .bot-model-picker { --bot-row-label: 82px; }
+/* The row pickers are filled, not outlined. */
+.bot-model-pop .settings-model-picker { border: 0; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+.bot-model-pop .settings-model-picker:hover, .bot-model-pop .settings-model-picker:has(.settings-model-btn.open) { background: color-mix(in srgb, var(--text-secondary) 15%, transparent); }
+.bot-model-pop-error { margin: 6px 0 0; font-size: 12px; color: var(--error, #e79090); }
 .bot-header-more { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--text-secondary); }
 .bot-header-more:hover, .bot-header-more.is-open { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
 .bot-menu { position: absolute; right: 0; top: 34px; z-index: 20; min-width: 200px; padding: 5px; border-radius: 10px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: var(--bg-secondary, #201d23); box-shadow: 0 18px 50px #0006; }
@@ -88,30 +121,50 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-message-line { position: relative; display: flex; align-items: flex-end; width: fit-content; min-width: 0; max-width: 100%; }
 /* Hidden, the tools take no width: past a wide bubble in a narrow window they would widen the transcript and give it a
    sideways scrollbar (they are moved inside it only while shown). They fold after their fade and open at once. Their
-   gap is in `left`, not padding, so their contents sit in the same place folded or open: that is what is measured. */
-.bot-message-tools { position: absolute; left: calc(100% + 6px); bottom: 0; display: flex; align-items: center; gap: 4px; max-width: 0; overflow: clip; white-space: nowrap; translate: var(--bot-tools-shift, 0) 0; transition: max-width 0s .12s; }
+   gap is in `left`, not padding, so their contents sit in the same place folded or open: that is what is measured.
+   Their `translate` makes them a layer of their own, so the reaction row opened in them stays under the next message
+   unless the tools themselves are raised above it. */
+.bot-message-tools { position: absolute; left: calc(100% + 6px); bottom: 0; z-index: 1; display: flex; align-items: center; gap: 4px; max-width: 0; overflow: clip; white-space: nowrap; translate: var(--bot-tools-shift, 0) 0; transition: max-width 0s .12s; }
 .chat-participant-message:hover .bot-message-tools, .bot-message-tools:focus-within,
 .bot-message-tools:has(.is-open, [data-read-aloud='loading'], [data-read-aloud='playing'], [data-read-aloud='paused']) { max-width: 100vw; overflow: visible; transition-delay: 0s; }
 /* While a picture's menu is open, the menu is what the owner looks at: the tools step aside, as the carousel's arrows do. */
 .bot-message.is-menu-open .bot-message-tools { visibility: hidden; }
 .bot-bubble { position: relative; min-width: 0; max-width: 100%; padding: 9px 12px 7px; border-radius: 16px 16px 16px 5px; color: var(--text-primary); background: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary, transparent)); }
 .bot-message:not(.is-group-start) .bot-bubble { border-top-left-radius: 6px; }
+/* A message from another of the owner's bots, as in a group chat: that bot's face at the foot of its bubble, its name on
+   the bubble's first line in its colour, and the bubble lightly tinted with it (--from-colour, set on the message). */
+.bot-from-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.bot-from-face { flex: none; margin-bottom: 2px; }
+.bot-message.is-from-bot .bot-bubble { background: color-mix(in srgb, var(--from-colour) 13%, var(--bg-primary, transparent)); }
+.bot-from-name { display: block; margin-bottom: 1px; font-size: var(--bot-meta); font-weight: 600; line-height: 18px; color: color-mix(in srgb, var(--from-colour) 62%, var(--text-primary)); }
 /* The thread's Markdown (an-md-*), at the bubble's size. Inline code keeps a short piece whole: it moves to the next line
    as one, and breaks only when it is wider than the bubble. Tables keep the thread's padding inside the bubble's own. */
-.bot-bubble > .bot-markdown { margin: 0; }
+.bot-bubble > .bot-markdown, .bot-bubble > .bot-find-text > .bot-markdown { margin: 0; }
+/* What find reads in a bubble: its words, in a box that takes no part in the layout. */
+.bot-find-text { display: contents; }
+/* The find bar hangs over the transcript's top right corner, under the header. */
+.bot-find-anchor { position: relative; height: 0; z-index: 20; }
 .bot-markdown > :first-child { margin-top: 0; }
 .bot-markdown > :last-child { margin-bottom: 0; }
 .bot-markdown .an-md-code { margin: 0; overflow-wrap: anywhere; }
 .bot-markdown .an-md-code.is-whole { white-space: nowrap; }
 .bot-bubble-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 2px; }
 .bot-bubble-time { margin-left: auto; font-size: 11px; line-height: 16px; color: var(--text-secondary); opacity: .8; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* A reply its turn stopped before finishing: muted, with "Stopped" where a time would be (this window only). */
+.bot-cut-reply .bot-bubble > .bot-markdown { opacity: .7; }
+.bot-cut-mark { margin-left: auto; font-size: 11px; line-height: 16px; color: var(--text-secondary); }
 .bot-bubble > .bot-reply-quote { margin: 0 0 6px; max-width: 100%; }
 .bot-bubble-ask { display: flex; align-items: center; gap: 7px; margin: 6px 0 0; font-size: var(--bot-text); line-height: 1.5; }
 .bot-bubble-ask > svg { flex: none; color: var(--accent); }
 .bot-bubble .bot-error, .bot-bubble .bot-message-files { margin-top: 8px; }
-/* "Worked for 32s ›": quiet, as under a thread's prompt; the chevron turns while the steps show. */
-.bot-worked { display: inline-flex; align-items: center; gap: 2px; padding: 0; font-size: 11.5px; line-height: 16px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.bot-worked:hover { color: var(--text-primary); }
+/* "Worked for 32s ›": quiet, as under a thread's prompt, a step dimmer than the time; the chevron turns while the steps
+   show. Never a fill: not the app's focus fill (a square grey box), not on hover or after a click. Hover only lightens
+   the words; keyboard focus alone brightens them and underlines them, which takes no room. Never a ring: keyboard focus
+   in the app is never an outline (tests/renderer/keyboardFocusFill.test.ts). */
+.bot-worked { display: inline-flex; align-items: center; gap: 2px; padding: 0; border-radius: 3px; font-size: 11.5px; line-height: 16px; color: color-mix(in srgb, var(--text-secondary) 64%, transparent); font-variant-numeric: tabular-nums; transition: color 150ms ease-out; }
+.bot-bubble .bot-worked:is(:hover, :focus, :focus-visible) { outline: none; background: none; }
+.bot-bubble .bot-worked:hover { color: color-mix(in srgb, var(--text-secondary) 80%, transparent); }
+.bot-bubble .bot-worked:focus-visible { color: var(--text-secondary); text-decoration: underline; text-underline-offset: 2px; }
 .bot-worked-chevron { transition: transform 150ms ease-out; }
 .bot-worked-chevron[data-open] { transform: rotate(90deg); }
 .bot-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--bot-meta); line-height: 19px; color: var(--text-secondary); }
@@ -123,17 +176,36 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
    it is doing now, in full (it wraps; "Working…" until it says), with a light band that runs on from the dots' wave through the words: a bright
    copy of them, seen through a band as wide as they are whose mask is bright only in its middle third. TypingDots moves
    the band across and the copy against it, so the copy's letters stay on the words. Still, the words are plain. */
-.bot-typing-bubble { display: inline-flex; align-items: flex-start; gap: 8px; padding: 7px 13px; }
+/* The chat's live turn (BotTurnBody), in the bubble its message will be drawn in: the typing row and the reply share one
+   grid cell, so the cell is as large as the larger of them. The row sits in a paragraph's line box (.an-md-p, as the
+   reply's first line), so the bubble is as tall typing as with one line of reply. At the handoff the row fades out as
+   the words fade in, then stays unseen. While the bubble eases to a new height (useEasedHeight), or the turn grows into
+   the chat (useGrowIn), it clips what is below that height; the posted message's foot fades in as it is uncovered. */
+.bot-turn-body { display: grid; }
+.bot-turn-body > * { grid-area: 1 / 1; min-width: 0; }
+.bot-turn-body > .bot-markdown { margin: 0; }
+.bot-bubble.is-easing, .bot-message.is-growing-in { box-sizing: border-box; overflow-y: clip; }
+.bot-message.is-growing-in > * { flex-shrink: 0; }
+.bot-message.was-live .bot-bubble-foot { animation: bot-turn-in calc(240ms * var(--ui-motion-scale, 1)) ease-out both; }
+.bot-turn-place { user-select: none; -webkit-user-select: none; }
+.bot-turn-place > .bot-turn-typing.an-md-p { display: flex; align-items: center; min-height: 1lh; margin: 0; white-space: normal; }
+.bot-turn-typing.is-held { visibility: hidden; }
+.bot-turn-typing.is-leaving { animation: bot-turn-out calc(180ms * var(--ui-motion-scale, 1)) ease-out both; }
+.bot-turn-reply.is-arriving { animation: bot-turn-in calc(180ms * var(--ui-motion-scale, 1)) ease-out both; }
+@keyframes bot-turn-out { to { opacity: 0; } }
+@keyframes bot-turn-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .bot-turn-typing.is-leaving, .bot-turn-reply.is-arriving, .bot-message.was-live .bot-bubble-foot { animation: none; } }
+.bot-typing-row { display: inline-flex; align-items: flex-start; gap: 8px; }
 .bot-typing-dots { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 18px; }
 .bot-typing-dots > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }
-.bot-typing-bubble.is-still .bot-typing-dots > i { opacity: .6; }
+.bot-typing-row.is-still .bot-typing-dots > i { opacity: .6; }
 .bot-typing-status { position: relative; min-width: 0; font-size: var(--bot-meta); line-height: 18px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .bot-typing-glint { position: absolute; inset: 0; pointer-events: none; user-select: none; transform: translateX(-100%);
   -webkit-mask-image: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%); mask-image: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%); }
 .bot-typing-glint > span { position: absolute; inset: 0; color: var(--text-primary); transform: translateX(100%); }
 @media (forced-colors: active) { .bot-typing-glint { display: none; } }
-.bot-status-line { margin: 0; padding: 7px 13px; font-size: var(--bot-meta); color: var(--text-secondary); }
-@media (prefers-reduced-motion: reduce) { .bot-worked-chevron { transition: none; } }
+.bot-status-line { margin: 0; font-size: var(--bot-meta); line-height: 18px; color: var(--text-secondary); }
+@media (prefers-reduced-motion: reduce) { .bot-worked, .bot-worked-chevron { transition: none; } }
 /* An open ask: quick replies under the bubble, the details on demand. */
 .bot-ask-replies { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
 .bot-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -382,14 +454,138 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-dialog-text { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
 .chat-primary-button.bot-danger-button { background: var(--error, #e79090); color: var(--surface-strong, #18151c); }
 
-/* About this bot: a narrow panel on the right. */
-.bot-about { width: 300px; flex-shrink: 0; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); padding: 22px 18px; overflow: auto; }
-.bot-about-close { display: flex; }
+/* A bot's chat: the rounded pane (frameless-shell.css) is the conversation, with an applet beside it (.bot-chat-pane),
+   and the side panel docks outside it on the window, as the app panel docks beside a thread's pane. */
+.bot-chat-pane { position: relative; display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
+html[data-theme] .app .chat-workspace:has(> .bot-chat-pane) { margin: 0; border-radius: 0; background: transparent; box-shadow: none; }
+html[data-theme] .app .chat-workspace:has(> .bot-chat-pane)::after { content: none; }
+html[data-theme] .app .bot-chat-pane { margin: 0 8px 8px 0; border-radius: var(--pane-radius); overflow: clip; background: var(--pane-backdrop); box-shadow: var(--pane-shadow); }
+html[data-theme] .app .bot-chat-pane::after { content: ''; position: absolute; inset: 0; z-index: 30; padding: 1px; border-radius: inherit; background: var(--pane-sheen);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); pointer-events: none; }
+
+/* The side panel (BotSidePanel) slides in from the right edge as it fades in, and out as it fades out; the chat pane
+   gives it room as its frame opens to the panel's own width. The panel stays at its width, pinned to the right, and is
+   clipped only while it moves. Its strip is the app panel's (.main-view-tabs): filled tabs, no lines. */
+.bot-side-slide { display: flex; justify-content: flex-end; flex: none; min-width: 0; min-height: 0; width: 0; overflow: clip; interpolate-size: allow-keywords; transition: width var(--ui-dur-slow) cubic-bezier(0.22, 1, 0.36, 1); }
+.bot-side-slide.is-open { width: auto; }
+.bot-side-slide.is-settled { overflow: visible; }
+.bot-side-slide > .bot-side { opacity: 0; transform: translateX(24px); transition: opacity var(--ui-dur-slow) ease, transform var(--ui-dur-slow) cubic-bezier(0.22, 1, 0.36, 1); }
+.bot-side-slide.is-open > .bot-side { opacity: 1; transform: none; }
+.bot-side { position: relative; box-sizing: border-box; display: flex; flex-direction: column; flex-shrink: 0; min-width: 0; min-height: 0; padding: 0 8px 8px 0; container-type: inline-size; container-name: bot-side; }
+/* A narrow panel shows its tabs' icons only (their names stay in the tooltips). */
+@container bot-side (max-width: 340px) { .bot-side-tabs .main-view-tab-label { display: none; } }
+.bot-side-resize { right: auto; left: -4px; }
+.bot-side-header { flex: none; gap: var(--space-8); min-width: 0; padding: 8px 0 8px 4px; }
+.bot-side-close { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: var(--ui-row-radius); color: var(--text-secondary); }
+.bot-side-close:hover { background: var(--ui-hover); color: var(--text-primary); }
+/* Each view fades in and slides from the side of the tab picked. */
+.bot-side-view { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; border-radius: var(--pane-radius, 12px); }
+.bot-side-view.from-right { animation: bot-side-from-right var(--ui-dur-slow) cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.bot-side-view.from-left { animation: bot-side-from-left var(--ui-dur-slow) cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+@keyframes bot-side-from-right { from { opacity: 0; transform: translateX(12px); } }
+@keyframes bot-side-from-left { from { opacity: 0; transform: translateX(-12px); } }
+@media (prefers-reduced-motion: reduce) {
+  .bot-side-slide, .bot-side-slide > .bot-side { transition: none; }
+  .bot-side-view.from-right, .bot-side-view.from-left { animation: none; }
+}
+/* The views fill the panel, with no lines of their own. */
+.bot-side .bot-about, .bot-side .bot-file-pane, .bot-side .watched-browser-pane { flex: 1 1 0; width: auto; min-width: 0; min-height: 0; border-left: 0; }
+.bot-side .watched-browser-pane { background: transparent; }
+/* The panel's strip closes it: the browser's own Close is not shown here. */
+.bot-side .watched-browser-bar > button[aria-label='Close the browser view'] { display: none; }
+.bot-side .bot-file-head { border-bottom: 0; padding: 4px 4px 8px 12px; }
+.bot-side .bot-file-body { padding: 6px 12px 22px; }
+.bot-side-files { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; }
+.bot-side-files-head { display: flex; align-items: center; gap: 4px; padding: 4px 4px 4px 12px; }
+.bot-side-files-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.bot-side-files .file-tree { flex: 1 1 0; min-height: 0; overflow: auto; }
+.bot-side-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-8); padding: 24px; text-align: center; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+.bot-side-empty > p { max-width: 260px; margin: 0; }
+.bot-side-empty > .settings-btn { height: 30px; padding: 0 var(--space-12); border-radius: var(--ui-control-radius); }
+
+/* About (the side panel's Agent settings) takes Settings' tokens (.settings-scope): its spacing ramp, type scale, group
+   surface, row anatomy and icon buttons, so it reads like the rest of the app rather than a page of its own. The header
+   pairs the mouse with what it does now; sections fold as Settings' do. */
+.bot-about { position: relative; display: flex; flex-direction: column; flex-shrink: 0; min-width: 0; }
+/* One rhythm: the same gap between every section, open or not, and the same gap from a header to its content. The
+   panel's sides are one inset throughout. */
+.bot-about { --bot-about-x: var(--space-16); --bot-about-gap: var(--space-8); }
+.bot-about-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-12) var(--bot-about-x) var(--space-24); }
+
+.bot-about-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-16); padding: var(--space-4) 0 var(--space-16); border-bottom: 1px solid var(--ui-line); }
+.bot-about-id { display: flex; flex-direction: column; min-width: 0; }
+.bot-about-name { display: flex; align-items: center; gap: var(--space-8); }
+.bot-about-name h2 { flex: 1; min-width: 0; margin: 0; font-size: var(--settings-fs-heading); font-weight: 600; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-about-close { margin: -2px calc(-1 * var(--space-4)) 0 0; }
+.bot-about-doing { margin: 2px 0 var(--space-8); font-size: 13px; line-height: 1.4; color: var(--text-primary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bot-about-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--space-12); row-gap: 2px; margin: 0; font-size: var(--settings-fs-small); line-height: 1.45; font-variant-numeric: tabular-nums; }
+.bot-about-facts dt { color: var(--text-secondary); }
+.bot-about-facts dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+/* Only status words take colour (Settings rule 12). */
+.bot-about .is-ok { color: var(--success); }
+.bot-about .is-warn { color: var(--warning); }
+.bot-about .is-bad { color: var(--danger); }
+
+/* A section: Settings' fold heading at row size, a full-width hit area, and one quiet summary while closed. */
+.bot-about-fold { margin-top: var(--bot-about-gap); }
+.bot-about-fold:first-of-type { margin-top: var(--space-12); }
+.bot-about-fold-head, .bot-about-memory { display: flex; align-items: center; gap: var(--space-8); width: calc(100% + 2 * var(--space-8)); min-height: 36px; margin: 0 calc(-1 * var(--space-8)); padding: 0 var(--space-8); border-radius: var(--ui-row-radius); text-align: left; color: var(--text-primary); transition: background-color .15s; }
+.bot-about-fold-head:hover, .bot-about-memory:hover { background: var(--ui-hover); }
+.bot-about-fold-icon { flex-shrink: 0; color: var(--text-secondary); }
+.bot-about-fold-title { flex-shrink: 0; font-size: var(--settings-fs-row); font-weight: 600; }
+.bot-about-fold-summary { flex: 1; min-width: 0; text-align: right; font-size: var(--settings-fs-small); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bot-about-fold.is-open .bot-about-fold-summary { visibility: hidden; }
+.bot-about-fold-chevron { flex-shrink: 0; margin-left: auto; color: var(--text-secondary); transition: transform 180ms var(--ui-collapse-ease-close); }
+.bot-about-fold-summary + .bot-about-fold-chevron { margin-left: 0; }
+.bot-about-fold.is-open .bot-about-fold-chevron { transform: rotate(90deg); transition-duration: 160ms; transition-timing-function: var(--ui-collapse-ease); }
+/* A section's content opens under its header (Collapse) and spans the header row, edge to edge: its cards line up
+   with the row's hover fill; plain lines keep the header's inset. */
+.bot-about-fold > .ui-collapse { margin: 0 calc(-1 * var(--space-8)); }
+.bot-about-fold-body { padding: var(--space-8) 0 0; }
+.bot-about-fold-body > .bot-about-empty { padding: 0 var(--space-8); }
+.bot-about-memory { margin-top: var(--bot-about-gap); }
+
+/* Rows on a section's surface: Settings' anatomy, tightened for a side panel. */
+.bot-about-surface { --settings-surface-x: var(--space-12); --settings-row-y: 10px; }
+.bot-about .settings-item { flex-wrap: nowrap; column-gap: var(--space-12); min-height: 0; }
+.bot-about .settings-item-lead { width: 18px; margin-right: calc(-1 * var(--space-4)); align-self: flex-start; padding-top: 1px; }
+.bot-about .settings-item-text { flex: 1 1 0; gap: 2px; }
+.bot-about .settings-item-title { font-size: 13px; line-height: 1.4; }
+.bot-about .settings-item-desc { font-size: 12px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bot-about .settings-item-control { gap: var(--space-4); flex-shrink: 0; }
+.bot-about .settings-item-control .settings-btn.danger.confirm { height: var(--settings-control-h); padding: 0 var(--space-8); border-radius: var(--ui-control-radius); font-size: 12px; }
+.bot-about-status { margin-left: var(--space-8); font-size: 12px; color: var(--warning); white-space: nowrap; }
+.bot-about-value { font-size: var(--settings-fs-small); white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.bot-about-permission.is-off .settings-item-lead, .bot-about-permission.is-off .settings-item-title { opacity: .55; }
+.bot-about-permission .settings-item-desc { -webkit-line-clamp: 1; }
+
+/* Context: the composer's context bar and breakdown, laid open. */
+.bot-about .bot-about-context { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: var(--space-8); }
+.bot-about-context-top { display: flex; align-items: baseline; gap: var(--space-8); font-variant-numeric: tabular-nums; }
+.bot-about-context-share { font-size: 22px; font-weight: 600; line-height: 1.1; letter-spacing: -.01em; }
+.bot-about-context-of { font-size: var(--settings-fs-small); color: var(--text-secondary); }
+.bot-about-breakdown { margin-top: 2px; }
+.bot-about-breakdown .context-usage-item { font-size: 12px; }
+.bot-about-breakdown .context-usage-swatch { border-radius: 2px; }
+
+/* An automation: its name, when it runs, what each run does, and how its last run went. */
+.bot-about-automation .settings-item-desc { display: flex; flex-direction: column; gap: 2px; -webkit-line-clamp: unset; }
+.bot-about-when { color: var(--text-secondary); }
+.bot-about-does { color: color-mix(in srgb, var(--text-primary) 78%, transparent); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Runs on: the model rows and the device choice, as one block on the surface; its rows stack. Scoped to About so
+   Settings' row layout (.settings-item, loaded later with the Settings page) never turns it into one squeezed row. */
+.bot-about .bot-about-setup-body { display: block; padding: var(--space-8) 0; }
+.bot-about-line { display: grid; grid-template-columns: var(--bot-row-label, 78px) minmax(0, 1fr); column-gap: var(--space-8); align-items: center; padding: 3px 0; font-size: 12px; }
+.bot-about-setup .bot-about-row { font-size: 12px; }
+
+.bot-about-fold .bot-prompt-head { min-height: 0; margin: 0 0 var(--space-4); justify-content: flex-end; }
+.bot-about-fold .bot-prompt-head h3 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+/* Pause and Delete stay at the panel's bottom edge, under every section. */
+.bot-about-foot { display: flex; flex: none; gap: var(--space-8); padding: var(--space-12) var(--bot-about-x); border-top: 1px solid var(--ui-line); }
+.bot-about-foot .settings-btn { flex: 1; gap: 6px; height: 30px; border-radius: var(--ui-control-radius); font-size: var(--settings-fs-small); }
 .bot-close { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; color: var(--text-secondary); margin: -8px -6px 0 auto; }
-.bot-about-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding-bottom: 18px; border-bottom: 1px solid rgba(var(--accent-pale-rgb), .1); }
-.bot-about-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
-.bot-about-head p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
-.bot-about h3 { margin: 18px 0 8px; font-size: 11px; font-weight: 500; letter-spacing: .075em; color: var(--text-secondary); }
 .bot-about-row { display: flex; align-items: center; gap: 9px; padding: 7px 0; font-size: 12px; }
 .bot-about-row > svg { color: var(--text-secondary); flex-shrink: 0; }
 .bot-about-row span { flex: 1; min-width: 0; }
@@ -398,10 +594,36 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-about-row button { font-size: 11px; color: var(--text-secondary); }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
+/* About's prompt: the owner's words as a profile section, in the app's own type on the Settings group surface
+   (.settings-scope gives its fill and edge per theme). Edit opens the words in the same card; selection is a fill. */
+.bot-prompt-head { display: flex; align-items: center; gap: 6px; min-height: 24px; margin: 18px 0 8px; }
+.bot-about .bot-prompt-head h3 { margin: 0; }
+.bot-prompt-mark { font-size: 11px; color: var(--text-secondary); }
+.bot-prompt-mark::before { content: '·'; margin-right: 6px; }
+.bot-prompt-edit { display: inline-flex; align-items: center; gap: 5px; margin: 0 -6px 0 auto; padding: 4px 8px; border-radius: 7px; font-size: 11.5px; font-weight: 500; color: var(--text-secondary); }
+.bot-prompt-edit:hover { color: var(--text-primary); background: var(--ui-hover); }
+.bot-prompt-card { padding: 12px 14px; border-radius: var(--ui-card-radius, 12px); background: var(--settings-surface); box-shadow: var(--settings-surface-edge); transition: background-color .15s; }
+.bot-prompt-card.is-editing { background: color-mix(in srgb, var(--text-primary) 7%, transparent); }
+.bot-prompt-card.is-editing:focus-within { background: color-mix(in srgb, var(--text-primary) 9%, transparent); }
+.bot-prompt-body { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bot-prompt-body.is-folded { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 7; overflow: hidden; }
+.bot-prompt-body.is-cut { mask-image: linear-gradient(to bottom, #000 calc(100% - 1.6em), transparent); }
+.bot-prompt-more { margin-top: 6px; font-size: 12px; font-weight: 500; color: var(--accent); }
+.bot-prompt-more:hover { color: var(--text-primary); }
+.bot-prompt-field { display: block; width: 100%; min-height: 4.8em; max-height: 320px; padding: 0; border: 0; outline: none; resize: none; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.6; overflow-y: auto; }
+/* The card carries the fill; light and acrylic themes paint every textarea white. */
+html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transparent; }
+.bot-prompt-count { margin-top: 8px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.bot-prompt-count.is-over, .bot-prompt-error { color: var(--danger, #e79090); }
+.bot-prompt-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.bot-prompt-spacer { flex: 1; }
+.bot-prompt-reset { display: inline-flex; align-items: center; gap: 5px; padding: 6px 0; font-size: 11.5px; color: var(--text-secondary); }
+.bot-prompt-reset:hover:not(:disabled) { color: var(--text-primary); }
+.bot-prompt-reset:disabled { opacity: .45; }
+.bot-prompt-actions :is(.bot-ghost-button, .chat-primary-button) { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 12px; }
+.bot-prompt-error { margin-top: 8px; }
 /* About's one Memory row: the count and its split; it opens the Memory dialog. */
 /* No heading of its own (the row names it): it keeps a section's space above it. */
-.bot-about-row.bot-about-memory { margin: 12px -8px 0; width: calc(100% + 16px); padding: 7px 8px; border-radius: 8px; text-align: left; color: var(--text-primary); font-size: 12px; }
-.bot-about-row.bot-about-memory:hover, .bot-about-row.bot-about-memory:focus-visible { background: color-mix(in srgb, var(--text-secondary) 10%, transparent); color: var(--text-primary); }
 
 /* The Memory dialog: a search box, then the owner's wishes and the bot's notes, each entry with its date. */
 .bot-memory-search { display: flex; align-items: center; gap: 8px; padding: 0 12px; margin-bottom: 12px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-secondary); }
@@ -451,9 +673,6 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 /* New bot's Runs on: Computer's label and control in the same columns as the rows. */
 .bot-new-runs-on .bot-new-row { display: grid; grid-template-columns: var(--bot-row-label) minmax(0, 1fr); column-gap: 12px; }
 .bot-new-runs-on .bot-new-row > .ui-select { width: 100%; }
-.bot-about-foot { display: flex; gap: 8px; margin-top: 22px; }
-.bot-about-foot button { flex: 1; }
-.bot-about-foot .is-danger { color: var(--error, #e79090); }
 
 /* The empty page. */
 .bot-empty-face { margin: 0 auto 18px; }
@@ -463,7 +682,9 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-conversation button:focus-visible, .bot-about button:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 
 /* Work beside the chat (docs/plans/bot-always-free.md): a small list under the header's presence, one line each, with Stop. */
-.bot-work { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; width: min(380px, 70vw); max-height: min(420px, 70vh); overflow-y: auto; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 5px; border-radius: 10px; border: 1px solid var(--ui-line-strong, rgba(255, 255, 255, .14)); background: var(--ui-raised, var(--surface-soft)); box-shadow: var(--ui-raised-shadow, 0 10px 32px rgba(0, 0, 0, .32)); }
+/* The list grows with its rows, never showing a scrollbar; past the window's height (the header above it, 130px) it
+   still scrolls, without a bar. */
+.bot-work { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; width: min(380px, 70vw); max-height: calc(100vh - 130px); overflow-y: auto; scrollbar-width: none; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 5px; border-radius: 10px; border: 1px solid var(--ui-line-strong, rgba(255, 255, 255, .14)); background: var(--ui-raised, var(--surface-soft)); box-shadow: var(--ui-raised-shadow, 0 10px 32px rgba(0, 0, 0, .32)); }
 .bot-work-line { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 4px 3px 8px; font-size: var(--bot-meta); color: var(--text-secondary); }
 .bot-work-line svg { flex: none; }
 .bot-work-title { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
@@ -496,12 +717,20 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-thread-show { position: absolute; right: 4px; bottom: 3px; display: grid; place-items: center; width: 22px; height: 20px; border-radius: 6px; color: var(--text-secondary); opacity: .75; }
 .bot-thread-show:hover:not(:disabled) { opacity: 1; background: color-mix(in srgb, var(--text-secondary) 14%, transparent); color: var(--text-primary); }
 .bot-thread-show:disabled { opacity: .4; cursor: default; }
-.bot-thread-fold { display: flex; align-items: center; gap: 4px; width: 100%; padding: 4px 8px 2px; border-radius: 6px; font-size: 11px; color: var(--text-secondary); text-align: left; }
-.bot-thread-fold:hover { color: var(--text-primary); }
-.bot-thread-fold svg { flex: none; transition: transform 150ms ease-out; }
-.bot-thread-fold svg[data-open] { transform: rotate(90deg); }
+/* "Recent": the threads that finished in the last six hours; "See all" lists every one in the sidebar. */
+.bot-thread-recent { display: flex; gap: 5px; margin-top: 8px; }
 .bot-thread-count { font-variant-numeric: tabular-nums; opacity: .8; }
-@media (prefers-reduced-motion: reduce) { .bot-thread-fold svg { transition: none; } }
+.bot-work::-webkit-scrollbar { display: none; width: 0; }
+/* Recent folded under Show more: it opens and closes by its height, and takes no gap while folded. */
+.bot-work-fold { display: grid; grid-template-rows: 0fr; margin-top: -4px; opacity: 0; transition: grid-template-rows var(--ui-dur-slow) var(--ui-collapse-ease), margin-top var(--ui-dur-slow) var(--ui-collapse-ease), opacity var(--ui-dur-slow) ease; }
+.bot-work-fold[data-open] { grid-template-rows: 1fr; margin-top: 0; opacity: 1; }
+.bot-work-fold > div { min-height: 0; overflow: hidden; }
+/* The bottom row: Show more or Show less on the left, "See all" on the right (centred when alone). It stays at the
+   panel's bottom edge if the list ever scrolls (5px: the panel's padding). */
+.bot-work-foot { position: sticky; bottom: -5px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px -5px -5px; padding: 3px 5px 5px; border-top: 1px solid var(--ui-line); border-radius: 0 0 9px 9px; background: var(--ui-raised, var(--surface-soft)); }
+.bot-work-foot > :only-child { flex: 1; justify-content: center; }
+.bot-work-more, .bot-thread-all { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; font-size: var(--bot-meta); color: var(--text-secondary); }
+.bot-work-more:hover, .bot-thread-all:hover { color: var(--text-primary); }
 
 /* What waits on the owner (an open ask, the bot's error), pinned above the composer as one line each; a click shows
    the full message. */
@@ -520,13 +749,13 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-jump:hover { background: color-mix(in srgb, var(--text-secondary) 14%, var(--bg-secondary, #201d23)); }
 
 /* The composer: one flat pill as wide as the column, with attach, mic and send inside. It is one line high and grows
-   with the words up to seven lines. Its specular is dimmer than the thread composer's: here the chat has the focus. */
+   with the words up to seven lines. Its edge light is the shared specular ring (specular.css). */
 .bot-conversation .chat-input-area.bot-input-area { width: var(--bot-column); padding: 0 0 18px; }
 .bot-conversation .chat-input-area.bot-input-area .composer {
   --bot-glint: rgba(255, 255, 255, 0.13);
   --bot-sheen: radial-gradient(125% 90% at 50% -20%, rgba(255, 255, 255, 0.035) 0%, transparent 60%);
   flex-direction: row; flex-wrap: wrap; align-items: flex-end; border-radius: 23px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.18), 0 4px 16px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
   background-image: linear-gradient(90deg, transparent, var(--bot-glint), transparent), var(--bot-sheen);
   background-size: 40% 1px, 100% 100%;
 }
@@ -557,7 +786,8 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 
 /* The composer's emoji: a small grid above the button. */
 .bot-emoji { position: relative; display: flex; }
-.bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: var(--bg-secondary, #201d23); box-shadow: 0 18px 50px #0006; }
+/* The emoji grids float over the conversation, so they take the theme's solid surface: --bg-secondary is see-through glass. */
+.bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: rgb(var(--surface-strong-rgb)); box-shadow: 0 18px 50px #0006; }
 .bot-emoji-grid button { width: 32px; height: 32px; border-radius: 8px; font-size: 18px; line-height: 32px; text-align: center; }
 .bot-emoji-grid button:hover, .bot-emoji-grid button:focus-visible { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
 
@@ -583,11 +813,90 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-emoji-grid [aria-checked='true'] { background: rgba(var(--accent-rgb), .22); }
 @media (prefers-reduced-motion: reduce) { .bot-react-bar { transition: none; } }
 
-/* A message's words can be selected, to copy them or to reply to that part (SelectionReplyButton). */
+/* A message's words can be selected, to copy them. */
 .bot-conversation .bot-markdown {
   user-select: text;
   -webkit-user-select: text;
 }
 
-.bot-about-permission > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bot-about-permission .bot-about-next { display: inline; margin-left: 6px; }
+
+/* A held call uses the ask's controls; all outside data remains readable in place. */
+.bot-action-card { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.bot-action-title { font-weight: 600; margin: 0 0 4px; }
+.bot-action-server { color: var(--text-secondary); }
+.bot-action-arguments { overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.bot-action-arguments:has(details[open]) { max-height: 360px; }
+.bot-action-arguments dl { margin: 8px 0; }
+.bot-action-arguments dt { font-family: inherit; color: var(--text-secondary); font-size: 12px; font-weight: 400; white-space: pre-wrap; }
+.bot-action-arguments dd { margin: 4px 0 12px; }
+.bot-action-arguments ol { margin: 4px 0; padding-left: 0; list-style-position: inside; }
+.bot-action-arguments summary { cursor: pointer; }
+.bot-action-hidden { display: inline-block; font-style: italic; color: var(--text-secondary); border: 1px dashed var(--border); border-radius: 4px; padding: 0 4px; }
+.bot-action-card blockquote { margin: 12px 0; padding: 8px 12px; border-left: 2px solid var(--border); max-height: 240px; overflow: auto; }
+
+.bot-action-arguments .bot-action-text { max-height: none; overflow: visible; white-space: pre-wrap; margin: 4px 0; padding: 4px 8px; border-left: 2px solid var(--border); }
+.bot-action-card .bot-action-identification { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0; padding: 4px 8px; }
+.bot-action-notice { display: flex; align-items: baseline; gap: 6px; }
+.bot-action-notice > svg { flex: 0 0 14px; }
+
+.bot-action-arguments code { display: inline-block; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; font-family: var(--font-mono, monospace); }
+.bot-action-empty { color: var(--text-secondary); font-style: italic; }
+
+.bot-action-paths { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.bot-action-path-segment { font-family: inherit; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; white-space: pre-wrap; }
+.bot-action-paths details { display: inline-block; max-width: 100%; }
+
+.bot-action-alphabet { display: inline-flex; gap: 4px; align-items: baseline; color: var(--text-secondary); font-family: var(--font-ui, sans-serif); font-size: 11px; margin-left: 4px; }
+
+.bot-action-card blockquote[aria-label="Tool result"] { white-space: pre-wrap; }
+
+.bot-action-outcome { color: var(--text-primary); font-size: inherit; margin: 4px 0 8px; }
+.bot-action-arguments dd > dl { margin-left: 16px; }
+
+.bot-expired-actions { margin-top: 14px; }
+.bot-expired-actions > summary { width: fit-content; max-width: 100%; margin-inline: auto; padding: 2px 10px; font-size: 12px; line-height: 18px; color: var(--text-secondary); border-radius: 999px; background: color-mix(in srgb, var(--text-secondary) 7%, transparent); cursor: pointer; }
+
+/* A bot's hover card in the sidebar: to the right of its row, top edges aligned, its status and the threads it works on. */
+/* Its row stays tinted while the card is open. */
+.bot-hover-anchor[data-open] > .bot-row:not([aria-current='true']) { background: color-mix(in srgb, var(--text-secondary) 11%, transparent); }
+.bot-hover-card { --bot-meta: 12.5px; position: fixed; top: auto; width: min(340px, 60vw); max-height: min(360px, 60vh); padding: 6px; z-index: 60; }
+.bot-hover-head { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 6px; min-width: 0; }
+.bot-hover-name { font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-hover-status { font-size: 12px; line-height: 1.35; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A bot's thread in the bot's chat pane: back, the face, "bot / thread", and the thread's project and state under it. */
+.bot-thread-header { gap: 6px; padding-block: 12px; padding-left: 12px; }
+.bot-thread-back { flex: none; }
+.bot-thread-header .bot-header-who { margin-left: 8px; }
+.app .bot-thread-crumbs { display: flex; align-items: baseline; gap: 6px; min-width: 0; max-width: 100%; margin: 0; font-size: 14px; line-height: 18px; font-weight: 600; }
+.bot-thread-crumb-bot { flex: none; min-height: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--text-secondary); cursor: pointer; }
+.bot-thread-crumb-bot:hover { color: var(--text-primary); }
+.bot-thread-crumb-sep { flex: none; font-weight: 400; color: var(--text-secondary); opacity: .7; }
+.bot-thread-crumb-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A private paste stays above the composer until its owner chooses. */
+.composer-question-modal.bot-pasted-secret.is-inline { max-width: none; padding: 12px; margin-bottom: 8px; }
+.bot-pasted-secret[role="alert"] { box-shadow: inset 0 0 0 1px var(--warning); }
+.bot-pasted-secret-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.bot-pasted-secret-controls .secret-request-keep { margin: 0; }
+.bot-pasted-secret-actions { display: flex; gap: 8px; }
+
+/* Mousse Dark: the New bot dialog sits near the true-dark canvas, a plain fill without the dialogs' top sheen. */
+html[data-theme='blacksphere-plus'] .chat-dialog.bot-dialog:has(> .bot-new-form) { background-color: color-mix(in srgb, var(--ui-lift) 7%, var(--surface-base)); background-image: none; }
+/* Mousse Dark: the bot composer's light, and row and menu hovers, take the shared accent tint (--ui-lift, polish.css). */
+html[data-theme='blacksphere-plus'] .bot-conversation .chat-input-area.bot-input-area .composer {
+  --bot-glint: color-mix(in srgb, var(--ui-lift) 16%, transparent);
+  --bot-sheen: radial-gradient(125% 90% at 50% -20%, color-mix(in srgb, var(--ui-lift) 6%, transparent) 0%, transparent 60%);
+}
+html[data-theme='blacksphere-plus'] .bot-row:not([aria-current='true']):hover,
+html[data-theme='blacksphere-plus'] .bot-hover-anchor[data-open] > .bot-row:not([aria-current='true']),
+html[data-theme='blacksphere-plus'] .bot-menu button:is(:hover, :focus-visible),
+html[data-theme='blacksphere-plus'] .chat-list-row:not(.active):hover { background: color-mix(in srgb, var(--ui-lift) 7.5%, transparent); }
+
+/* Pictures sit in a thin frame of their message's bubble colour, as in a messaging app, so they never melt into the
+   dark pane: the owner's in the accent tint of their bubbles, a bot's in its bubble's. 3px of bubble shows around them. */
+.bot-you-content > .bot-images { padding: 3px; border-radius: 16px; background: rgba(var(--accent-rgb), .2); }
+.bot-you-content > .bot-images > .bot-image { border-radius: 13px; }
+.bot-bubble.has-media > .bot-reply-media { margin-inline: -9px; }
+.bot-bubble.has-media > .bot-reply-media:first-child { margin-top: -6px; }
+.bot-bubble.has-media > .bot-reply-media .bot-picture { border-radius: 13px; }

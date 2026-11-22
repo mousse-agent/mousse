@@ -18,6 +18,7 @@ import type { RoutedStreamKind } from '../../../shared/bridge/routed'
 import type { Clock, IdentityService, KeyStore, StreamStore } from '../../net/contracts'
 import type { NetDatabase } from '../../net/store/database'
 import { canonicalJson, encodeEnvelope, MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
+import { engineLimits } from '../../netEngine/limits'
 import {
   PRIVATE_STREAM_QUOTA,
   PRIVATE_TERMINAL_RING_BYTES,
@@ -711,9 +712,10 @@ export class ThreadStreamAdapter {
       .map((row) => identity.verifySigned<NodeDelegation>(row, root))
       .filter((row) => row.subject === self.node)
       .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
+    // A clock a little behind the one that issued the delegation is allowed the engine's skew (wire.md).
     if (
       !delegation ||
-      delegation.issuedAt > this.options.clock.now() ||
+      delegation.issuedAt > this.options.clock.now() + engineLimits().clockSkewMs ||
       delegation.expiresAt <= this.options.clock.now() ||
       roster.revoked.some(
         (row) => row.subject === self.node && row.throughKeyEpoch >= delegation.keyEpoch

@@ -2,7 +2,6 @@ import { fail } from './db/RunStoreError'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
 import { str, type Row } from './db/rows'
-import { PRIORITY_TURN_SOURCES } from './delegation/sources'
 import {
   DEFAULT_EFFECT_MAX_ATTEMPTS,
   EFFECT_KIND_SPEC,
@@ -19,16 +18,6 @@ import {
 export const EFFECT_LEASE_GRACE_MS = 15_000
 const BACKOFF_BASE_MS = 100
 const BACKOFF_MAX_MS = 30_000
-/**
- * How long a background `turn.start` waits before it ranks with a person's turns again, so a steady
- * stream of people's messages never starves delegated subagents, wakes or resumes.
- */
-export const BACKGROUND_TURN_AGE_MS = 15 * 60_000
-
-/** A `turn.start` of a run a person is waiting for (`PRIORITY_TURN_SOURCES`, or a person's `steer-followup`). */
-const PERSON_TURN_SQL = `(c.kind = 'turn.start' AND EXISTS (SELECT 1 FROM runs r WHERE r.run_id = c.run_id
-  AND (r.source IN (${PRIORITY_TURN_SOURCES.map((source) => `'${source}'`).join(',')})
-    OR (r.source = 'steer-followup' AND json_extract(r.outcome, '$.sentByPerson') = 1))))`
 
 export type EffectSettlement =
   { settled: true; effect: EffectRecord } | { settled: false; status: EffectStatus | null }
@@ -66,8 +55,6 @@ export class EffectOutbox {
   private readonly claimSql: string
   /** Claim statements restricted to a set of lane classes, keyed by the sorted class list. */
   private readonly claimSqlByLanes = new Map<string, string>()
-  /** Claim statements restricted to a person's `turn.start`, keyed by the unrestricted statement. */
-  private readonly personOnlyByClaim = new Map<string, string>()
 
   constructor(
     readonly store: RunStore,
@@ -93,23 +80,21 @@ export class EffectOutbox {
     // (SPEC §12.3: a lane is FIFO). Each thread has four lanes: the thread lane (turns and
     // replay-safe work), the control lane (interrupt, steer and answers, which must reach a live
     // turn), the title lane and the resume lane (a `run.resume` timer waiting for a usage limit).
-    // The oldest claimable row comes first, except on the turn fibres (`claimSqlFor` with `turn`):
-    // there a person's `turn.start` comes first, and a background one older than
-    // `BACKGROUND_TURN_AGE_MS` ranks with a person's again.
+    // The oldest claimable row comes first.
     this.claimSql = `UPDATE effects SET status = 'running', attempts = attempts + 1,
         lease_owner = :owner, updated_at = :now,
         lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', :now,
           '+' || ((timeout_ms + ${EFFECT_LEASE_GRACE_MS}) / 1000.0) || ' seconds')
       WHERE effect_id = (
         SELECT c.effect_id FROM effects c
-        WHERE c.status = 'pending' AND c.available_at <= :now /*lanes*/ /*person*/
+        WHERE c.status = 'pending' AND c.available_at <= :now /*lanes*/
           AND NOT EXISTS (
             SELECT 1 FROM effects o
             WHERE o.thread_id = c.thread_id AND o.rowid <> c.rowid
               AND ${laneOf('o')} = ${laneOf('c')}
               AND ((o.status = 'running' AND o.lease_expires_at > :now)
                 OR (o.status = 'pending' AND o.rowid < c.rowid)))
-        ORDER BY /*rank*/ c.available_at, c.rowid LIMIT 1)
+        ORDER BY c.available_at, c.rowid LIMIT 1)
       RETURNING *`
   }
 
@@ -171,24 +156,29 @@ export class EffectOutbox {
   }
 
   /**
-   * Claims the next claimable effect for `owner`, or null. One `UPDATE … RETURNING`. The oldest
-   * comes first; when `lanes` has `turn`, a person's `turn.start` comes before a background one that
-   * has waited less than `BACKGROUND_TURN_AGE_MS`. `lanes` restricts the claim to effect kinds of those lane
-   * classes (a worker fibre group, SPEC §12.3); without it any kind may be claimed. `personOnly`
-   * claims only a person's `turn.start` (the turn slots kept for people).
+   * Records an effect that has already happened outside the worker (a notice handed over with a tool's
+   * result): inserted and `succeeded` in one transaction, so no executor ever claims it. Same ids and
+   * events as `enqueue`.
    */
-  claimNext(
-    owner: string,
-    now: string,
-    options: { lanes?: readonly EffectLaneClass[]; personOnly?: boolean } = {}
-  ): EffectRecord | null {
-    let sql = options.lanes ? this.claimSqlFor(options.lanes) : this.claimSql
-    if (sql === null) return null
-    if (options.personOnly) sql = this.personOnlySql(sql)
-    const params: Record<string, string> = { owner, now }
-    if (sql.includes(':agedBefore')) params.agedBefore = addMs(now, -BACKGROUND_TURN_AGE_MS)
+  recordDone(input: { threadId: string; runId: string; kind: EffectKind; payload?: unknown }): EffectRecord {
     return this.db.transaction(() => {
-      const row = this.db.statement(sql).get(params)
+      const pending = this.enqueue(input)
+      if (pending.status !== 'pending') return pending
+      const now = this.now()
+      return this.write(pending, { status: 'succeeded', attempts: 1, updatedAt: now, completedAt: now })
+    })
+  }
+
+  /**
+   * Claims the next claimable effect for `owner`, or null. One `UPDATE … RETURNING`; the oldest
+   * comes first. `lanes` restricts the claim to effect kinds of those lane classes (the worker's turn
+   * claimer or a fibre group, SPEC §12.3); without it any kind may be claimed.
+   */
+  claimNext(owner: string, now: string, options: { lanes?: readonly EffectLaneClass[] } = {}): EffectRecord | null {
+    const sql = options.lanes ? this.claimSqlFor(options.lanes) : this.claimSql
+    if (sql === null) return null
+    return this.db.transaction(() => {
+      const row = this.db.statement(sql).get({ owner, now })
       return row ? this.recorded(toEffect(row), false) : null
     })
   }
@@ -202,25 +192,12 @@ export class EffectOutbox {
       lanes.includes(effectLaneClass(kind))
     )
     if (!kinds.length) return null
-    let sql = this.claimSql.replace(
+    const sql = this.claimSql.replace(
       '/*lanes*/',
       `AND c.kind IN (${kinds.map((kind) => `'${kind}'`).join(',')})`
     )
-    if (lanes.includes('turn'))
-      sql = sql.replace(
-        '/*rank*/',
-        `(CASE WHEN c.kind <> 'turn.start' OR c.created_at <= :agedBefore OR ${PERSON_TURN_SQL} THEN 0 ELSE 1 END),`
-      )
     this.claimSqlByLanes.set(key, sql)
     return sql
-  }
-
-  private personOnlySql(sql: string): string {
-    const cached = this.personOnlyByClaim.get(sql)
-    if (cached !== undefined) return cached
-    const restricted = sql.replace('/*person*/', `AND ${PERSON_TURN_SQL}`)
-    this.personOnlyByClaim.set(sql, restricted)
-    return restricted
   }
 
   /** Extends the lease while `owner` still holds a running effect. */
@@ -286,6 +263,22 @@ export class EffectOutbox {
           updatedAt: now
         })
       }
+    })
+  }
+
+  /**
+   * The thread's `turn.start` effects deferred because the thread was busy (`defer`, reason `thread_busy`) become due
+   * now: the turn that kept them waiting has settled. Returns how many.
+   */
+  bringForwardDeferred(threadId: string, now: string): number {
+    return this.db.transaction(() => {
+      let moved = 0
+      for (const effect of this.listForThread(threadId, { status: 'pending' })) {
+        if (effect.kind !== 'turn.start' || effect.lastError !== 'thread_busy' || effect.availableAt <= now) continue
+        this.write(effect, { availableAt: now, updatedAt: now })
+        moved += 1
+      }
+      return moved
     })
   }
 

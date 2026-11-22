@@ -18,6 +18,7 @@ import {
   createLegacySingleProfileContext,
   type IntegrationRuntimeContext
 } from '../profileContext'
+import { extractSecretReferences } from '../secrets'
 import { inferMcpAuthMode } from './authMode'
 import { mcpConfigRevision, mcpInstallationId } from './connectionKey'
 import { tomlSubsetDiagnostics } from './tomlDiagnostics'
@@ -89,6 +90,16 @@ export class McpRegistry {
           // servers that happen to share the same config document.
           server.configRevision = server.configRevision ?? mcpConfigRevision(server)
           server.authMode = inferMcpAuthMode(server)
+          // Discovery must not call a bound reference ready just because the daemon can read it for masking.
+          const bound = unique([server.env, server.headers, authToStringRecord(server.auth)]
+            .flatMap(record => Object.values(record ?? {}))
+            .flatMap(extractSecretReferences)
+            .filter(name => this.context.secrets.canUseSecretRef?.(name) === false)
+            .map(name => `secret:${name}`))
+          if (bound.length) {
+            server.missingEnvVars = unique([...(server.missingEnvVars ?? []), ...bound])
+            if (server.enabled !== false) server.status = 'missing-env'
+          }
         }
         servers.push(...parsed)
       } catch (err) {

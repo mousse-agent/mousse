@@ -9,7 +9,8 @@
  * or the Claude Code named by `MOUSSE_CLAUDE_EVIDENCE_BINARY` (an installed version a record is made
  * for). A passing run is what a `CONTAINMENT_EVIDENCE` record for that version and platform cites.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -107,7 +108,11 @@ interface LockedRun {
 describe('locked Claude Code against the real pinned CLI', () => {
   const cleanups: Array<() => Promise<void> | void> = []
   afterEach(async () => {
-    for (const cleanup of cleanups.splice(0).reverse()) await Promise.resolve(cleanup()).catch(() => undefined)
+    const failures: unknown[] = []
+    for (const cleanup of cleanups.splice(0).reverse()) {
+      try { await cleanup() } catch (error) { failures.push(error) }
+    }
+    if (failures.length) throw new AggregateError(failures, 'Locked Claude test cleanup failed')
   })
 
   /**
@@ -116,7 +121,9 @@ describe('locked Claude Code against the real pinned CLI', () => {
    */
   async function lockedRun(steps: (paths: { root: string; scratch: string; outside: string; userHome: string }) => Json[], options: { charge?: () => unknown } = {}): Promise<LockedRun & { marker: (name: string) => string }> {
     const base = mkdtempSync(join(tmpdir(), 'mousse-claude-locked-'))
-    cleanups.push(() => rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+    // On Windows, recursive rmSync can fail immediately on ACCESS_DENIED despite maxRetries.
+    // Async removal retries transient EPERM while the OS releases the CLI's working directory.
+    cleanups.push(() => rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
     const root = join(base, 'root')
     const scratch = join(base, 'scratch')
     const outside = join(base, 'outside')

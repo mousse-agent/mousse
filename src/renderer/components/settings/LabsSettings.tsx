@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { PROFILER_TOOL_LABELS, PROFILER_TOOL_NAMES, type ProfilerSettings } from '../../../shared/diagnostics/profiler'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
-import { Cpu } from '../../lib/icons'
+import { Cloud, Cpu, Gauge } from '../../lib/icons'
 import { showToast } from '../ui/Toast'
 import { MemoryRows } from './MemoryRows'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
@@ -10,16 +10,99 @@ import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './Settings
 export const HEAP_SNAPSHOT_WARNING = 'Holds thread text, prompts, paths and tokens. Stays on this computer; never share it.'
 
 /**
- * Settings → Labs. The profiler: one switch, off by default; everything else shows only while it is on. The
+ * Settings → Labs. Mousse ID (legacy): one switch, on by default; off, this profile's networking leaves Mousse Plus
+ * alone (no sign-in, hosted relay or phone requests through it). The profiler: one switch, off by default; everything else shows only while it is on. The
  * Memory row stays in view; notices, heap snapshot, agent access and the tools fold under Advanced, the tools only
  * while agent access is on.
  */
 export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
   const profiler = settings.experimental.profiler
   const set = (next: Partial<ProfilerSettings>) =>
-    onUpdate({ experimental: { ...settings.experimental, profiler: { ...profiler, ...next, tools: { ...profiler.tools, ...next.tools } } } })
+    onUpdate({ experimental: { profiler: { ...profiler, ...next, tools: { ...profiler.tools, ...next.tools } } } })
   return (
     <section id="labs" className="settings-section">
+      <SettingsGroup title="Mousse ID" icon={Cloud}>
+        <SettingsRow
+          title="Mousse ID (legacy)"
+          anchor="labs-plus-legacy"
+          htmlFor="labs-plus-legacy"
+          description={
+            <span title="When off, this computer can still reach your devices over the local network, SSH, tunnels and your own relay. Your sign-in is kept for when you turn it back on.">
+              Sign-in, hosted relay and phone access through the legacy service.
+            </span>
+          }
+          control={
+            <Switch
+              id="labs-plus-legacy"
+              label="Mousse ID (legacy)"
+              checked={settings.experimental.plusLegacy !== false}
+              onChange={(plusLegacy) => void onUpdate({ experimental: { plusLegacy } })}
+            />
+          }
+        />
+      </SettingsGroup>
+      <SettingsGroup title="Performance" icon={Gauge}>
+        <SettingsRow
+          title="Performance"
+          anchor="labs-hybrid-bot-faces"
+          htmlFor="labs-hybrid-bot-faces"
+          description={
+            <span title="On: each bot's body is drawn once per state and kept as a picture, and only its flat 2D eyes move. Off: every bot face is drawn in 3D as it moves.">
+              Bots use less GPU using 2D hybrid rendering
+            </span>
+          }
+          control={
+            <Switch
+              id="labs-hybrid-bot-faces"
+              label="Performance"
+              checked={settings.experimental.hybridBotFaces === true}
+              onChange={(hybridBotFaces) => void onUpdate({ experimental: { hybridBotFaces } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Sidebar animations"
+          anchor="labs-sidebar-animations"
+          htmlFor="labs-sidebar-animations"
+          description="Animate sidebar transitions, working indicators, and the read-aloud waveform."
+          control={
+            <Switch
+              id="labs-sidebar-animations"
+              label="Sidebar animations"
+              checked={settings.experimental.sidebarAnimations}
+              onChange={(sidebarAnimations) => void onUpdate({ experimental: { sidebarAnimations } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="New chat animations"
+          anchor="labs-new-chat-animations"
+          htmlFor="labs-new-chat-animations"
+          description="Turn off for a still logo and no background wave."
+          control={
+            <Switch
+              id="labs-new-chat-animations"
+              label="New chat animations"
+              checked={settings.experimental.newChatAnimations}
+              onChange={(newChatAnimations) => void onUpdate({ experimental: { newChatAnimations } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Shimmer animations"
+          anchor="labs-shimmer-animations"
+          htmlFor="labs-shimmer-animations"
+          description="Animate activity labels and highlights in the sidebar."
+          control={
+            <Switch
+              id="labs-shimmer-animations"
+              label="Shimmer animations"
+              checked={settings.experimental.shimmerAnimations}
+              onChange={(shimmerAnimations) => void onUpdate({ experimental: { shimmerAnimations } })}
+            />
+          }
+        />
+      </SettingsGroup>
       <SettingsGroup title="Profiler" icon={Cpu}>
         <SettingsRow
           title="Profiler"

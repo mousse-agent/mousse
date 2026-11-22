@@ -54,7 +54,7 @@ describe('a steer still unread when Claude Code\'s reply ends', () => {
       launchConfig: () => ({ binaryPath: binary }),
       query: cli.query,
       ...(live ? { live } : {}),
-      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+      probe: () => ({ kind: 'signed_in', account: { subject: 'test-account', credential: 'subscription' } })
     })
     stops.push(async () => service.stop())
     const d = phase6Daemon(home, [new ClaudeSubscriptionAdapter(() => service)])

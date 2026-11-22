@@ -1,3 +1,7 @@
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
+import { ACTIVE_RUNS_EVENT, KEEP_AWAKE_CAPABILITY, type SleepBlocker } from '../../shared/keepAwake'
+import { KeepAwakeService, serviceSleepBlocker } from '../power/KeepAwakeService'
+import { onSettingsSaved } from '../settings/SettingsStore'
 import { AgentDefinitionError } from '../../shared/agents/errors'
 import { ERROR_INFO_CAPABILITY, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 /**
@@ -20,20 +24,25 @@ import type { RemoteListsPort } from './remoteListsPort'
 import { parseEnvelope, validateHello, validateRequest, asAfterSequence, isObject } from './validators'
 import {
   MMS_PROTOCOL_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
   MMS_PROTOCOL_CHUNK_BYTES,
   MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES,
   MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
   MMS_PROTOCOL_VERSION,
   GIT_OPERATIONS_CAPABILITY,
   FIRST_SEND_BINDING_CAPABILITY,
+  THREAD_ROWS_CAPABILITY,
   PROTOCOL_CAPABILITIES,
   type ProtocolConnectionEventType,
   type ProtocolEvent,
   type ProtocolClientType,
   type ProtocolHelloOk,
-  type ProtocolResponse
+  type ProtocolResponse,
+  type ThreadRowEventData
 } from './types'
 import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
@@ -53,7 +62,9 @@ import {
   keepsResponseForReplay,
   MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES
 } from './replayCache'
-import { envelopeFrames } from './envelopeChunks'
+import { EnvelopeAssembler, envelopeBudget, envelopeFrames } from './envelopeChunks'
+import { withImageBudget } from './transcriptPaging'
+import { cachedUsage, onUsageKept } from './usageReads'
 import { maxConnectionEventBytes, PROTOCOL_CONNECTION_EVENT_TYPES } from './types'
 import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
 import { BROWSER_VIEW_CAPABILITY } from '../../shared/browser/threadView'
@@ -76,6 +87,11 @@ export interface ProtocolServerOptions {
    * neither advertised nor granted.
    */
   commandRouter?: ConnectionCommandRouter
+  /**
+   * What the service holds the computer awake with while runs work and no app is attached. Absent: Electron's power
+   * save blocker when the service runs in Electron, none under plain Node. Null: none.
+   */
+  sleepBlocker?: SleepBlocker | null
 }
 
 /** Constant-time comparison so hello auth cannot be probed via timing. */
@@ -130,9 +146,17 @@ interface ClientSession {
   writer: OutboundWriter
   connectionEventPending: number
   connectionEventLifetime: AbortController
+  /**
+   * A request larger than one frame, arriving in chunks (`MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY`): one transfer at a
+   * time, its chunks in order and nothing else between them, at most `MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES`, within
+   * what all connections may hold at once (`MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES`).
+   */
+  inbound: EnvelopeAssembler
 }
 
 export class MmsProtocolServer {
+  /** What chunked requests in flight hold across every connection (`MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES`). */
+  private readonly inboundBudget = envelopeBudget(MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES)
   private server: Server | null = null
   private readonly clients = new Map<string, ClientSession>()
   /**
@@ -151,6 +175,9 @@ export class MmsProtocolServer {
   /** Each profile's `threads.updated` sender: changes in one turn of the event loop go out as one event. */
   private readonly threadListPushers = new Map<string, (threadId?: string) => void>()
   private profileLifecycleUnsubscribe: (() => void) | null = null
+  /** Counts working runs for the app's sleep blocker, and holds one itself while no app is attached. */
+  private keepAwake: KeepAwakeService | null = null
+  private keepAwakeSettingsUnsubscribe: (() => void) | null = null
   private accepting = false
   private endpointPath: string | null = null
   private stopping = false
@@ -222,6 +249,11 @@ export class MmsProtocolServer {
     }
     if (this.stopping) throw new Error('Protocol server stopped while starting')
 
+    this.keepAwake ??= new KeepAwakeService({
+      emit: (active) => this.emitInstallationEvent(ACTIVE_RUNS_EVENT, { active }),
+      blocker: this.opts.sleepBlocker !== undefined ? this.opts.sleepBlocker : serviceSleepBlocker()
+    })
+    this.keepAwakeSettingsUnsubscribe ??= onSettingsSaved(() => this.keepAwake?.settingsChanged())
     this.wireOrchestratorEvents(this.opts.mms)
     const host = this.opts.mms.getInstallationHost()
     if (host) {
@@ -311,6 +343,10 @@ export class MmsProtocolServer {
     this.clients.clear()
 
     this.disposeOrchestratorEvents()
+    this.keepAwakeSettingsUnsubscribe?.()
+    this.keepAwakeSettingsUnsubscribe = null
+    this.keepAwake?.dispose()
+    this.keepAwake = null
 
     if (this.server) {
       const server = this.server
@@ -411,6 +447,11 @@ export class MmsProtocolServer {
     disposers.push(() => services.events.off('protocol:event', requested as (data: unknown) => void))
     services.protocolSequence = () => this.ringFor(services.profileId).currentSequence
     disposers.push(() => { services.protocolSequence = () => 0 })
+    // Every run of the profile (threads, subagents, bots) counts toward keeping the computer awake.
+    const runStore = services.runEngine?.store
+    if (runStore && this.keepAwake) {
+      disposers.push(this.keepAwake.attach(services.profileId, runStore, () => services.settings.get().runs.keepAwake))
+    }
     const orch = services.orchestrator
     const onOrch = (event: string, handler: (...args: any[]) => void): void => {
       orch.on(event, handler)
@@ -425,9 +466,30 @@ export class MmsProtocolServer {
       disposers.push(() => target.off(event, handler))
     }
 
-    // One `threads.updated` per change. Creating, renaming or settling a thread fires the store's event and the
-    // request's own, often several of them; each used to send the whole list. They are sent once, after the
-    // turn of the event loop that made them, with the list as it is then. A single thread's change keeps its id.
+    // Personal bots' threads (`Thread.botOwned`): no window lists them, counts their activity or is sent their rows.
+    // Read from the list the first time it is needed, then kept from the store's events (a thread never stops being a
+    // bot's), so an activity event does not look at every thread.
+    let botThreads: Set<string> | undefined
+    const botThreadIds = (): Set<string> =>
+      (botThreads ??= new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id)))
+    const noteBotRow = (thread: { id?: string; botOwned?: boolean } | undefined): void => {
+      if (botThreads && thread?.id && thread.botOwned) botThreads.add(thread.id)
+    }
+    onEmitter(services.threads, 'created', noteBotRow)
+    onEmitter(services.threads, 'updated', noteBotRow)
+    // Threads that windows listed until they became a bot's: the next push tells windows to drop the row.
+    const leftForBots = new Set<string>()
+    onEmitter(services.threads, 'bot-owned', (change: { id: string }) => {
+      botThreads?.add(change.id)
+      leftForBots.add(change.id)
+    })
+
+    // One push per change. Creating, renaming or settling a thread fires the store's event and the request's own,
+    // often several of them; they are sent once, after the turn of the event loop that made them, with the list as it
+    // is then. A change to one thread is sent as that thread's row (`threads.row`, or its removal), with the version
+    // of the list it was read from, so a turn's end costs one row, not every thread; a session that cannot apply rows
+    // is sent the whole list instead (`eventForSession`). Changes to several threads, or to the list as a whole (a
+    // reorder, a trash that takes owned threads along), send the whole list (`threads.updated`).
     let threadListPending: { threadId?: string } | undefined
     let threadListTimer: ReturnType<typeof setImmediate> | undefined
     const pushThreadsUpdated = (threadId?: string): void => {
@@ -440,8 +502,22 @@ export class MmsProtocolServer {
         const pending = threadListPending
         threadListPending = undefined
         threadListTimer = undefined
-        // The snapshot's version lets a window drop a list it receives after a newer one (`ThreadListVersion`).
-        emitToSubscribers(this.ring.push('threads.updated', services.threads.listAllThreadsVersioned(), pending?.threadId))
+        const id = pending?.threadId
+        if (!id) {
+          // The snapshot's version lets a window drop a list it receives after a newer one (`ThreadListVersion`).
+          emitToSubscribers(this.ring.push('threads.updated', services.threads.listAllThreadsVersioned(), undefined))
+          return
+        }
+        const { thread, version } = services.threads.listedThreadVersioned(id)
+        if (thread?.botOwned) {
+          // A bot's thread: nothing, unless windows still list it from before it became the bot's.
+          if (!leftForBots.delete(id)) return
+          const removed: ThreadRowEventData = { removed: id, version }
+          emitToSubscribers(this.ring.push('threads.row', removed, id))
+          return
+        }
+        const row: ThreadRowEventData = thread ? { thread, version } : { removed: id, version }
+        emitToSubscribers(this.ring.push('threads.row', row, id))
       })
     }
     this.threadListPushers.set(services.profileId, pushThreadsUpdated)
@@ -449,12 +525,10 @@ export class MmsProtocolServer {
     // - the store's other list writes (pin, settle, archive, reorder, trash, restore, purge, a first message);
     // - the service bus's `threads:updated`, which in-daemon producers raise (an expiry deletion, a routed pin,
     //   settle, reorder or delete through the phone's backend, agent executions, chats). A request's own
-    //   `threads.updated` also reaches the bus (`pushRequestEvent`); it is already pending then and adds nothing.
-    const threadListChanged = (threadId?: string): void => {
-      if (threadListPending) return
-      pushThreadsUpdated(threadId)
-    }
-    onEmitter(services.threads, 'list-changed', (change: { id?: string } | undefined) => threadListChanged(change?.id))
+    //   `threads.updated` also reaches the bus (`pushRequestEvent`); joined to the pending push, it makes it the
+    //   whole list, as the request's own did.
+    onEmitter(services.threads, 'list-changed', (change: { id?: string; wholeList?: boolean } | undefined) =>
+      pushThreadsUpdated(change?.wholeList ? undefined : change?.id))
     // A save that moved only a thread's time: windows hear it as `threads.touched` ({ touches: [{ id, updatedAt }] }),
     // at most once every TOUCH_INTERVAL_MS per thread, and every thread due at that moment in one event. A turn that
     // starts or ends, and an approval that waits or is answered, send the thread's held time at once.
@@ -500,7 +574,7 @@ export class MmsProtocolServer {
       touchTimer = undefined
       touchPending.clear()
     })
-    onEmitter(services.events, 'threads:updated', () => threadListChanged())
+    onEmitter(services.events, 'threads:updated', () => pushThreadsUpdated())
     disposers.push(() => {
       if (this.threadListPushers.get(services.profileId) === pushThreadsUpdated) this.threadListPushers.delete(services.profileId)
       if (threadListTimer) clearImmediate(threadListTimer)
@@ -533,6 +607,24 @@ export class MmsProtocolServer {
         if (event.type === 'snapshots') emitToSubscribers(this.ring.push('providers.snapshots', event.data))
         else emitToSubscribers(this.ring.push('providers.operation', { event: event.data }))
       }))
+    }
+    // Each usage reading kept, whichever read made it, reaches every window (bot headers' usage rings). The sign-ins
+    // of a proxy are kept one by one: those kept in one turn of the event loop go as one event per provider.
+    {
+      const pending = new Set<string>()
+      let usageTimer: ReturnType<typeof setImmediate> | undefined
+      disposers.push(onUsageKept(services, (providerId) => {
+        pending.add(providerId)
+        usageTimer ??= setImmediate(() => {
+          usageTimer = undefined
+          for (const id of pending) {
+            const usage = cachedUsage(services, id)
+            if (usage) emitToSubscribers(this.ring.push('providers.usage', { usage }))
+          }
+          pending.clear()
+        })
+      }))
+      disposers.push(() => { if (usageTimer) clearImmediate(usageTimer); pending.clear() })
     }
     // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
     // create threads directly rather than through a protocol request. Fan those
@@ -572,9 +664,10 @@ export class MmsProtocolServer {
       }
     )
 
+    // A message's images go to windows within one update's image budget; the rest by name, fetched as they are shown.
     onOrch('thread-message', (payload: { threadId: string; message: unknown }) => {
       emitToSubscribers(
-        this.ring.push('thread.message', { message: payload.message }, payload.threadId)
+        this.ring.push('thread.message', { message: liveMessage(payload.message) }, payload.threadId)
       )
     })
 
@@ -582,15 +675,16 @@ export class MmsProtocolServer {
       emitToSubscribers(
         this.ring.push(
           'thread.message-updated',
-          { message: payload.message },
+          { message: liveMessage(payload.message) },
           payload.threadId
         )
       )
     })
 
     onOrch('thread-messages', (payload: { threadId: string; messages: unknown; replace?: boolean }) => {
+      const messages = Array.isArray(payload.messages) ? withImageBudget(payload.messages as Array<{ images?: never }>) : payload.messages
       emitToSubscribers(
-        this.ring.push('thread.messages', { messages: payload.messages, ...(payload.replace ? { replace: true } : {}) }, payload.threadId)
+        this.ring.push('thread.messages', { messages, ...(payload.replace ? { replace: true } : {}) }, payload.threadId)
       )
     })
 
@@ -645,6 +739,16 @@ export class MmsProtocolServer {
 
     onOrch('turn-state', (state: TurnState) => {
       emitToSubscribers(this.ring.push('turn.state', state, state.threadId))
+    })
+
+    // What a thread runs in the background changed (issue #1605): its monitors, background commands and holds, and its
+    // provider's own background work. The event carries the whole picture, so the composer's status row never refetches.
+    onOrch('background-work', ({ threadId }: { threadId: string }) => {
+      try {
+        emitToSubscribers(this.ring.push('thread.backgroundWork', services.orchestrator.backgroundWork(threadId), threadId))
+      } catch (error) {
+        console.warn('thread.backgroundWork could not be sent', { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
     })
 
     // Run Engine (SPEC §6): durable thread events and command acknowledgements.
@@ -720,17 +824,22 @@ export class MmsProtocolServer {
         .getOrHydrate(payload.threadId)
         .pendingQuestionIds.add(payload.requestId)
       services.orchestrator.setAwaitingInput(payload.threadId)
+      // A request the bot that started the thread answers (`supervisorOf`): clients ping no one for it.
+      const supervised = services.orchestrator.supervisorOf(payload.threadId, payload.requestId) !== undefined
       emitToSubscribers(
-        this.ring.push('questions.pending', payload, payload.threadId)
+        this.ring.push('questions.pending', supervised ? { ...payload, supervised: true } : payload, payload.threadId)
       )
     })
     onEmitter(
       questions,
       'cleared',
       (payload: { requestId: string; threadId: string }) => {
-        services.threadRuntimes
-          .getOrHydrate(payload.threadId)
-          .pendingQuestionIds.delete(payload.requestId)
+        const runtime = services.threadRuntimes.getOrHydrate(payload.threadId)
+        runtime.pendingQuestionIds.delete(payload.requestId)
+        // The last open question answered: a turn that still runs reads as working again (and a steer steers).
+        if (!runtime.pendingQuestionIds.size && !questions.listPendingForThread(payload.threadId).length && !services.secretRequests?.waiting(payload.threadId)) {
+          services.orchestrator.inputAnswered(payload.threadId)
+        }
         emitToSubscribers(
           this.ring.push('questions.cleared', payload, payload.threadId)
         )
@@ -742,6 +851,8 @@ export class MmsProtocolServer {
     if (secretRequests) {
       onEmitter(secretRequests, 'changed', (payload: { threadId: string }) => {
         if (secretRequests.waiting(payload.threadId)) services.orchestrator.setAwaitingInput(payload.threadId)
+        // The last secret typed in, with no question left: the thread stops waiting, as after an answer.
+        else if (!questions.listPendingForThread(payload.threadId).length) services.orchestrator.inputAnswered(payload.threadId)
         emitToSubscribers(this.ring.push('secrets.requests.changed', { threadId: payload.threadId }, payload.threadId))
       })
     }
@@ -798,11 +909,16 @@ export class MmsProtocolServer {
         state: string
         activity?: Record<string, string>
       }) => {
-        const bots = new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+        const bots = botThreadIds()
         // A scheduled occurrence's turn: its end is announced by `scheduled.runEnded` as the job's Tell me says, so
         // clients do not also announce the thread finishing.
         const scheduled = services.orchestrator.isScheduledTurn(payload.threadId)
-        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled ? { ...payload, scheduled: true } : payload, payload.threadId))
+        // A turn a person stopped: they did it, so clients do not announce it as stopped.
+        const stoppedByPerson = payload.state === 'idle' && services.orchestrator.stoppedByPerson(payload.threadId)
+        // A wait the bot that started the thread answers (`waitSupervised`): clients ping no one for it.
+        const supervised = payload.state === 'awaiting_input' && services.orchestrator.waitSupervised(payload.threadId, services.secretRequests?.waiting(payload.threadId) ?? false)
+        const marks = { ...(scheduled ? { scheduled: true } : {}), ...(stoppedByPerson ? { stoppedByPerson: true } : {}), ...(supervised ? { supervised: true } : {}) }
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled || stoppedByPerson || supervised ? { ...payload, ...marks } : payload, payload.threadId))
         if (payload.activity) {
           const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(
@@ -883,6 +999,9 @@ export class MmsProtocolServer {
     if (services.personalBots) onEmitter(services.personalBots.events, 'message', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.message', event, undefined))
     })
+    if (services.personalBots) onEmitter(services.personalBots.events, 'tell', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.tell', event, undefined))
+    })
     if (services.personalBots) onEmitter(services.personalBots.events, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.activity', event, undefined))
     })
@@ -914,9 +1033,12 @@ export class MmsProtocolServer {
       completedIds: new Set(),
       writer: undefined as unknown as OutboundWriter,
       connectionEventPending: 0,
-      connectionEventLifetime: new AbortController()
+      connectionEventLifetime: new AbortController(),
+      inbound: undefined as unknown as EnvelopeAssembler
     }
     session.writer = new OutboundWriter(socket, () => this.closeClient(session))
+    // A transfer that stalls is a broken client: its connection closes, which drops what arrived.
+    session.inbound = new EnvelopeAssembler(() => this.closeClient(session), undefined, MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES, this.inboundBudget)
     this.clients.set(session.id, session)
 
     // Serialize decode + admission only. Disconnect cancels remaining chain work.
@@ -960,8 +1082,9 @@ export class MmsProtocolServer {
    * - events.subscribe boundary mutation is awaited (serialized atomic)
    * - Other handlers start concurrently; responses complete out-of-order by id
    */
-  private async admitFrame(session: ClientSession, raw: unknown): Promise<void> {
+  private async admitFrame(session: ClientSession, frame: unknown): Promise<void> {
     if (session.closed) return
+    let raw = frame
 
     if (!session.authenticated) {
       const v = validateHello(raw)
@@ -995,15 +1118,24 @@ export class MmsProtocolServer {
         advertised.filter(
           (capability) =>
             capability !== MMS_PROTOCOL_CHUNK_CAPABILITY &&
+            capability !== MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY &&
             capability !== PROFILES_V1_CAPABILITY &&
             capability !== ERROR_INFO_CAPABILITY &&
+            capability !== BOT_TELLING_CAPABILITY &&
+            capability !== KEEP_AWAKE_CAPABILITY &&
             capability !== BROWSER_ATTACHED_V1_CAPABILITY
         )
       )
       if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
+      if (requested.has(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY)
+      if (v.hello.clientType === 'gui' && requested.has(BOT_TELLING_CAPABILITY)) session.capabilities.add(BOT_TELLING_CAPABILITY)
+      // The app holds the sleep blocker while it is attached (`refreshKeepAwakeHolders`).
+      if (v.hello.clientType === 'gui' && requested.has(KEEP_AWAKE_CAPABILITY)) session.capabilities.add(KEEP_AWAKE_CAPABILITY)
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       // A window says it binds a chat's first message; nothing else may claim it.
       if (v.hello.clientType === 'gui' && requested.has(FIRST_SEND_BINDING_CAPABILITY)) session.capabilities.add(FIRST_SEND_BINDING_CAPABILITY)
+      // A window applies one thread's row; every other session keeps getting the whole list.
+      if (v.hello.clientType === 'gui' && requested.has(THREAD_ROWS_CAPABILITY)) session.capabilities.add(THREAD_ROWS_CAPABILITY)
       if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
         session.capabilities.add(PROFILES_V1_CAPABILITY)
       }
@@ -1030,6 +1162,20 @@ export class MmsProtocolServer {
       this.attachCommandConnection(session)
       this.sendRaw(session, ok)
       return
+    }
+
+    // A request larger than one frame comes in chunks, only from a client this connection allowed to send them. A
+    // broken sequence (out of order, another transfer, another frame between, a wrong size) closes the connection.
+    if (isObject(raw) && raw.kind === 'envelope_chunk') {
+      if (!session.capabilities.has(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY)) throw new FrameDecodeError('Unnegotiated envelope chunk')
+      const chunk = parseEnvelope(raw)
+      if (chunk?.kind !== 'envelope_chunk') throw new FrameDecodeError('Malformed envelope chunk')
+      const complete = session.inbound.accept(chunk)
+      if (complete === null) return
+      if (!isObject(complete) || complete.kind !== 'req') throw new FrameDecodeError('Invalid assembled envelope')
+      raw = complete
+    } else if (session.inbound.active) {
+      throw new FrameDecodeError('Interrupted envelope transfer')
     }
 
     const env = parseEnvelope(raw)
@@ -1129,7 +1275,7 @@ export class MmsProtocolServer {
             kind: 'res',
             id: v.req.id,
             ok: false,
-            error: serializeAppError(normalizeAppError(err, 'handler_error'))
+            error: serializeAppError(normalizeAppError(err, 'handler_error', 'events.subscribe'))
           }
           this.sendRaw(session, response)
         } finally {
@@ -1230,6 +1376,7 @@ export class MmsProtocolServer {
           // A profile switch changes the event cursor namespace. Pause delivery
           // until the client establishes a fresh replay boundary for that profile.
           session.subscribeState = 'none'
+          this.refreshTellingWindows()
           session.eventBuffer = []
           session.lastSeq = 0
         }
@@ -1265,7 +1412,7 @@ export class MmsProtocolServer {
             ? knownAppError({ code: err.code, message, details: { ...err.details, ...(err.pointer ? { pointer: err.pointer } : {}) } }, { category: err.code === 'SETTINGS_UNSUPPORTED' ? 'unsupported' : 'invalid', retryable: err.retryable })
           : err instanceof ProfileError
             ? knownAppError({ code: err.code.toLowerCase(), message, details: err.details }, { category: 'invalid', retryable: false })
-            : normalizeAppError(err, 'handler_error'))
+            : normalizeAppError(err, 'handler_error', method))
       }
       if (response.error) console.error('MMS request failed', errorDiagnostic(response.error, method))
       this.sendRaw(session, response)
@@ -1330,10 +1477,15 @@ export class MmsProtocolServer {
     const result = res.result as { sequence: number; gap: boolean; replay: ProtocolEvent[] }
     const replayBudget = Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES / 2)
     let replayBytes = 4 + Buffer.byteLength(JSON.stringify(res), 'utf8')
-    for (const stored of replay.events) {
+    // A session that cannot apply rows is sent the whole list once, at the last row change, not once per row.
+    let lastRow = -1
+    if (!session.capabilities.has(THREAD_ROWS_CAPABILITY)) replay.events.forEach((event, index) => { if (event.type === 'threads.row') lastRow = index })
+    for (const [index, stored] of replay.events.entries()) {
       if (session.clientType !== 'gui' && isQualifiedId(stored.threadId)) continue
       // Project for this client first, so the budget counts what is actually sent.
-      const event = projectEventFor(session.clientType, stored, this.remoteListsFor(session))
+      if (stored.type === 'bots.tell') continue // A telling is shown live once; durable rows supply catch-up.
+      if (stored.type === 'threads.row' && lastRow >= 0 && index !== lastRow) continue
+      const event = projectEventFor(session.clientType, this.eventForSession(session, stored), this.remoteListsFor(session))
       replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
       if (replayBytes > replayBudget) {
         result.gap = true
@@ -1346,6 +1498,7 @@ export class MmsProtocolServer {
 
     session.subscribeState = 'active'
     session.lastSeq = currentSeq
+    this.refreshTellingWindows()
 
     // Flush events that landed during buffering with sequence after the boundary.
     const buffered = session.eventBuffer
@@ -1355,6 +1508,11 @@ export class MmsProtocolServer {
       if (ev.sequence <= currentSeq) continue
       this.deliverEventToClient(session, ev)
     }
+
+    this.refreshKeepAwakeHolders()
+    // The app that just attached learns how many runs work now, after the events it was owed, so the numbering stays in
+    // order; it holds the blocker from here on.
+    if (session.capabilities.has(KEEP_AWAKE_CAPABILITY) && !session.closed) this.keepAwake?.announce()
 
     return res
   }
@@ -1427,7 +1585,7 @@ export class MmsProtocolServer {
       if (!this.clientAcceptsEvent(client, event)) continue
       // The ring holds the complete thread list; each client gets its own projection of it,
       // whether the event is sent now or held for the end of a subscribe handshake.
-      const projected = projectEventFor(client.clientType, event, this.remoteListsFor(client))
+      const projected = projectEventFor(client.clientType, this.eventForSession(client, event), this.remoteListsFor(client))
       if (client.subscribeState === 'buffering') {
         client.eventBuffer.push(projected)
         continue
@@ -1435,6 +1593,25 @@ export class MmsProtocolServer {
       if (client.subscribeState !== 'active') continue
       this.deliverEventToClient(client, projected)
     }
+  }
+
+  /** The whole-list form of a `threads.row` event, made once for all the sessions that need it. */
+  private readonly wholeListForms = new WeakMap<ProtocolEvent, ProtocolEvent>()
+
+  /**
+   * The event as this session can take it: a `threads.row` for a session that did not ask for rows
+   * (`THREAD_ROWS_CAPABILITY`) becomes the whole list as it is now (`threads.updated`), with the same sequence.
+   */
+  private eventForSession(session: ClientSession, event: ProtocolEvent): ProtocolEvent {
+    if (event.type !== 'threads.row' || session.capabilities.has(THREAD_ROWS_CAPABILITY)) return event
+    let whole = this.wholeListForms.get(event)
+    if (!whole) {
+      const services = this.servicesByProfile.get(event.profileId ?? this.opts.mms.profileId)
+      if (!services) return event
+      whole = { ...event, type: 'threads.updated', data: services.threads.listAllThreadsVersioned() }
+      this.wholeListForms.set(event, whole)
+    }
+    return whole
   }
 
   /** The merged lists of other computers for the profile a client is bound to; only windows are given them. */
@@ -1453,7 +1630,12 @@ export class MmsProtocolServer {
   }
 
   private deliverEventToClient(session: ClientSession, event: ProtocolEvent): void {
+    if (event.type === 'bots.tell' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) return
     if (!this.sendRaw(session, event)) return
+    if (event.type === 'bots.message' && session.clientType === 'gui' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) {
+      const services = this.servicesByProfile.get(session.binding?.profileId ?? this.opts.mms.profileId)
+      try { services?.personalBots?.noteLegacyTelling(event.data) } catch { /* A best-effort receipt cannot undo a sent frame. */ }
+    }
     session.lastSeq = event.sequence
   }
 
@@ -1590,6 +1772,21 @@ export class MmsProtocolServer {
     })
   }
 
+  /** How many attached app connections hold the sleep blocker; while none does, the service holds its own. */
+  private refreshKeepAwakeHolders(): void {
+    const count = [...this.clients.values()].filter(c => !c.closed && c.authenticated && c.clientType === 'gui' &&
+      c.subscribeState === 'active' && c.capabilities.has(KEEP_AWAKE_CAPABILITY)).length
+    this.keepAwake?.setAppHolders(count)
+  }
+
+  private refreshTellingWindows(): void {
+    for (const [profileId, services] of this.servicesByProfile) {
+      const count = [...this.clients.values()].filter(c => !c.closed && c.authenticated && c.clientType === 'gui' &&
+        c.subscribeState === 'active' && c.capabilities.has(BOT_TELLING_CAPABILITY) && (c.binding?.profileId ?? this.opts.mms.profileId) === profileId).length
+      services.personalBots?.setTellingWindows(count)
+    }
+  }
+
   private closeClient(session: ClientSession): void {
     if (session.closed) return
     session.closed = true
@@ -1602,7 +1799,11 @@ export class MmsProtocolServer {
     session.completedResponseSizes.clear()
     session.completedResponseBytes = 0
     session.completedIds.clear()
+    // A request still arriving in chunks is dropped with its connection.
+    session.inbound.reset()
     this.clients.delete(session.id)
+    this.refreshTellingWindows()
+    this.refreshKeepAwakeHolders()
     this.opts.commandRouter?.revoke(session.id, 'close')
     this.opts.mms.domains?.notifyConnectionClosed(session.id)
     try {
@@ -1646,4 +1847,10 @@ function stripErrorInfo(value: unknown, depth = 0): unknown {
     result[key] = next
   }
   return changed ? result : value
+}
+
+/** A message as windows are sent it as it is written: its images within one update's budget (`withImageBudget`). */
+function liveMessage(message: unknown): unknown {
+  const images = (message as { images?: unknown } | null)?.images
+  return Array.isArray(images) && images.length ? withImageBudget([message as { images?: never }])[0] : message
 }

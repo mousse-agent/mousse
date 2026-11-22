@@ -16,6 +16,7 @@ import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../../src/mms/run/mcp/attachment'
 import type { BotAuthority, BotCheck, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage } from '../../src/shared/bots/personal/walls'
 import type { NeutralTool } from '../../src/shared/harness/tools'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture, type DelegationFixture } from '../run/delegationFixture'
 
@@ -134,7 +135,7 @@ describe('the Mousse app-tool registry', () => {
     const { authority } = runAuthority({ tools: [], appTools: ['create_task'], asks: (call) => call.kind === 'app' && call.tool === 'ask_user' })
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: authority }))
     const ctx = () => request({ threadId: 'thread-a', runId: run.runId })
-    expect(await registry.call('ask_user', { questions: [] }, ctx())).toEqual({ text: ASKED, isError: true })
+    expect(await registry.call('ask_user', { questions: [] }, ctx())).toEqual(refused('not_granted', ASKED))
     expect(fake.host.askUser).not.toHaveBeenCalled()
     expect((await registry.call('create_task', { description: 'fine' }, ctx())).isError).toBe(false)
     expect(fx.engine.getRun(run.runId)?.status).toBe('running')

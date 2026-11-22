@@ -14,6 +14,7 @@ import { KITTEN_TTS_MICRO, KITTEN_TTS_MINI, KITTEN_TTS_NANO, LOCAL_TTS_MODELS, f
 describe('kittenChunks', () => {
   it('splits sentences, drops their end marks and closes each with a comma', () => {
     expect(kittenChunks('Hello. World! Yes?? Fine')).toEqual(['Hello,', 'World,', 'Yes,', 'Fine,'])
+    expect(kittenChunks('Ask Dr. Smith, e.g. today. Done.')).toEqual(['Ask Dr. Smith, e.g. today,', 'Done,'])
   })
 
   it('keeps commas, semicolons and colons a piece already ends with', () => {
@@ -185,9 +186,5 @@ describe('Kitten TTS manifests', () => {
     expect(model.voices.map((voice) => voice.id)).toEqual(['Bella', 'Jasper', 'Luna', 'Bruno', 'Rosie', 'Hugo', 'Kiki', 'Leo'])
     expect(model.voices[0].label).toBe('Bella, female')
     expect(model.voices.some((voice) => voice.id === model.defaultVoice)).toBe(true)
-  })
-
-  it('use the nano int8 build for Nano', () => {
-    expect(KITTEN_TTS_NANO.repo).toBe('KittenML/kitten-tts-nano-0.8-int8')
   })
 })

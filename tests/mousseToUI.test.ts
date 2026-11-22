@@ -9,7 +9,7 @@ import { codexToolEvent } from '../src/mms/harness/vendors/codex/codexActivity'
 import { claudeActivityComplete, claudeActivityStart, claudeCallContext } from '../src/mms/harness/vendors/claude/claudeActivity'
 import { cursorToolActivity, cursorToolName, cursorToolTitle } from '../src/mms/harness/cursor/session'
 import { formatSearchRowLabels, getToolStatus, searchResultCount } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
-import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
+import { markRecoveredFailures, mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
 import { toolRegistry } from '../src/renderer/chat/components/agent-elements/tools/tool-registry'
 
 const base = (overrides: Partial<ChatMessage>): ChatMessage => ({
@@ -286,8 +286,7 @@ describe('mousseToUIMessages standardize layer', () => {
     )
   })
 
-  it('re-opens then settles Thought when processing becomes complete', () => {
-    // Simulate the two-step update: complete + processing, then both complete.
+  it('keeps a Thought pending while its latest segment is processing', () => {
     const pending = mousseToUIMessages([
       {
         id: 't1',
@@ -310,28 +309,6 @@ describe('mousseToUIMessages standardize layer', () => {
     expect(
       (pending[0].parts[0] as unknown as Record<string, unknown>).state,
     ).toBe('input-available')
-
-    const settled = mousseToUIMessages([
-      {
-        id: 't1',
-        role: 'system',
-        content: '',
-        timestamp: '2026-01-01T00:00:00.000Z',
-        kind: 'thinking',
-        thinking: { content: 'Done bit', status: 'complete' },
-      },
-      {
-        id: 't2',
-        role: 'system',
-        content: '',
-        timestamp: '2026-01-01T00:00:00.000Z',
-        kind: 'thinking',
-        thinking: { content: 'Still… now done', status: 'complete' },
-      },
-    ])
-    expect(
-      (settled[0].parts[0] as unknown as Record<string, unknown>).state,
-    ).toBe('output-available')
   })
 
   it('folds exact-duplicate consecutive assistant text (provider double-add)', () => {
@@ -695,6 +672,16 @@ describe('typed activity items', () => {
     expect(partOf(mousseToUIMessages([mcp])[0]!).type).toBe('tool-mcp__myserver__my_tool')
   })
 
+  it('gives a finished call its start and end, which a running call does not have yet', () => {
+    const secret = (status: 'running' | 'done') => row(
+      's',
+      { ...activityBase, id: 's', callId: 's', toolName: 'secret_request', kind: 'generic', server: 'mousse', status, ...(status === 'done' ? { endedAt: '2026-01-01T00:05:00.000Z' } : {}) },
+      { toolCall: { title: 'Called mousse.secret_request', summary: 'ok', details: ['Server: mousse', 'Tool: secret_request'], status: status === 'done' ? 'complete' : 'processing', toolName: 'secret_request' } }
+    )
+    expect(partOf(mousseToUIMessages([secret('done')])[0]!)).toMatchObject({ startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:05:00.000Z' })
+    expect(partOf(mousseToUIMessages([secret('running')])[0]!).endedAt).toBeUndefined()
+  })
+
   it('treats an unknown kind as generic and never throws', () => {
     const future = row(
       'x',
@@ -1038,6 +1025,19 @@ describe('failures the agent got past', () => {
     expect(failedParts(ended)[0]!.failureRecovered).toBeUndefined()
     const stopped = base({ id: 's', role: 'system', content: 'Stopped', turnEnd: { cause: 'user' } as ChatMessage['turnEnd'] })
     expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), stopped]))[0]!.failureRecovered).toBeUndefined()
+  })
+
+  it('does not count a call that ended with `success: false` as getting past a failure: it failed too', () => {
+    const call = (id: string, state: string, output?: unknown) =>
+      ({ id, role: 'assistant', parts: [{ type: 'tool-Bash', toolCallId: id, state, input: { command: 'npm test' }, ...(output ? { output } : {}) }] }) as unknown as UIMessage
+    const messages = [
+      { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Go' }] } as unknown as UIMessage,
+      call('a', 'output-error'),
+      call('b', 'output-available', { success: false }),
+      { id: 'e', role: 'assistant', parts: [{ type: 'error', errorText: 'failed' }] } as unknown as UIMessage,
+    ]
+    const parts = markRecoveredFailures(messages).flatMap((message) => message.parts as unknown as Array<Record<string, any>>)
+    expect(parts.filter((part) => part.type === 'tool-Bash').map((part) => part.failureRecovered)).toEqual([undefined, undefined])
   })
 
   it('does not count a thought after the failure as getting past it', () => {

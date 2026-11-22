@@ -14,11 +14,12 @@ import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage, PendingUserQuestions } from '../../src/shared/types'
+import { refusalOfResponse, type ReadRefusal } from './appToolsFixture'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -72,9 +73,14 @@ async function rpc(mcp: Mcp, method: string, params: Record<string, unknown>, id
 const call = (mcp: Mcp, name: string, args: Record<string, unknown> = {}) =>
   rpc(mcp, 'tools/call', { name, arguments: mcp.turnToken ? { ...args, [TURN_TOKEN_KEY]: mcp.turnToken } : args })
 
-/** What a call came back with, whether it was an answer, an error result or a refusal before the handler. */
-function outcome(response: Rpc): { isError: boolean; body: Record<string, unknown>; text: string; rpcError?: NonNullable<Rpc['error']> } {
+/**
+ * What a call came back with, whether it was an answer, an error result or a refusal. A refusal's `body` is the
+ * fields kept beside it and its `text` its words.
+ */
+function outcome(response: Rpc): { isError: boolean; body: Record<string, unknown>; text: string; refusal?: ReadRefusal; rpcError?: NonNullable<Rpc['error']> } {
   if (response.error) return { isError: true, body: {}, text: response.error.message, rpcError: response.error }
+  const refusal = refusalOfResponse(response)
+  if (refusal) return { isError: true, body: refusal.details, text: refusal.message, refusal }
   const text = response.result?.content?.[0]?.text ?? ''
   let body: Record<string, unknown> = {}
   try {
@@ -247,7 +253,8 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       const off = outcome(seen.off!)
       expect(off.isError).toBe(true)
       expect(off.body).toMatchObject({ ok: false, reason: 'approvals_disabled', requestId: first.requestId })
-      expect(off.body.message).toMatch(/not allowed agents to answer approvals on other threads/)
+      expect(off.refusal).toMatchObject({ refused: { code: 'not_granted', retry: 'after_change' } })
+      expect(off.text).toMatch(/not allowed agents to answer approvals on other threads/)
       expect(outcome(seen.on!).body).toMatchObject({ ok: true, decision: 'allow' })
       // Turned off again: the running turn's next answer is refused.
       expect(outcome(seen.offAgain!).body).toMatchObject({ ok: false, reason: 'approvals_disabled', requestId: second.requestId })
@@ -277,8 +284,8 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       ids.plain = w.d.questions.listPendingForThread(w.other.id).at(-1)!.requestId
       await w.go(w.agent.id)
 
-      expect(outcome(seen.bot!).rpcError!.message).toMatch(/belongs to a bot/)
-      expect(outcome(seen.plain!).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
+      expect(outcome(seen.bot!).refusal!.message).toMatch(/belongs to a bot/)
+      expect(outcome(seen.plain!).refusal).toMatchObject({ code: 'mousse_scope_denied' })
       expect(outcome(seen.plain!).text).toMatch(/not an approval; only the user answers it/)
       expect(w.d.questions.getPending(ids.plain!)).not.toBeNull()
       expect(w.row(bot.requestId).status).toBe('pending')
@@ -339,7 +346,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       ids.requestId = asked.requestId
       await w.go(w.agent.id)
 
-      expect(outcome(seen.byTool as Rpc).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
+      expect(outcome(seen.byTool as Rpc).refusal).toMatchObject({ code: 'mousse_scope_denied' })
       expect(outcome(seen.byTool as Rpc).text).toMatch(/cannot approve "always for this thread"/)
       expect(seen.byRule).toEqual({ ok: false, reason: 'agent_no_standing_grant' })
       expect(w.row(asked.requestId)).toMatchObject({ status: 'pending', decision: null })
@@ -370,7 +377,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       await w.go(w.agent.id)
 
       expect(outcome(seen.byOwnId as Rpc)).toMatchObject({ isError: true, text: expect.stringContaining('answers the approvals of other threads') })
-      expect(outcome(seen.byOtherId as Rpc).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'request_not_pending' } })
+      expect(outcome(seen.byOtherId as Rpc).refusal).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'request_not_pending' } })
       expect(seen.byRule).toEqual({ ok: false, reason: 'own_request' })
       expect(seen.status).toBe('pending')
       expect(seen.calls).toBe(0)
@@ -595,7 +602,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       expect(outcome(seen.rival!).body).toMatchObject({ ok: false, reason: 'already_answered', answeredBy: { kind: 'agent', threadId: w.agent.id } })
       expect(outcome(seen.rival!).body.replayed).toBeUndefined()
       // The key the agent used for one approval cannot answer another.
-      expect(outcome(seen.conflict!).rpcError).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'client_request_id_conflict' } })
+      expect(outcome(seen.conflict!).refusal).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'client_request_id_conflict' } })
       expect(w.row(second.requestId).status).toBe('pending')
       expect(w.rows(w.other.id, 'Approved by an agent')).toHaveLength(1)
       expect(first.outcome.calls).toBe(1)

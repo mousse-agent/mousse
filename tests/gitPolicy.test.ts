@@ -1,13 +1,13 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, normalize } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   assertGitAllowed, assertGitAllowedAsync, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, gitPolicyMode, isOwnedPath, isOwnedRef,
-  currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withUserRequest, type GitCommandRequest, type GitDecision
+  currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withOwnedBranches, withUserRequest, type GitCommandRequest, type GitDecision
 } from '../src/mms/git/gitPolicy'
-import { guardedSimpleGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
+import { guardedGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
 import { tryGit } from '../src/mms/actions/git'
 
 const USER = userAction('button', 'Push')
@@ -76,12 +76,33 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args: ['branch', '-D', '--', 'feature'] })).toMatchObject({ allowed: false })
   })
 
+  it('packs only refs/mousse/* on its own; packing any other ref is the user\'s', () => {
+    expect(decide({ args: ['pack-refs', '--include', 'refs/mousse/*'] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: ['pack-refs', '--include=refs/mousse/changes/*'] })).toMatchObject({ access: 'owned', allowed: true })
+    for (const args of [['pack-refs'], ['pack-refs', '--all'], ['pack-refs', '--include', 'refs/*'], ['pack-refs', '--include', 'refs/mousse/*', '--include', 'refs/heads/*'], ['pack-refs', '--include', 'refs/mousse/*', '--all']]) {
+      expect(decide({ args })).toMatchObject({ allowed: false })
+    }
+  })
+
   it('reads update-ref --stdin input, and refuses when it cannot see it', () => {
     const args = ['update-ref', '--no-deref', '--stdin']
     expect(decide({ args, stdin: 'start\ndelete refs/mousse/a 1\nprepare\ncommit\n' })).toMatchObject({ access: 'owned', allowed: true })
     expect(decide({ args, stdin: 'start\ndelete refs/mousse/a 1\ndelete refs/heads/main 2\ncommit\n' })).toMatchObject({ allowed: false })
     expect(decide({ args, stdin: 'update refs/mousse/a\0new\0old\0' })).toMatchObject({ allowed: true })
     expect(decide({ args })).toMatchObject({ allowed: false })
+  })
+
+  it('limits a branch rename transaction to owned HEADs and branch config sections', () => {
+    const args = ['update-ref', '--no-deref', '--stdin']
+    const stdin = 'symref-update HEAD refs/heads/fix/login ref refs/heads/team/temporary\n'
+    const config = ['config', '--local', '--rename-section', 'branch.team/temporary', 'branch.fix/login']
+    withOwnedBranches(['team/temporary', 'fix/login'], () => {
+      expect(decide({ cwd: owned, args, stdin })).toMatchObject({ access: 'owned', allowed: true })
+      expect(decide({ args, stdin })).toMatchObject({ allowed: false })
+      expect(decide({ cwd: owned, args, stdin: stdin.replace('refs/heads/fix/login', 'refs/heads/main') })).toMatchObject({ allowed: false })
+      expect(decide({ args: config })).toMatchObject({ access: 'owned', allowed: true })
+      expect(decide({ args: [...config.slice(0, -1), 'branch.refs/mousse/login'] })).toMatchObject({ allowed: false })
+    })
   })
 
   // What every fetch Mousse runs by itself must say: no tags, no submodules, no FETCH_HEAD, and an empty refmap.
@@ -148,6 +169,24 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args: ['push', 'origin', 'HEAD:refs/heads/main'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['push', '-u', 'origin', 'HEAD:refs/heads/mousse/x'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['push', 'origin', 'HEAD:refs/heads/mousse/x'], userRequested: USER })).toMatchObject({ access: 'userRequested', allowed: true })
+  })
+
+  it('counts a branch outside mousse/ as owned only inside a scope that names it, for writes and for a rename between owned names', () => {
+    const add = { args: ['worktree', 'add', '-b', 'av/1a2b3c4d', join(owned, 'wt'), 'HEAD'] }
+    const rename = { args: ['branch', '-m', '--', 'av/1a2b3c4d', 'fix/login-button'] }
+    // Outside a scope: a person's branch names, whatever Mousse is doing.
+    expect(decide(add)).toMatchObject({ allowed: false, reason: expect.stringContaining('refs/heads/av/1a2b3c4d') })
+    expect(decide(rename)).toMatchObject({ allowed: false })
+    withOwnedBranches(['av/1a2b3c4d'], () => {
+      expect(decide(add)).toMatchObject({ access: 'owned', allowed: true })
+      // One name of the two is not enough: the new name, and its config section, would be a person's.
+      expect(decide(rename)).toMatchObject({ allowed: false })
+      expect(decide({ args: ['update-ref', 'refs/heads/main', 'abc'] })).toMatchObject({ allowed: false })
+      withOwnedBranches(['fix/login-button'], () => expect(decide(rename)).toMatchObject({ access: 'owned', allowed: true }))
+    })
+    // A rename that is not between two named branches still writes the repository's config.
+    withOwnedBranches(['av/1a2b3c4d'], () => expect(decide({ args: ['branch', '-m', 'av/1a2b3c4d'] })).toMatchObject({ allowed: false }))
+    expect(isOwnedRef('refs/heads/av/1a2b3c4d')).toBe(false)
   })
 
   it('allows worktree content changes inside the Mousse home only', () => {
@@ -327,7 +366,7 @@ describe('round 3: private indexes in linked worktrees, update-ref options, simp
 
   it('accepts Mousse\'s private indexes in the Git directory of an owned linked worktree, in both shapes', () => {
     const { worktree, gitDir } = linked()
-    expect(gitDir).toContain(join('.git', 'worktrees'))
+    expect(normalize(gitDir)).toContain(join('.git', 'worktrees'))
     for (const index of [join(gitDir, 'mousse-pending-1.index'), join(gitDir, 'mousse', 'snapshot-index'), join(gitDir, 'mousse', 'restore-a.index'), join(gitDir, 'mousse', 'preserve-b.index')]) {
       expect(decideGitCommand({ cwd: worktree, args: ['add', '-u'], env: { GIT_INDEX_FILE: index } }), index).toMatchObject({ access: 'owned', allowed: true })
       expect(decideGitCommand({ cwd: worktree, args: ['read-tree', 'HEAD'], env: { GIT_INDEX_FILE: index } }), index).toMatchObject({ access: 'owned', allowed: true })
@@ -355,15 +394,15 @@ describe('round 3: private indexes in linked worktrees, update-ref options, simp
     git(outside, '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base')
     git(outside, 'branch', 'feature')
     vi.stubEnv('MOUSSE_GIT_POLICY', 'log')
-    await guardedSimpleGit(outside).branch(['-d', 'feature'])
+    await guardedGit(outside).raw(['branch', '-d', 'feature'])
     expect(gitPolicyLog().at(-1)).toMatchObject({ kind: 'violation', command: 'git branch -d feature' })
     vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
     git(outside, 'branch', 'feature')
     // Refused before Git runs; the check reads without blocking, so the refusal rejects the call.
-    await expect(guardedSimpleGit(outside).branch(['-D', 'feature'])).rejects.toThrow(GitPolicyError)
+    await expect(guardedGit(outside).raw(['branch', '-D', 'feature'])).rejects.toThrow(GitPolicyError)
     expect(git(outside, 'branch', '--list', 'feature')).toContain('feature')
     // A listing is still a read.
-    await expect(guardedSimpleGit(outside).branchLocal()).resolves.toBeTruthy()
+    await expect(guardedGit(outside).branchLocal()).resolves.toBeTruthy()
   })
 })
 

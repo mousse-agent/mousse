@@ -14,6 +14,9 @@ export type BotColour = (typeof BOT_COLOURS)[number]
 export type BotAccessory = (typeof BOT_ACCESSORIES)[number]
 export type BotKind = (typeof BOT_KINDS)[number]
 export type BotEyes = (typeof BOT_EYES)[number]
+/** Eye colours. A look without one shows the colour that stands out on its body (`defaultEyeColour`). */
+export const BOT_EYE_COLOURS = ['black', 'white'] as const
+export type BotEyeColour = (typeof BOT_EYE_COLOURS)[number]
 
 /** Stored as plain strings so later builds can add looks; unknown values read as the default. */
 export interface BotLook {
@@ -23,6 +26,8 @@ export interface BotLook {
   kind?: string
   /** Missing means the pill eyes. */
   eyes?: string
+  /** Missing means the default for the character and colour. */
+  eyeColour?: string
 }
 
 /** A look whose values this build knows. */
@@ -33,20 +38,22 @@ export interface KnownBotLook {
   kind?: BotKind
   /** Present only when not the pill eyes. */
   eyes?: BotEyes
+  /** Present only when picked. */
+  eyeColour?: BotEyeColour
 }
 
 export const DEFAULT_BOT_LOOK: KnownBotLook = { colour: 'coral', accessory: 'none' }
 
-/** Body colours, as the shader draws them. */
+/** Body colours, as the shader draws them: bold, saturated colours that stay bright on a true-dark page. */
 export const BOT_COLOUR_HEX: Record<BotColour, string> = {
-  coral: '#f0645a',
-  orange: '#f28a3c',
-  yellow: '#f2c230',
-  green: '#4fc283',
-  teal: '#22a99b',
-  blue: '#4378e3',
-  purple: '#9a6ae0',
-  pink: '#ee86b6'
+  coral: '#ff5245',
+  orange: '#ff7414',
+  yellow: '#ffc414',
+  green: '#22d36f',
+  teal: '#00b8a3',
+  blue: '#2b74ff',
+  purple: '#9150ff',
+  pink: '#ff3d9e'
 }
 
 /** Each accessory's own colour (none has none). */
@@ -79,6 +86,8 @@ export const BOT_EYES_LABELS: Record<BotEyes, string> = {
   code: 'Code'
 }
 
+export const BOT_EYE_COLOUR_LABELS: Record<BotEyeColour, string> = { black: 'Black', white: 'White' }
+
 /** Accessory names in plain words, for the picker and labels. */
 export const BOT_ACCESSORY_LABELS: Record<BotAccessory, string> = {
   none: 'None',
@@ -99,6 +108,7 @@ const isColour = (value: unknown): value is BotColour => (BOT_COLOURS as readonl
 const isAccessory = (value: unknown): value is BotAccessory => (BOT_ACCESSORIES as readonly unknown[]).includes(value)
 const isKind = (value: unknown): value is BotKind => (BOT_KINDS as readonly unknown[]).includes(value)
 const isEyes = (value: unknown): value is BotEyes => (BOT_EYES as readonly unknown[]).includes(value)
+const isEyeColour = (value: unknown): value is BotEyeColour => (BOT_EYE_COLOURS as readonly unknown[]).includes(value)
 
 /**
  * The look this build draws: each unknown or missing value becomes the default (coral, none, the
@@ -111,6 +121,7 @@ export function normalizeBotLook(look: Partial<BotLook> | null | undefined): Kno
   }
   if (isKind(look?.kind) && look.kind !== 'mouse') known.kind = look.kind
   if (isEyes(look?.eyes) && look.eyes !== 'pill') known.eyes = look.eyes
+  if (isEyeColour(look?.eyeColour)) known.eyeColour = look.eyeColour
   return known
 }
 
@@ -119,9 +130,35 @@ export const botKindOf = (look: Pick<KnownBotLook, 'kind'>): BotKind => look.kin
 /** The look's eye shape; looks without one have pill eyes. */
 export const botEyesOf = (look: Pick<KnownBotLook, 'eyes'>): BotEyes => look.eyes ?? 'pill'
 
-/** Only the fields a look stores (colour, accessory, and kind and eyes when given). */
+/**
+ * Whether white eyes stand out better than black on a body of `hex`: the Mousse's colour at eye height is about
+ * 0.89 of it, and white wins when that colour's relative luminance is under 0.3.
+ */
+export function whiteEyesSuit(hex: string): boolean {
+  const lin = [1, 3, 5].map((i) => {
+    const c = (parseInt(hex.slice(i, i + 2), 16) / 255) * 0.89
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+  })
+  return 0.2126 * lin[0]! + 0.7152 * lin[1]! + 0.0722 * lin[2]! < 0.3
+}
+
+/** The eye colour a look shows when none is picked: the mouse's are black; the Mousse's stand out on its colour. */
+export function defaultEyeColour(look: Pick<KnownBotLook, 'colour' | 'kind'>): BotEyeColour {
+  return botKindOf(look) === 'mousse' && whiteEyesSuit(BOT_COLOUR_HEX[look.colour]) ? 'white' : 'black'
+}
+
+/** The look's eye colour: the picked one, or the default. */
+export const botEyeColourOf = (look: Pick<KnownBotLook, 'colour' | 'kind' | 'eyeColour'>): BotEyeColour => look.eyeColour ?? defaultEyeColour(look)
+
+/** Only the fields a look stores (colour, accessory, and kind, eyes and eye colour when given). */
 export function lookFields(look: BotLook): BotLook {
-  return { colour: look.colour, accessory: look.accessory, ...(look.kind !== undefined ? { kind: look.kind } : {}), ...(look.eyes !== undefined ? { eyes: look.eyes } : {}) }
+  return {
+    colour: look.colour,
+    accessory: look.accessory,
+    ...(look.kind !== undefined ? { kind: look.kind } : {}),
+    ...(look.eyes !== undefined ? { eyes: look.eyes } : {}),
+    ...(look.eyeColour !== undefined ? { eyeColour: look.eyeColour } : {})
+  }
 }
 
 /** `look` with `kind` and `eyes` set, dropping either when it is the default. */
