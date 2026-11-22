@@ -3,6 +3,9 @@
  * the prompt, a native cancel that misses its deadline ends in a kill and a forgotten session, and
  * closing uses `session/close` only when the agent offers it.
  */
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, RequestError, type AgentApp } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcpSessions, readAcpPromptUsage, type AcpTurnUsage, type SavedAcpSession } from '../../src/mms/harness/acp/session'
@@ -19,8 +22,10 @@ import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
 import { holdControl } from '../support/steerHoldControl'
 
 const sessionsUnderTest: AcpSessions[] = []
+const tempDirs: string[] = []
 afterEach(() => {
   for (const sessions of sessionsUnderTest.splice(0)) sessions.stop()
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
 interface AgentScript {
@@ -87,7 +92,7 @@ function scriptedAgent(script: AgentScript) {
   return { ...agentApp, calls, cancels }
 }
 
-function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number } = {}) {
+function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
   const questions = new UserQuestionService()
@@ -96,7 +101,7 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     defaultInstanceId: 'acp:fake',
     questions,
     connect,
-    quirks: NO_QUIRKS,
+    quirks: { ...NO_QUIRKS, ...(options.clientFs ? { clientFs: true } : {}) },
     ...(options.closeSessions ? { closeSessions: true } : {}),
     ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {}),
     ...(options.promptSilenceMs !== undefined ? { promptSilenceMs: options.promptSilenceMs } : {}),
@@ -1084,6 +1089,115 @@ describe('ACP sessions', () => {
       expect(reported).toEqual([
         { input: 12946, output: 50, cacheRead: 8752, cacheWrite: 0, reasoning: 30, totalTokens: 21748, hasOutput: true }
       ])
+    })
+  })
+
+  describe('requests from an idle agent outside a turn', () => {
+    it('cancels unsolicited permission requests without asking, closes the idle process, forgets the session, and runs the next turn cleanly in Full access', async () => {
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      let turn = 0
+      let inTurnAnswer: unknown
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: `native-${turn + 1}`, ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            turn += 1
+            if (turn === 1) {
+              idleClient = c.client as unknown as { request: (method: string, params: unknown) => Promise<unknown> }
+              return { stopReason: 'end_turn' as const }
+            }
+            inTurnAnswer = await c.client.request(methods.client.session.requestPermission, {
+              sessionId: c.params.sessionId,
+              toolCall: { toolCallId: 'tool-turn-2', title: 'Run tests', kind: 'execute' },
+              options: [
+                { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+                { optionId: 'reject', name: 'Reject', kind: 'reject_once' }
+              ]
+            })
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const { sessions, saved, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'start background work', onText: vi.fn() })
+      sessions.commitConversation('t', 'history-1')
+      expect(saved.get('t')?.sessionId).toBe('native-1')
+
+      // After Turn 1 completes, the idle process wakes up on its own and fires permission requests outside any turn.
+      const outOfTurnExecute = await idleClient!.request(methods.client.session.requestPermission, {
+        sessionId: 'native-1',
+        toolCall: { toolCallId: 'rogue-1', title: 'Run git status', kind: 'execute' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'reject', name: 'Reject', kind: 'reject_once' }
+        ]
+      })
+      expect(outOfTurnExecute).toEqual({ outcome: { outcome: 'cancelled' } })
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      expect(saved.get('t')).toBeUndefined()
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+
+      // The next turn opens a clean process with Full access and auto-allows without prompting.
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', history: 'history-1', prompt: 'continue', onText: vi.fn() })
+      expect(agent.connections).toHaveLength(2)
+      expect(inTurnAnswer).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+      expect(pending).not.toHaveBeenCalled()
+    })
+
+    it('rejects client file reads and writes outside a turn without prompting or touching disk', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mousse-acp-idle-fs-'))
+      tempDirs.push(dir)
+      writeFileSync(join(dir, 'existing.txt'), 'secret-data', 'utf8')
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: 'native-fs', ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            idleClient = c.client as unknown as { request: (method: string, params: unknown) => Promise<unknown> }
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const { sessions, questions } = core(agent.connect, { clientFs: true })
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: dir, model: 'default', permissionMode: 'full', prompt: 'turn 1', onText: vi.fn() })
+      await expect(idleClient!.request(methods.client.fs.readTextFile, { sessionId: 'native-fs', path: join(dir, 'existing.txt') })).rejects.toThrow(/outside a turn/i)
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+
+      await sessions.chat({ threadId: 't', cwd: dir, model: 'default', permissionMode: 'full', prompt: 'turn 2', onText: vi.fn() })
+      await expect(idleClient!.request(methods.client.fs.writeTextFile, { sessionId: 'native-fs', path: join(dir, 'rogue.txt'), content: 'bad' })).rejects.toThrow(/outside a turn/i)
+      expect(existsSync(join(dir, 'rogue.txt'))).toBe(false)
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      await vi.waitFor(() => expect(agent.connections[1].killed).toBe(true))
+    })
+
+    it('still reuses an idle session and auto-allows in-turn requests on a normal follow-up turn', async () => {
+      let inTurnAnswer: unknown
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text === 'second') inTurnAnswer = await ctx.askPermission()
+          return 'end_turn'
+        }
+      })
+      const { sessions, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'first', onText: vi.fn() })
+      sessions.commitConversation('t', 'h')
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', history: 'h', prompt: 'second', onText: vi.fn() })
+
+      expect(agent.connections).toHaveLength(1)
+      expect(agent.connections[0].killed).toBe(false)
+      expect(inTurnAnswer).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+      expect(pending).not.toHaveBeenCalled()
     })
   })
 })
