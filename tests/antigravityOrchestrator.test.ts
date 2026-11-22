@@ -1,7 +1,9 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { expect, it, vi } from 'vitest'
+import { newId } from '../src/shared/net'
+import { MmsRemoteBackend } from '../src/mms/bridge/remote/MmsBackend'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import type { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
@@ -81,6 +83,42 @@ it('persists tokensUsed and tokensPerSecond in responseMetadata for Antigravity 
         usage: expect.objectContaining({ input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917 })
       })
     ]))
+  } finally {
+    await main.stop()
+    vi.restoreAllMocks()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+it('replies in a No Project Antigravity thread started from another computer', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-acp-standalone-'))
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  await main.start()
+  try {
+    main.settings.set({ provider: { llmProvider: 'antigravity', model: 'gemini-4-neon' } })
+    const seenCwds: string[] = []
+    vi.spyOn(main.antigravity, 'chat').mockImplementation(async (input) => {
+      seenCwds.push(input.cwd)
+      input.onText(`reply ${seenCwds.length}`)
+      return `reply ${seenCwds.length}`
+    })
+    const remote = new MmsRemoteBackend(main)
+    const caller = { node: newId('node') }
+    const { thread } = await remote.execute('threads.create', { name: 'Yo', started: true }, caller) as { thread: { id: string } }
+    expect(main.threads.getThread(thread.id)?.startedFrom?.node).toBe(caller.node)
+    const control = { signal: new AbortController().signal, drainSteer: () => undefined, onAccepted: vi.fn() }
+    expect(await remote.run(thread.id, 'yo', control)).toMatchObject({ text: 'reply 1', silent: false })
+    expect(await remote.run(thread.id, 'follow up', control)).toMatchObject({ text: 'reply 2', silent: false })
+
+    expect(seenCwds).toHaveLength(2)
+    expect(seenCwds[0]).toBe(seenCwds[1])
+    expect(statSync(seenCwds[0]!).isDirectory()).toBe(true)
+    expect(relative(home, seenCwds[0]!).startsWith('..')).toBe(false)
+    const other = main.threads.createThread('Other')
+    expect(main.harness.standaloneWorkspace('antigravity', other.id)).not.toBe(seenCwds[0])
+    const persisted = main.threads.loadThreadData(thread.id)
+    expect(persisted.messages.filter((message) => message.role === 'assistant').map((message) => message.content)).toEqual(['reply 1', 'reply 2'])
   } finally {
     await main.stop()
     vi.restoreAllMocks()

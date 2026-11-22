@@ -3,9 +3,9 @@
  * checked with an `initialize`-only handshake, runs only for interactive purposes, and a sign-in
  * changed from outside between two turns forgets the thread's native session.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AcpConnection } from '../../src/mms/harness/acp/connection'
@@ -47,6 +47,7 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
+  const sessionCwds: string[] = []
   const agent = inProcessAgent((app) => {
     app
       .onRequest(methods.agent.initialize, () => {
@@ -62,8 +63,9 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
         calls.push('logout')
         return {}
       })
-      .onRequest(methods.agent.session.new, () => {
+      .onRequest(methods.agent.session.new, (c) => {
         calls.push('session/new')
+        sessionCwds.push(c.params.cwd)
         return { sessionId: `s${calls.length}` }
       })
       .onRequest(methods.agent.session.prompt, async (c) => {
@@ -91,7 +93,7 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
     control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
     host: { mcp: null, context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as TurnSpec['host']
   })
-  return { home, harness, calls, agent, notices, spec, tick: (ms: number) => { clock += ms } }
+  return { home, harness, calls, sessionCwds, agent, notices, spec, tick: (ms: number) => { clock += ms } }
 }
 
 describe('the generic ACP driver', () => {
@@ -208,5 +210,21 @@ describe('the generic ACP driver', () => {
     const prompted = calls.filter((call) => call.startsWith('prompt'))
     expect(prompted).toHaveLength(2)
     expect(prompted[0]).not.toBe(prompted[1])
+  })
+
+  it('runs a standalone turn (cwd: null) in a private per-thread workspace inside the instance state dir', async () => {
+    const { home, harness, sessionCwds, spec } = fixture()
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
+    const turn = spec(binding)
+    turn.input.cwd = null
+    turn.input.threadId = '../../outside'
+    await expect(harness.startTurn(turn).result).resolves.toMatchObject({ text: 'hello' })
+    const expected = harness.standaloneWorkspace('acp:fake-agent', '../../outside')
+    expect(expected).toBeTruthy()
+    expect(sessionCwds).toEqual([expected])
+    expect(existsSync(expected!)).toBe(true)
+    expect(statSync(expected!).isDirectory()).toBe(true)
+    expect(relative(home, expected!).startsWith('..')).toBe(false)
   })
 })

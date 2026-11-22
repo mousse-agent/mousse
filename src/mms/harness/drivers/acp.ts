@@ -517,10 +517,16 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     capabilities: preset.staticCaps,
     planMode: () => Boolean(state.facts?.modes?.some((mode) => /^(plan|architect)$/i.test(mode.id) || /^(plan|architect)$/i.test(mode.name)))
   })
+  const standaloneWorkspace = (threadId: string): string => {
+    const directory = join(context.stateDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
+  }
   const client = {
     chat: (input: Parameters<AcpSessions['chat']>[0]) => sessions.chat(input),
     commitConversation: (threadId: string, history: string) => sessions.commitConversation(threadId, history),
     commitInterrupted: (threadId: string, history: string) => sessions.commitInterrupted(threadId, history),
+    standaloneWorkspace,
     configured: () => runtime.configured(),
     interrupt: (sessionId: string | undefined) => sessions.interrupt(sessionId)
   }
