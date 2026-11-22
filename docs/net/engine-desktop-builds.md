@@ -24,6 +24,8 @@ computer's architecture; electron-builder's targets follow it too, or `--x64` / 
 - `node scripts/build-net-helper.mjs [--require] [--arch x64|arm64 | --target <triple>]` builds the helper into
   `native/net-helper/target/package` with `cargo build --release --locked --target <triple>`, honouring
   `CARGO_TARGET_DIR`. A target other than the computer's own needs `rustup target add <triple>`.
+- On Linux the helper keeps its keys in the OS keyring over D-Bus, so its build needs `libdbus-1-dev` and
+  `pkg-config` (on Debian or Ubuntu: `sudo apt-get install libdbus-1-dev pkg-config`).
 - The helper names its build in `--version` (`mousse-helper <version> build <commit>+release control none`), from
   the commit it was built from. The script does not pass `MOUSSE_BUILD_ID` to the build, and stops when a helper it
   can run here names anything else.
