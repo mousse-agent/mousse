@@ -48,6 +48,26 @@
       "expiresAt": "2026-11-21T18:19:01.797Z"
     },
     {
+      "task": "fix/antigravity-status-and-subagents",
+      "session": "agibook-63a2b6",
+      "machine": "agibook",
+      "branch": "fix/antigravity-status-and-subagents",
+      "paths": [
+        "src/mms/harness/acp/session.ts",
+        "src/mms/harness/acp/quirks.ts",
+        "src/mms/harness/acp/presets/antigravity.ts",
+        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts",
+        "src/mms/harness/drivers/acp/adapter.ts",
+        "src/mms/harness/drivers/antigravity.ts",
+        "src/shared/subagentTools.ts",
+        "src/mms/run/mcp/attachment.ts",
+        "src/renderer/chat/adapters/nativeSubagents.ts",
+        "src/renderer/chat/adapters/mousseToUI.ts"
+      ],
+      "claimedAt": "2026-11-22T11:30:48.264Z",
+      "expiresAt": "2026-11-22T13:30:48.264Z"
+    },
+    {
       "task": "git-spawn-off-daemon-loop",
       "session": "Animatrix-2dabf9",
       "machine": "Animatrix",
