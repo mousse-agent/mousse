@@ -15,17 +15,6 @@
       "expiresAt": "2026-11-22T10:41:17.871Z"
     },
     {
-      "task": "engine-pin-invite-way-join-probe",
-      "session": "Animatrix-a702b8",
-      "machine": "Animatrix",
-      "branch": "engine-pin-invite-way-join-probe",
-      "paths": [
-        "native/net-helper/ENGINE_COMMIT"
-      ],
-      "claimedAt": "2026-11-22T20:19:33.139Z",
-      "expiresAt": "2026-11-22T22:19:33.139Z"
-    },
-    {
       "task": "fix/antigravity-status-and-subagents",
       "session": "agibook-63a2b6",
       "machine": "agibook",
