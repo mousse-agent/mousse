@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { appHintsLine, appMb, memorySource, memoryTable, serviceMb, type MemoryStatus, type MemoryTrendPoint } from '../../../shared/diagnostics/memory'
+import { appHintsLine, memorySource, memoryTable, memoryTotals, type MemoryStatus, type MemoryTrendPoint } from '../../../shared/diagnostics/memory'
 import { ExternalLink } from '../../lib/icons'
 import { openMemoryReport } from '../../hooks/useMemoryNotices'
 import { SettingsRow } from './SettingsRow'
@@ -82,9 +82,9 @@ export function MemoryRows() {
   }, [])
 
   const sample = status?.sample
-  const app = sample ? appMb(sample) : null
-  const summary = sample
-    ? `Service ${mb(serviceMb(sample))}${app !== null ? `, app ${mb(app)}` : ''}${status!.breaches.length ? ', above expected' : ''}`
+  const totals = sample ? memoryTotals(sample) : null
+  const summary = totals
+    ? `Service working set ${mb(totals.serviceWorkingSetMb)}, ${totals.workloadWorkingSetMb === null ? 'measured workload' : 'total workload'} ${mb(totals.measuredWorkingSetMb)}${status!.breaches.length ? ', above expected' : ''}`
     : unavailable ? 'Starting…' : 'Measuring…'
   const trend = status?.trend ?? []
   return (
@@ -98,7 +98,7 @@ export function MemoryRows() {
           <span className="memory-row-controls">
             <Sparkline label="Service" values={series(trend, (point) => point.service)} />
             <Sparkline label="GPU" values={series(trend, (point) => point.gpu)} />
-            <Sparkline label="App" values={series(trend, (point) => point.app)} />
+            <Sparkline label="App alert" values={series(trend, (point) => point.app)} />
             <button
               type="button"
               className="settings-btn"
