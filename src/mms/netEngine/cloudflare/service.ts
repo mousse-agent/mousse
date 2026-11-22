@@ -10,6 +10,7 @@ import { ensurePrivateDirectory } from '../../data/privateAcl'
 import { systemClock } from '../../net/clock'
 import { ProcessSupervisor } from '../../net/transports/runtime/process'
 import { CLOUDFLARE_TUNNEL_ID, CloudflareCli, cloudflareHostname, cloudflareEdge, type CloudflareAccount } from './cli'
+import { waitForCloudflareDns } from './dns'
 import { cloudflaredEnv, resolveCloudflared } from './runtime'
 
 const SIGN_IN_CLEANUP = { recursive: true, force: true, maxRetries: 3, retryDelay: 100 } as const
@@ -195,6 +196,7 @@ export class ManagedCloudflare {
     const ready = settings && 'token' in settings ? settings : await this.provision(attempt, runtime, settings)
     signal.throwIfAborted()
     if (!ready.enabled) this.save({ ...ready, enabled: true })
+    if (!saved) await waitForCloudflareDns(ready.hostname, signal)
     await this.connect(attempt, runtime, ready)
   }
 

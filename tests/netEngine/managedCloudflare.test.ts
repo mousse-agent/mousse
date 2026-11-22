@@ -31,6 +31,7 @@ const fixture = vi.hoisted(() => {
     create: vi.fn(),
     token: vi.fn(),
     route: vi.fn(),
+    dns: vi.fn(),
     processes,
     FakeSupervisor
   }
@@ -44,6 +45,10 @@ vi.mock('../../src/mms/data/privateAcl', async () => {
 vi.mock('../../src/mms/netEngine/cloudflare/runtime', () => ({
   cloudflaredEnv: () => ({}),
   resolveCloudflared: async () => 'cloudflared'
+}))
+
+vi.mock('../../src/mms/netEngine/cloudflare/dns', () => ({
+  waitForCloudflareDns: fixture.dns
 }))
 vi.mock('../../src/mms/netEngine/cloudflare/cli', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/mms/netEngine/cloudflare/cli')>()),
@@ -72,6 +77,7 @@ beforeEach(async () => {
     a: account.accountId, t: TUNNEL_ID, s: Buffer.alloc(32).toString('base64')
   })).toString('base64'))
   fixture.route.mockImplementation(async (_id: string, label: string) => `${label}.example.net`)
+  fixture.dns.mockResolvedValue(undefined)
   folder = await mkdtemp(join(tmpdir(), 'mousse-named-tunnel-test-'))
   connection = new ManagedCloudflare(join(folder, 'tunnel'), join(folder, 'runtime'), () => undefined)
 })
@@ -86,14 +92,20 @@ function origin(port: number) {
 }
 
 describe('managed Cloudflare tunnel', () => {
-  it('publishes only after verification and reconnects with the same hostname on a new helper', async () => {
+  it('waits for a new name to publish, verifies it, and reconnects with the same hostname', async () => {
     const first = origin(47101)
     let allowProbe!: (ok: boolean) => void
+    let publishName!: () => void
     first.test.mockImplementation(() => new Promise<boolean>((resolve) => { allowProbe = resolve }))
+    fixture.dns.mockImplementationOnce(() => new Promise<void>((resolve) => { publishName = resolve }))
     await connection.useOrigin(first)
     connection.start()
     connection.start()
 
+    await vi.waitFor(() => expect(fixture.dns).toHaveBeenCalledTimes(1))
+    expect(first.test).not.toHaveBeenCalled()
+    expect(fixture.processes).toHaveLength(0)
+    publishName()
     await vi.waitFor(() => expect(fixture.processes, JSON.stringify(connection.status())).toHaveLength(1))
     expect(fixture.login).toHaveBeenCalledTimes(1)
     expect(first.advertise).not.toHaveBeenCalled()
@@ -140,6 +152,7 @@ describe('managed Cloudflare tunnel', () => {
     expect(next.advertise).toHaveBeenCalledWith(route)
     expect(fixture.login).toHaveBeenCalledTimes(1)
     expect(fixture.create).toHaveBeenCalledTimes(1)
+    expect(fixture.dns).toHaveBeenCalledTimes(1)
 
     await connection.stop()
     expect(next.advertise).toHaveBeenLastCalledWith(null)
