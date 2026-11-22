@@ -102,7 +102,7 @@ const NO_ARGS: JsonSchema = { type: 'object', properties: {}, additionalProperti
 
 const DESCRIPTIONS: Record<ProfilerToolName, string> = {
   profiler_overview:
-    "Start here when Mousse is slow or uses too much memory. Every Mousse process by role (service, its workers and providers, main, each window, applet views, in-app browser, GPU, utilities) with private memory, working set, CPU and JS heap; the service against its start baseline; trends; limits broken now. Numbers only.",
+    "Start here when Mousse is slow or uses too much memory. Every Mousse process by role (service, its workers and providers, main, each window, applet views, in-app browser, GPU, utilities) with platform memory counters, working set, CPU and JS heap; separate desktop and combined workload working-set totals, with unavailable measurements and shared-page limits; the service against its start baseline; trends; limits broken now. Numbers only.",
   profiler_service_breakdown:
     "When the background service is the big one: its V8 heap and heap spaces, worker heaps, counts (loaded and cached threads, runtimes, workers, SQLite connections, replay buffer, terminals, file watchers, child processes) against their bounds, cache sizes, and each of this profile's threads in memory you may list, by id, with its measured cache size; private, bot and out-of-scope threads and other profiles as totals.",
   profiler_window_breakdown:
@@ -110,9 +110,9 @@ const DESCRIPTIONS: Record<ProfilerToolName, string> = {
   profiler_gpu_hints:
     "When the GPU process is big: its memory, the windows' sizes and scale, the pixels they draw, acrylic, WebGL contexts, canvases, and applet, browser and DevTools views.",
   profiler_children:
-    "When provider or tool processes may hold memory: tracked processes and their current descendants, discovered on demand, by fixed provider kind with memory and totals by kind. No command lines or paths.",
+    "Tracked providers and tools plus their current descendants, discovered on demand. Reports memory by kind and shows measurement and discovery gaps.",
   profiler_sample_now:
-    "A fresh sample now, and what changed since the previous one. Use it before and after an action to see what it costs.",
+    "A fresh sample now, with separate desktop and workload working-set totals and unavailable measurements, and what changed since the previous one. Use it before and after an action to see what it costs.",
   profiler_watch:
     "Samples every intervalSeconds (5 to 60) for minutes (at most 10, 120 points), so you can do something in parallel and see which numbers grow. Returns the series, the change and what grew most.",
   profiler_heap_summary:

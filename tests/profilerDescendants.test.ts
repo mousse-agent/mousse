@@ -57,6 +57,9 @@ it.skipIf(!['linux', 'darwin', 'win32'].includes(process.platform))('profiler_ch
     expect(report.processes.filter((p: { relationship: string }) => p.relationship === 'descendant')).toHaveLength(2)
     expect(report.processes.every((p: { kind: string; mb: number }) => p.kind === 'codex' && p.mb > 0)).toBe(true)
     expect(report.discovery).toBe('complete')
+    expect(report.totalMb).toBe(report.measuredTotalMb)
+    expect(report.totalMb).toBeGreaterThan(0)
+    expect(report.processes.every((p: { metric: string }) => ['footprint', 'working-set'].includes(p.metric))).toBe(true)
     // Nested roots belong to their own tracked kind, and are counted once.
     trackChildProcess(pids[0], 'mcp')
     const nested = await call()

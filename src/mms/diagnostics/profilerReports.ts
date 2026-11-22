@@ -7,9 +7,10 @@ import {
   appMb,
   largestOfKind,
   memoryTable,
+  memoryTotals,
+  MEMORY_TOTAL_SCOPE,
   serviceMb,
   type AppHints,
-  type ChildMemory,
   type MemoryDetail,
   type MemorySample,
   type MemoryStatus,
@@ -21,7 +22,7 @@ import type { AppWindowDetail } from './MemoryMonitor'
 import type { ThreadMemory } from './profilerService'
 import type { ChildTreeReading } from './processDescendants'
 
-const UNITS = "privateMb is the footprint on macOS (with GPU memory), private bytes on Windows, private memory or else the working set on Linux. CPU is percent of one core since the previous sample. detail splits a row: a window's JS heap, Blink and resource cache; each agent CLI or tool."
+const UNITS = `${MEMORY_TOTAL_SCOPE} MB fields use 1024^2 bytes. privateMb is a legacy field: desktop footprint on macOS, private bytes on Windows, platform-specific private/anonymous counters where available on Linux; never an RSS fallback. app.totalMb, appMb, serviceMb, gpuMb, largestWindowMb and trends retain the legacy alert measure (private/footprint with RSS fallback; app includes children and excludes service); do not use them as resident or private totals. Use memoryTotals or the explicit WorkingSetMb fields. CPU is percent of one core since the previous sample.`
 
 function r1(n: number): number {
   return Math.round(n * 10) / 10
@@ -58,6 +59,7 @@ export function overviewReport(status: MemoryStatus, thresholds: MemoryThreshold
     serviceUptimeMinutes: Math.round(sample.up / 60),
     activeTurns: sample.counts.activeTurns,
     processes: processRows(sample),
+    memoryTotals: memoryTotals(sample),
     service: {
       mb: service,
       baselineMb: status.baselineMb,
@@ -65,7 +67,7 @@ export function overviewReport(status: MemoryStatus, thresholds: MemoryThreshold
       growthMbPerHour: status.growthMbPerHour,
       limits: { idleMb: thresholds.servicePrivateMb, severeMb: thresholds.serviceSevereMb, baselineFactor: thresholds.serviceBaselineFactor }
     },
-    app: { totalMb: appMb(sample), gpuMb: largestOfKind(sample, 'gpu'), largestWindowMb: largestOfKind(sample, 'renderer') },
+    app: { metric: 'legacy-mixed-alert-measure', totalMb: appMb(sample), gpuMb: largestOfKind(sample, 'gpu'), largestWindowMb: largestOfKind(sample, 'renderer') },
     trend: {
       everyMinutes: stepMinutes,
       serviceMb: trend.map((p) => Math.round(p.service)),
@@ -197,42 +199,62 @@ export function gpuHintsReport(sample: MemorySample, detail: AppWindowDetail | n
   }
 }
 
-/** `profiler_children`. */
-export function childrenReport(children: readonly ChildMemory[]) {
-  const byKind = new Map<string, { count: number; mb: number }>()
-  for (const child of children) {
+/** The child tool discovers process trees independently of periodic samples. */
+export function childTreeReport({ children, discovery }: ChildTreeReading) {
+  const byKind = new Map<string, { count: number; mb: number; unavailable: number; metrics: Set<string> }>()
+  const metrics = new Set<string>()
+  let measured = 0
+  let unavailable = 0
+  const processes = children.map((child) => {
     const kind = fixedName(child.kind)
-    const entry = byKind.get(kind) ?? { count: 0, mb: 0 }
-    entry.count += 1
-    entry.mb += child.mb ?? 0
-    byKind.set(kind, entry)
-  }
+    const metric = child.footprint ? 'footprint' : 'working-set'
+    const group = byKind.get(kind) ?? { count: 0, mb: 0, unavailable: 0, metrics: new Set<string>() }
+    group.count += 1
+    if (child.mb === null) {
+      group.unavailable += 1
+      unavailable += 1
+    } else {
+      group.mb += child.mb
+      group.metrics.add(metric)
+      measured += child.mb
+      metrics.add(metric)
+    }
+    byKind.set(kind, group)
+    return { kind, mb: child.mb, metric, relationship: child.relationship }
+  })
+  const complete = discovery === 'complete'
+  const measuredTotalMb = metrics.size === 1 || (complete && children.length === 0) ? r1(measured) : null
   return {
-    processes: children.map((child) => ({ kind: fixedName(child.kind), mb: child.mb })),
-    byKind: [...byKind].map(([kind, entry]) => ({ kind, count: entry.count, mb: r1(entry.mb) })).sort((a, b) => b.mb - a.mb),
-    totalMb: r1(children.reduce((sum, child) => sum + (child.mb ?? 0), 0)),
-    note: 'mb is each process\'s footprint on macOS, its working set elsewhere; null when it could not be read. They count in the app\'s total.'
-  }
-}
-
-/** The child tool's on-demand tree, kept separate from the periodic sample's tracked processes. */
-export function childTreeReport(reading: ChildTreeReading) {
-  return {
-    ...childrenReport(reading.children),
-    processes: reading.children.map((child) => ({ kind: fixedName(child.kind), mb: child.mb, relationship: child.relationship })),
-    discovery: reading.discovery,
-    note: 'Tracked providers and tools plus their current descendants, each PID counted once. Descendants inherit the nearest tracked provider kind. Ancestry requests only PID and parent PID; output uses fixed kinds. Discovery is on demand and best effort; limited means the 1,024-process or 65,536-row cap was reached. Reparented processes cannot be linked back to former parents. Exited or inaccessible memory is null. mb uses the existing child memory reader (macOS footprint with resident fallback; resident or working set elsewhere). This tool includes descendants that periodic samples and app totals do not yet include.'
+    processes,
+    byKind: [...byKind].map(([kind, group]) => {
+      const measuredMb = group.metrics.size === 1 ? r1(group.mb) : null
+      return {
+        kind, count: group.count,
+        mb: complete && group.unavailable === 0 ? measuredMb : null,
+        measuredMb, unavailable: group.unavailable,
+        metric: group.metrics.size > 1 ? 'mixed' : [...group.metrics][0] ?? null
+      }
+    }).sort((a, b) => (b.measuredMb ?? 0) - (a.measuredMb ?? 0)),
+    totalMb: complete && unavailable === 0 ? measuredTotalMb : null,
+    measuredTotalMb,
+    discovery,
+    note: 'Tracked providers and tools plus their current descendants, each counted once. Descendants inherit the nearest tracked kind. Discovery is on demand and best effort. Reparented processes cannot be linked back to former parents. Measured subtotals use compatible readings. Working sets can count shared pages more than once. Descendants are only included in this report.'
   }
 }
 
 /** A sample's headline numbers, for `profiler_sample_now` and each point of `profiler_watch`. */
 export function samplePoint(sample: MemorySample) {
   const c = sample.counts
+  const totals = memoryTotals(sample)
   return {
     serviceMb: serviceMb(sample),
     serviceHeapMb: sample.service.heapUsed ?? null,
     ...(sample.service.cpu !== undefined ? { serviceCpuPercent: sample.service.cpu } : {}),
     appMb: appMb(sample),
+    desktopWorkingSetMb: totals.desktopWorkingSetMb,
+    workloadWorkingSetMb: totals.workloadWorkingSetMb,
+    measuredWorkingSetMb: totals.measuredWorkingSetMb,
+    unavailableChildren: totals.unavailableChildren,
     gpuMb: largestOfKind(sample, 'gpu'),
     largestWindowMb: largestOfKind(sample, 'renderer'),
     loadedThreads: c.loadedThreads,
@@ -264,6 +286,7 @@ export function sampleNowReport(sample: MemorySample, previous: MemorySample | n
   const point = samplePoint(sample)
   return {
     now: point,
+    memoryTotals: memoryTotals(sample),
     processes: processRows(sample),
     ...(previous ? { sincePreviousSample: { seconds: Math.round((sample.t - previous.t) / 1000), change: pointChange(samplePoint(previous), point) } } : {}),
     units: UNITS
