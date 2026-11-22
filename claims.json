@@ -39,10 +39,11 @@
       "machine": "agibook",
       "branch": "fix/mcp-server-before-boot-wakes",
       "paths": [
-        "src/mms/MmsProfileServices.ts"
+        "src/mms/MmsProfileServices.ts",
+        "tests/platformProfileStoreInjection.test.ts"
       ],
       "claimedAt": "2026-11-22T18:11:45.608Z",
-      "expiresAt": "2026-11-22T20:11:45.608Z"
+      "expiresAt": "2026-11-22T22:13:47.537Z"
     },
     {
       "task": "fix/standalone-acp-cursor-workspace",
