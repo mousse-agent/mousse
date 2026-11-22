@@ -201,9 +201,14 @@ export function mousseCallAsksPerson(
   return Boolean(tool.asksUser) || tool.access === 'editsWorkspace' || tool.access === 'changesSettings'
 }
 
-/** A tool of a server Mousse serves (`mcp__mousse__*` or `mcp__mousse-relay__*`): its calls reach Mousse. */
+/** A tool of a server Mousse serves (`mcp__mousse__*`, `mcp__mousse-relay__*`, `mcp_mousse_*` or `mcp_mousse-relay_*`): its calls reach Mousse. */
 export function isMousseServerTool(toolName: string): boolean {
-  return toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) || toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)
+  return (
+    toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) ||
+    toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX) ||
+    toolName.startsWith(ANTIGRAVITY_MOUSSE_TOOL_PREFIX) ||
+    toolName.startsWith(ANTIGRAVITY_RELAY_TOOL_PREFIX)
+  )
 }
 
 /**

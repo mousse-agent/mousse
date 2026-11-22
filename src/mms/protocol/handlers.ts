@@ -4112,7 +4112,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const history = await usageHistoryReader(ctx.mms.getHomeDir()).history({ range, ...(timeZone ? { timeZone } : {}), ...(agent ? { agent } : {}) })
       // Folders, projects and sessions stay on this computer: another one gets the totals only.
       if (!connectionIsLocal(ctx.connection)) return { ...history, sources: history.sources.map((source) => ({ ...source, path: '' })), projects: [], topSessions: [] }
-      return nameUsageProjects(history, ctx.mms.projects.listProjects(), (ids) => ctx.mms.runEngine.store.threadsForSessions(ids), (id) => ctx.mms.threads.getThread(id)?.name)
+      const threadsFor = (ids: string[]) => {
+        let map: Map<string, string>
+        try {
+          map = ctx.mms.runEngine.store.threadsForSessions(ids)
+        } catch {
+          map = new Map()
+        }
+        for (const [sessionId, threadId] of ctx.mms.antigravity?.threadsForSessions(ids) ?? []) {
+          if (!map.has(sessionId)) map.set(sessionId, threadId)
+        }
+        return map
+      }
+      return nameUsageProjects(history, ctx.mms.projects.listProjects(), threadsFor, (id) => ctx.mms.threads.getThread(id)?.name)
     }
     case 'providers.getUsageFor': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')

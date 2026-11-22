@@ -30,6 +30,8 @@ export const CURSOR_CAPABILITIES: ProviderCapabilities = Object.freeze({
 export interface CursorTurnClient {
   chat(input: CursorChatInput): Promise<CursorChatResult>
   commitConversation(threadId: string, history: string): void
+  /** Per-thread private working directory when a chat has no project workspace. */
+  standaloneWorkspace?(threadId: string): string
   configured(): boolean
   interrupt(agentId: string | undefined): Promise<'interrupted' | 'not_active'>
 }
@@ -49,9 +51,14 @@ export class CursorAdapter implements ProviderAdapter {
     return this.client()?.configured() ?? false
   }
 
+  standaloneWorkspace(threadId: string): string | undefined {
+    return this.client()?.standaloneWorkspace?.(threadId)
+  }
+
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
     const client = this.client()
-    if (!client || !input.cwd) throw new Error(`${this.label} requires a project workspace`)
+    const cwd = input.cwd ?? client?.standaloneWorkspace?.(input.threadId)
+    if (!client || !cwd) throw new Error(`${this.label} requires a project workspace`)
     const startedAt = Date.now()
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
@@ -65,7 +72,7 @@ export class CursorAdapter implements ProviderAdapter {
     const toolCalls = new Map<string, 'running' | 'completed' | 'unfinished'>()
     const result = await client.chat({
       threadId: input.threadId,
-      cwd: input.cwd,
+      cwd,
       model: input.model,
       ...(input.mode === 'plan' ? { mode: 'plan' as const } : {}),
       prompt: input.prompt,

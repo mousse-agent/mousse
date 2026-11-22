@@ -42,6 +42,8 @@ export interface AcpTurnClient {
   commitConversation(threadId: string, history: string): void
   /** A turn that did not finish: the history it left, so the next turn may resume the agent's session (`AcpSessions.commitInterrupted`). */
   commitInterrupted?(threadId: string, history: string): void
+  /** Per-thread private working directory when a chat has no project workspace. */
+  standaloneWorkspace?(threadId: string): string
   configured(): boolean
   /** The native cancel of the session's running prompt; without it, stop works through the turn's signal. */
   interrupt?(sessionId: string | undefined): Promise<'interrupted' | 'not_active'>
@@ -86,6 +88,10 @@ export class AcpAdapter implements ProviderAdapter {
     return this.client()?.configured() ?? false
   }
 
+  standaloneWorkspace(threadId: string): string | undefined {
+    return this.client()?.standaloneWorkspace?.(threadId)
+  }
+
   async startTurn(
     input: TurnInput,
     sink: TurnSink,
@@ -95,7 +101,8 @@ export class AcpAdapter implements ProviderAdapter {
     const plan = input.mode === 'plan'
     if (plan && !this.options.planMode?.()) throw new Error(`Use ${this.options.label}’s /plan command in a chat turn`)
     const client = this.client()
-    if (!client || !input.cwd) throw new Error(`${input.llmProvider || this.options.label} requires a project workspace`)
+    const cwd = input.cwd ?? client?.standaloneWorkspace?.(input.threadId)
+    if (!client || !cwd) throw new Error(`${input.llmProvider || this.options.label} requires a project workspace`)
     const startedAt = Date.now()
     // The ACP session id stays inside the runtime's saved sessions; the ref names the runtime.
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
@@ -114,7 +121,7 @@ export class AcpAdapter implements ProviderAdapter {
       text = await client.chat({
         threadId: input.threadId,
         instanceId: input.instanceId,
-        cwd: input.cwd,
+        cwd,
         model: input.model,
         ...(plan ? { mode: 'plan' as const } : {}),
         permissionMode: input.permissionMode,

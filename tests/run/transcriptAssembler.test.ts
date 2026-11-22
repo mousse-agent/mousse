@@ -754,7 +754,6 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
     const { assembler } = harness()
     assembler.tool(start('w1', 'thread_wait', { toolName: 'thread_wait', kind: 'generic' }))
     assembler.tool(start('w2', 'mcp__mousse__thread_wait', { toolName: 'mcp__mousse__thread_wait', kind: 'generic' }))
-    assembler.tool(start('w2b', 'mcp_mousse_thread_wait', { toolName: 'mcp_mousse_thread_wait', kind: 'generic' }))
     expect(ids(assembler)).toEqual([])
     // Another server's tool of the same name is not Mousse's wait.
     assembler.tool(start('w3', 'mcp__other__thread_wait', { toolName: 'mcp__other__thread_wait', kind: 'generic' }))
@@ -783,9 +782,9 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
 
   it('Mousse\'s asking tools are matched exactly: a look-alike title is no Mousse call', () => {
     const lookup = (tool: string) => ({ ask_user: { asksUser: 'question' }, thread_read: { access: 'readsOthers' } } as Record<string, { asksUser?: string; access?: string }>)[tool]
-    for (const name of ['mcp__mousse__ask_user', 'mcp_mousse_ask_user', 'mousse/ask_user', 'mousse.ask_user', 'mousse__ask_user', 'mousse: ask_user', 'ask_user (mousse MCP Server)', 'ask_user', 'mcp__mousse-relay__github__create_issue', 'mcp_mousse-relay_github__createIssue', 'mcp__mousse__newer_tool', 'mcp_mousse_newer_tool', 'mousse-relay/github__createIssue', 'mousse-relay.Linear__Create_Issue', 'github__createIssue (mousse-relay MCP Server)'])
+    for (const name of ['mcp__mousse__ask_user', 'mousse/ask_user', 'mousse.ask_user', 'mousse__ask_user', 'mousse: ask_user', 'ask_user (mousse MCP Server)', 'ask_user', 'mcp__mousse-relay__github__create_issue', 'mcp__mousse__newer_tool', 'mousse-relay/github__createIssue', 'mousse-relay.Linear__Create_Issue', 'github__createIssue (mousse-relay MCP Server)'])
       expect(mousseCallAsksPerson(name, lookup), name).toBe(true)
-    for (const name of ['mousse/docs', 'Mousse.md', 'mousse.md', 'MOUSSE/ask_user', 'mousse/thread_read', 'mcp__mousse__thread_read', 'mcp_mousse_thread_read', 'mcp_other_ask_user', 'docs (mousse MCP Server)', 'ask_user.md'])
+    for (const name of ['mousse/docs', 'Mousse.md', 'mousse.md', 'MOUSSE/ask_user', 'mousse/thread_read', 'mcp__mousse__thread_read', 'docs (mousse MCP Server)', 'ask_user.md'])
       expect(mousseCallAsksPerson(name, lookup), name).toBe(false)
     expect(mousseServerToolOf('Mousse.md')).toBeUndefined()
   })

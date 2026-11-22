@@ -32,7 +32,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-12);
-  width: min(420px, 100%);
 }
 
 .engine-dialog-home .engine-qr .engine-paste {
@@ -44,6 +43,7 @@
 }
 
 .engine-dialog-home .settings-input {
+  max-width: none;
   height: var(--settings-control-h, 28px);
   padding: 0 var(--space-8);
   border: 1px solid var(--ui-line-strong);
@@ -113,6 +113,16 @@
   flex-direction: column;
   align-items: center;
   gap: var(--space-8);
+}
+
+/* Holds the code's place while it is made, so nothing jumps when it shows. */
+.engine-preparing {
+  justify-content: center;
+  min-height: 208px;
+}
+
+.engine-preparing-percent {
+  font-variant-numeric: tabular-nums;
 }
 
 .engine-qr p {

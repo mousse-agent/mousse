@@ -94,7 +94,7 @@ function scriptedAgent(script: AgentScript) {
   return { ...agentApp, calls, cancels }
 }
 
-function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean; backgroundWork?: boolean; continuationSettleMs?: number; continuationQuietMs?: number; wakeGraceMs?: number } = {}) {
+function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean; formElicitation?: boolean; backgroundWork?: boolean; continuationSettleMs?: number; continuationQuietMs?: number; wakeGraceMs?: number } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
   const questions = new UserQuestionService()
@@ -104,6 +104,7 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     questions,
     connect,
     quirks: { ...NO_QUIRKS, ...(options.clientFs ? { clientFs: true } : {}), ...(options.backgroundWork ? { backgroundWork: true } : {}) },
+    ...(options.formElicitation ? { formElicitation: true } : {}),
     ...(options.closeSessions ? { closeSessions: true } : {}),
     ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {}),
     ...(options.promptSilenceMs !== undefined ? { promptSilenceMs: options.promptSilenceMs } : {}),
@@ -144,6 +145,44 @@ describe('ACP sessions', () => {
       activity: { kind: 'subagent', description: rawInput.Role, agentType: rawInput.TypeName, prompt: rawInput.Prompt }
     }))
     expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({ phase: 'complete', callId: launch.toolCallId, status: 'completed' }))
+  })
+
+  it('records Antigravity mcp_mousse_delegate_task and mcp_mousse_thread_send tool calls with their subagent ids', async () => {
+    const delegateIn = { title: 'GitHub researcher', prompt: 'Research GitHub', workspace: 'shared' }
+    const delegateOut = { delegationId: 'd-gh', childThreadId: 't-gh', title: 'GitHub researcher' }
+    const sendOut = { delegationId: 'd-gh-2', threadId: 't-gh', title: 'GitHub researcher', subagent: true }
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-del', name: 'mcp_mousse_delegate_task', title: 'Run mcp_mousse_delegate_task', rawInput: delegateIn, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-del', status: 'completed', rawOutput: { content: [{ type: 'text', text: JSON.stringify(delegateOut) }] } })
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-send', name: 'mcp_mousse_thread_send', title: 'Run mcp_mousse_thread_send', rawInput: { threadId: 't-gh', message: 'follow up' }, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-send', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: JSON.stringify(sendOut) } }] })
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    const onTool = vi.fn()
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'Start researcher', onText: vi.fn(), onTool })
+    expect(onTool).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      phase: 'start',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      status: 'completed',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, response: JSON.stringify(delegateOut), failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-send',
+      toolName: 'mcp_mousse_thread_send',
+      status: 'completed',
+      activity: { output: JSON.stringify(sendOut) }
+    }))
   })
 
   it('lists the session’s models, sets the chosen one, and runs the agent default without setting one', async () => {
@@ -1240,7 +1279,21 @@ describe('ACP sessions', () => {
             return { stopReason: 'end_turn' as const }
           })
       })
-      const { sessions, questions } = core(agent.connect, { backgroundWork: true, continuationSettleMs: 30, wakeGraceMs: 500 })
+      const formReceived = vi.fn()
+      const { sessions, questions } = core((launch) => {
+        const elicit = launch.handlers.createElicitation!
+        return agent.connect({
+          ...launch,
+          handlers: {
+            ...launch.handlers,
+            createElicitation: (request) => {
+              const reply = elicit(request)
+              formReceived()
+              return reply
+            }
+          }
+        })
+      }, { backgroundWork: true, formElicitation: true, continuationSettleMs: 30, wakeGraceMs: 500 })
       const bgStates: Array<[string, boolean]> = []
       const endedTasks: Array<[string, ProviderTaskEnd]> = []
       const continuations: Array<[string, ContinuationInfo]> = []
@@ -1302,6 +1355,19 @@ describe('ACP sessions', () => {
         options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }]
       })
 
+      const formReply = agentClient!.request(methods.client.elicitation.create, {
+        sessionId: 'agy-bg-1',
+        mode: 'form',
+        message: 'Which branch should this go to?',
+        requestedSchema: {
+          type: 'object',
+          properties: { branch: { type: 'string', title: 'Base branch', enum: ['main', 'release'] } }
+        }
+      })
+      await vi.waitFor(() => expect(formReceived).toHaveBeenCalledOnce())
+      expect(sessions.hasContinuation('t-bg', contId)).toBe(true)
+      expect(questions.listPendingForThread('t-bg')).toEqual([])
+
       // Now attach the continuation turn (with a different historyKey, since OrchestratorService inserts a notice).
       const contTools: Array<Record<string, unknown>> = []
       let contThinking = ''
@@ -1321,7 +1387,21 @@ describe('ACP sessions', () => {
 
       // Permission request waited for continuation attach and auto-allowed under permissionMode: 'full'.
       await expect(permPromise).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
-      expect(questions.listPendingForThread('t-bg')).toEqual([])
+      await vi.waitFor(() => expect(questions.listPendingForThread('t-bg')).toHaveLength(1))
+      const [form] = questions.listPendingForThread('t-bg')
+      expect(form!.questions[0]?.prompt).toBe('Base branch')
+      questions.submitAnswers(form!.requestId, { q0: 'option-0' })
+      await expect(formReply).resolves.toEqual({ action: 'accept', content: { branch: 'main' } })
+
+      const followUp = JSON.stringify({ delegationId: 'd-next', threadId: 't-child', title: 'Reviewer', subagent: true })
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'follow-up', name: 'mcp_mousse_thread_send', title: 'Follow up with reviewer', status: 'in_progress' }
+      })
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'tool_call_update', toolCallId: 'follow-up', status: 'completed', rawOutput: { content: [{ type: 'text', text: followUp }] } }
+      })
 
       // Complete the follow-up tool and emit final reply + usage_update.
       await agentClient!.notify(methods.client.session.update, {
@@ -1342,6 +1422,8 @@ describe('ACP sessions', () => {
       expect(contThinking).toBe('Verify passed, opening PR.')
       expect(contTools).toEqual([
         expect.objectContaining({ phase: 'start', callId: 'pr-1', toolName: 'run_command' }),
+        expect.objectContaining({ phase: 'start', callId: 'follow-up', toolName: 'mcp_mousse_thread_send' }),
+        expect.objectContaining({ phase: 'complete', callId: 'follow-up', status: 'completed', activity: { output: followUp } }),
         expect.objectContaining({ phase: 'complete', callId: 'pr-1', status: 'completed' })
       ])
       expect(bgStates).toEqual([['t-bg', true], ['t-bg', false]])

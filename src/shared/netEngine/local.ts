@@ -343,7 +343,8 @@ export interface NetEngineStatus {
   /** The engine runs and serves this profile's pairings now. */
   on: boolean
   /** The helper process: `off`, `starting`, `running`, `restarting`, `not_in_build`, `mismatch` or `failed`. */
-  helper: { state: string; text?: string }
+  /** `step`, while `starting`: `launch` (the process starts) or `hello` (it says who it is). */
+  helper: { state: string; text?: string; step?: 'launch' | 'hello' }
   /** Why networking is paused (a removal not saved yet), while it is. */
   paused?: string
   /** This endpoint's id, once its helper said hello. */

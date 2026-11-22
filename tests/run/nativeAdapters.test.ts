@@ -418,6 +418,18 @@ describe('AntigravityAdapter', () => {
     expect(service.chat).not.toHaveBeenCalled()
   })
 
+  it('uses the runtime standalone workspace when a thread has no project, and keeps the project cwd when one exists', async () => {
+    const standaloneWorkspace = vi.fn((threadId: string) => `/standalone/${threadId}`)
+    const service = { ...client(async () => 'ok'), standaloneWorkspace }
+    const adapter = antigravityAdapter(() => service)
+    const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
+    expect(adapter.standaloneWorkspace('thread-1')).toBe('/standalone/thread-1')
+    await adapter.startTurn(input({ ...turn, cwd: null }), recordingSink(), control(), host())
+    expect(service.chat.mock.calls[0][0].cwd).toBe('/standalone/thread-1')
+    await adapter.startTurn(input({ ...turn, cwd: '/project' }), recordingSink(), control(), host())
+    expect(service.chat.mock.calls[1][0].cwd).toBe('/project')
+  })
+
   it('reports the history a failed or stopped turn left, so the next turn may resume the agent session', async () => {
     const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
     const failing = { ...client(async () => { throw new Error('quota') }), commitInterrupted: vi.fn() }

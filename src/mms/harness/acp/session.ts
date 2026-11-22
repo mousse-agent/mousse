@@ -14,8 +14,10 @@ import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
 import { closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
+import { answerFormElicitation } from './elicitation'
 import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
+import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { AGENT_DEFAULT_MODEL, agentModels, agentModes, modelOptions, planModeId, type ModelControl } from './models'
 import {
@@ -73,6 +75,17 @@ function extractToolOutputText(event: { rawOutput?: unknown; content?: unknown }
       if (joined) return joined
     } else {
       const obj = rawOutput as Record<string, unknown>
+      if (Array.isArray(obj.content)) {
+        const joined = toolResultText(obj.content)
+        if (joined) return joined
+      }
+      if (typeof obj.delegationId === 'string' || typeof obj.childThreadId === 'string' || typeof obj.started === 'boolean') {
+        try {
+          return JSON.stringify(obj)
+        } catch {
+          // Ignore unserializable rawOutput
+        }
+      }
       for (const key of ['output', 'text', 'stdout', 'result', 'message'] as const) {
         if (typeof obj[key] === 'string' && (obj[key] as string).trim()) return obj[key] as string
       }
@@ -531,6 +544,8 @@ export interface AcpSessionsOptions {
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
   urlElicitation?: boolean
+  /** Interactive agent questions may arrive as form elicitations (`elicitation/create`, `mode: 'form'`). */
+  formElicitation?: boolean
   /** End a session with `session/close` (when advertised) before its process is killed. */
   closeSessions?: boolean
   /** Bumped when the launch settings change; a process from an older one is not reused. */
@@ -876,7 +891,7 @@ export class AcpSessions {
     let active: AcpProcess | undefined
     const inTurn = () => Boolean(active && this.turning.has(active))
     // When a reactive continuation has started on `active` and is waiting for the orchestrator to attach its
-    // `provider-continuation` turn (`chat({ continuation: true })`), hold an incoming permission/file request until the
+    // `provider-continuation` turn (`chat({ continuation: true })`), hold any permission, file or form request until the
     // turn adopts the process (or the continuation is discarded/settled). Idle processes without an open continuation
     // fail immediately below, preserving the idle-process isolation guard.
     const waitForTurn = async (): Promise<boolean> => {
@@ -956,12 +971,34 @@ export class AcpSessions {
           return writeWorkspaceFile(questions, scope, request, label)
         }
       } : {}),
-      // A sign-in link the agent sends as a URL elicitation goes to the sign-in; nothing else is answered.
-      ...(this.options.urlElicitation ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
-        const url = (request as { mode?: unknown; url?: unknown }).mode === 'url' ? (request as { url?: unknown }).url : undefined
-        if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
-        onAuthUrl(url)
-        return { action: 'accept' }
+      // URL elicitations carry sign-in links; form elicitations carry interactive questions for the thread's widget.
+      ...((this.options.urlElicitation || this.options.formElicitation) ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
+        const mode = (request as { mode?: unknown }).mode
+        if (mode === 'url' && this.options.urlElicitation) {
+          const url = (request as { url?: unknown }).url
+          if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
+          onAuthUrl(url)
+          return { action: 'accept' }
+        }
+        if (mode === 'form' && this.options.formElicitation) {
+          if (active?.refuseTools) {
+            active.refuseTools('a question')
+            return { action: 'cancel' }
+          }
+          if (!(await waitForTurn())) {
+            stopIdle()
+            return { action: 'cancel' }
+          }
+          const callId = (request as { toolCallId?: unknown }).toolCallId
+          const awaiting = typeof callId === 'string' && callId ? active?.turnToolAwaiting : undefined
+          awaiting?.(callId as string, true)
+          try {
+            return await answerFormElicitation(questions, scope, request)
+          } finally {
+            awaiting?.(callId as string, false)
+          }
+        }
+        return { action: 'decline' }
       } } : {}),
       ...(quirks.xaiExtensions ? xaiHandlers({
         questions,
@@ -1495,36 +1532,16 @@ export class AcpSessions {
         input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
-      if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed')
-        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: openTools.get(event.toolCallId)!.title })
+      if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed') {
+        const tracked = openTools.get(event.toolCallId)!
+        if (event.rawInput !== undefined && tracked.rawInput === undefined) tracked.rawInput = event.rawInput
+        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title })
+      }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
         const tracked = openTools.get(event.toolCallId)
-        if (tracked) {
-          openTools.delete(event.toolCallId)
-          const isBackgroundLaunch = tracked.isInvokeSubagent && event.status === 'completed' && !input.bot
-          if (isBackgroundLaunch) {
-            launchedSubagents.set(event.toolCallId, {
-              callId: event.toolCallId,
-              description: tracked.description,
-              startedAt: tracked.startedAt,
-              textResponses: 0,
-              sawTextInStep: false
-            })
-          }
-          const record = subagentToolName(tracked.name)
-            ? (recordSubagentCall(tracked.name, tracked.rawInput, { text: extractToolOutputText(event), isError: event.status === 'failed' }) ?? undefined)
-            : undefined
-          input.onTool?.({
-            phase: 'complete',
-            callId: event.toolCallId,
-            title: event.title ?? tracked.title,
-            ...(tracked.name ? { toolName: tracked.name } : {}),
-            status: isBackgroundLaunch ? 'background' : (event.status as 'completed' | 'failed'),
-            ...(record ? { record } : {})
-          })
-        } else if (current.backgroundTasks?.has(event.toolCallId)) {
-          const bg = current.backgroundTasks.get(event.toolCallId)!
-          current.backgroundTasks.delete(event.toolCallId)
+        const bg = current.backgroundTasks?.get(event.toolCallId)
+        if (!tracked && bg) {
+          current.backgroundTasks?.delete(event.toolCallId)
           const summary = extractToolSummary(event)
           try {
             this.liveHost?.taskEnded?.(input.threadId, {
@@ -1536,7 +1553,36 @@ export class AcpSessions {
             })
           } catch { /* best effort */ }
         } else {
-          input.onTool?.({ phase: 'complete', callId: event.toolCallId, title: event.title ?? `${label} tool`, status: event.status as 'completed' | 'failed' })
+          openTools.delete(event.toolCallId)
+          const isBackgroundLaunch = tracked?.isInvokeSubagent && event.status === 'completed' && !input.bot
+          if (tracked && isBackgroundLaunch) {
+            launchedSubagents.set(event.toolCallId, {
+              callId: event.toolCallId,
+              description: tracked.description,
+              startedAt: tracked.startedAt,
+              textResponses: 0,
+              sawTextInStep: false
+            })
+          }
+          const toolName = tracked?.name ?? event.name
+          const rawInput = tracked?.rawInput ?? event.rawInput
+          const outputText = extractToolOutputText(event)
+          const record = subagentToolName(toolName)
+            ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
+            : undefined
+          const served = toolName ? mousseServerToolOf(toolName) : undefined
+          const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
+            ? { output: outputText }
+            : undefined
+          input.onTool?.({
+            phase: 'complete',
+            callId: event.toolCallId,
+            title: event.title ?? tracked?.title ?? `${label} tool`,
+            ...(toolName ? { toolName } : {}),
+            status: isBackgroundLaunch ? 'background' : event.status,
+            ...(record ? { record } : {}),
+            ...(followUpOutput ? { activity: followUpOutput } : {})
+          })
         }
       }
       if (event.sessionUpdate === 'config_option_update' && event.configOptions) {

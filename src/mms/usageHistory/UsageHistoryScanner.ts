@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { copyFile, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { dirname, join, resolve, sep } from 'path'
+import { fileURLToPath } from 'url'
 import {
   USAGE_AGENT_LABELS,
   type UsageAgentId, type UsageHistoryAgent, type UsageHistoryModelRow, type UsageHistoryRequest,
@@ -94,7 +95,7 @@ async function guardOf(path: string, offset: number): Promise<string> {
  * Reads a JSONL log from `entry.offset` to its last complete line, decoding only lines that hold
  * one of the parser's markers. A line still being written is left for the next read.
  */
-async function readLines(path: string, entry: FileEntry, parser: LineParser, floor: number): Promise<void> {
+async function readLines(path: string, entry: FileEntry, parser: LineParser, floor: number, sessionCwds?: ReadonlyMap<string, string>): Promise<void> {
   const markers = parser.markers.map((marker) => Buffer.from(marker))
   const handle = await open(path, 'r')
   let position = entry.offset
@@ -122,7 +123,13 @@ async function readLines(path: string, entry: FileEntry, parser: LineParser, flo
           try {
             const found = parser.parse(data.toString('utf8', start, end), entry.state, path)
             for (const record of Array.isArray(found) ? found : found ? [found] : []) {
-              if (record.ts >= floor) entry.recs.push(pack(entry, record))
+              if (record.ts >= floor) {
+                if (!record.cwd && sessionCwds) {
+                  const cwd = sessionCwds.get(record.session)
+                  if (cwd) record.cwd = cwd
+                }
+                entry.recs.push(pack(entry, record))
+              }
             }
           } catch {
             // A malformed line is skipped.
@@ -146,6 +153,66 @@ async function listFiles(root: string, accepts: (path: string) => boolean): Prom
   } catch {
     return []
   }
+}
+
+/** Antigravity keeps each conversation's transcript at a fixed path under `brain/<id>`, avoiding walking artifacts and chunks. */
+async function listAntigravityTranscripts(root: string): Promise<string[]> {
+  try {
+    const dirents = await readdir(root, { withFileTypes: true })
+    const files: string[] = []
+    for (const dirent of dirents) {
+      if (!dirent.isDirectory() && !dirent.isSymbolicLink()) continue
+      const transcript = join(root, dirent.name, '.system_generated', 'logs', 'transcript.jsonl')
+      if (existsSync(transcript)) files.push(transcript)
+    }
+    return files
+  } catch {
+    return []
+  }
+}
+
+function firstWorkspacePath(raw: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return undefined
+    for (const entry of parsed) {
+      if (typeof entry !== 'string' || !entry) continue
+      if (entry.startsWith('file://')) {
+        try { return fileURLToPath(entry) } catch { continue }
+      }
+      return entry
+    }
+  } catch {
+    // Malformed workspace_uris leave the session without a folder.
+  }
+  return undefined
+}
+
+/** Reads `conversation_summaries.db` beside each Antigravity `brain` root to map session ids to their primary workspace folder. */
+async function loadAntigravityCwds(brainRoots: readonly string[]): Promise<Map<string, string>> {
+  const cwds = new Map<string, string>()
+  for (const root of brainRoots) {
+    const dbPath = join(dirname(root), 'conversation_summaries.db')
+    if (!existsSync(dbPath)) continue
+    try {
+      const database = await openReadOnly(dbPath, 'SELECT 1 FROM conversation_summaries LIMIT 1')
+      try {
+        const rows = database
+          .prepare("SELECT conversation_id, workspace_uris FROM conversation_summaries WHERE workspace_uris != ''")
+          .all() as Array<{ conversation_id: string; workspace_uris: string }>
+        for (const row of rows) {
+          if (!row.conversation_id || cwds.has(row.conversation_id)) continue
+          const cwd = firstWorkspacePath(row.workspace_uris)
+          if (cwd) cwds.set(row.conversation_id, cwd)
+        }
+      } finally {
+        database.close()
+      }
+    } catch {
+      // Missing or unreadable summaries leave sessions unattributed without failing the scan.
+    }
+  }
+  return cwds
 }
 
 /**
@@ -216,7 +283,7 @@ export class UsageHistoryScanner {
     const roots = [...new Set(source.roots().map((root) => resolve(root)))]
     const found = roots.filter((root) => existsSync(root))
     const report: UsageHistorySource = { agent: source.agent, path: found[0] ?? roots[0] ?? '', status: found.length ? 'read' : 'missing', files: 0, readFiles: 0 }
-    const files = (await Promise.all(found.map((root) => listFiles(root, source.accepts)))).flat()
+    const files = (await Promise.all(found.map((root) => (source.agent === 'antigravity' ? listAntigravityTranscripts(root) : listFiles(root, source.accepts))))).flat()
     const work: Array<{ path: string; size: number; mtimeMs: number }> = []
     await mapLimit(files, STAT_CONCURRENCY, async (path) => {
       try {
@@ -229,9 +296,13 @@ export class UsageHistoryScanner {
       }
     })
     report.files = work.length
-    await mapLimit(work, READ_CONCURRENCY, async ({ path, size, mtimeMs }) => {
+    const toRead = work.filter(({ path, size, mtimeMs }) => {
       const cached = cache.files[path]
-      if (cached && cached.size === size && cached.mtimeMs === mtimeMs) return
+      return !(cached && cached.size === size && cached.mtimeMs === mtimeMs)
+    })
+    const sessionCwds = toRead.length && source.agent === 'antigravity' ? await loadAntigravityCwds(found) : undefined
+    await mapLimit(toRead, READ_CONCURRENCY, async ({ path, size, mtimeMs }) => {
+      const cached = cache.files[path]
       try {
         let entry: FileEntry
         if (cached && size > cached.size && cached.offset > 0 && (await guardOf(path, cached.offset)) === cached.guard) {
@@ -239,7 +310,7 @@ export class UsageHistoryScanner {
         } else {
           entry = { agent: source.agent, size, mtimeMs, offset: 0, guard: '', state: source.parser.initial(), models: [], sessions: [], cwds: [], recs: [] }
         }
-        await readLines(path, entry, source.parser, floor)
+        await readLines(path, entry, source.parser, floor, sessionCwds)
         entry.size = size
         entry.mtimeMs = mtimeMs
         entry.guard = await guardOf(path, entry.offset)
@@ -272,7 +343,7 @@ export class UsageHistoryScanner {
         const cached = cache.files[path]
         if (cached && cached.size === size && cached.mtimeMs === mtimeMs) continue
         const entry: FileEntry = { agent: 'opencode', size, mtimeMs, offset: 0, guard: '', state: null, models: [], sessions: [], cwds: [], recs: [] }
-        const database = await openReadOnly(path)
+        const database = await openReadOnly(path, 'SELECT 1 FROM message LIMIT 1')
         try {
           const rows = database.prepare("SELECT id, session_id, time_created, data FROM message WHERE time_created >= ? AND data LIKE '%\"assistant\"%'").all(floor) as Array<{ id: string; session_id: string; time_created: number; data: string }>
           for (const row of rows) {
@@ -463,7 +534,7 @@ export function aggregate(result: ScanResult, request: UsageHistoryRequest, now:
     projects: [...projects.values()].map(({ sessionSet, ...row }) => ({ ...row, costUsd: cents(row.costUsd), sessions: sessionSet.size }))
       .sort((a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens),
     // The priciest five, each named by the model that cost it most.
-    topSessions: [...sessionRows.values()].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5)
+    topSessions: [...sessionRows.values()].sort((a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens).slice(0, 5)
       .map(({ modelCost, ...row }) => ({ ...row, model: [...modelCost].sort((a, b) => b[1] - a[1])[0]?.[0] ?? row.model, costUsd: cents(row.costUsd) })),
     agentIds: [...present].sort((a, b) => USAGE_AGENT_LABELS[a].localeCompare(USAGE_AGENT_LABELS[b])),
     cacheSavingsUsd: cents(cacheSavingsUsd),
@@ -475,22 +546,28 @@ export function aggregate(result: ScanResult, request: UsageHistoryRequest, now:
 }
 
 /**
- * Opens OpenCode's database read-only. Where the folder can't share its lock files (a network or
+ * Opens a SQLite database read-only. Where the folder can't share its lock files (a network or
  * mounted drive), a copy of the database and its write-ahead log is read instead.
  */
-async function openReadOnly(path: string): Promise<import('node:sqlite').DatabaseSync> {
+async function openReadOnly(path: string, probeSql: string): Promise<import('node:sqlite').DatabaseSync> {
   const { DatabaseSync } = await import('node:sqlite')
   try {
     const database = new DatabaseSync(path, { readOnly: true })
-    database.prepare('SELECT 1 FROM message LIMIT 1').get()
+    database.prepare(probeSql).get()
     return database
   } catch {
-    const dir = await mkdtemp(join(tmpdir(), 'mousse-opencode-'))
-    await copyFile(path, join(dir, 'opencode.db'))
-    await copyFile(`${path}-wal`, join(dir, 'opencode.db-wal')).catch(() => undefined)
-    const database = new DatabaseSync(join(dir, 'opencode.db'))
-    const close = database.close.bind(database)
-    database.close = () => { close(); void rm(dir, { recursive: true, force: true }) }
-    return database
+    const dir = await mkdtemp(join(tmpdir(), 'mousse-usage-db-'))
+    try {
+      const copy = join(dir, 'db.sqlite')
+      await copyFile(path, copy)
+      await copyFile(`${path}-wal`, `${copy}-wal`).catch(() => undefined)
+      const database = new DatabaseSync(copy)
+      const close = database.close.bind(database)
+      database.close = () => { close(); void rm(dir, { recursive: true, force: true }) }
+      return database
+    } catch (error) {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined)
+      throw error
+    }
   }
 }
