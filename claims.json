@@ -48,17 +48,6 @@
       "expiresAt": "2026-11-21T18:19:01.797Z"
     },
     {
-      "task": "fix/antigravity-question-widget",
-      "session": "agibook-dcec2f",
-      "machine": "agibook",
-      "branch": "fix/antigravity-question-widget",
-      "paths": [
-        "src/mms/harness/acp/"
-      ],
-      "claimedAt": "2026-11-22T16:56:45.519Z",
-      "expiresAt": "2026-11-22T18:56:45.519Z"
-    },
-    {
       "task": "fix/antigravity-status-and-subagents",
       "session": "agibook-63a2b6",
       "machine": "agibook",
