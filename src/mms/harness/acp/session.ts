@@ -211,6 +211,8 @@ export interface AcpProcess extends AcpConnection {
   activity?: () => void
   /** `interrupt` sent the running prompt a native cancel (cleared when the next prompt starts). */
   cancelRequested?: boolean
+  /** Mousse ends this process after a stop (`interrupt`); its saved session stays resumable (`stoppedForResume`). */
+  closedForResume?: boolean
   /** The slash commands the agent advertised (`available_commands_update`), without the slash. */
   commands?: Set<string>
   /** The agent answered a steer's second prompt with an error: its later steers are cut and restarted (`AcpQuirks.nativeSteerFrom`). */
@@ -1039,6 +1041,9 @@ export class AcpSessions {
         this.processes.delete(active)
         this.clearBackgroundState(active)
         this.failContinuation(active, new Error(`${label} exited`))
+        // A process that ended by itself leaves nothing resumable for the stopped turn.
+        if (!active.closedForResume && active.threadId && active.sessionId && this.stoppedForResume.get(active.threadId) === active.sessionId)
+          this.stoppedForResume.delete(active.threadId)
         if (active.threadId && this.sessions.get(active.threadId) === active) this.sessions.delete(active.threadId)
       }
     })
@@ -1174,6 +1179,7 @@ export class AcpSessions {
   commitInterrupted(threadId: string, history: string): void {
     const sessionId = this.interrupted.get(threadId)
     this.interrupted.delete(threadId)
+    this.stoppedForResume.delete(threadId)
     const saved = this.options.store.saved(threadId)
     if (!sessionId || !saved || saved.sessionId !== sessionId) return
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
@@ -1181,6 +1187,7 @@ export class AcpSessions {
 
   /** Drops the saved session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
+    this.stoppedForResume.delete(threadId)
     if (!this.options.store.saved(threadId)) return
     this.options.store.setSaved(threadId, undefined)
   }
@@ -1202,12 +1209,15 @@ export class AcpSessions {
     if (active.threadId) this.options.questions.autoRejectPendingForThread(active.threadId)
     // The prompt that ends `cancelled` now ends because Mousse asked, not because the agent chose to.
     active.cancelRequested = true
+    // The agent may still count its task as running after the cancel's reply: its process ends,
+    // and the thread's next turn reopens the saved session on a new one. Marked before the prompt ends, so the
+    // stopped turn's commit finds it whether it runs before or after the close.
+    const xai = this.options.quirks.xaiExtensions
+    if (xai && active.threadId) this.stoppedForResume.set(active.threadId, active.sessionId!)
     await active.connection.agent.notify(methods.agent.session.cancel, { sessionId: active.sessionId! })
     await active.prompting
-    // The agent may still count its task as running after the cancel's reply: its process ends,
-    // and the thread's next turn reopens the saved session on a new one.
-    if (this.options.quirks.xaiExtensions) {
-      if (active.threadId && active.sessionId) this.stoppedForResume.set(active.threadId, active.sessionId)
+    if (xai && !active.connection.signal.aborted) {
+      active.closedForResume = true
       closeAcpConnection(active)
     }
     return 'interrupted'
@@ -2159,6 +2169,7 @@ export class AcpSessions {
       closeAcpConnection(active)
     }
     this.sessions.clear()
+    this.stoppedForResume.clear()
   }
 
   stop(): void {

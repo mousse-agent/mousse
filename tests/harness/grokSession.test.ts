@@ -268,6 +268,28 @@ describe('Grok sessions', () => {
     expect(agent.calls.filter((call) => call.method === 'session/resume')).toHaveLength(1)
   })
 
+  it('opens a new session after a stop when the process ended by itself instead of being ended by Mousse', async () => {
+    let prompts = 0
+    const agent = grokAgent(async (c, cancelled) => {
+      if ((prompts += 1) > 1) return { stopReason: 'end_turn' }
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'working'))
+      await cancelled
+      agent.connections[0]!.connection.child.kill()
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    let sessionId: string | undefined
+    const turn = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'long', history: '', onText: vi.fn(), onSession: (id) => { sessionId = id } }).catch(() => undefined)
+    await vi.waitFor(() => expect(sessionId).toBe('grok-1'))
+    await vi.waitFor(() => expect(agent.calls.filter((call) => call.method === 'session/prompt')).toHaveLength(1))
+    expect(await sessions.interrupt('grok-1')).toBe('interrupted')
+    await turn
+    sessions.commitConversation('t', 'h')
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'again', history: 'h', onText: vi.fn() })
+    expect(agent.connections).toHaveLength(2)
+    expect(agent.calls.filter((call) => call.method === 'session/resume')).toHaveLength(0)
+  })
+
   describe('steers', () => {
     const STEER = 'Use pnpm, not npm'
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
