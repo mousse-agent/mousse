@@ -756,8 +756,9 @@ describe('seeding another worktree from a snapshot', () => {
     // The branch is at the real commit, the files are uncommitted, and the first turn will not call them outside changes.
     expect(git(seeded.worktreePath, 'rev-parse', 'HEAD')).toBe(head)
     expect(git(seeded.worktreePath, 'status', '--porcelain', '--untracked-files=all')).toBe('M value.txt\n?? new.txt')
-    expect(seeded.snapshotSha).toBe(action.endSha)
-    expect(git(seeded.worktreePath, 'rev-parse', seeded.retainedRef)).toBe(action.endSha)
+    // Its first baseline is the bytes after seeding (#1758): the snapshot's files, in a snapshot of the new worktree's own.
+    expect(git(seeded.worktreePath, 'rev-parse', `${seeded.snapshotSha}^{tree}`)).toBe(git(cwd, 'rev-parse', `${action.endSha}^{tree}`))
+    expect(git(seeded.worktreePath, 'rev-parse', seeded.retainedRef)).toBe(seeded.snapshotSha)
     const forkActions = new ThreadActionService(forkThread)
     expect((await forkActions.recordOutsideChanges({ threadId: 'fork', conversationBranchId: 'main', workspacePath: seeded.worktreePath })).action).toBeUndefined()
     // The source thread's files are untouched.

@@ -243,6 +243,17 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
   return { commonDir, key, worktreePath, metadataDir, capability, movedFrom }
 }
 
+/** What Git prints (under `LC_ALL=C`) for a folder that is not in a repository, or whose `.git` file names no repository. */
+const NO_REPOSITORY = /^fatal: (not a git repository|gitfile does not point to a valid repository)/
+
+/** True only when the folder does not exist: Git cannot start there, and the folder is no repository. */
+async function folderGone(path: string): Promise<boolean> {
+  try { await stat(path); return false } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'ENOTDIR'
+  }
+}
+
 async function gitAsync(cwd: string, args: readonly string[], absent: (code: string | number | undefined, stderr: string) => boolean): Promise<string | null> {
   const argv = await withoutRepoProgramsAsync(cwd, args)
   return new Promise((settle, reject) => {
@@ -266,7 +277,9 @@ export async function resolveRepositoryIdentityAsync(cwd: string, options: Resol
   const worktreePath = await canonicalAsync(cwd)
   // A turn's start or end asks once for all its callers (`repositoryFacts.ts`).
   const facts = await repositoryFacts(worktreePath)
-  const answer = facts ? null : await gitAsync(worktreePath, PROBE, (code, stderr) => code === 128 && stderr.startsWith('fatal: not a git repository'))
+  // A folder that is gone, or whose `.git` file points nowhere (an agent removed its worktree), is no repository, as
+  // for the synchronous call. Any other failure is Git's own error, never read as "not a repository".
+  const answer = facts || await folderGone(worktreePath) ? null : await gitAsync(worktreePath, PROBE, (code, stderr) => code === 128 && NO_REPOSITORY.test(stderr))
   const [commonRaw, bare, inside] = facts ? [facts.commonDirRaw, facts.bare, facts.inside] : probeAnswers(answer)
   if (answer !== null && (!commonRaw || !['true', 'false'].includes(bare ?? '') || !['true', 'false'].includes(inside ?? ''))) {
     throw new Error('Git returned an invalid repository identity')

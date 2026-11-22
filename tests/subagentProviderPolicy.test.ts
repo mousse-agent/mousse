@@ -20,6 +20,7 @@ import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex
 import { codexBotSandbox, codexTurnPolicy } from '../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MODEL_PROVIDER, CodexProviderService, type CodexChatInput } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { CodexAdapter } from '../src/mms/harness/drivers/codex/adapter'
+import { codexFixtureAccessToken } from '../src/mms/run/testkit/codexAppServerReplay'
 import type { ChildTurnPolicy } from '../src/mms/harness/adapter'
 
 const SHARED: ChildTurnPolicy = { readOnly: true }
@@ -249,10 +250,12 @@ describe('Codex children', () => {
   let home: string
   const services: CodexProviderService[] = []
   const questions = new UserQuestionService()
+  const WORKSPACE = 'fixture-workspace'
+  const TOKEN = codexFixtureAccessToken(WORKSPACE)
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-child-'))
-    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: 'fixture-token' } }))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: WORKSPACE, access_token: TOKEN } }))
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -309,7 +312,9 @@ describe('Codex children', () => {
           const reply: Record<string, unknown> =
             options.answer?.(message, send) ??
             (message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
-            : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
+            // The signed-in terminal account, proven as Codex proves it: the selected workspace and the token it holds match auth.json.
+            : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, workspaceRouting: { chatgptAccountId: WORKSPACE }, requiresOpenaiAuth: true } }
+            : message.method === 'getAuthStatus' ? { result: { authMethod: 'chatgpt', authToken: TOKEN } }
             : message.method === 'config/read' ? (options.configFails ? { error: { code: -32603, message: 'unreadable' } } : { result: { config: { mcp_servers: options.mcpServers ?? {} }, layers: options.layers ?? [] } })
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }

@@ -126,6 +126,9 @@ function subscribeChanges(listener: () => void): () => void {
   }
 }
 
+// No worktree change has been heard before the window is live (a server render).
+const noChange = (): number => 0
+
 /**
  * The project and folder the selected thread works on. A new, empty thread
  * follows the composer's project pick, so every surface agrees with the card.
@@ -153,7 +156,7 @@ export function useActiveProjectLocation(): ActiveProject {
   const [resolved, setResolved] = useState<({ scope: string; changed: number } & ResolvedWorkspace) | null>(null)
   // Retry (the Git section's), and Mousse saying the thread's worktree changed (made, rebuilt, restored, its branch
   // renamed), look the folder up again: fresh, never answered by a lookup already running.
-  const changed = useSyncExternalStore(subscribeChanges, () => (activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0))
+  const changed = useSyncExternalStore(subscribeChanges, () => (activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0), noChange)
   const [retried, setRetried] = useState<{ scope: string; fresh: number } | null>(null)
   const fresh = Math.max(changed, retried?.scope === scope ? retried.fresh : 0)
   const retry = useCallback(() => setRetried({ scope, fresh: nextFresh() }), [scope])
@@ -200,7 +203,7 @@ export function useFilesRoot(): { root: string; label: string; loading: boolean 
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
   const [resolved, setResolved] = useState<{ scope: string; root: string } | null>(null)
   // Follow the daemon's Files root when a turn makes the first checkout or a later workspace change replaces it.
-  const changed = useSyncExternalStore(subscribeChanges, () => activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0)
+  const changed = useSyncExternalStore(subscribeChanges, () => activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0, noChange)
   const turnPhase = useAppStore((s) => activeThreadId && s.threads.find((thread) => thread.id === activeThreadId)?.projectId
     ? s.turnStates[activeThreadId]?.phase ?? null
     : null)

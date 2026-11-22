@@ -254,6 +254,10 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'orchestrator.isTurnActive': read('thread', ['threadId']),
   'orchestrator.contextUsage': read('thread', ['threadId', 'draftInput', 'mode']),
   'orchestrator.pendingQuestions': read('thread', ['threadId']),
+  // Whether the owner accepted a send or steer with this request id: a window asks after a steer whose answer was lost.
+  'orchestrator.sendAccepted': read('thread', ['threadId', 'clientRequestId'], {
+    required: ['clientRequestId']
+  }),
   'queue.list': read('thread', ['threadId']),
   'runs.list': read('thread', ['threadId', 'limit']),
   'runs.get': read('thread', ['threadId', 'runId'], {

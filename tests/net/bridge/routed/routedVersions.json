@@ -359,6 +359,11 @@
     "digest": "f0c64070d7cee134",
     "security": "1447c39a3cdfbf97"
   },
+  "orchestrator.sendAccepted": {
+    "version": 1,
+    "digest": "771f5b712664189d",
+    "security": "04f7c680ffd36337"
+  },
   "orchestrator.steer": {
     "version": 3,
     "digest": "1a0db50919400888",
