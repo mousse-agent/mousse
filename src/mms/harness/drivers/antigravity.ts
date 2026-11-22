@@ -111,6 +111,10 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         validateOverride: (path) => void manualAntigravityRuntime(path),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         oneShot: (spec, signal) => service.oneShot(spec, signal),
+        setLiveHost: (host) => service.setLiveHost(host),
+        inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
+        hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
+        discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
         stop: () => {}
       }
     }
