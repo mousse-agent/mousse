@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, RequestError, type AgentApp } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/session'
+import { AcpSessions, readAcpPromptUsage, type AcpTurnUsage, type SavedAcpSession } from '../../src/mms/harness/acp/session'
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { interruptWithDeadline } from '../../src/mms/harness/supervise'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
@@ -34,8 +34,8 @@ interface AgentScript {
   session?: Record<string, unknown>
   /** Slash commands the agent advertises (`available_commands_update`) when it opens a session. */
   commands?: string[]
-  /** Runs one prompt; resolves with its stop reason. `blocks` is the text of every block of the prompt. */
-  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; update: (update: Record<string, unknown>) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string>
+  /** Runs one prompt; resolves with its stop reason or full prompt response. `blocks` is the text of every block of the prompt. */
+  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; update: (update: Record<string, unknown>) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string | { stopReason?: string; usage?: Record<string, unknown> }>
 }
 
 const DEFAULT_SESSION = { configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fast', options: [{ value: 'fast', name: 'Fast' }, { value: 'deep', name: 'Deep' }] }] }
@@ -69,7 +69,7 @@ function scriptedAgent(script: AgentScript) {
         const cancelled = new Promise<void>((resolve) => { cancel = resolve })
         const notify = (chunk: string) => c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } } })
         const blocks = c.params.prompt.map((block) => (block as { text?: string }).text ?? '')
-        const stopReason = await (script.prompt ?? (async (prompt, ctx) => { await ctx.notify(`echo: ${prompt}`); return 'end_turn' }))(text, {
+        const result = await (script.prompt ?? (async (prompt, ctx) => { await ctx.notify(`echo: ${prompt}`); return 'end_turn' }))(text, {
           notify,
           update: (update) => c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update } as never),
           cancelled,
@@ -80,8 +80,9 @@ function scriptedAgent(script: AgentScript) {
             options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }]
           })
         })
+        if (typeof result === 'object') return result as { stopReason: 'end_turn' }
         // An empty reason stands for an agent that sends no `stopReason` at all.
-        return (stopReason ? { stopReason: stopReason as 'end_turn' } : {}) as { stopReason: 'end_turn' }
+        return (result ? { stopReason: result as 'end_turn' } : {}) as { stopReason: 'end_turn' }
       })
       .onNotification(methods.agent.session.cancel, (c) => {
         cancels.push(c.params.sessionId)
@@ -1019,6 +1020,76 @@ describe('ACP sessions', () => {
     sessions.closeIdle()
     await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
     expect(agent.calls.filter((call) => call.method === 'session/close').map((call) => call.method)).toEqual(expected)
+  })
+
+  describe('PromptResponse.usage reporting', () => {
+    it.each([
+      [
+        'agy 1.5.13 payload with cached read and thought tokens',
+        { stopReason: 'end_turn', usage: { inputTokens: 2145, outputTokens: 20, cachedReadTokens: 8752, cachedWriteTokens: 0, thoughtTokens: 18, totalTokens: 10917 } },
+        { input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917, hasOutput: true }
+      ],
+      [
+        'payload without totalTokens sums reported token fields',
+        { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 25, cachedReadTokens: 50 } },
+        { input: 100, output: 25, cacheRead: 50, cacheWrite: 0, totalTokens: 175, hasOutput: true }
+      ],
+      [
+        'payload with only totalTokens marks output unavailable so speed stays unset',
+        { stopReason: 'end_turn', usage: { totalTokens: 500 } },
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 500, hasOutput: false }
+      ],
+      ['response without usage', { stopReason: 'end_turn' }, undefined],
+      ['null usage', { stopReason: 'end_turn', usage: null }, undefined],
+      ['empty or negative usage fields', { stopReason: 'end_turn', usage: { inputTokens: -1, outputTokens: Number.NaN } }, undefined]
+    ])('readAcpPromptUsage handles %s', (_label, outcome, expected) => {
+      expect(readAcpPromptUsage(outcome)).toEqual(expected)
+    })
+
+    it('sums PromptResponse.usage across multiple prompts in one steered turn', async () => {
+      let promptCount = 0
+      const agent = scriptedAgent({
+        prompt: async (prompt, ctx) => {
+          promptCount += 1
+          await ctx.notify(`reply ${promptCount}: ${prompt}`)
+          if (promptCount === 1) {
+            return {
+              stopReason: 'end_turn',
+              usage: { inputTokens: 10801, outputTokens: 20, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 18, totalTokens: 10821 }
+            }
+          }
+          return {
+            stopReason: 'end_turn',
+            usage: { inputTokens: 2145, outputTokens: 30, cachedReadTokens: 8752, cachedWriteTokens: 0, thoughtTokens: 12, totalTokens: 10927 }
+          }
+        }
+      })
+      const { sessions } = core(agent.connect)
+      let drained = false
+      const reported: AcpTurnUsage[] = []
+      await sessions.chat({
+        threadId: 't',
+        cwd: process.cwd(),
+        model: 'default',
+        prompt: 'first',
+        onText: vi.fn(),
+        onBoundary: () => {
+          // Make the boundary steer available right after the first prompt finishes.
+        },
+        drainSteer: () => {
+          if (promptCount === 1 && !drained) {
+            drained = true
+            return 'follow-up'
+          }
+          return undefined
+        },
+        onUsage: (usage) => reported.push(usage)
+      })
+      expect(promptCount).toBe(2)
+      expect(reported).toEqual([
+        { input: 12946, output: 50, cacheRead: 8752, cacheWrite: 0, reasoning: 30, totalTokens: 21748, hasOutput: true }
+      ])
+    })
   })
 
   describe('requests from an idle agent outside a turn', () => {
