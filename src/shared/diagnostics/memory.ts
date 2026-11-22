@@ -120,8 +120,10 @@ export interface MemorySample {
   counts: ServiceCounts
   /** Heap used by each worker thread of the service, MB. */
   workers?: number[]
-  /** The processes the service started (agent CLIs and tools), measured with each sample. */
+  /** The processes the service started (agent CLIs and tools), kept between detailed readings. */
   children?: ChildMemory[]
+  /** Epoch ms of the child memory reading; absent when it could not be read. */
+  childrenAt?: number
   /** The desktop app's processes, when the app reported in the last few minutes. */
   app?: AppProcessMemory[]
   /** What the app's windows draw, from the same report. */

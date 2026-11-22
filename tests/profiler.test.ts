@@ -358,6 +358,47 @@ describe('the profiler tools', () => {
     expectNoPrivateData(outcome.text, dir)
   })
 
+  it('profiler_sample_now refreshes provider memory between detailed samples', async () => {
+    const { monitor, service, now } = profilerFixture(home())
+    const registry = toolsFor(() => ON, service)
+    await call(registry, 'profiler_overview')
+    const read = vi.spyOn(monitor, 'readChildrenNow').mockResolvedValue([{ kind: 'codex', mb: 333 }])
+    now.t += 60_000
+    await monitor.tick()
+    const cached = await call(registry, 'profiler_overview')
+    expect(cached.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('claude 210') })
+    expect(read).not.toHaveBeenCalled()
+    const fresh = await call(registry, 'profiler_sample_now')
+    expect(fresh.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('codex 333 MB') })
+    expect(fresh.value.childrenSampledSecondsAgo).toBe(0)
+    expect(read).toHaveBeenCalledTimes(1)
+    monitor.stop()
+  })
+
+  it('profiler_sample_now waits for an in-flight periodic sample then takes a fresh child reading', async () => {
+    const { monitor, service, now } = profilerFixture(home())
+    const registry = toolsFor(() => ON, service)
+    await call(registry, 'profiler_overview')
+    let finish!: (children: Array<{ kind: string; mb: number }>) => void
+    let started!: () => void
+    const reading = new Promise<void>((resolve) => { started = resolve })
+    const read = vi.spyOn(monitor, 'readChildrenNow')
+      .mockImplementationOnce(() => { started(); return new Promise((resolve) => { finish = resolve }) })
+      .mockResolvedValue([{ kind: 'codex', mb: 444 }])
+    now.t += 5 * 60_000
+    const periodic = monitor.tick()
+    await reading
+    const requested = call(registry, 'profiler_sample_now')
+    const alsoRequested = call(registry, 'profiler_sample_now')
+    finish([{ kind: 'codex', mb: 111 }])
+    await periodic
+    const fresh = await requested
+    expect((await alsoRequested).value).toMatchObject({ childrenSampledSecondsAgo: 0 })
+    expect(fresh.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('codex 444 MB') })
+    expect(read).toHaveBeenCalledTimes(2)
+    monitor.stop()
+  })
+
   it('reports missing child working sets through the agent tools without calling them zero', async () => {
     const dir = home()
     const { service, monitor } = profilerFixture(dir)
@@ -621,6 +662,20 @@ describe('the profiler tools', () => {
     expect(value.points.at(-1).atSeconds).toBeLessThanOrEqual(600)
     expect(value.points[0]).toMatchObject({ serviceMb: 150, loadedThreads: 1 })
     expectNoPrivateData(outcome.text, dir)
+  })
+
+  it('shows cached provider age in watch points without counting it as growth', async () => {
+    vi.useFakeTimers({ now: T0 })
+    const { service, monitor, now } = profilerFixture(home())
+    now.t = T0
+    const pending = call(toolsFor(() => ON, service), 'profiler_watch', { intervalSeconds: 30, minutes: 0.5 })
+    await vi.advanceTimersByTimeAsync(0)
+    now.t += 30_000
+    await vi.advanceTimersByTimeAsync(30_000)
+    const { value } = await pending
+    expect(value.points.map((point: { childrenSampledSecondsAgo: number }) => point.childrenSampledSecondsAgo)).toEqual([0, 30])
+    expect(value.change).not.toHaveProperty('childrenSampledSecondsAgo')
+    monitor.stop()
   })
 
   it('profiler_watch stops when the call is stopped', async () => {

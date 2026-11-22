@@ -59,6 +59,7 @@ export function overviewReport(status: MemoryStatus, thresholds: MemoryThreshold
     serviceUptimeMinutes: Math.round(sample.up / 60),
     activeTurns: sample.counts.activeTurns,
     processes: processRows(sample),
+    childrenSampledSecondsAgo: childReadingAge(sample, now),
     memoryTotals: memoryTotals(sample),
     service: {
       mb: service,
@@ -281,6 +282,11 @@ export function pointChange(from: Point, to: Point): Record<string, number> {
   return out
 }
 
+/** Age of the child reading at the sample or report time. */
+export function childReadingAge(sample: MemorySample, now = sample.t): number | null {
+  return sample.childrenAt === undefined ? null : Math.max(0, Math.round((now - sample.childrenAt) / 1000))
+}
+
 /** `profiler_sample_now`. */
 export function sampleNowReport(sample: MemorySample, previous: MemorySample | null) {
   const point = samplePoint(sample)
@@ -288,6 +294,7 @@ export function sampleNowReport(sample: MemorySample, previous: MemorySample | n
     now: point,
     memoryTotals: memoryTotals(sample),
     processes: processRows(sample),
+    childrenSampledSecondsAgo: childReadingAge(sample),
     ...(previous ? { sincePreviousSample: { seconds: Math.round((sample.t - previous.t) / 1000), change: pointChange(samplePoint(previous), point) } } : {}),
     units: UNITS
   }
@@ -305,11 +312,11 @@ export function watchPlan(intervalSeconds: unknown, minutes: unknown): { interva
 }
 
 /** `profiler_watch`: the points, what changed from first to last, and the numbers that grew most. */
-export function watchReport(plan: { intervalSeconds: number }, points: Array<{ atSeconds: number } & Point>, stopped?: string) {
+export function watchReport(plan: { intervalSeconds: number }, points: Array<{ atSeconds: number; childrenSampledSecondsAgo?: number | null } & Point>, stopped?: string) {
   const first = points[0]
   const last = points[points.length - 1]
   const change = first && last ? pointChange(first, last) : {}
-  const { atSeconds: _a, ...changeWithoutTime } = change as Record<string, number>
+  const { atSeconds: _a, childrenSampledSecondsAgo: _childAge, ...changeWithoutTime } = change as Record<string, number>
   const grew = Object.entries(changeWithoutTime).filter(([, by]) => by > 0).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, by]) => ({ name, by }))
   return {
     intervalSeconds: plan.intervalSeconds,

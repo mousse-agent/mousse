@@ -10,6 +10,7 @@ import { MAX_CACHED_BYTES, MAX_CACHED_THREADS } from '../../../data/threadDb/thr
 import { HeapSummaryError } from '../../../diagnostics/heapSummary'
 import type { ProfilerService, ThreadMemory } from '../../../diagnostics/profilerService'
 import {
+  childReadingAge,
   childTreeReport,
   gpuHintsReport,
   overviewReport,
@@ -240,14 +241,14 @@ async function run(
     case 'profiler_sample_now': {
       const previous = latest()
       await service.collectApp(false)
-      await monitor.tick()
+      await monitor.tick({ children: true })
       const sample = latest()
       if (!sample || sample === previous) return error('The sample failed. Call again in a few seconds.')
       return json(sampleNowReport(sample, previous))
     }
     case 'profiler_watch': {
       const plan = watchPlan(args.intervalSeconds, args.minutes)
-      const points: Array<{ atSeconds: number } & ReturnType<typeof samplePoint>> = []
+      const points: Array<{ atSeconds: number; childrenSampledSecondsAgo: number | null } & ReturnType<typeof samplePoint>> = []
       const start = Date.now()
       let stopped: string | undefined
       for (let i = 0; i < plan.points; i++) {
@@ -262,7 +263,7 @@ async function run(
         }
         await service.collectApp(false, 2_000)
         const sample = await monitor.measure()
-        points.push({ atSeconds: Math.round((Date.now() - start) / 1000), ...samplePoint(sample) })
+        points.push({ atSeconds: Math.round((Date.now() - start) / 1000), childrenSampledSecondsAgo: childReadingAge(sample), ...samplePoint(sample) })
       }
       return json(watchReport(plan, points, stopped))
     }
