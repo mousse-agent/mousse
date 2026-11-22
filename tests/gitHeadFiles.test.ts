@@ -86,7 +86,7 @@ describe('a folder read from Git files', () => {
     const directory = join(main, '.git', name)
     renameSync(directory, `${directory}-away`)
 
-    expect(() => git(worktree, 'rev-parse', '--is-inside-work-tree')).toThrow(/not a git repository/)
+    expect(() => git(worktree, 'rev-parse', '--is-inside-work-tree')).toThrow(/not a git repository|gitfile does not point to a valid repository/)
     expect(await folderBranch(worktree)).toEqual({ repo: false, branch: null })
   })
 

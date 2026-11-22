@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { gitDirectoryEnvAsync } from '../git/gitEnv'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
@@ -6,6 +5,7 @@ import { activeHiddenStore, checkStoreCommandAsync, hiddenStoreEnv } from '../gi
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { spawnGit } from '../git/gitSpawn'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 
 /**
@@ -37,7 +37,7 @@ export async function verifiedRefTransactionAsync(cwd: string, commands: string,
   const args = await withoutRepoProgramsAsync(cwd, command, { stdin: prepare + 'commit\n' })
   const env = gitEnvFor(repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd) }))
   return new Promise((resolve, reject) => {
-    const child = timeGitChild(() => spawn(gitFile(), args, { cwd, env, windowsHide: true, stdio: 'pipe' }))
+    const child = timeGitChild(() => spawnGit(gitFile(), args, { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }))
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
     let verified: boolean | undefined
     let failure: unknown

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { gitDirectoryEnv, gitDirectoryEnvAsync, mousseGitEnv, scopedGitConfig } from './gitEnv'
 import { assertGitAllowed, assertGitAllowedAsync, untilAborted, type UserAction } from './gitPolicy'
 import { NO_HOOKS_PATH } from './gitNullDevice'
+import { NOT_A_GIT_REPOSITORY } from './gitMarkers'
 import { activeHiddenStore, checkStoreCommandAsync, hiddenStoreEnv } from './hiddenStore'
 import { isTrustedRepoEntry, readRepoTrust, readRepoTrustAt, readRepoTrustAtAsync, repoTrustPath, repoTrustPathAsync, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 import { waitForFolderAccess } from '../files/folderAccess'
@@ -758,7 +759,7 @@ export function guardedGit(cwd: string, options: { isolatedCheckout?: boolean } 
     async checkIsRepo() {
       const result = await run(['rev-parse', '--is-inside-work-tree'])
       if (result.status === 0) return result.stdout.trim() === 'true'
-      if (/not a git repository|kein git-repository/i.test(result.stderr)) return false
+      if (NOT_A_GIT_REPOSITORY.test(result.stderr) || /kein git-repository/i.test(result.stderr)) return false
       throw new Error(result.stderr || 'Git could not check the repository')
     },
     async branchLocal() {

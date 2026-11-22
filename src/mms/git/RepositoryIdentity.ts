@@ -9,6 +9,7 @@ import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '.
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { repositoryFacts } from './repositoryFacts'
+import { NOT_A_GIT_REPOSITORY } from './gitMarkers'
 import { gitEnvFor, gitFile } from './gitExecutable'
 import { execFileGitSync, execFileGit } from './gitSpawn'
 
@@ -255,6 +256,9 @@ async function gitAsync(cwd: string, args: readonly string[], absent: (code: str
   })
 }
 
+/** Git's answer for a folder outside any repository it can open, as the first line it writes. */
+const NOT_A_REPOSITORY_ANSWER = new RegExp('^fatal: (?:' + NOT_A_GIT_REPOSITORY.source + ')', 'i')
+
 /**
  * {@link resolveRepositoryIdentity} without blocking the daemon. It first waits until the folder's volume
  * answers; then Git runs as a child process and the folder is read and written with async calls. It asks Git
@@ -266,7 +270,7 @@ export async function resolveRepositoryIdentityAsync(cwd: string, options: Resol
   const worktreePath = await canonicalAsync(cwd)
   // A turn's start or end asks once for all its callers (`repositoryFacts.ts`).
   const facts = await repositoryFacts(worktreePath)
-  const answer = facts ? null : await gitAsync(worktreePath, PROBE, (code, stderr) => code === 128 && stderr.startsWith('fatal: not a git repository'))
+  const answer = facts ? null : await gitAsync(worktreePath, PROBE, (code, stderr) => code === 128 && NOT_A_REPOSITORY_ANSWER.test(stderr))
   const [commonRaw, bare, inside] = facts ? [facts.commonDirRaw, facts.bare, facts.inside] : probeAnswers(answer)
   if (answer !== null && (!commonRaw || !['true', 'false'].includes(bare ?? '') || !['true', 'false'].includes(inside ?? ''))) {
     throw new Error('Git returned an invalid repository identity')

@@ -36,6 +36,8 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   // A snapshot store's own commands (`runStoreGit`) and the check of every store command (`checkStoreCommand`).
   'src/mms/git/scopedRead.ts': 'assertGitAllowed',
   'src/mms/git/workingTreeStatus.ts': 'withoutRepoPrograms',
+  // A ref transaction held open while its caller verifies (`verifiedRefTransactionAsync`).
+  'src/mms/lifecycle/lifecycleGit.ts': 'withoutRepoProgramsAsync',
   'src/mms/workspace/ThreadWorkspaceManager.ts': 'assertGitAllowed',
   'src/mms/workspace/WorkflowWorkspace.ts': 'withoutRepoPrograms'
 }
