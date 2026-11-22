@@ -348,5 +348,30 @@ describe('Grok sessions', () => {
       expect(read).toEqual([])
       expect(returned).toEqual([`${STEER}@drain-1`])
     }, 20_000)
+
+    it('cancels an unsolicited ask_user_question arriving outside a turn without prompting and closes the idle process', async () => {
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      const agent = grokAgent(async (c) => {
+        idleClient = c.client
+        return { stopReason: 'end_turn' }
+      })
+      const { sessions, saved, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'first', onText: vi.fn() })
+      sessions.commitConversation('t', 'h')
+      expect(saved.get('t')?.sessionId).toBe('grok-1')
+
+      const answer = await idleClient!.request('_x.ai/ask_user_question', {
+        sessionId: 'grok-1',
+        questions: [{ question: 'Still there?', options: [{ label: 'Yes' }] }]
+      })
+      expect(answer).toEqual({ outcome: 'cancelled' })
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      expect(saved.get('t')).toBeUndefined()
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+    })
   })
 })

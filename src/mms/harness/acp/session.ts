@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
+import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
@@ -370,13 +370,28 @@ export class AcpSessions {
     const { label, questions, quirks } = this.options
     if (this.stopped) throw new Error(`${label} provider is stopped`)
     let active: AcpProcess | undefined
+    const inTurn = () => Boolean(active && this.turning.has(active))
+    // An agent that wakes up on its own between turns (for instance, its own background shell task finishing) has no
+    // running turn, transcript stream, lease or permission mode. Detach and close the idle process and drop its saved
+    // session so it cannot keep acting unobserved or drift from Mousse's committed history; the next turn opens fresh
+    // with Mousse's canonical history.
+    const stopIdle = () => {
+      const idle = active
+      if (!idle || this.turning.has(idle)) return
+      if (idle.threadId && this.sessions.get(idle.threadId) === idle) {
+        this.sessions.delete(idle.threadId)
+        this.forgetConversation(idle.threadId)
+      }
+      setImmediate(() => { if (!this.turning.has(idle)) closeAcpConnection(idle) })
+    }
     const scope: AcpRequestScope = {
-      get threadId() { return active?.threadId },
-      get cwd() { return active?.cwd },
-      get approvals() { return active?.turnPrompter?.approvals },
-      get permissionMode() { return active?.permissionMode },
-      aborted: () => Boolean(active?.turnSignal?.aborted || active?.connection.signal.aborted),
+      get threadId() { return inTurn() ? active?.threadId : undefined },
+      get cwd() { return inTurn() ? active?.cwd : undefined },
+      get approvals() { return inTurn() ? active?.turnPrompter?.approvals : undefined },
+      get permissionMode() { return inTurn() ? active?.permissionMode : undefined },
+      aborted: () => Boolean(!inTurn() || active?.turnSignal?.aborted || active?.connection.signal.aborted),
       throwIfAborted: () => {
+        if (!inTurn()) throw new Error(`${label} cannot act outside a turn`)
         active?.turnSignal?.throwIfAborted()
         active?.connection.signal.throwIfAborted()
       }
@@ -387,6 +402,10 @@ export class AcpSessions {
         // A one-shot runs no tool: refused unasked, and the request ends.
         if (active?.refuseTools) {
           active.refuseTools(request.toolCall?.title ?? 'a tool')
+          return { outcome: { outcome: 'cancelled' } }
+        }
+        if (!inTurn()) {
+          stopIdle()
           return { outcome: { outcome: 'cancelled' } }
         }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
@@ -402,10 +421,18 @@ export class AcpSessions {
       ...(quirks.clientFs ? {
         readTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
+          if (!inTurn()) {
+            stopIdle()
+            return Promise.reject(RequestError.invalidRequest(undefined, `${label} cannot read files outside a turn`))
+          }
           return readWorkspaceFile(scope, request)
         },
         writeTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
+          if (!inTurn()) {
+            stopIdle()
+            return Promise.reject(RequestError.invalidRequest(undefined, `${label} cannot write files outside a turn`))
+          }
           return writeWorkspaceFile(questions, scope, request, label)
         }
       } : {}),
@@ -420,7 +447,8 @@ export class AcpSessions {
         questions,
         scope,
         awaiting: () => active?.turnToolAwaiting,
-        promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params)
+        promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params),
+        onOutsideTurn: stopIdle
       }) : {})
     }
     const connection = this.options.connect({
