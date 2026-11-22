@@ -44,21 +44,6 @@
       ],
       "claimedAt": "2026-11-22T18:11:45.608Z",
       "expiresAt": "2026-11-22T23:14:27.822Z"
-    },
-    {
-      "task": "fix/standalone-acp-cursor-workspace",
-      "session": "agibook-3d55b3",
-      "machine": "agibook",
-      "branch": "fix/standalone-acp-cursor-workspace",
-      "paths": [
-        "src/mms/harness/drivers/acp/adapter.ts",
-        "src/mms/harness/drivers/acp.ts",
-        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts",
-        "src/mms/harness/drivers/cursor/adapter.ts",
-        "src/mms/harness/drivers/cursor.ts"
-      ],
-      "claimedAt": "2026-11-22T16:34:57.715Z",
-      "expiresAt": "2026-11-22T23:19:06.190Z"
     }
   ]
 }
