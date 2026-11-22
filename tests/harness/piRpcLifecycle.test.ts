@@ -211,6 +211,27 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     expect(unknown?.promptCache?.ttlMs).toBeUndefined()
   }, 30_000)
 
+  it('reports totalTokensUsed (including cache tokens) and tokensPerSecond when usage is reported, and omits both when absent', async () => {
+    const { engine, project } = setup()
+    const withUsage = turn(project('usage', {
+      events: [{ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop', usage: { input: 100, output: 40, cacheRead: 250, cacheWrite: 10 } } }]
+    }), { threadId: 't-usage' })
+    const metricsWithUsage: Array<Parameters<TurnSink['providerMetrics']>[0]> = []
+    withUsage.sink.providerMetrics = (metrics) => void metricsWithUsage.push(metrics)
+    const resultWithUsage = await run(engine, withUsage)
+    expect(resultWithUsage.totalTokensUsed).toBe(400)
+    expect(resultWithUsage.tokensPerSecond).toBeGreaterThan(0)
+    expect(metricsWithUsage.at(-1)?.totalTokensUsed).toBe(400)
+    expect(metricsWithUsage.at(-1)?.tokensPerSecond).toBe(resultWithUsage.tokensPerSecond)
+
+    const withoutUsage = turn(project('no-usage', {
+      events: [{ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop' } }]
+    }), { threadId: 't-no-usage' })
+    const resultWithoutUsage = await run(engine, withoutUsage)
+    expect(resultWithoutUsage.totalTokensUsed).toBeUndefined()
+    expect(resultWithoutUsage.tokensPerSecond).toBeUndefined()
+  }, 30_000)
+
   it('hands out the registered turn token as the attempt token Mousse calls are stamped with', async () => {
     const { engine, project } = setup()
     const cwd = project('p', { onPrompt: 'turn' })
