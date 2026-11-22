@@ -516,6 +516,17 @@ export class AntigravityProviderService {
     this.acp.forgetConversation(threadId)
   }
 
+  /** The Mousse thread that owns each of these Antigravity session ids, where one does. */
+  threadsForSessions(sessionIds: readonly string[]): Map<string, string> {
+    const found = new Map<string, string>()
+    if (!sessionIds.length || !this.settings.sessions) return found
+    const wanted = new Set(sessionIds)
+    for (const [threadId, saved] of Object.entries(this.settings.sessions)) {
+      if (saved?.sessionId && wanted.has(saved.sessionId)) found.set(saved.sessionId, threadId)
+    }
+    return found
+  }
+
   /** The installation's install, whichever profile started it: running, and its latest progress line. */
   installState(): { installing: boolean; progress?: string } {
     return antigravityInstallState(this.installationHome)

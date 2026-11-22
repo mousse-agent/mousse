@@ -8,7 +8,8 @@ export const AGENT_COLOR: Record<UsageAgentId, string> = {
   codex: 'var(--hue-5)',
   grok: 'var(--hue-1)',
   pi: 'var(--hue-2)',
-  opencode: 'var(--hue-4)'
+  opencode: 'var(--hue-4)',
+  antigravity: 'var(--hue-3)'
 }
 
 /** The provider icon each agent is drawn with. */
@@ -17,7 +18,8 @@ export const AGENT_ICON: Record<UsageAgentId, string> = {
   codex: 'codex',
   grok: 'xai',
   pi: 'pi',
-  opencode: 'opencode'
+  opencode: 'opencode',
+  antigravity: 'antigravity'
 }
 
 export const RANGE_WORDS: Record<UsageHistoryRange, string> = {

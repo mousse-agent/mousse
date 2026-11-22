@@ -167,8 +167,8 @@ export function mergeHistories(parts: readonly UsageHistoryResponse[]): UsageHis
       const total = rows.get(row.name) ?? { name: row.name, tokens: 0, costUsd: 0, sessions: 0 }
       rows.set(row.name, { name: row.name, tokens: total.tokens + row.tokens, costUsd: total.costUsd + row.costUsd, sessions: total.sessions + row.sessions })
       return rows
-    }, new Map<string, UsageProjectRow>()).values()].sort((a, b) => b.costUsd - a.costUsd),
-    topSessions: parts.flatMap((part) => part.topSessions).sort((a, b) => b.costUsd - a.costUsd).slice(0, 5),
+    }, new Map<string, UsageProjectRow>()).values()].sort((a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens),
+    topSessions: parts.flatMap((part) => part.topSessions).sort((a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens).slice(0, 5),
     agentIds: [...new Set(parts.flatMap((part) => part.agentIds))].sort((a, b) => label(a).localeCompare(label(b))),
     sources: parts.flatMap((part) => part.sources)
   }

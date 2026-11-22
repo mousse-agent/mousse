@@ -188,7 +188,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   }
   private async executeFor(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     // The mark of an agent's call is set only by another computer's daemon, through the routed API, never by a phone.
-    if (Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
+    // `usage.history` uses `agent` for its provider filter, validated by `dto.ts` against `USAGE_AGENT_LABELS`.
+    if (method !== 'usage.history' && Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     if (
