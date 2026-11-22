@@ -51,6 +51,17 @@ export function isIdNamedMousseBranch(name: string | undefined | null): boolean 
   return typeof name === 'string' && ID_NAMED.test(name) && isValidBranchName(name)
 }
 
+/** The id-named branches of agent and workflow checkouts (`mousse/agent/…`, `mousse/workflow/…`); a thread's branch is never one. */
+const AGENT_NAMED = /^mousse\/(agent|workflow)\//
+
+/**
+ * Whether this is an agent's or a workflow's branch. Their names are reserved (`RESERVED`), so the name and the record
+ * that names it prove whose it is; a thread's branch, which the person can rename, is proved by its journal instead.
+ */
+export function isAgentBranchName(name: string | undefined | null): boolean {
+  return typeof name === 'string' && AGENT_NAMED.test(name) && isValidBranchName(name)
+}
+
 /**
  * A branch prefix as typed in Settings: a trailing slash is optional, characters a branch cannot hold become hyphens, and
  * an empty prefix means none. A prefix inside the id-named branches' folders (`mousse/thread`, …) falls back to the default.
