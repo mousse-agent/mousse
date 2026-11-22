@@ -74,7 +74,7 @@ vi.mock('electron', async () => {
     destroy() { this.destroyed = true }
   }
   return {
-    app, BrowserWindow, Tray, Menu: { buildFromTemplate: (template: unknown) => ({ template }) }, ipcMain: new EventEmitter(),
+    app, BrowserWindow, Tray, Menu: { buildFromTemplate: (template: unknown) => ({ template }) }, ipcMain: Object.assign(new EventEmitter(), { handle: vi.fn(), removeHandler: vi.fn() }),
     nativeTheme: { shouldUseDarkColors: true },
     powerSaveBlocker: { start: () => 0, stop: () => undefined },
     dialog: { showErrorBox: vi.fn() }, shell: { openExternal: vi.fn() },
