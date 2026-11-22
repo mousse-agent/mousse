@@ -2881,6 +2881,8 @@ export class MmsProfileServices {
         console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
       }
     }
+    // Workers can start recovered turns immediately. Attach MCP before they can start a turn without it.
+    await startupPhase('start.mcpServer', () => this.startMcpServer())
     // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
     startupPhase('start.runEngineWorkers', () => { this.runEngine.inbox.withdrawRetiredRows(); this.startRunEngineWorkers() })
     // Threads' wake-ups whose time passed while the daemon was off fire now; the rest wait for theirs.
@@ -2901,7 +2903,6 @@ export class MmsProfileServices {
     // After the net service has loaded its ports, so the listener can refuse one of them.
     await startupPhase('start.webhooks', () => this.listenScheduledWebhooksIfEnabled())
 
-    await startupPhase('start.mcpServer', () => this.startMcpServer())
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     // The daemon settles each thread on its first use, and the rest after ready (`startAfterReadyWork`).
     // Only the threads whose saved agents or tasks were working, and those whose runs boot recovery cut off, are read.
@@ -3086,9 +3087,8 @@ export class MmsProfileServices {
   }
 
   /**
-   * SPEC §15.1: the Mousse MCP server starts after the run engine workers; turns of MCP-capable
-   * adapters then get a credential. A server that cannot bind leaves those turns without Mousse
-   * tools rather than failing the profile.
+   * SPEC §15.1: attach the profile's MCP server so MCP-capable adapters can get a turn credential.
+   * If the listener cannot bind, the profile still starts and those turns run without Mousse tools.
    */
   private async startMcpServer(): Promise<void> {
     try {

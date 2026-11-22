@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
@@ -50,6 +50,66 @@ it('persists ACP replies and accepted steer in canonical context and forwards it
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+it('offers Mousse tools to the first Antigravity turn woken by monitor recovery', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-acp-boot-wake-'))
+  vi.stubEnv('MOUSSE_HOME', home)
+  const workspace = join(home, 'workspace')
+  mkdirSync(workspace)
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const open = () => MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  let main: MousseMainService | undefined
+  try {
+    main = await open()
+    main.settings.set({ provider: { llmProvider: 'antigravity', model: 'account-model' } })
+    const project = main.projects.openProject(workspace)
+    const thread = main.threads.createThread('Monitor recovery', project.id, workspace)
+    const record = join(main.getProfileHomeDir(), 'monitors.json')
+    await main.stop()
+    main = undefined
+    // A monitor record left on disk by the previous process.
+    writeFileSync(record, JSON.stringify({
+      version: 1,
+      monitors: [{ id: 'bg-test', threadId: thread.id, kind: 'background', description: 'Verify tests' }]
+    }))
+
+    main = await open()
+    let wake: { threadId: string; prompt: string; tools: string[] } | undefined
+    vi.spyOn(main.antigravity, 'chat').mockImplementation(async ({ threadId, prompt, mcp, signal, onText }) => {
+      let tools: string[] = []
+      if (mcp) {
+        const response = await fetch(mcp.url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${mcp.token}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream'
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+          signal
+        })
+        const body = await response.json() as { result?: { tools: Array<{ name: string }> } }
+        tools = body.result?.tools.map(({ name }) => name) ?? []
+      }
+      wake = { threadId, prompt, tools }
+      onText('Restart notice received')
+      return 'Restart notice received'
+    })
+    // Keep startup in progress until the recovered notice has reached the provider.
+    vi.spyOn(main.net, 'start').mockImplementation(async () => {
+      await vi.waitFor(() => expect(wake).toBeDefined(), { timeout: 5_000 })
+    })
+    await main.start()
+    expect(wake?.threadId).toBe(thread.id)
+    expect(wake?.prompt).toContain('Mousse restarted')
+    expect(wake?.tools).toContain('background_run')
+  } finally {
+    await main?.stop()
+    vi.restoreAllMocks()
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true })
+  }
+}, 20_000)
 
 it('persists tokensUsed and tokensPerSecond in responseMetadata for Antigravity Gemini turns', async () => {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-acp-metadata-'))
