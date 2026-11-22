@@ -3,12 +3,16 @@
  * its input (`setMcpServers`, #358), the ACP `session/new|resume` `mcpServers` (HTTP or the stdio
  * bridge). Nothing is attached without `AdapterHost.mcp`.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ClaudeIntegrationResolver } from '../../src/mms/harness/vendors/claude/integrations'
+import { createLegacySingleProfileContext } from '../../src/mms/integrations/profileContext'
+import { SKILL_SCAN_CONCURRENCY, SkillsRegistry } from '../../src/mms/integrations/skills/SkillsRegistry'
+import { getDefaultSettings } from '../../src/shared/settings'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import {
@@ -92,7 +96,7 @@ describe('Claude subscription attachment', () => {
     const adapter = new ClaudeSubscriptionAdapter(() => client, () => ({ resolve }))
     await adapter.startTurn(input({ cwd: '/project' }), sink(), control, host(MCP))
     await adapter.startTurn(input({ cwd: null }), sink(), control, host(null))
-    expect(resolve.mock.calls).toEqual([['/project'], [undefined]])
+    expect(resolve.mock.calls).toEqual([['/project', undefined], [undefined, undefined]])
     expect(seen.map((chat) => chat.integrations)).toEqual([integrations, integrations])
     // A failing registry does not block the turn.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -101,6 +105,161 @@ describe('Claude subscription attachment', () => {
     expect(seen[2].integrations).toBeUndefined()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('registry down'))
     warn.mockRestore()
+  })
+
+  it.each(['warm', 'cold', 'prepared'] as const)('starts a %s Claude turn while a real shared Skills refresh is held', async (cache) => {
+    const root = tempHome('mousse-claude-skill-refresh-')
+    const project = join(root, 'project')
+    const turnProject = cache === 'warm' ? project : join(root, 'other-project')
+    const skillRoot = join(root, 'integrations', 'skills', 'check')
+    mkdirSync(project)
+    mkdirSync(turnProject, { recursive: true })
+    mkdirSync(skillRoot, { recursive: true })
+    const skillPath = join(skillRoot, 'SKILL.md')
+    writeFileSync(skillPath, '---\nname: check\ndescription: Check the change\n---\nReview the diff.\n')
+    const skills = new SkillsRegistry(createLegacySingleProfileContext({ profileRoot: root }))
+    const settings = getDefaultSettings()
+    settings.integrations.skills.enabledSkills = ['mousse-profile:check']
+    const start = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const reader = skills as unknown as { readSkillDescriptor: (source: unknown, path: string) => Promise<unknown> }
+    const original = reader.readSkillDescriptor.bind(reader)
+    let read: ReturnType<typeof vi.spyOn> | undefined
+    let pending: Promise<unknown> | undefined
+    try {
+      const snapshot = await skills.discover({ projectPath: project })
+      let held = false
+      read = vi.spyOn(reader, 'readSkillDescriptor').mockImplementation(async (source, path) => {
+        const result = await original(source, path)
+        if (path === skillPath && !held) {
+          held = true
+          entered.resolve()
+          await release.promise
+        }
+        return result
+      })
+      now.mockReturnValue(start + 31_000)
+      await skills.discover({ projectPath: project, stale: true })
+      await entered.promise
+      const integrations = new ClaudeIntegrationResolver({
+        skillsRegistry: skills,
+        mcpRegistry: { discover: async () => ({ servers: [], sources: [], diagnostics: [] }) },
+        settings: { get: () => settings },
+        secrets: createLegacySingleProfileContext({ profileRoot: root }).secrets,
+        pluginRoot: join(root, 'plugins')
+      })
+      const provider = Promise.withResolvers<ClaudeSubscriptionChatInput>()
+      const adapter = new ClaudeSubscriptionAdapter(() => ({
+        chat: async (chat) => { provider.resolve(chat); return 'ok' },
+        commitConversation: vi.fn(),
+        standaloneWorkspace: () => root,
+        configured: () => true
+      }), () => integrations)
+      const adapterHost = host(null)
+      if (cache === 'prepared') adapterHost.bridge!.skillsSnapshot = snapshot
+      const discover = vi.spyOn(skills, 'discover')
+      const turn = adapter.startTurn(input({ cwd: turnProject }), sink(), control, adapterHost)
+      pending = Promise.allSettled([turn])
+      // The timeout only detects a deadlock while the read is held.
+      const reached = vi.fn()
+      void provider.promise.then(reached)
+      await vi.waitFor(() => expect(reached).toHaveBeenCalled(), { timeout: 2_000 })
+      const plugin = (await provider.promise).integrations?.pluginPath
+      expect(plugin).toBeTruthy()
+      expect(readFileSync(join(plugin!, 'skills', 'check', 'SKILL.md'), 'utf-8')).toContain('Review the diff.')
+      expect((await turn).text).toBe('ok')
+      if (cache === 'prepared') expect(discover).not.toHaveBeenCalled()
+    } finally {
+      release.resolve()
+      await pending
+      await skills.discover({ projectPath: project })
+      read?.mockRestore()
+      now.mockRestore()
+    }
+  })
+
+  it('starts a cold Claude turn while a background refresh saturates its full scan batch', async () => {
+    const root = tempHome('mousse-claude-skill-full-batch-')
+    const project = join(root, 'project')
+    const otherProject = join(root, 'other-project')
+    const globalSkillRoot = join(root, 'integrations', 'skills', 'check')
+    mkdirSync(project)
+    mkdirSync(otherProject)
+    mkdirSync(globalSkillRoot, { recursive: true })
+    writeFileSync(join(globalSkillRoot, 'SKILL.md'), '---\nname: check\ndescription: Check the change\n---\nReview the diff.\n')
+    const count = SKILL_SCAN_CONCURRENCY + 4
+    const bulkPaths = new Set<string>()
+    for (let i = 0; i < count; i++) {
+      const dir = join(project, '.mousse', 'skills', `bulk-${i}`)
+      mkdirSync(dir, { recursive: true })
+      const path = join(dir, 'SKILL.md')
+      writeFileSync(path, `---\nname: bulk-${i}\ndescription: Bulk skill ${i}\n---\nBody ${i}.\n`)
+      bulkPaths.add(path)
+    }
+    const skills = new SkillsRegistry(createLegacySingleProfileContext({ profileRoot: root }))
+    const settings = getDefaultSettings()
+    settings.integrations.skills.enabledSkills = ['mousse-profile:check']
+    const start = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const release = Promise.withResolvers<void>()
+    const saturated = Promise.withResolvers<void>()
+    const reader = skills as unknown as { readSkillDescriptor: (source: unknown, path: string) => Promise<unknown> }
+    const original = reader.readSkillDescriptor.bind(reader)
+    let heldCount = 0
+    let holdBulk = false
+    let read: ReturnType<typeof vi.spyOn> | undefined
+    let pending: Promise<unknown> | undefined
+    try {
+      await skills.discover({ projectPath: project })
+      holdBulk = true
+      read = vi.spyOn(reader, 'readSkillDescriptor').mockImplementation(async (source, path) => {
+        const result = await original(source, path)
+        if (holdBulk && bulkPaths.has(path)) {
+          heldCount++
+          if (heldCount >= Math.floor(SKILL_SCAN_CONCURRENCY / 2)) saturated.resolve()
+          await release.promise
+        }
+        return result
+      })
+      now.mockReturnValue(start + 31_000)
+      await skills.discover({ projectPath: project, stale: true })
+      await saturated.promise
+      // Let any additional background reads enter their slots so a full-cap background batch would fill all slots.
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      const integrations = new ClaudeIntegrationResolver({
+        skillsRegistry: skills,
+        mcpRegistry: { discover: async () => ({ servers: [], sources: [], diagnostics: [] }) },
+        settings: { get: () => settings },
+        secrets: createLegacySingleProfileContext({ profileRoot: root }).secrets,
+        pluginRoot: join(root, 'plugins')
+      })
+      const provider = Promise.withResolvers<ClaudeSubscriptionChatInput>()
+      const adapter = new ClaudeSubscriptionAdapter(() => ({
+        chat: async (chat) => { provider.resolve(chat); return 'ok' },
+        commitConversation: vi.fn(),
+        standaloneWorkspace: () => root,
+        configured: () => true
+      }), () => integrations)
+      const turn = adapter.startTurn(input({ cwd: otherProject }), sink(), control, host(null))
+      pending = Promise.allSettled([turn])
+      const reached = vi.fn()
+      void provider.promise.then(reached)
+      await vi.waitFor(() => expect(reached).toHaveBeenCalled(), { timeout: 2_000 })
+      const plugin = (await provider.promise).integrations?.pluginPath
+      expect(plugin).toBeTruthy()
+      expect(readFileSync(join(plugin!, 'skills', 'check', 'SKILL.md'), 'utf-8')).toContain('Review the diff.')
+      expect((await turn).text).toBe('ok')
+      expect(heldCount).toBeLessThan(SKILL_SCAN_CONCURRENCY)
+    } finally {
+      holdBulk = false
+      release.resolve()
+      await pending
+      await skills.discover({ projectPath: project })
+      read?.mockRestore()
+      now.mockRestore()
+    }
   })
 
   const service = (query: (input: { options: Options; prompt: unknown }) => Query) => {

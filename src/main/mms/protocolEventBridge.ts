@@ -246,6 +246,11 @@ export function bridgeProtocolEvent(
       broadcast('git:selectionChanged', event.data)
       return true
     }
+    // Mousse changed these threads' branches: their cards read them again.
+    case 'git.headsChanged': {
+      broadcast('git:headsChanged', event.data)
+      return true
+    }
     case 'scheduled.status': {
       broadcast(
         'scheduled:status',

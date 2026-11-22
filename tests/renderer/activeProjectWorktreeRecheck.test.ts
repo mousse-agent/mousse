@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useActiveProjectLocation } from '../../src/renderer/hooks/useActiveProjectPath'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { ActiveProject } from '../../src/renderer/lib/activeProject'
+import { qualifyId } from '../../src/shared/threadRef'
 import type { Thread, TurnState } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -34,10 +35,11 @@ beforeEach(() => {
   seen = null
   ;(window as unknown as { mousse: unknown }).mousse = {
     app: { getFilesRoot: async () => (worktreeReady ? WORKTREE : PROJECT), getActiveProjectPath: async () => PROJECT },
-    workspace: {
-      getStatus: async () => {
+    git: {
+      // The worktree is made by the first turn: until then the thread works in no folder of its own.
+      heads: async () => {
         lookups++
-        return worktreeReady ? { execution: { projectPath: WORKTREE, lifecycle: 'ready' } } : { execution: { lifecycle: 'unprovisioned' } }
+        return { projects: {}, threads: { t1: worktreeReady ? { own: true, branch: 'mousse/t1', folder: WORKTREE } : { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' } } }
       }
     }
   }
@@ -58,8 +60,7 @@ describe('the folder of a new worktree thread', () => {
   it('becomes the thread worktree once its first turn has made it, without selecting the thread again', async () => {
     act(() => root.render(createElement(Probe)))
     await flush()
-    // Selected before the first turn: no worktree yet, so the project folder (and its branch) shows.
-    expect(seen).toMatchObject({ path: PROJECT, workspaceThreadId: null })
+    expect(seen).toMatchObject({ path: null, workspaceThreadId: 't1', loading: true })
 
     await phase('queued')
     await flush()
@@ -76,4 +77,23 @@ describe('the folder of a new worktree thread', () => {
     expect(lookups).toBe(after)
     expect(seen).toMatchObject({ path: WORKTREE, workspaceThreadId: 't1' })
   })
+})
+
+it('uses the owning computer’s workspace lookup for a remote thread', async () => {
+  const node = 'nod_0123456789abcdefghjkmnpqrs'
+  const threadId = qualifyId(node, 't1')
+  const projectId = qualifyId(node, 'p1')
+  const thread = useAppStore.getState().threads[0]!
+  useAppStore.setState({ activeThreadId: threadId, threads: [{ ...thread, id: threadId, projectId, node }] })
+
+  const getActiveProjectPath = vi.fn(async () => PROJECT)
+  const getStatus = vi.fn(async () => ({ metadata: { lifecycle: 'ready' }, execution: { projectPath: WORKTREE, lifecycle: 'ready', generation: 4 } }))
+  const heads = vi.fn()
+  ;(window as unknown as { mousse: unknown }).mousse = { app: { getActiveProjectPath }, workspace: { getStatus }, git: { heads } }
+  act(() => root.render(createElement(Probe)))
+  await flush()
+  expect(getStatus).toHaveBeenCalledWith(threadId, false)
+  expect(seen).toMatchObject({ path: WORKTREE, workspaceThreadId: threadId, workspaceGeneration: 4 })
+  expect(heads).not.toHaveBeenCalled()
+  expect(getActiveProjectPath).not.toHaveBeenCalled()
 })

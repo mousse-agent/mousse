@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
+import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
@@ -238,6 +238,79 @@ export interface AcpSessionStore {
   setModels(models: LlmModelOption[]): void
 }
 
+/** Token usage reported by an ACP agent across the prompt(s) of one turn (`PromptResponse.usage`). */
+export interface AcpTurnUsage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  /** Thought/reasoning token breakdown when reported (`thoughtTokens`). */
+  reasoning?: number
+  totalTokens: number
+  /** True when at least one prompt reported `outputTokens`, so output speed can be derived. */
+  hasOutput: boolean
+}
+
+function nonNegativeFinite(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** Token usage carried on an ACP `session/prompt` response (`PromptResponse.usage`), or undefined when absent. */
+export function readAcpPromptUsage(outcome: unknown): AcpTurnUsage | undefined {
+  if (!outcome || typeof outcome !== 'object') return undefined
+  const raw = (outcome as { usage?: unknown }).usage
+  if (!raw || typeof raw !== 'object') return undefined
+  const usage = raw as Record<string, unknown>
+  const input = nonNegativeFinite(usage.inputTokens)
+  const output = nonNegativeFinite(usage.outputTokens)
+  const cacheRead = nonNegativeFinite(usage.cachedReadTokens)
+  const cacheWrite = nonNegativeFinite(usage.cachedWriteTokens)
+  const reasoning = nonNegativeFinite(usage.thoughtTokens)
+  const reportedTotal = nonNegativeFinite(usage.totalTokens)
+  if (
+    input === undefined &&
+    output === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined &&
+    reportedTotal === undefined
+  ) {
+    return undefined
+  }
+  const inputTokens = input ?? 0
+  const outputTokens = output ?? 0
+  const cacheReadTokens = cacheRead ?? 0
+  const cacheWriteTokens = cacheWrite ?? 0
+  const sum = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
+  const totalTokens = reportedTotal !== undefined && (reportedTotal > 0 || sum === 0) ? reportedTotal : sum
+  return {
+    input: inputTokens,
+    output: outputTokens,
+    cacheRead: cacheReadTokens,
+    cacheWrite: cacheWriteTokens,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    totalTokens,
+    hasOutput: output !== undefined
+  }
+}
+
+/** Sums prompt-level ACP usage across multiple prompts of a single turn (steered turns). */
+export function addAcpTurnUsage(total: AcpTurnUsage | undefined, next: AcpTurnUsage): AcpTurnUsage {
+  if (!total) return { ...next }
+  const reasoning =
+    total.reasoning !== undefined || next.reasoning !== undefined
+      ? (total.reasoning ?? 0) + (next.reasoning ?? 0)
+      : undefined
+  return {
+    input: total.input + next.input,
+    output: total.output + next.output,
+    cacheRead: total.cacheRead + next.cacheRead,
+    cacheWrite: total.cacheWrite + next.cacheWrite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    totalTokens: total.totalTokens + next.totalTokens,
+    hasOutput: total.hasOutput || next.hasOutput
+  }
+}
+
 export interface AcpChatInput {
   threadId: string
   instanceId?: string
@@ -295,6 +368,8 @@ export interface AcpChatInput {
   prompter?: PermissionPrompter
   /** The agent's session id, once known (provider refs name it for interrupt and terminate). */
   onSession?: (sessionId: string) => void
+  /** Token usage summed across the prompts of this turn, when the agent reports `PromptResponse.usage`. */
+  onUsage?: (usage: AcpTurnUsage) => void
 }
 
 /** What the core learned about the agent and its sessions, for runtime facts. */
@@ -370,13 +445,28 @@ export class AcpSessions {
     const { label, questions, quirks } = this.options
     if (this.stopped) throw new Error(`${label} provider is stopped`)
     let active: AcpProcess | undefined
+    const inTurn = () => Boolean(active && this.turning.has(active))
+    // An agent that wakes up on its own between turns (for instance, its own background shell task finishing) has no
+    // running turn, transcript stream, lease or permission mode. Detach and close the idle process and drop its saved
+    // session so it cannot keep acting unobserved or drift from Mousse's committed history; the next turn opens fresh
+    // with Mousse's canonical history.
+    const stopIdle = () => {
+      const idle = active
+      if (!idle || this.turning.has(idle)) return
+      if (idle.threadId && this.sessions.get(idle.threadId) === idle) {
+        this.sessions.delete(idle.threadId)
+        this.forgetConversation(idle.threadId)
+      }
+      setImmediate(() => { if (!this.turning.has(idle)) closeAcpConnection(idle) })
+    }
     const scope: AcpRequestScope = {
-      get threadId() { return active?.threadId },
-      get cwd() { return active?.cwd },
-      get approvals() { return active?.turnPrompter?.approvals },
-      get permissionMode() { return active?.permissionMode },
-      aborted: () => Boolean(active?.turnSignal?.aborted || active?.connection.signal.aborted),
+      get threadId() { return inTurn() ? active?.threadId : undefined },
+      get cwd() { return inTurn() ? active?.cwd : undefined },
+      get approvals() { return inTurn() ? active?.turnPrompter?.approvals : undefined },
+      get permissionMode() { return inTurn() ? active?.permissionMode : undefined },
+      aborted: () => Boolean(!inTurn() || active?.turnSignal?.aborted || active?.connection.signal.aborted),
       throwIfAborted: () => {
+        if (!inTurn()) throw new Error(`${label} cannot act outside a turn`)
         active?.turnSignal?.throwIfAborted()
         active?.connection.signal.throwIfAborted()
       }
@@ -387,6 +477,10 @@ export class AcpSessions {
         // A one-shot runs no tool: refused unasked, and the request ends.
         if (active?.refuseTools) {
           active.refuseTools(request.toolCall?.title ?? 'a tool')
+          return { outcome: { outcome: 'cancelled' } }
+        }
+        if (!inTurn()) {
+          stopIdle()
           return { outcome: { outcome: 'cancelled' } }
         }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
@@ -402,10 +496,18 @@ export class AcpSessions {
       ...(quirks.clientFs ? {
         readTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
+          if (!inTurn()) {
+            stopIdle()
+            return Promise.reject(RequestError.invalidRequest(undefined, `${label} cannot read files outside a turn`))
+          }
           return readWorkspaceFile(scope, request)
         },
         writeTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
+          if (!inTurn()) {
+            stopIdle()
+            return Promise.reject(RequestError.invalidRequest(undefined, `${label} cannot write files outside a turn`))
+          }
           return writeWorkspaceFile(questions, scope, request, label)
         }
       } : {}),
@@ -420,7 +522,8 @@ export class AcpSessions {
         questions,
         scope,
         awaiting: () => active?.turnToolAwaiting,
-        promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params)
+        promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params),
+        onOutsideTurn: stopIdle
       }) : {})
     }
     const connection = this.options.connect({
@@ -771,6 +874,7 @@ export class AcpSessions {
     input.signal?.addEventListener('abort', abort, { once: true })
     let text = ''
     let thinking = ''
+    let turnUsage: AcpTurnUsage | undefined
     const toolTitles = new Map<string, string>()
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
@@ -1150,6 +1254,8 @@ export class AcpSessions {
         // The SDK settles an answer at once but hands an update to its handlers a few steps later: what the agent
         // wrote just before it answered (often its whole reply) is still on its way. It lands before the turn ends.
         await new Promise<void>((resolve) => setImmediate(resolve))
+        const promptUsage = readAcpPromptUsage(outcome)
+        if (promptUsage) turnUsage = addAcpTurnUsage(turnUsage, promptUsage)
         if (riding) {
           // A native steer rides: the prompt answered because the agent took it into the running work (or the prompt
           // was already ending, and it runs next). The steer's prompt carries the turn on, and its end ends the turn,
@@ -1208,6 +1314,7 @@ export class AcpSessions {
         if (text) text += '\n\n'
       }
       for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
+      if (turnUsage) input.onUsage?.(turnUsage)
       return text
     } catch (error) {
       // An agent that reopens a saved session by `session/resume` keeps it after a failed or stopped prompt. The next

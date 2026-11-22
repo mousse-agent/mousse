@@ -8,6 +8,7 @@ interface AssetPiece {
   size: number
   /** When the file was last written; absent from an older daemon. */
   mtimeMs?: number
+  canonicalPath?: string
   /** Base64 bytes of this piece. */
   data: string
 }
@@ -38,7 +39,8 @@ export async function readAssetInPieces(request: (offset: number, length: number
     received += bytes.length
     if (received === whole.length) return {
       data: new Uint8Array(whole.buffer, whole.byteOffset, whole.length), mimeType: piece.mimeType, size: piece.size,
-      ...(typeof first.mtimeMs === 'number' ? { mtimeMs: first.mtimeMs } : {})
+      ...(typeof first.mtimeMs === 'number' ? { mtimeMs: first.mtimeMs } : {}),
+      ...(first.canonicalPath ? { canonicalPath: first.canonicalPath } : {})
     }
     // The file shrank while it was read: stop rather than ask for bytes that are not there.
     if (bytes.length === 0) throw new Error(CHANGED)

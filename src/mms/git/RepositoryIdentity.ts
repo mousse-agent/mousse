@@ -5,12 +5,12 @@ import { access, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promis
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
-import { execFile, execFileSync } from 'node:child_process'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { repositoryFacts } from './repositoryFacts'
 import { gitEnvFor, gitFile } from './gitExecutable'
+import { execFileGitSync, execFileGit } from './gitSpawn'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -45,7 +45,7 @@ export interface ResolveRepositoryIdentityOptions {
 
 function git(cwd: string, ...args: string[]): string | null {
   try {
-    return timeGitSync(() => execFileSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
+    return timeGitSync(() => execFileGitSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
   } catch { return null }
 }
 function canonical(path: string): string { try { return realpathSync(path) } catch { return resolve(path) } }
@@ -243,13 +243,27 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
   return { commonDir, key, worktreePath, metadataDir, capability, movedFrom }
 }
 
-function gitAsync(cwd: string, ...args: string[]): Promise<string | null> {
-  return withoutRepoProgramsAsync(cwd, args).then(
-    (argv) => new Promise<string | null>((settle) => {
-      timeGitChild(() => execFile(gitFile(), argv, { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => settle(error ? null : stdout.trim())))
-    }),
-    () => null
-  )
+/** What Git prints (under `LC_ALL=C`) for a folder that is not in a repository, or whose `.git` file names no repository. */
+const NO_REPOSITORY = /^fatal: (not a git repository|gitfile does not point to a valid repository)/
+
+/** True only when the folder does not exist: Git cannot start there, and the folder is no repository. */
+async function folderGone(path: string): Promise<boolean> {
+  try { await stat(path); return false } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'ENOTDIR'
+  }
+}
+
+async function gitAsync(cwd: string, args: readonly string[], absent: (code: string | number | undefined, stderr: string) => boolean): Promise<string | null> {
+  const argv = await withoutRepoProgramsAsync(cwd, args)
+  return new Promise((settle, reject) => {
+    const env = gitEnvFor(repoProgramEnv({ ...process.env, LC_ALL: 'C' }))
+    timeGitChild(() => execFileGit(gitFile(), argv, { cwd, env, encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      if (!error) settle(stdout.trim())
+      else if (absent(error.code, stderr)) settle(null)
+      else reject(error)
+    }))
+  })
 }
 
 /**
@@ -263,8 +277,16 @@ export async function resolveRepositoryIdentityAsync(cwd: string, options: Resol
   const worktreePath = await canonicalAsync(cwd)
   // A turn's start or end asks once for all its callers (`repositoryFacts.ts`).
   const facts = await repositoryFacts(worktreePath)
-  const [commonRaw, bare, inside] = facts ? [facts.commonDirRaw, facts.bare, facts.inside] : probeAnswers(await gitAsync(worktreePath, ...PROBE))
-  const head = commonRaw && bare !== 'true' && inside === 'true' ? (facts ? facts.head ?? null : await gitAsync(worktreePath, 'rev-parse', '--verify', '--quiet', 'HEAD')) : null
+  // A folder that is gone, or whose `.git` file points nowhere (an agent removed its worktree), is no repository, as
+  // for the synchronous call. Any other failure is Git's own error, never read as "not a repository".
+  const answer = facts || await folderGone(worktreePath) ? null : await gitAsync(worktreePath, PROBE, (code, stderr) => code === 128 && NO_REPOSITORY.test(stderr))
+  const [commonRaw, bare, inside] = facts ? [facts.commonDirRaw, facts.bare, facts.inside] : probeAnswers(answer)
+  if (answer !== null && (!commonRaw || !['true', 'false'].includes(bare ?? '') || !['true', 'false'].includes(inside ?? ''))) {
+    throw new Error('Git returned an invalid repository identity')
+  }
+  const head = commonRaw && bare !== 'true' && inside === 'true'
+    ? (facts ? facts.head ?? null : await gitAsync(worktreePath, ['rev-parse', '--verify', '--quiet', 'HEAD'], (code, stderr) => code === 1 && stderr === ''))
+    : null
   const capability = capabilityOf(commonRaw, bare, inside, () => head)
   if (!capability.allowed && options.requireMutationCapability) throw new RepositoryIdentityError(capability)
 

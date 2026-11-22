@@ -176,6 +176,12 @@ export class ReplayTransport {
     return this.transcript.header
   }
 
+  /** The next expected outbound frame, if the replay is waiting for one. */
+  get expectedOutbound(): unknown {
+    const next = this.transcript.frames[this.cursor]
+    return next?.dir === 'out' ? next.frame : undefined
+  }
+
   /** The adapter sent `frame`; it must equal the next transcript frame, which must be outbound. */
   send(frame: unknown): void {
     if (this.failure) throw this.failure

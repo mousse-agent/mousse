@@ -483,6 +483,7 @@ class PiTurn {
   /** Native `steer` requests sent at `turn_end` and not answered yet; the turn's end and Stop wait for them before `clear_queue`. */
   readonly steerSends = new Set<Promise<void>>()
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  hasUsage = false
   /** When the turn's last request was answered, and the longest cache lifetime its requests wrote (`cacheWrite1h`). */
   promptCache: { at?: number; ttlMs?: number } = {}
   /** The current assistant message's text blocks by `contentIndex`. */
@@ -1662,7 +1663,21 @@ export class PiRpcEngine implements ProviderAdapter {
         // The gauge waits for the next turn.
       }
     }
-    sink.providerMetrics({ totalResponseTimeMs: Date.now() - turn.startedAt, totalTokensUsed: turn.usage.input + turn.usage.output, ...(context ? { context } : {}), ...(turn.promptCache.at ? { promptCache: { ...turn.promptCache } } : {}) })
+    const totalResponseTimeMs = Math.max(0, Date.now() - turn.startedAt)
+    const totalTokensUsed = turn.hasUsage
+      ? turn.usage.input + turn.usage.output + turn.usage.cacheRead + turn.usage.cacheWrite
+      : undefined
+    const tokensPerSecond =
+      turn.hasUsage && totalResponseTimeMs > 0
+        ? Math.round((turn.usage.output / totalResponseTimeMs) * 1000 * 10) / 10
+        : undefined
+    sink.providerMetrics({
+      totalResponseTimeMs,
+      ...(totalTokensUsed !== undefined ? { totalTokensUsed } : {}),
+      ...(tokensPerSecond !== undefined ? { tokensPerSecond } : {}),
+      ...(context ? { context } : {}),
+      ...(turn.promptCache.at ? { promptCache: { ...turn.promptCache } } : {})
+    })
     // Every step's text, as the legacy loop's reply joins them (a steered turn answers more than once).
     // A stopped turn keeps its partial reply; a finished one is every step's text, joined.
     const text = stopped ? turn.replyText() : turn.texts.join('\n\n')
@@ -1685,8 +1700,9 @@ export class PiRpcEngine implements ProviderAdapter {
       text,
       aborted: stopped,
       modelName: input.model,
-      totalResponseTimeMs: Date.now() - turn.startedAt,
-      totalTokensUsed: turn.usage.input + turn.usage.output,
+      totalResponseTimeMs,
+      ...(totalTokensUsed !== undefined ? { totalTokensUsed } : {}),
+      ...(tokensPerSecond !== undefined ? { tokensPerSecond } : {}),
       usage: turn.usage,
       contextSignature: contextKey,
       contextModelKey: contextKey,
@@ -2176,6 +2192,7 @@ export class PiRpcEngine implements ProviderAdapter {
         // Pi's own price of the request, from the catalogue Mousse registered.
         const cost = usage.cost?.total
         if (reported.input || reported.output || reported.cacheRead || reported.cacheWrite) {
+          turn.hasUsage = true
           sink.usage({ ...reported, ...(typeof cost === 'number' && Number.isFinite(cost) && cost > 0 ? { costUsd: cost } : {}) })
           turn.usage = { input: turn.usage.input + reported.input, output: turn.usage.output + reported.output, cacheRead: turn.usage.cacheRead + reported.cacheRead, cacheWrite: turn.usage.cacheWrite + reported.cacheWrite }
           // A lifetime only where pi reports the one-hour share (its Anthropic transport): the rest of a write

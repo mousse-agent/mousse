@@ -35,7 +35,7 @@ export interface UseThreadQueueOptions {
   threadId: string | null
   /** Messages just sent while a reply runs, shown until the daemon lists them. */
   optimisticItems?: QueuedMessage[]
-  onOptimisticItemReconciled?: (id: string) => void
+  onQueueObserved?: (threadId: string, items: QueuedMessage[]) => void
   /** A compaction holds the queue until it ends; null when nothing does. */
   hold?: QueueHold | null
   /**
@@ -161,17 +161,29 @@ export function startingItem(previous: QueuedMessage[], next: QueuedMessage[], s
  * item that send queued (the same `clientRequestId`), whichever of the list and the send's answer arrives first.
  */
 export function sameQueuedSend(item: QueuedMessage, optimistic: QueuedMessage): boolean {
-  return item.id === optimistic.id || Boolean(optimistic.clientRequestId && item.clientRequestId === optimistic.clientRequestId)
+  return item.threadId === optimistic.threadId && (item.id === optimistic.id || Boolean(optimistic.clientRequestId && item.clientRequestId === optimistic.clientRequestId))
 }
 
 /**
  * Loads the thread's queue, keeps it in step with `queue:updated`, and wraps the queue's changes
  * (send now, remove, reorder, edit) with busy marks and error text.
  */
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds, replyOpen = true, turnActive = false, turnSettingUp = false }: UseThreadQueueOptions): ThreadQueue {
+const EMPTY_QUEUE: QueuedMessage[] = []
+
+export function useThreadQueue({ threadId, optimisticItems = [], onQueueObserved, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds, replyOpen = true, turnActive = false, turnSettingUp = false }: UseThreadQueueOptions): ThreadQueue {
   const replyOpenRef = useRef(replyOpen)
   replyOpenRef.current = replyOpen
-  const [items, setItems] = useState<QueuedMessage[]>([])
+  const [loadedItems, setItems] = useState<QueuedMessage[]>([])
+  const recentQueues = useRef(new Map<string, QueuedMessage[]>())
+  const queueObserved = useRef(onQueueObserved)
+  queueObserved.current = onQueueObserved
+  const rememberQueue = useCallback((id: string, list: QueuedMessage[]) => {
+    queueObserved.current?.(id, list)
+    const cache = recentQueues.current
+    cache.delete(id)
+    cache.set(id, list)
+    if (cache.size > 8) cache.delete(cache.keys().next().value!)
+  }, [])
   // The first queued message, just taken by the daemon for its turn, kept in the list until that turn's prompt shows
   // (the transcript's last prompt is no longer `promptId`, or is this message's).
   const [starting, setStarting] = useState<{ item: QueuedMessage; promptId: string | null } | null>(null)
@@ -182,6 +194,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   const sentNowRef = useRef<Readonly<Record<string, SteerOnTheWay>>>({})
   // The thread `items` were read for; null until the shown thread's list arrives.
   const [itemsThread, setItemsThread] = useState<string | null>(null)
+  const items = itemsThread === threadId ? loadedItems : (threadId && recentQueues.current.get(threadId)) || EMPTY_QUEUE
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   // Open edits and "your edit is in the composer" notices live in the app store, by thread: they outlast the thread
@@ -237,6 +250,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
         const list = await window.mousse.queue.list(id)
         if (!current()) return
         loggedLoadFailure.current = false
+        rememberQueue(id, list)
         setItems(list)
         setItemsThread(id)
         return
@@ -253,7 +267,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
         if (!current()) return
       }
     }
-  }, [])
+  }, [rememberQueue])
 
   // The message of an open edit left the queue or started (sent, or removed elsewhere), here or while its thread
   // was not shown: the edit closes, and a draft with changes of its own goes to that thread's composer with the
@@ -291,17 +305,19 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   }, [])
 
   useEffect(() => {
-    setItems([])
+    const cached = threadId ? recentQueues.current.get(threadId) : undefined
+    setItems(cached ?? EMPTY_QUEUE)
     setStarting(null)
     removing.current.clear()
-    setItemsThread(null)
+    setItemsThread(cached ? threadId : null)
     setError(null)
     setNotice(null)
     setBusyIds({})
-    // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list. An update of
-    // another thread only matters to an edit open there.
+    // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list.
+    // Pushes for hidden threads also reconcile sends whose acknowledgements have yet to arrive.
     let settled = false
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
+      rememberQueue(updatedId, next)
       if (updatedId !== threadId) {
         if (updatedId === useAppStore.getState().openingThreadId) openingList.current = { threadId: updatedId, items: next }
         if (useAppStore.getState().queueEditDrafts[updatedId]) hiddenLists.current.set(updatedId, next)
@@ -323,6 +339,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     openingList.current = null
     if (early?.threadId === threadId) {
       settled = true
+      rememberQueue(threadId, early.items)
       setItems(early.items)
       setItemsThread(threadId)
     }
@@ -341,18 +358,11 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
       retryTimer.current = null
     }
-  }, [threadId, loadQueue, reconcileEdit])
+  }, [threadId, loadQueue, reconcileEdit, rememberQueue])
 
   useEffect(() => {
     if (threadId && itemsThread === threadId) reconcileEdit(threadId, items)
   }, [threadId, itemsThread, items, shownEdit, reconcileEdit])
-
-  useEffect(() => {
-    if (!onOptimisticItemReconciled) return
-    for (const optimistic of optimisticItems) {
-      if (items.some((item) => sameQueuedSend(item, optimistic))) onOptimisticItemReconciled(optimistic.id)
-    }
-  }, [items, optimisticItems, onOptimisticItemReconciled])
 
   const markBusy = useCallback((itemId: string, busy: boolean) => {
     setBusyIds((current) => {
@@ -444,6 +454,13 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     setSentNow({})
     setNext(new Set())
   }, [threadId])
+  // The service says which messages wait to join the turn being set up (`QueuedMessage.sendsNext`), whoever sent them
+  // and whichever window was showing the thread: they are marked as sending next here too, also after the thread was
+  // left and opened again.
+  useEffect(() => {
+    const marked = items.filter((item) => item.sendsNext && item.state === 'pending').map((item) => item.id)
+    if (marked.length) setNext((current) => (marked.every((id) => current.has(id)) ? current : new Set([...current, ...marked])))
+  }, [items])
   // Marked messages the daemon's list has shown: one sent from the composer may be marked before the list has it.
   const listedNext = useRef(new Set<string>())
   useEffect(() => {
@@ -455,6 +472,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       if (item) listedNext.current.add(id)
       // Gone: it started as a turn of its own (its prompt shows), joined a turn whose copy already shows, or was removed.
       if (id === lastPromptQueueItemId || (!item && listedNext.current.has(id))) gone.push(id)
+      else if (item?.steerMissed) gone.push(id)
       else if (item?.state === 'steering') joined.push(item)
     }
     if (!gone.length && !joined.length) return
@@ -482,7 +500,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   useEffect(() => {
     if (!replyOpen || !next.size) return
     const timer = window.setTimeout(() => {
-      dropNext(itemsRef.current.filter((item) => next.has(item.id) && item.state === 'pending').map((item) => item.id))
+      dropNext(itemsRef.current.filter((item) => next.has(item.id) && item.state === 'pending' && !item.sendsNext).map((item) => item.id))
     }, STARTING_ITEM_HOLD_MS)
     return () => window.clearTimeout(timer)
   }, [replyOpen, next, dropNext])

@@ -36,15 +36,16 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   // A snapshot store's own commands (`runStoreGit`) and the check of every store command (`checkStoreCommand`).
   'src/mms/git/scopedRead.ts': 'assertGitAllowed',
   'src/mms/git/workingTreeStatus.ts': 'withoutRepoPrograms',
+  // A ref transaction held open while its caller verifies (`verifiedRefTransactionAsync`).
+  'src/mms/lifecycle/lifecycleGit.ts': 'withoutRepoProgramsAsync',
   'src/mms/workspace/ThreadWorkspaceManager.ts': 'assertGitAllowed',
-  'src/mms/workspace/WorkflowWorkspace.ts': 'withoutRepoPrograms',
-  'src/mms/worktree/WorktreeManager.ts': 'policedSimpleGit'
+  'src/mms/workspace/WorkflowWorkspace.ts': 'withoutRepoPrograms'
 }
 
 /** The one place a `gh` process starts; everything else passes `'gh'` to an `ExecutableRunner`. */
 const GH_SPAWNER = 'src/mms/git/ghRunner.ts'
 
-const SPAWNERS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork', 'spawnGit', 'execFileAsync', 'nodeSpawn'])
+const SPAWNERS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork', 'spawnGit', 'spawnGitSync', 'execFileGitSync', 'execFileGit', 'execFileGitAsync', 'execFileAsync', 'nodeSpawn'])
 /** Calls that take `'gh'` without starting it themselves: the runner checks it. */
 const RUNNERS = new Set(['runExecutable', 'base', 'run', 'runner'])
 
@@ -118,6 +119,11 @@ describe('Git command sources', () => {
     }
     // The approved list has no stale entries.
     expect(Object.keys(APPROVED_GIT_SPAWNERS).filter((file) => !found.git.has(file))).toEqual([])
+  })
+
+  it('starts daemon Git through the tracked launcher', () => {
+    const direct = /^(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork|execFileAsync|nodeSpawn|simpleGit)\(/
+    expect([...found.git.values()].flat().filter((finding) => direct.test(finding.text))).toEqual([])
   })
 
   it('starts Git as the program gitExecutable.ts resolves, never by name', () => {

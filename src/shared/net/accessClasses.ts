@@ -139,6 +139,7 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'orchestrator.isTurnActive': 'view',
     'orchestrator.contextUsage': 'view',
     'orchestrator.pendingQuestions': 'view',
+    'orchestrator.sendAccepted': 'view',
     'queue.list': 'view',
     'runs.list': 'view',
     'runs.get': 'view',

@@ -883,6 +883,10 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (s.openingThreadId) set({ openingThreadId: null })
       return false
     }
+    if (s.turnStates[id]?.phase === 'queued') {
+      set((current) => ({ ...workspace, ...switchPatch(current, id) }))
+      return false
+    }
     if (opensFromCache(s, id)) {
       // Its row shows as chosen in this update; its transcript, which takes a while to draw, comes in the next.
       openingEarly = null

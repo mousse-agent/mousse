@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import type { WindowsProviderTree } from '../../windowsProviderProcess'
+import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
 import type { SpawnedRoot } from '../../stopProcesses'
@@ -18,8 +20,12 @@ import type { SpawnedRoot } from '../../stopProcesses'
  * the query and drives the runs.
  */
 
-/** How long a thread with no background work keeps its idle process before it is closed. */
-export const LIVE_IDLE_CLOSE_MS = 3 * 60_000
+/**
+ * How long a thread with no background work keeps its idle process before it is closed. A new process costs about a
+ * second before it takes the prompt (two at p90), so a reply written after reading the last answer should still find it
+ * open; at most `LIVE_MAX_IDLE_SESSIONS` stay open idle. `MOUSSE_CLAUDE_IDLE_CLOSE_MS` sets it.
+ */
+export const LIVE_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CLAUDE_IDLE_CLOSE_MS', 15 * 60_000)
 /** With background work pending: how long the thread may be silent before the release is reconsidered. */
 export const LIVE_IDLE_RELEASE_MS = 30 * 60_000
 /**
@@ -89,10 +95,11 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
 }
 
 /** A query's Claude Code as the SDK reported it at spawn: its pid and when Mousse heard of it (`noteClaudeQuerySpawn`). */
-const SPAWNED = new WeakMap<object, () => { pid: number; spawnedAt: number } | undefined>()
+type ClaudeSpawn = { pid: number; spawnedAt: number; windowsTree?: WindowsProviderTree }
+const SPAWNED = new WeakMap<object, () => ClaudeSpawn | undefined>()
 
 /** Records where the spawn of `query`'s Claude Code is read from once it has started. */
-export function noteClaudeQuerySpawn(query: object, spawned: () => { pid: number; spawnedAt: number } | undefined): void {
+export function noteClaudeQuerySpawn(query: object, spawned: () => ClaudeSpawn | undefined): void {
   SPAWNED.set(query, spawned)
 }
 
@@ -125,7 +132,7 @@ export function claudeQueryProcess(query: unknown): ClaudeProcess | undefined {
     pid,
     ...(typeof handle?.kill === 'function' ? { terminate: () => { try { handle.kill!('SIGTERM'); return true } catch { return false } } } : {}),
     root: {
-      ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt } : {}),
+      ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt, windowsTree: noted.windowsTree } : {}),
       exited: () => (knowsExit ? handle!.exitCode !== null || handle!.signalCode !== null : undefined),
       ...(typeof handle?.kill === 'function' ? { kill: () => { try { handle.kill!('SIGKILL') } catch { /* gone meanwhile */ } } } : {})
     }
@@ -652,6 +659,8 @@ export interface LiveSessionHooks {
   notice?(text: string): void
   /** The process ended or was released. */
   ended(reason: 'closed' | 'idle' | 'idle-cap' | 'died'): void
+  /** A run ended and nothing else runs on the process: it waits for the next turn. */
+  idle?(): void
   /**
    * The session sent the process SIGTERM itself (`terminate`): the owner kills it with everything it started if it is
    * still running after the grace, as after Stop.
@@ -739,7 +748,7 @@ export class LiveSession<Turn = unknown> {
   sessionId: string | undefined
   dead = false
   /** What the owner keyed this query on (model, folder, instructions...); the service compares it. */
-  meta: Record<string, unknown> = {}
+  meta: Record<string, unknown> & { hardParts?: readonly unknown[] } = {}
   private query: Query | undefined
   private readonly runs: LiveRun[] = []
   private continuation: LiveRun | undefined
@@ -2177,11 +2186,16 @@ export class LiveSession<Turn = unknown> {
       clearTimeout(this.capTimer)
       this.capTimer = undefined
     }
-    if (!this.busy) this.armIdle()
+    if (!this.busy) {
+      this.armIdle()
+      if (!active) this.hooks.idle?.()
+    }
   }
 
   private afterRunEnded(): void {
-    if (!this.busy && !this.dead) this.armIdle()
+    if (this.busy || this.dead) return
+    this.armIdle()
+    this.hooks.idle?.()
   }
 
   /** Provider activity restarts the idle clock. It does not move the cap on how long work may stay owed. */

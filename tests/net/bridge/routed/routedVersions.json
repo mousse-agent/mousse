@@ -155,8 +155,8 @@
     "security": "6f012c3ca58ce7c5"
   },
   "git.branches": {
-    "version": 1,
-    "digest": "be5c180f1cc0b52d",
+    "version": 2,
+    "digest": "44570bd18afeec60",
     "security": "23c8269058d1b9db"
   },
   "git.cancelOperation": {
@@ -200,13 +200,13 @@
     "security": "6f012c3ca58ce7c5"
   },
   "git.diff": {
-    "version": 1,
-    "digest": "6e076d207c54682f",
+    "version": 2,
+    "digest": "7e2845ecfb50a48b",
     "security": "23c8269058d1b9db"
   },
   "git.diffStats": {
-    "version": 1,
-    "digest": "be5c180f1cc0b52d",
+    "version": 2,
+    "digest": "44570bd18afeec60",
     "security": "23c8269058d1b9db"
   },
   "git.discard": {
@@ -235,8 +235,8 @@
     "security": "23c8269058d1b9db"
   },
   "git.log": {
-    "version": 1,
-    "digest": "4218d5ceaace1817",
+    "version": 2,
+    "digest": "037d4328c455e880",
     "security": "23c8269058d1b9db"
   },
   "git.pull": {
@@ -275,8 +275,8 @@
     "security": "6f012c3ca58ce7c5"
   },
   "git.status": {
-    "version": 1,
-    "digest": "be5c180f1cc0b52d",
+    "version": 2,
+    "digest": "44570bd18afeec60",
     "security": "23c8269058d1b9db"
   },
   "git.suggestCommitMessage": {
@@ -358,6 +358,11 @@
     "version": 8,
     "digest": "f0c64070d7cee134",
     "security": "1447c39a3cdfbf97"
+  },
+  "orchestrator.sendAccepted": {
+    "version": 1,
+    "digest": "771f5b712664189d",
+    "security": "04f7c680ffd36337"
   },
   "orchestrator.steer": {
     "version": 3,

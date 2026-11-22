@@ -1,4 +1,4 @@
-import type { AcpChatInput } from '../../acp/session'
+import type { AcpChatInput, AcpTurnUsage } from '../../acp/session'
 import { INTERRUPTED_SUMMARY } from '../../../../shared/agentActivity'
 import type { ProviderDriverKind } from '../../../../shared/providerInstances'
 import type { ProviderRef } from '../../../run/types'
@@ -52,8 +52,8 @@ export interface AcpAdapterOptions {
 
 /**
  * An agent over the Agent Client Protocol (SPEC §13.4). The agent runs its own loop and tools
- * inside the project workspace (weak containment), reports text and tool calls only (sparse
- * events: no thinking, no usage), and keeps its own ACP session, resumed while the history
+ * inside the project workspace (weak containment), reports text, thoughts, tool calls, and
+ * turn usage when the agent includes `PromptResponse.usage`, and keeps its own ACP session, resumed while the history
  * fingerprint matches. Steers cancel the active prompt and are sent as the next one, or join it as a second prompt on an
  * agent that takes them so (`AcpQuirks.nativeSteerFrom`).
  *
@@ -100,6 +100,7 @@ export class AcpAdapter implements ProviderAdapter {
     // The drained-turn proof for the bearer: ACP updates do not name the MCP server, so every tool call
     // the agent started must reach a completed update (none failed, none left open).
     const toolCalls = new Map<string, 'running' | 'completed' | 'failed'>()
+    let reportedUsage: AcpTurnUsage | undefined
     let text: string
     try {
       text = await client.chat({
@@ -170,13 +171,39 @@ export class AcpAdapter implements ProviderAdapter {
           sink.tool(runtimeToolEvent(withClosure(event, input.signal.aborted)))
         },
         // The ref names the agent's session once there is one, so stop and terminate find it.
-        ...(client.interrupt ? { onSession: (sessionId: string) => sink.providerRef({ ...providerRef, sessionId }) } : {})
+        ...(client.interrupt ? { onSession: (sessionId: string) => sink.providerRef({ ...providerRef, sessionId }) } : {}),
+        onUsage: (usage) => {
+          reportedUsage = usage
+        }
       })
     } catch (error) {
       // A stopped or failed turn, or one a usage limit ended: the history it left (its request, no reply), so the next
       // turn resumes the agent's session where the runtime judged that safe, instead of handing the history over again.
       if (host.context.nativeHistoryNow) client.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
       throw error
+    }
+    const totalResponseTimeMs = Math.max(0, Date.now() - startedAt)
+    const usage = reportedUsage
+      ? { input: reportedUsage.input, output: reportedUsage.output, cacheRead: reportedUsage.cacheRead, cacheWrite: reportedUsage.cacheWrite }
+      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    const totalTokensUsed = reportedUsage?.totalTokens
+    const tokensPerSecond =
+      reportedUsage?.hasOutput && totalResponseTimeMs > 0
+        ? Math.round((usage.output / totalResponseTimeMs) * 1000 * 10) / 10
+        : undefined
+    if (reportedUsage) {
+      sink.providerMetrics({
+        totalResponseTimeMs,
+        totalTokensUsed,
+        tokensPerSecond,
+        usage: {
+          ...usage,
+          ...(reportedUsage.reasoning !== undefined ? { reasoning: reportedUsage.reasoning } : {}),
+          totalTokens: reportedUsage.totalTokens,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        }
+      })
+      sink.usage(usage)
     }
     client.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
     streams.thinking.complete()
@@ -186,8 +213,10 @@ export class AcpAdapter implements ProviderAdapter {
       text,
       aborted: input.signal.aborted,
       modelName: input.model,
-      totalResponseTimeMs: Date.now() - startedAt,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      totalResponseTimeMs,
+      ...(totalTokensUsed !== undefined ? { totalTokensUsed } : {}),
+      ...(tokensPerSecond !== undefined ? { tokensPerSecond } : {}),
+      usage,
       contextSignature: contextKey,
       contextModelKey: contextKey,
       nativeMessages: [],

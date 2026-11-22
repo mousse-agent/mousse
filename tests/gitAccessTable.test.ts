@@ -47,7 +47,8 @@ const WRITE_SUBCOMMANDS = new Set([
 
 /**
  * The read forms of subcommands that can also write, told apart by their literal arguments: `config --get`,
- * `tag --list`, `remote` alone or `remote get-url`, `symbolic-ref` with one name. Anything else counts as a write.
+ * `tag --list`, `remote` alone or `remote get-url`, `symbolic-ref` with one name, `branch` with listing options only.
+ * Anything else counts as a write.
  */
 function readForm(subcommand: string, rest: readonly string[]): boolean {
   const positional = rest.filter((word) => !word.startsWith('-'))
@@ -55,6 +56,8 @@ function readForm(subcommand: string, rest: readonly string[]): boolean {
   if (subcommand === 'tag') return rest.some((word) => /^(-l|--list|--contains|--points-at|--merged|--no-merged)$/.test(word)) || positional.length === 0
   if (subcommand === 'remote') return positional.length === 0 || ['get-url', 'show'].includes(positional[0]!)
   if (subcommand === 'symbolic-ref') return !rest.some((word) => /^(-d|--delete)$/.test(word)) && positional.length <= 1
+  // `branch` with only listing options and no name lists branches (`branch -v --no-color`); any other option can write.
+  if (subcommand === 'branch') return positional.length === 0 && rest.every((word) => /^(-v|-vv|--verbose|-a|--all|-r|--remotes|-l|--list|--no-color|--color|--show-current|--no-column)$/.test(word))
   return false
 }
 /** Functions that run the Git command in their argument list. */

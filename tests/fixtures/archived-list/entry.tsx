@@ -3,7 +3,7 @@
 import { createRoot } from 'react-dom/client'
 import { ThreadsSidebar } from '../../../src/renderer/components/ThreadsSidebar'
 import { useAppStore } from '../../../src/renderer/stores/appStore'
-import type { Thread } from '../../../src/shared/types'
+import type { GitHeadsResult, Thread } from '../../../src/shared/types'
 import '../../../src/renderer/styles/app.css'
 
 const ARCHIVED = 600
@@ -11,10 +11,12 @@ const errors: string[] = []
 window.addEventListener('error', (event) => errors.push(event.message))
 window.addEventListener('unhandledrejection', (event) => errors.push(String(event.reason)))
 
-// Every bridge call answers nothing; event subscriptions return their unsubscribe.
+// Every bridge call answers nothing; event subscriptions return their unsubscribe. The cards' branch read always answers
+// a batch (`git.heads`): here one that names no branch.
 const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
 const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-;(window as unknown as { mousse: unknown }).mousse = new Proxy({}, { get: () => group() })
+const git = new Proxy({}, { get: (_target, key: string) => (key === 'heads' ? async (): Promise<GitHeadsResult> => ({ projects: {}, threads: {} }) : call(key)) })
+;(window as unknown as { mousse: unknown }).mousse = new Proxy({}, { get: (_target, key: string) => (key === 'git' ? git : group()) })
 
 const at = '2026-11-05T10:00:00.000Z'
 const thread = (id: string, name: string, over: Partial<Thread> = {}): Thread =>

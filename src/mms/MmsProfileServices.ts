@@ -190,6 +190,7 @@ import { trustExistingProjectsOnce } from './git/repoPrograms'
 import { LimitPoller } from './usageHistory/limitPoller'
 import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup/startupTiming'
 import { logInfo } from './log/diag'
+import { onThreadBranchChanged } from './workspace/threadHeads'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -1128,6 +1129,10 @@ export class MmsProfileServices {
       this.threadRuntimes.on('tasks.updated', onTasks)
       this.platform.onDispose(() => { this.threadRuntimes.off('tasks.updated', onTasks) })
     }
+    // Mousse made a thread's worktree or renamed its branch: windows read that card's branch again (`git.heads`).
+    this.platform.onDispose(onThreadBranchChanged((threadId) => {
+      if (this.threads.getThread(threadId)) this.events.broadcast('protocol:event', { type: 'git.headsChanged', data: { threadIds: [threadId] } })
+    }))
     // Minimum MMS-owned persistence so headless turns survive without the GUI.
     // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).
     this.orchestrator.setPersistCallback((threadId) => {
@@ -1585,11 +1590,12 @@ export class MmsProfileServices {
       beforePurgeRemoval: async (record) => {
         // A delete that keeps the thread's work keeps its snapshots too: nothing is released, and no store is collected.
         if (record.purge?.keptWork) return
+        const owned = this.lifecycleOwnedTasks(record.taskId)
         // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
         // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
         // tries again instead of leaving the refs or the store behind for good.
         const failures: string[] = []
-        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+        for (const task of owned) {
           try { await releaseThreadSnapshots(task.location, undefined, { discardAuthorized: Boolean(record.purge?.discardAuthorized) }) } catch (error) { failures.push(`${task.taskId}: ${error instanceof Error ? error.message : String(error)}`) }
         }
         if (failures.length) throw new Error(`The snapshots of a deleted thread could not be released yet; the delete will try again. ${failures.join('; ')}`)
@@ -2676,6 +2682,7 @@ export class MmsProfileServices {
           console.warn('agent episodes a restart cut short could not be ended', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
         }
       }, stopping), log)
+      if (!stopping()) await startupBackgroundTimed('forkCheckpoints', () => this.orchestrator.recoverForkCreations(stopping), log)
       if (!stopping()) await startupBackgroundTimed('subagentLineage', async () => this.repairSubagentLineage(), log)
     } finally {
       this.finishStartupLifecycle()
@@ -2902,6 +2909,7 @@ export class MmsProfileServices {
     // Idle threads leave memory and reload from disk when next needed; the feature flag is the kill switch.
     this.orchestrator.residency?.setEnabled(() => this.config.get().features.releaseIdleThreads !== false)
     startupPhase('start.residency', () => this.orchestrator.residency?.start())
+    this.orchestrator.startPreparedWorkspaceCleanup()
     // Threads still on JSON files move to thread.db in the background, one at a time.
     startupPhase('start.threadImport', () => this.threads.startBackgroundImport())
     // Wallpaper images no theme has used for a week go, in the background.

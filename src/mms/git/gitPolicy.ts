@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { spawn, spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
@@ -10,6 +9,7 @@ import { isGitDirectory, isGitDirectoryAsync, stripInheritedGitEnv, withGitConfi
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
+import { spawnGitSync, spawnGit } from './gitSpawn'
 
 /**
  * The central check for the Git (and `gh`) commands Mousse itself runs. It never applies to commands an
@@ -150,7 +150,7 @@ const SYNC_READS: CheckReads = {
   },
   isGitDirectory,
   git(cwd, args, gitDir) {
-    const result = timeGitSync(() => spawnSync(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: gitEnvFor(readGitEnv(gitDir)) }))
+    const result = timeGitSync(() => spawnGitSync(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: gitEnvFor(readGitEnv(gitDir)) }))
     return result.error ? null : { status: result.status, stdout: result.stdout }
   },
   gitFolder(cwd, gitDir, routing) {
@@ -161,7 +161,7 @@ const SYNC_READS: CheckReads = {
 /** {@link SYNC_READS}'s `git` without blocking: the same command, time limit and answer. */
 function readGitAsync(cwd: string, args: readonly string[], gitDir: string | undefined, signal?: AbortSignal): Promise<GitRead> {
   return new Promise((settle) => {
-    const child = timeGitChild(() => spawn(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true, env: gitEnvFor(readGitEnv(gitDir)), stdio: ['ignore', 'pipe', 'ignore'], signal }))
+    const child = timeGitChild(() => spawnGit(gitFile(), ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true, env: gitEnvFor(readGitEnv(gitDir)), stdio: ['ignore', 'pipe', 'ignore'], signal }))
     const chunks: Buffer[] = []
     let failed = false
     const timer = setTimeout(() => { failed = true; child.kill() }, READ_GIT_TIMEOUT_MS)
@@ -276,8 +276,7 @@ const ownedBranchScope = new AsyncLocalStorage<ReadonlySet<string>>()
 
 /**
  * Runs `work` with `branches` (full names, without `refs/heads/`) counted as Mousse's, for Git commands it runs itself.
- * Only for a branch Mousse's own records show it made: a thread's worktree branch, which `git worktree add -b` created
- * (so no branch of that name was there before) and which Mousse may have renamed since. Whatever the name, the person's
+ * Only for a branch Mousse's own records show it made, or a new name Git will create only if it is free. Whatever the name, the person's
  * prefix or one the title model picked, the branch is then judged as a `mousse/` branch is.
  */
 export function withOwnedBranches<T>(branches: readonly string[], work: () => T): T {
@@ -482,14 +481,20 @@ function heads(names: readonly string[], prefix = 'refs/heads/'): string[] {
   return names.map((name) => (name.startsWith('refs/') ? name : `${prefix}${name}`))
 }
 
-function updateRefInput(stdin: string | undefined): string[] | null {
+function updateRefInput(stdin: string | undefined): { refs: string[]; head: boolean } | null {
   if (stdin === undefined) return null
   const refs: string[] = []
+  let head = false
   for (const line of stdin.split(/[\n\0]/)) {
-    const [command, ref] = line.trim().split(/\s+/)
-    if (command && ref && /^(update|create|delete|symref-update|symref-create|symref-delete)$/.test(command)) refs.push(ref)
+    const words = line.trim().split(/\s+/)
+    const [command, ref, target, oldType, oldTarget] = words
+    if (command === 'symref-update' && ref === 'HEAD' && words.length === 5 &&
+      target?.startsWith('refs/heads/') && oldType === 'ref' && oldTarget?.startsWith('refs/heads/')) {
+      head = true
+      refs.push(target, oldTarget)
+    } else if (command && ref && /^(update|create|delete|symref-update|symref-create|symref-delete)$/.test(command)) refs.push(ref)
   }
-  return refs
+  return { refs, head }
 }
 
 const isObjectName = (value: string): boolean => /^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(value)
@@ -587,6 +592,10 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       // Records the index's cache tree back into the index.
       return { refs: [], index: true }
     case 'config': {
+      if (rest.length === 4 && rest[0] === '--local' && rest[1] === '--rename-section' &&
+        rest.slice(2).every((section) => section.startsWith('branch.'))) {
+        return { refs: rest.slice(2).map((section) => `refs/heads/${section.slice('branch.'.length)}`), config: true, branchConfig: true }
+      }
       const [first] = positionals(rest, new Set(['--file', '-f', '--blob', '--type', '--default', '--comment']))
       const reads = has(rest, '--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l', '--get-color', '--get-colorbool') || first === 'get' || first === 'list'
       const writes = has(rest, '--unset', '--unset-all', '--add', '--replace-all', '--rename-section', '--remove-section', '-e', '--edit') || ['set', 'unset', 'rename-section', 'remove-section', 'edit'].includes(first ?? '')
@@ -626,9 +635,9 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       // Without `--no-deref` an update or delete follows a symbolic ref and lands on its target.
       const deref = !has(rest, '--no-deref')
       if (has(rest, '--stdin')) {
-        const refs = updateRefInput(stdin)
+        const input = updateRefInput(stdin)
         const perLine = stdin !== undefined && /(^|[\n\0])\s*option\s+no-deref/.test(stdin)
-        return refs ? { refs, deref: deref && !perLine } : { refs: [], unlistedRefs: true }
+        return input ? { ...input, deref: deref && !perLine } : { refs: [], unlistedRefs: true }
       }
       const [ref] = positionals(rest, new Set(['-m']))
       if (!ref) return { refs: [], unlistedRefs: true }

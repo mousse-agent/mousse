@@ -18,7 +18,7 @@ import { UndoService } from '../src/mms/actions/UndoService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { trustRepositoryPrograms } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { actionOptions, CRASH_CHILD_REQUIRE, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { actionOptions, CRASH_CHILD_REQUIRE, git, gitFoundationFixture, KILL_CRASH_CHILD } from './fixtures/gitFoundation'
 import { pressed } from './support/userRequest'
 
 let f: ReturnType<typeof gitFoundationFixture>
@@ -342,7 +342,7 @@ describe('removing converted files and writing them again leaves the folder as G
     writeFileSync(entry, `import { UndoService } from '${project}/src/mms/actions/UndoService'; import { recordExactTrees } from '${project}/src/mms/actions/snapshots'; import { pressed } from '${project}/tests/support/userRequest'; recordExactTrees(false); await pressed('Undo', () => new UndoService(${JSON.stringify(f.thread)}).undoLatest('main', ${JSON.stringify(cwd)}));`)
     await build({ entryPoints: [entry], outfile: bundle, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     // The process stops as Git is about to write the new versions, after Mousse removed the old ones.
-    gitLauncher('*" checkout-index "*', 'kill -KILL "$PPID"; exit 86')
+    gitLauncher('*" checkout-index "*', `${KILL_CRASH_CHILD}; exit 86`)
     const child = spawnSync(process.execPath, [bundle], { env: { ...process.env, MOUSSE_HOME: f.home }, encoding: 'utf8', timeout: 30_000 })
     process.env.PATH = previousPath
     expect(child.signal, child.stderr).toBe('SIGKILL')

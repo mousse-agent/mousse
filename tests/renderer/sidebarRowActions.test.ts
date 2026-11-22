@@ -55,7 +55,7 @@ const projectsApi = {
 function preload(): unknown {
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = (known: Record<string, unknown> = {}) => new Proxy(known, { get: (target, key: string) => target[key] ?? call(key) })
-  return new Proxy({ platform: 'win32', threads: group(threadsApi), projects: group(projectsApi) } as Record<string, unknown>, {
+  return new Proxy({ platform: 'win32', threads: group(threadsApi), projects: group(projectsApi), git: {} } as Record<string, unknown>, {
     get: (target, key: string) => target[key] ?? group()
   })
 }

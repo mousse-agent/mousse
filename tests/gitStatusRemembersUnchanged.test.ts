@@ -3,24 +3,29 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ExecGitOptions } from '../src/mms/git/gitSpawn'
+import { ChildProcess } from 'node:child_process'
 
-// Counts the `hash-object` runs the status read makes, without changing what they do. `systemAttributes`, when set,
-// is the answer to `git var GIT_ATTR_SYSTEM`: the real file is the installation's, which a test must not write.
+// Count real hash starts at the tracked launcher on both platforms. The system attributes path is the
+// installation's, so the one test that edits it gives Git's query a temporary path.
 const hashRuns = vi.hoisted(() => ({ count: 0, systemAttributes: null as string | null }))
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>()
-  const execFile = ((...args: Parameters<typeof actual.execFile>) => {
-    const argv = args[1]
-    if (Array.isArray(argv) && argv.includes('hash-object')) hashRuns.count += 1
-    const callback = args.at(-1)
-    if (hashRuns.systemAttributes && Array.isArray(argv) && argv.at(-1) === 'GIT_ATTR_SYSTEM' && typeof callback === 'function') {
-      const answer = `${hashRuns.systemAttributes}\n`
-      setImmediate(() => (callback as (error: null, stdout: string, stderr: string) => void)(null, answer, ''))
-      return undefined as unknown as ReturnType<typeof actual.execFile>
+vi.mock('../src/mms/git/gitSpawn', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/mms/git/gitSpawn')>()
+  type Callback = Parameters<typeof actual.execFileGit>[3]
+  return {
+    ...actual,
+    execFileGit(file: string, args: readonly string[], options: ExecGitOptions, callback: Callback): ChildProcess {
+      if (hashRuns.systemAttributes && args.at(-1) === 'GIT_ATTR_SYSTEM') {
+        const answer = hashRuns.systemAttributes + '\n'
+        const child = new ChildProcess()
+        setImmediate(() => { callback(null, answer, ''); child.emit('close', 0, null) })
+        return child
+      }
+      const child = actual.execFileGit(file, args, options, callback)
+      if (args.includes('hash-object')) child.once('spawn', () => { hashRuns.count += 1 })
+      return child
     }
-    return (actual.execFile as (...values: unknown[]) => unknown)(...args)
-  }) as typeof actual.execFile
-  return { ...actual, execFile }
+  }
 })
 
 const { GitService } = await import('../src/mms/git/GitService')
