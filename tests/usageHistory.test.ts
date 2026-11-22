@@ -1,6 +1,8 @@
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { getUsageHistoryWorkerBuildOptions } from '../scripts/build-cli.mjs'
@@ -8,7 +10,7 @@ import { UsageHistoryScanner } from '../src/mms/usageHistory/UsageHistoryScanner
 import { UsageHistoryReader } from '../src/mms/usageHistory/usageHistoryReader'
 import type { UsageHistoryResponse } from '../src/shared/usageHistory'
 
-// Log lines in each agent's own format, written by hand from real logs (Claude Code 2.x, Codex 0.6x, Grok, Pi).
+// Log lines in each agent's own format, written by hand from real logs (Claude Code 2.x, Codex 0.6x, Grok, Pi, Antigravity).
 const NOW = Date.parse('2026-11-19T12:00:00Z')
 const at = (hoursAgo: number) => new Date(NOW - hoursAgo * 3_600_000).toISOString()
 const claudeLine = (id: string, hoursAgo: number, usage: Record<string, number>, model = 'claude-opus-5-5') =>
@@ -25,6 +27,16 @@ const piLines = (hoursAgo: number) => [
   JSON.stringify({ type: 'session', id: 'pi1' }),
   JSON.stringify({ type: 'message', id: 'm1', timestamp: at(hoursAgo), message: { role: 'assistant', model: 'house-model', usage: { input: 100, cacheRead: 0, cacheWrite: 0, output: 20, cost: { total: 0.5 } } } })
 ]
+const antigravityLine = (step: number, hoursAgo: number, fields: Record<string, unknown>) =>
+  JSON.stringify({ step_index: step, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: at(hoursAgo), ...fields })
+const writeAntigravitySummaries = (appDir: string, rows: ReadonlyArray<[string, string[]]>) => {
+  mkdirSync(appDir, { recursive: true })
+  const db = new DatabaseSync(join(appDir, 'conversation_summaries.db'))
+  db.exec('CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT NOT NULL)')
+  const insert = db.prepare('INSERT OR REPLACE INTO conversation_summaries (conversation_id, workspace_uris) VALUES (?, ?)')
+  for (const [id, paths] of rows) insert.run(id, JSON.stringify(paths.map((p) => pathToFileURL(p).href)))
+  db.close()
+}
 
 let home: string
 let cachePath: string
@@ -137,6 +149,63 @@ describe('usage history from the agents\' own logs', () => {
     const restarted = await scanner().history({ range: '24h', timeZone: 'UTC' })
     expect(tokensOf(restarted, 'claude-code')).toBe(tokens)
     expect(sourceOf(restarted, 'claude-code').readFiles).toBe(0)
+  })
+
+  it('reads Antigravity transcripts from both standalone and Mousse profile homes, handles checkpoints, and reads workspaces', async () => {
+    const cliDir = join(home, '.gemini', 'antigravity-cli')
+    const cliTranscript = join(cliDir, 'brain', 'agy-cli-1', '.system_generated', 'logs', 'transcript.jsonl')
+    write(cliTranscript, [
+      JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: at(4), content: 'hi' }),
+      antigravityLine(1, 4, { model: 'gemini-4-neon-high', input_tokens: 400, cache_read_tokens: 1000, output_tokens: 80 }),
+      // Compaction checkpoint omits `model`; it inherits the session's latest model.
+      JSON.stringify({ step_index: 2, source: 'SYSTEM', type: 'CHECKPOINT', status: 'DONE', created_at: at(3), input_tokens: 50, cache_read_tokens: 500, output_tokens: 20 }),
+      // Duplicate step_index with fewer output tokens is ignored; zero-token and malformed lines are skipped.
+      antigravityLine(1, 4, { model: 'gemini-4-neon-high', input_tokens: 400, cache_read_tokens: 1000, output_tokens: 40 }),
+      antigravityLine(3, 3, { model: 'gemini-4-neon-high', input_tokens: 0, cache_read_tokens: 0, output_tokens: 0 }),
+      '{bad json'
+    ])
+    // `transcript_full.jsonl` beside `transcript.jsonl` must never be double-counted.
+    write(join(cliDir, 'brain', 'agy-cli-1', '.system_generated', 'logs', 'transcript_full.jsonl'), [
+      antigravityLine(99, 4, { model: 'gemini-4-neon-high', input_tokens: 99999, cache_read_tokens: 0, output_tokens: 1 })
+    ])
+    const profileAppDir = join(home, '.mousse', 'profiles', 'prf_1', 'providers', 'antigravity', 'gemini-home', 'antigravity-acp')
+    const acpTranscript = join(profileAppDir, 'brain', 'agy-acp-1', '.system_generated', 'logs', 'transcript.jsonl')
+    write(acpTranscript, [
+      antigravityLine(1, 2, { model: 'claude-opus-5-5', input_tokens: 2000, cache_read_tokens: 10000, output_tokens: 500 })
+    ])
+    writeAntigravitySummaries(profileAppDir, [['agy-acp-1', ['/work/mousse', '/home/me']]])
+
+    const scan = scanner()
+    const history = await scan.history({ range: '24h', timeZone: 'UTC', agent: 'antigravity' })
+    const agy = history.agents.find((agent) => agent.id === 'antigravity')!
+    expect(agy.label).toBe('Antigravity')
+    expect(agy.sessions).toBe(2)
+    expect(agy.tokens).toEqual({ input: 2450, cacheRead: 11500, cacheWrite: 0, output: 600 })
+    expect(agy.unpricedTokens).toBe(2050)
+    expect(agy.costUsd).toBeGreaterThan(0)
+    expect(history.models.find((m) => m.model === 'gemini-4-neon-high')).toMatchObject({ agent: 'antigravity', tokens: 2050, priced: false, costUsd: 0 })
+    expect(history.models.find((m) => m.model === 'claude-opus-5-5')).toMatchObject({ agent: 'antigravity', tokens: 12500, priced: true })
+    expect(history.projects.find((p) => p.name === '/work/mousse')).toMatchObject({ tokens: 12500, sessions: 1 })
+    expect(history.topSessions[0]).toMatchObject({ agent: 'antigravity', session: 'agy-acp-1', project: '/work/mousse', tokens: 12500 })
+    expect(history.agentIds).toContain('antigravity')
+
+    // Appending a new step increments the cached Antigravity transcript without rereading the unchanged one.
+    appendFileSync(cliTranscript, `${antigravityLine(4, 1, { model: 'gemini-4-neon-high', input_tokens: 100, cache_read_tokens: 0, output_tokens: 50 })}\n`)
+    const second = await scan.history({ range: '24h', timeZone: 'UTC', agent: 'antigravity' })
+    expect(tokensOf(second, 'antigravity')).toBe(2450 + 11500 + 600 + 150)
+    expect(sourceOf(second, 'antigravity').readFiles).toBe(1)
+  })
+
+  it('ranks unpriced Antigravity sessions by token count when their list cost is zero', async () => {
+    const cliDir = join(home, '.gemini', 'antigravity-cli')
+    write(join(cliDir, 'brain', 'agy-small', '.system_generated', 'logs', 'transcript.jsonl'), [
+      antigravityLine(1, 3, { model: 'gemini-4-neon-high', input_tokens: 100, cache_read_tokens: 0, output_tokens: 20 })
+    ])
+    write(join(cliDir, 'brain', 'agy-big', '.system_generated', 'logs', 'transcript.jsonl'), [
+      antigravityLine(1, 2, { model: 'gemini-4-neon-high', input_tokens: 5000, cache_read_tokens: 20000, output_tokens: 1000 })
+    ])
+    const history = await scanner().history({ range: '24h', timeZone: 'UTC', agent: 'antigravity' })
+    expect(history.topSessions.map((row) => row.session)).toEqual(['agy-big', 'agy-small'])
   })
 
   it('drops what it kept from another home folder once that folder is no longer read', async () => {

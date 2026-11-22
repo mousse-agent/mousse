@@ -1,3 +1,4 @@
+import { readdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { UsageAgentId } from '../../shared/usageHistory'
@@ -184,6 +185,60 @@ const piParser: LineParser<{ session: string; cwd?: string }> = {
   }
 }
 
+/**
+ * Antigravity (`agy` CLI and Mousse's isolated `agy acp` homes): `PLANNER_RESPONSE` steps carry
+ * `model`, uncached `input_tokens`, `cache_read_tokens` and `output_tokens`; `CHECKPOINT`
+ * compaction steps omit `model` and reuse the session's latest model.
+ */
+const antigravityParser: LineParser<{ model: string }> = {
+  markers: ['"input_tokens"', '"output_tokens"'],
+  initial: () => ({ model: '' }),
+  parse(line, state, path) {
+    const entry = JSON.parse(line)
+    const ts = tsOf(entry?.created_at)
+    if (!ts) return null
+    const loggedModel = str(entry.model)
+    if (loggedModel) state.model = loggedModel
+    const model = loggedModel || state.model
+    if (!model) return null
+    const input = num(entry.input_tokens)
+    const cacheRead = num(entry.cache_read_tokens)
+    const cacheWrite = num(entry.cache_write_tokens ?? entry.cache_creation_tokens)
+    const output = num(entry.output_tokens)
+    if (input + cacheRead + cacheWrite + output === 0) return null
+    const parts = path.split(sep)
+    const session = parts.length >= 4 ? parts[parts.length - 4]! : ''
+    const step = typeof entry.step_index === 'number' && Number.isFinite(entry.step_index) ? entry.step_index : null
+    const key = step !== null ? `a:${session}:${step}` : `a:${session}:${ts}:${input}:${output}`
+    return { ts, model, session, input, cacheRead, cacheWrite, output, key }
+  }
+}
+
+function antigravityBrainDirs(geminiDir: string): string[] {
+  return [
+    join(geminiDir, 'antigravity-cli', 'brain'),
+    join(geminiDir, 'antigravity', 'brain'),
+    join(geminiDir, 'antigravity-acp', 'brain')
+  ]
+}
+
+function mousseAntigravityBrains(): string[] {
+  const brains: string[] = []
+  for (const mousseDir of [...env('MOUSSE_HOME'), join(home(), '.mousse')]) {
+    brains.push(join(mousseDir, 'providers', 'antigravity', 'gemini-home', 'antigravity-acp', 'brain'))
+    try {
+      const profilesDir = join(mousseDir, 'profiles')
+      for (const entry of readdirSync(profilesDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+        brains.push(join(profilesDir, entry.name, 'providers', 'antigravity', 'gemini-home', 'antigravity-acp', 'brain'))
+      }
+    } catch {
+      // No profiles folder yet.
+    }
+  }
+  return brains
+}
+
 export const LOG_SOURCES: readonly LogSource[] = [
   {
     agent: 'claude-code',
@@ -213,6 +268,19 @@ export const LOG_SOURCES: readonly LogSource[] = [
     ],
     accepts: (path) => path.endsWith('.jsonl'),
     parser: piParser
+  },
+  {
+    agent: 'antigravity',
+    roots: () => [
+      ...env('GEMINI_HOME').flatMap(antigravityBrainDirs),
+      ...antigravityBrainDirs(join(home(), '.gemini')),
+      ...mousseAntigravityBrains()
+    ],
+    accepts: (path) => {
+      const parts = path.split(sep)
+      return parts.length >= 4 && parts[parts.length - 1] === 'transcript.jsonl' && parts[parts.length - 2] === 'logs' && parts[parts.length - 3] === '.system_generated'
+    },
+    parser: antigravityParser
   }
 ]
 
