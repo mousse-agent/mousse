@@ -9,6 +9,7 @@ import { IMAGE_MAX_DATA_CHARS } from '../../../shared/imageLimits'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { harnessAppError } from '../../../shared/harness/types'
 import { compareVersions } from '../../../shared/net/version'
+import type { ContinuationInfo, LiveProcessHost } from '../driver'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
@@ -34,7 +35,7 @@ import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopRea
 import { xaiHandlers, xaiStopFailure } from './xai'
 
 /** The title is generic on agy: its launch arguments name the role and describe the work. */
-function subagentActivity(rawInput: unknown, title: string | undefined) {
+function subagentActivity(rawInput: unknown, title: string | undefined, background = false) {
   const args = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {}
   const role = typeof args.Role === 'string' ? args.Role.trim() : ''
   const agentType = typeof args.TypeName === 'string' ? args.TypeName.trim().slice(0, ACTIVITY_DESCRIPTION_CHARS) : ''
@@ -43,11 +44,28 @@ function subagentActivity(rawInput: unknown, title: string | undefined) {
     kind: 'subagent' as const,
     description: (role || title || 'Task').slice(0, ACTIVITY_DESCRIPTION_CHARS),
     ...(agentType ? { agentType } : {}),
-    ...(prompt ? { prompt } : {})
+    ...(prompt ? { prompt } : {}),
+    ...(background ? { background: true as const } : {})
   }
 }
 
-/** Extracts text from an ACP `tool_call_update`'s `rawOutput` or `content` blocks (for subagent call records). */
+/** Command activity for ACP shell tools (`run_command`), so backgrounded commands can settle in place. */
+function commandActivity(rawInput: unknown, title: string | undefined) {
+  const args = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {}
+  const raw = typeof args.CommandLine === 'string' ? args.CommandLine.trim()
+    : typeof args.command === 'string' ? args.command.trim()
+      : ''
+  return {
+    kind: 'command' as const,
+    command: (raw || title || 'command').slice(0, 1000)
+  }
+}
+
+function isDaemonCommand(rawInput: unknown): boolean {
+  return Boolean(rawInput && typeof rawInput === 'object' && (rawInput as { IsDaemon?: unknown }).IsDaemon === true)
+}
+
+/** Extracts text from an ACP `tool_call_update`'s `rawOutput` or `content` blocks (for subagent call records and summaries). */
 function extractToolOutputText(event: { rawOutput?: unknown; content?: unknown }): string | undefined {
   const { rawOutput, content } = event
   if (typeof rawOutput === 'string' && rawOutput.trim()) return rawOutput
@@ -90,6 +108,54 @@ function extractToolOutputText(event: { rawOutput?: unknown; content?: unknown }
   }
   return undefined
 }
+
+function extractToolSummary(event: { rawOutput?: unknown; content?: unknown }): string | undefined {
+  const text = extractToolOutputText(event)
+  if (!text) return undefined
+  const line = text.replace(/\s+/g, ' ').trim()
+  if (!line) return undefined
+  return line.length > 200 ? `${line.slice(0, 199)}…` : line
+}
+
+/** A background command or native subagent still running in the ACP process after a turn settled. */
+interface AcpBackgroundTask {
+  callId: string
+  kind: 'command' | 'subagent'
+  description: string
+  startedAt: number
+}
+
+/** A reactive turn an ACP agent started on its own after background work completed. */
+interface AcpContinuation {
+  id: string
+  info: ContinuationInfo
+  buffer: Array<{ update: unknown; sessionId?: string }>
+  claimed: boolean
+  discarded: boolean
+  settled: boolean
+  attachWaiters: Array<() => void>
+  done: Promise<void>
+  resolve: () => void
+  reject: (error: Error) => void
+  settleTimer?: ReturnType<typeof setTimeout>
+  quietTimer?: ReturnType<typeof setTimeout>
+  openTools: Map<string, string>
+  sawText: boolean
+  sawUsage: boolean
+  modelMovedPastOpenTools: boolean
+}
+
+/** How long a reactive continuation waits after `usage_update` (with no open tools/requests) before settling. */
+export const CONTINUATION_SETTLE_MS = 1_500
+/** Fallback quiet window for a reactive continuation that wrote text without sending `usage_update`. */
+export const CONTINUATION_QUIET_MS = 10_000
+/** Grace window after a background task finishes waiting for the agent's reactive wakeup to begin. */
+export const WAKE_GRACE_MS = 30_000
+/** Safety cap so a forgotten or silent background task cannot hold Waiting forever. */
+export const MAX_BACKGROUND_MS = 60 * 60_000
+
+/** Out-of-turn session updates that indicate a reactive continuation turn has started. */
+const CONTINUATION_START_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'plan'])
 
 /**
  * The ACP session lifecycle shared by every ACP agent: one agent process per thread, kept between
@@ -154,6 +220,20 @@ export interface AcpProcess extends AcpConnection {
    * file read or write) is refused, and ends the request.
    */
   refuseTools?: (what: string) => void
+  /** Background commands/subagents still running in the agent process after a turn settled (`quirks.backgroundWork`). */
+  backgroundTasks?: Map<string, AcpBackgroundTask>
+  /** Background tasks that ended between turns before the reactive wakeup began. */
+  recentlyEnded?: Array<{ taskId: string; description: string; summary?: string }>
+  /** True once any background-capable call ran on this process, so late reactive wakeups are accepted. */
+  mayWake?: boolean
+  /** Grace timer holding `backgroundWork` briefly after a background command ends until wakeup starts. */
+  wakeGraceTimer?: ReturnType<typeof setTimeout>
+  /** Safety cap timer so background work never holds Waiting indefinitely. */
+  backgroundCapTimer?: ReturnType<typeof setTimeout>
+  /** Last value reported to `liveHost.backgroundWork(threadId, active)`. */
+  reportedBackground?: boolean
+  /** In-flight reactive continuation started by the agent between turns. */
+  continuation?: AcpContinuation
 }
 
 /** Whether a steer goes into `process`'s running prompt as a second prompt, with no cancel (`AcpQuirks.nativeSteerFrom`). */
@@ -370,6 +450,10 @@ export interface AcpChatInput {
    * file writes are answered without asking. Absent asks about everything.
    */
   permissionMode?: PermissionMode
+  /** True when claiming a reactive continuation turn the ACP agent started on its own. */
+  continuation?: boolean
+  /** The continuation id reported by `LiveProcessHost.continuationStarted`. */
+  continuationId?: string
   prompt: string
   /** Prefixed to every prompt: the turn's skills, mode, applet catalogue and usable Mousse tools. */
   turnPreamble?: string
@@ -409,8 +493,8 @@ export interface AcpChatInput {
   onProviderTurn?: () => void
   /** A person is asked about the call `callId` (a permission request); false once it is answered. */
   onToolAwaiting?: (callId: string, waiting: boolean) => void
-  /** A tool call started, changed or ended; `status` says how it ended (`unfinished`: the turn ended first). */
-  onTool?: (event: ProviderToolEvent & { status?: 'completed' | 'failed' | 'unfinished' }) => void
+  /** A tool call started, changed or ended; `status` says how it ended (`unfinished`: the turn ended first; `background`: still running after `end_turn`). */
+  onTool?: (event: ProviderToolEvent & { status?: 'completed' | 'failed' | 'unfinished' | 'background' }) => void
   /** Who answers this turn's permission requests (the turn bridge's `permission`). */
   prompter?: PermissionPrompter
   /** The agent's session id, once known (provider refs name it for interrupt and terminate). */
@@ -448,6 +532,14 @@ export interface AcpSessionsOptions {
   loadIdleMs?: number
   /** Test seam: how long a prompt may get no sign of life before the turn fails (`PROMPT_SILENCE_MS`); 0 turns it off. */
   promptSilenceMs?: number
+  /** Test seam: settle wait after `usage_update` in a reactive continuation (`CONTINUATION_SETTLE_MS`). */
+  continuationSettleMs?: number
+  /** Test seam: fallback quiet window in a reactive continuation (`CONTINUATION_QUIET_MS`). */
+  continuationQuietMs?: number
+  /** Test seam: grace window after a background task completes waiting for wakeup (`WAKE_GRACE_MS`). */
+  wakeGraceMs?: number
+  /** Test seam: max duration a background task holds Waiting (`MAX_BACKGROUND_MS`). */
+  maxBackgroundMs?: number
   /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
@@ -483,10 +575,313 @@ export class AcpSessions {
   /** Per thread, the session a turn that did not finish left resumable, until `commitInterrupted` fingerprints it. */
   private readonly interrupted = new Map<string, string>()
   private stopped = false
+  private liveHost: LiveProcessHost | null = null
   private readonly prompter: PermissionPrompter
 
   constructor(private readonly options: AcpSessionsOptions) {
     this.prompter = options.prompter ?? questionsPrompter(options.questions)
+  }
+
+  /** Where live processes report background work, task ends and reactive continuation turns. */
+  setLiveHost(host: LiveProcessHost | null): void {
+    this.liveHost = host
+  }
+
+  /** The reactive continuation `threadId`'s process started itself and is still running, if any. */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
+    const cont = this.sessions.get(threadId)?.continuation
+    if (!cont || cont.settled) return undefined
+    return { id: cont.id, discarded: cont.discarded }
+  }
+
+  /** Whether `threadId`'s live process still holds a reactive continuation waiting to be claimed. */
+  hasContinuation(threadId: string, id?: string): boolean {
+    const cont = this.sessions.get(threadId)?.continuation
+    return Boolean(cont && !cont.discarded && !cont.claimed && (!id || cont.id === id))
+  }
+
+  /** Drops a reactive continuation held by `threadId`'s live process (only `id`, when given). */
+  discardContinuations(threadId: string, id?: string): void {
+    const active = this.sessions.get(threadId)
+    const cont = active?.continuation
+    if (!active || !cont || (id && cont.id !== id)) return
+    cont.discarded = true
+    this.clearContinuationTimers(cont)
+    this.wakeAttachWaiters(cont)
+    if (!cont.settled) {
+      cont.settled = true
+      cont.resolve()
+    }
+    if (!this.turning.has(active)) {
+      active.continuation = undefined
+      this.clearBackgroundState(active)
+      if (this.sessions.get(threadId) === active) {
+        this.sessions.delete(threadId)
+        this.forgetConversation(threadId)
+      }
+      setImmediate(() => { if (!this.turning.has(active)) closeAcpConnection(active) })
+    }
+  }
+
+  /** Stops any running turn, background work, or reactive continuation on `threadId`'s process. */
+  stopThread(threadId: string): 'stopped' | 'not_active' {
+    const active = this.sessions.get(threadId)
+    if (!active) return 'not_active'
+    const hadWork = this.turning.has(active) || this.hasBackgroundWork(active) || Boolean(active.continuation && !active.continuation.discarded)
+    if (!hadWork) return 'not_active'
+    if (active.backgroundTasks?.size) {
+      for (const task of active.backgroundTasks.values()) {
+        try {
+          this.liveHost?.taskEnded?.(threadId, {
+            toolUseId: task.callId,
+            taskId: task.callId,
+            status: 'stopped',
+            durationMs: Math.max(0, Date.now() - task.startedAt)
+          })
+        } catch { /* best effort */ }
+      }
+    }
+    this.clearBackgroundState(active)
+    this.failContinuation(active, new Error(`${this.options.label} was stopped`))
+    this.sessions.delete(threadId)
+    this.options.questions.autoRejectPendingForThread(threadId)
+    closeAcpConnection(active)
+    return 'stopped'
+  }
+
+  private hasBackgroundWork(process: AcpProcess): boolean {
+    return Boolean(process.backgroundTasks?.size) || Boolean(process.wakeGraceTimer)
+  }
+
+  private clearContinuationTimers(cont: AcpContinuation): void {
+    if (cont.settleTimer) { clearTimeout(cont.settleTimer); cont.settleTimer = undefined }
+    if (cont.quietTimer) { clearTimeout(cont.quietTimer); cont.quietTimer = undefined }
+  }
+
+  private wakeAttachWaiters(cont: AcpContinuation): void {
+    for (const wake of cont.attachWaiters.splice(0)) wake()
+  }
+
+  private settleContinuation(cont: AcpContinuation): void {
+    if (cont.settled) return
+    cont.settled = true
+    this.clearContinuationTimers(cont)
+    this.wakeAttachWaiters(cont)
+    cont.resolve()
+  }
+
+  private failContinuation(process: AcpProcess, error: Error): void {
+    const cont = process.continuation
+    if (!cont) return
+    cont.discarded = true
+    this.clearContinuationTimers(cont)
+    this.wakeAttachWaiters(cont)
+    if (!cont.settled) {
+      cont.settled = true
+      cont.reject(error)
+    }
+    if (process.continuation === cont) process.continuation = undefined
+  }
+
+  private syncBackgroundWork(process: AcpProcess): void {
+    const threadId = process.threadId
+    if (!threadId) return
+    const active = this.hasBackgroundWork(process)
+    if (active && !process.backgroundCapTimer) {
+      const capMs = this.options.maxBackgroundMs ?? MAX_BACKGROUND_MS
+      if (capMs > 0) {
+        process.backgroundCapTimer = setTimeout(() => {
+          process.backgroundCapTimer = undefined
+          if (!this.turning.has(process) && (!process.continuation || process.continuation.settled || process.continuation.discarded)) {
+            this.clearBackgroundState(process)
+          }
+        }, capMs)
+        process.backgroundCapTimer.unref?.()
+      }
+    } else if (!active && process.backgroundCapTimer) {
+      clearTimeout(process.backgroundCapTimer)
+      process.backgroundCapTimer = undefined
+    }
+    if (Boolean(process.reportedBackground) === active) return
+    process.reportedBackground = active
+    try {
+      this.liveHost?.backgroundWork?.(threadId, active)
+    } catch { /* host notification is best effort */ }
+  }
+
+  private clearBackgroundState(process: AcpProcess): void {
+    if (process.wakeGraceTimer) { clearTimeout(process.wakeGraceTimer); process.wakeGraceTimer = undefined }
+    if (process.backgroundCapTimer) { clearTimeout(process.backgroundCapTimer); process.backgroundCapTimer = undefined }
+    process.backgroundTasks?.clear()
+    process.recentlyEnded = undefined
+    if (process.reportedBackground && process.threadId) {
+      process.reportedBackground = false
+      try {
+        this.liveHost?.backgroundWork?.(process.threadId, false)
+      } catch { /* host notification is best effort */ }
+    }
+  }
+
+  private canSettleContinuationTools(cont: AcpContinuation): boolean {
+    if (cont.openTools.size === 0) return true
+    if (!cont.modelMovedPastOpenTools) return false
+    for (const name of cont.openTools.values()) if (name !== 'run_command') return false
+    return true
+  }
+
+  private continuationWaitingOnHost(process: AcpProcess): boolean {
+    if ((process.openRequests ?? 0) > 0) return true
+    return Boolean(process.threadId && this.options.questions.listPendingForThread(process.threadId).length > 0)
+  }
+
+  private scheduleContinuationSettle(process: AcpProcess, cont: AcpContinuation, kind: 'settle' | 'quiet'): void {
+    if (cont.settled || cont.discarded) return
+    const ms = kind === 'settle'
+      ? (this.options.continuationSettleMs ?? CONTINUATION_SETTLE_MS)
+      : (this.options.continuationQuietMs ?? CONTINUATION_QUIET_MS)
+    const arm = () => {
+      if (cont.settled || cont.discarded) return
+      if (this.continuationWaitingOnHost(process)) {
+        const retry = setTimeout(arm, Math.min(500, Math.max(20, ms)))
+        retry.unref?.()
+        if (kind === 'settle') cont.settleTimer = retry
+        else cont.quietTimer = retry
+        return
+      }
+      if (!this.canSettleContinuationTools(cont)) return
+      this.settleContinuation(cont)
+    }
+    if (kind === 'settle') {
+      if (cont.settleTimer) clearTimeout(cont.settleTimer)
+      cont.settleTimer = setTimeout(arm, ms)
+      cont.settleTimer.unref?.()
+    } else {
+      if (cont.quietTimer) clearTimeout(cont.quietTimer)
+      cont.quietTimer = setTimeout(arm, ms)
+      cont.quietTimer.unref?.()
+    }
+  }
+
+  private trackContinuationUpdate(process: AcpProcess, cont: AcpContinuation, update: unknown): void {
+    if (cont.settled || cont.discarded || !update || typeof update !== 'object') return
+    const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; name?: string; status?: string }
+    const kind = event.sessionUpdate
+    if (kind && (PROMPT_WORK_UPDATES.has(kind) || kind === 'usage_update')) {
+      this.clearContinuationTimers(cont)
+    }
+    if (kind === 'tool_call' && event.toolCallId) {
+      cont.openTools.set(event.toolCallId, event.name ?? '')
+      cont.modelMovedPastOpenTools = false
+      cont.sawUsage = false
+    } else if (kind === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
+      cont.openTools.delete(event.toolCallId)
+    } else if (kind === 'agent_message_chunk' && event.content?.type === 'text' && event.content.text) {
+      cont.sawText = true
+      if (cont.openTools.size > 0) cont.modelMovedPastOpenTools = true
+    } else if (kind === 'agent_thought_chunk' && event.content?.type === 'text' && event.content.text) {
+      if (cont.openTools.size > 0) cont.modelMovedPastOpenTools = true
+    }
+    if (kind === 'usage_update') {
+      cont.sawUsage = true
+      if (this.canSettleContinuationTools(cont)) this.scheduleContinuationSettle(process, cont, 'settle')
+    } else if (cont.sawText && this.canSettleContinuationTools(cont)) {
+      this.scheduleContinuationSettle(process, cont, 'quiet')
+    }
+  }
+
+  private maybeRearmContinuation(process: AcpProcess): void {
+    const cont = process.continuation
+    if (!cont || cont.settled || cont.discarded) return
+    if (!this.canSettleContinuationTools(cont) || this.continuationWaitingOnHost(process)) return
+    if (cont.sawUsage && !cont.settleTimer) this.scheduleContinuationSettle(process, cont, 'settle')
+    else if (cont.sawText && !cont.quietTimer) this.scheduleContinuationSettle(process, cont, 'quiet')
+  }
+
+  /** Handles `session/update` notifications while no turn is active on `process`. */
+  private handleRestingUpdate(process: AcpProcess, update: unknown, sessionId?: string): void {
+    noteCommands(process, update)
+    if (!this.options.quirks.backgroundWork || !update || typeof update !== 'object') return
+    const existing = process.continuation
+    if (existing && !existing.settled && !existing.discarded) {
+      existing.buffer.push({ update, sessionId })
+      this.trackContinuationUpdate(process, existing, update)
+      return
+    }
+    const event = update as { sessionUpdate?: string; toolCallId?: string; status?: string; rawOutput?: unknown; content?: unknown; title?: string }
+    const threadId = process.threadId
+    if (!threadId) return
+    if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
+      const task = process.backgroundTasks?.get(event.toolCallId)
+      if (!task) return
+      process.backgroundTasks!.delete(event.toolCallId)
+      const summary = extractToolSummary(event)
+      try {
+        this.liveHost?.taskEnded?.(threadId, {
+          toolUseId: task.callId,
+          taskId: task.callId,
+          status: event.status,
+          ...(summary ? { summary } : {}),
+          durationMs: Math.max(0, Date.now() - task.startedAt)
+        })
+      } catch { /* best effort */ }
+      ;(process.recentlyEnded ??= []).push({ taskId: task.callId, description: task.description, ...(summary ? { summary } : {}) })
+      if (process.wakeGraceTimer) clearTimeout(process.wakeGraceTimer)
+      const graceMs = this.options.wakeGraceMs ?? WAKE_GRACE_MS
+      if (graceMs > 0) {
+        process.wakeGraceTimer = setTimeout(() => {
+          process.wakeGraceTimer = undefined
+          this.syncBackgroundWork(process)
+        }, graceMs)
+        process.wakeGraceTimer.unref?.()
+      }
+      this.syncBackgroundWork(process)
+      return
+    }
+    if (!process.mayWake || !event.sessionUpdate || !CONTINUATION_START_UPDATES.has(event.sessionUpdate)) return
+    if (process.wakeGraceTimer) { clearTimeout(process.wakeGraceTimer); process.wakeGraceTimer = undefined }
+    const ended = process.recentlyEnded?.splice(0) ?? []
+    const pendingSubagents = [...(process.backgroundTasks?.values() ?? [])].filter((t) => t.kind === 'subagent')
+    const tasks = [
+      ...ended.map((item) => ({ taskId: item.taskId, description: item.description })),
+      ...pendingSubagents.map((item) => ({ taskId: item.callId, description: item.description }))
+    ]
+    const summaries = ended.flatMap((item) => (item.summary ? [item.summary] : item.description ? [item.description] : []))
+    if (!summaries.length && pendingSubagents.length) {
+      summaries.push(...pendingSubagents.map((item) => item.description))
+    }
+    const id = randomUUID()
+    let resolveDone!: () => void
+    let rejectDone!: (error: Error) => void
+    const done = new Promise<void>((resolve, reject) => { resolveDone = resolve; rejectDone = reject })
+    // Prevent unhandled rejection if the process exits before `chat({ continuation: true })` awaits `done`.
+    done.catch(() => undefined)
+    const cont: AcpContinuation = {
+      id,
+      info: { id, taskIds: tasks.map((t) => t.taskId), summaries, ...(tasks.length ? { tasks } : {}) },
+      buffer: [{ update, sessionId }],
+      claimed: false,
+      discarded: false,
+      settled: false,
+      attachWaiters: [],
+      done,
+      resolve: resolveDone,
+      reject: rejectDone,
+      openTools: new Map(),
+      sawText: false,
+      sawUsage: false,
+      modelMovedPastOpenTools: false
+    }
+    process.continuation = cont
+    this.trackContinuationUpdate(process, cont, update)
+    if (!this.liveHost?.continuationStarted) {
+      this.discardContinuations(threadId, id)
+      return
+    }
+    try {
+      this.liveHost.continuationStarted(threadId, cont.info)
+    } catch {
+      this.discardContinuations(threadId, id)
+    }
   }
 
   /** Opens a connection to the agent. `onAuthUrl` receives sign-in links; without it a link means the sign-in is gone. */
@@ -495,6 +890,20 @@ export class AcpSessions {
     if (this.stopped) throw new Error(`${label} provider is stopped`)
     let active: AcpProcess | undefined
     const inTurn = () => Boolean(active && this.turning.has(active))
+    // When a reactive continuation has started on `active` and is waiting for the orchestrator to attach its
+    // `provider-continuation` turn (`chat({ continuation: true })`), hold any permission, file or form request until the
+    // turn adopts the process (or the continuation is discarded/settled). Idle processes without an open continuation
+    // fail immediately below, preserving the idle-process isolation guard.
+    const waitForTurn = async (): Promise<boolean> => {
+      if (inTurn()) return true
+      const cont = active?.continuation
+      if (!cont || cont.discarded || cont.settled || cont.claimed) return false
+      await new Promise<void>((resolve) => {
+        if (inTurn() || cont.discarded || cont.settled) { resolve(); return }
+        cont.attachWaiters.push(resolve)
+      })
+      return inTurn()
+    }
     // An agent that wakes up on its own between turns (for instance, its own background shell task finishing) has no
     // running turn, transcript stream, lease or permission mode. Detach and close the idle process and drop its saved
     // session so it cannot keep acting unobserved or drift from Mousse's committed history; the next turn opens fresh
@@ -502,6 +911,8 @@ export class AcpSessions {
     const stopIdle = () => {
       const idle = active
       if (!idle || this.turning.has(idle)) return
+      this.clearBackgroundState(idle)
+      this.failContinuation(idle, new Error(`${label} cannot act outside a turn`))
       if (idle.threadId && this.sessions.get(idle.threadId) === idle) {
         this.sessions.delete(idle.threadId)
         this.forgetConversation(idle.threadId)
@@ -528,7 +939,7 @@ export class AcpSessions {
           active.refuseTools(request.toolCall?.title ?? 'a tool')
           return { outcome: { outcome: 'cancelled' } }
         }
-        if (!inTurn()) {
+        if (!(await waitForTurn())) {
           stopIdle()
           return { outcome: { outcome: 'cancelled' } }
         }
@@ -543,19 +954,19 @@ export class AcpSessions {
         return answer
       },
       ...(quirks.clientFs ? {
-        readTextFile: (request) => {
+        readTextFile: async (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
-          if (!inTurn()) {
+          if (!(await waitForTurn())) {
             stopIdle()
-            return Promise.reject(RequestError.invalidRequest(undefined, `${label} cannot read files outside a turn`))
+            throw RequestError.invalidRequest(undefined, `${label} cannot read files outside a turn`)
           }
           return readWorkspaceFile(scope, request)
         },
-        writeTextFile: (request) => {
+        writeTextFile: async (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
-          if (!inTurn()) {
+          if (!(await waitForTurn())) {
             stopIdle()
-            return Promise.reject(RequestError.invalidRequest(undefined, `${label} cannot write files outside a turn`))
+            throw RequestError.invalidRequest(undefined, `${label} cannot write files outside a turn`)
           }
           return writeWorkspaceFile(questions, scope, request, label)
         }
@@ -574,7 +985,7 @@ export class AcpSessions {
             active.refuseTools('a question')
             return { action: 'cancel' }
           }
-          if (!inTurn()) {
+          if (!(await waitForTurn())) {
             stopIdle()
             return { action: 'cancel' }
           }
@@ -609,6 +1020,7 @@ export class AcpSessions {
           if (!active) return
           active.openRequests = Math.max(0, (active.openRequests ?? 0) - 1)
           active.activity?.()
+          this.maybeRearmContinuation(active)
         }
       }),
       onAuthUrl: onAuthUrl ?? (() => {
@@ -618,13 +1030,17 @@ export class AcpSessions {
         active.connection.close(new Error(this.options.signInRequiredMessage))
       }),
       onExit: () => {
-        if (active) this.processes.delete(active)
+        if (!active) return
+        this.processes.delete(active)
+        this.clearBackgroundState(active)
+        this.failContinuation(active, new Error(`${label} exited`))
+        if (active.threadId && this.sessions.get(active.threadId) === active) this.sessions.delete(active.threadId)
       }
     })
     active = Object.assign(connection, { generation: this.options.launchGeneration(), signInGeneration: this.options.signInGeneration() })
-    // Between turns, and while a session opens, the agent's command list is still kept.
+    // Between turns, and while a session opens, keep the agent's command list and watch for background completions/wakeups.
     const resting = active
-    resting.onUpdate = (update) => noteCommands(resting, update)
+    resting.onUpdate = (update, sessionId) => this.handleRestingUpdate(resting, update, sessionId)
     this.processes.add(active)
     return active
   }
@@ -806,6 +1222,8 @@ export class AcpSessions {
   terminate(sessionId: string | undefined): void {
     const active = this.bySession(sessionId)
     if (!active) return
+    this.clearBackgroundState(active)
+    this.failContinuation(active, new Error(`${this.options.label} was terminated`))
     closeAcpConnection(active)
     if (active.threadId) {
       this.sessions.delete(active.threadId)
@@ -907,6 +1325,16 @@ export class AcpSessions {
     const stored = store.saved(input.threadId)
     let saved = stored && (stored.instanceId ?? this.options.defaultInstanceId) === instanceId ? stored : undefined
     let active = this.sessions.get(input.threadId)
+    let claimedContinuation: AcpContinuation | undefined
+    let priorSubagentIds: string[] = []
+    if (input.continuation) {
+      const cont = active?.continuation
+      if (!active || active.connection.signal.aborted || !cont || cont.discarded || (input.continuationId && cont.id !== input.continuationId)) {
+        return ''
+      }
+      claimedContinuation = cont
+      priorSubagentIds = [...(active.backgroundTasks?.values() ?? [])].filter((task) => task.kind === 'subagent').map((task) => task.callId)
+    }
     const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
     // A bot's session given other instructions is neither reused nor resumed (`AcpChatInput.bot`): a new one is opened.
     const opened = active ? active.instructionsHash : saved?.instructionsHash
@@ -915,7 +1343,9 @@ export class AcpSessions {
     const mcpToken = input.mcp?.token ?? null
     // A new relay catalogue reopens the session too: an agent reads its tool lists when the session opens.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
-    if (active && (botStale || active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.relayKey ?? null) !== relayKey || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
+    if (!claimedContinuation && active && (botStale || active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.relayKey ?? null) !== relayKey || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
+      this.clearBackgroundState(active)
+      this.failContinuation(active, new Error(`${label} session replaced`))
       this.close(active)
       this.sessions.delete(input.threadId)
       active = undefined
@@ -939,6 +1369,7 @@ export class AcpSessions {
     adopt(active)
     const abort = () => {
       questions.autoRejectPendingForThread(input.threadId)
+      this.failContinuation(current, new Error(`${label} was stopped`))
       // Closing also aborts setup RPCs; a lost startup abort must never dispatch a prompt.
       this.close(current)
     }
@@ -946,7 +1377,24 @@ export class AcpSessions {
     let text = ''
     let thinking = ''
     let turnUsage: AcpTurnUsage | undefined
-    const openTools = new Map<string, { title: string; name?: string; rawInput?: unknown }>()
+    interface TrackedTool {
+      title: string
+      name?: string
+      rawInput?: unknown
+      startedAt: number
+      isDaemon: boolean
+      isInvokeSubagent: boolean
+      description: string
+    }
+    interface LaunchedSubagent {
+      callId: string
+      description: string
+      startedAt: number
+      textResponses: number
+      sawTextInStep: boolean
+    }
+    const openTools = new Map<string, TrackedTool>()
+    const launchedSubagents = new Map<string, LaunchedSubagent>()
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let steerFailure: unknown
@@ -1037,8 +1485,18 @@ export class AcpSessions {
         readCarried()
       }
       if (event.sessionUpdate === 'agent_message_chunk' && textContent?.type === 'text') {
-        text += textContent.text ?? ''
+        const chunk = textContent.text ?? ''
+        if (chunk) for (const sub of launchedSubagents.values()) sub.sawTextInStep = true
+        text += chunk
         input.onText(text)
+      }
+      if (event.sessionUpdate === 'usage_update') {
+        for (const sub of launchedSubagents.values()) {
+          if (sub.sawTextInStep) {
+            sub.textResponses += 1
+            sub.sawTextInStep = false
+          }
+        }
       }
       // Agents such as Antigravity say what they are doing between tool calls as thoughts, not as message text.
       if (event.sessionUpdate === 'agent_thought_chunk' && textContent?.type === 'text' && textContent.text) {
@@ -1047,10 +1505,29 @@ export class AcpSessions {
       }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
         const subagent = isAcpSubagentTool(event.name)
-        const activity = subagent ? subagentActivity(event.rawInput, event.title) : undefined
+        const isInvokeSubagent = quirks.backgroundWork === true && event.name === 'invoke_subagent'
+        const isCommand = quirks.backgroundWork === true && event.name === 'run_command'
+        const activity = subagent
+          ? subagentActivity(event.rawInput, event.title, isInvokeSubagent && !input.bot)
+          : isCommand
+            ? commandActivity(event.rawInput, event.title)
+            : undefined
         const record = subagentToolName(event.name) ? (recordSubagentCall(event.name, event.rawInput, {}) ?? undefined) : undefined
-        const title = activity ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
-        openTools.set(event.toolCallId, { title, name: event.name, rawInput: event.rawInput })
+        const title = subagent && activity?.kind === 'subagent' ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
+        const description = subagent && activity?.kind === 'subagent'
+          ? activity.description
+          : isCommand && activity?.kind === 'command'
+            ? activity.command
+            : title
+        openTools.set(event.toolCallId, {
+          title,
+          name: event.name,
+          rawInput: event.rawInput,
+          startedAt: Date.now(),
+          isDaemon: isCommand && isDaemonCommand(event.rawInput),
+          isInvokeSubagent,
+          description
+        })
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
         input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
       }
@@ -1062,26 +1539,51 @@ export class AcpSessions {
       }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
         const tracked = openTools.get(event.toolCallId)
-        openTools.delete(event.toolCallId)
-        const toolName = tracked?.name ?? event.name
-        const rawInput = tracked?.rawInput ?? event.rawInput
-        const outputText = extractToolOutputText(event)
-        const record = subagentToolName(toolName)
-          ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
-          : undefined
-        const served = toolName ? mousseServerToolOf(toolName) : undefined
-        const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
-          ? { output: outputText }
-          : undefined
-        input.onTool?.({
-          phase: 'complete',
-          callId: event.toolCallId,
-          title: event.title ?? tracked?.title ?? `${label} tool`,
-          ...(toolName ? { toolName } : {}),
-          status: event.status as 'completed' | 'failed',
-          ...(record ? { record } : {}),
-          ...(followUpOutput ? { activity: followUpOutput } : {})
-        })
+        const bg = current.backgroundTasks?.get(event.toolCallId)
+        if (!tracked && bg) {
+          current.backgroundTasks?.delete(event.toolCallId)
+          const summary = extractToolSummary(event)
+          try {
+            this.liveHost?.taskEnded?.(input.threadId, {
+              toolUseId: bg.callId,
+              taskId: bg.callId,
+              status: event.status,
+              ...(summary ? { summary } : {}),
+              durationMs: Math.max(0, Date.now() - bg.startedAt)
+            })
+          } catch { /* best effort */ }
+        } else {
+          openTools.delete(event.toolCallId)
+          const isBackgroundLaunch = tracked?.isInvokeSubagent && event.status === 'completed' && !input.bot
+          if (tracked && isBackgroundLaunch) {
+            launchedSubagents.set(event.toolCallId, {
+              callId: event.toolCallId,
+              description: tracked.description,
+              startedAt: tracked.startedAt,
+              textResponses: 0,
+              sawTextInStep: false
+            })
+          }
+          const toolName = tracked?.name ?? event.name
+          const rawInput = tracked?.rawInput ?? event.rawInput
+          const outputText = extractToolOutputText(event)
+          const record = subagentToolName(toolName)
+            ? (recordSubagentCall(toolName, rawInput, { text: outputText, isError: event.status === 'failed' }) ?? undefined)
+            : undefined
+          const served = toolName ? mousseServerToolOf(toolName) : undefined
+          const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
+            ? { output: outputText }
+            : undefined
+          input.onTool?.({
+            phase: 'complete',
+            callId: event.toolCallId,
+            title: event.title ?? tracked?.title ?? `${label} tool`,
+            ...(toolName ? { toolName } : {}),
+            status: isBackgroundLaunch ? 'background' : event.status,
+            ...(record ? { record } : {}),
+            ...(followUpOutput ? { activity: followUpOutput } : {})
+          })
+        }
       }
       if (event.sessionUpdate === 'config_option_update' && event.configOptions) {
         const updated = quirks.modelConfigId ? modelOptions({ configOptions: event.configOptions }) : agentModels({ configOptions: event.configOptions }).models
@@ -1164,11 +1666,18 @@ export class AcpSessions {
         this.sessions.set(input.threadId, current)
       }
       active = current
-      active.onUpdate = onUpdate
+      active.onUpdate = claimedContinuation
+        ? (update) => {
+            onUpdate(update)
+            if (claimedContinuation && !claimedContinuation.settled) this.trackContinuationUpdate(active!, claimedContinuation, update)
+          }
+        : onUpdate
       if (!active.sessionId) throw new Error(`${label} session was not created`)
       input.onSession?.(active.sessionId)
-      await this.selectModel(active, input.model)
-      if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
+      if (!claimedContinuation) {
+        await this.selectModel(active, input.model)
+        if (!quirks.modelConfigId) await this.selectMode(active, input.mode)
+      }
       input.signal?.throwIfAborted()
       const imageBlocks = (input.images ?? []).map((image) => {
         const block = acpImageBlock(image)
@@ -1197,6 +1706,11 @@ export class AcpSessions {
       const cut = (): void => {
         cancelSent = true
         questions.autoRejectPendingForThread(input.threadId)
+        if (claimedContinuation && !claimedContinuation.settled) {
+          void turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! }).catch(() => undefined)
+          this.settleContinuation(claimedContinuation)
+          return
+        }
         // The same cancel and deadline as a stop: an agent that does not stop for the steer is
         // ended, and the turn fails rather than replaying a request whose outcome is unknown.
         void interruptWithDeadline({
@@ -1228,6 +1742,7 @@ export class AcpSessions {
         // A stop's cancel ends both prompts: it waits for the second one too.
         const running = turnProcess.prompting
         turnProcess.prompting = Promise.all([running, reply.then(() => undefined, () => undefined)]).then(() => undefined)
+        if (claimedContinuation && !claimedContinuation.settled) this.settleContinuation(claimedContinuation)
         reply.catch((error: unknown) => {
           // Only an error answer while the first prompt still runs is a refusal; a closed connection ends the turn anyway.
           const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
@@ -1293,7 +1808,51 @@ export class AcpSessions {
       let attachments = imageBlocks
       // A native steer's prompt the agent took in: the loop waits on it next, and sends nothing.
       let adopted: Promise<unknown> | undefined
-      for (;;) {
+      let runPromptLoop = true
+      if (claimedContinuation) {
+        claimedContinuation.claimed = true
+        prompting = true
+        promptSent = true
+        input.onProviderTurn?.()
+        active.activity = watchSilence
+        watchSilence()
+        for (const buffered of claimedContinuation.buffer.splice(0)) onUpdate(buffered.update)
+        this.wakeAttachWaiters(claimedContinuation)
+        // Re-check settle conditions in case a request or buffered update arrived before attach.
+        this.maybeRearmContinuation(active)
+        await claimedContinuation.done
+        if (active.continuation === claimedContinuation) active.continuation = undefined
+        if (riding) {
+          readCarried()
+          const taken = riding
+          riding = undefined
+          carried.push(...taken.steers.splice(0))
+          adopted = taken.reply
+          active.prompting ??= adopted.then(() => undefined, () => undefined)
+          input.onProviderTurn?.()
+          if (text) text += '\n\n'
+          watchSilence()
+        } else {
+          prompting = false
+          watchSilence()
+          input.signal?.throwIfAborted()
+          if (steerFailure) throw steerFailure
+          input.onBoundary?.()
+          collectSteer()
+          if (steerFailure) throw steerFailure
+          if (pendingSteers.length) {
+            const steers = pendingSteers.splice(0)
+            carried.push(...steers)
+            blocks = [steers.map((entry) => entry.text).join('\n')]
+            commandTurn = false
+            attachments = steerImageBlocks(steers)
+            if (text) text += '\n\n'
+          } else {
+            runPromptLoop = false
+          }
+        }
+      }
+      if (runPromptLoop) for (;;) {
         input.signal?.throwIfAborted()
         if (steerFailure) throw steerFailure
         let reply: Promise<unknown>
@@ -1408,7 +1967,56 @@ export class AcpSessions {
         attachments = steerImageBlocks(steers)
         if (text) text += '\n\n'
       }
-      for (const [callId, tracked] of openTools) input.onTool?.({ phase: 'complete', callId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}), status: 'unfinished' })
+      for (const sub of launchedSubagents.values()) {
+        if (sub.sawTextInStep) {
+          sub.textResponses += 1
+          sub.sawTextInStep = false
+        }
+      }
+      for (const [callId, tracked] of openTools) {
+        if (quirks.backgroundWork && !input.bot && tracked.name === 'run_command') {
+          input.onTool?.({ phase: 'complete', callId, title: tracked.title, toolName: tracked.name, status: 'background' })
+          active.mayWake = true
+          if (!tracked.isDaemon) {
+            ;(active.backgroundTasks ??= new Map()).set(callId, { callId, kind: 'command', description: tracked.description, startedAt: tracked.startedAt })
+          }
+        } else {
+          input.onTool?.({ phase: 'complete', callId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}), status: 'unfinished' })
+        }
+      }
+      if (quirks.backgroundWork && !input.bot) {
+        for (const sub of launchedSubagents.values()) {
+          active.mayWake = true
+          if (sub.textResponses >= 2) {
+            try {
+              this.liveHost?.taskEnded?.(input.threadId, {
+                toolUseId: sub.callId,
+                taskId: sub.callId,
+                status: 'completed',
+                durationMs: Math.max(0, Date.now() - sub.startedAt)
+              })
+            } catch { /* best effort */ }
+          } else {
+            ;(active.backgroundTasks ??= new Map()).set(sub.callId, { callId: sub.callId, kind: 'subagent', description: sub.description, startedAt: sub.startedAt })
+          }
+        }
+        if (claimedContinuation) {
+          for (const callId of priorSubagentIds) {
+            const task = active.backgroundTasks?.get(callId)
+            if (!task) continue
+            active.backgroundTasks!.delete(callId)
+            try {
+              this.liveHost?.taskEnded?.(input.threadId, {
+                toolUseId: task.callId,
+                taskId: task.callId,
+                status: 'completed',
+                durationMs: Math.max(0, Date.now() - task.startedAt)
+              })
+            } catch { /* best effort */ }
+          }
+        }
+        this.syncBackgroundWork(active)
+      }
       if (turnUsage) input.onUsage?.(turnUsage)
       return text
     } catch (error) {
@@ -1424,6 +2032,8 @@ export class AcpSessions {
         this.interrupted.set(input.threadId, sessionId)
       // Drained steers no prompt delivered go back; they run as the follow-up.
       handBack()
+      this.clearBackgroundState(current)
+      this.failContinuation(current, error instanceof Error ? error : new Error(String(error)))
       this.close(current)
       this.sessions.delete(input.threadId)
       if (steerFailure) throw steerFailure
@@ -1435,7 +2045,7 @@ export class AcpSessions {
       current.activity = undefined
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', abort)
-      current.onUpdate = (update) => noteCommands(current, update)
+      current.onUpdate = (update, sessionId) => this.handleRestingUpdate(current, update, sessionId)
       current.turnSignal = undefined
       current.turnPrompter = undefined
       current.turnToolAwaiting = undefined
@@ -1513,22 +2123,30 @@ export class AcpSessions {
     }
   }
 
-  /** Whether any agent process runs a turn now. */
+  /** Whether any agent process runs a turn or holds active background work now. */
   busy(): boolean {
-    return this.turning.size > 0
+    if (this.turning.size > 0) return true
+    for (const active of this.sessions.values()) {
+      if (this.hasBackgroundWork(active) || (active.continuation && !active.continuation.discarded)) return true
+    }
+    return false
   }
 
-  /** Idle agent processes close now; a busy one is replaced on that thread's next turn. */
+  /** Idle agent processes close now; a busy one (or one with background work) is replaced on that thread's next turn. */
   closeIdle(): void {
     for (const [threadId, active] of this.sessions) {
-      if (this.turning.has(active)) continue
+      if (this.turning.has(active) || this.hasBackgroundWork(active) || (active.continuation && !active.continuation.discarded)) continue
       this.close(active)
       this.sessions.delete(threadId)
     }
   }
 
   closeAll(): void {
-    for (const active of this.processes) closeAcpConnection(active)
+    for (const active of this.processes) {
+      this.clearBackgroundState(active)
+      this.failContinuation(active, new Error(`${this.options.label} provider closed`))
+      closeAcpConnection(active)
+    }
     this.sessions.clear()
   }
 

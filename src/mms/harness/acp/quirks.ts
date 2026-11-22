@@ -33,6 +33,13 @@ export interface AcpQuirks {
    * restarted as any other ACP agent.
    */
   nativeSteerFrom?: string
+  /**
+   * The agent runs background commands (`run_command` left open at `end_turn`) and background subagents
+   * (`invoke_subagent` whose launch completes before the child does) after `session/prompt` returns, then wakes up
+   * out-of-turn with updates and tool calls when they finish (Antigravity `agy acp`). Mousse tracks that pending work
+   * (`LiveProcessHost.backgroundWork`) and runs each reactive wakeup as a `provider-continuation` turn.
+   */
+  backgroundWork?: boolean
 }
 
 export const NO_QUIRKS: Readonly<AcpQuirks> = Object.freeze({})

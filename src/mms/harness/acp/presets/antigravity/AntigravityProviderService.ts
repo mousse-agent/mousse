@@ -8,7 +8,7 @@ import { ANTIGRAVITY_INSTANCE_ID } from '../../../../../shared/providerInstances
 import type { UserQuestionService } from '../../../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../../../data/AtomicFs'
 import { harnessAppError } from '../../../../../shared/harness/types'
-import { compareVersions, type OneShotSpec, type RuntimeUsage } from '../../../driver'
+import { compareVersions, type LiveProcessHost, type OneShotSpec, type RuntimeUsage } from '../../../driver'
 import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
 import { isAuthRequired } from '../../auth'
 import type { AcpConnectionFactory } from '../../connection'
@@ -524,6 +524,31 @@ export class AntigravityProviderService {
   /** Drops the saved ACP session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     this.acp.forgetConversation(threadId)
+  }
+
+  /** Where live ACP processes report background work, task ends and reactive continuation turns. */
+  setLiveHost(host: LiveProcessHost | null): void {
+    this.acp.setLiveHost(host)
+  }
+
+  /** The reactive continuation turn `threadId`'s live process is running now, if any. */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
+    return this.acp.inFlightContinuation(threadId)
+  }
+
+  /** Whether `threadId`'s live process still holds a reactive continuation waiting to run. */
+  hasContinuation(threadId: string, id?: string): boolean {
+    return this.acp.hasContinuation(threadId, id)
+  }
+
+  /** Drops reactive continuations held by `threadId`'s live process. */
+  discardContinuations(threadId: string, id?: string): void {
+    this.acp.discardContinuations(threadId, id)
+  }
+
+  /** Stops any background work or active turn on `threadId`'s live ACP process. */
+  stopThread(threadId: string): 'stopped' | 'not_active' {
+    return this.acp.stopThread(threadId)
   }
 
   /** The Mousse thread that owns each of these Antigravity session ids, where one does. */

@@ -33,9 +33,10 @@ export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = ACP_BASE_CAPABILIT
 
 /**
  * Client fs with the workspace check, `session/resume` for saved sessions, its exact protocol
- * version, the `model` option with the account's listed models only, and its own steer from 1.5.0.
+ * version, the `model` option with the account's listed models only, its own steer from 1.5.0,
+ * and background commands/subagents with out-of-turn reactive wakeups.
  */
-export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true, strictProtocol: true, modelConfigId: 'model', nativeSteerFrom: ANTIGRAVITY_NATIVE_STEER_FROM })
+export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true, strictProtocol: true, modelConfigId: 'model', nativeSteerFrom: ANTIGRAVITY_NATIVE_STEER_FROM, backgroundWork: true })
 
 /** The method `authenticate` signs in with, eagerly, before the first `session/new`. */
 export const ANTIGRAVITY_AUTH_METHOD = 'oauth-personal'
