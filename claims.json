@@ -82,6 +82,22 @@
       "expiresAt": "2026-11-22T18:34:57.715Z"
     },
     {
+      "task": "fix/usage-history-antigravity",
+      "session": "agibook-39826e",
+      "machine": "agibook",
+      "branch": "fix/usage-history-antigravity",
+      "paths": [
+        "src/shared/usageHistory.ts",
+        "src/mms/usageHistory",
+        "src/renderer/lib/usageHistory.ts",
+        "src/renderer/lib/usageHistoryDevices.ts",
+        "src/mms/protocol/handlers.ts",
+        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts"
+      ],
+      "claimedAt": "2026-11-22T16:55:24.773Z",
+      "expiresAt": "2026-11-22T18:55:24.773Z"
+    },
+    {
       "task": "git-spawn-off-daemon-loop",
       "session": "Animatrix-2dabf9",
       "machine": "Animatrix",
