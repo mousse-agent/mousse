@@ -78,6 +78,17 @@
       "expiresAt": "2026-11-22T19:01:50.787Z"
     },
     {
+      "task": "fix/mcp-server-before-boot-wakes",
+      "session": "agibook-e58f50",
+      "machine": "agibook",
+      "branch": "fix/mcp-server-before-boot-wakes",
+      "paths": [
+        "src/mms/MmsProfileServices.ts"
+      ],
+      "claimedAt": "2026-11-22T18:11:45.608Z",
+      "expiresAt": "2026-11-22T20:11:45.608Z"
+    },
+    {
       "task": "fix/standalone-acp-cursor-workspace",
       "session": "agibook-3d55b3",
       "machine": "agibook",
@@ -119,26 +130,6 @@
       ],
       "claimedAt": "2026-11-21T10:20:49.161Z",
       "expiresAt": "2026-11-21T19:07:55.290Z"
-    },
-    {
-      "task": "sidebar-branch-without-git-reads",
-      "session": "Animatrix-4b6bd9",
-      "machine": "Animatrix",
-      "branch": "sidebar-branch-without-git-reads",
-      "paths": [
-        "src/renderer/components/FilesPanel.tsx",
-        "src/renderer/stores/filesStore.ts",
-        "src/renderer/utils/filesBrowse.ts",
-        "src/renderer/utils/fileWorkspace.ts",
-        "src/mms/files/browsedRoot.ts",
-        "src/mms/protocol/handlers.ts",
-        "tests/renderer/filesPanelEmpty.test.ts",
-        "tests/filesByThread.test.ts",
-        "tests/filesBrowseRoot.test.ts",
-        "tests/filesBrowse.test.ts"
-      ],
-      "claimedAt": "2026-11-21T04:52:44.669Z",
-      "expiresAt": "2026-11-21T18:09:21.279Z"
     },
     {
       "task": "worktree-turns-skip-start-snapshot",
