@@ -646,7 +646,11 @@ export class MmsProfileServices {
       registry: this.orchestrator.mcpToolRegistry(),
       relay: this.orchestrator.relayHandler(),
       boundary: this.orchestrator.mcpToolBoundary(),
-      attribute: (threadId, meta) => this.orchestrator.attributeMcpCall(threadId, meta)
+      attribute: (threadId, meta) => this.orchestrator.attributeMcpCall(threadId, meta),
+      compactToolSchemas: (provider) =>
+        this.providerInstances.get(provider)?.driver === 'antigravity' ||
+        provider === 'antigravity' ||
+        provider.startsWith('antigravity:')
     })
     this.orchestrator.setAppletStore(this.applets)
     // Registry agents install once per installation; each profile records which versions it uses.

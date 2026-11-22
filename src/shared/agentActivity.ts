@@ -534,9 +534,13 @@ function todosOf(value: unknown): ActivityTodoItem[] | undefined {
 }
 
 function serverOf(toolName: string): string | undefined {
-  if (!toolName.startsWith('mcp__')) return undefined
-  const split = toolName.indexOf('__', 'mcp__'.length)
-  return split === -1 ? undefined : toolName.slice('mcp__'.length, split)
+  if (toolName.startsWith('mcp__')) {
+    const split = toolName.indexOf('__', 'mcp__'.length)
+    return split === -1 ? undefined : toolName.slice('mcp__'.length, split)
+  }
+  if (toolName.startsWith('mcp_mousse-relay_')) return 'mousse-relay'
+  if (toolName.startsWith('mcp_mousse_')) return 'mousse'
+  return undefined
 }
 
 /**

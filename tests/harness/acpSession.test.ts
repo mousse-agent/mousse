@@ -141,6 +141,44 @@ describe('ACP sessions', () => {
     expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({ phase: 'complete', callId: launch.toolCallId, status: 'completed' }))
   })
 
+  it('records Antigravity mcp_mousse_delegate_task and mcp_mousse_thread_send tool calls with their subagent ids', async () => {
+    const delegateIn = { title: 'GitHub researcher', prompt: 'Research GitHub', workspace: 'shared' }
+    const delegateOut = { delegationId: 'd-gh', childThreadId: 't-gh', title: 'GitHub researcher' }
+    const sendOut = { delegationId: 'd-gh-2', threadId: 't-gh', title: 'GitHub researcher', subagent: true }
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-del', name: 'mcp_mousse_delegate_task', title: 'Run mcp_mousse_delegate_task', rawInput: delegateIn, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-del', status: 'completed', rawOutput: { content: [{ type: 'text', text: JSON.stringify(delegateOut) }] } })
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-send', name: 'mcp_mousse_thread_send', title: 'Run mcp_mousse_thread_send', rawInput: { threadId: 't-gh', message: 'follow up' }, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-send', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: JSON.stringify(sendOut) } }] })
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    const onTool = vi.fn()
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'Start researcher', onText: vi.fn(), onTool })
+    expect(onTool).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      phase: 'start',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      status: 'completed',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, response: JSON.stringify(delegateOut), failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-send',
+      toolName: 'mcp_mousse_thread_send',
+      status: 'completed',
+      activity: { output: JSON.stringify(sendOut) }
+    }))
+  })
+
   it('lists the session’s models, sets the chosen one, and runs the agent default without setting one', async () => {
     const agent = scriptedAgent({})
     const { sessions, models } = core(agent.connect)

@@ -211,9 +211,9 @@ function mcpCustomType(rawName: string | undefined): string {
   return `tool-mcp__custom__${mcpToolSlug(rawName)}`
 }
 
-/** A runtime's full MCP tool name (`mcp__<server>__<tool>`, as Claude Code and Codex name them), split. */
+/** A runtime's full MCP tool name (`mcp__<server>__<tool>` for Claude/Codex, `mcp_mousse_<tool>` for Antigravity), split. */
 function splitMcpName(rawName: string | undefined): { server: string; tool: string } | undefined {
-  const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
+  const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/) ?? rawName?.match(/^mcp_(mousse-relay|mousse)_(.+)$/)
   return match ? { server: match[1]!, tool: match[2]! } : undefined
 }
 
@@ -232,7 +232,7 @@ const BUILTIN_TOOL_NAMES = new Set([
  * "Reading" is not one: it is guessed from below.
  */
 function titleIsToolName(title: string): boolean {
-  return /^mcp__\w+$/.test(title) || /^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(title) || (/^\w+$/.test(title) && knownToolName(title) !== undefined)
+  return /^mcp__\w+$/.test(title) || /^mcp_(?:mousse-relay|mousse)_\w+$/.test(title) || /^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(title) || (/^\w+$/.test(title) && knownToolName(title) !== undefined)
 }
 
 function fallbackToolName(msg: ChatMessage): string | undefined {
