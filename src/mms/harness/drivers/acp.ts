@@ -327,9 +327,11 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     ...(preset.classifyOption ? { classifyOption: preset.classifyOption } : {}),
     ...(preset.initializeMeta ? { initializeMeta: preset.initializeMeta } : {}),
     urlElicitation: true,
-    // ACP 1.5: agents offer terminal sign-in only to clients that can run one, and send sign-in
-    // links as URL elicitations only to clients that accept them.
-    clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {} } }),
+    formElicitation: true,
+    // ACP 1.5: agents offer terminal sign-in only to clients that can run one, send sign-in
+    // links as URL elicitations only to clients that accept them, and route interactive questions
+    // through form elicitations only when form support is advertised.
+    clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {}, form: {} } }),
     closeSessions: true,
     beforeLaunch: () => checkInstall(undefined, { reuse: true }),
     store: {
