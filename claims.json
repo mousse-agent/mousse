@@ -43,7 +43,7 @@
         "tests/antigravityOrchestrator.test.ts"
       ],
       "claimedAt": "2026-11-22T18:11:45.608Z",
-      "expiresAt": "2026-11-22T22:14:46.608Z"
+      "expiresAt": "2026-11-22T23:14:27.822Z"
     },
     {
       "task": "fix/standalone-acp-cursor-workspace",
