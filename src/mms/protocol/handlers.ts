@@ -1354,18 +1354,23 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
   const directory = ctx.mms.threads.getThreadDir(threadId)
+  const manager = new ThreadWorkspaceManager(directory)
+  const placement = threadPlacement(thread)
   if (!heldThreadLease) {
     await settledPreparation(directory)
-    const lease = await waitAcquireExecutionLease(directory, { source: 'task-workspace' })
-    try {
-      return await ensureOwnedTaskWorkspace(ctx, params, lease)
-    } finally {
-      releaseExecutionLeaseHandle(lease)
+    // Only making, claiming or rebuilding the worktree takes the thread's lease. A thread in its project's folder, or one
+    // whose worktree is ready, is used as it is: a Git action does not wait for a terminal open in the thread, which
+    // holds the lease for as long as it runs.
+    if (workspaceNeedsWriter(manager, manager.load(), placement)) {
+      const lease = await waitAcquireExecutionLease(directory, { source: 'task-workspace' })
+      try {
+        return await ensureOwnedTaskWorkspace(ctx, params, lease)
+      } finally {
+        releaseExecutionLeaseHandle(lease)
+      }
     }
   }
-  const manager = new ThreadWorkspaceManager(directory)
   const workspace = manager.load()
-  const placement = threadPlacement(thread)
   if (workspace?.prepared) {
     await new WorkspaceResolver(directory, threadId, project, placement).resolve('agent', 'main', undefined, heldThreadLease, branchNameSource(ctx, threadId))
   } else if (placement === 'project-folder') {
@@ -1376,11 +1381,23 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   }
   const stored = manager.load()
   await assertWorktreeFolderConnected(stored?.worktreePath)
-  if (stored && (!existsSync(join(stored.worktreePath, '.git')) || manager.rebuildUnfinished(stored)) && manager.hasReconstructionManifest(stored)) {
+  if (stored && worktreeNeedsRestore(manager, stored)) {
     await manager.restore(project, undefined, heldThreadLease, (notice) => ctx.mms.orchestrator.noteThreadUpdate(threadId, notice.text, { messageId: notice.id, kind: 'warning' }))
     clearCleanupMarker(ctx.mms.threads.lifecycleStore, threadId)
   }
   if ((await manager.verify()).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
+}
+
+/** A worktree a retirement or rebuild left without its `.git`, or unfinished, that its reconstruction manifest can bring back. */
+function worktreeNeedsRestore(manager: ThreadWorkspaceManager, workspace: ThreadWorkspaceMetadata): boolean {
+  return (!existsSync(join(workspace.worktreePath, '.git')) || manager.rebuildUnfinished(workspace)) && manager.hasReconstructionManifest(workspace)
+}
+
+/** Whether {@link ensureOwnedTaskWorkspace} has a worktree to claim, make or restore, which needs the thread's lease. */
+function workspaceNeedsWriter(manager: ThreadWorkspaceManager, workspace: ThreadWorkspaceMetadata | undefined, placement: ReturnType<typeof threadPlacement>): boolean {
+  if (workspace?.prepared) return true
+  if (placement === 'project-folder') return false
+  return !workspace || worktreeNeedsRestore(manager, workspace)
 }
 
 /** Refusals that follow from a thread's worktree being the thread's own. Each has a fixed code the GUI can show copy for. */

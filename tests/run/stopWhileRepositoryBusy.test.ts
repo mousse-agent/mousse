@@ -16,6 +16,7 @@ import { acquireRepositoryLease, getRepositoryLeasePath, type RepositoryLeaseHan
 import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
+import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 import { hiddenStoreIdentity } from '../../src/mms/git/hiddenStore'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -222,6 +223,10 @@ describe('Stop while the thread\'s repository is busy', () => {
     const existing = w.thread('Existing')
     await w.d.orch.send('Hello', false, { threadId: existing.id, clientRequestId: 'hello', awaitMode: 'ack' })
     await waitFor(() => w.adapter.turns.length === 1 && !w.running(existing.id), 'the first turn to finish')
+    // A next turn in a worktree as Mousse left it reaches the provider with no Git and no repository lease (#1758). Without
+    // its retained snapshot ref the start has to read the files, under the repository's lease.
+    const workspace = new ThreadWorkspaceManager(w.d.store.getThreadDir(existing.id)).load()!
+    execFileSync('git', ['update-ref', '-d', workspace.retainedRef], { cwd: workspace.worktreePath, stdio: 'ignore' })
 
     // Another process holds the lease and keeps its heartbeat fresh, so it is never taken over as stale.
     const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' })
@@ -233,7 +238,7 @@ describe('Stop while the thread\'s repository is busy', () => {
     writeLease()
     const refresh = setInterval(writeLease, 1_000)
     try {
-      // The next turn of a thread that already has a worktree: its recovery at the start waits for the repository.
+      // The next turn of a thread that already has a worktree: reading its files at the start waits for the repository.
       await w.d.orch.send('Again', false, { threadId: existing.id, clientRequestId: 'again', awaitMode: 'ack' })
       await waitFor(() => w.running(existing.id), 'the next turn to be admitted')
       await new Promise((resolve) => setTimeout(resolve, 300))

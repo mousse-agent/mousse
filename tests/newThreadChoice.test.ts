@@ -42,7 +42,10 @@ function daemon(options: { clientType?: 'gui' | 'cli' | 'bridge'; bridgeCaller?:
     },
     orchestrator: {
       setThreadPermissionMode: (id: string, permissionMode: Thread['permissionMode']) => { const next = { ...threads.get(id)!, permissionMode }; threads.set(id, next); return next },
-      setThreadModelOverride: (id: string, model: ModelOverride | undefined) => { threads.set(id, { ...threads.get(id)!, modelOverride: model }); return model }
+      setThreadModelOverride: (id: string, model: ModelOverride | undefined) => { threads.set(id, { ...threads.get(id)!, modelOverride: model }); return model },
+      // A window showing a new thread with a worktree starts its checkout early (#1771).
+      isActiveTurnRunning: () => false,
+      prepareNewThreadWorkspace: vi.fn()
     },
     providerInstances: {
       migrate: (model: ModelOverride) => model,

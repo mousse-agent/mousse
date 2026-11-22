@@ -74,11 +74,12 @@ it('reports provisioning from the owner before the checkout exists', async () =>
   const threadId = t.qualified(thread.id)
   const beforeCheckout = Promise.withResolvers<string>()
   const gate = Promise.withResolvers<void>()
-  const addWorktree = worktreeCheckout.addWorktree
-  const hold = vi.spyOn(worktreeCheckout, 'addWorktree').mockImplementationOnce(async (options) => {
-    beforeCheckout.resolve(options.worktreePath)
+  // A new thread's worktree is registered first (`git worktree add --no-checkout`) and its files written after.
+  const registerWorktree = worktreeCheckout.registerWorktree
+  const hold = vi.spyOn(worktreeCheckout, 'registerWorktree').mockImplementationOnce(async (options) => {
+    beforeCheckout.resolve(options.add[0]!)
     await gate.promise
-    return addWorktree(options)
+    return registerWorktree(options)
   })
   const provisioning = manager.provision(thread.id, 'main', repo)
   try {
