@@ -78,6 +78,17 @@
       "expiresAt": "2026-11-22T18:35:06.514Z"
     },
     {
+      "task": "fix/antigravity-subagent-cards",
+      "session": "agibook-011e1e",
+      "machine": "agibook",
+      "branch": "fix/antigravity-subagent-cards",
+      "paths": [
+        "src/mms/run/mcp/MousseMcpServer.ts"
+      ],
+      "claimedAt": "2026-11-22T17:01:50.787Z",
+      "expiresAt": "2026-11-22T19:01:50.787Z"
+    },
+    {
       "task": "fix/standalone-acp-cursor-workspace",
       "session": "agibook-3d55b3",
       "machine": "agibook",
