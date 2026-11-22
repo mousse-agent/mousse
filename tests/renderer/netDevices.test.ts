@@ -4,15 +4,16 @@ import {
   canWorkOnThreads,
   capabilityLabel,
   deviceLine,
+  deviceListLine,
   isComputer,
   isIncompatible,
   lastSeenLabel,
   netErrorWords,
   PAIRING_DISCLOSURE,
+  passLapsed,
   routeDetails,
   routeLabel,
   serveSettings,
-  updateInstructions,
   workOnThreadsDisclosure,
   worksOnThreads,
   type Device
@@ -173,7 +174,6 @@ describe('works on threads and blocking', () => {
     const policy = { blocked: true, maxPermissionMode: 'accept_edits' as const, terminal: false, editor: false }
     expect(deviceLine(device({ policy }), NOW)).toBe('Online · can read, chat, write · blocked on this computer')
     expect(deviceLine(device({ policy: { ...policy, blocked: false } }), NOW)).toBe('Online · can read, chat, write')
-    expect(deviceLine(device(), NOW)).toBe('Online · can read, chat, write')
   })
 })
 
@@ -201,62 +201,6 @@ describe('routeDetails', () => {
   })
 })
 
-describe('updateInstructions', () => {
-  const lines = (command?: string) => (command ?? '').split('\n')
-
-  it('gives a headless Linux x86_64 host the full sequence for this version', () => {
-    const result = updateInstructions(device({ platform: 'linux', arch: 'x64' }), '0.1.3')
-    const script = lines(result.command)
-    const base = 'https://github.com/mousse-agent/mousse/releases/download/v0.1.3'
-    expect(script).toContain(`curl -fLO ${base}/mousse-cli-0.1.3-linux-x86_64.AppImage`)
-    expect(script).toContain(`curl -fLO ${base}/SHA256SUMS-0.1.3.txt`)
-    expect(script).toContain('sha256sum -c --ignore-missing SHA256SUMS-0.1.3.txt')
-    expect(script).toContain('export ELECTRON_DISABLE_SANDBOX=1')
-    expect(script.at(-1)).toBe('systemctl --user restart mousse-mms')
-    expect(result.command).toContain('Environment=ELECTRON_DISABLE_SANDBOX=1')
-    // Stops at the first failure, and verifies before it installs anything.
-    expect(script[0]).toBe('set -e')
-    expect(script.findIndex((line) => line.startsWith('sha256sum'))).toBeLessThan(script.findIndex((line) => line.includes('service install')))
-    expect(result.summary).toContain('Linux VPS')
-    expect(result.summary).toContain('desktop app')
-  })
-
-  it('offers no command for Linux on another architecture or one that did not report it', () => {
-    const arm = updateInstructions(device({ platform: 'linux', arch: 'arm64' }), '0.1.3')
-    expect(arm.command).toBeUndefined()
-    expect(arm.summary).toContain('arm64')
-    expect(updateInstructions(device({ platform: 'linux' }), '0.1.3').command).toBeUndefined()
-  })
-
-  it('says a Mac has no in-app update and names the download for its chip', () => {
-    const arm = updateInstructions(device({ platform: 'darwin', arch: 'arm64', name: 'Build Mac' }), '0.1.3')
-    expect(arm.command).toBeUndefined()
-    expect(arm.summary).toContain("can't update itself")
-    expect(arm.summary).toContain('Mousse-0.1.3-arm64.dmg')
-    expect(arm.summary).not.toContain('x64')
-    expect(updateInstructions(device({ platform: 'darwin', arch: 'x64' }), '0.1.3').summary).toContain('Mousse-0.1.3-x64.dmg')
-    const either = updateInstructions(device({ platform: 'darwin' }), '0.1.3').summary
-    expect(either).toContain('arm64.dmg')
-    expect(either).toContain('x64.dmg')
-  })
-
-  it('tells Windows to let the app update, and an unknown platform to use the release page', () => {
-    const windows = updateInstructions(device({ platform: 'win32' }), '0.1.3')
-    expect(windows.command).toBeUndefined()
-    expect(windows.summary).toContain('updates itself')
-    expect(windows.summary).toContain('Mousse.Setup.0.1.3.exe')
-    const unknown = updateInstructions(device(), '0.1.3')
-    expect(unknown.command).toBeUndefined()
-    expect(unknown.summary).toContain('releases/tag/v0.1.3')
-  })
-
-  it('never builds a command from a target that is not a version', () => {
-    const result = updateInstructions(device({ platform: 'linux', arch: 'x64' }), '1.0; rm -rf ~')
-    expect(result.command).toBeUndefined()
-    expect(result.summary.length).toBeGreaterThan(0)
-  })
-})
-
 describe('what pairing and granting say they open', () => {
   it('says at pairing, in both directions, what a paired computer can do and what stays off', () => {
     expect(PAIRING_DISCLOSURE).toContain('each computer can run and change threads on the other')
@@ -279,5 +223,36 @@ describe('Net errors in words', () => {
   it('turns the codes a person sees on the Devices screen into sentences, and softens an unknown one', () => {
     expect(netErrorWords('route_unreachable')).toBe('none of your other devices can be reached right now')
     expect(netErrorWords('some_new_code')).toBe('some new code')
+  })
+})
+
+describe('deviceListLine', () => {
+  it('keeps the list to online or last seen, the route in use, and only what needs attention', () => {
+    expect(deviceListLine(device({ version: '0.1.3', route: { transport: 'ssh', direction: 'out' } }), NOW)).toBe('Online · via SSH')
+    expect(deviceListLine(device({ state: 'closed', lastSeenAt: NOW - 3 * 3600_000 }), NOW)).toBe('Offline · last seen 3h ago')
+    expect(deviceListLine(device({ state: 'closed', olderThanThis: true }), NOW)).toBe('Offline · older version')
+    expect(deviceListLine(device({ state: 'closed', error: 'incompatible_peer', olderThanThis: true }), NOW)).toBe('Offline · incompatible version')
+    expect(deviceListLine(device({ policy: { blocked: true, maxPermissionMode: 'accept_edits', terminal: false, editor: false } }), NOW)).toBe('Online · blocked on this computer')
+    expect(deviceListLine(device({ sshOffer: { endpoint: 'me@box' } }), NOW)).toBe('Online · offers an SSH route')
+  })
+
+  it('says Nearby or Not nearby while signed out of Mousse ID', () => {
+    expect(deviceListLine(device(), NOW, { signedOut: true })).toBe('Nearby')
+    expect(deviceListLine(device({ state: 'closed', lastSeenAt: NOW - 3 * 3600_000 }), NOW, { signedOut: true })).toBe('Not nearby · last seen 3h ago')
+  })
+})
+
+describe('passLapsed', () => {
+  const status = (patch: Record<string, unknown> = {}) => ({ peers: [], ...patch }) as Parameters<typeof passLapsed>[0]
+  it('reads a bad_delegation on this computer or from a peer as a lapsed device pass', () => {
+    expect(passLapsed(undefined)).toBe(false)
+    expect(passLapsed(status())).toBe(false)
+    expect(passLapsed(status({ error: 'bad_delegation' }))).toBe(true)
+    expect(passLapsed(status({ peers: [{ node: 'nod_a', state: 'closed', error: 'bad_delegation' }] }))).toBe(true)
+    expect(passLapsed(status({ peers: [{ node: 'nod_a', state: 'closed', error: 'route_unreachable' }] }))).toBe(false)
+  })
+
+  it('never shows the raw code', () => {
+    expect(netErrorWords('bad_delegation')).toBe('waiting for your other computer to reconnect this one')
   })
 })

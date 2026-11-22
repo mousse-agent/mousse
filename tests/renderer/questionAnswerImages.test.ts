@@ -42,7 +42,10 @@ function stubBridge(): void {
     })
   const sections: Record<string, unknown> = {
     orchestrator: section('orchestrator', orchestrator),
-    skills: section('skills', { list: () => Promise.resolve({ skills: [] }) })
+    skills: section('skills', { list: () => Promise.resolve({ skills: [] }) }),
+    // Each inline image also goes as its file: a pasted one is written to a temporary file.
+    threads: section('threads', { attachmentPath: async (file: File) => `/tmp/mousse-attachments/${file.name}` }),
+    fileDrag: section('fileDrag', { pathOf: () => '' })
   }
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy(sections, {
     get: (target, key) => {
@@ -143,7 +146,8 @@ describe('answering the agent\'s question with a screenshot from the composer', 
     expect(orchestrator.answerQuestionsDetailed).toHaveBeenCalledTimes(1)
     expect(orchestrator.answerQuestionsDetailed).toHaveBeenCalledWith(
       'ask-1',
-      { screen: '' },
+      // The answer names the image's file too, for the agent to open once a compaction drops the image.
+      { screen: '[Attached files: screen.png (/tmp/mousse-attachments/screen.png)]' },
       'thread-a',
       { screen: [{ name: 'screen.png', mimeType: 'image/png', data: PNG }] }
     )
@@ -168,7 +172,7 @@ describe('answering the agent\'s question with a screenshot from the composer', 
 
     expect(orchestrator.answerQuestionsDetailed).toHaveBeenCalledWith(
       'ask-1',
-      { screen: 'This one', wrong: 'The header' },
+      { screen: 'This one\n\n[Attached files: first.png (/tmp/mousse-attachments/first.png)]', wrong: 'The header' },
       'thread-a',
       { screen: [{ name: 'first.png', mimeType: 'image/png', data: PNG }] }
     )

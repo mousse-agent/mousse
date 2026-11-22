@@ -8,6 +8,7 @@ import { DevGuiTools } from '../../src/mms/devgui/DevGuiTools'
 import { QuickActionTools } from '../../src/mms/orchestrator/QuickActionTools'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { questionApproval } from '../../src/mms/run/mcp/appTools/quickActions'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -39,11 +40,11 @@ describe('dev GUI tools and Settings', () => {
     // Listed for the thread (the list a native client caches does not follow Settings).
     expect(s.registry.listForThread('thread-a').map((tool) => tool.name)).toEqual(expect.arrayContaining(['mousse_gui_reload', 'mousse_gui_evaluate']))
     // Initially off.
-    expect(await s.registry.call('mousse_gui_reload', {}, s.ctx())).toEqual({ text: 'Tool "mousse_gui_reload" is disabled in Settings → Skills & MCP.', isError: true })
+    expect(await s.registry.call('mousse_gui_reload', {}, s.ctx())).toEqual(refused('unavailable', 'Tool "mousse_gui_reload" is disabled in Settings → Skills & MCP.'))
     // On, then turned off after the runtime cached its list.
     expect(await s.registry.call('mousse_gui_evaluate', { expression: '1' }, s.ctx())).toMatchObject({ text: 'evaluated' })
     s.enabled.delete('mousse_gui_evaluate')
-    expect(await s.registry.call('mousse_gui_evaluate', { expression: '1' }, s.ctx())).toEqual({ text: 'Tool "mousse_gui_evaluate" is disabled in Settings → Skills & MCP.', isError: true })
+    expect(await s.registry.call('mousse_gui_evaluate', { expression: '1' }, s.ctx())).toEqual(refused('unavailable', 'Tool "mousse_gui_evaluate" is disabled in Settings → Skills & MCP.'))
     expect(execute).toHaveBeenCalledTimes(1)
   })
 })

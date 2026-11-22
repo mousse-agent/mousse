@@ -11,6 +11,9 @@ Start one MMS daemon for an installation home, not one daemon per profile. It ow
 
 Keep `MOUSSE_HOME` stable across GUI, CLI, and autostart. Separate development worktrees use isolated homes by default. Back up the installation home, including profiles and migration records, before upgrading. Use [the support guide](implementation/agent-platform/usage-and-support.md) for profile removal, browser setup, and workflow recovery behavior.
 
+The new networking asks once, when a profile's networking is first turned on, whether to install this entry
+([net/engine-login-start.md](net/engine-login-start.md)).
+
 ## Overview
 
 | Platform | Mechanism | Config location |

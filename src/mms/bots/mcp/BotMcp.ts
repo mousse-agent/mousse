@@ -1,10 +1,11 @@
+import { canonicalJson, shortHash } from '../../integrations/revision'
 import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import type { BotMcpAsk } from '../../../shared/bots/personal/escalation'
 import { mcpGrantable } from '../../../shared/bots/personal/manifest'
 import { checkMessage } from '../../../shared/bots/personal/walls'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../shared/integrations/results'
-import type { McpCallOptions } from '../../integrations/mcp/McpManager'
+import type { McpCallOptions, McpToolExecutionPin } from '../../integrations/mcp/McpManager'
 import { redactSensitiveText } from '../../integrations/secrets'
 import { logWarn } from '../../log/diag'
 import { userMcpOutcome } from '../../run/mcp/appTools/registry'
@@ -95,9 +96,15 @@ export type BotMcpWhere =
 export interface BotMcpHost {
   /** Reads the servers again when the listing is cold or old, waiting at most `BOT_MCP_WARM_MS`. Never throws. */
   warm(): Promise<void>
+  refresh?(serverId: string, toolName?: string): Promise<boolean>
   servers(): BotMcpServer[]
   /** Whether the servers were read since Mousse started: before that, `servers()` says nothing of a server being gone. */
   listed?(): boolean
+  inputSchema?(tool: BotMcpTool): unknown
+  /** Configuration evidence remains available when a server has no successful tool listing. */
+  configurationDigest?(serverId: string): string | undefined
+  binding?(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined
+  call?: BotMcp['call']
   /** The granted tools (`<server id>::<tool>`) of servers set up now. */
   offered(granted: ReadonlySet<string>): BotMcpTool[]
   /** Where a granted server id stands now; undefined while the servers were not read yet. */
@@ -107,8 +114,8 @@ export interface BotMcpHost {
 }
 
 export interface BotMcpDeps {
-  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed' | 'configured' | 'onPublished'>>
-  manager: { callTool(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal | undefined, actor: ReturnType<typeof defaultIntegrationActor>, expected: undefined, options: McpCallOptions): Promise<McpToolCallResult> }
+  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed' | 'configured' | 'onPublished' | 'refreshServer' | 'serverRefreshedAt' | 'serverRefreshedWallAt'>>
+  manager: { callTool(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal | undefined, actor: ReturnType<typeof defaultIntegrationActor>, expected: McpToolExecutionPin | undefined, options: McpCallOptions): Promise<McpToolCallResult> }
   /** MCP is on in Settings. */
   enabled(): boolean
   callMs?: number
@@ -219,6 +226,8 @@ export function failureText(serverName: string, error: unknown, signal?: AbortSi
   return `${serverName} couldn't run this call. ${carryOn}`
 }
 
+export type BotMcpCallOutcome = ToolOutcome & { callState?: 'failed' | 'uncertain'; toolReportedError?: true; notSentInTime?: true }
+
 export class BotMcp implements BotMcpHost {
   constructor(private readonly deps: BotMcpDeps) {}
 
@@ -229,6 +238,28 @@ export class BotMcp implements BotMcpHost {
     } catch {
       // The listing stays as it was; a turn starts without the tools it could not list.
     }
+  }
+
+  /** Send needs fresh server evidence, even when the ordinary turn cache is warm. */
+  async refresh(serverId: string, toolName?: string): Promise<boolean> {
+    const before = this.where(serverId)
+    const offered = before?.state === 'on' ? before.server.tools.find(t => t.tool === toolName) : undefined
+    const hint = offered?.readOnlyHint
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const read = this.deps.catalog.refreshServer
+        ? this.deps.catalog.refreshServer(installationOf(serverId)).then(() => true)
+        : this.deps.catalog.ensure(undefined, BOT_MCP_WARM_MS, { signIn: false, fresh: true }).then(() => true)
+      const done = await Promise.race([read, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), BOT_MCP_WARM_MS) })])
+      const where = this.where(serverId)
+      if (where?.state !== 'on' || where.server.failing || where.server.starting) return false
+      if (done) return true
+      const refreshedAt = this.deps.catalog.serverRefreshedAt?.(installationOf(serverId))
+      const wallAt = this.deps.catalog.serverRefreshedWallAt?.(installationOf(serverId))
+      const current = where.server.tools.find(t => t.tool === toolName)
+      return Boolean(offered && current && current.readOnlyHint === hint && refreshedAt !== undefined && performance.now() - refreshedAt <= 30_000 && wallAt !== undefined && Date.now() - wallAt <= 30_000)
+    } catch { return false }
+    finally { clearTimeout(timer) }
   }
 
   listed(): boolean {
@@ -281,6 +312,24 @@ export class BotMcp implements BotMcpHost {
       .sort((a, b) => a.name.localeCompare(b.name))
   }
 
+  /** The installed schema, before descriptions are shortened for the model. */
+  inputSchema(tool: BotMcpTool): unknown {
+    return this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool)?.inputSchema
+  }
+
+  configurationDigest(serverId: string): string | undefined {
+    return (this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(serverId)) as { configDigest?: string } | undefined)?.configDigest
+  }
+
+  binding(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined {
+    if (!this.deps.enabled()) return undefined
+    const server = this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))
+    const current = server?.tools.find(t => t.toolName === tool.tool)
+    const configDigest = (server as { configDigest?: string } | undefined)?.configDigest
+    if (!server || !current || !configDigest || !this.offered(new Set([`${tool.server}::${tool.tool}`])).length) return undefined
+    return { serverId: tool.server, tool: tool.tool, configDigest, schemaDigest: shortHash(canonicalJson(current.inputSchema ?? {}), 64) }
+  }
+
   where(serverId: string): BotMcpWhere | undefined {
     if (!this.deps.enabled()) return { state: 'mcp_off' }
     if (!this.listed()) return undefined
@@ -309,6 +358,7 @@ export class BotMcp implements BotMcpHost {
         server: held,
         tool: tool.tool,
         serverName: server.name,
+        readOnlyHint: tool.readOnlyHint,
         description: framedDescription(server.name, tool.description),
         inputSchema: boundedSchema(tool.inputSchema)
       }]
@@ -333,9 +383,16 @@ export class BotMcp implements BotMcpHost {
    * sign-in, and its result is framed as data from the server (`images`: the turn's model can see images). A failure is
    * a plain result, never a throw; its raw text goes to the owner's log only.
    */
-  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<ToolOutcome> {
-    if (signal.aborted) return { text: `The call to ${tool.serverName} was stopped.`, isError: true }
-    if (!this.deps.enabled()) return { text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
+  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertDispatchActive?: () => void; sanitizeResult?: (result: ToolOutcome) => ToolOutcome; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<BotMcpCallOutcome> {
+    const certainty = options.heldAction ? { callState: 'failed' as const } : {}
+    if (signal.aborted) return { ...certainty, text: `The call to ${tool.serverName} was stopped.`, isError: true }
+    if (!this.deps.enabled()) return { ...certainty, text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
+    const descriptor = options.heldAction ? this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool) : undefined
+    const pin: McpToolExecutionPin | undefined = options.heldAction && descriptor?.configRevision ? {
+      installationId: installationOf(tool.server), toolName: tool.tool, configRevision: descriptor.configRevision,
+      schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64), assertDispatchActive: options.assertDispatchActive
+    } : undefined
+    if (options.heldAction && !pin) return { ...certainty, text: 'This tool has no installed revision to bind the approved call to. Nothing was sent.', isError: true }
     const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
     // The manager times the call out itself; this timer is the floor under it, so nothing a server does holds the run.
     const timeout = new AbortController()
@@ -346,20 +403,22 @@ export class BotMcp implements BotMcpHost {
       const result = await new Promise<McpToolCallResult>((resolve, reject) => {
         const stop = () => reject(both.reason ?? new Error('stopped'))
         both.addEventListener('abort', stop, { once: true })
-        this.deps.manager.callTool(tool.providerName, args, undefined, both, defaultIntegrationActor(false), undefined, { timeoutMs: callMs, signIn: false })
+        this.deps.manager.callTool(tool.providerName, args, undefined, both, defaultIntegrationActor(false), pin, { timeoutMs: callMs, signIn: false, ...(options.heldAction ? { trackDispatch: true as const } : {}) })
           .then(resolve, reject)
           .finally(() => both.removeEventListener('abort', stop))
       })
-      const outcome = userMcpOutcome(result)
+      const rawOutcome = userMcpOutcome(result)
+      const outcome = options.sanitizeResult?.(rawOutcome) ?? rawOutcome
       // Its pictures are the owner's to see too, whatever the bot's model sees (`keepToolImages`).
       const kept = outcome.images?.length ? options.keepImages?.(outcome.images) : undefined
-      const framed = framedResult(tool.serverName, tool.tool, outcome, options)
-      return kept ? { ...framed, text: `${framed.text}
-${kept}` } : framed
+      const framed = { ...framedResult(tool.serverName, tool.tool, outcome, options), ...(options.heldAction && outcome.isError ? { toolReportedError: true as const } : {}) }
+      return kept ? { ...certainty, ...framed, text: `${framed.text}
+${kept}` } : { ...certainty, ...framed }
     } catch (error) {
       const failure = timeout.signal.aborted && !signal.aborted ? timeout.signal.reason : error
-      if (!signal.aborted) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
-      return { text: failureText(tool.serverName, failure, signal), isError: true }
+      if (!signal.aborted && !options.heldAction) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
+      const bindingChanged = options.heldAction && ['stale_revision', 'bot_action_changed'].includes(String((failure as { code?: string })?.code))
+      return { ...(options.heldAction ? { callState: (failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched ? 'failed' as const : 'uncertain' as const } : {}), text: bindingChanged ? 'This changed since you saw it. Nothing was sent. Ask for a fresh review before trying again.' : failureText(tool.serverName, failure, signal), isError: true }
     } finally {
       clearTimeout(timer)
     }
@@ -434,7 +493,7 @@ export function mcpAskFor(servers: readonly BotMcpServer[], named: { serverId?: 
  */
 export async function callForBot(input: {
   /** `activationId` and `workspace`: where a result's pictures are kept for the owner (`keepToolImages`); absent: nowhere. */
-  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace'>>
+  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace' | 'holdMcp'>>
   /** The name the runtime called: the relay's on Claude Code and Codex, the provider name on Pi. */
   name: string
   args: Record<string, unknown>
@@ -444,16 +503,23 @@ export async function callForBot(input: {
   known?(name: string): { server: string; tool: string; serverName: string } | undefined
   /** The turn's model can see images: a result's images reach it (within limits); otherwise a plain note does. */
   images?: boolean
-}): Promise<ToolOutcome> {
+  toolCallId?: string
+  heldAction?: boolean
+  assertDispatchActive?: () => void
+  sanitizeResult?: (result: ToolOutcome) => ToolOutcome
+}): Promise<BotMcpCallOutcome> {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
   if (!target) return { text: `There is no tool called ${input.name} for you.`, isError: true }
+  const held = offered && await input.bot.holdMcp?.(offered, input.args, input.toolCallId)
+  if (held) return held
   const decided = input.bot.check({ kind: 'mcp', server: target.server, tool: target.tool, serverName: target.serverName, args: input.args })
-  if (!decided.ok) return { text: checkMessage(decided), isError: true }
+  if (!decided.ok) return { ...(input.heldAction ? { callState: 'failed' as const } : {}), text: checkMessage(decided), isError: true }
   if (!offered) return { text: `${target.serverName}'s tools are allowed now, but this turn started without them: you get them when it ends.`, isError: true }
   const { activationId, workspace } = input.bot
   return input.mcp.call(offered, input.args, AbortSignal.any([input.signal, input.bot.time.signal]), {
     images: input.images === true,
+    ...(input.heldAction ? { heldAction: true, assertDispatchActive: input.assertDispatchActive, sanitizeResult: input.sanitizeResult } : {}),
     keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
   })
 }

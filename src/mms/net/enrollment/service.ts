@@ -9,6 +9,7 @@ import type {
   NodeDelegation,
   NodeId,
   Roster,
+  Route,
   RoutesRecord,
   Signed,
   UserId
@@ -41,6 +42,16 @@ export interface EnrollmentServiceOptions {
   clock: Clock
   routes(): Signed
   fault?(point: 'enroll.beforeCommit' | 'join.beforeCommit'): void
+  /**
+   * In the transaction that enrolls a device with an invitation made here: the device is connected here (an
+   * invitation connects whoever redeems it), or held, when the invitation came from a connect link made here.
+   */
+  onRedeemed?(node: NodeId, invite: InviteId): void
+  /**
+   * In the transaction that completes this computer's join: the computer it joined through is connected here, or
+   * held when this computer joined through a connect link.
+   */
+  onJoined?(inviter: NodeId, link: boolean): void
 }
 export interface NodeInviteInput {
   ttlMs?: number
@@ -56,6 +67,13 @@ export interface NodeInviteInput {
    * signed invite), so the device list can tell phones from computers; unknown reads as a computer.
    */
   kind?: NodeKind
+  /**
+   * Issued on a connect link's offer path, after the pinned offer exchange: the invitation may carry an empty
+   * published route record, since the joiner already reached this computer. A raw invitation still needs a route.
+   */
+  emptyRoutes?: boolean
+  /** The latest the invitation may end (a connect link's own expiry); `ttlMs` still bounds it. */
+  endsBy?: number
 }
 export type NodeKind = 'computer' | 'phone'
 export interface NodeInviteAuthorization {
@@ -87,6 +105,11 @@ export interface PreparedNodeJoin {
   routes: Signed
   state: 'prepared' | 'enrolled'
   rendezvous?: RelayRendezvous
+  /**
+   * The join came through a connect link: the addresses of the link the offer exchange answered on, dialled
+   * before the invitation's own routes (which may be empty) for the enrollment and its retries.
+   */
+  link?: { routes: Route[] }
 }
 export interface NodeEnrollmentResult {
   delegation: Signed
@@ -174,7 +197,10 @@ function currentNode(
     throw new NetError('bad_delegation')
   return found
 }
-function parseInvite(text: string): {
+function parseInvite(
+  text: string,
+  emptyRoutes = false
+): {
   authorization: Signed
   token: Uint8Array
   document: NodeInviteAuthorization
@@ -244,7 +270,7 @@ function parseInvite(text: string): {
     if (
       routes.node !== document.node ||
       routes.issuedAt > document.issuedAt ||
-      !routes.routes.length ||
+      (!emptyRoutes && !routes.routes.length) ||
       !equal(
         decodeBase64(document.transportFingerprint, 32),
         decodeBase64(fingerprint(decodeBase64(issued.delegation.keys.transport)), 32)
@@ -303,8 +329,8 @@ function validateRendezvous(
   )
     return invalid()
 }
-export function inviteRequiresProtection(text: string): boolean {
-  const parsed = parseInvite(text)
+export function inviteRequiresProtection(text: string, emptyRoutes = false): boolean {
+  const parsed = parseInvite(text, emptyRoutes)
   try {
     return parsed.document.rendezvous !== undefined
   } finally {
@@ -457,11 +483,15 @@ export class EnrollmentService {
       delegation.delegation.keys.sign,
       'routes'
     )
-    if (routeRecord.node !== self.node || !routeRecord.routes.length || routeRecord.issuedAt > now)
+    if (
+      routeRecord.node !== self.node ||
+      (!input.emptyRoutes && !routeRecord.routes.length) ||
+      routeRecord.issuedAt > now
+    )
       throw new NetError('route_unreachable')
     const token = randomBytes(32),
       invite = newId('invite'),
-      expiresAt = Math.min(now + ttl, delegation.delegation.expiresAt)
+      expiresAt = Math.min(now + ttl, delegation.delegation.expiresAt, input.endsBy ?? Infinity)
     return {
       token,
       authorization: {
@@ -622,8 +652,13 @@ export class EnrollmentService {
     const outcome = this.inviteOutcome(invite)
     return outcome.state === 'consumed' ? { node: outcome.node, name: outcome.name } : undefined
   }
-  async prepareNodeJoin(text: string, requestedName?: string): Promise<PreparedNodeJoin> {
-    const parsed = parseInvite(text),
+  /** `link`: the invitation came from a connect link's offer path, answered on these addresses. */
+  async prepareNodeJoin(
+    text: string,
+    requestedName?: string,
+    link?: { routes: Route[] }
+  ): Promise<PreparedNodeJoin> {
+    const parsed = parseInvite(text, link !== undefined),
       { document, authorization, token } = parsed
     try {
       const label = requestedName ?? document.name ?? 'Enrolled node'
@@ -685,7 +720,8 @@ export class EnrollmentService {
         transportFingerprint: document.transportFingerprint,
         routes: document.routes,
         state: 'prepared',
-        ...(document.rendezvous ? { rendezvous: document.rendezvous } : {})
+        ...(document.rendezvous ? { rendezvous: document.rendezvous } : {}),
+        ...(link ? { link: { routes: link.routes } } : {})
       }
       this.options.db.transaction(() => {
         if (this.join() || this.options.identity.self()) throw new NetError('conflict')
@@ -698,6 +734,42 @@ export class EnrollmentService {
   }
   preparedNodeJoin(): PreparedNodeJoin | undefined {
     return structuredClone(this.join()?.claims)
+  }
+  /**
+   * The join this computer has under way, if any. `unsent`: no request has left `nodeJoinRequest`,
+   * so nothing exists on the other computer and the attempt can be dropped. `sent`: a request may
+   * have reached it and its answer is unknown. `enrolled`: the answer was accepted. The journal's
+   * flags are plain JSON, so this answers with the key store locked; the other computer's name and
+   * the invitation's expiry need the authorization, which a locked store may hold.
+   */
+  joinAttempt():
+    | { phase: 'unsent' | 'sent' | 'enrolled'; authority: NodeId; name?: string; expiresAt?: number }
+    | undefined {
+    const row = this.options.db.database
+      .prepare('SELECT journal FROM net_enrollment_join WHERE singleton=1')
+      .get() as { journal: string } | undefined
+    if (!row) return undefined
+    const held = parseProtocolJson(Buffer.from(row.journal)) as {
+      attempted?: boolean
+      claims: Pick<PreparedNodeJoin, 'authority' | 'state'>
+    }
+    const phase =
+      held.claims.state === 'enrolled' ? 'enrolled' : held.attempted === false ? 'unsent' : 'sent'
+    try {
+      const document = parseProtocolJson(
+          decodeBase64(this.join()!.authorization.payload)
+        ) as NodeInviteAuthorization,
+        roster = verifyDocument<Roster>(document.roster, document.rootKey, 'roster'),
+        issuer = currentNode(roster, document.node, document.issuedAt)
+      return {
+        phase,
+        authority: held.claims.authority,
+        name: issuer.delegation.name,
+        expiresAt: document.expiresAt
+      }
+    } catch {
+      return { phase, authority: held.claims.authority }
+    }
   }
   /** Only a request that provably never left this API can be safely discarded locally. */
   abandonPreparedJoin(): void {
@@ -895,6 +967,7 @@ export class EnrollmentService {
       db.database
         .prepare('UPDATE net_enrollment_kinds SET node=? WHERE invite=?')
         .run(request.node, request.invite)
+      this.options.onRedeemed?.(request.node, request.invite)
       this.options.fault?.('enroll.beforeCommit')
     })
     return result
@@ -949,6 +1022,7 @@ export class EnrollmentService {
       )
       latest.claims.state = 'enrolled'
       this.saveJoin(latest)
+      this.options.onJoined?.(claims.authority, claims.link !== undefined)
       this.options.fault?.('join.beforeCommit')
     })
     return this.preparedNodeJoin()!

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
 import { BotRoomAbort, type BotTurnDispatcher } from '../../src/mms/bots/activation/dispatcher'
+import { setSharedShellPath } from '../../src/mms/harness/shellPath'
 import type { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { MousseMainService } from '../../src/mms/MousseMainService'
 import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
@@ -20,6 +21,7 @@ let main: MousseMainService
 
 beforeAll(async () => {
   home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-bot-final-message-'))
+  setSharedShellPath({ entries: [], source: 'login_shell' })
   vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
   main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
   await main.start()
@@ -27,8 +29,12 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  try { await main?.stop() }
+  try {
+    try { await main?.threads.flushSearchIndex() }
+    finally { await main?.stop() }
+  }
   finally {
+    setSharedShellPath(undefined)
     vi.restoreAllMocks()
     rmSync(home, { recursive: true, force: true })
   }
@@ -62,13 +68,18 @@ async function botTurn(script: (input: Parameters<Chat>[0], time: AbortControlle
   }
   main.orchestrator.setBotDispatcher(dispatcher)
   const chat = vi.spyOn(main.claudeSubscription, 'chat').mockImplementation((input) => script(input, time))
+  const settleRun = vi.spyOn(main.personalBots!, 'settleRun')
   try {
     const runs = (main.orchestrator as unknown as { runEngine: RunEngine }).runEngine
     const sent = await runs.sendWithStart({ kind: 'send', threadId: thread.id, clientRequestId: `${thread.id}:d1`, source: 'bot' },
       (runId): BotTurnPayload => ({ kind: 'bot', runId, threadId: thread.id, activationId: 'act-1', dispatchN: 1 }))
     if (sent.status !== 'accepted') throw new Error('rejected')
-    await vi.waitFor(() => expect(settled).toHaveLength(1), { timeout: 20_000 })
+    await vi.waitFor(() => {
+      expect(settled).toHaveLength(1)
+      expect(settleRun).toHaveBeenCalledWith(sent.runId)
+    }, { timeout: 20_000 })
   } finally {
+    settleRun.mockRestore()
     chat.mockRestore()
   }
   const rows = (main.threads.loadThreadData(thread.id).messages ?? []).filter((message) => message.role === 'assistant' && !message.kind).map((message) => message.content)

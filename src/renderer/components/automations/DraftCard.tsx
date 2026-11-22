@@ -46,7 +46,8 @@ export function whenChoices(schedule: JobSchedule | undefined, now: Date): Array
 }
 
 /** When, for a trigger that is not a time: the CLI, a request, or a pull request's activity. */
-export function whenWords(item: Pick<AutomationItem, 'trigger' | 'whenText' | 'cliName'>): string | undefined {
+export function whenWords(item: Pick<AutomationItem, 'trigger' | 'whenText' | 'cliName'> & Partial<Pick<AutomationItem, 'schedule'>>, now = new Date()): string | undefined {
+  if (item.trigger === 'time' && item.whenText) return item.schedule ? `${describeSchedule(item.schedule, now)} · ${item.whenText}` : item.whenText
   if (item.trigger === 'thread_event') return item.whenText
   if (item.trigger === 'request') return 'On request'
   if (item.trigger === 'on_demand') return item.cliName ? `From the CLI · ${item.cliName}` : 'When you run it'
@@ -57,7 +58,7 @@ export function whenWords(item: Pick<AutomationItem, 'trigger' | 'whenText' | 'c
 export function onLine(item: Pick<AutomationItem, 'paused' | 'next' | 'computer' | 'trigger' | 'whenText' | 'cliName'>, now: Date, viewerZone: string): string {
   if (item.paused) return 'Paused'
   if (item.next) return `On · next ${ownedWhenText(item.next.at, now, item.computer, viewerZone)}`
-  return `On · ${(whenWords(item) ?? 'when you run it').toLowerCase()}`
+  return `On · ${(whenWords(item, now) ?? 'when you run it').toLowerCase()}`
 }
 
 export interface DraftCardProps {
@@ -101,14 +102,14 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
     }
   }
   const when = whenChoices(item.schedule, now)
-  const fixedWhen = whenWords(item)
+  const fixedWhen = whenWords(item, now)
   const projectOptions: SelectOption[] = [
     ...(item.where ? [] : [{ value: '', label: 'Pick a project' }]),
     ...projects.map((project) => ({ value: project.id, label: project.name })),
     ...(item.where && !projects.some((project) => project.id === item.where!.projectId) ? [{ value: item.where.projectId, label: item.where.name }] : [])
   ]
   return (
-    <section className="inbox-draft" data-mousse-decision="" data-testid={`${testIdPrefix}-card`} data-key={item.key} data-fresh={fresh || undefined} aria-label={`Draft: ${item.name}`}>
+    <section className="inbox-draft" data-mousse-guarded="" data-testid={`${testIdPrefix}-card`} data-key={item.key} data-fresh={fresh || undefined} aria-label={`Draft: ${item.name}`}>
       <div className="inbox-draft-head">
         <strong>{item.name}</strong>
         {fresh ? <span className="inbox-draft-tag">New</span> : null}

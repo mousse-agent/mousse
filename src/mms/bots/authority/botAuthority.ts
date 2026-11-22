@@ -1,8 +1,8 @@
+import { createHash } from 'node:crypto'
+import { closeSync, fstatSync, openSync, readSync, realpathSync, type Stats } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
-import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
-import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
-import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
+import { basename, dirname, join, resolve } from 'node:path'
+import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotFileReadResult, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -16,8 +16,8 @@ import type { BotPermissions } from '../grants/compile'
  * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools, Claude Code's
  * grant gate (its hooks and `canUseTool`), and Codex's approval requests. It asks nobody: a call outside the grant stops at a wall. The bot's
  * files folder (Bot Phase 1 §5.10) counts as a granted writable root, and every allowed call is
- * reported to `onAllowed`, the source of activity chips (§5.8). What this computer lets bots do (`limit`, read on
- * every call) comes before the grant: a call it has switched off is refused (a `computer` wall), never asked about.
+ * reported to `onAllowed`, the source of activity chips (§5.8). A permission the owner switched off for the bot
+ * (`disabled`, read on every call) is refused before anything else, never asked about.
  */
 
 /** The arguments that name a path, on every runtime (Pi's and Claude's built-ins). */
@@ -28,8 +28,19 @@ const WRITE_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['edit', 'wri
 /** Built-ins that never touch the file system. */
 const NETWORK_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['web_fetch', 'web_search'])
 
+/** Coverage is a contiguous prefix of one observed version, never pages from different versions. */
+export interface BotFileReadState {
+  version: string
+  through: number
+  whole: boolean
+  tooLong: boolean
+}
+interface FileObservation { version: string; lines?: number; bytes: number }
+
 export interface BotAuthorityInput {
   activationId: string
+  /** Read versions and contiguous page coverage, shared by dispatches. Memory only, fresh after a restart. */
+  fileReads?: Map<string, BotFileReadState>
   role: BotThreadRole
   permissions: BotPermissions
   /** Whether the activation waits for its owner's answer (`waiting_grant`), read at call time. */
@@ -45,15 +56,21 @@ export interface BotAuthorityInput {
   /** Told of every call the check allows, whatever the runtime (`BotActivitySink.observer`). Never fails a call. */
   onAllowed?: BotAllowedObserver
   /**
-   * What this computer lets bots do now (Settings → What bots may do here), read on every call, so a switch turned off
-   * refuses the next call of a turn already running. Absent: everything. Must not throw.
+   * Why the owner's switch refuses `call` now (a permission switched off for this bot in About), read on every call, so a
+   * switch turned off refuses the next call of a turn already running. Undefined: not switched off. Must not throw.
    */
   disabled?(call: NormalisedCall): string | undefined
-  limit?(): BotComputerLimit
+  /**
+   * Why the grant as it stands now refuses a call this turn's own permissions allow (the owner took that permission away
+   * since the turn started), read on every such call. A change that takes nothing away (a work-time limit) refuses
+   * nothing. Undefined: still held. Must not throw.
+   */
+  narrowed?(call: NormalisedCall): string | undefined
 }
 
 export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   const { permissions } = input
+  const fileReads = input.fileReads ?? new Map<string, BotFileReadState>()
   const tools: ReadonlySet<NeutralTool> = new Set(permissions.tools)
   const appTools: ReadonlySet<string> = new Set(permissions.appTools)
   const skills: ReadonlySet<string> = new Set(permissions.skills)
@@ -68,7 +85,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     tools,
     appTools,
     skills,
+    ...(permissions.allSkills ? { allSkills: true as const } : {}),
     mcp,
+    ...(permissions.catalogue ? { catalogue: permissions.catalogue } : {}),
     workspace: workspace ? {
       roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch,
       ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {})
@@ -77,6 +96,44 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     counters: input.counters,
     time: input.time,
     spend: input.spend,
+    piFileCall(tool, args) {
+      const files = permissions.workspace?.files
+      const raw = args.path
+      if (!files || typeof raw !== 'string' || !['read', 'edit', 'write'].includes(tool)) return { completed() {} }
+      // Pi's gate has resolved this path and checked the grant already. Canonical names make
+      // relative paths and symlinks within the folder refer to the same remembered file.
+      if (!insideAny([files], raw, files)) return { completed() {} }
+      const absolute = resolve(files, raw)
+      let path = absolute
+      try { path = realpathSync.native(absolute) } catch {
+        // Creation under a symlinked folder must use the same key as its next edit.
+        try { path = join(realpathSync.native(dirname(absolute)), basename(absolute)) } catch { /* The tool reports a missing parent. */ }
+      }
+      const before = fileVersion(path)
+      const previous = fileReads.get(path)
+      if (tool !== 'read' && (before === null || (before !== undefined && previous?.version !== before.version))) {
+        return { refused: 'This file changed since you read it. Read it again, then make your change.' }
+      }
+      if (tool === 'write' && before !== undefined && previous && !previous.whole) {
+        return { refused: previous.tooLong
+          ? 'This file is too long to read in one call; change it with edit, which is checked against what you read, or read every page first.'
+          : 'Before replacing this file, read it again without offset or limit.' }
+      }
+      return {
+        completed(success, result = {}) {
+          if (!success) return
+          // A read remembers the version at admission, not a racing writer's newer version.
+          const observed = tool === 'read' ? before : fileVersion(path)
+          if (!observed) { fileReads.delete(path); return }
+          if (tool === 'read') {
+            fileReads.set(path, readCoverage(observed, args, result, previous))
+          } else {
+            fileReads.set(path, { version: observed.version, through: 0,
+              whole: tool === 'write' || previous?.whole === true, tooLong: previous?.tooLong ?? false })
+          }
+        }
+      }
+    },
     check(call: NormalisedCall): BotCheck {
       const decided = decide(call)
       if (decided.ok && input.onAllowed) {
@@ -92,34 +149,34 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   return authority
 
   function decide(call: NormalisedCall): BotCheck {
+    const decided = decideHeld(call)
+    if (!decided.ok) return decided
+    const taken = input.narrowed?.(call)
+    return taken ? { ok: false, refused: { text: taken, askId: '' } } : decided
+  }
+
+  function decideHeld(call: NormalisedCall): BotCheck {
     const disabled = input.disabled?.(call)
     if (disabled) return { ok: false, refused: { text: disabled, askId: '' } }
     const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
     if (ended) return { ok: false, wall: ended }
     if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
-    const limit = input.limit?.() ?? BOT_COMPUTER_OPEN
     switch (call.kind) {
       case 'skill':
-        return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
+        return permissions.allSkills || skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
       case 'mcp':
         // Granted parts never hold `:`, so a call whose parts do can never match another pair.
         return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`)
           ? { ok: true }
           : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool, ...(call.serverName ? { serverName: call.serverName } : {}) } }
       case 'app':
-        // The browser switched off on this computer: none of its tools runs, whatever the grant holds.
-        if (!limit.browser && botGrantTool(call.tool) === BOT_BROWSER_PERMISSION) return { ok: false, wall: { kind: 'computer', tool: call.tool, off: 'browser' } }
-        // The owner's threads switched off on this computer: no thread tool runs, whatever the grant or this turn holds.
-        if (!limit.threads && botGrantTool(call.tool) === BOT_THREADS_PERMISSION) return { ok: false, wall: { kind: 'computer', tool: call.tool, off: 'threads' } }
         return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
       case 'builtin':
-        return checkBuiltin(call.tool, call.nativeName, call.args, limit, call.own)
+        return checkBuiltin(call.tool, call.nativeName, call.args, call.own)
     }
   }
 
-  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>, limit: BotComputerLimit, own?: true): { ok: true } | { ok: false; wall: WallReason } {
-    // This computer's switches come before the grant: what is off here is refused, and never asked for.
-    if (tool === 'shell' && !limit.shell) return { ok: false, wall: { kind: 'computer', tool: nativeName, off: 'shell' } }
+  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>, own?: true): { ok: true } | { ok: false; wall: WallReason } {
     if (!tools.has(tool)) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
     // "Run commands" is granted as a whole: any command, wherever it says it runs. What a command
     // can reach is the runtime's sandbox, where it has one, not a path check here.
@@ -257,4 +314,67 @@ function insideAny(roots: readonly string[], raw: string, scratch: string): bool
   } catch {
     return false
   }
+}
+
+/** Lists get exact content checks; attachments and logs never allocate unbounded buffers. */
+export const BOT_FILE_HASH_MAX_BYTES = 2 * 1024 * 1024
+
+function metadataVersion(stat: Stats): string {
+  return `stat:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+}
+
+function fileVersion(path: string): FileObservation | undefined | null {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const stat = fstatSync(fd)
+    if (stat.size > BOT_FILE_HASH_MAX_BYTES) return { version: metadataVersion(stat), bytes: stat.size }
+    // Read a bounded descriptor, not readFileSync(path): the file can grow after fstat.
+    const bytes = Buffer.allocUnsafe(stat.size)
+    let length = 0
+    while (length < bytes.length) {
+      const n = readSync(fd, bytes, length, bytes.length - length, length)
+      if (!n) break
+      length += n
+    }
+    const after = fstatSync(fd)
+    if (after.size > BOT_FILE_HASH_MAX_BYTES) return { version: metadataVersion(after), bytes: after.size }
+    // A changing small file has no stable observation. Ask for a fresh read.
+    if (length !== stat.size || metadataVersion(stat) !== metadataVersion(after)) return null
+    let lines = 1
+    for (let n = 0; n < length; n++) if (bytes[n] === 10) lines++
+    return { version: `sha256:${createHash('sha256').update(bytes.subarray(0, length)).digest('hex')}`, lines, bytes: length }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    return null
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+function readCoverage(file: FileObservation, args: Record<string, unknown>, result: BotFileReadResult, previous?: BotFileReadState): BotFileReadState {
+  const same = previous?.version === file.version ? previous : undefined
+  const start = args.offset === undefined ? 1 : Number.isInteger(args.offset) ? Math.max(1, args.offset as number) : NaN
+  const limit = args.limit === undefined ? Infinity : Number.isInteger(args.limit) && (args.limit as number) > 0 ? args.limit as number : NaN
+  const truncated = result.truncated === true || result.firstLineExceedsLimit === true
+  let end = 0
+  let eof = false
+  if (Number.isFinite(start) && !Number.isNaN(limit)) {
+    if (truncated) {
+      if (!result.firstLineExceedsLimit && Number.isInteger(result.outputLines) && result.outputLines! > 0) {
+        end = start - 1 + Math.min(result.outputLines!, limit)
+      }
+    } else if (file.lines !== undefined) {
+      end = Math.min(file.lines, start - 1 + limit)
+      eof = end === file.lines
+    } else if (limit === Infinity) {
+      // Pi returns the rest without a continuation notice only when it reached EOF.
+      end = Infinity
+      eof = true
+    }
+  }
+  const contiguous = start <= (same?.through ?? 0) + 1 && end >= start
+  const through = contiguous ? Math.max(same?.through ?? 0, end) : same?.through ?? 0
+  return { version: file.version, through, whole: same?.whole === true || (contiguous && eof),
+    tooLong: truncated || same?.tooLong === true || file.bytes > 50 * 1024 || (file.lines ?? 0) > 2000 }
 }

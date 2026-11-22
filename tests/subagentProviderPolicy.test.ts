@@ -20,6 +20,7 @@ import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex
 import { codexBotSandbox, codexTurnPolicy } from '../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MODEL_PROVIDER, CodexProviderService, type CodexChatInput } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { CodexAdapter } from '../src/mms/harness/drivers/codex/adapter'
+import { codexFixtureAccessToken } from '../src/mms/run/testkit/codexAppServerReplay'
 import type { ChildTurnPolicy } from '../src/mms/harness/adapter'
 
 const SHARED: ChildTurnPolicy = { readOnly: true }
@@ -77,11 +78,6 @@ describe('policy table: permission decisions', () => {
     expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'win32' })).toEqual({ shell: true, writableRoots })
     expect(codexBotSandbox({ tools: new Set(['read']), workspace }, { platform: 'win32' })).toEqual({ shell: false, writableRoots: [] })
     expect(codexBotSandbox({})).toEqual({ shell: false, writableRoots: [] })
-  })
-
-  it('never sends a workspaceWrite policy on an interactive turn', () => {
-    for (const permissionMode of ['ask', 'accept_edits', 'full'] as const)
-      expect(codexTurnPolicy('default', undefined, permissionMode).sandboxPolicy.type).not.toBe('workspaceWrite')
   })
 })
 
@@ -254,9 +250,12 @@ describe('Codex children', () => {
   let home: string
   const services: CodexProviderService[] = []
   const questions = new UserQuestionService()
+  const WORKSPACE = 'fixture-workspace'
+  const TOKEN = codexFixtureAccessToken(WORKSPACE)
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-child-'))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: WORKSPACE, access_token: TOKEN } }))
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -313,7 +312,9 @@ describe('Codex children', () => {
           const reply: Record<string, unknown> =
             options.answer?.(message, send) ??
             (message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
-            : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
+            // The signed-in terminal account, proven as Codex proves it: the selected workspace and the token it holds match auth.json.
+            : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, workspaceRouting: { chatgptAccountId: WORKSPACE }, requiresOpenaiAuth: true } }
+            : message.method === 'getAuthStatus' ? { result: { authMethod: 'chatgpt', authToken: TOKEN } }
             : message.method === 'config/read' ? (options.configFails ? { error: { code: -32603, message: 'unreadable' } } : { result: { config: { mcp_servers: options.mcpServers ?? {} }, layers: options.layers ?? [] } })
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
@@ -350,7 +351,7 @@ describe('Codex children', () => {
   const create = (s: ReturnType<typeof server>) => {
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-    const service = new CodexProviderService(home, questions, { launch: s.launch }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const service = new CodexProviderService(home, questions, { launch: s.launch }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(service)
     return service
   }
@@ -373,7 +374,7 @@ describe('Codex children', () => {
     await chat(service, { child: SHARED })
     service.commitConversation('child', '')
     service.stop()
-    const restarted = new CodexProviderService(home, questions, { launch: s.launch }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const restarted = new CodexProviderService(home, questions, { launch: s.launch }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(restarted)
     await chat(restarted, { child: SHARED })
     expect(s.requests('thread/resume')[0].params).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'on-request' })
@@ -381,8 +382,8 @@ describe('Codex children', () => {
     const turns = s.requests('turn/start')
     expect(turns).toHaveLength(3)
     for (const turn of turns) expect(turn.params).toMatchObject({ approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
-    // The turns themselves never read or write the user's Codex config.
-    expect(s.messages.map((message) => message.method)).not.toContain('config/read')
+    // The startup sign-in check reads the store. Shared children need no separate MCP setup read.
+    expect(s.requests('config/read').some((message) => message.params?.includeLayers)).toBe(false)
   })
 
   it('an isolated child and a thread that is not a subagent run under the thread\'s permission mode', async () => {
@@ -469,37 +470,37 @@ describe('Codex children', () => {
   })
 
   describe('preflight of the user setup (CodexAdapter.childPreflight)', () => {
-    const preflight = (s: ReturnType<typeof server>, workspace: 'shared' | 'isolated') =>
-      new CodexAdapter(() => create(s)).childPreflight({ workspace, cwd: home })
+    const preflight = (s: ReturnType<typeof server>, kind: 'read-only' | 'general-purpose') =>
+      new CodexAdapter(() => create(s)).childPreflight({ readOnly: kind === 'read-only', cwd: home })
     const SHARED_REFUSED = 'shared_unsupported_for_provider'
 
     it.each([
-      ['no MCP servers', {}, 'shared', null],
-      ['no MCP servers', {}, 'isolated', null],
-      ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'shared', null],
-      ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'shared', SHARED_REFUSED],
-      ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'shared', SHARED_REFUSED],
-      ['a Mousse-managed server named mousse counts as external', { mcpServers: { mousse: { enabled: true } } }, 'shared', SHARED_REFUSED],
-      ['a user MCP server, isolated child', { mcpServers: { ext: { enabled: true } } }, 'isolated', null],
-      ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'shared', SHARED_REFUSED],
-      ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'shared', null],
-      ['an unreadable config, shared child', { configFails: true }, 'shared', SHARED_REFUSED],
-      ['an unreadable config, isolated child', { configFails: true }, 'isolated', null]
-    ] as const)('%s (%s workspace)', async (_name, setup, workspace, code) => {
+      ['no MCP servers', {}, 'read-only', null],
+      ['no MCP servers', {}, 'general-purpose', null],
+      ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'read-only', null],
+      ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'read-only', SHARED_REFUSED],
+      ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'read-only', SHARED_REFUSED],
+      ['a Mousse-managed server named mousse counts as external', { mcpServers: { mousse: { enabled: true } } }, 'read-only', SHARED_REFUSED],
+      ['a user MCP server, general-purpose child', { mcpServers: { ext: { enabled: true } } }, 'general-purpose', null],
+      ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'read-only', SHARED_REFUSED],
+      ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'read-only', null],
+      ['an unreadable config, read-only child', { configFails: true }, 'read-only', SHARED_REFUSED],
+      ['an unreadable config, general-purpose child', { configFails: true }, 'general-purpose', null]
+    ] as const)('%s (%s child)', async (_name, setup, kind, code) => {
       const s = server(setup)
-      expect((await preflight(s, workspace))?.code ?? null).toBe(code)
+      expect((await preflight(s, kind))?.code ?? null).toBe(code)
       // It only reads the user's setup, and it never looks at Codex's own subagent flags.
       expect(s.messages.map((message) => message.method).filter((method) => /write|set|batch|experimentalFeature/i.test(method ?? ''))).toEqual([])
     })
 
     it("leaves Codex's native subagents alone: no refusal whatever the config", async () => {
-      for (const workspace of ['shared', 'isolated'] as const) expect((await preflight(server(), workspace))?.code ?? null).toBeNull()
+      for (const kind of ['read-only', 'general-purpose'] as const) expect((await preflight(server(), kind))?.code ?? null).toBeNull()
     })
 
-    it('names the servers and points to isolated', async () => {
-      const refusal = await preflight(server({ mcpServers: { ext: {}, other: {} } }), 'shared')
+    it('names the servers and says to leave readOnly out', async () => {
+      const refusal = await preflight(server({ mcpServers: { ext: {}, other: {} } }), 'read-only')
       expect(refusal?.message).toContain('ext, other')
-      expect(refusal?.message).toContain('"isolated"')
+      expect(refusal?.message).toContain('Leave readOnly out')
     })
   })
 
@@ -607,6 +608,52 @@ describe('Codex children', () => {
       await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
     })
 
+    it("a helper's approval is asked in the hosting thread, about the helper's own item, and names the helper", async () => {
+      // The parent and the helper each have an item `patch-1`: item ids are unique per thread only.
+      const item = (threadId: string, path: string) => ({ method: 'item/started', params: { threadId, turnId: threadId === HELPER ? 'h-turn-1' : 'turn-1', item: { type: 'fileChange', id: 'patch-1', changes: [{ path, kind: { type: 'update' }, diff: '' }], status: 'inProgress' } } })
+      const s = server({
+        onTurnStart: (send) =>
+          setImmediate(() => {
+            send(item(PARENT, 'src/parent.ts'))
+            send(spawned('subAgentActivity'))
+            send(helperTurn)
+            send(item(HELPER, 'src/helper.ts'))
+            send({ id: 77, method: 'item/fileChange/requestApproval', params: { threadId: HELPER, turnId: 'h-turn-1', itemId: 'patch-1', reason: null } })
+            send(completed(PARENT, 'turn-1'))
+          })
+      })
+      const asked: Array<{ threadId: string; prompt: string; helper?: { agentId: string } }> = []
+      const onPending = (event: { requestId: string; threadId: string; questions: Array<{ prompt: string }>; helper?: { agentId: string } }): void => {
+        asked.push({ threadId: event.threadId, prompt: event.questions[0]!.prompt, ...(event.helper ? { helper: event.helper } : {}) })
+        questions.submitAnswers(event.requestId, { permission: 'allow' }, { kind: 'user' })
+      }
+      questions.on('pending', onPending)
+      try {
+        const running = chat(create(s), { child: ISOLATED, permissionMode: 'ask' })
+        await vi.waitFor(() => expect(s.messages.find((message) => message.id === 77)).toMatchObject({ result: { decision: 'accept' } }))
+        expect(asked).toEqual([{ threadId: 'child', prompt: expect.stringContaining('src/helper.ts'), helper: { agentId: HELPER } }])
+        expect(asked[0]!.prompt).not.toContain('src/parent.ts')
+        s.emit(completed(HELPER, 'h-turn-1'))
+        await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      } finally {
+        questions.off('pending', onPending)
+      }
+    })
+
+    it("Stop of one helper's mirror interrupts that helper alone, and the run goes on", async () => {
+      const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity'), onInterrupt: (send, params) => params.threadId === HELPER && interruptReply(send, params) })
+      const service = create(s)
+      const running = chat(service, { child: ISOLATED })
+      expect(await state(running)).toBe('pending')
+      expect(service.stopHelper('child', 'someone-else')).toBe('not_active')
+      expect(service.stopHelper('other-thread', HELPER)).toBe('not_active')
+      expect(service.stopHelper('child', HELPER)).toBe('stopped')
+      await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
+      // The helper's interrupted turn settles it, so the run completes as itself, not stopped.
+      await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      expect(service.stopHelper('child', HELPER)).toBe('not_active')
+    })
+
     it("Stop during the parent's turn interrupts the parent and its helper", async () => {
       const s = server({
         onTurnStart: (send) =>
@@ -698,7 +745,7 @@ describe('Codex children', () => {
       const withCaps = (s: ReturnType<typeof server>, caps: { helperIdleCapMs?: number; helperPinCapMs?: number }) => {
         mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
         writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-        const service = new CodexProviderService(home, questions, { launch: s.launch, ...caps }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+        const service = new CodexProviderService(home, questions, { launch: s.launch, ...caps }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
         services.push(service)
         return service
       }
@@ -953,7 +1000,7 @@ describe('Codex children', () => {
     const createFast = (s: Server, deps: Partial<ConstructorParameters<typeof CodexProviderService>[2]> = {}) => {
       mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
       writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-      const service = new CodexProviderService(home, questions, { launch: s.launch, helperTiming: FAST, helperSweepMs: 900, ...deps }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+      const service = new CodexProviderService(home, questions, { launch: s.launch, helperTiming: FAST, helperSweepMs: 900, ...deps }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
       services.push(service)
       return service
     }

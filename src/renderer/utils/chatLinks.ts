@@ -2,6 +2,7 @@ import { parseChatReference, parseMousseFileLink, type ChatReference } from '../
 import { useAppStore } from '../stores/appStore'
 import { visibleThreads } from '../../shared/threadLineage'
 import { parseThreadLink } from '../../shared/threadLink'
+import { isQualifiedId } from '../../shared/threadRef'
 import { selectThread } from '../lib/threadActions'
 import { showToast } from '../components/ui/Toast'
 
@@ -86,7 +87,10 @@ export function openLinkedThread(threadId: string): void {
   const store = useAppStore.getState()
   const missing = (): void => { showToast({ key: 'thread-link-missing', message: 'That thread is no longer here.' }) }
   if (!store.threads.some((thread) => thread.id === threadId)) return missing()
-  store.setThreadsSidebarView('projects')
+  // The sidebar lands on Projects. Only the list tab is set here: the switch out of Chats is selectThread's, after the
+  // navigation guards agree and together with the thread it opens, so the history records that thread and not the one
+  // the workspace showed before (see trackThreadHistory).
+  useAppStore.setState({ lastThreadListView: 'projects' })
   void selectThread(threadId).catch(missing)
 }
 
@@ -105,6 +109,8 @@ export async function resolveChatReference(reference: ChatReference): Promise<Ch
   const parsed = parseChatReference(reference)
   if (!parsed) throw new Error('This reference is incomplete or invalid.')
   if (parsed.kind !== 'project' && parsed.kind !== 'thread') return parsed
+  // A thread of another computer: this daemon does not hold it, and the agent reads it there, as that computer allows.
+  if (parsed.kind === 'thread' && isQualifiedId(parsed.threadId)) return parsed
   const resolved = await window.mousse.chatReferences.resolve(parsed)
   if (!resolved) throw new Error(`The ${parsed.kind} “${parsed.title}” no longer exists in this profile.`)
   const validated = parseChatReference(resolved)

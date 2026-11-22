@@ -1,6 +1,6 @@
 import { readFile, stat } from 'fs/promises'
 import { dirname, extname, join, normalize, posix, relative, resolve, sep } from 'path'
-import type { SimpleGit } from 'simple-git'
+import type { RepositoryGit } from '../git/repoPrograms'
 
 export interface BlastRadiusResult {
   declaredFiles: string[]
@@ -98,7 +98,7 @@ async function isDirectory(path: string): Promise<boolean> {
 }
 
 export class BlastRadiusAnalyzer {
-  constructor(private readonly root: string, private readonly git: SimpleGit) {}
+  constructor(private readonly root: string, private readonly git: RepositoryGit) {}
 
   async analyze(requestedFiles: string[]): Promise<BlastRadiusResult> {
     const tracked = new Set(

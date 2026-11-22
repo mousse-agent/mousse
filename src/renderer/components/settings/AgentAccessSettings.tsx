@@ -6,7 +6,7 @@ import { useComputers } from '../../lib/computers'
 
 /**
  * Settings > Agents > Access and Subagents: whether agents may answer approvals on other threads, then whether they
- * may start subagents on other devices. Both read and write the one stored `agentAccess` setting. Agents read and
+ * may work on the user's other devices ("Let agents work on your other devices", stored as `remoteSubagents`). Both read and write the one stored `agentAccess` setting. Agents read and
  * manage every thread; there is no level to choose (SPEC §15.1).
  */
 export function AgentAccessSettings({
@@ -76,7 +76,7 @@ export function AgentAccessSettings({
       </SettingsGroup>
       <SettingsGroup title="Subagents" icon={GitFork} anchor="agents-subagents">
         <SettingsRow
-          title="Subagents on other devices"
+          title="Let agents work on your other devices"
           anchor="agents-remote-subagents"
           htmlFor="agent-access-remote-subagents"
           description={access.remoteSubagents && !(routed && computers.length > 0) && goneComputers.length === 0
@@ -86,13 +86,14 @@ export function AgentAccessSettings({
               <MoreDetails>
                 An agent can start a subagent on another of your computers. It runs there under that computer&rsquo;s agents and
                 accounts, in its copy of the repository, no looser than the agent that started it and within the limit that
-                computer set for this one in its Devices settings. Off by default.
+                computer set for this one in its Devices settings. That computer also chooses which of its threads this
+                computer&rsquo;s agents may change. Off by default.
               </MoreDetails>
             </>}
           control={
             <Switch
               id="agent-access-remote-subagents"
-              label="Subagents on other devices"
+              label="Let agents work on your other devices"
               checked={access.remoteSubagents}
               onChange={(remoteSubagents) => save({ remoteSubagents })}
             />

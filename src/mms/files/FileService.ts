@@ -1,11 +1,20 @@
 import { randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, realpath } from 'node:fs'
+import { promisify } from 'node:util'
 import { open, readdir, readFile, writeFile, stat, lstat, rename, unlink, type FileHandle } from 'fs/promises'
 import { basename, dirname, join, posix } from 'path'
-import type { FileAsset, FileEntry, FileStat } from '../../shared/types'
+import type { FileAsset, FileEntry, FileStat, FileText } from '../../shared/types'
 import { countLineEdits } from '../../shared/lineEditStats'
 import { SKIP_DIR_NAMES, lexicalGuard, type GuardedPath, type PathGuard } from './pathGuard'
 import { OTHER_NAMES, PathContainmentError } from './routedGuard'
+
+const nativeRealpath = promisify(realpath.native)
+
+async function fileIdentity(path: string, include: boolean): Promise<{ canonicalPath?: string }> {
+  if (!include) return {}
+  const canonicalPath = await nativeRealpath(path).catch(() => undefined)
+  return canonicalPath ? { canonicalPath } : {}
+}
 
 const MAX_READ_BYTES = 512 * 1024
 const MAX_ASSET_BYTES = 100 * 1024 * 1024
@@ -81,17 +90,22 @@ export class FileService {
   }
 
   async readFile(root: string, filePath: string, guard: PathGuard = lexicalGuard): Promise<string> {
+    return (await this.readFileDetails(root, filePath, guard)).content
+  }
+
+  async readFileDetails(root: string, filePath: string, guard: PathGuard, includeCanonicalPath = false): Promise<FileText> {
     const { absolute } = guard.resolve(root, filePath, 'read')
     const info = await stat(absolute)
     if (!info.isFile()) throw new Error('Not a file')
     if (info.size > MAX_READ_BYTES) {
       throw new Error(`File exceeds ${MAX_READ_BYTES / 1024}KB limit`)
     }
-    return readFile(absolute, 'utf8')
+    const content = await readFile(absolute, 'utf8')
+    return { content, ...await fileIdentity(absolute, includeCanonicalPath) }
   }
 
   /** The asset's file, once the root guard, the size limit and the preview types have passed. */
-  private async assetFile(root: string, filePath: string, guard: PathGuard): Promise<{ absPath: string; mimeType: string; size: number }> {
+  private async assetFile(root: string, filePath: string, guard: PathGuard): Promise<{ absPath: string; mimeType: string; size: number; mtimeMs: number }> {
     const { absolute: absPath } = guard.resolve(root, filePath, 'read')
     const info = await stat(absPath)
     if (!info.isFile()) throw new Error('Not a file')
@@ -101,27 +115,27 @@ export class FileService {
     const extension = filePath.split('.').pop()?.toLowerCase() ?? ''
     const mimeType = ASSET_MIME_TYPES[extension]
     if (!mimeType) throw new Error('This file type does not support binary preview')
-    return { absPath, mimeType, size: info.size }
+    return { absPath, mimeType, size: info.size, mtimeMs: info.mtimeMs }
   }
 
   async readAsset(root: string, filePath: string, guard: PathGuard = lexicalGuard): Promise<FileAsset> {
-    const { absPath, mimeType, size } = await this.assetFile(root, filePath, guard)
+    const { absPath, mimeType, size, mtimeMs } = await this.assetFile(root, filePath, guard)
     const data = await readFile(absPath)
-    return { data: new Uint8Array(data), mimeType, size }
+    return { data: new Uint8Array(data), mimeType, size, mtimeMs }
   }
 
   /**
    * `length` bytes of the asset from `offset`, so a preview of any size travels in pieces that fit a
    * daemon message. `size` is the whole file's; a piece past its end is empty.
    */
-  async readAssetRange(root: string, filePath: string, offset: number, length: number, guard: PathGuard = lexicalGuard): Promise<FileAsset> {
-    const { absPath, mimeType, size } = await this.assetFile(root, filePath, guard)
+  async readAssetRange(root: string, filePath: string, offset: number, length: number, guard: PathGuard = lexicalGuard, includeCanonicalPath = false): Promise<FileAsset> {
+    const { absPath, mimeType, size, mtimeMs } = await this.assetFile(root, filePath, guard)
     const wanted = Math.max(0, Math.min(length, size - offset))
     const buffer = Buffer.alloc(wanted)
     const handle = await open(absPath, 'r')
     try {
       const { bytesRead } = wanted > 0 ? await handle.read(buffer, 0, wanted, offset) : { bytesRead: 0 }
-      return { data: new Uint8Array(buffer.subarray(0, bytesRead)), mimeType, size }
+      return { data: new Uint8Array(buffer.subarray(0, bytesRead)), mimeType, size, mtimeMs, ...await fileIdentity(absPath, includeCanonicalPath) }
     } finally {
       await handle.close()
     }

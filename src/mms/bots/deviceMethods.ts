@@ -19,6 +19,8 @@ export interface BotDevicesSource {
   store: Pick<BotDeviceAccessStore, 'get' | 'set'>
   /** The owner's other devices on the account, or undefined while Bridge is off (nothing to pick from). */
   devices(): Promise<BotDeviceChoice[] | undefined>
+  /** After a change: the Bots list reads the bot again (its lock). */
+  changed?(botId: string): void
 }
 
 /** The choice as About shows it: devices no longer on the account are left out of the list. */
@@ -74,6 +76,7 @@ export function registerBotDeviceMethods(
               }
             }
             source.store.set(botId, access)
+            source.changed?.(botId)
           }
           return await view(source, botId)
         } catch (error) {

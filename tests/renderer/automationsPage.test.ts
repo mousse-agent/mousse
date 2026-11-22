@@ -405,6 +405,15 @@ describe('Edit details, from the inbox', () => {
     expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', { tellMe: 'needs_you' })
   })
 
+  it('a said line always tells and shows its end on the Automations page', async () => {
+    const stored = job({ id: 'b--s', name: 'Pills', prompt: 'Say exactly: Take your pills', schedule: { kind: 'interval', minutes: 60 }, threadId: 'bot-schedule:b', bot: { botId: 'b', scheduleId: 's', createdBy: 'bot', say: 'Take your pills' }, expiresAt: '2030-11-21T23:59:59.999Z' })
+    await mount([item({ key: 'job:b--s', name: 'Pills', who: { kind: 'bot', name: 'Pip', look: { colour: 'teal', accessory: 'none' } }, mayIsGrant: true, link: { kind: 'job', jobId: 'b--s', botId: 'b' } })], [stored])
+    await openForm('job:b--s')
+    expect(document.body.textContent).toContain('Always, like a reminder')
+    expect($('[aria-labelledby$="tell-label"]')).toBeNull()
+    expect($('[data-testid="automation-bot-end"]')?.textContent).toContain('Ends')
+  })
+
   it('shows who actually ran each run, and when its saved agent changed since the run before', async () => {
     const stored = job({ id: 'j1', name: 'Nightly', projectId: 'p1', agent: { definitionId: 'agent-1' } })
     const runs = [

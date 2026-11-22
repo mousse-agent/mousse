@@ -16,11 +16,12 @@ import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, T
 import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage, QueuedMessage } from '../../src/shared/types'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
+import { refusalOfResponse as refusal } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -110,9 +111,13 @@ const parse = (response: Response): Record<string, unknown> => {
   if (response.result?.isError) throw new Error(response.result.content?.[0]?.text ?? 'tool error')
   return JSON.parse(response.result!.content![0].text)
 }
-/** What a call came to: `ok`, or the reason it was refused (`mousse_scope_denied`, `mousse_conflict`, ...), or `error` for a tool error result. */
-const verdict = (response: Response): string => response.error ? response.error.data?.reason ?? 'error' : response.result?.isError ? 'error' : 'ok'
-const conflictOf = (response: Response): string | undefined => response.error?.data?.conflict
+/** What a call came to: `ok`, or the reason it was refused (`mousse_scope_denied`, `mousse_conflict`, ...), or `error` for any other error result. */
+const verdict = (response: Response): string => {
+  if (response.error) return response.error.data?.reason ?? 'error'
+  const reason = refusal(response)?.details.reason
+  return typeof reason === 'string' ? reason : response.result?.isError ? 'error' : 'ok'
+}
+const conflictOf = (response: Response): unknown => refusal(response)?.details.conflict
 
 describe('queue tools that change other threads\' queues and the caller\'s own (SPEC §15.1)', () => {
   let home: string | undefined
@@ -288,8 +293,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
 
       const current = (parse(seen.revision) as { revision: string }).revision
       for (const name of ['enqueue', 'edit', 'reorder', 'remove', 'promote']) {
-        expect(seen[name].error, name).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'revision_mismatch', revision: current } })
-        expect(seen[name].error!.data!.expectedRevision, name).not.toBe(current)
+        expect(refusal(seen[name]), name).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'revision_mismatch', revision: current } })
+        expect(refusal(seen[name])!.details.expectedRevision, name).not.toBe(current)
       }
       // Only the fresh edit reached the queue, with its own journal entry and event.
       expect(verdict(seen.fresh)).toBe('ok')
@@ -647,13 +652,13 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(w.d.engine.bindingForRun(askRun.runId)?.policy.permissionMode).toBe('ask')
 
       await w.d.orch.send(GO, false, { threadId: askCaller.id, clientRequestId: 'go-ask' })
-      expect(seen.askIntoFull.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
+      expect(refusal(seen.askIntoFull)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
       // The ask caller's own mode is no bar to a run that is as strict.
       expect(parse(seen.askIntoAsk)).toMatchObject({ outcome: 'promoted', itemId: ids.typedAsk })
       await w.d.orch.send(GO, false, { threadId: fullCaller.id, clientRequestId: 'go-full' })
-      expect(seen.limitedIntoFull.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
+      expect(refusal(seen.limitedIntoFull)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'ceiling_exceeded', callerMode: 'ask', targetMode: 'full' } })
       // The message is promoted already (the ask agent did it); the full caller finds it steering.
-      expect(seen.fullIntoAsk.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'item_steering' } })
+      expect(refusal(seen.fullIntoAsk)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'item_steering' } })
 
       // The refused ones are exactly as they were: pending, no run bound, nothing cancelled, nothing recorded.
       expect(w.queue(fullTarget.id).map((item) => [item.id, item.state, item.intent, item.steerRunId])).toEqual([
@@ -703,7 +708,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const b = await w.d.orch.send('B', false, { threadId: w.other.id, clientRequestId: 'run-b', awaitMode: 'ack' })
       ids.item = w.typed(w.other.id, 'typed note').id
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.replaced.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'run_not_active', expectedRunId: a.runId, activeRunId: b.runId } })
+      expect(refusal(seen.replaced)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_not_active', expectedRunId: a.runId, activeRunId: b.runId } })
       // The message is where it was, and run B (now active) never saw it.
       expect(w.queue(w.other.id).find((item) => item.id === ids.item)).toMatchObject({ state: 'pending', intent: 'normal' })
       expect(w.events(w.other.id, 'agent.action')).toEqual([])
@@ -728,7 +733,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       ids.item = w.typed(w.other.id, 'typed note').id
       w.d.engine.pauseRun({ runId: sent.runId, pause: { reason: 'usage_limit', until: '2099-01-01T00:00:00.000Z', estimated: true, count: 1, autoResume: false } })
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.paused.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'run_paused', expectedRunId: sent.runId } })
+      expect(refusal(seen.paused)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'run_paused', expectedRunId: sent.runId } })
       expect(w.queue(w.other.id)).toEqual([expect.objectContaining({ id: ids.item, state: 'pending', intent: 'normal' })])
       expect(w.d.engine.getRun(sent.runId)).toMatchObject({ status: 'paused' })
       expect(w.events(w.other.id, 'agent.action')).toEqual([])
@@ -990,7 +995,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const questions = (w.d.orch as unknown as { questions: { requestAnswers(questions: unknown, threadId: string, options: unknown): Promise<unknown>; listPendingForThread(threadId: string): Array<{ requestId: string }>; submitAnswers(requestId: string, answers: unknown): boolean } }).questions
       const asked = questions.requestAnswers([{ id: 'q', prompt: 'Allow it?', options: [{ id: 'a', label: 'Allow' }] }], w.other.id, {})
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.promote.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'questions_pending' } })
+      expect(refusal(seen.promote)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'questions_pending' } })
       expect(w.queue(w.other.id)).toEqual([expect.objectContaining({ id: ids.typed, state: 'pending', intent: 'normal' })])
       expect(questions.listPendingForThread(w.other.id)).toHaveLength(1)
 
@@ -1059,7 +1064,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
 
       expect(conflictOf(seen.promoteBefore!)).toBe('questions_pending')
-      expect(JSON.parse(seen.answerPerson!.result!.content![0]!.text)).toMatchObject({ ok: false, reason: 'person_turn' })
+      expect(refusal(seen.answerPerson!)?.details).toMatchObject({ ok: false, reason: 'person_turn' })
       expect(conflictOf(seen.promoteAfter!)).toBe('questions_pending')
       expect(verdict(seen.answerPlain!)).toBe('mousse_scope_denied')
       expect(w.d.questions.listPendingForThread(w.other.id)).toHaveLength(2)
@@ -1173,7 +1178,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       ids.y = w.typed(w.other.id, 'y').id
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       expect(verdict(seen.first)).toBe('ok')
-      expect(seen.other.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'request_conflict' } })
+      expect(refusal(seen.other)).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'request_conflict' } })
       expect(parse(seen.retry)).toMatchObject({ itemId: ids.x, replayed: true })
       expect(w.queue(w.other.id).map((item) => item.id)).toEqual([ids.y])
       release.resolve()
@@ -1224,8 +1229,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       ids.typed = w.typed(w.other.id, 'a note I typed').id
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       expect(seen.slice(0, 3).map(verdict)).toEqual(['ok', 'ok', 'ok'])
-      expect(seen[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full_per_sender' } })
-      expect(seen[4].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full_per_sender' } })
+      expect(refusal(seen[3])).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_queue_full_per_sender' } })
+      expect(refusal(seen[4])).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_queue_full_per_sender' } })
       expect(w.queue(w.other.id).map((item) => item.origin?.kind)).toEqual([undefined, 'agent', 'agent', 'agent'])
       expect(w.queue(w.other.id)[0].content).toBe('a note I typed')
 

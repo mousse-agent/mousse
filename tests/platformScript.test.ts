@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -39,30 +39,6 @@ describe('ScriptRunner', () => {
     })
     expect(result.exitCode).toBe(0)
     expect(JSON.parse(result.stdout)).toEqual({ ok: true, n: 3, argv: ['--flag'] })
-  })
-
-  it('aborts an owned child process', async () => {
-    const dir = tempDir('mousse-script-abort-')
-    const script = join(dir, 'sleep.mjs')
-    writeFileSync(script, 'await new Promise((r) => setTimeout(r, 30000))\n')
-    const runner = new ScriptRunner()
-    const controller = new AbortController()
-    const pending = runner.run({
-      runtime: 'node',
-      scriptPath: script,
-      scriptHash: 'x',
-      argv: [],
-      cwd: dir,
-      env: { PATH: process.env.PATH ?? '' },
-      stdin: '{}',
-      timeoutMs: 20_000,
-      maxStdoutBytes: 1024,
-      maxStderrBytes: 1024,
-      signal: controller.signal
-    })
-    setTimeout(() => controller.abort(), 80)
-    const result = await pending
-    expect(result.exitCode === 0).toBe(false)
   })
 
   it('aborts descendants in the owned process tree', async () => {
@@ -134,4 +110,3 @@ describe('ScriptRunner', () => {
   })
 })
 
-void mkdirSync

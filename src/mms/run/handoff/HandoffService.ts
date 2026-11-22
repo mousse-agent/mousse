@@ -8,6 +8,7 @@ import type { RunStore } from '../RunStore'
 import {
   TERMINAL_RUN_STATUSES,
   runId as makeRunId,
+  type AttemptStatus,
   type HandoffRecord,
   type HandoffStatus,
   type HandoffStrategy,
@@ -21,6 +22,9 @@ import {
   type HandoffItem,
   type SelectedHandoffItem
 } from './budget'
+
+/** How an attempt that opened a session ended when its runtime can resume that session (`HandoffService.decide`). */
+const RESUMABLE_ATTEMPT_STATUSES: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>(['completed', 'interrupted'])
 
 /** The thread owner's transcript of `threadId` as handoff items, oldest first. */
 export type HandoffTranscriptSource = (threadId: string) => HandoffItem[]
@@ -213,8 +217,14 @@ export class HandoffService {
 
   /**
    * SPEC §16.1 strategy. A fixed transfer strategy wins; otherwise the same provider with a live
-   * native session resumes, a provider that already ran on this thread gets the runs since its last
-   * turn, and anything else gets a full summary.
+   * native session resumes, a provider whose session on this thread can be resumed gets the runs
+   * since that session's last turn, and anything else gets a full summary.
+   *
+   * Only an attempt that holds a session (`providerRef.sessionId`) and ended in a state its runtime
+   * resumes from (`completed`, `interrupted`) is a return point: an attempt refused before its
+   * session opened changed nothing on the runtime's side and is passed over, and the newest one that
+   * did open a session but failed left nothing to resume, so the target gets a full summary instead
+   * of a delta that would assume the history before it.
    */
   private decide(input: HandoffPlanInput, targetOrdinal: number): { strategy: HandoffStrategy; afterOrdinal?: number } {
     if (input.strategy === 'fork_delta_summary') return { strategy: input.strategy, afterOrdinal: input.afterOrdinal }
@@ -223,8 +233,11 @@ export class HandoffService {
       return { strategy: 'native_resume' }
     for (let ordinal = targetOrdinal - 1; ordinal >= 1; ordinal -= 1) {
       const attempts = this.store.listAttempts(makeRunId(input.threadId, ordinal))
-      if (attempts.some((attempt) => attempt.providerRef?.provider === input.to.provider))
-        return { strategy: 'delta', afterOrdinal: Math.max(ordinal, input.afterOrdinal ?? 0) }
+      const withSession = attempts.filter((attempt) => attempt.providerRef?.provider === input.to.provider && attempt.providerRef.sessionId)
+      const latest = withSession.reduce<(typeof withSession)[number] | undefined>((newest, attempt) => (!newest || attempt.ordinal > newest.ordinal ? attempt : newest), undefined)
+      if (!latest) continue
+      if (!RESUMABLE_ATTEMPT_STATUSES.has(latest.status)) break
+      return { strategy: 'delta', afterOrdinal: Math.max(ordinal, input.afterOrdinal ?? 0) }
     }
     return { strategy: 'full_summary', afterOrdinal: input.afterOrdinal }
   }

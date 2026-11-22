@@ -259,6 +259,17 @@ describe('P3 real MMS remote Bridge', () => {
     ).rejects.toMatchObject({ code: 'stream_unknown' })
     expect(p.mms.threads.listAllThreads()).toHaveLength(1)
   })
+
+  it('returns the new thread inline over the phone RPC even when the computer has a large thread list', async () => {
+    const p = await setup()
+    for (let i = 0; i < 140; i++) p.mms.threads.createThread(`Existing thread ${i} ${'x'.repeat(480)}`)
+    const { b } = await p.connect()
+    const result = await b.rpc('threads.create', { name: 'New Thread' }, { id: newId('rpc'), idem: 'phone-create', deadlineMs: 3000 })
+    expect(result).toEqual({
+      thread: expect.objectContaining({ id: expect.any(String), name: 'New Thread' })
+    })
+    expect(p.mms.threads.listAllThreads()).toHaveLength(141)
+  })
   it('enforces current read-only capability and closes an actual active TLS session on revoke', async () => {
     const p = await setup(['read']),
       { a, b } = await p.connect()

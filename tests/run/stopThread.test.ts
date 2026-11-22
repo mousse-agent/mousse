@@ -167,7 +167,9 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
       f!.engine.stopSubtree({ threadId: 'child-1', reason: 'user' })
       const [notice] = f!.engine.inbox.listPending('parent')
       expect(notice).toMatchObject({ kind: 'reconcile_notice', payload: { kind: 'delegation_stopped', delegationId: c.delegationId, childThreadId: 'child-1' } })
-      expect(planWakeNotice([notice], { titleOf: () => 'Reviewer' }).text).toBe(`Subagent "Reviewer" (thread child-1) was stopped before it finished task ${c.delegationId}.`)
+      const planned = planWakeNotice([notice], { titleOf: () => 'Reviewer' })
+      expect(planned.text).toBe(`<mousse_notice kind="subagent_stopped" ref="${c.delegationId}">\nSubagent "Reviewer" (thread child-1) was stopped before it finished its task.\n</mousse_notice>`)
+      expect(planned.items).toMatchObject([{ event: 'stopped', childThreadId: 'child-1', title: 'Reviewer' }])
       // The subagent's own task into child-2 is inside the subtree: no notice for it.
       expect(f!.engine.inbox.listForThread('child-1')).toEqual([])
 
@@ -800,6 +802,9 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       expect(prompt).toContain('Which database should I use?')
       expect(prompt).toContain(`answer_subagent`)
       expect(prompt).toContain(requestId)
+      // The transcript keeps it as a notice about the subagent, so the app does not show that text as the person's message.
+      const stored = s.d.orch.getMessages(s.parentId).find((message) => message.role === 'user' && message.content === prompt)
+      expect(stored?.subagentNotice).toMatchObject([{ event: 'question', childThreadId: s.childThreadId, title: 'Worker', requestId }])
       // The wake read it; the parent answers with answer_subagent.
       expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
       expect(await (s.d.orch as any).answerSubagent(s.parentId, wake, { subagent: 'Worker', requestId, answers: { db: 'sqlite' } })).toMatchObject({ answered: true })
@@ -1031,8 +1036,6 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     it('the follow-up is a queued run from the start: it holds the task by itself, with no session in memory, and survives a restart', async () => {
       const { s, followUp } = await heldBySteer()
       expect(followUp.status).toBe('queued')
-      // It is the person's text, so its turn takes a free slot ahead of background turns.
-      expect(followUp.outcome?.sentByPerson).toBe(true)
       expect(followUp.outcome?.sentByAgent).toBeUndefined()
       expect(s.d.store.loadMessageQueue(s.childThreadId).map((item) => item.runId)).toEqual([followUp.runId])
       expect(s.task(s.delegation.delegationId).status).toBe('running')

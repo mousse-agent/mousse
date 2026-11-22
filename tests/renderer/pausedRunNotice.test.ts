@@ -2,7 +2,7 @@
 import { act, createElement, Fragment, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PausedRunNotice, pausedRunNotice, type PausedRunNoticeInput } from '../../src/renderer/chat/components/PausedRunNotice'
+import { PausedRunNotice, RESUME_STALLED_TEXT, RESUME_WAIT_MS, pausedRunNotice, type PausedRunNoticeInput } from '../../src/renderer/chat/components/PausedRunNotice'
 import { ComposerNotice, ComposerNoticeProvider, ComposerNoticeSlot } from '../../src/renderer/components/ComposerNotice'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { createPausedRunClient, type PausedRunClient } from '../../src/renderer/services/pausedRunClient'
@@ -58,8 +58,6 @@ describe('the paused run notice', () => {
     expect(line()!.title).toBe("Resumes in 2h 15m. Claude's 5-hour limit was reached. Continues by itself at reset.")
     expect(notice()!.dataset.tone).toBe('warning')
     expect(names()).toEqual(['Try now', 'Cancel'])
-    expect(button('Try now').className).toBe('composer-notice-btn composer-notice-btn-primary')
-    expect(button('Cancel').className).toBe('composer-notice-btn')
     expect(button('Cancel').title).toBe('Drop this run; queued messages still send')
     expect(host.querySelector('[aria-haspopup]')).toBeNull()
   })
@@ -83,6 +81,13 @@ describe('the paused run notice', () => {
     expect(line()!.textContent).toBe('Usage limit reached · should have reset by now')
   })
 
+  it('a continue turn that hit the limit again says it is still limited, with the reset time', () => {
+    view({ pause: pause({ again: true, autoResume: false }) })
+    expect(line()!.textContent).toMatch(/^Still limited · resets \S+(\s?[AaPp][Mm])?$/)
+    expect(line()!.title).toContain("Claude's 5-hour limit was reached again after resuming.")
+    expect(names()).toEqual(['Try now', 'Cancel'])
+  })
+
   it('a stale pause says the resume time is unknown, and still offers Try now', () => {
     view({ pause: pause({ autoResume: false, stale: true }), now: at(9, 0, 29) })
     expect(line()!.textContent).toBe('Usage limit reached · resume time unknown')
@@ -99,14 +104,9 @@ describe('the paused run notice', () => {
     expect(calls()).toEqual([1, 1])
   })
 
-  it('has no dismiss: it resolves when the run continues or the pause ends', () => {
-    view()
-    expect(names()).not.toContain('Dismiss')
-  })
-
   it('while a press is in flight every button ignores presses, and the pressed one says so', () => {
     const input = view({ busy: 'resume' })
-    expect(button('Trying…').getAttribute('aria-busy')).toBe('true')
+    expect(button('Resuming…').getAttribute('aria-busy')).toBe('true')
     for (const entry of buttons().filter((entry) => entry.textContent)) {
       expect(entry.getAttribute('aria-disabled')).toBe('true')
       click(entry)
@@ -132,7 +132,7 @@ describe('the paused run notice', () => {
     expect(notice()!.getAttribute('aria-label')).toBe('Run paused by a usage limit')
     button('Try now').focus()
     view({ busy: 'resume' })
-    expect(document.activeElement).toBe(button('Trying…'))
+    expect(document.activeElement).toBe(button('Resuming…'))
   })
 })
 
@@ -158,19 +158,51 @@ describe('the notice on a thread', () => {
     expect(notice()).toBeNull()
   })
 
-  it('Try now asks the daemon to continue that run, and a second press while it is in flight does nothing', async () => {
-    const resume = vi.fn(() => new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 0)))
-    const client = clientOf({ resumeNow: resume })
+  it('Try now says Resuming… from the press until the run continues, and ignores presses meanwhile', async () => {
+    const client = clientOf()
     setTurn(state())
     show('t1', client)
     click(button('Try now'))
-    expect(resume).toHaveBeenCalledWith('run:1', 't1')
-    click(button('Trying…'))
+    expect(client.resumeNow).toHaveBeenCalledWith('run:1', 't1')
+    // The daemon took the press; the continue turn has not started yet.
+    await flush()
+    expect(line()!.textContent).toBe('Usage limit reached · resuming…')
+    expect(button('Resuming…').getAttribute('aria-busy')).toBe('true')
+    click(button('Resuming…'))
     click(button('Cancel'))
-    expect(resume).toHaveBeenCalledTimes(1)
+    expect(client.resumeNow).toHaveBeenCalledTimes(1)
     expect(client.cancel).not.toHaveBeenCalled()
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)) })
+    // The continue turn starts: the thread is no longer paused and the notice goes.
+    setTurn(state({ turnId: 'run:2', phase: 'thinking', pause: undefined }))
+    expect(notice()).toBeNull()
+  })
+
+  it('a resume that runs into the limit again shows the new pause as still limited, with Try now back', async () => {
+    vi.useFakeTimers({ now: NOW })
+    const client = clientOf()
+    setTurn(state())
+    show('t1', client)
+    click(button('Try now'))
+    await flush()
+    setTurn(state({ turnId: 'run:2', phase: 'thinking', pause: undefined }))
+    setTurn(state({ turnId: 'run:2', pause: pause({ runId: 'run:2', again: true }) }))
+    expect(line()!.textContent).toMatch(/^Still limited · resumes \S+(\s?[AaPp][Mm])?$/)
     expect(button('Try now').getAttribute('aria-disabled')).toBeNull()
+  })
+
+  it('a run still paused long after the daemon took Try now says it did not continue, and Try now works again', async () => {
+    vi.useFakeTimers({ now: NOW })
+    const client = clientOf()
+    setTurn(state())
+    show('t1', client)
+    click(button('Try now'))
+    await flush()
+    act(() => { vi.advanceTimersByTime(RESUME_WAIT_MS - 1_000) })
+    expect(button('Resuming…')).toBeDefined()
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(host.querySelector('[role="alert"]')!.textContent).toBe(RESUME_STALLED_TEXT)
+    click(button('Try now'))
+    expect(client.resumeNow).toHaveBeenCalledTimes(2)
   })
 
   it('Cancel asks the daemon to end the pause for that run', async () => {
@@ -230,6 +262,94 @@ describe('the notice on a thread', () => {
   })
 })
 
+describe('the notice on a thread that waits on paused subagents', () => {
+  const sub = (id: string, parentThreadId: string) => ({ id, lineage: { parentThreadId, rootThreadId: 'p', relationship: 'subagent' } })
+  // p ── c1 ── g1, p ── c2; x is a thread of its own.
+  const threads = [{ id: 'p' }, sub('c1', 'p'), sub('g1', 'c1'), sub('c2', 'p'), { id: 'x' }]
+  const turn = (threadId: string, patch: Partial<TurnState> = {}): TurnState => ({ threadId, turnId: `run:${threadId}`, phase: 'completed', updatedAt: new Date(NOW).toISOString(), ...patch })
+  const pausedTurn = (threadId: string, hours: number, patch: Partial<TurnPause> = {}): TurnState =>
+    turn(threadId, { phase: 'paused', pause: pause({ runId: `run:${threadId}`, until: new Date(at(hours)).toISOString(), autoResume: false, ...patch }) })
+  const setTurns = (...turns: TurnState[]) => act(() => { useAppStore.setState({ threads: threads as never, turnStates: Object.fromEntries(turns.map((entry) => [entry.threadId, entry])) }) })
+  const clientOf = (): PausedRunClient => ({ resumeNow: vi.fn(async () => undefined), cancel: vi.fn(async () => undefined) })
+  const show = (client: PausedRunClient) =>
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Fragment, null, createElement(ComposerNoticeSlot), createElement(PausedRunNotice, { threadId: 'p', client })))))
+  const flush = () => act(async () => { await Promise.resolve() })
+
+  afterEach(() => { useAppStore.setState({ threads: [] }) })
+
+  it('shows the paused subagent\'s reset with only Try now, which resumes that subagent', async () => {
+    vi.useFakeTimers({ now: NOW })
+    const client = clientOf()
+    setTurns(turn('p'), pausedTurn('c1', 15, { runId: 'run:c1' }))
+    show(client)
+    expect(notice()!.getAttribute('aria-label')).toBe('Subagent paused by a usage limit')
+    expect(line()!.textContent).toMatch(/^Subagent hit a usage limit · resets \S+(\s?[AaPp][Mm])?$/)
+    expect(names()).toEqual(['Try now'])
+
+    click(button('Try now'))
+    await flush()
+    expect(client.resumeNow).toHaveBeenCalledWith('run:c1', 'c1')
+    expect(line()!.textContent).toBe('Subagent hit a usage limit · resuming…')
+    expect(button('Resuming…').getAttribute('aria-busy')).toBe('true')
+    // The subagent continues: nothing below the parent is paused any more.
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }))
+    expect(notice()).toBeNull()
+  })
+
+  it('counts every paused subagent at any depth, shows the soonest reset, resumes each, and ignores other threads', async () => {
+    vi.useFakeTimers({ now: NOW })
+    const client = clientOf()
+    setTurns(turn('p'), pausedTurn('g1', 16), pausedTurn('c2', 15), pausedTurn('x', 14))
+    show(client)
+    expect(line()!.textContent).toMatch(/^2 subagents hit a usage limit · resets /)
+    expect(line()!.title).toContain('Resets in')
+    click(button('Try now'))
+    await flush()
+    expect((client.resumeNow as ReturnType<typeof vi.fn>).mock.calls).toEqual([['run:c2', 'c2'], ['run:g1', 'g1']])
+  })
+
+  it('stays Resuming… until every subagent it resumed has continued, and the minute counts from the press', async () => {
+    vi.useFakeTimers({ now: NOW })
+    setTurns(turn('p'), pausedTurn('c1', 15), pausedTurn('c2', 16))
+    show(clientOf())
+    click(button('Try now'))
+    await flush()
+    act(() => { vi.advanceTimersByTime(20_000) })
+    // c1 continues first; c2 is still on its way.
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }), pausedTurn('c2', 16))
+    expect(line()!.textContent).toBe('Subagent hit a usage limit · resuming…')
+    expect(button('Resuming…').getAttribute('aria-busy')).toBe('true')
+    // c2 never continues: the minute from the press runs out, not a new minute from c1's start.
+    act(() => { vi.advanceTimersByTime(RESUME_WAIT_MS - 20_000) })
+    expect(host.querySelector('[role="alert"]')!.textContent).toBe(RESUME_STALLED_TEXT)
+    expect(button('Try now').getAttribute('aria-disabled')).toBeNull()
+  })
+
+  it('when the last resumed subagent continues, the notice goes', async () => {
+    setTurns(turn('p'), pausedTurn('c1', 15), pausedTurn('c2', 16))
+    show(clientOf())
+    click(button('Try now'))
+    await flush()
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }), pausedTurn('c2', 16))
+    expect(button('Resuming…')).toBeDefined()
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }), turn('c2', { phase: 'thinking' }))
+    expect(notice()).toBeNull()
+  })
+
+  it('a subagent that ran into the limit again reads still limited', () => {
+    setTurns(turn('p'), pausedTurn('c1', 15, { again: true }))
+    show(clientOf())
+    expect(line()!.textContent).toMatch(/^Subagent still limited · /)
+  })
+
+  it('the thread\'s own pause comes first: its own notice, whose Try now resumes the subagents too', () => {
+    setTurns(pausedTurn('p', 15), pausedTurn('c1', 14))
+    show(clientOf())
+    expect(notice()!.getAttribute('aria-label')).toBe('Run paused by a usage limit')
+    expect(names()).toEqual(['Try now', 'Cancel'])
+  })
+})
+
 describe('the paused run client', () => {
   it('names the run, and the thread when it is given, so a thread on another computer can be reached', async () => {
     const request = vi.fn(async () => ({ runId: 'run:1' }))
@@ -258,7 +378,7 @@ describe('the notice when the paused run changes', () => {
     act(() => { useAppStore.setState({ turnStates: { t1: paused('run:1') } }) })
     act(() => root.render(inSlot(createElement(PausedRunNotice, { threadId: 't1', client }))))
     click(button('Try now'))
-    expect(button('Trying…')).toBeDefined()
+    expect(button('Resuming…')).toBeDefined()
     // The run is replaced by another paused run of the same thread.
     act(() => { useAppStore.setState({ turnStates: { t1: paused('run:2') } }) })
     await act(async () => { refuse(); await new Promise((resolve) => setTimeout(resolve, 0)) })

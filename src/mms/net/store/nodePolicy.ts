@@ -3,6 +3,7 @@ import type { NodeId } from '../../../shared/net'
 import { isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import type { Clock } from '../contracts'
 import type { NetDatabase } from './database'
+import { AGENT_REACHES, isAgentReach, type AgentReach } from '../../../shared/net/local'
 
 /**
  * What this computer lets one other device do here, set on this computer alone. It never travels
@@ -30,16 +31,22 @@ export interface NodePolicy {
    * boundary: a person's calls from the device are not marked and are held to the other fields only.
    */
   agentReach: AgentReach
+  /**
+   * A person or an agent on the device may work on threads here: start, send, steer, stop, queue, change settings and
+   * files, run Git, and make or change bots (the `work` and `bots_manage` classes of `shared/net/accessClasses.ts`).
+   * Off, it still reads threads and chats with bots, every family alike, checked on every call and every saved result.
+   */
+  work: boolean
   createdAt: number
 }
 export type NodePolicyChange = Partial<
-  Pick<NodePolicy, 'blocked' | 'maxPermissionMode' | 'terminal' | 'editor' | 'bots' | 'agentReach'>
+  Pick<
+    NodePolicy,
+    'blocked' | 'maxPermissionMode' | 'terminal' | 'editor' | 'bots' | 'agentReach' | 'work'
+  >
 >
 
-export type AgentReach = 'none' | 'launched' | 'all'
-export const AGENT_REACHES: readonly AgentReach[] = ['none', 'launched', 'all']
-export const isAgentReach = (value: unknown): value is AgentReach =>
-  (AGENT_REACHES as readonly unknown[]).includes(value)
+export { AGENT_REACHES, isAgentReach, type AgentReach }
 /** A device's agents change only the threads they started here, until a person on this computer allows more. */
 export const DEFAULT_AGENT_REACH: AgentReach = 'launched'
 
@@ -51,6 +58,8 @@ export const DEFAULT_TERMINAL_ACCESS = false
 export const DEFAULT_EDITOR_ACCESS = false
 /** Every device reaches this computer's bots until the owner switches bots off for it (as before the switch existed). */
 export const DEFAULT_BOTS_ACCESS = true
+/** Every device works on threads here until the owner makes it view only (as before the switch existed). */
+export const DEFAULT_WORK_ACCESS = true
 
 export interface NodePolicyEvent {
   node: NodeId
@@ -66,10 +75,11 @@ interface Row {
   editor: number
   bots: number
   agent_reach: string
+  work: number
   created_at: number
 }
 
-const COLUMNS = 'node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,created_at'
+const COLUMNS = 'node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at'
 
 /** `net_node_policy`, in the Net database. A node without a row has the defaults. */
 export class SqliteNodePolicy {
@@ -114,6 +124,7 @@ export class SqliteNodePolicy {
       (change.terminal !== undefined && typeof change.terminal !== 'boolean') ||
       (change.editor !== undefined && typeof change.editor !== 'boolean') ||
       (change.bots !== undefined && typeof change.bots !== 'boolean') ||
+      (change.work !== undefined && typeof change.work !== 'boolean') ||
       (change.maxPermissionMode !== undefined && !isPermissionMode(change.maxPermissionMode)) ||
       (change.agentReach !== undefined && !isAgentReach(change.agentReach))
     )
@@ -127,6 +138,7 @@ export class SqliteNodePolicy {
           ...(change.terminal === undefined ? {} : { terminal: change.terminal }),
           ...(change.editor === undefined ? {} : { editor: change.editor }),
           ...(change.bots === undefined ? {} : { bots: change.bots }),
+          ...(change.work === undefined ? {} : { work: change.work }),
           ...(change.agentReach === undefined ? {} : { agentReach: change.agentReach }),
           ...(change.maxPermissionMode === undefined
             ? {}
@@ -135,8 +147,8 @@ export class SqliteNodePolicy {
       this.db.charge(1)
       this.db.database
         .prepare(
-          'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,created_at) VALUES(?,?,?,?,?,?,?,?) ' +
-            'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor,bots=excluded.bots,agent_reach=excluded.agent_reach'
+          'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,work,created_at) VALUES(?,?,?,?,?,?,?,?,?) ' +
+            'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor,bots=excluded.bots,agent_reach=excluded.agent_reach,work=excluded.work'
         )
         .run(
           node,
@@ -146,6 +158,7 @@ export class SqliteNodePolicy {
           after.editor ? 1 : 0,
           after.bots ? 1 : 0,
           after.agentReach,
+          after.work ? 1 : 0,
           after.createdAt || this.clock.now()
         )
       event = { node, before, after: this.get(node) }
@@ -181,6 +194,7 @@ export class SqliteNodePolicy {
       editor: DEFAULT_EDITOR_ACCESS,
       bots: DEFAULT_BOTS_ACCESS,
       agentReach: DEFAULT_AGENT_REACH,
+      work: DEFAULT_WORK_ACCESS,
       createdAt: 0
     }
   }
@@ -199,6 +213,8 @@ export class SqliteNodePolicy {
       bots: row.bots === 1,
       // A value this version does not know reaches nothing.
       agentReach: isAgentReach(row.agent_reach) ? row.agent_reach : 'none',
+      // Only a stored 1 is on: a value this version does not know leaves the device to view and chat with bots.
+      work: row.work === 1,
       createdAt: row.created_at
     }
   }

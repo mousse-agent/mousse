@@ -162,6 +162,18 @@ describe('BotActivitySink', () => {
     expect(activity.drain('d1')).toEqual([])
   })
 
+  it('a call with no words of its own shows "working" in place of the step before it, never its tool\'s name, and settles to no chip', () => {
+    const { activity, events, advance } = sink()
+    activity.onAllowed(at, { tool: 'web_search', input: { query: 'a' } })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    activity.onAllowed(at, { tool: 'some_new_tool', input: { secret: 'x' } })
+    expect(events.map((event) => event.chip)).toEqual([
+      { icon: 'search', text: 'searching the web', highlight: 'a', live: true },
+      { icon: 'think', text: 'working', live: true }
+    ])
+    expect(activity.drain('d1')).toEqual([{ icon: 'search', text: 'searched the web', highlight: 'a' }])
+  })
+
   it('takes app-tool results for the activation\'s current dispatch, for outcome chips', () => {
     const { activity } = sink()
     activity.onAllowed(at, { tool: 'memory_save', input: { text: 'Invoices go to ~/Documents/Invoices', kind: 'note' } })

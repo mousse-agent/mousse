@@ -1,4 +1,7 @@
+import type { BotChatContext, BotChatContextInput } from './memory/contextPack'
+import type { BotChatEpochEnd } from './memory/contextBudget'
 import type { BotChip } from '../../shared/bots/personal/chat'
+import type { BotChipCall, BotChipContext } from '../../shared/bots/personal/chips'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
@@ -69,14 +72,16 @@ export interface BotRuntimeHold {
 export interface BotToolHost {
   /**
    * The bot activation a thread's turn belongs to. Lane and bot always come from here, never from
-   * tool arguments; `role` is the calling thread's (a consult calls from a `context` thread).
+   * tool arguments; `memoryLane` is the activation's memory rights (missing means run notes only); `role` is the calling thread's (a consult calls from a `context` thread).
    */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role?: 'home' | 'activation' | 'context' | 'subagent' } | undefined
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; memoryLane?: BotLane; role?: 'home' | 'activation' | 'context' | 'subagent' } | undefined
   schedules: {
     /** `from`: the turn that adds it; its next message shows the automation as a card (`card`). */
-    add(botId: string, s: { when: BotSchedule['when']; prompt: string }, from?: string): { scheduleId: string; label: string; card?: true }
+    add(botId: string, s: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; onlyIfChanged?: import('./pageChecks').PageSetting }, from?: string): { scheduleId: string; label: string; card?: true }
     remove(botId: string, scheduleId: string): boolean
-    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
+    /** The calling thread ends only the schedule on its own activation. */
+    done?(threadId: string, why: string): void
+    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }>
   }
   setProfile(botId: string, p: { name?: string; description?: string }): void
   /**
@@ -103,7 +108,7 @@ export interface BotToolHost {
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
     /** `question`: the work waits for the owner's answer to its question and takes nothing else until then. */
-    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question'
+    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting'
     /**
      * When a note reaches the work: `now` (at its next step, while it runs), `after_compaction` (its runtime is making
      * room in its context: once that ends, within minutes), `step_end` (when its current turn ends: its runtime takes no
@@ -135,11 +140,19 @@ export interface BotToolHost {
   cards?: {
     show(botId: string, activationId: string, card: BotCard): { shown: boolean; text: string }
   }
+  /**
+   * Messages to the owner's other bots (`bot_list`, `bot_send`). `from` is the turn that sends: a chat turn, or work the
+   * owner asked for. `send` throws, with why in words for the bot, when the message can't go. Absent: none here.
+   */
+  bots?: {
+    list(botId: string): Array<{ name: string; does: string; paused?: true }>
+    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }>
+  }
   /** One-off reminders: said at a time, or work started then. Wakes are listed and cancelled with them. */
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }
     /** `wake`: it is a wake, and what it waits for ("when acme/app#12 merges", "at its time"). */
-    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; work?: string; wake?: string }>
+    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; ownerSet?: boolean | null; work?: string; wake?: string }>
     cancel(botId: string, reminderId: string): boolean
   }
   /**
@@ -148,7 +161,23 @@ export interface BotToolHost {
    * wakes here.
    */
   wakes?: {
+    wait?(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
     add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
+  }
+  /**
+   * The ledger (docs/plans/bot-context.md §16): a job the turn `from` handed to one of the owner's threads, by sending it
+   * `sent` (a first message, or a message to a thread it already had). Kept in `bots.db` with who asked and what; the bot
+   * is told in its chat when the thread finishes or waits for a person. A thread still working on an earlier job of the
+   * bot keeps that job. Absent: no ledger here.
+   */
+  jobs?: {
+    open(botId: string, from: string, input: { threadId: string; title: string; project?: string; sent: string }): { jobId: string }
+    /**
+     * A message thread `threadId`, which bot `botId` started, sends the bot while it works (`message_parent`): a notice
+     * turn in the bot's chat, keyed by `requestKey` so a retry replays. Throws, with why in words for the thread, when
+     * it can't be sent. Absent: threads here can't message their bot.
+     */
+    message?(botId: string, threadId: string, input: { message: string; title: string; requestKey: string; maxWaiting: number }): Promise<{ bot: string; replayed: boolean }>
   }
   /**
    * Background commands (`watch_start`, `watch_list`, `watch_stop`): a command that runs beside the bot and wakes it in its
@@ -159,6 +188,8 @@ export interface BotToolHost {
     start(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string }
     list(botId: string): Array<{ id: string; title: string; command: string; match?: string; startedAt: string; until: string; lastLine?: string }>
     stop(botId: string, watcherId: string): boolean
+    /** All of one command's kept output, while it runs and for a while after it ended (`watch_list` with its id). */
+    output?(botId: string, watcherId: string): import('./watchers').WatcherOutput | undefined
   }
 }
 
@@ -168,7 +199,7 @@ export interface BotToolHost {
  * text but its tools' names.
  */
 export interface BotMcpListing {
-  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'some: it has new tools' | 'no: it changed since you were allowed it'; answering?: false; starting?: true }>
+  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'no: switched off by your owner'; answering?: false; starting?: true }>
   note: string
 }
 
@@ -193,6 +224,8 @@ export interface BotWorkModel {
 
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {
+  /** This request found existing work; no new activation was started. */
+  replayed?: true
   workId: string
   status: 'started' | 'queued' | 'ended'
   ahead: string[]
@@ -206,7 +239,7 @@ export interface BotWorkList {
    * `waitsFor: 'answer'`: held while it waits for the owner's answer to `question` (`question_answer` passes on an answer
    * they gave in the chat).
    */
-  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule'; waitsFor?: 'answer'; question?: { questionId: string; question: string } }>
+  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule'; wait?: { dueAt: string; event: BotWakeEvent | null }; waitsFor?: 'answer'; question?: { questionId: string; question: string } }>
   recent: Array<{ workId: string; title: string; status: 'done' | 'failed' | 'stopped'; endedAt: string; report?: string }>
 }
 
@@ -225,6 +258,18 @@ export interface BotActivitySink {
   onAppResult(ctx: BotActivityContext, tool: string, result: unknown): void
   /** The dispatch settled: its rolled-up chips for the message row, and the list is cleared. */
   drain(dispatchId: string): BotChip[]
+  /**
+   * As `drain`, with the calls the chips were rolled up from. A turn that goes on in another (the turn cap, a question)
+   * carries its calls rather than its chips, so the message that ends the work rolls them all up as one: "saved 30
+   * files", not "saved 2 files" once for each turn.
+   */
+  drainCalls?(dispatchId: string): { chips: BotChip[]; calls?: BotActivityCalls }
+}
+
+/** One dispatch's calls as the chips read them, and where they happened (`rollUpChips`). */
+export interface BotActivityCalls {
+  calls: BotChipCall[]
+  context: BotChipContext
 }
 
 /** How a dispatch ended, for capture. */
@@ -238,6 +283,18 @@ export type BotDispatchEnd = 'settled' | 'wall' | 'reload' | 'stopped' | 'failed
 export interface BotContextProvider {
   /** The chat pack, placed in `turnPreamble` right after `clearConversationContext(homeThreadId)`. */
   chatPreamble(input: { botId: string; activationId: string }): Promise<string>
+  /**
+   * With chat epochs on (docs/plans/bot-context.md §14): the chat turn's pack, the base of a new epoch (`fresh`: the
+   * engine clears the home context first) or the delta of the running one (the turn resumes the thread's conversation).
+   */
+  chatContext?(input: BotChatContextInput): Promise<BotChatContext>
+  /**
+   * The whole chat pack, built now and not frozen: what a turn on a running epoch is given again after its runtime
+   * compacted the conversation (its own pack holds only what was new).
+   */
+  chatPackNow?(input: { botId: string; activationId: string }): string
+  /** Ends the chat's epoch: its next turn starts from a cleared context (`/clear`, a runtime compaction). */
+  endChatEpoch?(botId: string, reason: BotChatEpochEnd): void
   /** The run brief. `scheduleId` absent: a manual run. */
   runPreamble(input: { botId: string; activationId: string; scheduleId?: string; input: string }): Promise<string>
   /**
@@ -245,8 +302,9 @@ export interface BotContextProvider {
    * thread and moves the chat window and summary. If it throws `bot_journal_failed`, the engine fails
    * the activation and sets the stuck error "I can't save my work. Free some disk space."
    * `consult`: the dispatch was a consult of the turn, not the turn itself.
+   * `memoryLane`: derived by the engine from the activation key; only chat rights allow the wish fallback.
    */
-  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; threadId: string; endedBy: BotDispatchEnd; consult?: true }): Promise<void>
+  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; memoryLane?: BotLane; threadId: string; endedBy: BotDispatchEnd; consult?: true }): Promise<void>
 }
 
 /** One journal row to write. `kind` follows bot-context.md §3. */
@@ -280,6 +338,8 @@ export interface BotJournal {
 
 /** Owner-side memory operations. WP6 implements; the `bots.memory.*` handlers and the engine's purge call it. */
 export interface BotMemoryAdmin {
+  /** Quiet upkeep; calls canTidy only after finding duplicates, before any write. */
+  tidyDuplicates?(botId: string, canTidy?: () => boolean): number
   list(botId: string, history?: boolean): BotMemoryListing
   forget(botId: string, id: string): BotMemoryForgetResult
   /** The owner's new words for an entry (`bots.memory.edit`): its next version. */

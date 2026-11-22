@@ -6,15 +6,16 @@
  * budget ask; when the internet is back the activation sends or continues its dispatch. A waiting
  * run survives a restart, and a schedule keeps at most one waiting run.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_OFFLINE_POLL_MAX_MS, BOT_OFFLINE_POLL_MS, BOT_OFFLINE_STALL_MS, BOT_OFFLINE_TEXT, BOT_OFFLINE_WATCH_MS, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { DEFAULT_BOT_ACTIVE_MS, OLD_DEFAULT_BOT_ACTIVE_MS } from '../../src/shared/bots/personal/definition'
+import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
-const net = { online: true, checks: 0 }
+/** `next` answers the next checks before `online` does; `fresh` counts the checks that asked for a fresh round. */
+const net = { online: true, checks: 0, fresh: 0, next: [] as boolean[] }
 let timers: Array<{ fn: () => void; ms: number; cleared: boolean }>
 
 const call: NormalisedCall = { kind: 'app', tool: 'memory_list', args: {} }
@@ -43,17 +44,51 @@ beforeEach(async () => {
   }
   net.online = true
   net.checks = 0
+  net.fresh = 0
+  net.next = []
   botId = (await createBot(f, { name: 'Noobesh', reply: 'Hello.' })).botId
-  f.host.connectivity = { online: async () => { net.checks += 1; return net.online } }
+  f.host.connectivity = {
+    online: async ({ fresh }) => {
+      net.checks += 1
+      if (fresh) net.fresh += 1
+      return net.next.shift() ?? net.online
+    },
+    lastProbes: () => [{ host: 'api.anthropic.com', outcome: net.online ? 'ok' : 'ENOTFOUND' }]
+  }
 })
 
-afterEach(() => f.close())
+afterEach(() => {
+  vi.restoreAllMocks()
+  f.close()
+})
 
 describe('offline before a dispatch starts', () => {
+  it('one failed check that a fresh round contradicts sends at once: no wait, no notice', async () => {
+    net.next = [false]
+    const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
+    await flush()
+    expect(net.fresh).toBe(1)
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', offline: false })
+    expect(f.store.dispatch(activation.id, 1)!.runId).not.toBeNull()
+    expect(notices()).toHaveLength(0)
+    expect(live(BOT_OFFLINE_POLL_MS)).toHaveLength(0)
+    expect(summary().waiting).toBeUndefined()
+    await runDispatch(f, activation.id, 1, { text: 'Three stories.' })
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'done' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'Three stories.' })
+  })
+
   it('waits with one notice and no time charged, then sends the dispatch when the internet is back', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     net.online = false
     const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
     await flush()
+    // The failed check was confirmed by one fresh round, and the log says how each host's probe ended.
+    expect(net.fresh).toBe(1)
+    expect(warn.mock.calls.filter(([message]) => /waits for the internet/.test(String(message)))).toEqual([[
+      expect.any(String),
+      { activationId: activation.id, first: [{ host: 'api.anthropic.com', outcome: 'ENOTFOUND' }], fresh: [{ host: 'api.anthropic.com', outcome: 'ENOTFOUND' }] }
+    ]])
     const row = f.store.activation(activation.id)!
     expect(row).toMatchObject({ status: 'running', offline: true })
     expect(f.store.dispatch(activation.id, 1)).toMatchObject({ runId: null, startedAt: null })
@@ -159,8 +194,8 @@ describe('offline while a dispatch runs', () => {
     const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
     const { payload, prepared } = await start(f, activation.id)
     net.online = false
-    f.clock.now += DEFAULT_BOT_ACTIVE_MS
-    await fire(DEFAULT_BOT_ACTIVE_MS)
+    f.clock.now += BOT_TURN_WINDOW_MS
+    await fire(BOT_TURN_WINDOW_MS)
     expect(prepared.authority.time.signal.aborted).toBe(true)
     await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', offline: true })
@@ -169,23 +204,24 @@ describe('offline while a dispatch runs', () => {
     expect(chatOf(f, botId).some((message) => /ran out of room/.test(message.text) || message.kind === 'error')).toBe(false)
   })
 
-  it('the deadline of a dispatch that worked is still a budget end with its ask', async () => {
+  it('the end of the window of a dispatch that worked goes on in a fresh turn, with no ask', async () => {
     const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
-    const { prepared } = await start(f, activation.id)
-    net.checks = 0
-    f.clock.now += DEFAULT_BOT_ACTIVE_MS
+    const { payload, prepared } = await start(f, activation.id)
+    f.clock.now += BOT_TURN_WINDOW_MS
     prepared.authority.check(call)
-    await fire(DEFAULT_BOT_ACTIVE_MS)
-    expect(net.checks).toBe(0)
-    expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
-    expect(f.store.openAsks(botId)).toMatchObject([{ kind: 'budget', title: 'work for up to 2 hours per run' }])
+    await fire(BOT_TURN_WINDOW_MS)
+    expect(prepared.authority.time.signal.aborted).toBe(true)
+    await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'running' })
+    expect(f.store.dispatch(activation.id, 2)!.prompt.text).toMatch(/ran as long as one turn may/)
+    expect(f.store.openAsks(botId)).toEqual([])
   })
 
   it('the deadline of a run that made no call at all, with the internet there, ends it without a time ask', async () => {
     const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
     await start(f, activation.id)
-    f.clock.now += DEFAULT_BOT_ACTIVE_MS
-    await fire(DEFAULT_BOT_ACTIVE_MS)
+    f.clock.now += BOT_TURN_WINDOW_MS
+    await fire(BOT_TURN_WINDOW_MS)
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'no_progress' })
     expect(f.store.openAsks(botId)).toEqual([])
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: 'I couldn\'t get anything done on this, so I stopped.' } })
@@ -271,40 +307,5 @@ describe('schedules', () => {
     }
     expect(f.book.get(botId, scheduleId)).toMatchObject({ skip: { reason: 'waiting_for_internet' } })
     expect(f.store.listActivations(botId).filter((row) => row.lane === 'run' && row.status !== 'done')).toHaveLength(1)
-  })
-})
-
-describe('the hour of work', () => {
-  const setWorkTime = (ms: number) => f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxActiveMs: ms } }))
-
-  it('a new bot works up to an hour per run', () => {
-    expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(60 * 60_000)
-    expect(f.bots.definitionOf(botId).permissions.budget.maxActiveMs).toBe(60 * 60_000)
-  })
-
-  it('a grant still on the old 15 minutes is upgraded to the hour, its revision and draft too', () => {
-    setWorkTime(OLD_DEFAULT_BOT_ACTIVE_MS)
-    expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(OLD_DEFAULT_BOT_ACTIVE_MS)
-    expect(f.bots.upgradeWorkTime()).toEqual([botId])
-    expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(DEFAULT_BOT_ACTIVE_MS)
-    const entry = f.host.definitions.get(botId)!
-    expect(entry.published!.permissions.budget.maxActiveMs).toBe(DEFAULT_BOT_ACTIVE_MS)
-    expect(entry.draft.permissions.budget.maxActiveMs).toBe(DEFAULT_BOT_ACTIVE_MS)
-    // Once only: a second open changes nothing.
-    expect(f.bots.upgradeWorkTime()).toEqual([])
-  })
-
-  it('a grant the owner set to something else stays', () => {
-    setWorkTime(30 * 60_000)
-    expect(f.bots.upgradeWorkTime()).toEqual([])
-    expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(30 * 60_000)
-  })
-
-  it('a queued run moves to the upgraded grant and runs with the hour', async () => {
-    setWorkTime(OLD_DEFAULT_BOT_ACTIVE_MS)
-    f.bots.upgradeWorkTime()
-    const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
-    const { prepared } = await start(f, activation.id)
-    expect(prepared.authority.time.deadline() - f.clock.now).toBe(DEFAULT_BOT_ACTIVE_MS)
   })
 })

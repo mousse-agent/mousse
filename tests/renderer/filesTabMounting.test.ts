@@ -168,24 +168,32 @@ describe('Files tab while hidden', () => {
     expect(rowNames().length).toBeGreaterThan(0)
     await act(async () => host.querySelector<HTMLButtonElement>('.file-tree-row[data-path="dir-000"]')!.click())
     await flush()
+    sizeViewport(10)
+    await scrollTo(FILE_TREE_ROW_HEIGHT)
+    // A picked file has its own tab beside Files: it takes the pane and the tree unmounts.
     await act(async () => host.querySelector<HTMLButtonElement>('.file-tree-row[data-path="dir-000/inner.ts"]')!.click())
     await flush()
     expect(useFileWorkspaceStore.getState().workspaces[scope()]?.activePath).toBe('dir-000/inner.ts')
-    sizeViewport(10)
-    await scrollTo(FILE_TREE_ROW_HEIGHT)
+    expect(host.querySelector('.editor-stub')).not.toBeNull()
+    expect(host.querySelector('.file-tree')).toBeNull()
 
     act(() => useAppStore.setState({ mainAreaOpen: false }))
     await flush()
     expect(host.querySelector('.files-panel')).toBeNull()
     expect(host.querySelector('.editor-stub')).toBeNull()
 
+    // The picked file comes back selected.
     act(() => useAppStore.setState({ mainAreaOpen: true }))
+    await flush()
+    expect(useFileWorkspaceStore.getState().workspaces[scope()]?.activePath).toBe('dir-000/inner.ts')
+    expect(host.querySelector('.editor-stub')).not.toBeNull()
+
+    // The Files tab shows the tree again, with its open folder and scroll offset.
+    act(() => useFileWorkspaceStore.getState().deactivateFile(scope()))
     await flush()
     expect(scroller().scrollTop).toBe(FILE_TREE_ROW_HEIGHT)
     await scrollTo(0)
     expect(rowNames().slice(0, 2)).toEqual(['dir-000', 'inner.ts'])
-    expect(host.querySelector('.file-tree-item.selected .file-tree-row')?.getAttribute('data-path')).toBe('dir-000/inner.ts')
-    expect(host.querySelector('.editor-stub')).not.toBeNull()
 
     act(() => useAppStore.setState({ mainView: 'git' }))
     await flush()
@@ -195,16 +203,17 @@ describe('Files tab while hidden', () => {
     await flush()
     await scrollTo(0)
     expect(rowNames().slice(0, 2)).toEqual(['dir-000', 'inner.ts'])
+    expect(useFileWorkspaceStore.getState().workspaces[scope()]?.openPaths).toEqual(['dir-000/inner.ts'])
   })
 
   it('focuses the row of a closed preview after bringing it back into the drawn rows', async () => {
     await renderPanel(true)
     sizeViewport(10)
-    await scrollTo(500 * FILE_TREE_ROW_HEIGHT)
-    await act(async () => host.querySelector<HTMLButtonElement>('.file-tree-row[data-path="file-500"]')!.click())
-    await flush()
-    await scrollTo(0)
     expect(host.querySelector('.file-tree-row[data-path="file-500"]')).toBeNull()
+    // Opened from elsewhere (search, an agent's link) while the tree shows its top rows.
+    act(() => useFileWorkspaceStore.getState().openFile(scope(), 'file-500'))
+    await flush()
+    expect(host.querySelector('.file-tree')).toBeNull()
 
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close preview"]')!.click())
     await flush()

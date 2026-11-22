@@ -252,6 +252,11 @@ export class FileKeyStore implements KeyStore {
     return mode === 'vault' || mode === 'passphrase' || (mode === 'plain' && !!this.codec.plainAtRest)
   }
 
+  /** The saved keys are encrypted with a passphrase, rather than by the system keychain. */
+  protectedByPassphrase(): boolean {
+    return this.stored?.mode === 'passphrase'
+  }
+
   /** Explicitly protects an unlocked existing profile; a failed write retains its previous mode. */
   protect(passphrase?: string): void {
     const keys = structuredClone(this.required())

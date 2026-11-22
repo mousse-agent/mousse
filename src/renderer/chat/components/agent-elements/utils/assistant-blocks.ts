@@ -1,4 +1,4 @@
-import { latestThoughtHeading } from "./format-tool";
+import { getToolStatus, thoughtHeadline } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
 import type { LiveThoughtSource } from "../../../../stores/liveTextStore";
 
@@ -179,6 +179,14 @@ export function isCompactionRow(message: SettleTurnMessage): boolean {
 }
 
 /**
+ * A provider retry row: Mousse's line counting a turn's retries of a failed request. Like a compaction row it is
+ * never the agent's answer, and it stays in place when the turn folds its activity.
+ */
+export function isProviderRetryRow(message: SettleTurnMessage): boolean {
+  return (message.metadata as { providerRetry?: unknown } | undefined)?.providerRetry != null;
+}
+
+/**
  * A model switch marker: Mousse's line naming the model that takes over, drawn where the turn starts. Like a
  * compaction row it is neither the answer nor a note, so a finished turn does not fold it into its activity.
  */
@@ -188,7 +196,7 @@ function isHandoffMarker(message: SettleTurnMessage): boolean {
 
 /** The text of a reply row, or "" when the message is not one. */
 function replyText(message: SettleTurnMessage): string {
-  if (message.role !== "assistant" || isCompactionRow(message) || isHandoffMarker(message)) return "";
+  if (message.role !== "assistant" || isCompactionRow(message) || isProviderRetryRow(message) || isHandoffMarker(message)) return "";
   return (message.parts ?? [])
     .filter(isTextPart)
     .map((part) => part.text.trim())
@@ -259,7 +267,7 @@ function isSteerRow(message: SettleTurnMessage): boolean {
 }
 
 /** A thinking part's text (what streamed so far, or its final output). */
-function thoughtTextFromPart(part: ToolPartBase): string {
+export function thoughtTextFromPart(part: ToolPartBase): string {
   if (part.type !== "tool-Thinking") return "";
   const input = isRecord(part.input) ? part.input.thought : undefined;
   const output = part.output ?? part.result;
@@ -322,9 +330,29 @@ export function thoughtSourceOf(part: ToolPartBase & { liveId?: string; liveFrom
   return { id, thought, from: Math.min(part.liveFrom ?? 0, thought.length) };
 }
 
-/** A thought still being written: while the turn runs it is the turn's live line, never folded into a group. */
-export function isLiveThoughtItem(item: AssistantToolItem | undefined): boolean {
-  return item?.part.type === "tool-Thinking" && item.part.state === "input-available";
+/**
+ * The calls of a running turn that failed with nothing after them yet: no later call succeeded and no reply followed.
+ * The transcript marks such a failure as got past while the turn runs (`markRecoveredFailures`), so its row stays
+ * quiet; a group line still counts it, as it will if the turn ends there.
+ */
+export function pendingFailures(messages: readonly { parts?: unknown[] }[]): ReadonlySet<string> {
+  let pending: string[] = [];
+  for (const message of messages) {
+    for (const part of (message.parts ?? []) as unknown[]) {
+      if (isTextPart(part)) {
+        if (part.text.trim()) pending = [];
+        continue;
+      }
+      if (!isV5ToolPart(part) || part.type === "tool-Thinking") continue;
+      // The row's own rule: a call that ended with `success: false` in its output failed too. Only a call that
+      // succeeded gets past the failures before it.
+      const status = getToolStatus(part);
+      if (status.isError) {
+        if (part.toolCallId) pending.push(part.toolCallId);
+      } else if (status.isSuccess) pending = [];
+    }
+  }
+  return new Set(pending);
 }
 
 /** What a call in a work group did, for the group's title. */
@@ -388,10 +416,10 @@ function tallyKinds(items: AssistantToolItem[]): KindTally[] {
   return [...tallies.values()];
 }
 
-/** One line from the latest thought in `items` that has text: a group of thoughts alone is titled with it. */
+/** The headline of the latest thought in `items` that has text: a group of thoughts alone is titled with it. */
 function latestThoughtTitle(items: AssistantToolItem[]): string {
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    const heading = latestThoughtHeading(thoughtTextFromPart(items[index]!.part));
+    const heading = thoughtHeadline(thoughtTextFromPart(items[index]!.part));
     if (heading) return heading;
   }
   return "";
@@ -421,23 +449,25 @@ export function workGroupTitle(items: AssistantToolItem[]): string {
 }
 
 /**
- * A group's header: the latest thought written before one of its calls, with a short tag of what the calls did after
- * it (`summary`: "Ran 1 command", or "8 actions" for a mix); otherwise what the calls did (`workGroupTitle`) and no summary. That thought says why
- * the calls ran, which a count does not. A thought after the group's last call is about what comes next, so it does
- * not title the calls.
+ * A group's header: the headline of the run's latest thought before its last call (the headline the person last saw
+ * while the run was live), with a short tag of what the calls did (`summary`: "Ran 1 command", or "8 actions" for a
+ * mix); otherwise what the calls did (`workGroupTitle`) and no summary. A thought after the last call is about what
+ * comes next, not about this run. A running run is shown by the live row, not as a group, so a group line is drawn
+ * only once its run has ended and never changes. `thought` is set when a thought is the title, so the row shows the
+ * thinking icon beside it.
  */
-export function workGroupHeading(items: AssistantToolItem[]): { title: string; summary?: string } {
+export function workGroupHeading(items: AssistantToolItem[]): { title: string; summary?: string; thought?: true } {
   const title = workGroupTitle(items);
   let lastCall = -1;
-  items.forEach((item, index) => { if (workKindOf(item.part.type) !== "thought") lastCall = index; });
+  items.forEach((item, index) => {
+    if (workKindOf(item.part.type) !== "thought") lastCall = index;
+  });
   const thought = lastCall > 0 ? latestThoughtTitle(items.slice(0, lastCall)) : "";
   if (!thought) return { title };
   // Short beside a thought: one kind keeps its phrase ("Ran 3 commands"), a mix counts its calls ("8 actions").
   const kinds = tallyKinds(items).filter((tally) => tally.kind !== "thought").length;
   const calls = items.filter((item) => workKindOf(item.part.type) !== "thought").length;
-  // The row cuts the thought at its width; past a few lines' worth it is not read out either.
-  const heading = thought.length > 200 ? `${thought.slice(0, 199).trimEnd()}…` : thought;
-  return { title: heading, summary: kinds === 1 ? title : plural(calls, "action") };
+  return { title: thought, summary: kinds === 1 ? title : plural(calls, "action"), thought: true };
 }
 
 /**
@@ -457,7 +487,7 @@ export type FoldRow = {
   kind: TurnSegment["kind"];
   /** Tool calls and thoughts only. */
   toolsOnly?: boolean;
-  /** A reply row with text (narration, or the answer). */
+  /** A reply row with text (narration, or the answer), calls written beside the text included. */
   text?: boolean;
   /** A person's message steered into the turn. */
   steer?: boolean;
@@ -469,34 +499,153 @@ export type FoldRow = {
 };
 
 /**
- * Which segments of a finished turn fold behind its "Worked for" line: the work (thoughts, tool groups, narration),
- * not the answer. The answer is the last reply row with no work after it; a turn cut off before it wrote one folds
- * all of its work. What needs the person stays in view: errors and failures the agent did not get past, questions,
- * approvals, notices, Mousse's own markers, steered messages and the replies written before them, and subagent
- * cards, finished or not, so every subagent shows where it was started.
+ * The parts of a finished turn that each get their own fold line, as ranges of its rows: the rows before the first
+ * steered message ("Worked for"), then each steered message with the rows after it ("Continued for"). A turn nobody
+ * steered is one part.
+ */
+export function turnFoldParts(rows: ReadonlyArray<Pick<FoldRow, "steer">>): Array<{ from: number; to: number }> {
+  const parts: Array<{ from: number; to: number }> = [];
+  let from = 0;
+  rows.forEach((row, index) => {
+    if (!row.steer || index === 0) return;
+    parts.push({ from, to: index });
+    from = index;
+  });
+  parts.push({ from, to: rows.length });
+  return parts;
+}
+
+/**
+ * Which rows of a finished turn fold behind their part's line (see `turnFoldParts`): the work (thoughts, tool groups,
+ * narration). Each part's last reply row stays below its line, whether it is the answer, a reply to a steered message
+ * or the last thing a stopped turn said: what was said to the person is never hidden. What needs the person stays in
+ * view too: errors and failures the agent did not get past, questions, approvals, notices, Mousse's own markers,
+ * steered messages, and subagent cards, finished or not, so every subagent shows where it was started.
  */
 export function foldTurnWork(rows: FoldRow[]): boolean[] {
-  let answer = -1;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index]!;
-    if (row.kind === "tools") break;
-    if (row.kind === "cards") continue;
-    if (row.steer || row.toolsOnly) break;
-    if (row.keep) continue;
-    if (row.text) answer = index;
-    break;
+  const folded = rows.map(() => false);
+  for (const { from, to } of turnFoldParts(rows)) {
+    let reply = -1;
+    for (let index = to - 1; index >= from; index -= 1) {
+      const row = rows[index]!;
+      if (row.kind === "message" && row.text && !row.toolsOnly && !row.keep && !row.steer) {
+        reply = index;
+        break;
+      }
+    }
+    for (let index = from; index < to; index += 1) {
+      const row = rows[index]!;
+      if (row.kind === "cards" || row.steer || row.keep || index === reply) continue;
+      folded[index] = true;
+    }
   }
-  let lastSteer = -1;
-  rows.forEach((row, index) => {
-    if (row.steer) lastSteer = index;
+  return folded;
+}
+
+/** Time the agent waited on the person (an approval, a question, a secret); `to` is null while it still waits. */
+export type WaitSpan = { from: number; to: number | null };
+
+/** The span from `from` to `to` less the time in `waits` (overlaps count once): how long the agent worked in it. */
+export function activeMs(from: number, to: number, waits: readonly WaitSpan[]): number {
+  const clipped = waits
+    .map((wait) => ({ from: Math.max(from, wait.from), to: Math.min(to, wait.to ?? to) }))
+    .filter((wait) => wait.to > wait.from)
+    .sort((a, b) => a.from - b.from);
+  let waited = 0;
+  let reach = from;
+  for (const wait of clipped) {
+    const start = Math.max(wait.from, reach);
+    if (wait.to > start) waited += wait.to - start;
+    reach = Math.max(reach, wait.to);
+  }
+  return Math.max(0, to - from - waited);
+}
+
+/**
+ * Each part's own working time (see `turnFoldParts`), not the time since the prompt. The parts tile the turn: a part
+ * starts when its prompt or steered message was sent and runs until the next steered message was sent (the agent
+ * worked the whole time; a command running when the steer came in has not ended yet), the last one until its newest
+ * message ended. Time spent waiting on the person does not count. Null when nothing says when the turn started.
+ */
+export function partWorkTimes(
+  parts: ReadonlyArray<{ startedAt: number | null; endedAt: number | null }>,
+  waits: readonly WaitSpan[],
+): Array<number | null> {
+  let previousEnd: number | null = null;
+  return parts.map((part, index) => {
+    const start: number | null =
+      part.startedAt == null ? previousEnd : previousEnd == null ? part.startedAt : Math.max(part.startedAt, previousEnd);
+    if (start == null) return null;
+    const next = parts[index + 1]?.startedAt ?? null;
+    const end = Math.max(next ?? part.endedAt ?? start, start);
+    previousEnd = end;
+    return activeMs(start, end, waits);
   });
-  return rows.map((row, index) => {
-    if (row.kind === "tools") return !row.keep;
-    if (row.kind === "cards") return false;
-    if (row.steer || row.keep || index === answer) return false;
-    if (row.toolsOnly) return true;
-    return !(row.text && index < lastSteer);
+}
+
+
+const PERMISSION_PART = "data-permission-request";
+const SECRET_PART = "data-secret-request";
+
+function timeOf(value: unknown): number | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : null;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const ms = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Mousse's `secret_request` call, however the runtime names it (`mcp__mousse__secret_request`, a bare
+ * `secret_request`, or the name an ACP agent leaves in the call's summary).
+ */
+function isSecretRequestCall(part: Record<string, unknown>): boolean {
+  if (typeof part.type !== "string" || !part.type.startsWith("tool-")) return false;
+  const bare = (name: string) => name.trim().split("__").pop() === "secret_request";
+  const summary = isRecord(part.input) && typeof part.input.summary === "string" ? part.input.summary : "";
+  return bare(part.type.slice(5)) || bare(summary);
+}
+
+/**
+ * When a turn's messages say the agent waited on the person: an approval from when it was asked until it was answered
+ * (still waiting while pending), a secret request while it is open, and a question until its answers when nothing
+ * ran in between (a question asked without waiting lets the agent go on, so its time counts). A `secret_request`
+ * call blocks until the person answers, declines or an hour passes, so once it ended its wait runs from the call to
+ * its saved end (`endedAt`, when its result arrived), which stays after the open request is gone. A call saved
+ * without its end (an older transcript) counts only while its request is open.
+ */
+export function turnWaitSpans(messages: ReadonlyArray<SettleTurnMessage & { createdAt?: unknown }>): WaitSpan[] {
+  const spans: WaitSpan[] = [];
+  messages.forEach((message, index) => {
+    const at = timeOf(message.createdAt);
+    for (const part of message.parts ?? []) {
+      if (!isRecord(part)) continue;
+      if (part.type === PERMISSION_PART && isRecord(part.data)) {
+        if (at == null) continue;
+        if (part.data.status === "pending") spans.push({ from: at, to: null });
+        else {
+          const to = timeOf(part.data.settledAt);
+          if (to != null) spans.push({ from: at, to });
+        }
+      } else if (part.type === SECRET_PART && isRecord(part.data)) {
+        const from = at ?? timeOf(part.data.createdAt);
+        if (from != null) spans.push({ from, to: null });
+      } else if (isSecretRequestCall(part)) {
+        const from = timeOf(part.startedAt) ?? at;
+        const to = timeOf(part.endedAt);
+        if (from != null && to != null && to > from) spans.push({ from, to });
+      } else if (part.type === "tool-Question" && at != null) {
+        const next = messages[index + 1];
+        const answered = next?.parts?.some((p) => isRecord(p) && p.type === "tool-QuestionAnswers");
+        if (answered) {
+          const to = timeOf(next!.createdAt);
+          if (to != null) spans.push({ from: at, to });
+        } else if (index === messages.length - 1 && (part.state === "input-streaming" || part.state === "input-available")) {
+          spans.push({ from: at, to: null });
+        }
+      }
+    }
   });
+  return spans;
 }
 
 /**

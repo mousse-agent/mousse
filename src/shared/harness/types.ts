@@ -2,6 +2,7 @@ import { AppError, type ErrorCategory } from '../errors'
 import type { AgentExecutionLimit } from '../agents/execution'
 import type { PermissionMode } from '../permissionMode'
 import type { ProviderDriverKind } from '../providerInstances'
+import { retriesOf, retriesPhrase } from '../providerRetry'
 
 /**
  * Shared contracts of the harness gateway (`src/mms/harness/gateway.ts`). App code reaches agents
@@ -238,9 +239,13 @@ export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Cont
  */
 export const PROVIDER_TURN_CAP = 'provider_turn_cap'
 
-/** How a provider's failure reads as its turn's error (the transcript line and the run's `outcome.error`): `[code] message`. */
-export function providerFailureText(error: { code: string; message: string }): string {
-  return `[${error.code}] ${error.message}`
+/**
+ * How a provider's failure reads as its turn's error (the transcript line and the run's `outcome.error`): `[code] message`,
+ * then how many retries the request had when its details say (`(after 10/10 retries)`).
+ */
+export function providerFailureText(error: { code: string; message: string; details?: unknown }): string {
+  const retries = retriesOf(error.details)
+  return `[${error.code}] ${error.message}${retries ? ` (${retriesPhrase(retries)})` : ''}`
 }
 
 /** Whether a run's error says its turn reached the runtime's cap on model turns (`providerFailureText` of `PROVIDER_TURN_CAP`). */
@@ -308,8 +313,18 @@ export interface HarnessError {
    * turn shows the connection-failed retry affordance, and no turn-level retry runs again.
    */
   retriesExhausted?: true
+  /**
+   * The agent took the prompt and then went silent: it may have acted on it unseen, so Mousse never sends the turn
+   * again itself (the person may).
+   */
+  promptTaken?: true
   /** `permission_mode_unenforceable`: the modes the instance can enforce. */
   supportedModes?: PermissionMode[]
+}
+
+/** A turn error whose details say the agent took the prompt before it failed (`HarnessError.promptTaken`). */
+export function isPromptTaken(error: unknown): boolean {
+  return error instanceof AppError && (error.details as { promptTaken?: unknown } | undefined)?.promptTaken === true
 }
 
 /** A turn error whose details say the runtime's own request retries ran out (`HarnessError.retriesExhausted`). */

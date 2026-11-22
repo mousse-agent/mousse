@@ -21,7 +21,7 @@ import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEAS
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { measureTree, type Measurement } from './diskMeasure'
 import { claimOverlapsPath, getExternalResourceClaims, repositoryTargetAsync, unverifiedOwnerOver } from './LifecycleClaims'
-import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
+import { canonicalPathAsync, gitCommonDirAsync, pathsOverlap } from './canonicalPath'
 import type { ResourcePurgeService, TrashSweepOutcome } from './ResourcePurgeService'
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { PolicySnapshot, StoragePolicyStore } from './StoragePolicyStore'
@@ -33,6 +33,7 @@ import { WorktreeManager } from '../worktree/WorktreeManager'
 import { CLEANUP_QUIET_MS, cleanupRecordFor, DELETING_NAME, listCleanupRecords, onlyInFolderAsync, resumeCleanupAsync, type CleanupRecord } from '../worktree/verifiedCleanup'
 import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
 import { dispatchKeptFilesOwner, projectKeptFilesOwners, registerDispatchKeptFilesFolder } from '../actions/keptCopies'
+import { inBackgroundGitLane } from '../git/gitSpawn'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -51,7 +52,7 @@ const KEEP_MEMO_TTL_MS = 7 * DAY_MS
 /** Errors that mean "not now" rather than "this failed": the profile or the task is busy. They are kept and retried. */
 const BUSY_REASON = /^Cannot trash thread:|Cleanup owns this task|is still active|execution lease busy|Repository is busy/i
 /** Keep reasons that can differ on the next look, so they are not remembered. */
-const TRANSIENT_REASON = /Settings changed|Commit changed|in use|busy|owns this task|still active|lease/i
+const TRANSIENT_REASON = /Settings changed|Commit changed|in use|busy|owns this task|still active|lease|working in this|open in this|folder is in this/i
 const IN_USE_REASON = 'Files in this worktree are in use'
 /** `realpathSync` without blocking (the same answers, unlike `fs/promises`' native one). */
 const realpathLike = promisify(realpathCallback)
@@ -120,6 +121,12 @@ export interface StorageCleanupDeps {
   clock: StorageSweepClock
   /** Why a thread is not idle (`threadHasPendingWork`), or undefined. */
   idle(threadId: string): string | undefined
+  /**
+   * Why others use the folder `path` (a worktree a rule would remove), or undefined: a project's folder is in it, or a
+   * turn or terminal of a thread other than `exceptThreadId` and its subagents works in it. Removing the folder would
+   * pull it out from under them, and `idle` looks only at the thread itself. Without it, nothing else is checked.
+   */
+  otherWork?(path: string, exceptThreadId?: string): string | undefined
   installationHome: string
   codeHost?: { cachedDefaultBranch(cwd: string): string | undefined }
   /**
@@ -212,16 +219,52 @@ export async function findNestedRepository(root: string): Promise<{ nested?: str
   return { truncated: false }
 }
 
+const CONTROL_FILE_SET = new Set(MOUSSE_CONTROL_FILE_PATHS)
+function isControlDirectoryPrefix(relPath: string): boolean {
+  const prefix = `${relPath}/`
+  return MOUSSE_CONTROL_FILE_PATHS.some((control) => control.startsWith(prefix))
+}
+
 /** Ignored entries that are only Mousse control files do not keep a worktree (the verifier retains them). */
-async function onlyControlFiles(worktree: string, entry: string): Promise<boolean> {
+export async function onlyControlFiles(worktree: string, entry: string, listDir: typeof readdir = readdir): Promise<boolean> {
   const path = entry.replace(/\/$/, '')
-  if (MOUSSE_CONTROL_FILE_PATHS.includes(path)) return true
-  if (!entry.endsWith('/')) return false
-  const directory = join(worktree, path)
+  if (CONTROL_FILE_SET.has(path)) return true
+  if (!entry.endsWith('/') || !isControlDirectoryPrefix(path)) return false
+  let foundFile = false
+  const stack = [path]
   try {
-    const names = (await readdir(directory, { recursive: true, withFileTypes: true })).filter((child) => !child.isDirectory())
-    return names.length > 0 && names.every((child) => MOUSSE_CONTROL_FILE_PATHS.includes(`${path}/${relative(directory, join(child.parentPath, child.name)).split('\\').join('/')}`))
+    while (stack.length) {
+      const current = stack.pop()!
+      for (const child of await listDir(join(worktree, current), { withFileTypes: true })) {
+        const rel = `${current}/${child.name}`
+        if (child.isDirectory() && !child.isSymbolicLink()) {
+          if (!isControlDirectoryPrefix(rel)) return false
+          stack.push(rel)
+        } else {
+          if (!CONTROL_FILE_SET.has(rel)) return false
+          foundFile = true
+        }
+      }
+    }
+    return foundFile
   } catch { return false }
+}
+
+/** Whether `root` holds at least one non-directory entry (stopping on the first), or exceeds a small directory bound. */
+async function hasAnyFile(root: string): Promise<boolean> {
+  const stack = [root]
+  let dirs = 0
+  while (stack.length) {
+    if (++dirs > 64) return true
+    const current = stack.pop()!
+    let entries: Dirent[]
+    try { entries = await readdir(current, { withFileTypes: true }) } catch { return true }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) return true
+      stack.push(join(current, entry.name))
+    }
+  }
+  return false
 }
 
 /**
@@ -266,8 +309,8 @@ export class StorageCleanupService {
     this.deps.clock.start()
     this.firstRun = setTimeout(() => {
       this.firstRun = undefined
-      void this.run('schedule').catch(() => undefined)
-      this.interval = setInterval(() => { void this.run('schedule').catch(() => undefined) }, RUN_INTERVAL_MS)
+      void inBackgroundGitLane(() => this.run('schedule')).catch(() => undefined)
+      this.interval = setInterval(() => { void inBackgroundGitLane(() => this.run('schedule')).catch(() => undefined) }, RUN_INTERVAL_MS)
       this.interval.unref()
     }, FIRST_RUN_DELAY_MS)
     this.firstRun.unref()
@@ -289,7 +332,7 @@ export class StorageCleanupService {
     if (this.afterPolicyChange) clearTimeout(this.afterPolicyChange)
     this.afterPolicyChange = setTimeout(() => {
       this.afterPolicyChange = undefined
-      void this.run('schedule').catch(() => undefined)
+      void inBackgroundGitLane(() => this.run('schedule')).catch(() => undefined)
     }, POLICY_CHANGE_DELAY_MS)
     this.afterPolicyChange.unref()
   }
@@ -657,8 +700,10 @@ export class StorageCleanupService {
     let busy: string | undefined
     try { busy = this.deps.idle(record.taskId) } catch { busy = undefined }
     if (busy) return { keep: busy, remember: false }
+    const shared = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
+    if (shared) return { keep: shared, remember: false }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use', remember: false }
-    if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready', remember: true, fingerprint }
+    if (workspace.lifecycle !== 'ready' || workspace.rebuilding) return { keep: 'Workspace is not ready', remember: true, fingerprint }
     let facts: Awaited<ReturnType<StorageCleanupService['inspectCheckout']>>
     try { facts = await this.inspectCheckout(record, workspace) } catch (error) { return { keep: (error as Error).message, remember: false } }
     if ('keep' in facts) return { keep: facts.keep, remember: true, fingerprint }
@@ -693,15 +738,15 @@ export class StorageCleanupService {
         if (await readOnlyGitAsync(path, ['rev-parse', 'HEAD']) !== head) return 'Commit changed since check'
         // Again, with nothing awaited after it: the reads above wait.
         if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
-        return this.probeRemoval(path)
+        return this.deps.otherWork?.(path, record.taskId) ?? this.probeRemoval(path)
       } catch (error) { return (error as Error).message }
     }
     // The checks that can change without the reads above, once more right before the move, with nothing awaited between
-    // them and its start (retirement prepares first): the settings, and on Windows whether a file in it is open.
+    // them and its start (retirement prepares first): the settings, others' work in it, and on Windows whether a file in it is open.
     const beforeMove = (): string | undefined => {
       try {
         if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
-        return this.probeRemoval(path)
+        return this.deps.otherWork?.(path, record.taskId) ?? this.probeRemoval(path)
       } catch (error) { return (error as Error).message }
     }
     try { await this.deps.purge.retireTrashed(record.taskId, { recheck, beforeMove }) }
@@ -853,13 +898,15 @@ export class StorageCleanupService {
     const policy = snapshot.policy
     const workspace = readWorkspaceFile(record.location)
     if (!workspace) return undefined
-    if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready' }
+    if (workspace.lifecycle !== 'ready' || workspace.rebuilding) return { keep: 'Workspace is not ready' }
     const path = workspace.worktreePath
     const offline = await disconnectedWorktreeFolder(path)
     if (offline) return { keep: driveNotConnectedText(offline) }
     if (!await present(path)) return undefined
     const busy = this.deps.idle(record.taskId)
     if (busy) return { keep: busy }
+    const shared = this.deps.otherWork?.(path, record.taskId)
+    if (shared) return { keep: shared }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use' }
     const facts = await this.inspectCheckout(record, workspace)
     if ('keep' in facts) return facts
@@ -911,6 +958,8 @@ export class StorageCleanupService {
         if (this.deps.policy.digest() !== verdict.policyDigest) return kept('Settings changed since check')
         const busy = this.deps.idle(record.taskId)
         if (busy) return kept('Thread became busy')
+        const shared = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
+        if (shared) return kept(shared)
         const bound = readWorkspaceFile(record.location)
         if (!bound || bound.worktreePath !== workspace.worktreePath || bound.branch !== workspace.branch || bound.headSha !== workspace.headSha || bound.lifecycle !== workspace.lifecycle) return kept('Workspace changed since check')
         const placement = await this.placementProblem(workspace, record.taskId)
@@ -933,6 +982,8 @@ export class StorageCleanupService {
           if (this.deps.policy.digest() !== verdict.policyDigest) stop(kept('Settings changed since check'))
           const busyNow = this.deps.idle(record.taskId)
           if (busyNow) stop(kept('Thread became busy'))
+          const sharedNow = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
+          if (sharedNow) stop(kept(sharedNow))
           const boundNow = readWorkspaceFile(record.location)
           if (!boundNow || boundNow.worktreePath !== workspace.worktreePath || boundNow.branch !== workspace.branch || boundNow.headSha !== workspace.headSha || boundNow.lifecycle !== workspace.lifecycle) stop(kept('Workspace changed since check'))
           let inUseNow: string | undefined
@@ -1219,7 +1270,8 @@ export class StorageCleanupService {
       if (!existsSync(kept.path)) continue
       const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
       const { rule, key, label, threadId, projectId } = this.dispatchWorktreeBase(kept)
-      planned.push({ rule, key, label, ...(threadId ? { threadId } : {}), ...(projectId ? { projectId } : {}), action: 'remove', reason: await this.dispatchWorktreeReason(kept), bytes: measurement.bytes, ...approximate(measurement) })
+      const shared = this.deps.otherWork?.(kept.path)
+      planned.push({ rule, key, label, ...(threadId ? { threadId } : {}), ...(projectId ? { projectId } : {}), action: shared ? 'keep' : 'remove', reason: shared ?? await this.dispatchWorktreeReason(kept), bytes: measurement.bytes, ...approximate(measurement) })
     }
     return planned
   }
@@ -1239,6 +1291,9 @@ export class StorageCleanupService {
       const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
       const sized = { bytes: measurement.bytes, files: measurement.files, ...approximate(measurement) }
       if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${await this.dispatchWorktreeReason(kept)} Preview cleanup lists it.` }); continue }
+      // Confirmed in a plan, but someone may have started working in it since.
+      const shared = this.deps.otherWork?.(kept.path)
+      if (shared) { items.push({ ...base, ...sized, outcome: 'kept', reason: shared }); continue }
       // The ignored files go, as confirmed; Git's own data of the worktree is kept, as a copy the dispatch owns.
       let owner: string | undefined
       try { owner = dispatchKeptFilesOwner(this.deps.store.profileHome, kept.dispatchId) } catch { owner = undefined }
@@ -1309,9 +1364,34 @@ export class StorageCleanupService {
 
   // ---- Orphans ----
 
+  /**
+   * Real paths of worktrees directly named by non-purged threads' valid `workspace.json` records in this profile.
+   * Any directory overlapping one of these is guaranteed to be claimed by `getExternalResourceClaims` (or to fail
+   * ownership proof, which reports nothing), so when every directory in `worktreeContainers` is already covered here
+   * the orphan scan skips the installation-wide inventory and Git verification pass.
+   */
+  private async knownWorkspaceWorktrees(): Promise<string[]> {
+    const raw = new Set<string>()
+    for (const record of this.deps.store.list()) {
+      if (record.state === 'purged') continue
+      const path = join(record.location, 'workspace.json')
+      try {
+        const stat = lstatSync(path)
+        if (!relative(this.deps.store.profileHome, path).startsWith('..')) assertLifecyclePath(this.deps.store.profileHome, path)
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 32 * 1024 * 1024) continue
+        const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+        if (value?.schemaVersion === 1 && value.threadId === record.taskId && typeof value.worktreePath === 'string' && isAbsolute(value.worktreePath)) {
+          raw.add(value.worktreePath)
+        }
+      } catch {
+        // Missing, unreadable or malformed: leave unclaimed so the full ownership check judges it.
+      }
+    }
+    return Promise.all([...raw].map((path) => canonicalPathAsync(path)))
+  }
+
   /** Directories in the managed worktree folders that nothing claims. Reported with their size, never removed. */
   private async orphanItems(): Promise<StorageCleanupItem[]> {
-    const claims = await getExternalResourceClaims(this.deps.store, new Set())
     const items: StorageCleanupItem[] = []
     // A worktree a dispatch left in place has its own row, which can remove it.
     const dispatchKept = new Set(await Promise.all(listKeptWorktrees(this.deps.store.profileHome).map((kept) => canonicalPathAsync(kept.path))))
@@ -1319,6 +1399,7 @@ export class StorageCleanupService {
     const clearing = new Set(await Promise.all(new WorktreeRetirementService(this.deps.store).clearingFolders().map((path) => canonicalPathAsync(path))))
     // Mousse's own folder and every worktree folder the person chose that is there (`worktreeLayout`). One that is not
     // there (a drive not connected) is not looked at: what is in it is out of reach, never unused.
+    const candidates: Array<{ folder: string; repository: string; kind: 'threads' | 'agents' | 'folder'; name: string; directory: string; real: string }> = []
     for (const { path: folder, repository, kind } of await worktreeContainers(this.deps.installationHome)) {
       if (!existsSync(folder)) continue
       for (const name of readdirSync(folder)) {
@@ -1333,18 +1414,34 @@ export class StorageCleanupService {
         if (!stat.isDirectory() || stat.isSymbolicLink()) continue
         // Compared by real paths, so a record that names this folder through an alias still claims it.
         const real = await canonicalPathAsync(directory)
-        if (dispatchKept.has(real) || clearing.has(real) || claims.some((claim) => claimOverlapsPath(claim, real))) continue
-        const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
-        if (!measurement.files) continue // An empty leftover folder holds nothing.
-        // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
-        // The repository is the one the folder's checkouts point at now, as well as the one its place is named after.
-        let children: string[] = []
-        try { children = readdirSync(directory).slice(0, 32) } catch { /* Judged by the folder itself. */ }
-        const checkouts = [directory, ...children.map((child) => join(directory, child))]
-        const actual = await Promise.all([...new Set((await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).filter((commonDir): commonDir is string => Boolean(commonDir)))].map((commonDir) => repositoryTargetAsync(commonDir)))
-        const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual.flatMap((target) => target.repositoryIds)], registeredWorktrees: actual.flatMap((target) => target.registeredWorktrees), path: real })
-        items.push({ rule: 'worktree-orphan', label: `${kind === 'folder' ? basename(folder) : kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: unverified ? `${unverified.reason} It may still use this worktree.` : 'No thread uses this worktree' })
+        if (dispatchKept.has(real) || clearing.has(real)) continue
+        candidates.push({ folder, repository, kind, name, directory, real })
       }
+    }
+    if (!candidates.length) return items
+    const knownClaimed = await this.knownWorkspaceWorktrees()
+    const unclaimed: typeof candidates = []
+    for (const candidate of candidates) {
+      if (this.stopping) return items
+      if (knownClaimed.some((claimed) => pathsOverlap(claimed, candidate.real))) continue
+      if (!await hasAnyFile(candidate.directory)) continue // An empty leftover folder holds nothing.
+      unclaimed.push(candidate)
+    }
+    if (!unclaimed.length) return items
+    const claims = await getExternalResourceClaims(this.deps.store, new Set())
+    for (const { folder, repository, kind, name, directory, real } of unclaimed) {
+      if (this.stopping) return items
+      if (claims.some((claim) => claimOverlapsPath(claim, real))) continue
+      const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
+      if (!measurement.files) continue // An empty leftover folder holds nothing.
+      // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
+      // The repository is the one the folder's checkouts point at now, as well as the one its place is named after.
+      let children: string[] = []
+      try { children = readdirSync(directory).slice(0, 32) } catch { /* Judged by the folder itself. */ }
+      const checkouts = [directory, ...children.map((child) => join(directory, child))]
+      const actual = await Promise.all([...new Set((await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).filter((commonDir): commonDir is string => Boolean(commonDir)))].map((commonDir) => repositoryTargetAsync(commonDir)))
+      const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual.flatMap((target) => target.repositoryIds)], registeredWorktrees: actual.flatMap((target) => target.registeredWorktrees), path: real })
+      items.push({ rule: 'worktree-orphan', label: `${kind === 'folder' ? basename(folder) : kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: unverified ? `${unverified.reason} It may still use this worktree.` : 'No thread uses this worktree' })
     }
     return items
   }

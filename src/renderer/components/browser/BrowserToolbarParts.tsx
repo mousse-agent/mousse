@@ -1,4 +1,6 @@
+import { useEffect, useState, type MouseEvent } from 'react'
 import { Bot, CircleAlert, CircleCheck, User, X } from '../../lib/icons'
+import { motionOff, scaleMotionMs } from '../../lib/motion'
 import type { InAppBrowserState } from '../../../shared/browser/inApp'
 import { MousseLogoOutline } from '../MousseLogoOutline'
 import { Switch } from '../settings/SettingsRow'
@@ -51,9 +53,56 @@ export function BrowserAccessControl({
   return (
     <div className={`browser-access browser-access-${state}`} title={AGENT_STATE_TEXT[state]} data-state={state}>
       <Icon size={14} className="browser-access-icon" aria-hidden="true" />
-      <span className="browser-access-label">Agents</span>
       <span className="sr-only" role="status">{AGENT_STATE_TEXT[state]}</span>
       <Switch checked={allowed} disabled={busy} label="Agent access to all browser tabs" onChange={onChange} />
+    </div>
+  )
+}
+
+/**
+ * Asking before agents may use every browser tab: a panel at the pane's right, below the toolbar, that slides and fades
+ * in and out like a bot's About. It is the same ask whether the switch was turned on or an agent asked.
+ */
+export function BrowserAccessPanel({ open, agentAsking, busy, onAllow, onDeny }: {
+  open: boolean
+  agentAsking: boolean
+  busy: boolean
+  onAllow: (event: MouseEvent<HTMLButtonElement>) => void
+  onDeny: () => void
+}) {
+  const [mounted, setMounted] = useState(open)
+  const [shown, setShown] = useState(open)
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+      if (motionOff()) { setShown(true); return }
+      // Two frames: the closed state is laid out first, so the change to open is a transition.
+      let inner = 0
+      const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setShown(true)) })
+      return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner) }
+    }
+    setShown(false)
+    if (motionOff()) { setMounted(false); return }
+    // transitionend, or this backstop when it never comes (a pane hidden mid-slide).
+    const timer = window.setTimeout(() => setMounted(false), scaleMotionMs(200) + 80)
+    return () => window.clearTimeout(timer)
+  }, [open])
+  if (!mounted) return null
+  return (
+    <div
+      className={`browser-access-panel${shown ? ' is-open' : ''}`}
+      inert={!open || undefined}
+      // A closing panel is no longer a request.
+      {...(open ? { role: 'region', 'aria-label': 'Agent browser access request', 'data-mousse-decision': '' } : {})}
+      onTransitionEnd={(event) => { if (!open && event.target === event.currentTarget && event.propertyName === 'opacity') setMounted(false) }}
+    >
+      <span className="browser-access-panel-icon" aria-hidden="true"><Bot size={18} strokeWidth={1.8} /></span>
+      <p className="browser-access-panel-title">{agentAsking ? 'An agent wants to use the browser' : 'Let agents use the browser?'}</p>
+      <p className="browser-access-panel-line">Agents could open, read and act in every browser tab, in every thread. You can turn it off any time.</p>
+      <div className="browser-access-panel-actions">
+        <button type="button" className="browser-access-panel-allow" disabled={busy} onClick={onAllow}>Allow</button>
+        <button type="button" disabled={busy} onClick={onDeny}>Deny</button>
+      </div>
     </div>
   )
 }

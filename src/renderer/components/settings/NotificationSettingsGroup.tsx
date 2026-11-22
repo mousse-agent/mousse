@@ -109,6 +109,18 @@ export function NotificationSettingsGroup({
           />
         }
       />
+      <SettingsRow
+        title="Notify for bot threads"
+        anchor="general-bot-thread-notifications"
+        description={<span title="Threads your bots keep out of the sidebar. Off: they stay quiet until you show them in the sidebar.">Threads your bots keep out of the sidebar.</span>}
+        control={
+          <Switch
+            label="Notify for bot threads"
+            checked={notifications.botThreads === true}
+            onChange={(botThreads) => void onUpdate({ notifications: { ...notifications, botThreads } })}
+          />
+        }
+      />
     </SettingsGroup>
   )
 }

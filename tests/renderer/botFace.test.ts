@@ -3,7 +3,7 @@ import { act, createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BotFace, BotFaceStill, normalizeFaceProps, type BotFaceState } from '../../src/renderer/components/bots/face/BotFace'
-import { FaceMotion, faceUniforms, hop, stillPose, type FaceUniforms } from '../../src/renderer/components/bots/face/facePoses'
+import { EYE_SCALE, FaceMotion, HEAD_FOV, faceUniforms, hop, stillPose, type FaceUniforms } from '../../src/renderer/components/bots/face/facePoses'
 import {
   createWebGlGpu,
   faceArtVersion,
@@ -27,6 +27,7 @@ import {
   type FaceGpu,
   type FaceRendererEnv
 } from '../../src/renderer/components/bots/face/faceRenderer'
+import { applyFaceMode } from '../../src/renderer/components/bots/face/faceMode'
 import { SavedFaceFrames, type FaceFrameBackend, type FaceFrameCodec, type SavedFrameImage, type SavedFrameRecord } from '../../src/renderer/components/bots/face/faceFrameStore'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
@@ -516,6 +517,26 @@ const face = (overrides: Partial<Parameters<typeof BotFace>[0]> = {}) =>
 const flat = () => host.querySelector('svg.bot-face-still')
 const faceCanvas = () => host.querySelector<HTMLCanvasElement>('canvas.bot-face-canvas')
 
+describe('Settings → Labs → Performance', () => {
+  afterEach(() => act(() => applyFaceMode(null)))
+
+  it('turns every moving face into the 2D hybrid as the setting changes, and back; a still face stays as it was', () => {
+    const fake = fakeEnv({ status: () => 'ready' })
+    resetSharedFaceRenderer(() => fake.env)
+    warmFaceRenderer()
+    fake.tick(READY_POLL_MS)
+    render(createElement('div', null, face(), face({ state: 'working' }), face({ still: true })))
+    const hybrids = () => host.querySelectorAll('.bot-face-hybrid').length
+    expect(host.querySelectorAll('.bot-face')).toHaveLength(3)
+    expect(hybrids()).toBe(0)
+    act(() => applyFaceMode({ experimental: { hybridBotFaces: true } }))
+    expect(hybrids()).toBe(2)
+    expect(host.querySelectorAll('.bot-face')).toHaveLength(3)
+    act(() => applyFaceMode({ experimental: { hybridBotFaces: false } }))
+    expect(hybrids()).toBe(0)
+  })
+})
+
 describe('ready from launch', () => {
   it('starts the renderer only once the first frame has painted', () => {
     const fake = fakeEnv()
@@ -894,9 +915,18 @@ describe('BotFace props', () => {
   it('draws a Mousse in the fallback and passes its kind and eyes to the shader', () => {
     render(createElement(BotFaceStill, { look: { colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, state: 'idle', size: 48, view: 'head' }))
     expect(host.querySelector('svg')!.getAttribute('data-kind')).toBe('mousse')
-    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([1, 6, 1])
-    expect(faceUniforms({ colour: 'purple', accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([0, 0, 1])
-    expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([1, 0, 0])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 6, 1])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([0, 0, 0])
+    expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 0])
+    // A picked eye colour wins over the one the colour gets, on either character.
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', eyeColour: 'white' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([0, 0, 1])
+    expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse', eyeColour: 'white' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 1])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyeColour: 'black' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 0])
+    // The 3D eyes sit as far apart as the flat ones: wide eye shapes further out than the pill.
+    for (const kind of ['mouse', 'mousse'] as const) {
+      const spread = (eyes: 'star' | 'pill') => faceUniforms({ colour: 'coral', accessory: 'none', kind, eyes }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK[3]
+      expect(spread('star')).toBeGreaterThan(spread('pill'))
+    }
   })
 
   it('keeps unknown stored values drawable in the fallback', () => {
@@ -917,6 +947,58 @@ describe('BotFace props', () => {
     expect(face.getAttribute('data-still')).toBeNull()
     expect(host.querySelector('.bot-face-z')?.textContent).toBe('z')
     expect(host.querySelector('canvas')!.width).toBe(48)
+  })
+
+  it('sleeps an idle face asked to: the paused pose with its z, marked resting so it keeps its colour; other states stay awake', () => {
+    const fake = fakeEnv()
+    resetSharedFaceRenderer(() => fake.env)
+    render(createElement('div', null,
+      createElement(BotFace, { look: coral, state: 'idle', sleep: true, size: 36, view: 'head', className: 'resting' }),
+      createElement(BotFace, { look: coral, state: 'paused', size: 36, view: 'head', className: 'paused' }),
+      createElement(BotFace, { look: coral, state: 'working', sleep: true, size: 36, view: 'head', className: 'busy' })))
+    const face = (name: string) => host.querySelector<HTMLElement>(`.${name}`)!
+    expect(['resting', 'paused', 'busy'].map((name) => [face(name).getAttribute('data-state'), face(name).getAttribute('data-resting'), face(name).querySelector('.bot-face-z')?.textContent ?? null]))
+      .toEqual([['paused', 'true', 'z'], ['paused', null, 'z'], ['working', null, null]])
+  })
+})
+
+describe('the head view of a tipped head', () => {
+  const view = (kind: 'head' | 'full') => ({ view: kind, size: 36, samples: 1 as const })
+  it('follows the lean, panning and widening so both ears stay in, while an upright head stays centred', () => {
+    const upright = faceUniforms(coral, stillPose('idle'), view('head'))
+    const asleep = faceUniforms(coral, stillPose('paused'), view('head'))
+    const stuck = faceUniforms(coral, stillPose('stuck'), view('head'))
+    expect([upright.pan, upright.uV[1]]).toEqual([[0, 0], HEAD_FOV])
+    expect(Math.sign(asleep.pan[0])).toBe(Math.sign(stillPose('paused').hroll))
+    expect(asleep.uV[1]).toBeGreaterThan(HEAD_FOV)
+    expect(Math.abs(stuck.pan[0])).toBeLessThan(Math.abs(asleep.pan[0]))
+    // The whole mouse has room around it: its view never moves.
+    expect(faceUniforms(coral, stillPose('paused'), view('full')).pan).toEqual([0, 0])
+  })
+
+  it('moves the picture\u2019s origin in its square by the pan when it draws', () => {
+    const calls: Array<[string, unknown[]]> = []
+    const context = new Proxy({} as Record<string | symbol, unknown>, {
+      get: (target, key) => {
+        if (key === 'getExtension') return () => null
+        if (key === 'getParameter') return () => 'ANGLE (Intel, Mesa Intel(R) Graphics, OpenGL 4.6)'
+        if (key === 'getProgramParameter') return () => true
+        if (key === 'isContextLost') return () => false
+        if (key === 'getUniformLocation') return (_program: unknown, name: string) => name
+        if (key === 'uniform2f') return (...args: unknown[]) => { calls.push(['uniform2f', args]) }
+        if (typeof key === 'string' && /^[A-Z_]+$/.test(key)) return 1
+        return (target[key] ??= vi.fn(() => ({})))
+      }
+    })
+    const canvas = { width: 256, height: 256, getContext: () => context, addEventListener: () => {} }
+    const gpu = createWebGlGpu({ createElement: () => canvas } as unknown as Document)!
+    expect(gpu.status()).toBe('ready')
+    const origin = () => calls.filter(([, args]) => args[0] === 'uOrg').at(-1)![1].slice(1)
+    gpu.draw(10, 20, 72, faceUniforms(coral, stillPose('idle'), view('head')))
+    expect(origin()).toEqual([10, canvas.height - 20 - 72])
+    const asleep = faceUniforms(coral, stillPose('paused'), view('head'))
+    gpu.draw(10, 20, 72, asleep)
+    expect(origin()).toEqual([10 + asleep.pan[0] * 72, canvas.height - 20 - 72 + asleep.pan[1] * 72])
   })
 })
 
@@ -969,7 +1051,7 @@ describe('reduced motion', () => {
     render(createElement(BotFace, { look: coral, state: 'needs_you', size: 40, view: 'head', still: true }))
     fake.tick()
     expect(fake.draws).toHaveLength(2)
-    expect(fake.draws[1]!.uniforms.uE2[2]).toBe(1.2)
+    expect(fake.draws[1]!.uniforms.uE2[2]).toBeCloseTo(1.2 * EYE_SCALE)
     expect(fake.pending()).toBe(0)
   })
 })
@@ -1024,21 +1106,6 @@ describe('the shared renderer', () => {
     handle.dispose()
     expect(renderer.running).toBe(false)
     expect(fake.pending()).toBe(0)
-    renderer.dispose()
-  })
-
-  it('waits while the shader compiles', () => {
-    let status: ReturnType<FaceGpu['status']> = 'pending'
-    const fake = fakeEnv({ status: () => status })
-    const renderer = new FaceRenderer(fake.env)
-    renderer.register(document.createElement('canvas'), spec())
-    fake.tick()
-    expect(fake.draws).toHaveLength(0)
-    expect(renderer.status()).toBe('pending')
-    status = 'ready'
-    fake.tick()
-    expect(fake.draws).toHaveLength(1)
-    expect(renderer.status()).toBe('ready')
     renderer.dispose()
   })
 
@@ -1200,6 +1267,22 @@ describe('shared ticks', () => {
     fake.display(3000, 100)
     // Within the seconds an idle or paused face moves before it settles (`IDLE_LIVE_SECONDS`).
     expect(states.map((_, i) => drawnAt(fake, i, from).length)).toEqual([90, 90, 90, 90, 45, 45])
+    renderer.dispose()
+  })
+
+  it('moves faces smaller than 40 px (the sidebar, the chat header) 15 times a second in every state', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    const faces = [{ state: 'working', size: 36 }, { state: 'needs_you', size: 32 }, { state: 'happy', size: 36 }, { state: 'idle', size: 36 }, { state: 'working', size: 88 }] as const
+    faces.forEach(({ state, size }, i) => {
+      renderer.register(document.createElement('canvas'), { ...face(i, state), size })
+      fake.display(13, 100)
+    })
+    const from = fake.draws.length
+    fake.display(3000, 100)
+    expect(faces.map((_, i) => drawnAt(fake, i, from).length)).toEqual([45, 45, 45, 45, 90])
+    // Still on the shared ticks: a small busy face draws on the same ticks as a large one.
+    for (const at of drawnAt(fake, 0, from)) expect(drawnAt(fake, 4, from)).toContain(at)
     renderer.dispose()
   })
 

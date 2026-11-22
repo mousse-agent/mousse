@@ -23,7 +23,7 @@ export interface AskText {
 export const THREADS_TEXT: AskText = {
   title: 'use your threads',
   note: 'Threads it starts run with full access on this computer.',
-  tip: 'It can read your threads, start new ones, message or stop them, and archive or unarchive them, only when you ask it in its chat. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It never answers an approval or a question.'
+  tip: 'It can read your threads, their queues and their Git status and diffs, here and on your other computers that let agents work there. When you ask it in its chat, or in work you gave it, it can start new threads, message, steer or stop them, change what waits in their queues, fork one and hand a fork\'s work back, and archive or unarchive them. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It answers the questions and approvals of the threads it starts. In other threads it answers an approval only while you let agents answer approvals on other threads, and never a question.'
 }
 
 /** Tools by name, as a card says them after "wants to". */
@@ -37,13 +37,32 @@ const TOOL_TEXT: Record<string, AskText> = {
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
   web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' },
   browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' },
+  computer: {
+    title: 'use the computer',
+    note: 'Sees and operates apps on this computer: windows, clicks and typing.',
+    tip: "It can read app windows, click, type and run steps in apps on this computer through Cua Driver, as a thread's agent can, in its work (never in the chat itself). Threads it starts get it too. Settings → Computer use can still turn it off for everyone."
+  },
   threads: THREADS_TEXT,
-  profiler: {
-    title: 'use the profiler',
-    note: "Mousse's memory and CPU numbers, while Labs lets agents read the profiler.",
-    tip: "It can read Mousse's profiler: memory and CPU of each process, the service's counts and caches, windows and the GPU, and take samples. Numbers only, never your chats or files; threads it can't see count only in totals. Never a heap snapshot. Settings → Labs → Profiler can still turn it off."
-  }
+  // The bot's own tools: a bot made before one of them existed has none of it in its grant, so its first use asks.
+  bot_schedule_add: { title: 'run on a schedule', note: '' },
+  bot_schedule_remove: { title: 'remove its schedules', note: '' },
+  bot_schedule_list: { title: 'see its schedules', note: '' },
+  set_profile: { title: 'change its name or description', note: '' },
+  set_depth: { title: 'change how long it thinks', note: '' },
+  use_model: { title: 'switch its model', note: '' },
+  escalate: { title: 'ask you for permissions', note: '' },
+  run_report: { title: 'report on its automation runs', note: '' },
+  memory_search: { title: 'search its memory', note: '' },
+  memory_read: { title: 'read its memory', note: '' },
+  memory_list: { title: 'list its memory', note: '' },
+  memory_save: { title: 'save to its memory', note: '' },
+  memory_forget: { title: 'forget things in its memory', note: '' },
+  item_save: { title: 'keep its list of what you asked for', note: '' },
+  item_list: { title: 'read its list of what you asked for', note: '' }
 }
+
+/** Any other tool: the card never shows a tool's name; the tooltip does. */
+const otherToolText = (tool: string): AskText => ({ title: 'use another of Mousse\'s tools', note: '', tip: `Mousse's tool ${tool}.` })
 
 /**
  * What an MCP ask's card says of what the tools can do, only as the tools' own annotations tell it (their read-only
@@ -61,13 +80,7 @@ export function mcpChangesNote(name: string, changes: 'none' | 'some' | 'unknown
  */
 export const OLD_FILES_TEXT: AskText = { title: 'use files on this computer', note: 'No longer available: a bot uses only its own files folder.' }
 
-const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000))
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
-/** "45 minutes", "2 hours", "90 minutes": whole hours read as hours. */
-const duration = (ms: number) => {
-  const count = minutes(ms)
-  return count >= 60 && count % 60 === 0 ? plural(count / 60, 'hour') : plural(count, 'minute')
-}
 /** "400,000 tokens". */
 const tokens = (count: number) => `${Math.round(count).toLocaleString('en-US')} tokens`
 
@@ -75,8 +88,9 @@ function budgetText(key: string, amount: number | undefined, budget: BotBudget |
   const held = budget?.[key as keyof BotBudget]
   const total = amount !== undefined && held !== undefined ? held + amount : undefined
   switch (key) {
+    // An older build's ask for work time, which has no limit now: only its answered card is still shown.
     case 'maxActiveMs':
-      return total !== undefined ? { title: `work for up to ${duration(total)} per run`, note: '' } : { title: 'work longer on each run', note: '' }
+      return { title: 'keep working', note: '' }
     case 'maxTurns':
       return total !== undefined ? { title: `take up to ${plural(Math.round(total), 'step')} per run`, note: '' } : { title: 'take more steps on each run', note: '' }
     case 'maxToolCalls':
@@ -94,7 +108,7 @@ function budgetText(key: string, amount: number | undefined, budget: BotBudget |
 
 /** `request` in plain words. `budget`, the bot's current limits, turns a limit ask into its new total. */
 export function askText(request: BotAskRequest, options: { budget?: BotBudget } = {}): AskText {
-  if (isSpecialAsk(request)) return { title: 'save its memory to a folder', note: 'You pick the folder. Nothing else changes.' }
+  if (isSpecialAsk(request)) return request.ask === 'export_memory' ? { title: 'save its memory to a folder', note: 'You pick the folder. Nothing else changes.' } : { title: 'allow this request', note: 'This request grants no tools.' }
   if ('path' in request) return OLD_FILES_TEXT
   if ('skill' in request) return { title: `use the ${request.skill} skill`, note: '' }
   // The owner's MCP tools are one ask per server: "use your GitHub tools", and "use GitHub's new tools" once it added some.
@@ -112,7 +126,7 @@ export function askText(request: BotAskRequest, options: { budget?: BotBudget } 
   if ('tool' in request) {
     // Every browser tool is one permission: "use the browser", never "the browser act tool".
     const tool = botGrantTool(request.tool)
-    return TOOL_TEXT[tool] ?? { title: `use the ${tool.replace(/_/g, ' ')} tool`, note: '' }
+    return TOOL_TEXT[tool] ?? otherToolText(tool)
   }
   return budgetText(request.budget.key, request.budget.amount, options.budget)
 }

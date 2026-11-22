@@ -5,7 +5,7 @@
  */
 import { createServer, type AddressInfo, type LookupFunction } from 'node:net'
 import { describe, expect, it } from 'vitest'
-import { GENERIC_PROBE_HOSTS, botApiHost, createBotConnectivity, isConnectionFailure, probeHost } from '../../src/mms/bots/activation/connectivity'
+import { GENERIC_PROBE_HOSTS, botApiHost, createBotConnectivity, isConnectionFailure, probeHost, probeHostOutcome } from '../../src/mms/bots/activation/connectivity'
 
 describe('the internet check', () => {
   const setup = (answers: Record<string, boolean>) => {
@@ -15,7 +15,7 @@ describe('the internet check', () => {
       apiHost: (instanceId) => (instanceId === 'claude' ? 'api.anthropic.com' : instanceId === 'pi:ollama' ? 'local' : undefined),
       probe: async (host) => {
         probed.push(host)
-        return answers[host] ?? false
+        return answers[host] ? 'ok' : 'ENOTFOUND'
       },
       now: () => clock.now
     })
@@ -35,6 +35,22 @@ describe('the internet check', () => {
     expect(probed).toHaveLength(3)
     clock.now += 10_000
     await connectivity.online({ instanceId: 'claude' })
+    expect(probed).toHaveLength(6)
+  })
+
+  it('a fresh check probes again and replaces the kept result; the last round says how each host ended', async () => {
+    const answers: Record<string, boolean> = {}
+    const { connectivity, probed } = setup(answers)
+    expect(await connectivity.online({ instanceId: 'claude' })).toBe(false)
+    expect(connectivity.lastProbes!({ instanceId: 'claude' })).toEqual(expect.arrayContaining([
+      { host: 'api.anthropic.com', outcome: 'ENOTFOUND' }, { host: 'www.google.com', outcome: 'ENOTFOUND' }, { host: 'cloudflare.com', outcome: 'ENOTFOUND' }
+    ]))
+    answers['www.google.com'] = true
+    expect(await connectivity.online({ instanceId: 'claude', fresh: true })).toBe(true)
+    expect(probed).toHaveLength(6)
+    expect(connectivity.lastProbes!({ instanceId: 'claude' })).toContainEqual({ host: 'www.google.com', outcome: 'ok' })
+    // The fresh result is the one kept.
+    expect(await connectivity.online({ instanceId: 'claude' })).toBe(true)
     expect(probed).toHaveLength(6)
   })
 
@@ -81,6 +97,21 @@ describe('one host\'s probe', () => {
     const { port } = server.address() as AddressInfo
     await new Promise<void>((resolve) => server.close(() => resolve()))
     expect(await probeHost('api.example.test', 4_000, { port, lookup: ipv6First })).toBe(false)
+  })
+
+  it('says how it failed: a name that does not resolve, a port that refuses', async () => {
+    const notFound: LookupFunction = (hostname, _options, callback) => {
+      (callback as (error: NodeJS.ErrnoException) => void)(Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: 'ENOTFOUND' }))
+    }
+    expect(await probeHostOutcome('api.example.test', 4_000, { lookup: notFound })).toBe('ENOTFOUND')
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    const loopback: LookupFunction = (_hostname, _options, callback) => {
+      (callback as (error: null, addresses: Array<{ address: string; family: number }>) => void)(null, [{ address: '127.0.0.1', family: 4 }])
+    }
+    expect(await probeHostOutcome('api.example.test', 4_000, { port, lookup: loopback })).toBe('ECONNREFUSED')
   })
 })
 

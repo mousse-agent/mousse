@@ -24,6 +24,13 @@ import { systemClock } from '../clock'
 import { openSecureChannel } from './secureChannel'
 
 type RouteState = RouteHealth & { failures: number; retryAt: number }
+/**
+ * How long local routes (priority below 0: LAN hints and remembered LAN addresses) get before a remote
+ * route (priority above 0: Tailscale, the Mousse ID relay, tunnels) is dialled. A LAN dial with its pinned
+ * TLS finishes well within it, so two computers on one network do not touch the relay; once every local
+ * route has failed, the remote routes start at once.
+ */
+export const LOCAL_HEAD_START_MS = 1_500
 export interface RouteManagerOptions {
   node: NodeId
   transports: Transport[]
@@ -209,7 +216,8 @@ export class RouteManagerImpl implements RouteManager {
     return new Promise((resolve, reject) => {
       let finished = false,
         remaining = routes.length,
-        lastError: NetError | undefined
+        lastError: NetError | undefined,
+        localFailed = (): void => {}
       const controllers = new Set<AbortController>(),
         timers: Array<{ cancel(): void }> = []
       const clean = () => {
@@ -301,7 +309,11 @@ export class RouteManagerImpl implements RouteManager {
           if (finished) return
           if (error.code !== 'cancelled') this.failed(state, error)
           lastError = error
+          // A remembered address that another device now answers on is a dead route, not a forged peer.
+          const stale =
+            error.code === 'peer_key_mismatch' && peer.remembered?.includes(route.address) === true
           if (
+            !stale &&
             !['route_unreachable', 'deadline_exceeded', 'peer_offline', 'rate_limited'].includes(
               error.code
             )
@@ -310,21 +322,39 @@ export class RouteManagerImpl implements RouteManager {
             return
           }
           if (--remaining === 0) fail(lastError)
+          else if (route.priority < 0) localFailed()
         } finally {
           controllers.delete(controller)
         }
       }
+      const stagger = this.options.staggerMs ?? 250
+      // Remote routes wait for the local ones' head start, or until every local route has failed.
+      let localLeft = routes.filter((route) => route.priority < 0).length
+      const deferred = new Map<Route, { cancel(): void }>()
+      const start = (route: Route) => {
+        deferred.delete(route)
+        void attempt(route)
+      }
+      localFailed = () => {
+        if (--localLeft > 0 || finished) return
+        const waiting = [...deferred]
+        deferred.clear()
+        waiting.forEach(([route, timer], index) => {
+          timer.cancel()
+          if (index === 0) start(route)
+          else timers.push(this.clock.setTimeout(() => start(route), stagger * index))
+        })
+      }
       routes.forEach((route, index) => {
         if (index === 0) void attempt(route)
-        else
-          timers.push(
-            this.clock.setTimeout(
-              () => {
-                void attempt(route)
-              },
-              (this.options.staggerMs ?? 250) * index
-            )
+        else if (localLeft > 0 && route.priority > 0) {
+          const timer = this.clock.setTimeout(
+            () => start(route),
+            Math.max(stagger * index, LOCAL_HEAD_START_MS)
           )
+          deferred.set(route, timer)
+          timers.push(timer)
+        } else timers.push(this.clock.setTimeout(() => void attempt(route), stagger * index))
       })
       if (signal.aborted) aborted()
     })

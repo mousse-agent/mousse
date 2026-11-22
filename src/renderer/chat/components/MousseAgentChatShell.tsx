@@ -99,10 +99,11 @@ export function RunInterruptedNotice({ onContinue, uncertain, onContinueUncertai
  * all through a reply, so only this provider follows them: the chat it wraps stays as it is, and only what reads the
  * context (the progress line, the turn's end mark) renders.
  */
-function TurnProgressProvider({ threadId, children }: { threadId?: string | null; children: ReactNode }) {
+function TurnProgressProvider({ threadId, startingSince, children }: { threadId?: string | null; startingSince?: string; children: ReactNode }) {
   const turnPhase = useAppStore(state => (threadId ? state.turnStates[threadId]?.phase : undefined))
   const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
   const stopping = useAppStore(state => Boolean(threadId && state.stopRequests[threadId]))
+  const turnStartedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.startedAt : undefined))
   const turnUpdatedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.updatedAt : undefined))
   // A steer waits for the running tool, or (strict release, nothing of the turn running) for the turn's end: the line's
   // tooltip says when it goes in.
@@ -110,9 +111,10 @@ function TurnProgressProvider({ threadId, children }: { threadId?: string | null
     const held = threadId ? state.turnStates[threadId]?.heldSteer : undefined
     return held?.untilTurnEnd ? 'turn_end' : Boolean(held)
   })
+  const startedAt = turnStartedAt ?? startingSince
   const turnProgress = useMemo<TurnProgressState>(
-    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt, steerHeld }),
-    [turnPhase, turnStep, stopping, threadId, turnUpdatedAt, steerHeld]
+    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, startedAt, updatedAt: turnUpdatedAt, steerHeld }),
+    [turnPhase, turnStep, stopping, threadId, startedAt, turnUpdatedAt, steerHeld]
   )
   return <TurnProgressContext.Provider value={turnProgress}>{children}</TurnProgressContext.Provider>
 }
@@ -145,6 +147,12 @@ interface MousseAgentChatShellProps {
   turnActions?: TurnActions | null
   /** The thread's queued messages, drawn after the last turn. */
   queue?: ThreadQueue
+  /** Drawn above the first turn (a side chat's fork line). */
+  beforeTurns?: ReactNode
+  /** When an optimistically starting turn began (e.g. a subagent's `createdAt`), before the daemon reports a turn state. */
+  startingSince?: string
+  /** Ctrl/Cmd+F finds in this transcript; off for a second chat on screen (a side chat), so the main one keeps it. */
+  enableFind?: boolean
 }
 
 export function MousseAgentChatShell({
@@ -161,6 +169,9 @@ export function MousseAgentChatShell({
   permissionRequests,
   turnActions,
   queue,
+  beforeTurns,
+  startingSince,
+  enableFind = true,
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
@@ -181,13 +192,15 @@ export function MousseAgentChatShell({
   </>, [threadId, interrupted, continueRun, uncertain, continueUncertain])
   return (
     <MousseComposerContext.Provider value={composer}>
-      <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
+      {/* A thread's undo starts over in another profile. Without a thread (the warm start's chat) there is none, and the
+          window learning its profile does not mount the transcript again (which would scroll it back to its end). */}
+      <PromptUndoProvider key={threadId ? `${profileId}:${threadId}` : ""} threadId={threadId} busy={busy} revision={messages}>
       <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
       <PermissionRequestContext.Provider value={permissionRequests ?? NO_PERMISSION_REQUESTS}>
       <SubagentCardsContext.Provider value={subagentCards}>
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
       <TurnActionsContext.Provider value={turnActions ?? null}>
-      <TurnProgressProvider threadId={threadId}>
+      <TurnProgressProvider threadId={threadId} startingSince={startingSince}>
       <HeldSteerProvider threadId={threadId} messages={messages}>
         <AgentChat
           className="mousse-chat-shell"
@@ -200,9 +213,11 @@ export function MousseAgentChatShell({
           slots={slots}
           lastTurnNotice={lastTurnNotice}
           afterTurns={queued}
+          beforeTurns={beforeTurns}
           showCopyToolbar
           enableImagePreview
-          enableFind
+          enableFind={enableFind}
+          threadId={threadId}
         />
       </HeldSteerProvider>
       </TurnProgressProvider>

@@ -116,7 +116,11 @@ it('prefers the clone that shares a remote and refuses to guess between the rest
   expect(await ask(['example.com/org/y'])).toEqual({ projectId: idOf(y.path) })
   expect(await ask(['example.com/org/x'])).toEqual({ projectId: idOf(x.path) })
   expect(await ask(['example.com/org/other'])).toEqual({})
-  expect(await ask([])).toEqual({})
+  // With no remote to tell them apart there is no answer, only the projects that may be it, each weak (issue #1160).
+  const unsure = (await ask([])) as { projectId?: string; candidates?: Array<{ projectId: string; weak?: boolean }> }
+  expect(unsure.projectId).toBeUndefined()
+  expect(unsure.candidates?.map((entry) => entry.projectId).sort()).toEqual([idOf(x.path), idOf(y.path)].sort())
+  expect(unsure.candidates?.every((entry) => entry.weak === true)).toBe(true)
 })
 
 it('matches a project that is a subfolder of the repository, and one reached through a link', async () => {

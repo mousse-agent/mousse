@@ -141,6 +141,8 @@ export type AgentChatProps = {
   lastTurnNotice?: React.ReactNode;
   /** Drawn after the last turn (the thread's queued messages). */
   afterTurns?: React.ReactNode;
+  /** Drawn above the first turn, once the transcript has one (a side chat's fork line). */
+  beforeTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
 
   /**
@@ -164,6 +166,9 @@ export type AgentChatProps = {
    * default so a chat embedded somewhere else does not take the shortcut.
    */
   enableFind?: boolean;
+
+  /** The thread shown: what the person opens in its transcript is kept for it while the app runs. */
+  threadId?: string | null;
 
   suggestions?: InputSuggestions;
 

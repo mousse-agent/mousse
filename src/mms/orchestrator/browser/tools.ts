@@ -108,8 +108,23 @@ export function browserToolCapability(name: BrowserAutomationTool): BrowserAutom
   return BROWSER_TOOL_DESCRIPTORS.find((item) => item.name === name)!.capability
 }
 
-export function browserToolEffect(name: BrowserAutomationTool): 'read' | 'external' {
+/**
+ * What a call of the tool does: `read` (`browser.read`) or `external` (`browser.act`, docs/plans/tool-api.md §2.6
+ * "Rights"). Without `args`, the tool's widest call. `browser_tabs` only lists with operation `list` (or none).
+ */
+export function browserToolEffect(name: BrowserAutomationTool, args?: unknown): 'read' | 'external' {
+  if (name === 'browser_tabs' && args !== undefined) return browserTabsListsOnly(args) ? 'read' : 'external'
   return BROWSER_READ_TOOLS.has(name) ? 'read' : 'external'
+}
+
+/** Whether some call of the tool only reads: the read tools, and `browser_tabs` listing tabs. */
+export function browserToolReads(name: BrowserAutomationTool): boolean {
+  return BROWSER_READ_TOOLS.has(name) || name === 'browser_tabs'
+}
+
+function browserTabsListsOnly(args: unknown): boolean {
+  const operation = args && typeof args === 'object' ? (args as { operation?: unknown }).operation : undefined
+  return operation === undefined || operation === 'list'
 }
 
 const looseObject = Type.Object({}, { additionalProperties: true })

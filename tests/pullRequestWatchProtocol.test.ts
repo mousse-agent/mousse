@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
-import { PROTOCOL_METHODS } from '../src/mms/protocol/types'
 import { parsePullRequestDetail } from '../src/mms/git/GitHubCodeHost'
 import { relinked, type PullRequestDetail, type PullRequestWatchStatus, type ThreadPullRequestLink } from '../src/shared/pullRequests'
 import type { Thread } from '../src/shared/types'
@@ -81,11 +80,6 @@ describe('the watch through the daemon protocol', () => {
     const project = mms.projects.openProject(f.repo)
     return mms.threads.createThread(name, project.id)
   }
-
-  it('lists the methods and the event', () => {
-    expect(PROTOCOL_METHODS).toContain('pullRequests.watch')
-    expect(PROTOCOL_METHODS).toContain('pullRequests.watchStatus')
-  })
 
   it('refuses bad parameters, an unlinked thread and an unknown thread', async () => {
     const thread = newThread()

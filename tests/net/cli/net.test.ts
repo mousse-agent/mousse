@@ -101,6 +101,22 @@ describe('network CLI validation', () => {
       params: { node: nodeId, name: 'Desk' }
     })
   })
+  it('maps connect and disconnect to the daemon methods and refuses a missing or bad node', () => {
+    expect(prepareNetCommand(args('bridge', 'connect', [nodeId]))).toEqual({
+      method: 'bridge.connect',
+      params: { node: nodeId }
+    })
+    expect(prepareNetCommand(args('bridge', 'disconnect', [nodeId]))).toEqual({
+      method: 'bridge.disconnect',
+      params: { node: nodeId }
+    })
+    for (const bad of [
+      args('bridge', 'connect', []),
+      args('bridge', 'disconnect', ['not-a-node']),
+      args('bridge', 'connect', [nodeId], [['terminal', 'on']])
+    ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
   it('maps block, unblock, limits, caps and kind to the daemon methods and refuses bad input', () => {
     expect(prepareNetCommand(args('bridge', 'block', [nodeId]))).toEqual({
       method: 'bridge.policy',
@@ -148,6 +164,18 @@ describe('network CLI validation', () => {
         )
       )
     ).toEqual({ method: 'bridge.policy', params: { node: nodeId, terminal: true, editor: true } })
+    // What the device's agents may change here.
+    for (const reach of ['none', 'launched', 'all'])
+      expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['agent-reach', reach]]))).toEqual({
+        method: 'bridge.policy',
+        params: { node: nodeId, agentReach: reach }
+      })
+    // Work on threads from this device: off leaves it to view threads and chat with bots.
+    for (const [flag, work] of [['off', false], ['on', true]] as const)
+      expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['work', flag]]))).toEqual({
+        method: 'bridge.policy',
+        params: { node: nodeId, work }
+      })
     expect(
       prepareNetCommand(args('bridge', 'caps', [nodeId], [['caps', 'read,chat,write,settings']]))
     ).toEqual({
@@ -165,6 +193,10 @@ describe('network CLI validation', () => {
       args('bridge', 'limits', [nodeId], [['max-mode', 'root']]),
       args('bridge', 'limits', [nodeId], [['terminal', 'maybe']]),
       args('bridge', 'limits', [nodeId], [['editor', 'maybe']]),
+      args('bridge', 'limits', [nodeId], [['agent-reach', 'everything']]),
+      args('bridge', 'limits', [nodeId], [['work', 'maybe']]),
+      args('bridge', 'block', [nodeId], [['work', 'off']]),
+      args('bridge', 'block', [nodeId], [['agent-reach', 'all']]),
       args('bridge', 'block', [nodeId], [['editor', 'on']]),
       args('bridge', 'caps', [nodeId]),
       args('bridge', 'caps', [nodeId], [['caps', 'read,read']]),
@@ -481,6 +513,80 @@ describe('network CLI command transport and presentation', () => {
       )
     ).rejects.toThrow(/invite/)
     expect(request).not.toHaveBeenCalled()
+  })
+})
+
+describe('connect link commands', () => {
+  const link = 'ml1_eyJ2IjoxfQ'
+  it('makes, pastes and allows with exact parameters, reading a link that is not an argument at a hidden prompt', () => {
+    expect(prepareNetCommand(args('bridge', 'link'))).toEqual({ method: 'net.link.make', params: {} })
+    expect(prepareNetCommand(args('bridge', 'link', [], [['name', 'Studio Mac'], ['protect', true]]))).toEqual({
+      method: 'net.link.make',
+      params: { name: 'Studio Mac' },
+      promptPassphrase: true
+    })
+    expect(prepareNetCommand(args('bridge', 'paste', [link], [['start-over', true]]))).toEqual({
+      method: 'net.link.paste',
+      params: { link, startOver: true }
+    })
+    expect(prepareNetCommand(args('bridge', 'paste', [], [['name', 'Laptop']]))).toEqual({
+      method: 'net.link.paste',
+      params: { name: 'Laptop' },
+      promptLink: true
+    })
+    expect(prepareNetCommand(args('bridge', 'allow', [nodeId]))).toEqual({ method: 'bridge.allow', params: { node: nodeId } })
+    for (const bad of [
+      args('bridge', 'paste', [bearer]),
+      args('bridge', 'paste', [link, link]),
+      args('bridge', 'paste', [link], [['start-over', 'yes']]),
+      args('bridge', 'link', [link]),
+      args('bridge', 'link', [], [['passphrase', 'visible password']]),
+      args('bridge', 'allow', []),
+      args('bridge', 'allow', ['not-a-node'])
+    ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
+  it('prints the link once with what pasting it does, and keeps it out of every other output', async () => {
+    const emit = vi.fn()
+    await executeNetCommand(
+      { method: 'net.link.make', params: {} },
+      { request: vi.fn(async () => ({ link, add: true, created: true, expiresAt: 1000, reachable: true, proofKey: 'private' })) },
+      { emit }
+    )
+    expect(emit).toHaveBeenCalledWith(
+      { link, add: true, created: true, expiresAt: 1000, reachable: true },
+      'This computer will keep the others connected. Pick the one that is usually on.\nPaste on the computer to add:\n' +
+        `mousse-cli bridge paste ${link}\nExpires: 1970-01-01T00:00:01.000Z`
+    )
+    emit.mockClear()
+    await executeNetCommand(
+      { method: 'net.link.make', params: {} },
+      { request: vi.fn(async () => ({ link, add: false, created: false, expiresAt: 1000, reachable: false, keeper: 'Studio Mac' })) },
+      { emit }
+    )
+    expect(emit.mock.calls[0][1]).toContain('make the link on Studio Mac')
+    // No route: the side that made the link says so too.
+    expect(emit.mock.calls[0][1]).toContain('Only this computer can reach this link.')
+    const request = vi.fn(async () => ({ row: 'join', node: nodeId, connection: 'held', echo: link }))
+    const emitted: unknown[] = []
+    await executeNetCommand(
+      { method: 'net.link.paste', params: {}, promptLink: true },
+      { request },
+      { readLink: async () => ` ${link}\n`, emit: (value) => emitted.push(value) }
+    )
+    expect(request).toHaveBeenCalledWith('net.link.paste', { link })
+    expect(emitted).toEqual([{ row: 'join', node: nodeId, connection: 'held', echo: '[redacted]' }])
+  })
+  it('says what to do when a link cannot be made or used, for the link commands only', () => {
+    const stale = { code: 'invite_invalid', details: { reason: 'stale' } }
+    expect(netCliFailure(stale, 'net.link.paste').error).toBe('This link was used or replaced. Make a new link.')
+    expect(netCliFailure(stale, 'bridge.join').error).toBe('The invite is invalid, expired or already used.')
+    expect(
+      netCliFailure({ code: 'route_unreachable', details: { reason: 'link_unreachable' } }, 'net.link.paste').error
+    ).toMatch(/firewall.*Tailscale or SSH/)
+    expect(netCliFailure({ code: 'conflict', details: { reason: 'start_over' } }, 'net.link.paste').error).toMatch(
+      /--start-over/
+    )
   })
 })
 

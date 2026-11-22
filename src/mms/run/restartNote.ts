@@ -1,6 +1,7 @@
 import { commandLabel, INTERRUPTED_SUMMARY } from '../../shared/agentActivity'
 import { redactSecrets } from '../../shared/errors'
 import type { ChatMessage } from '../../shared/types'
+import { providerRetryText } from '../../shared/providerRetry'
 
 /** One piece of saved work a restart cut off, as the note names it. Never carries output, a working directory or a result; a Codex helper's label is the capped start of its prompt, redacted like every label. */
 export interface CutOffActivity {
@@ -92,9 +93,9 @@ export const RESTART_UNSENT_TEXT = 'Not sent: Mousse restarted before this messa
 /** A compaction row a daemon restart cut short: the compaction never finished, so nothing was cut. */
 export const COMPACTION_INTERRUPTED_TEXT = 'Compaction interrupted · full history kept'
 
-/** A row a previous daemon may have left running: a `running` item, or a compaction row still streaming. */
+/** A row a previous daemon may have left running: a `running` item, or a compaction or provider retry row still streaming. */
 export function isOpenActivityRow(message: ChatMessage): boolean {
-  return message.activity?.status === 'running' || (message.kind === 'context_compaction' && message.streaming === true)
+  return message.activity?.status === 'running' || ((message.kind === 'context_compaction' || message.kind === 'provider_retry') && message.streaming === true)
 }
 
 /**
@@ -114,6 +115,12 @@ export function closeStaleActivity(messages: readonly ChatMessage[], endedAt: st
         streaming: false,
         compaction: { ...message.compaction, kept: 'interrupted' }
       })
+      continue
+    }
+    // Retries a restart cut short: they stopped there, and the turn's own end says what became of it.
+    if (message.kind === 'provider_retry' && message.streaming === true && message.providerRetry) {
+      const providerRetry = { ...message.providerRetry, status: 'stopped' as const }
+      closed.set(message.id, { ...message, content: providerRetryText(providerRetry), streaming: false, providerRetry })
       continue
     }
     const item = message.activity

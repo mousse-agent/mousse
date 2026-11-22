@@ -1,7 +1,9 @@
+import { useEffect, useRef, useState } from 'react'
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
+import { TITLE_PROMPT_MAX } from '../../../shared/threadTitleText'
 import { resolveModelChoice } from '../../lib/modelChoice'
-import type { BotComputerLimit, IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { BOTS_SHELL_TIP, BOTS_THREADS_TIP, BOTS_UNREADABLE_LINE, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
+import type { IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
+import { normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import { AgentAccessSettings } from './AgentAccessSettings'
@@ -10,7 +12,7 @@ import { SecretsSettings } from './SecretsSettings'
 import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
-import { Bot, Brain, Layers, RotateCcw } from '../../lib/icons'
+import { Brain, Layers, RotateCcw } from '../../lib/icons'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { DEVICE_SCOPE, useProviderSnapshots } from '../../lib/providerSnapshots'
 
@@ -66,54 +68,72 @@ function CacheTimeRow() {
   )
 }
 
-/** The switches of What bots may do here, in the owner's words, with where search lands on each and its tooltip. */
-const BOT_SWITCHES: ReadonlyArray<{ key: keyof BotComputerLimit; title: string; anchor: string; tip?: string }> = [
-  { key: 'shell', title: 'Run commands', anchor: 'agents-bots-shell', tip: BOTS_SHELL_TIP },
-  { key: 'browser', title: 'Use the browser', anchor: 'agents-bots-browser' },
-  { key: 'threads', title: 'Use your threads', anchor: 'agents-bots-threads', tip: BOTS_THREADS_TIP }
-]
-
 /**
- * What bots may do here: a ceiling over every bot of every profile on this computer, enforced by the background
- * service. A switch that is off gives no bot that permission here, and no bot can ask for it; a bot that holds it keeps
- * it for when it is switched on again. When the stored setting could not be read, every switch is off and one line says
- * why, until the owner sets them again.
+ * The optional title prompt under Thread titles: a dimmed row with Add while empty; the text box shows
+ * while it is being written or once it has text, and saves when it loses focus (blank removes it).
  */
-function BotsHereGroup({ settings, updateSettings }: { settings: MousseSettings; updateSettings: (partial: MousseSettingsUpdate) => Promise<void> }) {
-  const { here, unreadable } = normalizeBotSettings(settings.bots)
+function TitlePromptRow({ prompt, automatic, updateSettings }: {
+  prompt: string
+  automatic: boolean
+  updateSettings: (partial: MousseSettingsUpdate) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(prompt)
+  useEffect(() => { if (!editing) setDraft(prompt) }, [prompt, editing])
+  // Escape blurs the box without saving what was typed.
+  const discarded = useRef(false)
+  const open = editing || Boolean(prompt)
+  const save = () => {
+    setEditing(false)
+    if (discarded.current) {
+      discarded.current = false
+      setDraft(prompt)
+      return
+    }
+    const next = draft.trim()
+    if (next !== prompt) void updateSettings({ title: { prompt: next } })
+  }
   return (
-    <SettingsGroup
-      title="What bots may do here"
-      icon={Bot}
-      anchor="agents-bots-here"
-      description={unreadable ? <span role="status">{BOTS_UNREADABLE_LINE}</span> : 'Every bot on this computer, whatever it was allowed.'}
+    <SettingsRow
+      title="Title prompt"
+      anchor="agents-title-prompt"
+      htmlFor={open ? 'agents-title-prompt' : undefined}
+      indent
+      disabled={!open || automatic}
+      description={automatic ? <span title="Automatic names threads from their first line, without a model.">Used with a chosen title model.</span> : undefined}
+      control={!open && (
+        <button type="button" className="settings-btn" onClick={() => setEditing(true)}>Add</button>
+      )}
     >
-      {BOT_SWITCHES.map(({ key, title, anchor, tip }) => (
-        <SettingsRow
-          key={key}
-          title={tip ? <span title={tip}>{title}</span> : title}
-          anchor={anchor}
-          htmlFor={anchor}
-          control={
-            <Switch
-              id={anchor}
-              label={title}
-              checked={here[key]}
-              // Only the switch that changed: the service puts it over the switches it holds, so a page whose copy is
-              // older never turns back a switch changed elsewhere (another window, profile or the CLI).
-              onChange={(on) => void updateSettings({ bots: { here: { [key]: on } as Partial<BotComputerLimit> } } as MousseSettingsUpdate)}
-            />
-          }
+      {open && (
+        <textarea
+          id="agents-title-prompt"
+          className="agents-title-prompt"
+          rows={2}
+          maxLength={TITLE_PROMPT_MAX}
+          autoFocus={editing && !prompt}
+          value={draft}
+          placeholder="e.g. Start each title with an emoji"
+          onFocus={() => setEditing(true)}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          onBlur={save}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            event.stopPropagation()
+            discarded.current = true
+            event.currentTarget.blur()
+          }}
         />
-      ))}
-    </SettingsGroup>
+      )}
+    </SettingsRow>
   )
 }
 
 /**
- * Settings > Agents, in six groups: Models (default, thread titles, bots), Context (compaction and
- * the prompt cache), Access (answering approvals on other threads), Subagents, What bots may do
- * here, and the limits on Automations agents add. Replaces the old Models, Context and per-CLI Agents
+ * Settings > Agents, in five groups: Models (default, thread titles, bots), Context (compaction and
+ * the prompt cache), Access (answering approvals on other threads), Subagents, and the limits on
+ * Automations agents add. Replaces the old Models, Context and per-CLI Agents
  * pages; their stored keys are left untouched.
  */
 export function AgentsSettings({
@@ -220,6 +240,7 @@ export function AgentsSettings({
             />
           }
         />
+        <TitlePromptRow prompt={settings.title?.prompt ?? ''} automatic={titleIsAutomatic} updateSettings={updateSettings} />
         <SettingsRow
           title="Bot model"
           anchor="agents-bot-model"
@@ -307,8 +328,6 @@ export function AgentsSettings({
           />
         }
       />
-
-      <BotsHereGroup settings={settings} updateSettings={updateSettings} />
 
       <AgentAutomationsSettings />
 

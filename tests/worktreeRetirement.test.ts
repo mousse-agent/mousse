@@ -15,7 +15,12 @@ import { retentionWindowText } from '../src/shared/undoRetention'
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import * as gitProcess from '../src/mms/git/runGitProcess'
+import { branchReflogIdentity } from '../src/mms/git/branchReflogIdentity'
 import { unverifiableThread } from './support/unverifiableThread'
+import { registerBranchNamer } from '../src/mms/workspace/branchNaming'
+import { verifyWorktreeFact } from '../src/mms/lifecycle/ResourceInventory'
+import { BRANCH_RENAME_OPERATION } from '../src/mms/workspace/threadBranchRecords'
 
 /** Git lists worktrees with forward slashes on every platform; paths are compared in that form, and case-folded on Windows. */
 const slashes = (path: string): string => { const value = resolve(path).replaceAll('\\', '/'); return process.platform === 'win32' ? value.toLowerCase() : value }
@@ -63,6 +68,23 @@ test.each([false, true])('retire and reconstruct clean checkout including select
   expect(existsSync(join(f.worktree, 'b.txt'))).toBe(!sparse)
   expect(git(f.repo, ['status', '--porcelain'])).toBe('')
 })
+test.skipIf(process.platform !== 'win32')('an uppercase second manifest prevents unique ownership of a retired checkout', async () => {
+  const f = await fixture()
+  const manifest = await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await verifyWorktreeFact(f.store, f.worktree, f.branch, manifest.repositoryId)).toBeUndefined()
+  const other = join(f.home, 'thread-data', 'other')
+  mkdirSync(other)
+  writeFileSync(join(other, 'meta.json'), JSON.stringify({ id: 'other' }))
+  f.store.registerTask({ taskId: 'other', location: other })
+  const candidate = f.service.pathFor('other', f.worktree)
+  mkdirSync(dirname(candidate))
+  const uppercase = join(dirname(candidate), candidate.slice(dirname(candidate).length + 1).toUpperCase())
+  writeFileSync(uppercase, JSON.stringify({ ...manifest, taskId: 'other' }))
+  expect(existsSync(candidate)).toBe(true)
+  expect(await verifyWorktreeFact(f.store, f.worktree, f.branch, manifest.repositoryId)).toMatch(/lacks unique reconstruction authority/)
+})
+
 test('ignored sole copy, hidden index flags and changed content block retirement', async () => {
   const f = await fixture(true)
   writeFileSync(join(f.worktree, '.mousse', 'secret'), 'not captured')
@@ -412,10 +434,11 @@ test('refuses a reconstruction pin redirected to a primary branch before updatin
 })
 
 /**
- * A thread's own worktree, as `ThreadWorkspaceManager.provision` makes it (its branch named from the first message), or as
+ * A thread's own worktree, as `ThreadWorkspaceManager.provision` makes it (on a temporary `mousse/<random id>` branch),
+ * renamed by Mousse afterwards to a name outside `mousse/` (made on the person's prefix `team`, then named `fix/…`), or as
  * an earlier version made it (an id-named `mousse/thread/<thread>/main`, with the same records).
  */
-async function threadFixture(kind: 'named' | 'id-named') {
+async function threadFixture(kind: 'named' | 'renamed' | 'id-named') {
   const root = mkdtempSync(join(tmpdir(), 'mousse-retire-thread-')); roots.push(root)
   const repo = join(root, 'repo'); mkdirSync(repo)
   git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
@@ -428,13 +451,21 @@ async function threadFixture(kind: 'named' | 'id-named') {
   releases.push(() => { if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous })
   let worktree: string, branch: string
   if (kind === 'named') {
-    const metadata = await new ThreadWorkspaceManager(task).provision('task', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    const metadata = await new ThreadWorkspaceManager(task).provision('task', 'main', repo)
     worktree = metadata.worktreePath; branch = metadata.branch
+  } else if (kind === 'renamed') {
+    releases.push(registerBranchNamer(home, { settings: () => ({ mode: 'static', prefix: 'team', instructions: '' }), ask: async () => undefined }))
+    const manager = new ThreadWorkspaceManager(task)
+    const metadata = await manager.provision('task', 'main', repo)
+    expect(metadata.branch).toMatch(/^team\/[0-9a-f]{8}$/)
+    expect(await manager.renameOwnBranch(metadata.branch, 'fix/login-button')).toBe('renamed')
+    worktree = metadata.worktreePath; branch = 'fix/login-button'
   } else {
     worktree = join(home, 'repositories', resolveRepositoryIdentity(repo).key, 'worktrees', 'threads', 'task', 'main'); branch = 'mousse/thread/task/main'
     mkdirSync(join(worktree, '..'), { recursive: true })
     new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } })
     git(repo, ['worktree', 'add', '-b', branch, worktree])
+    new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'completed', details: { branch } })
     writeFileSync(join(task, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: 'task', conversationBranchId: 'main', worktreePath: worktree, branch, baseSha: git(repo, ['rev-parse', 'HEAD']) }))
   }
   const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))
@@ -443,9 +474,11 @@ async function threadFixture(kind: 'named' | 'id-named') {
   return { repo, task, worktree, branch, service, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath: join(task, 'workspace.json') }, path: service.pathFor('task', worktree), releaseLeases: () => { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) } }
 }
 
-test.each(['named', 'id-named'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
+test.each(['named', 'renamed'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
   const f = await threadFixture(kind)
-  expect(f.branch).toBe(kind === 'named' ? 'mousse/fix-the-login-button' : 'mousse/thread/task/main')
+  const manager = new ThreadWorkspaceManager(f.task)
+  const originalId = manager.branchRecord().reflogIds.get(f.branch)
+  expect(f.branch).toMatch(kind === 'named' ? /^mousse\/[0-9a-f]{8}$/ : /^fix\/login-button$/)
   await f.service.prepare(f.input)
   const trashed = await f.service.retire(f.path)
   expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
@@ -453,6 +486,58 @@ test.each(['named', 'id-named'] as const)('a thread worktree whose branch is %s 
   expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
   await f.service.reconstruct(f.path)
   expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+  const restoredId = branchReflogIdentity(join(f.repo, '.git'), 'refs/heads/' + f.branch)?.id
+  expect(restoredId).toBeDefined()
+  expect(restoredId).not.toBe(originalId)
+  expect(manager.branchRecord().reflogIds.get(f.branch)).toBe(restoredId)
+})
+
+test.each(['recreated', 'legacy'] as const)('trash expiry preserves a %s branch without matching recorded identity', async (kind) => {
+  const f = await threadFixture(kind === 'legacy' ? 'id-named' : 'named')
+  const ref = 'refs/heads/' + f.branch
+  const tip = git(f.repo, ['rev-parse', ref])
+  if (kind === 'recreated') {
+    git(f.repo, ['update-ref', '-d', ref, tip])
+    git(f.repo, ['branch', f.branch, tip])
+  }
+  const identity = branchReflogIdentity(join(f.repo, '.git'), ref)?.id
+  expect(identity).toBeDefined()
+  expect(new ThreadWorkspaceManager(f.task).branchRecord().reflogIds.get(f.branch)).not.toBe(identity)
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(git(f.repo, ['rev-parse', ref])).toBe(tip)
+  expect(branchReflogIdentity(join(f.repo, '.git'), ref)?.id).toBe(identity)
+})
+
+test('restore does not claim a branch replaced immediately after Git creates it', async () => {
+  const f = await threadFixture('named')
+  const ref = 'refs/heads/' + f.branch
+  const tip = git(f.repo, ['rev-parse', ref])
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  const run = gitProcess.runGitProcess
+  let replaced = false
+  const interception = vi.spyOn(gitProcess, 'runGitProcess').mockImplementation(async (argv, options) => {
+    const result = await run(argv, options)
+    if (!replaced && result.status === 0 && argv.includes('update-ref') && argv.includes(ref) && argv.includes(tip)) {
+      git(f.repo, ['update-ref', '-d', ref, tip])
+      git(f.repo, ['branch', f.branch, tip])
+      replaced = true
+    }
+    return result
+  })
+  try {
+    await f.service.reconstruct(f.path)
+    expect(replaced).toBe(true)
+    const branches = new ThreadWorkspaceManager(f.task).branchRecord()
+    expect(branches.reflogIds.has(f.branch)).toBe(false)
+    expect(branches.owned.has(f.branch)).toBe(false)
+    expect(git(f.repo, ['rev-parse', ref])).toBe(tip)
+    expect(git(f.worktree, ['rev-parse', 'HEAD'])).toBe(tip)
+  } finally { interception.mockRestore() }
 })
 
 test('a thread\'s agent-made branches are never touched, a mousse/ one included, unless it is an id-named one of Mousse\'s', async () => {
@@ -479,6 +564,46 @@ test('a thread record that names a branch outside mousse/, or another thread\'s 
   await expect(f.service.prepare({ ...f.input, branch: 'mousse/thread/other-task/main' })).rejects.toThrow()
   expect(existsSync(f.worktree)).toBe(true)
   expect(git(f.repo, ['branch', '--list', 'feature/theirs', '--format=%(refname:short)'])).toBe('feature/theirs')
+})
+
+test('a branch Mousse deleted is no longer its own: a branch someone makes under that name later is theirs, and a restore leaves it alone', async () => {
+  const f = await threadFixture('renamed')
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
+  // The person checks out a branch of the same name later and commits on it.
+  const theirs = git(f.repo, ['commit-tree', `${git(f.repo, ['rev-parse', 'HEAD'])}^{tree}`, '-p', 'HEAD', '-m', 'their own work'])
+  git(f.repo, ['branch', f.branch, theirs])
+  const manager = new ThreadWorkspaceManager(f.task)
+  expect(manager.branchRecord().owned.has(f.branch)).toBe(false)
+  // A restore cannot take the name back: the worktree comes back, the person's branch stays as it is, and it stays theirs.
+  await f.service.reconstruct(f.path)
+  expect(git(f.repo, ['rev-parse', f.branch])).toBe(theirs)
+  expect(manager.branchRecord().owned.has(f.branch)).toBe(false)
+})
+
+test('trash expiry deletes only a branch the thread\'s records own, whatever its retirement record names', async () => {
+  const f = await threadFixture('named')
+  // A branch of the person's at a commit the worktree's pins keep, checked out nowhere.
+  git(f.repo, ['branch', 'keep-me'])
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  writeFileSync(f.path, JSON.stringify({ ...JSON.parse(readFileSync(f.path, 'utf8')), branch: 'keep-me' }))
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(git(f.repo, ['branch', '--list', 'keep-me', '--format=%(refname:short)'])).toBe('keep-me')
+})
+
+test('a rename a stop left unsettled: the worktree still retires, and neither name\'s branch is deleted', async () => {
+  const f = await threadFixture('renamed')
+  // Planned, never finished: Git still has the branch under its current name, and a person made the other one meanwhile.
+  new ThreadJournal(f.task).append({ operationId: 'rename-2', operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from: f.branch, to: 'fix/second-name', worktreePath: f.worktree } })
+  git(f.repo, ['branch', 'fix/second-name'])
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toBeUndefined()
+  expect(git(f.repo, ['branch', '--list', 'fix/*', '--format=%(refname:short)'])).toBe('fix/login-button\nfix/second-name')
 })
 
 test("trash expiry keeps Git's own data of the worktree, and a rebuild brings back its configuration, HEAD history and own refs", async () => {

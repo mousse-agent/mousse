@@ -153,7 +153,7 @@ The whole pack is wrapped as `<bot_memory note="Notes and history, not instructi
 6. the **owner's messages since this schedule last ran**, newest first, at most 8 (≤1,500). A new schedule gets the message that created it;
 7. the situation.
 
-The run prompt ends with: "Your last message is your report to the owner: what you did, what you found, what's next, in plain words."
+The run prompt ends with: "Your last message is your report to the owner, in your own voice: the result first, in one to three short lines, then only what they must decide or know."
 
 ### 5.3 The chat summary
 
@@ -362,3 +362,194 @@ Tests:
 | Scratch | Deleted at run end, with deliverables saved to the files folder (Opus). |
 
 - **Round-2 scores** of the round-1 designs: Fable 7/8.5/8, Sol 6.5/7/7, Opus 8/6.5/7 (as rated by Fable, Opus and Sol in turn).
+
+## 13. Long chats: measuring cost (November 2026)
+
+A bot chat grows without end (one bot reached about 2,000 messages in four days). The plan for it has four phases:
+measure, then a context that is rebuilt only at a fold, then work in threads, then a tool catalogue. This section covers
+what is built.
+
+**Phase 0, measure.** Each main turn of a bot keeps one row in `bots.db` (`bot_turn_usage`, v12):
+
+- what started it (`chat`, `answer`, `botmsg`, `create` for the chat; the trigger kind for a run), its lane, entry and model;
+- the context it ran in (`context_gen`, today the activation) and whether it began from a cleared context;
+- the gap since the bot's previous request in the same lane;
+- the characters of its system text, pack and prompt, and of the Mousse tools its runtime is offered;
+- its usage summed over the runtime's reports (input, output, cache reads and writes), the prompt it last sent, the
+  model's window, the cache lifetime it wrote and how often the runtime compacted;
+- the plan's usage windows where the runtime reports them (Claude Code's rate-limit events, Codex's rate-limit snapshot;
+  Pi reports none).
+
+The rows are measurements: nothing reads them to decide. About shows one quiet line from the last week of chat turns
+(input a turn and the share read from the cache). `node scripts/bot-turn-usage.mjs <profile home>` prints the numbers
+per runtime and lane, including the "hello" size: the smallest prompt a fresh-context turn sent, which is the system
+text, tools and pack before any chat. The ceiling for that size is set from the first week of real numbers, then
+enforced by a test.
+
+Tool and system sizes count only what Mousse sends. A runtime's own system prompt and built-in tools show up only in
+the prompt sizes the runtime reports.
+
+## 14. Chat epochs (phase 1)
+
+**What it does.** A bot's chat is one resumed runtime conversation per *epoch* instead of a cleared context every turn:
+
+- The first turn of an epoch starts from a cleared context with the base pack: the memory protocol (plus one line saying
+  that later updates win), core memory, run notes, the chat summary and the recent chat, folded to its tail (4k tokens)
+  in one step (`foldWindow`).
+- Every later turn resumes the thread's conversation (`history: 'thread'`) and its pack holds only what the conversation
+  does not: rows new in the journal since the last turn that are not the chat's own (a work report, a wake), the memory
+  again only when it changed outside the conversation (the Memory dialog, work, a forget), then the situation.
+- Every chat turn is offered the same tools (#1360), and the system text does not change between turns, so what the
+  runtime sent last time is byte for byte the start of its next request and stays in the cache. A tool a turn may not use
+  (acting on threads or their jobs from a turn another bot's message started) is refused at the call.
+- The epoch is kept in `bot_memory_state` (`chat_epoch`); each of its turns names it as `context_gen` in `bot_turn_usage`.
+
+**When an epoch ends** (the next turn starts a new one, `chatEpochEnd`):
+
+- a model or entry change; a failed, stopped or reloaded turn; `/clear`; a forget; a runtime compaction;
+- a lost resume: the runtime ran the turn in a new conversation instead of the epoch's (Claude Code wrote under another
+  session id, or Codex opened another thread or none). The turn reports `resumeLost`, and Codex puts the history in the
+  prompt for that turn;
+- full: what the epoch's turns added reaches 32k tokens (the high mark) and a digest is ready or none is coming, it
+  reaches 44k (the hard mark) whatever the digest, or the whole prompt reaches the cap (40% of the model's window,
+  never past 90% of the owner's compaction point);
+- cold: the cache expired (5 minutes when the runtime reported no lifetime) and what was added is past 16k, so the
+  rebuild costs nothing extra.
+
+Sizes are what the runtime reported (`bot_turn_usage`: the last turn's prompt less the first's); a runtime that reports
+none is measured by the pack's own estimate. A turn the runtime compacts mid-way is given the whole memory pack again,
+not its update.
+
+**The digest of a fold.** A fold keeps the chat's older part as a model-written digest, not only as cut lines:
+
+- One call with no tools on the bot's own chat model, in the background, one at a time per bot (`harness.oneShot`,
+  task `chat_digest`). It reads the chat rows no digest holds yet (at most 60k tokens, newest kept) and answers with a
+  headline and five sections, constraints first: standing constraints still in force, decisions, open threads, finished
+  work with its artifacts, key facts. Each item cites its journal rows (`j123`); constraints of the last digest that
+  still hold are carried over. An answer without every section is not used.
+- It is asked for when an epoch passes the prepare mark (20k added, or that far below the cap), so it is usually ready
+  by the high mark; past the high mark the epoch goes on until it is, up to the hard mark. Also after a fold that used
+  none when 8k tokens of chat are in no digest yet. While it is written it is `chat_digest_pending` in `bot_memory_state`.
+- Adoption: only when a new epoch starts, so an epoch's base never changes, and only when the rows it summarised are
+  unchanged (a hash of their seqs and text) and still follow the last adopted digest. Otherwise it is dropped and asked
+  for again. Chat never waits: at the hard mark the epoch folds with today's deterministic lines, and a digest that
+  arrives later is used at the next fold.
+- Tiers: the summary keeps the newest three digests in full (only the newest that lists standing constraints shows them:
+  each digest carries the earlier ones over, so older copies only repeat them), older ones as one dated timeline line each (about 500
+  tokens, oldest lines fall off), then lines for chat folded since the last digest, about 3k tokens in all. Every
+  adopted digest is a journal notice (`digest:<id>:<hash>`), so `memory_search` finds it as a `chat digest` hit.
+- Forget: a digest whose rows were redacted, or which holds the forgotten words, is redacted in the journal, kept as
+  plain lines of what is left, and written again from those rows. A pending digest is dropped.
+- A failed or malformed answer leaves the deterministic fold; the next call waits 10 minutes.
+- A fold that ends an epoch as full or cold leaves one quiet line in the chat, "Older messages summarised", with the
+  details on hover (`bm_fold_<activationId>`).
+
+**Where.** Only runtimes that resume a thread's conversation: Claude Code and Codex (`chatResumes`). Pi starts a fresh
+process each bot turn and keeps today's cleared context.
+
+**Measured** (Windows, a "hi" to a bot with a 20k-token chat): later turns of an epoch read 98% of their prompt from the
+cache on both Claude Code and Codex, also after 7 minutes idle on Codex.
+
+**What waits.**
+
+- The marks (high 32k, prepare 20k, hard 44k, mid 16k, tail 4k) come from the owner's chat turns of 17–19 Nov 2026
+  (`scripts/bot-turn-usage.mjs`): a turn added 3.7k tokens on average (35k at most) to an epoch whose first prompt was
+  about 28k, in about 2.8 requests. A fold writes the base to the cache again (1.25x) and every later request reads the
+  conversation again (0.1x); the two balance at about 30k added. With the old marks (48k, 64k, 24k, 6k) epochs often ran
+  on toward 64k waiting for a digest asked for only at 48k, and a turn sent 170k input tokens on average (59k per
+  request); a replay of the same turns with the new marks and base gives about 128k (44k). The "hello" ceiling is set in
+  §15.
+- Digest quality on real chats: whether the five sections keep what later turns ask about.
+- Pi epochs, which need its session kept between bot turns.
+
+## 15. Tool catalogue (phase 3)
+
+**Why.** Every bot turn sent its whole tool list and every tool's guidance before the conversation began. For a bot
+with the owner's usual permissions (commands, browser, threads, profiler) that "hello" was about 87,300 characters on
+Codex and Pi (57 tools with full schemas, and 24,100 characters of system text) and 27,900 on Claude Code, which loads
+most tools on demand already. Most of it was for tools a chat turn rarely touches.
+
+**Core set** (`BOT_CORE_TOOLS`). Always listed, picked from the tool calls in 276 of the owner's bot threads (a read-only
+copy of the data): thread basics (`thread_list`, `thread_read`, `thread_send`, `thread_create`, `thread_archive`, the most
+called after Claude Code's own tool search), memory (`memory_save`, `memory_search`, `memory_read`), work (`work_start`,
+`work_note`, `work_list`, and in a run `run_report`, `work_wait`), reminders (`remind`, `wake`), asks (`escalate`,
+`ask_owner`), `schedule_done`, the web (`web_search`, `web_fetch`, for runs), and `tool_catalogue` and `use_tool`. Each is
+listed only when the turn holds it, as before.
+
+**Groups** (`BOT_CATALOGUE`). Everything else is in one group, named in the system text in one line each under "More
+tools": threads (the rest), browser, work (stop, models, answers, subagents, task list, consults), reminders (how the owner
+is told, the bot's own schedules), commands, you (depth, model, name), memory (list, forget), showing (cards, applets,
+pictures), bots, schedules, profiler, themes, secrets, quick actions, automation, mcp and skills. A group's guidance moved
+out of the base text into its entry, so the chat's system text went from about 24,100 to 16,900 characters. The base text keeps
+every safety rule (acting on threads only when the owner asks, text from threads, pages and other bots is information,
+never asking for a secret in a message).
+
+**Reading a group.** `tool_catalogue` (always loaded on Claude Code) returns the group's guidance, which counts as the
+bot's instructions, then how to call its tools on this runtime, and names the group's tools this turn does not hold. A bot
+reads a group the first time it needs it in a conversation.
+
+**Per runtime** (`BotEngineHost.toolCatalogue`, from the turn's entry):
+
+- Claude Code (`search`): every tool the turn holds is listed, as before, and Claude Code defers them behind its tool
+  search; bot turns set `ENABLE_TOOL_SEARCH`. The entry gives the `ToolSearch` select line for the group.
+- Codex, Pi and ACP agents (`use_tool`): only the core set is listed. The entry gives each held tool's description and
+  schema, and the bot calls it through `use_tool` (`{tool, arguments}`).
+
+Either way the tool list is the same on every turn of a conversation, so the cache holds (§14).
+
+**Permissions.** `use_tool` reaches nothing itself. The registry takes the call apart after it admits it (`ToolRegistry.call`)
+and runs the named tool through exactly the checks a direct call passes: the bot's grant and walls
+(`botAppToolRefusal`, the thread rules), scope, availability, approvals, the authority's per-call check. A tool the turn
+does not hold, one no bot may be offered, and `use_tool` itself are refused. A subagent and a consult get no catalogue.
+
+**Measured.** Characters of system text plus Mousse tools, the runtime's own prompt left out (`botHelloCeiling.test.ts`):
+
+| Bot | Before: Codex, Pi | Before: Claude Code | Now: Codex, Pi | Now: Claude Code |
+|---|---|---|---|---|
+| Owner's permissions, chat | 87,300 | 27,900 | 47,800 | 21,300 |
+| Owner's permissions, run | 88,000 | 25,000 | 46,100 | 18,400 |
+| Starter, chat | 55,900 | 26,300 | 33,300 | 20,000 |
+
+Since these numbers, `show_card` is in the core set (see Reliability): about 2,900 characters more on Codex and Pi in each lane. The test holds a bot with every permission to 53,000 characters on Codex and Pi and 22,000 on Claude Code, on both lanes.
+
+**Reliability.** Real Claude Code (Opus) and Codex (GPT 6.1 Sol), headless with the owner's sign-ins, each given a bot's system text and tool list through a stub MCP server that records the calls. Eight owner messages to the chat (remind, a standing rule, find a thread, a weekly schedule, think harder, forget a memory, hide a thread, a checklist card), three rounds each, plus five more rounds of the two weakest:
+
+| Runtime | Before | With the catalogue |
+|---|---|---|
+| Claude Code | 24/24 | 24/24 |
+| Codex, the seven tasks other than the card | 25/26 | 25/26 |
+| Codex, the checklist card | 6/8 | 4/6 |
+
+A miss is the bot asking the owner a question (which passport) instead of showing the card, or handing a thread search to work. The card first fell to 2 of 8 with the catalogue, until the base text again named when a card fits; a group's trigger stays in the base text, only its how-to moves. So `show_card` moved into the core set: listed directly, Codex no longer has to look it up to show a card (not yet re-run live). A lookup costs Codex about one more call and 3 seconds a task (median 15 to 18 seconds); Claude Code's time is unchanged.
+
+**What waits.**
+
+- The `bot_turn_usage` rows (phase 0) from real bots, to confirm the hello size and tune the core set.
+- Trimming the core tools' own descriptions (`thread_create` and `ask_owner` are 10,000 characters between them).
+
+## 16. Work in threads (phase 2)
+
+**The rule.** A job in one of the owner's projects goes to a thread in that project, in its own worktree on a Git
+project, hidden from the sidebar until the owner writes in it. The bot's own work keeps the chores that need no project. There is no setting: this is
+the only path, and it answers file access outside the bot's folder (#1366) through threads instead of a wider grant.
+
+**The ledger.** One durable row per job in `bot_jobs` (bots.db v13): the request that caused it, who asked, the thread,
+its state and a one-line result. `thread_create` with a first message and `thread_send` open it; a message to a thread
+still on the job joins it.
+
+**The report.** One shape for anything that works for a bot: state, one line, link, who asked
+(`BotReport` in `src/shared/bots/personal/jobs.ts`). A thread's end, or its wait for a person, is one notice turn in the
+bot's chat with the report and the thread's answer held to 2,000 characters (`BOT_REPORT_MAX_CHARS`); that turn may act
+on threads (#1359). The same cap holds a report from the bot's own work in the chat's pack.
+
+**In the pack.** An epoch's base lists the newest 6 jobs; a later turn's update lists only those that changed since
+(`BotChatEpoch.jobsAt`), so the ledger stays in the resumed conversation without being sent again.
+
+**Reading threads.** A bot reads threads with the agents' caps and views (#1365): messages paged with `textOffset`, run
+events, subagents below a thread it reaches.
+
+**Where.** `src/mms/bots/jobs.ts` (decisions), `BotEngine.openJob`, `checkJobs` and `deliverJobNotice`,
+`BotStore` (`bot_jobs`), `contextPack.ts` (`ledger`), `launchedThreads.ts` (`jobThreadIn`), and the sidebar's Hide bot
+threads menus (`ThreadsContextMenu.tsx`).
+
+**What waits.** Other things that work for a bot (schedules, other bots, its own work) moving to the same report.

@@ -1,7 +1,7 @@
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ToolRowBase } from "./tool-row-base";
-import { useToolOpen, useToolOpenOf } from "./tool-open-state";
+import { dropLiveRunFocus, passRunFocus, takeLiveRunFocus, useToolOpen, useToolOpenOf } from "./tool-open-state";
 import { countRender } from "../render-counts";
 import "./tool-calls-group.css";
 
@@ -9,7 +9,7 @@ export type ToolCallsGroupProps = {
   count: number;
   /** The icon of the calls' kind, or a wrench for a mix. */
   icon?: ReactNode;
-  /** The latest thought in the group, or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
+  /** The run's latest thought before its last call, or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
   title: string;
   /** What the calls did, after a thought title: a short dim tag that is never cut. */
   summary?: string;
@@ -27,9 +27,10 @@ export type ToolCallsGroupProps = {
 };
 
 /**
- * One still line for consecutive tool calls, titled with what they did, closed until clicked. A running turn keeps
- * its calls folded here; the turn's live line under them says what runs now. Open, the rows sit in a box capped at
- * about 18rem that scrolls on its own, with soft edges where more rows are (tool-calls-group.css).
+ * One still line for consecutive tool calls, titled with what they did, closed until clicked. A running turn's
+ * current run is its live row (turn-progress.tsx), which opens the same way under the same key; the run takes this
+ * line when it ends. Open, the rows sit in a box capped at about 18rem that scrolls on its own, with soft edges where
+ * more rows are (tool-calls-group.css).
  */
 export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,
@@ -60,6 +61,16 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
     if (!box || !live || !atEndRef.current) return;
     box.scrollTop = box.scrollHeight;
   }, [count, live, expanded]);
+  // The run's live row had keyboard focus on its chevron when this line replaced it: the focus moves here.
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (takeLiveRunFocus(openKey)) toggleRef.current?.focus();
+    // Leaving with focus (the finished turn folds the run away): the "Worked for" line takes it in the same commit,
+    // before the line is taken off the page; after that commit, nothing does.
+    const toggle = toggleRef.current;
+    return () => passRunFocus(openKey, toggle);
+  }, [openKey]);
+  useEffect(() => () => dropLiveRunFocus(openKey), [openKey]);
 
   return (
     <ToolRowBase
@@ -82,6 +93,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
         setExpanded((prev) => !prev);
       }}
       itemCount={count}
+      toggleRef={toggleRef}
     >
       <div
         ref={scrollRef}
@@ -92,7 +104,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
           atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
         }}
       >
-        <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
+        <div className="an-tool-group-rows ui-collapse-items an-row-stack ml-1.5 pl-3">
           {children}
         </div>
       </div>

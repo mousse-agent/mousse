@@ -1,5 +1,5 @@
 import { isProtocolVersionMismatch, type LocalMmsClient } from '../../mms/protocol/client'
-import { MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
+import { FILE_WORKSPACE_BINDING_CAPABILITY, MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
 import { AUTOMATIONS_METHODS } from '../../shared/automations'
 
@@ -15,6 +15,8 @@ export const GUI_REQUIRED_METHODS = [
   'storage.policy', 'storage.configure', 'storage.reviewDismiss', 'storage.cleanup.plan', 'storage.cleanup.run', 'storage.cleanup.lastReport',
   'storage.usage',
   'subagents.list',
+  // The composer's status row of a thread's background work; an older service lacks it.
+  'threads.backgroundWork', 'threads.stopBackground',
   // Settings → Providers runs on the harness gateway; an older service lacks it.
   'providers.snapshots', 'providers.catalog.addOptions', 'providers.instances.add', 'providers.instances.setSecret',
   'providers.instances.remove', 'providers.instances.configure',
@@ -36,6 +38,17 @@ export const GUI_REQUIRED_METHODS = [
   // The Automations page's one list; an older service lacks it.
   ...AUTOMATIONS_METHODS
 ] as const
+
+/** The methods each connected service said it has (`capabilities`), for the ones this app uses only when there. */
+const supported = new WeakMap<LocalMmsClient, ReadonlySet<string>>()
+
+/**
+ * Whether the service `client` is connected to has `method`: false for one from before it, or not checked yet. For a
+ * method the app can do without (`git.heads`, which an older service lacks), so the app works with that service too.
+ */
+export function daemonSupports(client: LocalMmsClient, method: string): boolean {
+  return supported.get(client)?.has(method) ?? false
+}
 
 function recoveryText(homeDir: string): string {
   return `The running Mousse service is incompatible with this app or its API support could not be verified. Let active tasks finish, then run mousse-cli service stop --home ${JSON.stringify(homeDir)} (or, from a source checkout, node out/cli/index.js service stop --home ${JSON.stringify(homeDir)}), then reopen Mousse. The service has not been stopped automatically.`
@@ -67,6 +80,31 @@ export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: P
     throw new Error(`${recovery} The service returned an invalid API capability description.`)
   }
   const methods = new Set(result.methods)
+  supported.set(client, methods)
   const missing = GUI_REQUIRED_METHODS.filter(method => !methods.has(method))
   if (missing.length) throw new Error(`${recovery} Missing APIs: ${missing.join(', ')}.`)
+}
+
+function supportsFileWorkspaceBinding(hello: ProtocolHelloOk | null): boolean {
+  return hello?.capabilities.includes(FILE_WORKSPACE_BINDING_CAPABILITY) === true
+}
+
+type EditorClient = Pick<LocalMmsClient, 'hello' | 'request'>
+
+export async function readThreadEditorFile(client: EditorClient, params: Record<string, unknown>, expectedRoot?: string): Promise<{ content: string; canonicalPath?: string; workspaceRoot?: string }> {
+  const bindRoot = supportsFileWorkspaceBinding(client.hello)
+  if (expectedRoot && !bindRoot) throw new Error('The workspace for this file could not be verified.')
+  const file = await client.request<{ content: string; canonicalPath?: string; workspaceRoot?: string }>('files.read', {
+    ...params, ...(bindRoot ? { bindRoot: true, expectedRoot } : {})
+  })
+  if (!bindRoot) return { content: file.content }
+  if (!file.workspaceRoot) throw new Error('The workspace for this file could not be verified.')
+  return file
+}
+
+export async function writeThreadEditorFile(client: EditorClient, params: Record<string, unknown>, expectedRoot?: string): Promise<void> {
+  if (!expectedRoot || !supportsFileWorkspaceBinding(client.hello)) {
+    throw new Error('This service cannot verify the workspace for this file. Reopen it after updating Mousse.')
+  }
+  await client.request('files.writeDirect', { ...params, expectedRoot })
 }

@@ -11,8 +11,8 @@ import { automationTools, type AutomationToolHost } from '../src/mms/run/mcp/app
 import type { AppToolHost } from '../src/mms/run/mcp/appTools/host'
 import type { ToolCallContext } from '../src/mms/run/mcp/appTools/types'
 import { levelNotifies, openForBot, openForPerson, resolvedRun, runReportNotice } from '../src/shared/automationInbox'
-import { tellMeNotifies, type ScheduledRunEnded } from '../src/shared/automations'
-import { parseTellMe, tellMeOf, type Thread } from '../src/shared/types'
+import { type ScheduledRunEnded } from '../src/shared/automations'
+import { type Thread } from '../src/shared/types'
 
 let home: string
 let previousHome: string | undefined
@@ -263,9 +263,6 @@ describe('usage', () => {
 
 describe('notifications follow the level', () => {
   it('notifies needs_you and failures by default, and look; a filter can lower or raise it; legacy Tell me reads as a level', () => {
-    expect(tellMeOf({})).toBe('look')
-    expect(parseTellMe('news')).toBe('look')
-    expect(parseTellMe('problems')).toBe('needs_you')
     expect(levelNotifies('look', { failed: false, level: 'needs_you' })).toBe(true)
     expect(levelNotifies('look', { failed: false, level: 'look' })).toBe(true)
     // No report counts as worth a look, never quiet.
@@ -275,7 +272,6 @@ describe('notifications follow the level', () => {
     expect(levelNotifies('needs_you', { failed: true, level: 'quiet' })).toBe(true)
     expect(levelNotifies('fyi', { failed: false, level: 'fyi' })).toBe(true)
     expect(levelNotifies('every', { failed: false, level: 'quiet' })).toBe(true)
-    expect(tellMeNotifies('look', 'nothing_new')).toBe(false)
   })
 })
 
@@ -390,6 +386,7 @@ describe('the draft tool in an ordinary chat', () => {
     expect(report.listed!({ threadId: 'chat', readOnly: false, modeCeiling: 'default' } as never)).toBe(false)
     const call = { caller: { threadId: 'run-thread', runId: 'engine-1' }, turn: { threadId: 'run-thread' }, toolCallId: 'c' } as unknown as ToolCallContext
     expect(JSON.parse((await report.handler({ level: 'look', summary: 'Two flaky tests' }, call)).text)).toMatchObject({ level: 'look' })
+    expect(JSON.parse((await report.handler({ level: 'quiet', summary: 'Nothing new.', leftOff: 'Checked today.' }, call)).text)).toMatchObject({ leftOff: expect.stringContaining('not kept: only a bot scheduled run') })
     expect((await report.handler({ level: 'loud', summary: 'x' }, call)).isError).toBe(true)
     runs.finish({ jobId: 'j1', occurrenceKey: 'k1', failed: false })
     expect(report.available!({ threadId: 'run-thread', runId: 'engine-2' } as never)).toMatch(/Only an automation/)

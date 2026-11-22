@@ -44,6 +44,16 @@ export interface AccountReadParams {
 export interface AccountReadResponse {
   account: CodexAccount | null
   requiresOpenaiAuth: boolean
+  workspaceRouting?: { chatgptAccountId: string } | null
+}
+/** `getAuthStatus`: how Codex is signed in, with its current access token when `includeToken` is set. */
+export interface GetAuthStatusParams {
+  includeToken?: boolean
+  refreshToken?: boolean
+}
+export interface GetAuthStatusResponse {
+  authMethod?: string | null
+  authToken?: string | null
 }
 
 export interface ModelListParams {
@@ -290,10 +300,10 @@ export interface ConfigReadParams {
 }
 type McpServerEntry = { enabled?: boolean | null } | null
 export interface ConfigReadResponse {
-  /** The effective config; Mousse reads only the entries under `mcp_servers`. */
+  /** The effective config, including the auth store mode and MCP servers. */
   config: { mcp_servers?: Record<string, McpServerEntry> | null } & Record<string, unknown>
   /** Each layer (user, system, project) with why it is switched off, when it is; requires `includeLayers`. */
-  layers?: Array<{ disabledReason: string | null; config?: { mcp_servers?: Record<string, McpServerEntry> | null } | null }> | null
+  layers?: Array<{ name?: { type: string; dotCodexFolder?: string }; disabledReason: string | null; config?: { mcp_servers?: Record<string, McpServerEntry> | null } | null }> | null
 }
 
 /** Request methods Mousse calls, with their params and results. `account/logout` is deliberately absent. */
@@ -301,6 +311,7 @@ export interface CodexRequestMap {
   initialize: { params: InitializeParams; result: InitializeResponse }
   'config/read': { params: ConfigReadParams; result: ConfigReadResponse }
   'account/read': { params: AccountReadParams; result: AccountReadResponse }
+  getAuthStatus: { params: GetAuthStatusParams; result: GetAuthStatusResponse }
   'account/rateLimits/read': { params: undefined; result: RateLimitsReadResponse }
   'account/rateLimitResetCredit/consume': { params: ConsumeResetCreditParams; result: ConsumeResetCreditResponse }
   'model/list': { params: ModelListParams; result: ModelListResponse }

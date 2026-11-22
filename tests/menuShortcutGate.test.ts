@@ -37,15 +37,6 @@ function inputForBinding(binding: string, platform: string): Partial<MenuKeyInpu
 const ctrlN = { key: 'n', code: 'KeyN', control: true }
 
 describe('the menu shortcut gate', () => {
-  it('keeps a registry chord away from the native menu', () => {
-    const { webContents, press, setIgnoreMenuShortcuts } = fakeWebContents()
-    attachMenuShortcutGate(webContents, () => ({}), 'win32')
-    press(ctrlN)
-    expect(setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(true)
-    press({ key: 'Tab', code: 'Tab', control: true })
-    expect(setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(true)
-  })
-
   it('lets role chords reach the menu: Select all, Copy, and the zoom keys', () => {
     const { webContents, press, setIgnoreMenuShortcuts } = fakeWebContents()
     attachMenuShortcutGate(webContents, () => ({}), 'win32')

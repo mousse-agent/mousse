@@ -437,7 +437,7 @@ export function parseAgentSettings(
           : defaults.limits.maxToolCalls,
       maxElapsedMs:
         typeof limits.maxElapsedMs === 'number'
-          ? requireFiniteNumber(limits.maxElapsedMs, '/settings/limits/maxElapsedMs', 1)
+          ? requireFiniteNumber(limits.maxElapsedMs, '/settings/limits/maxElapsedMs', 0)
           : defaults.limits.maxElapsedMs,
       maxInputTokens:
         typeof limits.maxInputTokens === 'number'

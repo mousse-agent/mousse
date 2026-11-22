@@ -17,6 +17,7 @@ import { useBotsPolling, useBotsStore } from '../../stores/botsStore'
 import { BotChatView } from '../bots/BotChatView'
 import { BotDialogs } from '../bots/BotDialogs'
 import { BotFace } from '../bots/face/BotFace'
+import { Mascot } from './mascot/Mascot'
 import '../../styles/chats.css'
 import '../../styles/bots.css'
 
@@ -90,7 +91,7 @@ export function ChatWorkspace() {
         <p>Pick a colour and an accessory, and say what it should do. It asks for anything else it needs as it goes.</p>
         <button className="chat-primary-button" onClick={newBot}>New bot</button>
         {error && <p role="alert" className="chat-error">{error}</p>}
-      </div> : <div className="chat-workspace-empty"><h1>{loading ? 'Opening chat…' : 'Talk to your bots and agents'}</h1>
+      </div> : <div className="chat-workspace-empty">{!loading && <Mascot />}<h1>{loading ? 'Opening chat…' : 'Talk to your bots and agents'}</h1>
         {!loading && <span className="bot-empty-actions"><button className="chat-primary-button" onClick={newBot}>New bot</button>
           {!!snapshot.agents.length && <button className="bot-ghost-button" onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })}>New chat</button>}</span>}
         {error && <p role="alert" className="chat-error">{error}</p>}</div>}

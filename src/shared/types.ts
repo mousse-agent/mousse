@@ -3,9 +3,10 @@ import type { AppletReference } from './applets'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
+import type { ProviderRetryState } from './providerRetry'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'sideChats' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
@@ -109,6 +110,10 @@ export interface ScheduledRunAgent {
  * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
  */
 export interface ScheduledJobBot {
+  /** A fixed reminder line, posted without a model run. */
+  say?: string
+  /** The owner's message or tapped answer started the turn that added this timer. */
+  ownerAsked?: boolean
   botId: string
   scheduleId: string
   /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */
@@ -545,6 +550,15 @@ export interface OrchestratorSendRequest {
    * outcome comes through turn and run events. Absent: the send answers with the turn's result, as it always has.
    */
   await?: 'ack'
+  /**
+   * Steer: the message is meant for the turn that runs or is being set up, not for after it. When the thread is busy
+   * the service queues it and sends it into that turn at once, or, while the turn is set up, keeps it first to join
+   * the turn as it runs (`QueuedMessage.steerOnStart`). Decided with the send's admission, so it holds whatever the
+   * window shows by the time the send answers. This computer's threads only.
+   */
+  steer?: boolean
+  /** Run visible at the click, when known. A later run must not take this Steer. */
+  steerRunId?: string
 }
 
 /** The model, permission mode and (when known) settings revision a send is bound to (`OrchestratorSendRequest.expect`). */
@@ -555,6 +569,19 @@ export interface SendExpectation {
 }
 
 export type OrchestratorSendInput = string | OrchestratorSendRequest
+
+/** Why a thread's message could not start (`Thread.setupFailure`). */
+export interface ThreadSetupFailure {
+  /** One plain line, as the person reads it. */
+  reason: string
+  /** What Git or the system said, for the tooltip. */
+  detail?: string
+  at: string
+  /** The run that failed. */
+  runId?: string
+  /** The message can be sent again with Retry: Mousse kept it. */
+  retryable: boolean
+}
 
 export interface OrchestratorContextUsageRequest {
   draftInput?: string
@@ -636,6 +663,21 @@ export interface PendingUserQuestions {
   threadId?: string
   /** Present on a provider's, the Pi agent's or a Mousse tool's saved approval request. */
   approval?: PendingApprovalInfo
+  /**
+   * Set when the request is for a native helper's action (`Thread.native`): it is the hosting thread's own request and
+   * is shown on the mirror thread whose `native.agentId` this is, under that thread, as well.
+   */
+  helper?: { agentId: string }
+  /**
+   * `false`: the agent asked without waiting (`ask_user` with `wait: false`) and keeps working. The question stays
+   * open until it is answered, dismissed or withdrawn; a new message does not close it.
+   */
+  wait?: false
+  /**
+   * Set when the personal bot that started the thread answers this request (whoever started the turn): the
+   * owner is not pinged for it and it is not in Needs me. The card still shows, and the owner may answer first.
+   */
+  supervised?: true
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
@@ -928,9 +970,9 @@ export interface ChatMessage {
    */
   scheduledRun?: { jobId: string; threadId: string; runId?: string }
   /**
-   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, which
-   * the transcript draws as a chip with its title and live status, and what was chosen for it (model, mode, where it
-   * runs). Notes written before this field stay plain text.
+   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, and
+   * what was chosen for it (model, mode, where it runs). The note is kept in the thread's record and read by agents
+   * (`thread_read`); the chat does not show it, as the agent's reply names the thread.
    */
   launchedThread?: { threadId: string; summary?: string }
   /**
@@ -981,6 +1023,13 @@ export interface ChatMessage {
     | 'context_cleared'
     /** Presentation-only model transition; never injected into provider context. */
     | 'context_handoff'
+    /**
+     * Presentation-only row of a turn's failed provider requests and their retries (`providerRetry`); never injected
+     * into provider context. When the retries run out it becomes the turn's error line.
+     */
+    | 'provider_retry'
+  /** A `provider_retry` row's state. */
+  providerRetry?: ProviderRetryState
   /** Selection actually admitted for this user turn, independent of composer edits. */
   /** The model the message's turn ran (older messages carry the level packed into `model`). */
   modelSelection?: MessageModelSelection
@@ -1093,6 +1142,8 @@ export interface OrchestratorResponse {
   message: string
   /** With `error`, on a bot's turn whose work goes on (it reached its runtime's turn cap): the words it said last. */
   partial?: string
+  /** On a bot's turn: a steer cut it and the model wrote nothing after it (`TurnResult.steerUnanswered`). */
+  steerUnanswered?: boolean
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.
@@ -1102,6 +1153,8 @@ export interface OrchestratorResponse {
   queueItem?: QueuedMessage
   /** With `queued`: the thread is paused by a usage limit, and the message waits behind the pause (which stays). */
   heldByPause?: boolean
+  /** With `queued`: the send's Steer (`OrchestratorSendRequest.steer`) was applied to the queued message by the service. */
+  steerApplied?: boolean
   workflowRun?: import('./workflowChat').WorkflowChatRun
   /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
   runId?: string
@@ -1129,6 +1182,9 @@ export type QueuedMessageState = 'pending' | 'steering' | 'claimed' | 'drained' 
  * Minimal durable claim metadata for a normal queue item reserved by an execution owner.
  * Sufficient to identify the owner and claim time; not a broad workflow state machine.
  */
+/** What a pending message waits for (`QueuedMessage.waitsFor`). */
+export type QueuedMessageWait = 'finish' | 'setup'
+
 export interface QueuedMessageClaim {
   ownerPid: number
   ownerToken: string
@@ -1206,6 +1262,12 @@ export interface QueuedMessage {
    * waiting for Send now after such a restart.
    */
   waitsForLease?: true
+  /**
+   * Why a pending message waits right now, beyond its place in the queue: the last turn's reply is shown complete but
+   * the turn is still finishing (its end checkpoint), or the next turn is being set up. Set only on the lists the
+   * service sends (never saved), and sent again whenever it changes.
+   */
+  waitsFor?: QueuedMessageWait
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /** The other computer of the user this message was sent or last edited from (a routed call); absent for this computer's own. */
@@ -1228,6 +1290,19 @@ export interface QueuedMessage {
    * that moves the item out of `steering` drops the field.
    */
   steerNow?: { runId: string; holdGeneration: number; requestId: string }
+  /**
+   * Steered (Steer, or Send now) while its run was still being set up: the item waits first in the queue and joins that
+   * run (`runId`) once, as soon as it runs. The saved target also identifies a steer returned unread to the queue.
+   * An explicit Send now into a different run clears it.
+   */
+  steerOnStart?: { runId: string }
+  /**
+   * Set only on the lists the service sends (never saved). `sendsNext`: the item waits to join the run being set up
+   * (`steerOnStart`). `steerMissed`: it was steered, but its run ended before it could join; it is an ordinary queued
+   * message again, first in the queue.
+   */
+  sendsNext?: true
+  steerMissed?: true
   /**
    * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
    * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
@@ -1274,6 +1349,18 @@ export interface AgentOrigin {
   body?: AgentMessageBody
   /** The sending thread's title when it sent, shown for a sender that was deleted since. */
   title?: string
+  /**
+   * The owner's bot that sent it ("use your threads"), whose chat thread is `threadId`: its id, and its name when it sent,
+   * shown for a bot this window does not list (deleted, or on another computer). Absent on an agent's message, and on a
+   * bot's stored before it was kept.
+   */
+  bot?: AgentOriginBot
+}
+
+/** The bot behind a message (`AgentOrigin.bot`). */
+export interface AgentOriginBot {
+  id: string
+  name: string
 }
 
 /** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */
@@ -1324,6 +1411,12 @@ export interface ContextUsageSnapshot {
    * new thread, or the history changed since, which starts a fresh session).
    */
   promptCache?: ContextPromptCache
+  /**
+   * A runtime that reports no context (an ACP agent, Cursor): Mousse's estimate of the history the next send
+   * carries, sent with `promptCache` so the composer can still suggest compacting once it goes cold. The gauge
+   * itself stays empty.
+   */
+  historyEstimate?: number
 }
 
 export interface ContextPromptCache {
@@ -1349,6 +1442,8 @@ export interface PtyCreateRequest {
   command?: string
   env?: Record<string, string>
   shellArgs?: string[]
+  /** The quick action that opened the terminal: agents are told it runs, by this name. */
+  label?: string
 }
 
 export interface PtyCreateResult {
@@ -1411,7 +1506,47 @@ export interface ThreadLineage {
   parentThreadId: string
   /** The thread at the top of the parent chain, the one a person started. */
   rootThreadId: string
-  relationship: 'subagent'
+  /**
+   * `subagent`: a Mousse subagent (`delegate_task`). `native`: a watch-only mirror of a helper the provider runtime
+   * started on its own (`Thread.native`); the parent is the thread whose run hosts it. Only the thread record says
+   * `native`: the run store's `thread_lineage` has no row for a mirror, so no delegation rule ever applies to one.
+   * `side`: a side chat, a fork of the parent made from its side panel (`thread.fork` with `sideChat`). The run store
+   * keeps it as a `fork`; only the thread record says `side`. No list shows it: only its parent's Side chats panel does.
+   */
+  relationship: 'subagent' | 'native' | 'side'
+}
+
+/** The runtimes whose own helpers Mousse mirrors as threads. */
+export type NativeHelperRuntime = 'codex' | 'claude'
+
+/**
+ * How a native helper's mirror stands. `running` until the runtime reports its end; `unknown` when its hosting run
+ * ended (or the process went away) without one: never shown as done or idle.
+ */
+export type NativeHelperState = 'running' | 'done' | 'failed' | 'stopped' | 'unknown'
+
+/**
+ * Set on a mirror thread (`ThreadLineage.relationship: 'native'`): a helper a provider runtime started inside a Mousse
+ * run (Codex's helper threads, Claude Code's Agent subagents). Mirroring creates no authority: the thread is
+ * watch-only, its runtime owns its turns, and nothing sent to it reaches the helper.
+ */
+export interface ThreadNativeHelper {
+  runtime: NativeHelperRuntime
+  /** The provider instance the hosting run ran on. */
+  instanceId: string
+  /** The runtime session the agent id belongs to (driver, home and account generation of the hosting run's binding). */
+  sessionEpoch: string
+  /** The runtime's own id of the helper: Codex's helper thread id, Claude Code's Agent call (`parent_tool_use_id`). */
+  agentId: string
+  /** The id Claude Code's SendMessage addresses the agent by, once the runtime has said it. */
+  sendTo?: string
+  /** The runtime can stop this helper without stopping the run that hosts it. */
+  stoppable?: true
+  /** The Mousse run that started the helper, then the latest that hosted it. */
+  hostRunId: string
+  state: NativeHelperState
+  /** Set when the log was rebuilt from what the runtime reported after the fact, not followed live from the start. */
+  partial?: true
 }
 
 /**
@@ -1421,8 +1556,13 @@ export interface ThreadLineage {
 export interface SubagentWorkspaceBinding {
   /** `primary`: a scheduled run on the project's own checkout, never a provisioned worktree. */
   policy: 'shared' | 'isolated' | 'primary'
-  /** The parent's workspace path a `shared` child observes read-only. */
+  /** The parent's workspace path a `shared` child works in. */
   sharedPath?: string
+  /**
+   * What a `shared` child may do there: `write`, every tool its parent has; `read-only` (and absent, on a child saved
+   * before this existed), the read-only tools only (`delegate_task` `readOnly`).
+   */
+  access?: 'read-only' | 'write'
   /**
    * An `isolated` child started with "Give each subagent its own worktree" on: the parent's HEAD when it was started. Its
    * worktree is made from this commit before its first turn, whatever that turn's mode.
@@ -1489,6 +1629,25 @@ export function isOlderThreadList(next: ThreadListVersion | undefined, held: Thr
   return next.epoch === held.epoch && next.seq < held.seq
 }
 
+/** One thread's change as windows are sent it (`threads.row`): its row, or the id of a thread that left the list. */
+export interface ThreadRowPayload {
+  thread?: Thread
+  removed?: string
+  version: ThreadListVersion
+}
+
+/**
+ * What a window does with a row of list version `row` while it holds a list of version `held`: `apply` it to that
+ * list; `drop` it, since the list already has it (taken at or after the row); or `refresh`, reading the whole list
+ * again, when there is no versioned list to put it in or it comes from another store (a restarted service).
+ */
+export function threadRowAction(row: ThreadListVersion, held: ThreadListVersion | undefined): 'apply' | 'drop' | 'refresh' {
+  if (!held) return 'refresh'
+  if (isOlderThreadList(row, held)) return 'drop'
+  if (row.epoch !== held.epoch) return 'refresh'
+  return row.seq <= held.seq ? 'drop' : 'apply'
+}
+
 export interface Thread {
   id: string
   name: string
@@ -1503,8 +1662,10 @@ export interface Thread {
   projectId?: string
   createdAt: string
   updatedAt: string
-  /** Set on a subagent thread: the thread that started it. Absent on every other thread. */
+  /** Set on a subagent thread, and on a native helper's mirror: the thread that started it. Absent on every other thread. */
   lineage?: ThreadLineage
+  /** Set on a native helper's mirror thread (`ThreadLineage.relationship: 'native'`); watch-only. */
+  native?: ThreadNativeHelper
   /**
    * Set on a thread an agent launched with `thread_create`: the creating thread. Unlike `lineage` it
    * is not a subagent relation; it marks the thread as the creator's (the `launched` scope of the thread tools).
@@ -1519,7 +1680,9 @@ export interface Thread {
   /**
    * Set on a thread kept out of the owner's sidebar: a personal bot started it hidden, or hid it later (a short background
    * job). It is not in the thread lists of this computer or the owner's other devices; the bot's chat lists it, it opens
-   * like any thread, and Show in sidebar (`threads.setHidden`) clears the mark. Search, links and Needs me still reach it.
+   * like any thread, and Show in sidebar (`threads.setHidden`) clears the mark. Search and links still reach it. Until it is
+   * shown, it and its subagents notify nothing (no banner, sound, toast, Needs me or app badge) unless the person turned
+   * on `notifications.botThreads`.
    */
   hidden?: true
   /** Set on a thread another of the user's devices created through Bridge. */
@@ -1555,8 +1718,8 @@ export interface Thread {
    */
   automationManager?: true
   /**
-   * When the thread deletes itself (ISO time): it, its subagents, worktree, checkpoints and attachments are
-   * deleted for good, not archived and not moved to Recently deleted. A subagent follows its root thread's.
+   * When the thread archives itself (ISO time), as Archive does; the expiry is then removed. Nothing is deleted.
+   * A subagent follows its root thread's.
    * Absent: the thread never expires. Set when the thread is created or later, extended or removed before then.
    */
   expiresAt?: string
@@ -1605,8 +1768,29 @@ export interface Thread {
   worktreeStartSha?: string
   /** The branch `worktreeStartSha` was read from, for display. */
   worktreeBaseBranch?: string
+  /**
+   * Its last message could not start: setting up its worktree failed before the agent ran. The chat and the sidebar row
+   * say why; Retry sends that message again on this thread, once. Cleared when a turn sets the worktree up, or on Retry.
+   */
+  setupFailure?: ThreadSetupFailure
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
+  /**
+   * Every pull request the thread has been linked to, oldest first, with its state as last read, for the sidebar's count.
+   * Written when a link is made and when the app reads, merges or closes one of them. Read through `threadPullRequestsOf`,
+   * which counts the `pullRequest` of a thread linked before this list was kept.
+   */
+  pullRequests?: import('./pullRequests').ThreadPullRequestSummary[]
+  /**
+   * The latest reply of the thread's agent as one clipped line of plain text (`replyPreviewText`), for its sidebar row.
+   * Written when a turn ends; absent until the first turn that ends with this field known.
+   */
+  lastReply?: string
+  /**
+   * How the thread's latest run ended, for its links once it is quiet: `done` or `failed`. Written when a turn ends; a
+   * stopped run clears it. Kept in its metadata, so it outlives a restart.
+   */
+  lastRun?: 'done' | 'failed'
   /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
   goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */
@@ -1657,6 +1841,8 @@ export interface TurnPause {
   autoResume: boolean
   /** The reset passed while Mousse was off for more than a day: the timer was dropped and only Resume now (or a message) continues the run. */
   stale?: true
+  /** The paused run was itself the continue turn of an earlier pause: resuming ran into the limit again. */
+  again?: true
 }
 
 export interface TurnState {
@@ -1725,12 +1911,14 @@ export type TurnStep =
    * nothing back in time (its own retry, outside the attempt count).
    */
   | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
-  /**
-   * The turn has not started: the profile runs `running` turns of the `limit` it runs at once, and this one starts when
-   * one of them ends. `keptForPeople`: set on a background turn (a subagent, a wake, a resume), which waits while every
-   * slot but those kept for people's turns is taken. Only with phase `queued`. `limit` is absent from an older daemon.
-   */
-  | { kind: 'waiting_slot'; running: number; limit?: number; keptForPeople?: number }
+  /** The turn is not started yet: its setup does `what` (shown with phase `queued`), once that has taken a moment. */
+  | { kind: 'preparing'; what: TurnSetupStep }
+
+/**
+ * A step of a turn's setup that can take long: checking the thread's worktree, making it, making it again from its
+ * snapshot, or recording its files before the turn (each may wait for other work on the same repository).
+ */
+export type TurnSetupStep = 'check' | 'worktree' | 'restore' | 'snapshot'
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
@@ -2005,10 +2193,19 @@ export interface FileStat {
   modifiedAt: string
 }
 
+export interface FileText {
+  content: string
+  /** Native file spelling, when available from the daemon. */
+  canonicalPath?: string
+}
+
 export interface FileAsset {
   data: Uint8Array
   mimeType: string
   size: number
+  /** When the file was last written, as read; absent from an older daemon. */
+  mtimeMs?: number
+  canonicalPath?: string
 }
 
 export type GitChangeStatus =
@@ -2052,6 +2249,45 @@ export interface GitStatusSnapshot {
   missing?: boolean
   /** How long a Discard here keeps a copy of what it removes: its owner's Undo window. Set by the daemon. */
   discardKeptForMs?: number
+}
+
+/**
+ * A folder's branch as a thread card names it (`git.heads`): read from Git's files, or why it could not be (`error`).
+ * A detached HEAD has no branch and names its commit (`detachedAt`, '' when not known); a failed read is an `error`.
+ */
+export type GitFolderHead = { repo: boolean; branch: string | null; detachedAt?: string } | { error: string }
+
+/**
+ * What a thread's card names (`git.heads`): its project's branch when it works in its project's folder (`project`);
+ * else its own worktree's branch, null when detached (`detachedAt`) or before Mousse records the worktree
+ * (`lifecycle: 'unprovisioned'`). `folder` is the folder
+ * the thread works in, set only while its worktree is on disk and ready; without it the branch is the one Mousse
+ * recorded, and why: `lifecycle` (`provisioning` while it is made), `missing` (a ready worktree not on disk, retired by
+ * a storage rule), or `unavailable` (its drive is not answering, or it could not be read). `generation` counts the
+ * worktree's rebuilds: Git state read for an older one is not this one's.
+ */
+export type GitThreadHead =
+  | { project: true }
+  | { own: true; branch: string | null; detachedAt?: string; folder?: string; generation: number; lifecycle: string; missing?: true; unavailable?: string }
+  | { error: string }
+
+export interface GitHeadsRequest {
+  threadIds?: string[]
+  projectIds?: string[]
+  /** A Retry's own number: a new one is never answered by a request already in flight. */
+  attempt?: number
+}
+
+export interface GitHeadsResult {
+  /** The connected service needs Git reads to answer this batch. Skip background polling on such services. */
+  legacy?: true
+  projects: Record<string, GitFolderHead>
+  threads: Record<string, GitThreadHead>
+}
+
+/** Mousse changed these threads' branches (made a worktree, renamed its branch): their cards read them again. */
+export interface GitHeadsChangedEvent {
+  threadIds: string[]
 }
 
 export interface GitCommit {
@@ -2248,7 +2484,17 @@ export interface GitScope {
   projectId: string | null
   /** Set only when the folder is the thread's own ready worktree. */
   workspaceThreadId: string | null
+  /**
+   * That worktree's generation (`git.heads`): what was read of an older one is kept apart, and the service refuses a
+   * read whose worktree has been rebuilt since (`workspace_changed`).
+   */
+  workspaceGeneration?: number
+  /** A Retry's own number, on a read: a new one is never answered by a read already in flight, here or in the service. */
+  attempt?: number
 }
+
+/** What the service says (`workspace_changed`) to a read whose thread worktree was rebuilt since the window looked it up. */
+export const WORKSPACE_CHANGED_MESSAGE = "This thread's worktree was rebuilt since it was looked up. Look it up again."
 
 /** The copy a Discard kept before it removed anything (`git.discard`'s `kept`). */
 export interface GitKeptCopy {
@@ -2417,5 +2663,7 @@ export interface ProjectTerminalTab {
   cwd?: string
   title: string
   exited: boolean
+  /** The quick action that opened this terminal: its shell is started with it as its label (`PtyCreateRequest.label`). */
+  quickAction?: string
 }
 export type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from './platform'

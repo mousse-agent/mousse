@@ -408,7 +408,6 @@ describe('the pictures of a watched tab', () => {
     await after(once)
     await vi.advanceTimersByTimeAsync(2_000)
     expect(captures.active).toBe(0)
-    expect(cdp).toBeDefined()
     expect(count('Page.startScreencast', 'cdp-b')).toBeGreaterThanOrEqual(1)
     expect(count('Page.stopScreencast', 'cdp-b')).toBe(count('Page.startScreencast', 'cdp-b') + 1)
     captures.dispose()

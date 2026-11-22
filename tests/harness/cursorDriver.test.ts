@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
-import { CursorSessions, cursorToolActivity, cursorToolName } from '../../src/mms/harness/cursor/session'
+import { CursorSessions, cursorToolActivity, cursorToolName, type SavedCursorAgent } from '../../src/mms/harness/cursor/session'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
@@ -259,7 +259,7 @@ describe('Cursor behind the gateway', () => {
   })
 })
 
-describe("the hold: a person's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
+describe("the hold: a person's steer cuts in at once; an agent's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
   const STEER = 'Use pnpm, not npm'
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
   function held(options: { cancel?: 'ends' | 'never' } = {}) {
@@ -299,13 +299,13 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     }
   }
 
-  it.each([['held for a command before', true], ['sent while it asks', false]] as const)('Mousse\'s ask_user over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
+  it.each([['an agent\'s, held for a command before', true], ['a person\'s, sent while it asks', false]] as const)('Mousse\'s ask_user over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     if (heldBefore) {
       c.toolStart('run-1', 'call-1')
-      c.hold.steer(STEER)
+      c.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(c.hold.held()).toBe(true))
       c.toolDone('run-1', 'call-1')
     }
@@ -323,12 +323,12 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
   })
 
-  it('strict boundary drain: a steer held during a tool goes in as the next run when the run ends, and nothing is cancelled', async () => {
+  it('strict boundary drain: an agent\'s steer held during a tool goes in as the next run when the run ends, and nothing is cancelled', async () => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     c.toolStart('run-1', 'call-1')
-    c.hold.steer(STEER)
+    c.hold.steer(STEER, { person: false })
     await vi.waitFor(() => expect(c.hold.held()).toBe(true))
     c.toolDone('run-1', 'call-1')
     c.writes('run-1', 'All 12 passed.')
@@ -360,13 +360,32 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     expect(c.sent()).toEqual(['hi', STEER])
   })
 
-  it('a tool that starts between the drain and the cancel keeps the steer: handed back, held, and sent at the run\'s end', async () => {
+  it("the run a steer becomes is sent with the steer's images", async () => {
+    const c = held()
+    const drain = c.hold.ctl.drainSteerEntry!
+    c.hold.ctl.drainSteerEntry = (opts) => {
+      const entry = drain(opts)
+      return entry && { ...entry, images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] }
+    }
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.steer(STEER)
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    const sends = c.host.calls('send')
+    expect(sends[0]).not.toHaveProperty('images')
+    expect(sends[1]).toMatchObject({ text: STEER, images: [{ data: 'AAAA', mimeType: 'image/png' }] })
+  })
+
+  it('a tool that starts between the drain and the cancel keeps an agent\'s steer: handed back, held, and sent at the run\'s end', async () => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     c.writes('run-1', 'working')
     c.hold.beforeMayCut = () => c.toolStart('run-1', 'late')
-    c.hold.steer(STEER)
+    c.hold.steer(STEER, { person: false })
     await vi.waitFor(() => expect(c.events()).toContain(`returned:${STEER}`))
     await vi.waitFor(() => expect(c.hold.held()).toBe(true))
     c.toolDone('run-1', 'late')
@@ -379,19 +398,21 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-2`])
   })
 
-  it('Send now during a tool cancels the run at once, and the steer goes in once', async () => {
+  it('a person\'s steer during a tool cancels the run at once, holds nothing, and the turn goes on with it as the next run, once', async () => {
     const c = held()
     const handle = await c.turn()
     await c.running(1)
     c.toolStart('run-1', 'call-1')
     c.hold.steer(STEER)
-    await vi.waitFor(() => expect(c.hold.held()).toBe(true))
-    c.hold.sendNow()
+    // The tool never reports a result: the cancel comes during it.
     await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    expect(c.hold.held()).toBe(false)
     await c.running(2)
+    c.writes('run-2', 'Switching to pnpm')
     c.end('run-2')
-    await handle.result
+    expect(await handle.result).toMatchObject({ aborted: false })
     expect(c.sent()).toEqual(['hi', STEER])
+    order(c.events(), 'tool:start:call-1', `drain:${STEER}`, 'mayCut:true', 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
     expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
   })
 
@@ -653,6 +674,52 @@ describe('the Mousse MCP token', () => {
     expect(host.calls('create')).toHaveLength(1)
     expect(host.calls('resume')).toEqual([])
     expect(host.calls('send').map((call) => (call.mcpServers as { mousse: { headers: Record<string, string> } }).mousse.headers.Authorization)).toEqual(['Bearer first', 'Bearer second'])
+  })
+})
+
+describe("a bot's instructions", () => {
+  it('an agent given other ones (its owner edited its prompt) is not reopened: a new agent gets them and the history', async () => {
+    const fake = new FakeCursorHost({
+      create: (_params, host) => ({ agentId: `agent-${host.calls('create').length}` }),
+      resume: (params) => ({ agentId: params.agentId }),
+      close: () => ({}),
+      prune: () => ({}),
+      send: (_params, host) => {
+        const runId = `run-${host.calls('send').length}`
+        setTimeout(() => host.emit({ event: 'run_end', runId, status: 'finished' }), 1)
+        return { runId }
+      }
+    })
+    const saved = new Map<string, SavedCursorAgent>()
+    const sessions = new CursorSessions({
+      label: 'Cursor',
+      host: new CursorHostClient(fake.connect),
+      storeDir: '/store',
+      apiKey: () => 'key',
+      settingSources: [],
+      store: { saved: (threadId) => saved.get(threadId), setSaved: (threadId, next) => void (next ? saved.set(threadId, next) : saved.delete(threadId)), threads: () => [...saved.keys()] },
+      markSignedOut: () => undefined,
+      signInRequiredMessage: 'sign in'
+    })
+    const prompts = () => fake.calls('send').map((call) => call.text as string)
+    const turn = async (prompt: string, history: string, instructions: string) => {
+      await sessions.chat({ threadId: 't', cwd: '/w', model: 'default', prompt, history, orchestrationInstructions: instructions, bot: true, onText: () => {} })
+      sessions.commitConversation('t', `${history}+${prompt}`)
+    }
+    await turn('first', '', 'OLD WORDS')
+    await turn('second', '+first', 'OLD WORDS')
+    expect(fake.calls('create')).toHaveLength(1)
+    expect(prompts()[1]).toBe('second')
+    await turn('third', '+first+second', 'NEW WORDS')
+    expect(fake.calls('create')).toHaveLength(2)
+    expect(fake.calls('resume')).toEqual([])
+    expect(prompts()[2]).toBe('<mousse_orchestration_instructions>\nNEW WORDS\n</mousse_orchestration_instructions>\n\nPrevious conversation (context only; do not repeat earlier actions):\n+first+second\n\nCurrent request:\nthird')
+    await vi.waitFor(() => expect(fake.calls('prune')).toEqual([expect.objectContaining({ agentIds: ['agent-1'] })]))
+    // The new agent holds the new words: the next turn goes on in it.
+    await turn('fourth', '+first+second+third', 'NEW WORDS')
+    expect(fake.calls('create')).toHaveLength(2)
+    expect(prompts()[3]).toBe('fourth')
+    sessions.stop()
   })
 })
 

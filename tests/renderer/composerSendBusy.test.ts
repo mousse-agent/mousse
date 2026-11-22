@@ -6,11 +6,14 @@ import { SERVICE_LOST_RECONNECT, SERVICE_LOST_TITLE } from '../../src/renderer/c
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-// The transcript is not part of this check: the shell shows the composer and its notices only.
+// The transcript is not part of this check: the shell shows the composer, its notices and what the queue lists.
 vi.mock('../../src/renderer/chat/components/MousseAgentChatShell', async () => {
   const { createElement: create } = await import('react')
   const { ComposerNoticeProvider } = await import('../../src/renderer/components/ComposerNotice')
-  return { MousseAgentChatShell: ({ composer }: { composer: never }) => create(ComposerNoticeProvider, null, composer) }
+  return {
+    MousseAgentChatShell: ({ composer, queue }: { composer: never; queue?: { items: Array<{ id: string; content: string }> } }) =>
+      create(ComposerNoticeProvider, null, composer, create('ol', { className: 'test-queue' }, (queue?.items ?? []).map((item) => create('li', { key: item.id }, item.content))))
+  }
 })
 vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 
@@ -168,6 +171,50 @@ describe('the composer follows what a send did', () => {
 
     expect(orchestrator.sendToThread).toHaveBeenCalledTimes(1)
     expect(shown.some((contents) => contents.includes('Third message'))).toBe(false)
+  })
+
+  it('starts a turn for a message sent after a Stop held the queue, and shows it once', async () => {
+    const now = new Date().toISOString()
+    // The service starts the turn at once; its send answers when that turn ends.
+    orchestrator.sendToThread = vi.fn(() => new Promise(() => undefined))
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    await mount()
+    // A Stop ended the last turn: the message queued before it waits for the person.
+    await act(async () => {
+      for (const listener of listeners['queue.onUpdated'] ?? []) {
+        listener({ threadId: 'thread-a', items: [{ id: 'queue-1', threadId: 'thread-a', content: 'Held message', enqueuedAt: now, order: 1, intent: 'normal', state: 'pending', source: 'gui', heldAfterStop: true }] })
+      }
+    })
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    await send('After the Stop')
+
+    expect(orchestrator.sendToThread).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().messages.map((message) => message.content)).toContain('After the Stop')
+    expect([...host.querySelectorAll('.test-queue li')].map((item) => item.textContent)).toEqual(['Held message'])
+  })
+
+  it('takes a message painted in the queue out of it when the service started its turn instead', async () => {
+    const now = new Date().toISOString()
+    orchestrator.sendToThread = vi.fn(() => new Promise(() => undefined))
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    await mount()
+    // The window still lists a message waiting in the queue, so the send is painted there.
+    await act(async () => {
+      for (const listener of listeners['queue.onUpdated'] ?? []) {
+        listener({ threadId: 'thread-a', items: [{ id: 'queue-1', threadId: 'thread-a', content: 'Waiting message', enqueuedAt: now, order: 1, intent: 'normal', state: 'pending', source: 'gui' }] })
+      }
+    })
+    await send('Sent now')
+    const listed = () => [...host.querySelectorAll('.test-queue li')].map((item) => item.textContent)
+    expect(listed()).toEqual(['Waiting message', 'Sent now'])
+
+    // The service started it as a turn: the transcript shows it while the send is still on its way.
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    await act(async () => {
+      useAppStore.setState({ messages: [...useAppStore.getState().messages, { id: 'm-2', role: 'user', content: 'Sent now', timestamp: now }] as never })
+    })
+    await settle()
+    expect(listed()).toEqual(['Waiting message'])
   })
 
   it('stops showing busy and shows the service notice again when reconnecting fails', async () => {

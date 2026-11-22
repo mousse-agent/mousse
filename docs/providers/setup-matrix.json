@@ -30,8 +30,10 @@
       "label": "Antigravity",
       "driver": "antigravity",
       "rows": [
-        { "source": "managed", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Install and Google sign-in were tested with fakes and replays (#157); no live install or sign-in." },
-        { "source": "custom", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "An executable set in Settings (with its helper beside it) was not run separately." }
+        { "source": "path", "signIn": "agent_home", "os": ["windows-x64"], "status": "untested", "reason": "agy 1.5.13 answered `agy acp` and opened a session on this computer's existing sign-in in a direct check; not run through Mousse." },
+        { "source": "path", "signIn": "agent_home", "os": ["windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "No run on these systems." },
+        { "source": "managed", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Install from Google's feed and the sign-in were tested with fakes and replays; no live install or Google sign-in." },
+        { "source": "custom", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "An executable set in Settings (agy, or the 1.1.1 server beside its helper) was not run separately." }
       ]
     },
     {

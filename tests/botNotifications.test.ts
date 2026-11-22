@@ -5,6 +5,8 @@ import {
   botNotificationKind,
   planThreadNotification
 } from '../src/main/notifications/threadNotification'
+import { BotChatProjection } from '../src/mms/bots/chat/projection'
+import type { BotMessageRow } from '../src/mms/bots/store/BotStore'
 import type { BotChatMessage } from '../src/shared/bots/personal/chat'
 
 /**
@@ -19,6 +21,15 @@ const row = (over: Partial<BotChatMessage> = {}): BotChatMessage =>
 describe('what a bot row announces', () => {
   it('announces run reports, replies, notices and errors as completed', () => {
     for (const kind of ['run_report', 'text', 'notice', 'error'] as const) expect(botNotificationKind(row({ kind }), NOW)).toBe('completed')
+  })
+
+  it.each(['bm_wake_w1', 'bm_permission_switch_1'])('keeps projected service line %s silent and announces the reply', (id) => {
+    // These notice ids become systemLine in the chat projection used by bots.message.
+    const projection = new BotChatProjection({ store: {} as never, emit: () => {} })
+    const service = projection.toMessage({ ...row({ id, kind: 'notice', text: 'Following up' }), botId: 'b1' } as BotMessageRow)
+    expect(service.systemLine).toBe(true)
+    expect(botNotificationKind(service, NOW)).toBeNull()
+    expect(botNotificationKind(row({ kind: 'text', text: 'The deploy is done.' }), NOW)).toBe('completed')
   })
 
   it('announces an open ask as a question, and an answered one not at all', () => {
@@ -95,4 +106,64 @@ describe('how a bot row reaches the person', () => {
   it('shows the system notification for a bot that is not on screen, even with Mousse in front', () => {
     expect(planThreadNotification(channels, { windowFocused: true, viewingThread: false, systemSupported: true })).toEqual({ toast: false, system: true, playSound: false })
   })
+})
+
+it('keeps an owner MCP review readable in its sidebar summary, card and notification after the master merges', async () => {
+  // Owner MCP tools are offered and called directly; use_tool deliberately refuses their names.
+  const { botFixture, createBot, start, finish } = await import('./bots/botFixture')
+  const { BotMcp, callForBot } = await import('../src/mms/bots/mcp/BotMcp')
+  const { getDefaultSettings } = await import('../src/shared/settings')
+  const { botManifestDigest } = await import('../src/mms/bots/grants/compile')
+  const f = botFixture()
+  try {
+    const settings = getDefaultSettings()
+    settings.experimental.botAsksFirstOff = false
+    f.host.settings = { get: () => settings } as never
+    const descriptor = { configRevision: 'r1', toolName: 'send_email', providerName: 'mail_send_email', inputSchema: { type: 'object' }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
+    const mcp = new BotMcp({ enabled: () => true, catalog: {
+      ensure: async () => undefined, listing: () => [{ ...descriptor, name: 'Mail__send_email' }],
+      servers: () => [{ installationId: 'mail', serverName: 'Mail', configDigest: 'c1', tools: [descriptor] }]
+    }, manager: { callTool: async () => { throw new Error('An open review must not send') } } as never })
+    f.host.mcp = mcp
+    await f.bots.reconcileOnStartup()
+    const { botId } = await createBot(f, { reply: 'Ready' })
+    const grant = f.store.activeGrant(botId)!
+    f.store.approve(botId, botManifestDigest({ ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send_email', level: 'asks_first' }] }), { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send_email', level: 'asks_first' }] })
+    await f.bots.service.chatSend({ botId, text: 'Send an email', clientRequestId: 'owner-mail' })
+    const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const talk = await start(f, chat.id)
+    const { workId } = await f.bots.tools.work.start(botId, chat.id, { title: 'Mail', brief: 'Send the email', key: 'send-mail' })
+    await finish(f, talk.payload)
+    const work = await start(f, workId)
+    await callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send_email', args: { to: 'private@example.test', body: 'Private content' }, toolCallId: 'send-one', signal: new AbortController().signal })
+    const message = f.bots.service.chatList(botId).messages.find(message => message.action)!
+    expect(message.action).toMatchObject({ title: 'Send email', serverName: 'Mail', status: 'open' })
+    const summary = f.bots.service.list().bots.find(bot => bot.id === botId)!
+    expect(summary).toMatchObject({ state: 'needs_you', needsOwner: true })
+    expect(summary.stateText).toBe('Waiting for you: Send email · Mail')
+    const banner = botNotificationContent(summary.name, message)
+    expect(botNotificationKind(message, f.clock.now)).toBe('question')
+    expect(banner).toEqual({ title: summary.name, body: 'Wants to send email' })
+    for (const internal of ['send_email', 'mail_send_email', 'Mail__', 'private@example.test', 'Private content']) expect(`${summary.stateText}\n${banner.body}`).not.toContain(internal)
+  } finally { f.close() }
+})
+
+it('notifies an older bot own-tool permission in its plain card words, without the tool id or call details', async () => {
+  const { botFixture, createBot, start, finish } = await import('./bots/botFixture')
+  const f = botFixture()
+  try {
+    const { botId } = await createBot(f, { reply: 'Ready' })
+    f.bots.narrowGrant(botId, manifest => ({ ...manifest, appTools: manifest.appTools.filter(tool => tool !== 'set_profile') }))
+    await f.bots.service.chatSend({ botId, text: 'Call yourself Scout.', clientRequestId: 'rename' })
+    const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { prepared, payload } = await start(f, chat.id)
+    expect(prepared.authority.check({ kind: 'app', tool: 'set_profile', args: { name: 'Scout' } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
+    const message = f.bots.service.chatList(botId).messages.find(message => message.ask?.status === 'open')!
+    expect(message.ask?.title).toBe('change its name or description')
+    const banner = botNotificationContent('Helper', message)
+    expect(botNotificationKind(message, f.clock.now)).toBe('question')
+    expect(banner).toEqual({ title: 'Helper', body: 'Wants to change its name or description' })
+    for (const internal of ['set_profile', 'Scout']) expect(banner.body).not.toContain(internal)
+  } finally { f.close() }
 })

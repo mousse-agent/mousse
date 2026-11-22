@@ -560,8 +560,8 @@ export function AddProviderDialog({
 
 /**
  * The Add step of an agent: "Ready to add" when Mousse found the CLI, with a different executable
- * on request; the executable is required when it was not found. An agent that is not installed yet
- * offers Install in its editor once added.
+ * on request. When it was not found, the executable is required, unless Mousse can install the
+ * agent: Install is then offered in its editor once added.
  */
 export function AgentConnectStep({
   choice,
@@ -584,7 +584,10 @@ export function AgentConnectStep({
   const known = choice.existing
   const detected = known?.binary?.source === 'override' ? undefined : known?.binary?.path
   const checked = Boolean(known && (known.checkedAt || known.stale))
-  const missing = checked && known?.install.state === 'not_installed'
+  const notFound = checked && known?.install.state === 'not_installed'
+  // Mousse installs it after adding; otherwise nothing runs without an executable.
+  const installsLater = notFound && known?.install.canInstall === true
+  const missing = notFound && !installsLater
   // Most people never need the executable field: it shows only when nothing was found or on request.
   const showPath = missing || manual
   const version = known?.binary?.version
@@ -592,6 +595,7 @@ export function AgentConnectStep({
   const canAdd = !disabled && (entered !== '' || !missing)
   const label = cliLabel ?? DRIVER_INFO[choice.driver].label
   const bundled = DRIVER_INFO[choice.driver].bundled === true
+  const hint = DRIVER_INFO[choice.driver].executableHint
   const add = () => {
     if (canAdd) onAdd(entered || undefined)
   }
@@ -609,15 +613,17 @@ export function AgentConnectStep({
               `${label} ships with Mousse. Sign in after adding.`
             ) : detected ? (
               `Mousse found ${label}${version ? ` ${version}` : ''} on this computer.`
+            ) : installsLater ? (
+              'Not on this computer yet. Install it after adding.'
             ) : (
-              `Mousse uses the ${label} it finds on this computer.`
+              DRIVER_INFO[choice.driver].addHint ?? `Mousse uses the ${label} it finds on this computer.`
             )
           }
           control={
             <>
               {!bundled && (
-                <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual(true)}>
-                  Use a different executable
+                <button type="button" className="prov-link" disabled={disabled} title={hint} onClick={() => setManual(true)}>
+                  {detected ? 'Use a different executable' : 'Choose an executable'}
                 </button>
               )}
               <button type="button" className="settings-btn" autoFocus disabled={!canAdd} onClick={() => add()}>
@@ -637,6 +643,8 @@ export function AgentConnectStep({
               'Checking the executable…'
             ) : missing ? (
               'Not found automatically. Choose the executable.'
+            ) : installsLater ? (
+              'Optional. Leave empty to install it after adding.'
             ) : (
               'Optional. Leave empty to use the one Mousse finds.'
             )
@@ -653,7 +661,7 @@ export function AgentConnectStep({
                     setPath('')
                   }}
                 >
-                  Use the one Mousse found
+                  {detected ? 'Use the one Mousse found' : installsLater ? 'Install it instead' : 'Use the one Mousse finds'}
                 </button>
               )}
               <input
@@ -661,7 +669,7 @@ export function AgentConnectStep({
                 value={path}
                 autoFocus
                 disabled={disabled}
-                placeholder={detected ?? 'Path to the executable'}
+                placeholder={detected ?? (hint ? `Path to ${hint}` : 'Path to the executable')}
                 title={detected}
                 aria-label={`${label} executable path`}
                 aria-invalid={pathError ? true : undefined}

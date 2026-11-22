@@ -15,6 +15,8 @@ export type FindInThreadBarProps = {
   onNext: () => void;
   onPrevious: () => void;
   onClose: () => void;
+  /** The field's name and placeholder: "Find in thread", or "Find in chat" in a bot's chat. */
+  label?: string;
 };
 
 /**
@@ -31,6 +33,7 @@ export function FindInThreadBar({
   onNext,
   onPrevious,
   onClose,
+  label = "Find in thread",
 }: FindInThreadBarProps) {
   const [value, setValue] = useState(query);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -73,8 +76,8 @@ export function FindInThreadBar({
         ref={inputRef}
         type="text"
         className="chat-find-input"
-        aria-label="Find in thread"
-        placeholder="Find in thread"
+        aria-label={label}
+        placeholder={label}
         spellCheck={false}
         autoComplete="off"
         value={value}

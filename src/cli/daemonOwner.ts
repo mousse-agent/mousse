@@ -11,6 +11,7 @@ import {
   MmsOwnerBusyError
 } from '../mms/ownership/MmsOwnerLease'
 import { exitWithError } from './output'
+import { startupPhase } from '../mms/startup/startupTiming'
 import type { MousseMainService } from './contract'
 import type { MmsOptions } from './contract'
 
@@ -23,21 +24,24 @@ export async function createDaemonOwner(
   opts?: {
     start?: boolean
     requireOwnership?: boolean
+    /** See `MmsOptions.ownerToken`. */
+    ownerToken?: string
   }
 ): Promise<{ homeDir: string; mms: MousseMainService }> {
   const homeDir = resolveMousseHome(globals.homeDir || undefined)
   try {
-    const { MousseMainService } = await import('../mms/MousseMainService')
+    const { MousseMainService } = await startupPhase('create.loadCode', () => import('../mms/MousseMainService'))
     const createOpts: MmsOptions = {
       homeDir,
       repoRoot: process.cwd(),
       headless: true,
       ownerKind: 'daemon',
       requireOwnership: opts?.requireOwnership,
+      ownerToken: opts?.ownerToken,
       version: process.env.MOUSSE_VERSION ?? process.env.npm_package_version
     }
     const mms = await MousseMainService.create(createOpts)
-    await mms.providerAuth.init()
+    await startupPhase('create.providersAgain', () => mms.providerAuth.init())
 
     const patch: Record<string, unknown> = {}
     if (globals.provider) {

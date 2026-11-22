@@ -3,7 +3,8 @@
  * The new chat composer's Send and its sidebar row (`lib/pendingThreadRows`): the row is listed in the click itself,
  * before anything is awaited; the composer locks once that frame is drawn; one Send (or one quick action) prepares a
  * chat at a time; a failed create takes the row away and keeps the prompt; a thread made after the composer moved on is
- * still listed; text typed while the row's frame was drawn is kept.
+ * still listed; text typed while the row's frame was drawn is kept. The message shows in the transcript from the click
+ * and stays the same copy on the made thread; a send that does not go ahead takes it back to the composer.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -79,6 +80,7 @@ async function drawFrame(): Promise<void> {
 
 const input = () => host.querySelector<HTMLTextAreaElement>('.composer-input')!
 const pendingRows = () => usePendingThreadRows.getState().rows
+const userMessages = () => useAppStore.getState().messages.filter((message) => message.role === 'user')
 
 function type(text: string): void {
   act(() => {
@@ -179,6 +181,7 @@ describe('Send in a new chat', () => {
     await drawFrame()
     await settle()
     expect(pendingRows()).toEqual([])
+    expect(userMessages()).toEqual([])
     expect(input().value).toBe('Plan the release notes')
     expect(host.textContent).toContain('The service did not answer.')
     expect(isWorkspacePending(useAppStore.getState())).toBe(false)
@@ -210,6 +213,62 @@ describe('Send in a new chat', () => {
     expect(useAppStore.getState().threads.map((thread) => thread.id)).toEqual(['t1'])
     // The send stopped there: its row is the thread's own now.
     expect(pendingRows()).toEqual([])
+  })
+
+  it('shows the message in the transcript in the click, with the locked composer empty, and keeps that copy on the made thread', async () => {
+    let answer!: (thread: Thread) => void
+    create.mockImplementation(() => new Promise<Thread>((resolve) => { answer = resolve }))
+    await showNewChat()
+    type('Plan the release notes')
+    const clicked = Date.now()
+    pressEnter()
+    const [shown] = userMessages()
+    expect(shown).toMatchObject({ content: 'Plan the release notes' })
+    expect(Date.parse(shown!.timestamp)).toBeGreaterThanOrEqual(clicked)
+    expect(create).not.toHaveBeenCalled()
+    await drawFrame()
+    // The thread is being made: the composer that still holds the message does not show it a second time.
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(input().value).toBe('')
+    await act(async () => { answer(madeThread('shown-1')) })
+    await settle()
+    expect(useAppStore.getState().activeThreadId).toBe('shown-1')
+    expect(sendToThread).toHaveBeenCalledTimes(1)
+    // One copy, the one shown at the click: the same row, and the same time to count Working from.
+    expect(userMessages()).toEqual([expect.objectContaining({ id: shown!.id, timestamp: shown!.timestamp, content: 'Plan the release notes' })])
+  })
+
+  it('takes the message out of the made thread and back to the composer when the send stops before it is sent', async () => {
+    // Thread ids of their own: the store keeps transcripts of threads shown before, across tests.
+    create.mockImplementation(async () => madeThread('stopped-1'))
+    await showNewChat()
+    ;(window.mousse.threads as unknown as { select: () => Promise<void> }).select = async () => { throw new Error('The thread could not be opened.') }
+    type('Plan the release notes')
+    pressEnter()
+    expect(userMessages()).toHaveLength(1)
+    await drawFrame()
+    await settle()
+    expect(useAppStore.getState().activeThreadId).toBe('stopped-1')
+    expect(sendToThread).not.toHaveBeenCalled()
+    expect(userMessages()).toEqual([])
+    expect(input().value).toBe('Plan the release notes')
+    // Nor is it kept for a later visit to the thread.
+    act(() => useAppStore.getState().switchToThread('elsewhere'))
+    act(() => useAppStore.getState().switchToThread('stopped-1'))
+    expect(userMessages()).toEqual([])
+  })
+
+  it('takes the message away and back to the composer when the service refuses it', async () => {
+    sendToThread.mockImplementation(async () => { throw new Error('The model is not available.') })
+    create.mockImplementation(async () => madeThread('refused-1'))
+    await showNewChat()
+    type('Plan the release notes')
+    pressEnter()
+    await drawFrame()
+    await settle()
+    expect(sendToThread).toHaveBeenCalledTimes(1)
+    expect(userMessages()).toEqual([])
+    expect(input().value).toBe('Plan the release notes')
   })
 
   it('keeps what was typed while the row frame was drawn', async () => {

@@ -356,20 +356,21 @@ describe('the repository lease, round 2', () => {
     expect(lease.release()).toBe(true)
   })
 
-  it('stays held while a stopped Git command is still running: fresh for older builds, and says what to do', async () => {
+  it.skipIf(process.platform === 'win32')('stays held while a stopped POSIX Git command is still running: fresh for older builds, and says what to do', async () => {
     const root = repo(); const identity = resolveRepositoryIdentity(root)
     const threadDirectory = mkdtempSync(join(tmpdir(), 'mousse-lease-retained-')); dirs.push(threadDirectory)
     Object.assign(REPOSITORY_LEASE_TIMING, { heartbeatMs: 100 })
     Object.assign(GIT_STOP_TIMING, { exitWaitMs: 200, slowPollMs: 50, survivorLimitMs: 300 })
     let lingering = true
     gitStopProbe.alive = () => lingering
-    // A kill that does nothing: the command survives its stop, so the processes listed at the stop are still there (off
-    // Windows the list is read after the kill, and a command that was killed leaves none to name).
+    // A kill that does nothing leaves the process group alive for the survivor check.
     gitStopProbe.kill = () => undefined
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 500)
-    const ran = await withGitMutationLocks(threadDirectory, root, 'test', () => runGitProcess(['-c', 'alias.slow=!sleep 30', 'slow'], { cwd: root, env: process.env }), undefined, undefined, controller.signal)
+    const running = withGitMutationLocks(threadDirectory, root, 'test', () => runGitProcess(['-c', 'alias.slow=!: > git-ready; sleep 30', 'slow'], { cwd: root, env: process.env }), undefined, undefined, controller.signal)
+    await vi.waitFor(() => expect(existsSync(join(root, 'git-ready'))).toBe(true), { timeout: 10_000 })
+    controller.abort()
+    const ran = await running
     expect(ran.error?.code).toBe('ABORT_ERR')
     const first = JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8')) as { heartbeatAt: string; stoppedGitPids?: number[] }
     expect(first.stoppedGitPids?.length).toBeGreaterThan(0)
@@ -388,8 +389,7 @@ describe('the repository lease, round 2', () => {
     await acquires(identity)
     // The command and what it started are ended here, so its folder can be removed.
     const command = first.stoppedGitPids![0]!
-    if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(command), '/T', '/F'], { stdio: 'ignore' }) } catch { /* gone */ } }
-    else { try { process.kill(-command, 'SIGKILL') } catch { /* gone */ } }
+    try { process.kill(-command, 'SIGKILL') } catch { /* gone */ }
     await vi.waitFor(() => expect(() => process.kill(command, 0)).toThrow(), { timeout: 5_000 })
   }, 30_000)
 

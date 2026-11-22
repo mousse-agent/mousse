@@ -3,6 +3,8 @@ import { basename } from 'node:path'
 import { mousseGitEnv } from './gitEnv'
 import { assertGitAllowed, type UserAction } from './gitPolicy'
 import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
+import { gitEnvFor, gitFile } from './gitExecutable'
+import { execFileGitAsync, withGitDiskAdmission } from './gitSpawn'
 
 export interface ExecutableResult {
   stdout: string
@@ -25,19 +27,25 @@ export type ExecutableRunner = (
 export const execRunner: ExecutableRunner = async (executable, args, options) => {
   const cwd = options?.cwd ?? process.cwd()
   if (/^gh(\.exe)?$/i.test(basename(executable))) assertGitAllowed({ executable: 'gh', cwd, args, userRequested: options?.userRequested })
-  const argv = executable === 'git' ? await withoutRepoProgramsAsync(cwd, args, { userRequested: options?.userRequested }) : [...args]
+  const timeout = options?.timeoutMs ?? 60_000
+  const maxBuffer = 1024 * 1024
+  const env = { ...process.env, ...options?.env }
+  if (executable === 'git') return withGitDiskAdmission(cwd, async () => {
+    const argv = await withoutRepoProgramsAsync(cwd, args, { userRequested: options?.userRequested })
+    return execFileGitAsync(gitFile(), argv, { cwd, env: gitEnvFor(repoProgramEnv(env)), windowsHide: true, timeout, maxBuffer })
+  })
   return new Promise((resolvePromise, reject) => {
     execFile(
       executable,
-      argv,
+      [...args],
       {
         cwd: options?.cwd,
         // `gh` runs Git itself (remotes, `pr checkout`), so its Git gets the same settings as Mousse's own.
-        env: executable === 'git' ? repoProgramEnv({ ...process.env, ...options?.env }) : mousseGitEnv({ ...process.env, ...options?.env }),
+        env: mousseGitEnv(env),
         windowsHide: true,
         encoding: 'utf8',
-        timeout: options?.timeoutMs ?? 60_000,
-        maxBuffer: 1024 * 1024
+        timeout,
+        maxBuffer
       },
       (error, stdout, stderr) => {
         if (error) {

@@ -1,5 +1,5 @@
 import { AppError, knownAppError } from '../../../shared/errors'
-import { providerReportedError } from '../../orchestrator/providerErrors'
+import { providerReportedError, usageLimitError } from '../../orchestrator/providerErrors'
 
 /**
  * How a prompt that the agent answered counts for the turn (ACP `stopReason`). `end_turn`, an
@@ -32,7 +32,7 @@ const RPC_ERROR_CODES = { min: -32768, max: -32000 }
  * the provider's status and message for the transcript. The text comes from the `data` the agent attached when the
  * message is only the SDK's label. Undefined for anything that is not the agent's answer (a closed connection, a stop).
  */
-export function acpAgentError(error: unknown): AppError | undefined {
+export function acpAgentError(error: unknown, provider?: string): AppError | undefined {
   if (!error || typeof error !== 'object' || error instanceof AppError) return undefined
   const { code, message, data } = error as { code?: unknown; message?: unknown; data?: unknown }
   if (typeof code !== 'number' || code < RPC_ERROR_CODES.min || code > RPC_ERROR_CODES.max) return undefined
@@ -42,5 +42,36 @@ export function acpAgentError(error: unknown): AppError | undefined {
   const text = attached && (!label || /^internal error\.?$/i.test(label)) ? attached : label || attached
   if (!text) return undefined
   const status = data && typeof data === 'object' ? [(data as { status?: unknown }).status, (data as { statusCode?: unknown }).statusCode].find((value): value is number => typeof value === 'number') : undefined
-  return providerReportedError(text, { ...(status !== undefined ? { status } : {}), cause: error })
+  return acpQuotaLimit(text, provider, error) ?? providerReportedError(text, { ...(status !== undefined ? { status } : {}), cause: error })
+}
+
+/** A wait this short is a rate limit the next attempt may clear, not a plan limit to pause for. */
+const QUOTA_MIN_RESET_MS = 10_000
+
+/** `Resets in 4h29m13s` (also days, and spaces between the parts) in milliseconds; undefined without one. */
+function resetsInMs(text: string): number | undefined {
+  const match = /\bresets? in\s+((?:\d+\s*[dhms]\s*)+)/i.exec(text)
+  if (!match) return undefined
+  const unit: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 }
+  let total = 0
+  for (const [, amount, part] of match[1]!.matchAll(/(\d+)\s*([dhms])/gi)) total += Number(amount) * unit[part!.toLowerCase()]!
+  return total
+}
+
+/**
+ * A plan quota an agent reports as its error, as Antigravity does (`RESOURCE_EXHAUSTED (code 429): Individual quota
+ * reached. Please upgrade your subscription to increase your limits. Resets in 4h29m13s.`): a usage limit, so the run
+ * pauses until the time it names, or an estimate when it names none. A reset only seconds away is left as the rate
+ * limit it is. Undefined for any other text.
+ */
+export function acpQuotaLimit(text: string, provider: string | undefined, cause?: unknown, nowMs: number = Date.now()): AppError | undefined {
+  if (!/\bRESOURCE_EXHAUSTED\b|\b429\b/.test(text)) return undefined
+  const resetIn = resetsInMs(text)
+  if (resetIn === undefined && !/\bquota (?:was )?reached\b|\busage limit\b/i.test(text)) return undefined
+  if (resetIn !== undefined && resetIn <= QUOTA_MIN_RESET_MS) return undefined
+  return usageLimitError({
+    ...(provider ? { provider } : {}),
+    ...(resetIn !== undefined ? { resetsAt: new Date(nowMs + resetIn).toISOString() } : {}),
+    estimated: resetIn === undefined
+  }, cause, { status: 429 })
 }

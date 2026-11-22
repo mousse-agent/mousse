@@ -1,13 +1,12 @@
 /**
  * `thread_create` through the registry's central check (docs/run-engine/SPEC.md §15.1): the arguments it refuses
- * before the host is asked, bot and plan callers, the per-run cap with a replay past it, and what the creator may
- * do with the thread afterwards.
+ * before the host is asked, bot and plan callers, that a run has no count of threads it creates, and what the creator
+ * may do with the thread afterwards.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../../src/shared/types'
-import { McpToolError, type AgentCreatedThread, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
-import { THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import type { AgentCreatedThread, McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-12T00:00:00.000Z'
@@ -43,7 +42,6 @@ describe('thread_create (SPEC §15.1)', () => {
       threadMeta: (id) => threads.get(id),
       toolLedger: () => ledger,
       createThread: vi.fn(async () => created(`new-${(made += 1)}`)),
-      creationStarted: vi.fn(() => false),
       noteOnThread: vi.fn(),
       stopRun: vi.fn(async (_threadId, runId) => ({ status: 'accepted' as const, runId, sequence: 1, replayed: false })),
       showAgentAction: vi.fn(),
@@ -55,7 +53,7 @@ describe('thread_create (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: callerRun.runId, ...extra })
     const call = (args: Record<string, unknown> = { projectId: 'p1' }, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call('thread_create', args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     return { fx, registry, threads, ledger, call, as, denied, callerRun, ...fake }
   }
 
@@ -106,7 +104,7 @@ describe('thread_create (SPEC §15.1)', () => {
 
     it('a host without thread creation says so', async () => {
       const { call } = await world({ createThread: undefined })
-      expect(await call()).toMatchObject({ isError: true, text: 'thread_create is not available in this host.' })
+      expect(await refusalIn(call())).toMatchObject({ message: 'thread_create is not available in this host.' })
     })
   })
 
@@ -144,58 +142,14 @@ describe('thread_create (SPEC §15.1)', () => {
       expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'th1' }, expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }), 'created this thread')
     })
 
-    it('a refusal of the host reaches the caller as an error and frees its place under the cap', async () => {
-      const { call, host } = await world({
+    it('a refusal of the host reaches the caller as an error', async () => {
+      const { call } = await world({
         createThread: vi.fn()
           .mockRejectedValueOnce(Object.assign(new Error('too many in a row'), { code: 'agent_hops_exceeded' }))
           .mockResolvedValue(created('th1'))
       })
-      const error = await call({ projectId: 'p1', firstMessage: 'go' }).then(() => undefined, (thrown: McpToolError) => thrown)
-      expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' } })
-      for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) expect((await call()).isError).toBeUndefined()
-      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
-    })
-  })
-
-  describe('the cap per run', () => {
-    it(`a run may create ${THREAD_CREATE_MAX_PER_RUN} threads; the next is refused and asks the host for nothing`, async () => {
-      const { call, host } = await world()
-      for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) expect((await call()).isError, `${index}`).toBeUndefined()
-      const refused = await call()
-      expect(refused).toMatchObject({ isError: true, text: expect.stringContaining(`limited to ${THREAD_CREATE_MAX_PER_RUN} threads per run`) })
-      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN)
-    })
-
-    it('a retry of a stored creation takes no new place and still reaches the host at the cap, so it can finish its first message; a new key is refused', async () => {
-      const stored = new Set<string>()
-      const { call, host } = await world({ creationStarted: vi.fn((key: string) => stored.has(key)) })
-      for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) await call({ projectId: 'p1', clientRequestId: `k-${index}` })
-      stored.add('thread_create:caller:k-0')
-      const retry = await call({ projectId: 'p1', firstMessage: 'go', clientRequestId: 'k-0' })
-      expect(retry.isError).toBeUndefined()
-      expect((await call({ projectId: 'p1', clientRequestId: 'k-new' })).isError).toBe(true)
-      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
-    })
-
-    it('a failed retry at the cap does not free a place it never took', async () => {
-      let retryStored = false
-      const { call, host } = await world({
-        creationStarted: vi.fn((key: string) => key === 'thread_create:caller:retry' && retryStored),
-        createThread: vi.fn()
-          .mockResolvedValueOnce(created('th0'))
-          .mockResolvedValueOnce(created('th1'))
-          .mockResolvedValueOnce(created('th2'))
-          .mockResolvedValueOnce(created('th3'))
-          .mockResolvedValueOnce(created('th4'))
-          .mockRejectedValueOnce(new Error('the thread was used'))
-      })
-      for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN; index += 1) await call({ projectId: 'p1', clientRequestId: `n-${index}` })
-      retryStored = true
-      expect((await call({ projectId: 'p1', clientRequestId: 'retry' })).isError).toBe(true)
-      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
-      // Still at the cap: a new creation is refused without asking the host.
-      expect((await call({ projectId: 'p1', clientRequestId: 'new' })).isError).toBe(true)
-      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
+      const error = await refusalIn(call({ projectId: 'p1', firstMessage: 'go' }))
+      expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'agent_hops_exceeded' }, refused: { code: 'conflict', retry: 'never' } })
     })
 
     it('a creation tells the creator thread which model, mode and place the agent chose, once, and a replay says nothing more', async () => {
@@ -211,10 +165,10 @@ describe('thread_create (SPEC §15.1)', () => {
       expect(host.noteOnThread).toHaveBeenCalledWith('caller', 'Created thread «Audit» (th1) in project p1: claude / sonnet, ask mode, a worktree of its own.', { threadId: 'th1', summary: 'claude / sonnet, ask mode, a worktree of its own' })
     })
 
-    it('a replayed creation does not use up a place', async () => {
-      const { call, host } = await world({ createThread: vi.fn(async () => created('same', { replayed: true })) })
-      for (let index = 0; index < THREAD_CREATE_MAX_PER_RUN + 3; index += 1) expect((await call({ projectId: 'p1', clientRequestId: 'k' })).isError).toBeUndefined()
-      expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 3)
+    it('has no count per run: one run creates 20 threads and none is refused', async () => {
+      const { call, host } = await world()
+      for (let index = 0; index < 20; index += 1) expect((await call({ projectId: 'p1', clientRequestId: `k-${index}` })).isError, `${index}`).toBeUndefined()
+      expect(host.createThread).toHaveBeenCalledTimes(20)
     })
   })
 

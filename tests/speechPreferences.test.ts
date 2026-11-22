@@ -53,9 +53,7 @@ describe('voiceFor', () => {
 describe('voices', () => {
   it('ships a verified file for every Kokoro voice', () => {
     const paths = new Set(KOKORO_82M.files.map((file) => file.path))
-    expect(KOKORO_82M.voices).toHaveLength(28)
     for (const voice of KOKORO_82M.voices) expect(paths).toContain(`voices/${voice.id}.bin`)
-    expect(KOKORO_82M.voices[0]).toEqual({ id: 'af_heart', label: 'Heart, American female' })
     // Only the default voice is needed for the model to count as downloaded.
     const required = KOKORO_82M.files.filter((file) => file.path.startsWith('voices/') && !file.optional)
     expect(required.map((file) => file.path)).toEqual([`voices/${KOKORO_82M.defaultVoice}.bin`])

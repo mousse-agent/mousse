@@ -2,11 +2,12 @@ import type { CustomToolRendererProps } from '../../chat/components/agent-elemen
 import { useAppStore } from '../../stores/appStore'
 import { useProjectComputerName } from '../../hooks/useProjectComputerName'
 import { Lock } from '../../lib/icons'
+import { secretNameInResult } from '../../../shared/secretRequests'
 
 /** The name a `secret_request` result says the secret is kept under; the result never holds the value. */
 export function secretNameFromResult(output: unknown): string | undefined {
   const text = typeof output === 'string' ? output : Array.isArray(output) ? output.map((part) => (part && typeof part === 'object' ? String((part as { text?: unknown }).text ?? '') : String(part))).join(' ') : ''
-  return /kept by Mousse as ([A-Z][A-Z0-9_]{0,63})\b/.exec(text)?.[1]
+  return secretNameInResult(text)
 }
 
 /**
@@ -21,7 +22,7 @@ export function SecretRequestRow({ input, output, status }: CustomToolRendererPr
   const name = secretNameFromResult(output)
   const line = waiting
     ? computer ? `Answer on ${computer}: the secret is typed and kept on the computer that runs this thread.` : 'Waiting for you: enter it in the card above the message box.'
-    : status === 'success' && name ? `Given. The agent uses it by name: ${name}.` : 'Not given. Nothing was stored.'
+    : status === 'success' && name ? `Given. Kept out of the chat as ${name}.` : 'Not given. Nothing was stored.'
   return (
     <p className="secret-request-row" data-testid="secret-request-row" role="status">
       <Lock size={13} aria-hidden="true" />

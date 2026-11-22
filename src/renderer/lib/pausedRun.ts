@@ -38,7 +38,7 @@ export function describePausedRun(pause: TurnPause, nowMs: number): PausedRunTex
   const due = Number.isFinite(until) && until <= nowMs
   // A timer more than a day past its reset is ruled stale the moment the daemon looks at it; say so already.
   const stale = pause.stale === true || (pause.autoResume && isLongOverdue(pause, nowMs))
-  const reached = `${limitName(pause)} was reached.`
+  const reached = `${limitName(pause)} was reached${pause.again ? ' again after resuming' : ''}.`
   const relative = formatTimeUntil(pause.until, nowMs)
   let next: string
   if (stale) next = "The reset passed while Mousse was off, so it won't continue by itself. Press Try now to continue."

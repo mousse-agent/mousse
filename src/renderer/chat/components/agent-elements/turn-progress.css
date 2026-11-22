@@ -1,14 +1,84 @@
-/* The live line at the end of a running turn (turn-progress.tsx): what the turn does now. Laid out like the
-   reasoning row (18px icon box, body-size label on a 22px line), so the row that comes next takes its place. Its
-   motion is the thinking icon's turn while the turn thinks (thinking-icon.css), or the dots below: transform and
-   opacity only, which the compositor draws. */
+/* The live row at the end of a running turn (turn-progress.tsx): the current thought's headline, then what the turn
+   does now. Each line is laid out like a tool row (18px icon box, 14px label on a 22px line) and is one line high
+   whatever its text, so the row keeps its height while the turn works. Its motion is the thinking icon's pulse while
+   the turn thinks (thinking-icon.css), a running call's icon pulse, or the dots below: transform and opacity only,
+   which the compositor draws. Each holds still while no one can see it (lib/offscreenMotion.ts). */
 
-.turn-progress {
+.turn-live {
+  gap: 2px;
   color: color-mix(in srgb, var(--text-secondary) 85%, transparent);
-  /* The chat's body size (1rem, Tailwind `text-base`), like the user's and the assistant's text. */
-  font-size: 1rem;
-  font-weight: 450;
+  /* The reply's size (14px) at regular weight, like the tool rows. */
+  font-size: 14px;
+  font-weight: 400;
   line-height: 22px;
+}
+
+/* With nothing to say (text being written is on screen) the row is hidden, and comes back as the same element. */
+.turn-live[hidden] {
+  display: none;
+}
+
+/* A paced reply has text the row cannot see on screen yet: "Writing…" stays until the reply right above it shows some. */
+.turn-answer > :has(.an-markdown) + .turn-live[data-until-text] {
+  display: none;
+}
+
+.turn-live-thought,
+.turn-progress {
+  height: 22px;
+}
+
+/* The thought's headline: one line, cut at the row's width. */
+.turn-live-headline {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-progress-failed {
+  color: var(--danger);
+}
+
+/* "· 1 failed" after what the turn does now: never cut. */
+.turn-progress-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* The two lines open the run's rows when clicked; the chevron is the keyboard's way in. */
+.turn-live-lines {
+  width: fit-content;
+}
+
+.turn-live-lines[data-toggles] {
+  cursor: pointer;
+}
+
+.turn-live-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.turn-live-toggle:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+/* "+2 running": other calls beside the one named. Dim, never cut. */
+.turn-progress-more {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--text-secondary) 55%, transparent);
 }
 
 .turn-progress-icon {
@@ -63,6 +133,11 @@
 
 .turn-progress-dots > span:nth-child(3) {
   animation-delay: calc(0.4s * var(--ui-motion-scale, 1));
+}
+
+/* Out of view or in a hidden window, the dots hold still (lib/offscreenMotion.ts marks the box, not each dot). */
+.turn-progress-dots[data-offscreen] > span {
+  animation-play-state: paused;
 }
 
 @keyframes turn-progress-dot {

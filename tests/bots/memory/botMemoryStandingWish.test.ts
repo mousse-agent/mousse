@@ -25,7 +25,7 @@ function chat(fx: MemoryFixture) {
       fx.store.append({ botId: 'ada', kind: 'tool_call', lane: 'chat', activationId, sourceKey: `t:${n}`, who: 'bot', text: 'memory_save', json: { tool: 'memory_save' } })
       fx.store.save('ada', { lane: 'chat', kind: 'owner', text: options.modelSaves, activationId })
     }
-    await provider.afterDispatch({ botId: 'ada', activationId, dispatchId: `d-${n}`, lane: 'chat', threadId: 'home', endedBy: options.endedBy ?? 'settled' })
+    await provider.afterDispatch({ botId: 'ada', activationId, dispatchId: `d-${n}`, lane: 'chat', memoryLane: 'chat', threadId: 'home', endedBy: options.endedBy ?? 'settled' })
   }
   const entries = () => fx.store.list('ada').entries.map((entry) => ({ kind: entry.kind, text: entry.text, by: entry.by }))
   return { turn, entries }
@@ -40,6 +40,41 @@ describe('the missed-wish fallback', () => {
     // The next dispatch's pack carries it.
     const journal = createBotJournal({ store: fx.store, readThread: () => ({ messages: [] }), listThreads: () => [] })
     expect(await createBotContextProvider({ store: fx.store, journal }).chatPreamble({ botId: 'ada', activationId: 'act-next' })).toContain(EM)
+  })
+
+  it('tells the next chat about wishes refused at the cap, until a carrying turn settles', async () => {
+    const fx = memoryFixture()
+    for (let n = 0; n < 6; n++) {
+      expect(fx.store.save('ada', { lane: 'chat', kind: 'owner', text: `Fact ${n}: ${'ordinary words '.repeat(30)}`.slice(0, 400) })).not.toHaveProperty('error')
+    }
+    const { turn } = chat(fx)
+    await turn(EM)
+    await turn('Always keep your replies short.')
+    expect(fx.store.active('ada')).toHaveLength(6)
+    // Reopen to prove that the notice survives a service restart.
+    const store = fx.reopen()
+    const journal = createBotJournal({ store, readThread: () => ({ messages: [] }), listThreads: () => [] })
+    const packs = createBotContextProvider({ store, journal })
+    const next = await packs.chatPreamble({ botId: 'ada', activationId: 'next' })
+    const situation = next.slice(next.indexOf('Situation:'))
+    expect(situation).toContain('2 standing wishes')
+    expect(situation).toContain('full')
+    expect(situation).toContain('which')
+    expect(await packs.runPreamble({ botId: 'ada', activationId: 'run' })).not.toContain('2 standing wishes')
+    const end = { botId: 'ada', activationId: 'next', dispatchId: 'd-next', lane: 'chat' as const, memoryLane: 'chat' as const, threadId: 'home' }
+    await packs.afterDispatch({ ...end, endedBy: 'failed' })
+    expect(await packs.chatPreamble({ botId: 'ada', activationId: 'retry' })).toContain('2 standing wishes')
+    await packs.afterDispatch({ ...end, endedBy: 'settled', consult: true })
+    expect(await packs.chatPreamble({ botId: 'ada', activationId: 'after-consult' })).toContain('2 standing wishes')
+    // A third wish fails during the turn carrying the first two; only those two are acknowledged.
+    fx.message({ botId: 'ada', id: 'new-wish', author: 'owner', text: 'Never use emoji.', activationId: 'next' })
+    await packs.afterDispatch({ ...end, endedBy: 'settled' })
+    await packs.afterDispatch({ ...end, endedBy: 'settled' })
+    const last = await packs.chatPreamble({ botId: 'ada', activationId: 'last' })
+    expect(last).toContain('1 standing wish')
+    await packs.afterDispatch({ ...end, activationId: 'last', endedBy: 'settled' })
+    const done = await packs.chatPreamble({ botId: 'ada', activationId: 'done' })
+    expect(done.slice(done.indexOf('Situation:'))).not.toContain('standing wish')
   })
 
   it('does not save a one-off request', async () => {
@@ -109,7 +144,10 @@ describe('isStandingWish', () => {
     "I never got the email",
     'Please write a short summary of the report',
     'Use em dashes here for now',
-    `${'Always '.repeat(40)}`
+    `${'Always '.repeat(40)}`,
+    // Mousse's own text, in the old and the new form, is never the owner's wish.
+    '[Mousse] From now on, never use em dashes.',
+    '<mousse_notice kind="bot_wake" reply="if-needed">\nFrom now on, never use em dashes.\n</mousse_notice>'
   ])('skips %j', (text) => expect(isStandingWish(text)).toBe(false))
 })
 
@@ -122,4 +160,14 @@ describe('nearDuplicate', () => {
     // A reversal is a new wish, not a duplicate.
     expect(nearDuplicate('Always use em dashes', ["Don't use em dashes."])).toBe(false)
   })
+})
+
+// There is no telling setting: a wish about how or when to be told is kept as owner memory like any other.
+it('keeps a telling wish the bot did not save as owner memory', async () => {
+  const fx = memoryFixture()
+  fx.message({ botId: 'ada', id: 'wish', author: 'owner', text: 'Never ping me at night.', activationId: 'telling' })
+  const journal = createBotJournal({ store: fx.store, readThread: () => ({ messages: [] }), listThreads: () => [] })
+  const provider = createBotContextProvider({ store: fx.store, journal })
+  await provider.afterDispatch({ botId: 'ada', activationId: 'telling', dispatchId: 'd', lane: 'chat', memoryLane: 'chat', threadId: 'home', endedBy: 'settled' })
+  expect(fx.store.active('ada').map(entry => entry.text)).toEqual(['Never ping me at night.'])
 })

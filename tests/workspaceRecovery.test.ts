@@ -132,10 +132,12 @@ describe('what a thread is waiting on', () => {
     expect(await status()).toEqual({ kind: 'paused', reason: 'The code-revert operation did not finish.', operationId: 'revert-1', operationType: 'code-revert' })
   })
 
-  it('pauses the thread when Git cannot read the worktree', async () => {
+  it('pauses nothing when Git cannot read a worktree that no operation of Mousse\'s own left so: its turns run in the project folder', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+    rmSync(join(workspace.worktreePath, '.git'))
     writeFileSync(join(workspace.worktreePath, '.git'), 'gitdir: /nowhere\n')
-    expect(await status()).toEqual({ kind: 'paused', reason: 'Git cannot read the worktree.' })
+    expect((await new ThreadWorkspaceManager(f.thread).verify()).lifecycle).toBe('recovery_required')
+    expect(await status()).toBeUndefined()
   })
 
   it('reports a merge an earlier version left in the worktree, without pausing the thread, until it is aborted', async () => {
@@ -411,9 +413,10 @@ describe('through the daemon', () => {
     try {
       // A release interrupted after its intent was written, whose receipt is gone, cannot finish.
       new ThreadJournal(d.directory).append({ operationId: 'release-1', operationType: 'undo-ref-release', state: 'prepared', details: { version: 1, receiptId: '00000000-0000-0000-0000-000000000000', repositoryId: 'repo', refs: [] } })
-      expect(await d.recovery()).toMatchObject({ kind: 'paused', operationType: 'undo-ref-release' })
+      expect(await d.recovery()).toBeUndefined()
       const result = await d.call('operations.recover') as Record<string, unknown>
-      expect(result).toMatchObject({ ok: true, settled: false, recovery: { kind: 'paused', operationType: 'undo-ref-release' } })
+      expect(result).toMatchObject({ ok: true, settled: false })
+      expect(result.recovery).toBeUndefined()
       expect(result.stillWaiting).toMatch(/^old Undo history could not be released yet: \S/)
     } finally {
       await d.mms.stop()

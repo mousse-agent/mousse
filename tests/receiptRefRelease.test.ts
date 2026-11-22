@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
@@ -16,6 +16,10 @@ import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundati
 import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 import { unverifiableThread } from './support/unverifiableThread'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import * as gitProcess from '../src/mms/git/runGitProcess'
+
+// The real-Git setup and exact read-back both start processes, which can be slow on Windows.
+vi.setConfig({ testTimeout: 120_000 })
 
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
@@ -63,6 +67,21 @@ it('retries a crash after CAS deletion without recreating either ref', async () 
   expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual([])
 })
 
+it('keeps a release prepared when Git omits a dangling symbolic ref from read-back', async () => {
+  const { workspace, receipt, release } = await fixture()
+  const [before] = receipt.retainedRefs
+  let replaced = false
+  try {
+    const result = await release.release(workspace.worktreePath, { afterGit: () => {
+      git(f.repo, 'symbolic-ref', before!, 'refs/heads/this-branch-does-not-exist')
+      replaced = true
+    } })
+    expect(result.releasedRefs).toEqual([])
+    expect(result.retained).toEqual([{ receiptId: receipt.id, reason: expect.stringContaining('Symbolic') }])
+    expect(new ThreadJournal(f.thread).unsettled().some((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')).toBe(true)
+  } finally { if (replaced) git(f.repo, 'symbolic-ref', '--delete', before!) }
+}, 60_000)
+
 it('refuses changed refs, pending integration and shared/unknown source claims', async () => {
   const { workspace, receipt, release } = await fixture()
   git(workspace.worktreePath, 'update-ref', receipt.retainedRefs[0]!, receipt.afterSha)
@@ -83,6 +102,27 @@ it('preserves a saved-branch claim and blocks physical release during pending in
   new ThreadJournal(f.thread).append({ operationId: 'pending-integration', operationType: 'integrate', state: 'prepared' })
   await expect(release.release(workspace.worktreePath)).rejects.toThrow('recovery')
 })
+
+it('keeps both refs when a saved branch claims one after discovery and before Git admission', async () => {
+  const { workspace, receipt, release } = await fixture()
+  const run = gitProcess.runGitProcess
+  const start = vi.spyOn(gitProcess, 'runGitProcess').mockImplementation((args, options) => {
+    if (args.includes('update-ref') && args.includes('--no-deref') && options.input?.includes(receipt.retainedRefs[0]!)) {
+      writeFileSync(join(f.thread, 'conversation-branches.json'), JSON.stringify([{ id: 'late-claim', retainedRef: receipt.retainedRefs[0] }]))
+    }
+    return run(args, options)
+  })
+  try {
+    const result = await release.release(workspace.worktreePath)
+    expect(result.releasedRefs).toEqual([])
+    expect(result.retained).toEqual([{ receiptId: receipt.id, reason: expect.stringContaining('claim') }])
+    expect(git(f.repo, 'rev-parse', receipt.retainedRefs[0]!)).toBe(receipt.beforeSha)
+    expect(git(f.repo, 'rev-parse', receipt.retainedRefs[1]!)).toBe(receipt.afterSha)
+    expect(new ThreadJournal(f.thread).ofTypes('undo-ref-release')).toEqual([])
+  } finally {
+    start.mockRestore()
+  }
+}, 60_000)
 
 it('rejects symbolic replacement rather than following it into user refs', async () => {
   const { workspace, receipt, release } = await fixture()

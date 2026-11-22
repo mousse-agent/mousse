@@ -29,7 +29,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
   })
 
   /** Turns run on a scripted pi adapter; `reply` answers each. */
-  function scriptTurns(reply: () => Promise<string> | string): void {
+  function scriptTurns(reply: Parameters<typeof piAdapter>[0]): void {
     orch.setHarness(testHarness({ adapters: [piAdapter(reply)], profileHome: home }))
   }
 
@@ -513,12 +513,11 @@ describe('OrchestratorService concurrent threads and queue', () => {
     })
   })
 
-  // Twelve real orchestrator turns run two at a time with thread-file persistence after each,
-  // so this test is bound by throughput, not by a race: about 6 s alone and 15 s inside a full
-  // run on a loaded machine. The assertion on the concurrency bound stays exact.
-  it('startup drain concurrency bound holds across multi-message threads', { timeout: 60_000 }, async () => {
-    // Several eligible threads each with multiple pending normals — internal auto-drain
-    // must not stack turns on top of the startup pump (bound = 2).
+  // Twelve real orchestrator turns with thread-file persistence after each.
+  it("startup drain starts every queued thread without waiting for another thread's turn, and runs each thread's messages one at a time", { timeout: 60_000 }, async () => {
+    // Several eligible threads each with multiple pending normals: every thread starts its first, a few a second,
+    // and goes on to its next when its turn ends; the thread's own auto-drain never stacks a second turn on it.
+    ;(orch as unknown as { startupDrainSpacingMs: number }).startupDrainSpacingMs = 5
     const messagesPerThread = 3
     const threads = Array.from({ length: 4 }, (_, i) =>
       store.createThread(`Startup bound ${i}`)
@@ -539,16 +538,20 @@ describe('OrchestratorService concurrent threads and queue', () => {
       })
     }
 
-    let inFlight = 0
-    let maxInFlight = 0
+    const inFlight = new Map<string, number>()
+    let maxInFlightPerThread = 0
     let totalChatCalls = 0
-    scriptTurns(async () => {
-      inFlight += 1
-      maxInFlight = Math.max(maxInFlight, inFlight)
+    // Every first turn waits until all threads have one running: a drain that waits for one thread's turn to end
+    // before it starts the next never gets there, and the test times out.
+    let allStarted!: () => void
+    const everyThreadRunning = new Promise<void>((resolve) => (allStarted = resolve))
+    scriptTurns(async (input) => {
+      inFlight.set(input.threadId, (inFlight.get(input.threadId) ?? 0) + 1)
+      maxInFlightPerThread = Math.max(maxInFlightPerThread, inFlight.get(input.threadId)!)
       totalChatCalls += 1
-      // Long enough that chained internal drains would overlap another thread's turn.
-      await new Promise((r) => setTimeout(r, 40))
-      inFlight -= 1
+      if ([...inFlight.values()].filter((n) => n > 0).length === threads.length) allStarted()
+      await everyThreadRunning
+      inFlight.set(input.threadId, inFlight.get(input.threadId)! - 1)
       return 'ok'
     })
     orch.setPersistCallback((threadId) => {
@@ -582,9 +585,8 @@ describe('OrchestratorService concurrent threads and queue', () => {
       { timeout: 45_000 }
     )
 
-    // STARTUP_QUEUE_DRAIN_CONCURRENCY is 2 — never exceeded even with multi-item chains.
-    expect(maxInFlight).toBeLessThanOrEqual(2)
-    expect(maxInFlight).toBeGreaterThan(0)
+    // One turn per thread at a time, and every message ran once.
+    expect(maxInFlightPerThread).toBe(1)
     expect(totalChatCalls).toBe(totalMessages)
   })
 

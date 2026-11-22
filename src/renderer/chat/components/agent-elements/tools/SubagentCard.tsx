@@ -4,6 +4,7 @@ import type { SubagentCardModel } from "../../../adapters/subagentCards";
 import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { isSubagentStartTool } from "../../../../../shared/subagentTools";
 import { openThread } from "../../../../lib/openThread";
+import { useProviderSnapshotsStore } from "../../../../lib/providerSnapshots";
 import { SubagentAvatar } from "../../../../components/SubagentAvatar";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { subagentBadgeTone, subagentIconId } from "../../../../components/subagentStatus";
@@ -12,6 +13,9 @@ import { Markdown } from "../markdown";
 import { GenericTool } from "./generic-tool";
 import { toolRegistry } from "./tool-registry";
 import { useInheritedProvider, useSubagentCard, useSubagentCards } from "./subagent-cards-context";
+import { useSubagentRevealSeq } from "../../../../stores/chatNavigationStore";
+import { nativeSubagentLabel } from "../../../../components/sideCard/lineageLogic";
+import { useThreadRefMenu } from "../../../../components/ThreadRefMenu";
 import {
   cardElapsedLabel,
   cardGroupElapsedLabel,
@@ -74,11 +78,15 @@ function SubagentRowBody({ card, result, label, inheritedProvider }: { card: Sub
  * took. Clicking opens the subagent's own thread, which holds the full result.
  */
 export function SubagentCardView({ card, now, result, inheritedProvider, onOpen }: SubagentCardViewProps) {
+  // The model's name comes from the providers' lists: a list that loads later renames the row.
+  useProviderSnapshotsStore((state) => state.scopes);
   const title = cardTitle(card);
   const elapsed = cardElapsedLabel(card, now);
   const status = cardStatusLabel(card);
   const childThreadId = card.childThreadId;
-  return (
+  // Right-click: Copy reference, to point another chat's agent at the subagent's thread.
+  const refMenu = useThreadRefMenu(childThreadId ?? undefined);
+  return (<>
     <button
       type="button"
       className="subagent-card"
@@ -89,12 +97,14 @@ export function SubagentCardView({ card, now, result, inheritedProvider, onOpen 
       onClick={() => {
         if (childThreadId) onOpen(childThreadId);
       }}
+      {...refMenu.bind}
     >
       <SubagentRowBody card={card} result={result} label={cardModelLabel(card)} inheritedProvider={inheritedProvider} />
       {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
       {childThreadId && <IconChevronRight className="subagent-card-chevron" aria-hidden="true" />}
     </button>
-  );
+    {refMenu.menu}
+  </>);
 }
 
 /** Replies already read from subagent threads, so reopening a thread does not read them again. */
@@ -143,7 +153,8 @@ function useCardResult(card: SubagentCardModel, visible: boolean): string | null
     };
   }, [key, visible, card.childThreadId]);
   if (!isCardRunning(card) && card.error && card.state !== "done") return card.error;
-  if (!key) return null;
+  // A subagent whose thread is gone quotes the result the daemon kept for its task.
+  if (!key) return card.state === "done" ? card.summary ?? null : null;
   return resultCache.get(key) ?? (fetched?.key === key ? fetched.text : null);
 }
 
@@ -192,13 +203,24 @@ export type NativeSubagentCardViewProps = {
  */
 export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inheritedProvider }: NativeSubagentCardViewProps) {
   const [open, setOpen] = useState(false);
+  // Nest shows this subagent: the card opens on its result and calls, once per request.
+  const revealSeq = useSubagentRevealSeq([card.toolCallId]);
+  const [openedFor, setOpenedFor] = useState<number | null>(null);
+  useProviderSnapshotsStore((state) => state.scopes);
   const title = cardTitle(card);
   const elapsed = cardElapsedLabel(card, now);
   const status = cardStatusLabel(card);
   const result = card.error ?? card.native?.result ?? null;
   // The row's line is plain text; opened, the whole report keeps its Markdown.
   const fullResult = result?.trim() ?? "";
-  const expandable = nestedTools.length > 0 || fullResult.length > 0;
+  const task = card.native?.acp?.prompt;
+  const noActivity = Boolean(card.native?.acp && !nestedTools.length && !fullResult);
+  const itemCount = nestedTools.length + Number(Boolean(fullResult)) + Number(Boolean(task)) + Number(noActivity);
+  const expandable = itemCount > 0;
+  if (revealSeq !== null && revealSeq !== openedFor) {
+    setOpenedFor(revealSeq);
+    if (expandable) setOpen(true);
+  }
   return (
     <div className="subagent-card-native" data-native-subagent={card.toolCallId}>
       <button
@@ -211,12 +233,19 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
         disabled={!expandable}
         onClick={() => setOpen(!open)}
       >
-        <SubagentRowBody card={card} result={result} label={card.native?.agentType ?? null} inheritedProvider={inheritedProvider} />
+        <SubagentRowBody card={card} result={result} label={nativeSubagentLabel(card.native)} inheritedProvider={inheritedProvider} />
         {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
         {expandable && <IconChevronDown className="subagent-card-chevron ui-collapse-chevron" data-open={open || undefined} aria-hidden="true" />}
       </button>
       {expandable && (
-        <Collapse open={open} className="subagent-card-calls" itemCount={nestedTools.length + (fullResult ? 1 : 0)}>
+        <Collapse open={open} className="subagent-card-calls" itemCount={itemCount}>
+          {task && (
+            <div className="subagent-card-full">
+              <strong>Assigned task</strong>
+              <p className="whitespace-pre-wrap">{task}</p>
+            </div>
+          )}
+          {noActivity && <p className="subagent-card-full">No subagent activity reported</p>}
           {fullResult && <NativeSubagentResult text={fullResult} failed={Boolean(card.error)} />}
           {nestedTools.map((nestedPart, index) => {
             const meta = toolRegistry[nestedPart.type];
@@ -288,10 +317,20 @@ export const SubagentTool = memo(function SubagentTool({ part, chatStatus }: { p
 });
 
 /**
+ * A `thread_send` or `thread_update` row that gave the caller's own subagent a follow-up task: that task's card,
+ * like a `continue_subagent` call's. Until the task is known, the row (`children`) stays as it is.
+ */
+export function SubagentFollowUpTool({ part, children }: { part: any; children: ReactNode }) {
+  const card = useSubagentCard(part.toolCallId);
+  if (!card || card.spawning) return <>{children}</>;
+  return <LiveSubagentCard card={card} />;
+}
+
+/**
  * Subagents started in quick succession. Two or more share one card headed by their provider icons, a title,
- * a coloured count of what they are doing and how long they have run. It starts folded, titled with the first
- * subagent's name and how many more ("Archive builder + 2"); opened, it says how many there are ("3 subagents")
- * and lists their rows, each opening its subagent. A single card stands alone.
+ * a coloured count of what they are doing and how long they have run. It starts open: it says how many there are
+ * ("3 subagents") and lists their rows, each opening its subagent. Folded by the user, it is titled with the first
+ * subagent's name and how many more ("Archive builder + 2"). A single card stands alone.
  */
 export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: readonly string[]; children: ReactNode }) {
   const cards = useSubagentCards();
@@ -300,9 +339,16 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
   const running = models.length > 1 && models.some(isCardRunning);
   const now = useTick(running);
   const [chosenOpen, setChosenOpen] = useState<boolean | null>(null);
+  // Nest shows a subagent in this group: the group opens so its card can be reached, once per request.
+  const revealSeq = useSubagentRevealSeq(toolCallIds);
+  const [openedFor, setOpenedFor] = useState<number | null>(null);
+  if (revealSeq !== null && revealSeq !== openedFor) {
+    setOpenedFor(revealSeq);
+    setChosenOpen(true);
+  }
   if (models.length < 2) return <div className="subagent-cards">{children}</div>;
-  // Folded until the user opens it.
-  const open = chosenOpen ?? false;
+  // Open until the user folds it, so every subagent stays in sight after the turn ends.
+  const open = chosenOpen ?? true;
   const { title, parts } = cardGroupSummary(models);
   const folded = cardGroupFoldedTitle(models);
   const stack = cardIconStack(models);

@@ -1,4 +1,5 @@
 import type { NetStatus } from '../../shared/net'
+import { serviceFailureLine } from './errorText'
 
 declare const __MOUSSE_ID_ORIGIN__: string | undefined
 
@@ -179,6 +180,9 @@ export function mousseIdSetupStep(net?: NetStatus): string {
 /** This computer was removed from the user's devices; signing in sets its old identity aside and adds it back. */
 export const REMOVED_FROM_DEVICES = 'This computer was removed from your devices. Sign in to add it back.'
 
+/** Mousse ID folded this computer's devices list into the account's one list (PlusStatus `reason`). */
+export const LIST_MERGED = 'Your devices are now on one list. Sign in again to join it.'
+
 /** Sign-in failure in words a person can act on. */
 export function signInErrorMessage(cause: unknown, origin: string, net?: NetStatus): string {
   let host = origin
@@ -201,6 +205,16 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       return 'Your other computer signed in to this Mousse ID adds this one to your devices. Open Mousse on it, then sign in again.'
     case 'expired':
       return 'The sign-in code expired. Sign in again.'
+    case 'conflict': {
+      // Mousse ID keeps one devices list per account, and this account's is on another computer.
+      const reason = ((cause as { details?: { reason?: unknown } } | null)?.details ?? {}).reason
+      if (reason === 'account_network_kept')
+        return 'Your Mousse ID already has a devices list on another computer. This computer has its own devices or Spaces, so it can’t join that list without leaving them. It keeps working on its own.'
+      if (reason === 'account_network')
+        return 'Your Mousse ID already has a devices list on another computer. Sign in again to join it.'
+      // The daemon words every conflict the same; at sign-in it means this computer still holds the old account.
+      return 'This computer is still set up for an earlier sign-in. Sign out, then sign in again.'
+    }
     case 'bad_delegation':
     case 'revoked':
       if (net?.self?.removed) return REMOVED_FROM_DEVICES
@@ -208,6 +222,7 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       // device list again, so the owner computer only needs to be open.
       return 'This computer was away too long to reconnect on its own. Open Mousse on the computer that owns your devices, then sign in here again to get the renewed device list.'
     default:
-      return String((cause as Error | null)?.message ?? cause)
+      // A dropped or slow call to Mousse's own background service, not a refusal from Mousse ID.
+      return serviceFailureLine(cause) ?? String((cause as Error | null)?.message ?? cause)
   }
 }

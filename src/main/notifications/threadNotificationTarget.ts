@@ -1,8 +1,8 @@
 import type { Thread } from '../../shared/types'
-import { isSubagentThread, nearestVisibleAncestor } from '../../shared/threadLineage'
+import { hiddenFromOwner, isSideChatThread, isSubagentThread, nearestVisibleAncestor } from '../../shared/threadLineage'
 import type { ThreadNotificationKind } from './threadNotification'
 
-type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId'>
+type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId' | 'hidden'>
 
 /** What a notification is about once subagents are folded under their parents. */
 export interface ThreadNotificationTarget {
@@ -12,12 +12,15 @@ export interface ThreadNotificationTarget {
   parentName?: string
   /** The thread that raised the notification, when that is a subagent; viewing it counts as viewing the target. */
   viaThreadId?: string
+  /** Set when that thread is a side chat rather than a subagent. */
+  sideChat?: true
 }
 
 /**
  * Who a notification is for. A subagent finishing or pausing is not news: the parent reports the
  * outcome when it hears back. A subagent's question is, so it is announced under its nearest
- * visible ancestor's name. A thread nobody knows lineage for notifies as itself.
+ * visible ancestor's name. A side chat is read in its parent's panel: only its question is news, announced under the
+ * thread whose panel shows it. A thread nobody knows lineage for notifies as itself.
  */
 export function resolveThreadNotification(
   threadId: string,
@@ -25,6 +28,12 @@ export function resolveThreadNotification(
   threads: ReadonlyMap<string, NotificationThread>
 ): ThreadNotificationTarget | null {
   const thread = threads.get(threadId)
+  if (thread && isSideChatThread(thread)) {
+    const parentId = thread.lineage!.parentThreadId
+    const listedId = threads.has(parentId) ? nearestVisibleAncestor(parentId, [...threads.values()]) : undefined
+    if (kind !== 'question' || !listedId) return null
+    return { threadId: listedId, parentName: threads.get(listedId)?.name?.trim() || undefined, viaThreadId: threadId, sideChat: true }
+  }
   if (!thread || !isSubagentThread(thread)) return { threadId }
   const ancestorId = nearestVisibleAncestor(threadId, [...threads.values()])
   // A subagent whose parent is gone is listed as a normal thread, so it notifies as one.
@@ -55,9 +64,24 @@ export class NotificationThreadIndex {
     if (!rows) return
     const next = new Map<string, NotificationThread>()
     for (const row of rows as NotificationThread[]) {
-      if (row && typeof row.id === 'string') next.set(row.id, { id: row.id, name: row.name, lineage: row.lineage, projectId: row.projectId })
+      if (row && typeof row.id === 'string') {
+        next.set(row.id, { id: row.id, name: row.name, lineage: row.lineage, projectId: row.projectId, ...(row.hidden ? { hidden: true as const } : {}) })
+      }
     }
     this.byProfile.set(profileId, next)
+  }
+
+  /** Puts one thread's row in, or takes it out, from a `threads.row` event (`{ thread }` or `{ removed }`). */
+  noteRow(profileId: string, data: unknown): void {
+    const row = data as { thread?: NotificationThread | null; removed?: unknown } | null
+    const threads = this.byProfile.get(profileId)
+    if (!threads) return
+    const thread = row?.thread
+    if (thread && typeof thread.id === 'string') {
+      threads.set(thread.id, { id: thread.id, name: thread.name, lineage: thread.lineage, projectId: thread.projectId, ...(thread.hidden ? { hidden: true as const } : {}) })
+    } else if (typeof row?.removed === 'string') {
+      threads.delete(row.removed)
+    }
   }
 
   /** Replaces a profile's project names from a project list, or from an event carrying `{ projects }`. */
@@ -71,8 +95,13 @@ export class NotificationThreadIndex {
     this.projectNames.set(profileId, next)
   }
 
-  resolve(profileId: string, threadId: string, kind: ThreadNotificationKind): NamedThreadNotificationTarget | null {
+  /**
+   * What to announce for `threadId`, or null for nothing. A thread a bot keeps out of the sidebar, or a subagent below
+   * one, is quiet unless the person chose to hear about bot threads (`notifications.botThreads`).
+   */
+  resolve(profileId: string, threadId: string, kind: ThreadNotificationKind, notifyBotThreads = false): NamedThreadNotificationTarget | null {
     const threads = this.byProfile.get(profileId) ?? new Map<string, NotificationThread>()
+    if (!notifyBotThreads && hiddenFromOwner(threadId, (id) => threads.get(id))) return null
     const target = resolveThreadNotification(threadId, kind, threads)
     if (!target) return null
     const thread = threads.get(target.threadId)
@@ -85,6 +114,7 @@ export class NotificationThreadIndex {
   listedAs(profileId: string, threadId: string): string | undefined {
     const threads = this.byProfile.get(profileId)
     const thread = threads?.get(threadId)
+    if (threads && thread && isSideChatThread(thread)) return nearestVisibleAncestor(thread.lineage!.parentThreadId, [...threads.values()])
     if (!threads || !thread || !isSubagentThread(thread)) return threadId
     return nearestVisibleAncestor(threadId, [...threads.values()])
   }

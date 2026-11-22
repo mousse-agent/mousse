@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Bot, Sparkles } from '../lib/icons'
 import { openThread } from '../lib/openThread'
+import { showBotThreadInSidebar, useShownBotThread } from '../lib/botThread'
 import { setThreadHidden } from '../lib/threadActions'
 import { useAppStore } from '../stores/appStore'
 import { useBotsStore } from '../stores/botsStore'
@@ -29,6 +30,21 @@ export function ThreadStartedByBarView({ name, onOpenBot, deleted = false, onSho
 }
 
 /**
+ * Top of a bot's thread opened in the bot's chat pane, whose header already names the bot: only Show in sidebar, for a
+ * thread the bot keeps out of the sidebar. It lists the thread again and takes the sidebar back to the thread list.
+ */
+export function BotThreadShowBarView({ onShow }: { onShow: () => Promise<unknown> }) {
+  const [showing, setShowing] = useState(false)
+  return (
+    <div className="thread-computer-bar thread-started-by" role="note">
+      <button type="button" className="thread-started-by-name thread-started-by-show" disabled={showing}
+        title="Not in your sidebar. Show it there."
+        onClick={() => { setShowing(true); void onShow().finally(() => setShowing(false)) }}>Show in sidebar</button>
+    </div>
+  )
+}
+
+/**
  * Top of a thread an agent in another thread started (`thread_create`): "Started by an agent in «title»", whose title
  * opens that thread. A launcher this window no longer lists (deleted) is named as gone, with nothing to open.
  */
@@ -50,7 +66,8 @@ export function ThreadStartedByAgentBarView({ title, onOpen }: { title?: string;
  * `Thread.createdByThreadId`), or when one of the owner's bots started it: the thread names its launcher
  * (`Thread.createdByThreadId`, the bot's chat thread) and keeps the bot's name from then (`Thread.startedByBot`). A thread
  * of another computer whose bot this device may not reach comes without the bot's name or id, and says "Started by a bot".
- * A hidden thread of this computer (`Thread.hidden`) offers Show in sidebar, also once its bot is deleted.
+ * A hidden thread of this computer (`Thread.hidden`) offers Show in sidebar, also once its bot is deleted. In a bot's chat
+ * pane (lib/botThread.ts) only Show in sidebar shows.
  */
 export function ThreadStartedByBar() {
   const thread = useAppStore((state) => state.threads.find((entry) => entry.id === state.activeThreadId))
@@ -68,6 +85,9 @@ export function ThreadStartedByBar() {
   // Showing a hidden thread is asked of the computer that runs it (`threads.setHidden` is not routed).
   const threadId = thread?.id
   const onShow = threadId && thread.hidden && !thread.node ? () => setThreadHidden(threadId, false) : undefined
+  // In the bot's chat pane the header names the bot: no "Started by", only Show in sidebar for a hidden thread.
+  const inBotPane = useShownBotThread()?.threadId === threadId && threadId !== undefined
+  if (inBotPane) return onShow ? <BotThreadShowBarView onShow={() => onShow().then((shown) => { if (shown) showBotThreadInSidebar(threadId) })} /> : null
   // A thread of another computer whose bot this device does not reach names no bot (`botId` empty): "Started by a bot".
   if (started && !started.botId) return <ThreadStartedByBarView name={started.name || HIDDEN_BOT_NAME} />
   if (bot) return <ThreadStartedByBarView name={bot.name} onOpenBot={() => void useChatsStore.getState().openBot(bot.id)} onShow={onShow} />

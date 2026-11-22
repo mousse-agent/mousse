@@ -31,14 +31,13 @@ describe('continue_subagent and the title address (issue #142)', () => {
     })
 
     it('a retried delegate_task replays its first result before the title is checked', async () => {
-      const { parent, steps, out, say, start } = world()
+      const { steps, out, say, start } = world()
       steps['one'] = async (tools) => { out.first = await start(tools, 'API reviewer', {}, 'mcp:retry-1') }
       steps['two'] = async (tools) => { out.retry = await start(tools, 'API reviewer', {}, 'mcp:retry-1') }
       await say('one')
       // The retry arrives in a later run of the same thread: the receipt is scoped to the thread.
       await say('two')
       expect(out.retry).toMatchObject({ delegationId: out.first.delegationId, replayed: true })
-      expect(parent.id).toBeTruthy()
     })
 
     it('titles are unique when renamed: another subagent of the parent holds it, a stranger does not', async () => {
@@ -55,15 +54,6 @@ describe('continue_subagent and the title address (issue #142)', () => {
       expect(d.store.updateThreadMeta(out.b.childThreadId, { name: 'Release notes' }).name).toBe('Release notes')
       const stranger = d.store.createThread('Elsewhere')
       expect(d.store.updateThreadMeta(stranger.id, { name: 'API reviewer' }).name).toBe('API reviewer')
-    })
-
-    it('the same title under another parent is fine', async () => {
-      const { d, parent, steps, out, say, start } = world()
-      steps['go'] = async (tools) => { out.mine = await start(tools, 'API reviewer') }
-      await say('go')
-      const other = d.store.createThread('Other parent')
-      expect(d.store.listAllThreads().some((thread) => thread.name === 'API reviewer' && thread.lineage?.parentThreadId !== other.id)).toBe(true)
-      expect(parent.id).not.toBe(other.id)
     })
   })
 

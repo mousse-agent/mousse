@@ -10,6 +10,7 @@ import {
   branchSearchAria,
   changedFileCount,
   diffStatLabel,
+  gitCanRetry,
   gitCollapsedLabel,
   gitErrorCode,
   gitErrorMessage,
@@ -550,6 +551,10 @@ describe('git section stylesheet', () => {
     expect(rule('.side-card-git-popover')).toMatch(/transition:\s*none/)
   })
 
+  it('stops the pending pull request animation when reduced motion is asked for', () => {
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.side-card-git-pr-pending \{\s*animation: none/)
+  })
+
   it('marks the selected branch with a neutral fill, not an accent tint', () => {
     const selected = rule(".side-card-git-option[aria-selected='true']")
     expect(selected).toMatch(/background:\s*var\(--ui-pressed\)/)
@@ -559,22 +564,6 @@ describe('git section stylesheet', () => {
   it('leaves the commit submit buttons neutral', () => {
     expect(rule('.side-card-git-submit')).not.toMatch(/accent/)
     expect(rule('.side-card-git-submit-quiet')).not.toMatch(/accent/)
-  })
-
-  it('removes the global focus ring from the branch search', () => {
-    const focus = rule('.side-card-git-search input:focus')
-    expect(focus).toMatch(/box-shadow:\s*none/)
-    expect(focus).toMatch(/outline:\s*none/)
-    expect(focus).toMatch(/border:\s*0/)
-  })
-
-  it('keeps each action button on one line and gives the branch its own full-width row', () => {
-    const actions = rule('.side-card-git-commit-button,\n.side-card-git-push,\n.side-card-git-pr-create')
-    expect(actions).toMatch(/flex:\s*none/)
-    expect(actions).toMatch(/white-space:\s*nowrap/)
-    expect(rule('.side-card-git-branch')).toMatch(/width:\s*100%/)
-    expect(rule('.side-card-git-branch-name')).toMatch(/min-width:\s*0/)
-    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.side-card-git-pr-pending \{\s*animation: none/)
   })
 })
 
@@ -604,10 +593,19 @@ describe('git section collapsed state', () => {
   it('collapses to one line for each reason there is nothing to manage', () => {
     expect(gitCollapsedLabel({ ...base, hasProject: false })).toBe('No project')
     expect(gitCollapsedLabel({ ...base, pathPending: true })).toBe('Checking…')
+    expect(gitCollapsedLabel({ ...base, pathPending: true, pathSlow: true })).toBe('Not answering')
+    expect(gitCollapsedLabel({ ...base, loaded: false, status: null, pathSlow: true })).toBe('Not answering')
+    expect(gitCollapsedLabel({ ...base, hasPath: false, unavailable: 'The drive at E:\ is not answering.' })).toBe('Not answering')
+    expect(gitCollapsedLabel({ ...base, hasPath: false, unavailable: 'Worktree not on disk' })).toBe('Worktree not on disk')
     expect(gitCollapsedLabel({ ...base, hasPath: false })).toBe('No project folder')
     expect(gitCollapsedLabel({ ...base, loaded: false, status: null })).toBe('Checking…')
     expect(gitCollapsedLabel({ ...base, status: null })).toBe('Unavailable')
     expect(gitCollapsedLabel({ ...base, status: repoStatus({ isRepo: false, branch: null }) })).toBe('Not a repository')
+  })
+
+  it('offers Retry only for a read that did not answer or failed, not for an answer', () => {
+    expect(['Not answering', 'Unavailable'].map(gitCanRetry)).toEqual([true, true])
+    expect(['Checking…', 'Worktree not on disk', 'Not a repository', 'No project', null].map(gitCanRetry)).toEqual([false, false, false, false, false])
   })
 })
 

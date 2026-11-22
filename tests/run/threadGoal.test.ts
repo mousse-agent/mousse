@@ -229,6 +229,9 @@ describe('a thread goal', () => {
     // What a daemon that died mid-goal leaves: the goal working, and its next turn queued on disk.
     d.store.updateThreadMeta(id, { goal: newGoal('Ship it', 20, new Date().toISOString(), 'goal-before-restart') }, { touch: false })
     d.orch.enqueueForThread(id, { content: CONTINUE_TEXT, mode: 'agent' }, { source: 'goal', internal: true })
+    // The thread list writes its entry changes within a second (`STANDALONE_INDEX_WRITE_MS`); a goal that has been
+    // working longer than that is in the list a restart reads.
+    d.store.flushStandaloneIndex()
     await d.crash()
 
     const second = piAdapter(() => 'continued')
@@ -302,7 +305,7 @@ describe('a thread goal', () => {
     const d = boot(newHome(), piAdapter(() => 'reply'))
     const { id } = thread(d)
     const tool = goalTools(d.orch.mcpToolHost())[0]!
-    const turn = { threadId: id, subagent: false, discovery: false } as never
+    const turn = { threadId: id, subagent: false } as never
     expect(tool.available!(turn)).toMatch(/no goal/)
     const outcome = await report(d, { threadId: id, runId: 'run:none' }, { status: 'met', reason: 'Done.' })
     expect(outcome).toMatchObject({ isError: true })

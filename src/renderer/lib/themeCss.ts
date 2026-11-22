@@ -123,6 +123,9 @@ export function sanitizeThemeCss(css: string, maxLength: number = THEME_CSS_MAX_
   return { css: second, dropped }
 }
 
+/** What paints the window frame around the chat pane: the title bar, the rail and the sidebar (vscode-compat names). */
+const FRAME_TOKENS = ['--vscode-titleBar-activeBackground', '--vscode-activityBar-background', '--vscode-sideBar-background']
+
 /** `#rgb` or `#rrggbb` as `r, g, b`; null for any other color. */
 function hexChannels(value: string): string | null {
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim())?.[1]
@@ -137,62 +140,104 @@ function hexChannels(value: string): string | null {
  */
 export function themeTokensCss(colors: Record<string, string>): string {
   const declarations: string[] = []
+  const applied = new Set<string>()
   for (const [name, value] of Object.entries(colors)) {
     if (!isThemeTokenName(name) || !isThemeColorValue(value)) continue
+    applied.add(name)
     declarations.push(`${name}: ${value.trim()} !important;`)
     const channels = hexChannels(value)
     if (channels && !(`${name}-rgb` in colors)) declarations.push(`${name}-rgb: ${channels} !important;`)
   }
-  return declarations.length ? `:root { ${declarations.join(' ')} }` : ''
+  const rules: string[] = []
+  if (applied.has('--surface-base')) {
+    // The window frame is one colour: the title bar (the Settings page's too), the rail, the sidebar and the edges
+    // around the chat pane all take --surface-base, and so does the acrylic tint. The base themes set their own frame
+    // colours (Mousse Dark sets them inline to #000000), which would otherwise keep parts of the frame their colour.
+    for (const name of FRAME_TOKENS) declarations.push(`${name}: var(--surface-base) !important;`)
+    if ('--surface-base-rgb' in colors || hexChannels(colors['--surface-base'])) declarations.push('--acrylic-base-rgb: var(--surface-base-rgb) !important;')
+    // Under acrylic the window stays see-through (the glass is tinted by --acrylic-base-rgb instead).
+    rules.push(`html:not([data-acrylic='true']) { --app-window-bg: var(--surface-base) !important; }`)
+  } else if (applied.has('--surface-strong')) {
+    // An older theme that colours only --surface-strong keeps its coloured sidebar.
+    declarations.push('--vscode-sideBar-background: var(--surface-strong) !important;')
+  }
+  return declarations.length ? [`:root { ${declarations.join(' ')} }`, ...rules].join('\n') : ''
 }
 
 /**
- * While a person is asked to decide something (approve or deny a tool, allow a bot, a device or a browser), the page
- * shows Mousse as it is, without any theme: those controls carry `data-mousse-decision`, and while one is on the page
- * the theme sheet is off. A theme could otherwise relabel, hide, move or cover Approve and Deny.
+ * Where a person is asked to decide something (approve or deny a tool, allow a bot, a device or a browser), the
+ * controls carry `data-mousse-decision`.
  */
 export const DECISION_SELECTOR = '[data-mousse-decision]'
 
+/**
+ * A page, panel or menu that holds access settings in its own layout (Settings, the Automations page, a bot's About
+ * panel, the permission menu) carries `data-mousse-guarded`.
+ */
+export const GUARDED_SELECTOR = '[data-mousse-guarded]'
+
+/** The theme's color tokens: always on while the theme is. */
+let tokenSheet: CSSStyleSheet | null = null
+/** The theme's own CSS. */
 let themeSheet: CSSStyleSheet | null = null
 let guard: MutationObserver | null = null
+/** Whether a user theme is on: the guard runs while one is. */
+let themeActive = false
 
-/** Turns the theme sheet off while a decision is on the page, and on again once none is. */
-function syncDecisionPause(doc: Document): void {
-  if (!themeSheet) return
-  const paused = doc.querySelector(DECISION_SELECTOR) !== null
-  if (themeSheet.disabled !== paused) themeSheet.disabled = paused
-  doc.documentElement.toggleAttribute('data-user-theme-paused', paused)
+/**
+ * While a decision or a guarded page is on screen, only the theme's own CSS is off, so it cannot relabel, hide, move or
+ * cover Approve, Deny or a permission control. The theme never goes off as a whole: its colors and its wallpaper stay.
+ */
+function syncCssGuard(doc: Document): void {
+  const cssOff = themeActive && doc.querySelector(`${DECISION_SELECTOR}, ${GUARDED_SELECTOR}`) !== null
+  if (themeSheet && themeSheet.disabled !== cssOff) themeSheet.disabled = cssOff
+}
+
+/**
+ * Starts or stops the guard. A mutation observer turns the theme's CSS off before the next frame whenever a decision or
+ * a guarded page appears (mutation records are delivered before the page paints).
+ */
+export function setUserThemeActive(active: boolean, doc: Document = document): void {
+  themeActive = active
+  if (active && !guard && typeof MutationObserver === 'function') {
+    guard = new MutationObserver(() => syncCssGuard(doc))
+    guard.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-mousse-decision', 'data-mousse-guarded'] })
+  } else if (!active) {
+    guard?.disconnect()
+    guard = null
+  }
+  syncCssGuard(doc)
 }
 
 /**
  * Puts a theme on the page after the app's own styles (an adopted sheet comes after the document's): its color tokens
- * and its CSS, cleaned by `sanitizeThemeCss`. Empty takes it off. A mutation observer pauses it before the next frame
- * whenever a decision appears (mutation records are delivered before the page paints). Returns what was dropped.
+ * and its CSS, cleaned by `sanitizeThemeCss`. Empty takes the sheet off; the decision guard stays as
+ * `setUserThemeActive` set it. CSS to apply turns the guard on. Returns what was dropped.
  */
 export function applyThemeCss(css: string, options: { tokens?: Record<string, string> } = {}, doc: Document = document): DroppedCss[] {
   const tokens = themeTokensCss(options.tokens ?? {})
   // CSS over the limit is not applied at all; the colors still are.
   const tooLong = css.length > THEME_CSS_MAX_LENGTH
-  const own = tooLong ? '' : css
-  const { css: safe, dropped } = sanitizeThemeCss(tokens ? `${tokens}\n${own}` : own, THEME_CSS_MAX_LENGTH + tokens.length + 1)
+  const ownCss = sanitizeThemeCss(tooLong ? '' : css, THEME_CSS_MAX_LENGTH)
+  const tokenCss = sanitizeThemeCss(tokens, tokens.length + 1)
+  const dropped = [...tokenCss.dropped, ...ownCss.dropped]
   if (tooLong) dropped.unshift({ text: 'the whole theme CSS', reason: themeCssTooLong(css.length) })
   // A page without constructable sheets (a test DOM) gets no theme at all.
   if (!Array.isArray(doc.adoptedStyleSheets)) return dropped
-  const others = doc.adoptedStyleSheets.filter((sheet) => sheet !== themeSheet)
-  if (!safe) {
+  const others = doc.adoptedStyleSheets.filter((sheet) => sheet !== themeSheet && sheet !== tokenSheet)
+  if (!tokenCss.css && !ownCss.css) {
     if (others.length !== doc.adoptedStyleSheets.length) doc.adoptedStyleSheets = others
-    guard?.disconnect()
-    guard = null
-    doc.documentElement.removeAttribute('data-user-theme-paused')
     return dropped
   }
+  tokenSheet ??= new CSSStyleSheet()
+  tokenSheet.replaceSync(tokenCss.css)
   themeSheet ??= new CSSStyleSheet()
-  themeSheet.replaceSync(safe)
-  syncDecisionPause(doc)
-  if (!doc.adoptedStyleSheets.includes(themeSheet)) doc.adoptedStyleSheets = [...others, themeSheet]
-  if (!guard && typeof MutationObserver === 'function') {
-    guard = new MutationObserver(() => syncDecisionPause(doc))
-    guard.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-mousse-decision'] })
-  }
+  themeSheet.replaceSync(ownCss.css)
+  if (!themeActive) setUserThemeActive(true, doc)
+  else syncCssGuard(doc)
+  // The colors first, then the theme's CSS, as one sheet had them.
+  const ours = [tokenSheet, themeSheet]
+  const current = doc.adoptedStyleSheets
+  if (current.length !== others.length + 2 || current.at(-2) !== tokenSheet || current.at(-1) !== themeSheet) doc.adoptedStyleSheets = [...others, ...ours]
   return dropped
 }

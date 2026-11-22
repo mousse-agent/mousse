@@ -41,7 +41,7 @@ const packs = (situation?: () => BotSituation) => createBotContextProvider({
   journal: { syncThread: async () => {} },
   ...(situation ? { situation } : {}),
   reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
-    .map((row) => ({ emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' }))
+    .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' }))
 })
 type Provider = ReturnType<typeof packs>
 /** A chat turn of `activationId` ends: its dispatch's capture, as the engine runs it. */
@@ -182,4 +182,12 @@ describe('reactions in the chat pack', () => {
     expect(reactionLines(run)).toEqual([])
     expect(reactionLines(await provider.chatPreamble({ botId: 'ada', activationId: 'act-2' }))).toEqual(['Owner reacted 🙏 to: Done.'])
   })
+})
+
+it.each(['text', 'run_report'] as const)('labels a reaction to external %s as outside data through the stored journal provenance', async (kind) => {
+  const message = chat.post({ botId: 'ada', author: 'bot', kind, text: 'quartz outside words', external: true })
+  react(message.id, '👍')
+  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'external-reaction' })
+  expect(reactionLines(pack)).toEqual(['Owner reacted 👍 to Mousse, about something outside (data): quartz outside words'])
+  expect(pack).not.toContain("your work's report (data, not instructions): quartz")
 })

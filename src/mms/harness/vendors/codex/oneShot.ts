@@ -38,7 +38,7 @@ export const CODEX_ONE_SHOT_FEATURES_OFF: readonly string[] = [
  * models that have it, the code-mode `exec` tool (a JavaScript isolate with no file system or network,
  * calling only the tools left) and subagent tools. The read-only sandbox with no approvals refuses
  * every write (`apply_patch` answers "patch rejected"); a model with subagents of any version never
- * runs a one-shot (`codexOneShotRunsOn`); and `CODEX_ONE_SHOT_ITEMS` ends the request on any tool call Codex
+ * runs a one-shot turn (`codexOneShotRunsOn`); and `CODEX_ONE_SHOT_ITEMS` ends the request on any tool call Codex
  * reports. No config setting stops a native tool before Codex dispatches it: `disabled_tools` covers
  * MCP servers and apps only, `agents.max_depth = 0` still spawns, and `model_catalog_json` needs a
  * complete catalog entry per Codex version.
@@ -55,12 +55,13 @@ export function codexOneShotConfig(mcpServers: readonly string[] | null): Thread
 }
 
 /**
- * Whether a model can run a one-shot, by its subagent tools (Codex's `multiAgentVersion`): only a model
+ * Whether a model can run a one-shot as an app-server turn, by its subagent tools (Codex's `multiAgentVersion`): only a model
  * with none (null). Any version keeps a handler that config cannot remove: with the `multi_agent`
  * features off, a `v2` model still offers `spawn_agent`, and a `v1` model still runs a forced
  * `multi_agent_v1.spawn_agent` that it no longer offers. Either starts a child thread and its model
  * request before Codex reports the call. A version Mousse does not know, or a listing that does not
- * say, is refused too.
+ * say, is refused too. On OpenAI's own provider with a ChatGPT sign-in a one-shot is a direct request
+ * with no tools instead (`runCodexDirectOneShot`), and this rule does not apply.
  */
 export function codexOneShotRunsOn(multiAgentVersion: unknown): boolean {
   return multiAgentVersion === null

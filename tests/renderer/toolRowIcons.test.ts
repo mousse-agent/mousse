@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ToolRenderer } from '../../src/renderer/chat/components/agent-elements/tools/tool-renderer'
 import { BashTool } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { toolIconFor } from '../../src/renderer/chat/components/agent-elements/tools/tool-icon'
+import { MousseToolIcon } from '../../src/renderer/chat/components/agent-elements/tools/mousse-tool-icon'
 import { Eye, RowEdit, RowSearch, RowSubagent, RowTodo, RowWeb, Terminal, Wrench } from '../../src/renderer/lib/icons'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -52,6 +53,8 @@ describe('the icon of each tool', () => {
     ['tool-Task', RowSubagent],
     ['tool-Agent', RowSubagent],
     ['tool-mcp__tracker__search_issues', Wrench],
+    ['tool-mcp__mousse__thread_create', MousseToolIcon],
+    ['tool-mcp__mousse-relay__github__get_issue', Wrench],
     ['tool-SomethingNew', Wrench],
   ] as const)('%s', (type, Icon) => {
     expect(toolIconFor(type)).toBe(Icon)
@@ -68,6 +71,7 @@ describe('the icon of each tool', () => {
     ['a page fetch', { type: 'tool-WebFetch', input: { url: 'https://example.com/a' } }, RowWeb],
     ['a to-do list', { type: 'tool-TodoWrite', input: { todos: [{ content: 'Read', status: 'completed' }, { content: 'Fix', status: 'pending' }] } }, RowTodo],
     ['an MCP tool', { type: 'tool-mcp__tracker__search_issues', input: { query: 'crash' } }, Wrench],
+    ['a Mousse tool', { type: 'tool-mcp__mousse__thread_create', input: { title: 'Fix login' } }, MousseToolIcon],
   ] as const)('%s row draws its icon, running then done', (_name, part, Icon) => {
     render({ ...part, toolCallId: 't1', state: 'input-available' }, 'streaming')
     expect(rowIcon()?.getAttribute('data-state')).toBe('running')
@@ -84,6 +88,30 @@ describe('the icon of each tool', () => {
       expect(shape(rowIcon()?.querySelector('svg'))).toBe(drawingOf(Icon))
       expect(text()).toMatch(/^Failed/)
     }
+  })
+
+  it('a Mousse tool says what it does in words, running, done and failed', () => {
+    const row = (tool: string, state: string, chatStatus?: string) => {
+      render({ type: `tool-mcp__mousse__${tool}`, toolCallId: `m-${tool}`, state, input: {} }, chatStatus)
+      return text()
+    }
+    expect(row('thread_create', 'input-available', 'streaming')).toBe('Creating a thread in Mousse')
+    expect(row('thread_create', 'output-available')).toBe('Created a thread in Mousse')
+    expect(row('thread_create', 'output-error')).toBe("Couldn't create a thread in Mousse")
+    expect(shape(rowIcon()?.querySelector('svg'))).toBe(drawingOf(MousseToolIcon))
+    expect(row('thread_send', 'input-available', 'streaming')).toBe('Messaging a thread in Mousse')
+    expect(row('thread_read', 'input-available', 'streaming')).toBe('Reading a thread in Mousse')
+    expect(row('remind', 'input-available', 'streaming')).toBe('Setting a reminder')
+    expect(row('memory_save', 'input-available', 'streaming')).toBe('Saving to memory')
+    expect(row('schedule_create', 'output-available')).toBe('Created a schedule in Mousse')
+    expect(row('work_start', 'input-available', 'streaming')).toBe('Starting work in Mousse')
+    expect(row('profiler_overview', 'input-available', 'streaming')).toBe('Checking performance in Mousse')
+    // A Mousse tool without words of its own still says it is Mousse's.
+    expect(row('brand_new_thing', 'input-available', 'streaming')).toBe('Running brand new thing in Mousse')
+    expect(row('brand_new_thing', 'output-available')).toBe('Ran brand new thing in Mousse')
+    // Another server's tool keeps its own name and the wrench.
+    render({ type: 'tool-mcp__tracker__search_issues', toolCallId: 'o1', state: 'output-available', input: {} })
+    expect(text()).toBe('Searched Issues')
   })
 
   it('the thinking row keeps its own turning icon', () => {

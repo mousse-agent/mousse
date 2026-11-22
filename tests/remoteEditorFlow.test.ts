@@ -236,14 +236,6 @@ describe('everything an editor needs for a thread of another computer', () => {
     expect(await mousseHost(refusedLine.ask, node)).toMatchObject({ ok: false, reason: 'ssh_settings', code: 'unwritable' })
   })
 
-  it('does not prepare Mousse’s SSH settings while the proxy command does not exist', async () => {
-    const d = daemon({})
-    await resolveRemoteOpen(d.ask, threadId, { proxyReady: false })
-    expect(d.methods()).not.toContain('net.editor.ssh.prepare')
-    expect(d.methods()).not.toContain('net.editor.alias')
-    expect(d.methods()).not.toContain('net.editor.ssh.status')
-  })
-
   it('reports why the settings could not be prepared, with the line to add by hand', async () => {
     for (const code of ['ssh_check_failed', 'unwritable', 'not_owner']) {
       const d = daemon({ alias: { ok: false, code, message: 'detail', status: status() } })

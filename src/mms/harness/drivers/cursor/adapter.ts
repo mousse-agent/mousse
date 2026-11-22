@@ -76,6 +76,7 @@ export class CursorAdapter implements ProviderAdapter {
       // SPEC §15.2: the Mousse MCP server over HTTP, and the shared guidance in the first prompt.
       mcp: host.bridge?.mcp ?? null,
       ...(host.bridge?.sessionInstructions ? { orchestrationInstructions: host.bridge.sessionInstructions } : {}),
+      ...(host.bot ? { bot: true as const } : {}),
       drainSteer: () => ctl.drainSteer(),
       // Per drain, with its token (docs/design/steer-and-interruptions.md §2.6, §2.7): read only once the run that
       // carries it started, handed back otherwise.
@@ -86,7 +87,11 @@ export class CursorAdapter implements ProviderAdapter {
       steerTaken: (token) => ctl.steerTaken?.(token),
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
       onBoundary: () => sink.boundary?.(),
-      onProviderTurn: () => sink.providerTurn?.(),
+      onProviderTurn: () => {
+        sink.providerTurn?.()
+        // The run was sent to the agent: the turn is no longer starting, and the model is next.
+        sink.status?.('waiting')
+      },
       onSteer: (steer, token) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.

@@ -6,17 +6,20 @@ import { RENDERER_ERROR_CHANNEL, type RendererErrorReport } from '../shared/diag
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import { MAX_STAGED_FILE_BYTES, stagedFileTooLargeText } from '../shared/attachedFilesMarker'
+import { MAX_DRAG_BYTES, type FileDragAnswer, type FileDragRequest } from '../shared/fileDrag'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
+import type { StoredWallpaperInfo, WallpaperPieceResult } from '../shared/themes/wallpaperImage'
 import type { LocalTtsModelId, LocalTtsModelStatus, NativeSpeechResult, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
 import type { SubagentSummary, SubagentsUpdatedEvent } from '../shared/subagents'
+import type { ThreadBackgroundWork } from '../shared/backgroundWork'
 import type {
   Agent,
   BrowserBounds,
@@ -29,6 +32,7 @@ import type {
   FileAsset,
   EditorInfo,
   FileEntry,
+  FileText,
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
@@ -63,6 +67,9 @@ import type {
   GitPushOptions,
   GitScope,
   GitStatusSnapshot,
+  GitHeadsChangedEvent,
+  GitHeadsRequest,
+  GitHeadsResult,
   MainView,
   OrchestratorResponse,
   PermissionMode,
@@ -85,6 +92,7 @@ import type {
   TaskStatus,
   Thread,
   ThreadListVersion,
+  ThreadRowPayload,
   ThreadActivitySnapshot,
   TurnState,
   TurnStateSnapshot,
@@ -111,6 +119,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
+import type { WarmStartView } from '../shared/warmStart'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
@@ -120,7 +129,9 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
+import type { UsageHistoryRequest, UsageHistoryResponse } from '../shared/usageHistory'
+import type { LimitTrendRange, LimitTrendsResponse } from '../shared/limitTrends'
+import type { CliInstallEvent, ProviderUsage, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { SetVendorSettingInput, VendorSettingsView } from '../shared/harness/vendorSettings'
 import type { MoveResult } from '../shared/harness/move'
@@ -201,6 +212,9 @@ let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number
 async function attachmentPath(file: File, target: { kind: 'bot' } | { kind: 'thread'; threadId: string | null }): Promise<string> {
   return webUtils.getPathForFile(file) || ipcRenderer.invoke('attachments:stage', target, file.name, new Uint8Array(await file.arrayBuffer()))
 }
+
+/** The warm start is read once per page load (`app.warmStartView`). */
+let warmStartTaken = false
 
 const api = {
   platform: process.platform,
@@ -383,6 +397,9 @@ const api = {
     getTurnSnapshot: (): Promise<TurnStateSnapshot> => ipcRenderer.invoke('turn:getSnapshot'),
     retryConnection: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:retryConnection', threadId),
+    /** Retry on a thread whose worktree could not be set up: sends the message it kept again, once. */
+    retrySetup: (threadId: string): Promise<{ ok: boolean; queued: boolean }> =>
+      ipcRenderer.invoke('orchestrator:retrySetup', threadId),
     onConnectionFailed: (cb: () => void): (() => void) => {
       const handler = () => cb()
       ipcRenderer.on('orchestrator:connection-failed', handler)
@@ -529,10 +546,17 @@ const api = {
       ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
     readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
-    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
-      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
-    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
+    readFileInWorkspace: (filePath: string, threadId: string, expectedRoot?: string): Promise<FileText & { workspaceRoot?: string }> =>
+      ipcRenderer.invoke('fs:readFile', filePath, undefined, threadId, undefined, { expectedRoot }),
+    readFileDetails: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileText> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root, true),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string, details?: boolean): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root, details),
+    /** A preview's size and write time (`mtimeMs` absent from an older daemon), without reading it. */
+    assetStamp: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<{ size: number; mtimeMs?: number }> =>
+      ipcRenderer.invoke('fs:assetStamp', filePath, projectId, threadId, root),
+    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string, expectedRoot?: string): Promise<void> =>
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root, expectedRoot),
     /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
     listDrives: (): Promise<{ home: string; drives: Array<{ path: string; label: string; volume?: string }> }> => ipcRenderer.invoke('fs:listDrives'),
     search: (
@@ -561,6 +585,15 @@ const api = {
     // Reads name their folder by scope, like the mutations: the thread when it is the thread's own worktree, else the project.
     status: (scope: GitScope): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', scope),
+    /** The branches thread cards name, from Git's files: no Git process. */
+    heads: (request: GitHeadsRequest): Promise<GitHeadsResult> =>
+      ipcRenderer.invoke('git:heads', request),
+    /** Mousse changed these threads' branches (made a worktree, renamed its branch). */
+    onHeadsChanged: (cb: (event: GitHeadsChangedEvent) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: GitHeadsChangedEvent): void => cb(payload)
+      ipcRenderer.on('git:headsChanged', handler)
+      return () => ipcRenderer.removeListener('git:headsChanged', handler)
+    },
     log: (limit: number | undefined, scope: GitScope): Promise<GitCommit[]> =>
       ipcRenderer.invoke('git:log', limit, scope),
     branches: (scope: GitScope): Promise<GitBranchInfo> =>
@@ -706,9 +739,29 @@ const api = {
     /** Shows the file or folder selected in the computer's file manager. */
     showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:showInFolder', path),
     /** Saves a copy where the person picks; the path it was saved to, or null when they closed the dialog. */
-    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path),
-    /** Puts a picture file on the clipboard as an image. */
-    copyImage: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:copyImage', path)
+    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path)
+  },
+  /**
+   * Dragging a file out of the window into Finder, File Explorer or another app. Call from a `dragstart` handler that
+   * cancelled the window's own drag; the app starts the system's drag while the mouse button is still down.
+   */
+  fileDrag: {
+    /** A file of the thread's folder, an attached file by its path, or bytes with a name. */
+    start: (request: FileDragRequest): Promise<FileDragAnswer> => ipcRenderer.invoke('files:startDrag', request),
+    /**
+     * A file the composer holds: its bytes under its name, or, for a file too large to hand over, its own path on
+     * this computer (which the app drags only when it belongs to the thread).
+     */
+    startComposerFile: async (file: File, scope: { threadId?: string; projectId?: string }): Promise<FileDragAnswer> => {
+      const path = webUtils.getPathForFile(file)
+      if (file.size > MAX_DRAG_BYTES) {
+        if (!path) return { refused: `${file.name} is too large to drag.` }
+        return ipcRenderer.invoke('files:startDrag', { ...scope, item: { kind: 'attachment', path, name: file.name } })
+      }
+      return ipcRenderer.invoke('files:startDrag', { ...scope, item: { kind: 'bytes', name: file.name, data: new Uint8Array(await file.arrayBuffer()) } })
+    },
+    /** Where a dropped file is on this computer; empty when it has no path (a pasted one). */
+    pathOf: (file: File): string => webUtils.getPathForFile(file)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
@@ -766,6 +819,25 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, settings: MousseSettings) => cb(settings)
       ipcRenderer.on('settings:changed', handler)
       return () => ipcRenderer.removeListener('settings:changed', handler)
+    }
+  },
+  /** Theme wallpapers, kept by the daemon (`WallpaperStore`). Every call names the profile it is for. */
+  wallpapers: {
+    /** Opens the file dialog and stores the chosen image; null when cancelled. Rejects when the file cannot be used. */
+    choose: (profileId: string): Promise<StoredWallpaperInfo | null> => ipcRenderer.invoke('appearance:chooseWallpaper', profileId),
+    /** Stores an image carried as base64 (a theme file's wallpaper). */
+    importBytes: (profileId: string, dataBase64: string): Promise<StoredWallpaperInfo> =>
+      ipcRenderer.invoke('appearance:importWallpaperBytes', profileId, dataBase64),
+    /** A piece of the original (no bucket) or of a display copy; `missing` when it is not stored. */
+    read: (profileId: string, id: string, bucket: number | null, offset: number): Promise<WallpaperPieceResult> =>
+      ipcRenderer.invoke('appearance:readWallpaper', profileId, id, bucket, offset),
+    saveCopy: (profileId: string, id: string, bucket: number, dataBase64: string, replace: boolean): Promise<boolean> =>
+      ipcRenderer.invoke('appearance:saveWallpaperCopy', profileId, id, bucket, dataBase64, replace),
+    displayLongEdge: (): Promise<number> => ipcRenderer.invoke('appearance:displayLongEdge'),
+    onDisplaysChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('appearance:displaysChanged', handler)
+      return () => ipcRenderer.removeListener('appearance:displaysChanged', handler)
     }
   },
   lineEdits: {
@@ -875,7 +947,7 @@ const api = {
     resetWorktreeFolder: (): Promise<{ status: import('../shared/storage').WorktreeFolderStatus }> => storageInvoke('storage:resetWorktreeFolder')
   },
   workspace: {
-    getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
+    getStatus: (threadId: string, fresh?: boolean): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId, fresh),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
     /**
@@ -915,7 +987,10 @@ const api = {
   },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
-    open: (): Promise<Project | null> => ipcRenderer.invoke('projects:open'),
+    /** Asks for a folder; or opens `path` as it is, or with `create` makes it first as a new empty Git project. */
+    open: (target?: { path: string; create?: boolean }): Promise<Project | null> => ipcRenderer.invoke('projects:open', target),
+    /** Asks where new and cloned projects go; null when cancelled. */
+    chooseFolder: (): Promise<string | null> => ipcRenderer.invoke('projects:chooseFolder'),
     remove: (projectId: string): Promise<void> =>
       ipcRenderer.invoke('projects:remove', projectId),
     rename: (projectId: string, name: string): Promise<Project> =>
@@ -941,6 +1016,16 @@ const api = {
     }
   },
   threads: {
+    /** What the thread runs in the background besides its subagents (the composer's status row). */
+    backgroundWork: (threadId: string): Promise<ThreadBackgroundWork> => ipcRenderer.invoke('threads:backgroundWork', threadId),
+    /** Stops one item of it by id (`PROVIDER_BACKGROUND_ID` for the provider's own work); false when it was not running. */
+    stopBackground: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke('threads:stopBackground', threadId, id),
+    /** The daemon's whole picture of a thread's background work, each time it changes. */
+    onBackgroundWork: (cb: (work: ThreadBackgroundWork) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, work: ThreadBackgroundWork) => cb(work)
+      ipcRenderer.on('threads:backgroundWork', handler)
+      return () => ipcRenderer.removeListener('threads:backgroundWork', handler)
+    },
     /**
      * A file attached in a thread's composer as a path on this computer: where it is, or, for a pasted one, a
      * temporary copy under the thread's folder (`new` before the thread is made).
@@ -976,6 +1061,9 @@ const api = {
     /** One image of a message that arrived without its bytes. */
     messageImage: (threadId: string, messageId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
       ipcRenderer.invoke('threads:messageImage', threadId, messageId, index),
+    /** One image of a queued message that arrived without its bytes (a queue list sends large ones by name). */
+    queueImage: (threadId: string, queueItemId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
+      ipcRenderer.invoke('threads:queueImage', threadId, queueItemId, index),
     /** Deletes an archived thread and its subagent threads for good; a thread that is not archived is refused. */
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>
@@ -991,6 +1079,8 @@ const api = {
     /** `/fork`: a new thread from the thread's latest finished turn, selected. */
     /** Forks after the thread's latest finished turn, or after the turn `atRunId` names (a message's `turnId`). */
     fork: (threadId: string, options?: { atRunId?: string }): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId, options),
+    /** A side chat of the thread: a fork of it as it is now, not selected (`Thread.lineage.relationship: 'side'`). */
+    newSideChat: (threadId: string): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:newSideChat', threadId),
     setModel: (
       threadId: string,
       model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
@@ -1019,13 +1109,14 @@ const api = {
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
-    /** When the thread deletes itself for good (`Thread.expiresAt`); null keeps it. */
+    /** When the thread archives itself (`Thread.expiresAt`); null: never. */
     setExpiry: (threadId: string, expiresAt: string | null, stopsRun?: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
-    search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
-      ipcRenderer.invoke('threads:search', query, limit),
+    /** `perThread`: which threads match, one message hit each, from this computer only (the sidebar's filter). */
+    search: (query: string, limit?: number, options?: { perThread?: boolean }): Promise<ThreadSearchResponse> =>
+      ipcRenderer.invoke('threads:search', query, limit, options),
     /** Saves that moved only these threads' `updatedAt` (`threads.touched`), throttled by the service. */
     onTouched: (cb: (touches: Array<{ id: string; updatedAt: string }>) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, touches: Array<{ id: string; updatedAt: string }>) => cb(touches)
@@ -1038,6 +1129,12 @@ const api = {
         Array.isArray(data) ? cb(data) : cb(data.threads, data.version)
       ipcRenderer.on('threads:updated', handler)
       return () => ipcRenderer.removeListener('threads:updated', handler)
+    },
+    /** One thread's change (`threads.row`): its row, or the id of a thread that left the list, with the list version. */
+    onRow: (cb: (row: ThreadRowPayload) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, row: ThreadRowPayload) => cb(row)
+      ipcRenderer.on('threads:row', handler)
+      return () => ipcRenderer.removeListener('threads:row', handler)
     },
     onTitleGenerationFailed: (
       cb: (payload: { threadId: string; error: string }) => void
@@ -1135,6 +1232,18 @@ const api = {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     /** Every provider the usage page shows, with its last reading, before any is read. */
     usageSlots: (): Promise<UsageSlotsResponse> => ipcRenderer.invoke('providers:usageSlots'),
+    /** Keeps a provider read every 5 minutes for a few minutes (a bot header's usage ring); answers with its last reading. */
+    watchUsage: (providerId: string): Promise<{ watched: boolean; cached?: ProviderUsage }> => ipcRenderer.invoke('providers:watchUsage', providerId),
+    /** Each usage reading the service keeps, whichever read made it. */
+    onUsage: (cb: (event: { usage: ProviderUsage }) => void): (() => void) => {
+      const handler = (_: unknown, event: { usage: ProviderUsage }) => cb(event)
+      ipcRenderer.on('providers:usage', handler)
+      return () => ipcRenderer.removeListener('providers:usage', handler)
+    },
+    /** How the 5-hour and weekly limits moved over the range, from the readings kept of them. */
+    limitTrends: (range: LimitTrendRange): Promise<LimitTrendsResponse> => ipcRenderer.invoke('providers:limitTrends', range),
+    /** Tokens and cost over time, read from the coding agents' own logs on this computer. */
+    usageHistory: (request: UsageHistoryRequest): Promise<UsageHistoryResponse> => ipcRenderer.invoke('usage:history', request),
     /** Uses one of a provider's limit-reset credits (the one named, or the next); it asks nothing itself. */
     useLimitReset: (request: { providerId: string; creditId?: string }): Promise<UseLimitResetResponse> =>
       ipcRenderer.invoke('providers:useLimitReset', request),
@@ -1307,6 +1416,11 @@ const api = {
       return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
+  /** Settings → Computer use. */
+  computerUse: {
+    /** The system's file picker for a Cua Driver file; null when the person cancels. */
+    chooseDriver: (): Promise<string | null> => ipcRenderer.invoke('computerUse:chooseDriver')
+  },
   /** The profiler's memory monitor (Settings → Labs, and its notice). */
   diagnostics: {
     /** An error in this window's page, for main's `logs/renderer-errors.log`. Nothing is answered. */
@@ -1335,10 +1449,19 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
+    /**
+     * What this window's profile showed last time, to show until the service answers (display only). Synchronous, so
+     * the window's first frame shows it; answered once per page load, then null.
+     */
+    warmStartView: (): WarmStartView | null => {
+      if (warmStartTaken) return null
+      warmStartTaken = true
+      return (ipcRenderer.sendSync('app:warmStartView') as WarmStartView | null) ?? null
+    },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
-    getFilesRoot: (threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('app:getFilesRoot', threadId),
+    getFilesRoot: (threadId?: string | null, fresh?: boolean): Promise<string> =>
+      ipcRenderer.invoke('app:getFilesRoot', threadId, fresh),
     restart: (): Promise<void> => ipcRenderer.invoke('app:restart'),
     navigateMainView: (view: MainView): Promise<void> =>
       ipcRenderer.invoke('app:navigateMainView', view),
@@ -1400,6 +1523,22 @@ const api = {
       return () => ipcRenderer.removeListener('net:editor-asks', handler)
     }
   },
+  netEngine: {
+    /** A profile's new networking changed (its switch, helper, a device or its connection): read `netEngine.status` again. */
+    onChanged: (cb: (change: { profileId?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, change: { profileId?: string }) => cb(change)
+      ipcRenderer.on('netEngine:changed', handler)
+      return () => ipcRenderer.removeListener('netEngine:changed', handler)
+    },
+    /** A `mousse://pair` link reached Mousse: take it with `takePairLink`. */
+    onPairLink: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('netEngine:pairLink', handler)
+      return () => ipcRenderer.removeListener('netEngine:pairLink', handler)
+    },
+    /** The `mousse://pair` link waiting for a window, once (null when none). */
+    takePairLink: (): Promise<string | null> => ipcRenderer.invoke('netEngine:takePairLink')
+  },
   /** In-app updates from GitHub Releases (src/main/updates). */
   updates: {
     getState: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.getState),
@@ -1444,7 +1583,9 @@ const api = {
   },
   clipboard: {
     showCopyMenu: (x: number, y: number, text: string): Promise<void> =>
-      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
+      ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text),
+    /** Puts a picture, as PNG bytes, on the clipboard as an image that other apps paste. */
+    writeImage: (png: Uint8Array): Promise<void> => ipcRenderer.invoke('clipboard:writeImage', png)
   },
   dialog: {
     /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */

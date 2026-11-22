@@ -1,4 +1,4 @@
-import type { ThreadActivityState } from './types'
+import type { ThreadActivityState, TurnPhase } from './types'
 
 /**
  * How much a thread needs the person, worst first: it waits for an answer or an approval, it is
@@ -43,6 +43,32 @@ export function threadStatus(activity: ThreadActivityState | undefined, awaitsAp
   }
 }
 
+/** What a link to a thread says of it: its live status, or how its latest run ended once nothing is going on. */
+export type ThreadLinkStatus = ThreadStatus | 'failed'
+
+/**
+ * The status a thread link and its card show: the live status while the thread works, waits or needs the person;
+ * once it is quiet, how its latest run ended, so Failed and Done stay after the thread was seen: the phase its latest
+ * turn ended in this session (`lastPhase`), else what its metadata kept (`lastRun`, `Thread.lastRun`), which outlives
+ * a restart. A stopped run is quiet. `setupFailed`: its last message did not start.
+ */
+export function threadLinkStatus(
+  activity: ThreadActivityState | undefined,
+  lastPhase: TurnPhase | undefined,
+  awaitsApproval = false,
+  setupFailed = false,
+  lastRun?: 'done' | 'failed'
+): ThreadLinkStatus {
+  const live = threadStatus(activity, awaitsApproval)
+  if (live !== 'quiet' && live !== 'done') return live
+  if (setupFailed) return 'failed'
+  if (live === 'done') return 'done'
+  if (lastPhase === 'failed') return 'failed'
+  if (lastPhase === 'completed') return 'done'
+  if (lastPhase === 'stopped') return 'quiet'
+  return lastRun ?? 'quiet'
+}
+
 /** The attention level of a thread with this activity. */
 export function threadAttention(activity: ThreadActivityState | undefined): ThreadAttention {
   return ATTENTION_OF[threadStatus(activity)]
@@ -65,6 +91,15 @@ export function worstOf(levels: Iterable<ThreadAttention>): ThreadAttention {
 }
 
 /** "1 thread needs you", "3 threads need you": the one phrase every surface uses for the count. */
-export function needsMeLabel(count: number): string {
-  return count === 1 ? '1 thread needs you' : `${count} threads need you`
+export function needsMeLabel(count: number, bots = 0): string {
+  if (bots === 0) return count === 1 ? '1 thread needs you' : `${count} threads need you`
+  const botLabel = bots === 1 ? '1 bot' : `${bots} bots`
+  if (count === 0) return `${botLabel} ${bots === 1 ? 'needs' : 'need'} you`
+  const threadLabel = count === 1 ? '1 thread' : `${count} threads`
+  return `${threadLabel} and ${botLabel} need you`
+}
+
+/** The app badge counts threads and bots together. Thread-only lists keep `needsMeLabel`. */
+export function attentionCountLabel(count: number): string {
+  return count === 1 ? '1 item needs you' : `${count} items need you`
 }

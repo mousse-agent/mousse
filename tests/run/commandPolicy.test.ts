@@ -77,14 +77,24 @@ describe('steerDelivery (docs/design/steer-and-interruptions.md §2.2)', () => {
   const agent = { person: false }
   const hold = (steerBoundary: 'announce' | 'start', steer: ProviderCapabilities['steer'] = 'interrupt_restart') => caps({ steer, steerBoundary })
 
-  it.each(['announce', 'start'] as const)('a person\'s steer on a %s provider: forced cuts, a tool or the window holds, a boundary is native, writing cuts', (boundary) => {
-    const c = hold(boundary)
-    expect(steerDelivery(c, turn({ forced: true, foreground: 2 }), person)).toBe('cut')
-    expect(steerDelivery(c, turn({ foreground: 1 }), person)).toBe('hold')
-    expect(steerDelivery(c, turn({ releaseOpen: true }), person)).toBe('hold')
-    expect(steerDelivery(c, turn({ atBoundary: true }), person)).toBe('native')
-    expect(steerDelivery(c, turn(), person)).toBe('cut')
-  })
+  // A person's steer goes in now, whatever the turn does; it waits only for a compaction, unless sent now.
+  const PERSON: Array<[string, Partial<SteerTurnFacts>, 'cut' | 'native' | 'hold']> = [
+    ['the model writes or thinks', {}, 'cut'],
+    ['a foreground tool runs', { foreground: 1 }, 'cut'],
+    ['two foreground tools run', { foreground: 2 }, 'cut'],
+    ['the release window after a tool is open', { releaseOpen: true }, 'cut'],
+    ['strict release holds a steer already', { strict: true, held: true }, 'cut'],
+    ['the provider\'s own turn ended', { atBoundary: true }, 'native'],
+    ['the provider compacts', { compacting: true }, 'hold'],
+    ['the provider compacts, and Send now', { compacting: true, forced: true }, 'cut'],
+    ['Send now during a tool', { forced: true, foreground: 2 }, 'cut']
+  ]
+  it.each((['announce', 'start'] as const).flatMap((boundary) => PERSON.map(([what, facts, want]) => [boundary, what, facts, want] as const)))(
+    'a person\'s steer on a %s provider when %s: %s',
+    (boundary, _what, facts, want) => {
+      for (const steer of ['interrupt_restart', 'native'] as const) expect(steerDelivery(hold(boundary, steer), turn(facts), person)).toBe(want)
+    }
+  )
 
   it('an agent\'s steer or a notice on a native provider is always native, during a tool too, and never forced', () => {
     const c = hold('start', 'native')
@@ -112,18 +122,20 @@ describe('steerDelivery (docs/design/steer-and-interruptions.md §2.2)', () => {
     expect(steerDelivery(old as ProviderCapabilities, turn({ foreground: 1 }), person)).toBe('cut')
   })
 
-  it('strict keeps a steer that is already held held until the provider\'s turn ends, on a start provider only', () => {
-    expect(steerDelivery(hold('start'), turn({ strict: true, held: true }), person)).toBe('hold')
-    expect(steerDelivery(hold('start'), turn({ strict: true, held: true, atBoundary: true }), person)).toBe('native')
-    expect(steerDelivery(hold('start'), turn({ strict: true, held: true, forced: true }), person)).toBe('cut')
+  it('strict keeps an agent\'s steer that is already held held until the provider\'s turn ends, on a start provider only', () => {
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: true }), agent)).toBe('hold')
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: true, atBoundary: true }), agent)).toBe('native')
     // An announce provider knows every tool before it runs: strict changes nothing there.
-    expect(steerDelivery(hold('announce'), turn({ strict: true, held: true }), person)).toBe('cut')
+    expect(steerDelivery(hold('announce'), turn({ strict: true, held: true }), agent)).toBe('cut')
     // Best effort releases the same steer.
-    expect(steerDelivery(hold('start'), turn({ strict: false, held: true }), person)).toBe('cut')
+    expect(steerDelivery(hold('start'), turn({ strict: false, held: true }), agent)).toBe('cut')
+    // Nothing held yet and the window closed: it cuts.
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: false }), agent)).toBe('cut')
   })
 
-  it('strict, after a tool finished and model output closed the window, a new steer (nothing held) cuts', () => {
-    expect(steerDelivery(hold('start'), turn({ strict: true, held: false, foreground: 0, releaseOpen: false }), person)).toBe('cut')
+  it('an agent\'s steer or a notice waits for a compaction on an interrupt_restart provider; a native provider takes it at its next step', () => {
+    expect(steerDelivery(hold('announce'), turn({ compacting: true }), agent)).toBe('hold')
+    expect(steerDelivery(hold('start', 'native'), turn({ compacting: true }), agent)).toBe('native')
   })
 })
 

@@ -16,6 +16,7 @@ import { acquireRepositoryLease, getRepositoryLeasePath, type RepositoryLeaseHan
 import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
+import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 import { hiddenStoreIdentity } from '../../src/mms/git/hiddenStore'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -148,6 +149,29 @@ describe('Stop while the thread\'s repository is busy', () => {
     if (next) expect(next.presentationMessageStart).toBeGreaterThanOrEqual(action.presentationMessageEnd)
   })
 
+  it('a turn cut off by the service stopping saves where it ended without waiting for the repository or running Git', async () => {
+    const w = world()
+    // Long enough that waiting for the repository would show: a person's Stop waits up to this for it.
+    ;(w.d.orch as unknown as { stoppedTurnCheckpointWaitMs: number }).stoppedTurnCheckpointWaitMs = 20_000
+    const thread = w.thread('Sync')
+    const sent = await w.d.orch.send(SYNC, false, { threadId: thread.id, clientRequestId: 'go', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.turns.length === 1, 'the turn to reach the provider', 30_000)
+    await w.holdRepository()
+
+    const began = Date.now()
+    const stopping = w.d.shutdown()
+    await waitFor(() => w.d.orch.getOrCreateSession(thread.id).activeTurn?.abort.signal.aborted === true, 'the turn to be cut off')
+    // The provider's turn ends, as the service's stop of the harness makes it.
+    await w.adapter.interrupt()
+    await stopping
+    // Before, the service's stop waited here until the 20-second checkpoint wait ran out.
+    expect(Date.now() - began).toBeLessThan(5_000)
+    // Where the turn ended is saved; its snapshot is left for the next turn's recovery.
+    const action = new ThreadActionService(w.d.store.getThreadDir(thread.id)).list().find((item) => item.turnId === sent.runId)!
+    expect(action.state).toBe('running')
+    expect(action.presentationMessageEnd).toBeGreaterThan(action.presentationMessageStart)
+  })
+
   it('lets a Stop end the next turn\'s start in a folder without Git while its snapshot store is busy', async () => {
     const w = world({ git: false })
     const thread = w.thread('No Git')
@@ -199,6 +223,10 @@ describe('Stop while the thread\'s repository is busy', () => {
     const existing = w.thread('Existing')
     await w.d.orch.send('Hello', false, { threadId: existing.id, clientRequestId: 'hello', awaitMode: 'ack' })
     await waitFor(() => w.adapter.turns.length === 1 && !w.running(existing.id), 'the first turn to finish')
+    // A next turn in a worktree as Mousse left it reaches the provider with no Git and no repository lease (#1758). Without
+    // its retained snapshot ref the start has to read the files, under the repository's lease.
+    const workspace = new ThreadWorkspaceManager(w.d.store.getThreadDir(existing.id)).load()!
+    execFileSync('git', ['update-ref', '-d', workspace.retainedRef], { cwd: workspace.worktreePath, stdio: 'ignore' })
 
     // Another process holds the lease and keeps its heartbeat fresh, so it is never taken over as stale.
     const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' })
@@ -210,7 +238,7 @@ describe('Stop while the thread\'s repository is busy', () => {
     writeLease()
     const refresh = setInterval(writeLease, 1_000)
     try {
-      // The next turn of a thread that already has a worktree: its recovery at the start waits for the repository.
+      // The next turn of a thread that already has a worktree: reading its files at the start waits for the repository.
       await w.d.orch.send('Again', false, { threadId: existing.id, clientRequestId: 'again', awaitMode: 'ack' })
       await waitFor(() => w.running(existing.id), 'the next turn to be admitted')
       await new Promise((resolve) => setTimeout(resolve, 300))

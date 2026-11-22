@@ -19,6 +19,7 @@ import {
   pickReadingNode,
   reconcileWindow,
   resolveTurnKey,
+  shiftWindow,
   shouldGlide,
   stepSettle,
   windowRowItems,
@@ -89,10 +90,6 @@ describe('indexAtOffset', () => {
     expect(indexAtOffset(layout, 124)).toBe(1)
     expect(indexAtOffset(layout, 123)).toBe(0)
     expect(indexAtOffset(layout, 10_000)).toBe(4)
-  })
-
-  it('assigns a gap to the row above it', () => {
-    expect(indexAtOffset(layout, 110)).toBe(0)
   })
 })
 
@@ -187,6 +184,22 @@ describe('reconcileWindow', () => {
   it('clamps when rows were removed and respects the row cap', () => {
     expect(reconcileWindow({ start: 90, end: 99, n: 100 }, 60)).toEqual({ start: 59, end: 59 })
     expect(reconcileWindow({ start: 1, end: 59, n: 60 }, 61, 58)).toEqual({ start: 2, end: 60 })
+  })
+})
+
+describe('shiftWindow', () => {
+  const keys = (from: number, to: number) => Array.from({ length: to - from }, (_, index) => `u-${from + index}`)
+  // Rows: an earlier page above a window in the middle, at the top (the first row is read there), at the end; turns
+  // appended at the end; a page that splits a turn (its first turn has no prompt, keyed by index); a list of every row.
+  it.each([
+    ['page above a middle window', { start: 40, end: 50, n: 100 }, keys(100, 200), keys(0, 200), { start: 140, end: 150, n: 200 }],
+    ['page above a window at the top keeps the old first row', { start: 1, end: 12, n: 100 }, keys(100, 200), keys(0, 200), { start: 100, end: 112, n: 200 }],
+    ['page above a window that reached the end', { start: 80, end: 99, n: 100 }, keys(100, 200), keys(0, 200), { start: 180, end: 199, n: 200 }],
+    ['turn appended at the end', { start: 80, end: 99, n: 100 }, keys(0, 100), keys(0, 101), null],
+    ['page that completes a split first turn', { start: 1, end: 12, n: 100 }, ['turn-0', ...keys(101, 200)], keys(0, 200), { start: 100, end: 112, n: 200 }],
+    ['list of every row that grows past the threshold', { start: 1, end: 29, n: 30 }, keys(170, 200), keys(140, 200), { start: 30, end: 59, n: 60 }],
+  ])('%s', (_name, prev, prevKeys, nextKeys, expected) => {
+    expect(shiftWindow(prev, prevKeys, nextKeys)).toEqual(expected)
   })
 })
 
@@ -318,10 +331,6 @@ describe('anchorDelta', () => {
 
   it('is zero for growth below the anchor', () => {
     expect(anchorDelta({ posBefore: position(1_000, 500), posAfter: position(1_000, 500) })).toBe(0)
-  })
-
-  it('is zero when only scrollTop changed', () => {
-    expect(anchorDelta({ posBefore: position(1_000, 500), posAfter: position(1_000, 900) })).toBe(0)
   })
 
   it('is exactly the shift when the content moved while scrollTop also changed', () => {

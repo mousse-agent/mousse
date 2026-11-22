@@ -15,7 +15,7 @@ import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
 import type { AdapterHost, ProviderAdapter } from '../../src/mms/harness/adapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { McpCredentials, type BearerTurn } from '../../src/mms/run/mcp/McpCredentials'
-import { RELAY_SESSION_INSTRUCTION, sessionInstructions } from '../../src/mms/run/mcp/appTools/assemble'
+import { LAST_REPLY_SESSION_INSTRUCTION, RELAY_SESSION_INSTRUCTION, sessionInstructions } from '../../src/mms/run/mcp/appTools/assemble'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 import type { McpAttachmentProvider } from '../../src/mms/run/mcp/MousseMcpServer'
 import { RunStore } from '../../src/mms/run/RunStore'
@@ -163,11 +163,11 @@ describe('MCP relay at turn start', () => {
 
   it('the session text gains one sentence for the relay, and stays the same without it', () => {
     const plain = sessionInstructions({ mcp: true, appletGuidance: 'APPLETS' })
-    expect(plain).toBe(`${mousseOrchestrationInstructions()}\n\nAPPLETS`)
+    expect(plain).toBe(`${LAST_REPLY_SESSION_INSTRUCTION}\n\n${mousseOrchestrationInstructions()}\n\nAPPLETS`)
     expect(sessionInstructions({ mcp: true, relay: false, appletGuidance: 'APPLETS' })).toBe(plain)
-    expect(sessionInstructions({ mcp: true, relay: true, appletGuidance: 'APPLETS' })).toBe(`${mousseOrchestrationInstructions()}\n\n${RELAY_SESSION_INSTRUCTION}\n\nAPPLETS`)
+    expect(sessionInstructions({ mcp: true, relay: true, appletGuidance: 'APPLETS' })).toBe(`${LAST_REPLY_SESSION_INSTRUCTION}\n\n${mousseOrchestrationInstructions()}\n\n${RELAY_SESSION_INSTRUCTION}\n\nAPPLETS`)
     expect(RELAY_SESSION_INSTRUCTION).toBe('The user\'s MCP servers set up in Mousse are also available through the "mousse-relay" server as <server>__<tool>.')
     // No Mousse server, no relay sentence.
-    expect(sessionInstructions({ mcp: false, relay: true })).toBe('')
+    expect(sessionInstructions({ mcp: false, relay: true })).toBe(LAST_REPLY_SESSION_INSTRUCTION)
   })
 })

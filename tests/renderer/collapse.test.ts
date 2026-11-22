@@ -1,6 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { act, createElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -75,22 +73,13 @@ describe('Collapse', () => {
     expect(shell()?.dataset.motion).toBe('exit')
     expect(shell()?.hasAttribute('inert')).toBe(true)
     expect(shell()?.getAttribute('aria-hidden')).toBe('true')
-    advance(COLLAPSE_CLOSE_MS - 10)
-    expect(shell()).not.toBeNull()
-    advance(100)
-    expect(host.innerHTML).toBe('')
-  })
-
-  it('keeps the rows mounted and inert for the whole close, then unmounts them', () => {
-    draw({ open: true })
-    draw({ open: false })
-    expect(host.querySelectorAll('.ui-collapse > .ui-collapse-clip > ul.rows > li')).toHaveLength(3)
+    // The rows stay mounted, inside the inert shell, for the whole close.
     expect(host.querySelector('.ui-collapse ul.rows')?.closest('[inert]')).toBe(shell())
     advance(COLLAPSE_CLOSE_MS - 10)
-    expect(host.querySelectorAll('li')).toHaveLength(3)
-    expect(shell()?.hasAttribute('inert')).toBe(true)
+    expect(shell()).not.toBeNull()
+    expect(host.querySelectorAll('.ui-collapse > .ui-collapse-clip > ul.rows > li')).toHaveLength(3)
     advance(100)
-    expect(host.querySelectorAll('li')).toHaveLength(0)
+    expect(host.innerHTML).toBe('')
   })
 
   it('reopening while it closes keeps the content and turns back', () => {
@@ -127,15 +116,6 @@ describe('Collapse', () => {
     expect(shell()?.hasAttribute('data-stagger')).toBe(true)
     draw({ open: true, itemCount: COLLAPSE_LONG_LIST + 1 })
     expect(shell()?.hasAttribute('data-stagger')).toBe(false)
-  })
-
-  it('lays a settled group out as the same one-row grid it moves in, so the close has a row to shrink from', () => {
-    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
-    const base = css.match(/\n\.ui-collapse \{([^}]*)\}/)?.[1] ?? ''
-    expect(base).toMatch(/display: grid;/)
-    expect(base).toMatch(/grid-template-rows: 1fr;/)
-    // Only the clip and the transitions depend on the motion; the layout does not.
-    expect(css).not.toMatch(/\.ui-collapse\[data-motion\] \{[^}]*display/)
   })
 })
 

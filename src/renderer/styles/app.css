@@ -73,7 +73,8 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* clip, not hidden: nothing, not even scrollIntoView or focus, can scroll the app's frame. */
+  overflow: clip;
   background: var(--app-window-bg);
 }
 
@@ -81,7 +82,7 @@
   display: flex;
   flex: 1 1 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .titlebar {
@@ -371,7 +372,8 @@ html.platform-darwin .titlebar-left {
   width: 1px;
   flex-shrink: 0;
   cursor: col-resize;
-  background: rgba(var(--accent-pale-rgb), 0.12);
+  /* No line at rest: the rounded chat pane's edge divides; hover and drag still light it. */
+  background: transparent;
   transition: background 0.15s;
 }
 
@@ -402,10 +404,34 @@ html.platform-darwin .titlebar-left {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: clip;
   background: transparent;
   container-type: inline-size;
   container-name: main-area;
+}
+
+/* Opening and closing, the panel slides in from the right edge as it fades, and the conversation eases to its new
+   width. The panel keeps its own width (KeepMounted's last measured one) the whole way, so its content never
+   reflows: a negative right margin of that width is what hands the room to the conversation. Hidden at once when
+   it goes for another reason (Chats), and still with motion off (--ui-dur-slow is 0). */
+.app-workspace:has(> .main-area) {
+  overflow-x: clip;
+}
+
+.main-area:not(.keep-mounted-layout-inactive) {
+  transition:
+    margin-right var(--ui-dur-slow) var(--ui-collapse-ease),
+    opacity var(--ui-dur-slow) ease;
+}
+
+.main-area.keep-mounted-layout-inactive,
+.main-area.is-closing {
+  margin-right: calc(-1 * var(--keep-mounted-width, 480px));
+}
+
+.main-area.is-closing {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .header {
@@ -591,10 +617,21 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
+/* A browser tab names its page (its title, else its host), cut short with an ellipsis, even where other tabs show
+   only their icons. */
+.main-view-tab.is-browser .main-view-tab-label {
+  max-width: 22ch;
+}
+
 @container main-area (max-width: 520px) {
   .main-view-tab-label,
   .main-view-tab-detail {
     display: none;
+  }
+
+  .main-view-tab.is-browser .main-view-tab-label {
+    display: block;
+    max-width: 12ch;
   }
 
   .main-view-tab {
@@ -618,12 +655,12 @@ html.platform-darwin .titlebar-left {
 }
 
 .main-view-tab:hover {
-  background: rgba(var(--accent-rgb), 0.1);
+  background: var(--ui-hover, rgba(127, 127, 127, 0.1));
   color: var(--text-primary);
 }
 
 .main-view-tab.active {
-  background: rgba(var(--accent-rgb), 0.18);
+  background: var(--main-tab-selected, rgba(127, 127, 127, 0.16));
   color: var(--text-primary);
 }
 
@@ -634,7 +671,6 @@ html.platform-darwin .titlebar-left {
 
 .main-view-tab.active .main-view-tab-icon {
   opacity: 1;
-  color: var(--accent);
 }
 
 /* The empty app panel: one muted line and the list, in a compact column centred in the pane, a little
@@ -2328,8 +2364,40 @@ html[data-chat-width='full'] .chat {
 
 .composer-attachments {
   padding: 8px 10px 0;
-  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.1);
+  border-bottom: none;
   border-radius: 12px 12px 0 0;
+}
+
+/* What an attached image's preparation came to: one short line on a tinted background (details in its tooltip). */
+.composer-attachment-status {
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+}
+
+.composer-attachment-status[data-tone='info'] {
+  background: color-mix(in srgb, var(--warning) 30%, var(--bg-primary));
+}
+
+.composer-attachment-status[data-tone='error'] {
+  background: color-mix(in srgb, var(--danger) 34%, var(--bg-primary));
+}
+
+.composer-attachment-status-overlay {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  justify-content: flex-start;
+  pointer-events: none;
 }
 
 .composer-attachments-scroll {
@@ -2453,6 +2521,15 @@ html[data-chat-width='full'] .chat {
   min-height: 0;
 }
 
+.composer-input,
+.composer-input-backdrop {
+  /* Both layers reserve the same gutter, including at fractional zoom. */
+  scrollbar-gutter: stable;
+  /* Keep glyph widths consistent across the backdrop's inline spans. */
+  font-kerning: none;
+  font-variant-ligatures: none;
+}
+
 .composer-input-backdrop {
   box-sizing: border-box;
   /* Backdrop may not enforce the draft min-height; the textarea does. */
@@ -2542,8 +2619,8 @@ html[data-chat-width='full'] .chat {
 .composer-quote-chip {
   padding: 1px 2px;
   margin: 0 -2px;
-  background: rgba(var(--accent-rgb), 0.12);
-  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
@@ -2558,7 +2635,7 @@ html[data-chat-width='full'] .chat {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  color: var(--accent);
+  color: var(--text-secondary);
 }
 
 /* A quote in a sent message: the reply icon and the quoted words, on a line of their own. */
@@ -2569,12 +2646,12 @@ html[data-chat-width='full'] .chat {
   width: fit-content;
   max-width: 100%;
   margin: 2px 0 8px;
-  padding: 4px 9px;
-  border-radius: 8px;
-  background: rgba(var(--accent-rgb), 0.12);
-  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.3);
-  font-size: 0.92em;
-  line-height: 1.45;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  color: var(--text-secondary);
+  font-size: 0.82em;
+  line-height: 1.4;
   white-space: normal;
 }
 
@@ -2589,7 +2666,7 @@ html[data-chat-width='full'] .chat {
 .sent-quote-icon {
   flex-shrink: 0;
   margin-top: 0.2em;
-  color: var(--accent);
+  opacity: 0.8;
 }
 
 .sent-quote-text {
@@ -2597,35 +2674,53 @@ html[data-chat-width='full'] .chat {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   overflow: hidden;
-  opacity: 0.9;
 }
 
-/* The Reply button beside text selected in a conversation. */
-.selection-reply-button {
+/* The bar beside text selected in a conversation: Read aloud and Reply in one raised pill, a hairline between. */
+.selection-actions {
   position: fixed;
   z-index: 1000;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   height: 30px;
-  padding: 0 10px;
+  padding: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--ui-raised, var(--surface-raised, #1c1c1c));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+}
+
+.selection-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 100%;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-primary);
   font-size: 12.5px;
   font-weight: 500;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
   cursor: pointer;
 }
 
-.selection-reply-button:hover {
+.selection-action:hover {
   background: rgba(var(--accent-rgb), 0.12);
-  border-color: rgba(var(--accent-rgb), 0.45);
 }
 
-.selection-reply-button:focus-visible {
+.selection-action:focus-visible {
+  outline: none;
   background-image: var(--ui-focus-layer);
+}
+
+.selection-actions-divider {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  background: var(--border);
 }
 
 .browser-element-pill-tag {
@@ -3272,6 +3367,12 @@ html[data-chat-width='full'] .chat {
   animation: shimmer-sweep 1.8s steps(27, jump-none) infinite !important;
 }
 
+[data-shimmer-motion='off'] .shimmer-text {
+  color: var(--text-secondary);
+  background: none;
+  animation: none !important;
+}
+
 @keyframes shimmer-sweep {
   0% {
     background-position: 120% 0;
@@ -3359,7 +3460,7 @@ html[data-chat-width='full'] .chat {
 :root {
   --ui-dialog-dim: rgba(0, 0, 0, 0.4);
   --ui-dialog-blur: blur(3px);
-  --ui-dialog-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+  --ui-dialog-edge: 0 0 #0000;
   --ui-dialog-drop: 0 16px 48px rgba(0, 0, 0, 0.36), 0 2px 8px rgba(0, 0, 0, 0.16);
 }
 
@@ -3905,8 +4006,7 @@ html[data-theme='high-contrast'] {
 }
 
 .browser-access-icon { flex-shrink: 0; }
-.browser-access-off .browser-access-icon,
-.browser-access-off .browser-access-label { opacity: 0.6; }
+.browser-access-off .browser-access-icon { opacity: 0.6; }
 .browser-access-agent .browser-access-icon { color: var(--accent); }
 .browser-access-human .browser-access-icon { color: var(--text-primary); }
 
@@ -3938,12 +4038,12 @@ html[data-theme='high-contrast'] {
   border-radius: 6px;
   background: rgba(var(--surface-elevated-rgb), 0.55);
   min-width: 0;
+  transition: background-color 0.15s;
 }
 
-.browser-url-icon {
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.7;
+/* Focus shows on the address box alone; the field inside stays bare. */
+.browser-url-form:focus-within {
+  background: rgba(var(--surface-elevated-rgb), 0.8);
 }
 
 .browser-url-input {
@@ -3953,6 +4053,14 @@ html[data-theme='high-contrast'] {
   background: transparent;
   color: var(--text-primary);
   font-size: 13px;
+  outline: none;
+}
+
+.browser-url-input:focus,
+.browser-url-input:focus-visible {
+  background: transparent;
+  background-image: none;
+  box-shadow: none;
   outline: none;
 }
 
@@ -3981,11 +4089,42 @@ html[data-theme='high-contrast'] {
 
 .browser-manual-surface { position: relative; }
 
-.browser-agent-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 12px; font-size: 12px; border-bottom: 1px solid var(--border); background: rgba(var(--surface-strong-rgb), .55); }
-.browser-agent-controls > span:first-child { flex: 1; }
-.browser-agent-controls button { padding: 5px 10px; border: 1px solid rgba(var(--accent-rgb), .35); border-radius: 6px; background: rgba(var(--accent-rgb), .12); color: var(--text-primary); cursor: pointer; }
-.browser-agent-controls button:disabled { opacity: .5; cursor: default; }
-.browser-agent-controls [role="alert"] { width: 100%; color: var(--text-secondary); }
+/* Asking for agent access: a panel at the pane's right edge, under the toolbar, sliding and fading like a bot's About. */
+.browser-manual-surface { anchor-scope: --browser-toolbar; }
+.browser-toolbar { anchor-name: --browser-toolbar; }
+.browser-access-panel {
+  position: absolute;
+  z-index: 4;
+  top: anchor(--browser-toolbar bottom, 0px);
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+  width: min(300px, 100%);
+  padding: var(--space-24) var(--space-16);
+  overflow-y: auto;
+  background: var(--pane-surface, var(--bg-primary));
+  border-left: 1px solid var(--ui-line);
+  box-shadow: -16px 0 32px rgb(0 0 0 / 0.18);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+  opacity: 0;
+  transform: translateX(24px);
+  transition: opacity var(--ui-dur-slow) ease, transform var(--ui-dur-slow) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.browser-access-panel.is-open { opacity: 1; transform: none; }
+.browser-access-panel p { margin: 0; }
+.browser-access-panel-icon { display: grid; place-items: center; width: 36px; height: 36px; margin-bottom: var(--space-4); border-radius: 50%; background: var(--ui-hover); color: var(--text-secondary); }
+.browser-access-panel .browser-access-panel-title { color: var(--text-primary); font-size: 13px; font-weight: 500; }
+.browser-access-panel-actions { display: flex; gap: var(--space-8); margin-top: var(--space-8); }
+.browser-access-panel-actions button { padding: 5px 12px; border: 1px solid var(--ui-line); border-radius: 6px; background: transparent; color: var(--text-primary); cursor: pointer; }
+.browser-access-panel-actions button:hover:not(:disabled) { background: var(--ui-hover); }
+.browser-access-panel-actions .browser-access-panel-allow { border-color: transparent; background: var(--accent); color: var(--ui-on-accent); }
+.browser-access-panel-actions .browser-access-panel-allow:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, #fff); }
+.browser-access-panel-actions button:disabled { opacity: .5; cursor: default; }
 .browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
 
 /* The app-owned start page follows the app theme; visited sites keep the white default. */
@@ -4024,6 +4163,130 @@ html[data-theme='high-contrast'] {
   height: 100%;
 }
 
+/* A page the tab couldn't open: the app's own page over the guest's blank error document. */
+.browser-load-error {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  overflow: auto;
+  padding: clamp(32px, 12%, 112px) 32px 32px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.browser-load-error-body {
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.browser-load-error-art {
+  width: 96px;
+  height: auto;
+  margin-bottom: 28px;
+  color: var(--text-secondary);
+}
+
+.browser-load-error-art-frame { opacity: 0.55; }
+.browser-load-error-art-plug { color: var(--accent); }
+.browser-load-error-art-spark { color: var(--accent); opacity: 0.6; }
+.browser-load-error-art-glow { fill: var(--accent); opacity: 0.1; }
+
+.browser-load-error-title {
+  margin: 0 0 10px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+.browser-load-error-line {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.browser-load-error-line strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-load-error-tips {
+  margin-top: 14px;
+}
+
+.browser-load-error-tips p { margin: 0; }
+
+.browser-load-error-tips ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.browser-load-error-tips li::marker { color: var(--accent); }
+
+.browser-load-error-code {
+  margin: 16px 0 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+}
+
+.browser-load-error-details {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(var(--surface-strong-rgb), 0.45);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.browser-load-error-url {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-primary);
+}
+
+.browser-load-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 28px;
+}
+
+.browser-load-error-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-load-error-reload {
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
+.browser-load-error-reload:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.24); }
+.browser-load-error-reload:disabled { opacity: 0.7; cursor: default; }
+
+.browser-load-error-more {
+  border: 1px solid var(--border);
+  background: transparent;
+}
+
+.browser-load-error-more:hover { background: rgba(var(--surface-strong-rgb), 0.5); }
+
 .browser-webview {
   flex: 1;
   min-width: 0;
@@ -4042,10 +4305,6 @@ html[data-theme='high-contrast'] {
 }
 
 @container browser-panel (max-width: 420px) {
-  .browser-url-icon {
-    display: none;
-  }
-
   .browser-url-form {
     padding-inline: 8px;
   }
@@ -4053,10 +4312,6 @@ html[data-theme='high-contrast'] {
   .browser-toolbar {
     padding: 6px;
     gap: 2px;
-  }
-
-  .browser-access-label {
-    display: none;
   }
 }
 
@@ -5715,6 +5970,11 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   background-image: var(--ui-focus-layer);
 }
 
+/* A message's actions are controls, not words: selecting across messages leaves out their times and labels. */
+.chat-message-toolbar {
+  user-select: none;
+}
+
 /* Copy, Details, Undo and Read aloud under a message: the focus fill, full strength while focused. */
 .chat-message-toolbar button:focus-visible,
 .chat-user-image:focus-visible {
@@ -6139,7 +6399,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 
 .composer-command-suggestion { border-radius: 10px; padding: 9px 12px; }
 
-.composer-attachments { border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.08); }
+.composer-attachments { border-bottom: none; }
 
 .composer-attachment-pill {
   border-radius: 999px;

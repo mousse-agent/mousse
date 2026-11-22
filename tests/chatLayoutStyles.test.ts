@@ -28,27 +28,6 @@ describe('chat layout styles', () => {
     )
   })
 
-  it('dims idle tool chrome so assistant text keeps the contrast', () => {
-    expect(globalCss).toMatch(
-      /\.an-message-list \.an-tool-chrome\s*\{[\s\S]*?opacity:\s*0\.55/
-    )
-    // Hover and keyboard focus intentionally keep the dimmed level; only a
-    // running shimmer or a card awaiting approval returns to full opacity.
-    expect(globalCss).not.toMatch(/\.an-tool-chrome:hover/)
-    expect(globalCss).not.toMatch(/\.an-tool-chrome:focus-within/)
-    expect(globalCss).toMatch(
-      /\.an-tool-chrome:has\(\.an-text-shimmer--active\)\s*\{\s*opacity:\s*1;/
-    )
-    expect(globalCss).toMatch(
-      /\.an-tool-chrome\[data-awaiting-approval="true"\]\s*\{\s*opacity:\s*1;/
-    )
-    const toolRowBase = readFileSync(
-      resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/tool-row-base.tsx'),
-      'utf8'
-    )
-    expect(toolRowBase).toMatch(/an-tool-chrome/)
-  })
-
   it('preserves single newlines in prose as line breaks', () => {
     // Chat convention (verses, addresses): a lone \n breaks the line.
     // Scoped to text elements so fences, tables, and list structure keep
@@ -64,28 +43,6 @@ describe('chat layout styles', () => {
     // node_modules, which automatic content detection skips (gitignored).
     // Without an explicit @source those classes never compile.
     expect(globalCss).toMatch(/@source\s+["'][^"']*streamdown[^"']*["']/)
-  })
-
-  it('renders quick-action bash with highlighting but no code header', () => {
-    // The "Action" micro-label already names the block, so the Streamdown
-    // language header row is hidden via CSS while shiki highlighting stays.
-    expect(globalCss).toMatch(
-      /\.an-code-no-header[\s\S]*?code-block-header[\s\S]*?display:\s*none/
-    )
-    // Bash preview matches the Git tab diff surface (12px).
-    expect(globalCss).toMatch(
-      /\.an-markdown\.an-code-no-header[\s\S]*?font-family:\s*inherit/
-    )
-    expect(globalCss).toMatch(
-      /\.an-markdown\.an-code-no-header[\s\S]*?font-size:\s*12px/
-    )
-    const quickActionTool = readFileSync(
-      resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/quick-action-tool.tsx'),
-      'utf8'
-    )
-    expect(quickActionTool).toMatch(/codeHighlighter/)
-    expect(quickActionTool).toMatch(/```bash/)
-    expect(quickActionTool).toMatch(/an-code-no-header/)
   })
 
   it('keeps the scrollbar at the pane edge when the side card is reserved', () => {
@@ -115,12 +72,4 @@ describe('chat layout styles', () => {
     expect(reduced).toMatch(/\.an-message-list > div[\s\S]*?transition:\s*none/)
   })
 
-  it('slides the overlay card in from the right with a scrim, and drops the slide for reduced motion', () => {
-    const [overlayCard] = rulesFor(sideCardCss, '.thread-side-card-layer--overlay .thread-side-card').filter((rule) => rule.selector === '.thread-side-card-layer--overlay .thread-side-card')
-    expect(overlayCard!.body).toMatch(/transform:\s*translateX\(calc\(100% \+ var\(--side-card-gutter\)\)\)/)
-    expect(overlayCard!.body).toMatch(/width:\s*min\(var\(--side-card-width\), calc\(100% - 2 \* var\(--side-card-gutter\)\)\)/)
-    expect(sideCardCss).toMatch(/\.thread-side-card-scrim\s*\{[^}]*position:\s*absolute/)
-    const reduced = sideCardCss.slice(sideCardCss.indexOf('prefers-reduced-motion'))
-    expect(reduced).toMatch(/\.thread-side-card\.thread-side-card\.thread-side-card\[data-shown\]\s*\{[^}]*transform:\s*none/)
-  })
 })

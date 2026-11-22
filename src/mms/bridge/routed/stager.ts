@@ -9,7 +9,8 @@ import {
   type BlobId
 } from '../../../shared/net'
 import { ROUTED_STAGE_ITEM_BYTES, routedNetMethod, isRoutedReply } from '../../../shared/bridge/routed'
-import type { IdentityService, KeyStore, SyncSession } from '../../net/contracts'
+import type { IdentityService, KeyStore } from '../../net/contracts'
+import type { BridgeClient } from '../peers'
 import { encodeEnvelope } from '../../net/sync/codec'
 import { DomainRpcError } from '../../protocol/domainRegistry'
 import { refusalError } from './computerErrors'
@@ -29,7 +30,7 @@ export class RoutedStager {
   constructor(private readonly deps: StagerDeps) {}
 
   /** The id the owner gives the staged value (`stg_…`). */
-  async stage(session: SyncSession, value: unknown, signal?: AbortSignal): Promise<string> {
+  async stage(session: Pick<BridgeClient, 'rpc' | 'putBlob' | 'append'>, value: unknown, signal?: AbortSignal): Promise<string> {
     const bytes = Buffer.from(JSON.stringify(value))
     if (bytes.length > ROUTED_STAGE_ITEM_BYTES)
       throw new DomainRpcError('too_large', 'That is too large to send to another computer.', {

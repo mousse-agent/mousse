@@ -89,6 +89,8 @@ export interface RoutedRow {
 
 const FOLDER = ['threadId', 'projectId'] as const
 const GEN = 'expectedJournalGeneration'
+const GIT_READ = ['workspaceGeneration', 'attempt'] as const
+const gitReadV2 = { version: 2, since: { workspaceGeneration: 2, attempt: 2 } }
 /** The key of a call that names its staged values: `{ stagedValues: { content: 'stg_…' } }`. */
 export const ROUTED_STAGED_KEY = 'stagedValues'
 
@@ -129,9 +131,14 @@ const write = (target: RoutedTarget, keys: readonly string[], extra?: Partial<Ro
  */
 export const ROUTED_SEND_WINDOW_KEY = 'window'
 
-/** Keys that only tell an owner more about the caller: one whose version of the row predates them goes without. */
+/** Optional behavior an older owner can omit while still providing its original answer. */
 export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  'orchestrator.send': [ROUTED_SEND_WINDOW_KEY]
+  'orchestrator.send': [ROUTED_SEND_WINDOW_KEY],
+  'git.status': GIT_READ,
+  'git.diff': GIT_READ,
+  'git.log': GIT_READ,
+  'git.branches': GIT_READ,
+  'git.diffStats': GIT_READ
 })
 
 /**
@@ -159,6 +166,17 @@ export const ROUTED_AGENT_METHODS: Readonly<Record<string, number>> = Object.fre
   'orchestrator.abort': 2
 })
 
+/**
+ * On an agent's `orchestrator.send` (with `agent`), set only by the calling computer's daemon: the minutes of running
+ * time the run it starts may use (a remote subagent's `maxMinutes`, issue #685), a whole number of at least 1. The owner
+ * counts the time the run works, not the time it waits on a person, stops the run when it is used up, and answers with
+ * the same key when it took the limit. A caller sends it only to an owner whose row is at `ROUTED_DEADLINE_SINCE`;
+ * an older owner is stopped by the caller after that many minutes instead.
+ */
+export const ROUTED_DEADLINE_KEY = 'deadlineMinutes'
+/** The version of `orchestrator.send` that added `deadlineMinutes`. */
+export const ROUTED_DEADLINE_SINCE = 8
+
 /** What the `agent` key carries. */
 export interface RoutedAgentMark {
   /** The sending thread, by its id on the calling computer. */
@@ -172,6 +190,19 @@ export interface RoutedAgentMark {
   /** The mode the sender runs in. The owner narrows it further and never widens anything by it. */
   mode: string
 }
+
+/**
+ * `runs.wait`: the longest one call waits on the owner, and the deadline the caller gives the call. The deadline is above
+ * the wait (the owner answers at its end) and below the minute an MCP client waits on a tool call.
+ */
+export const ROUTED_RUN_WAIT_MAX_MS = 40_000
+export const ROUTED_RUN_WAIT_DEADLINE_MS = 50_000
+
+/**
+ * What an agent's read of a thread on another computer asks for (`thread.messages` with `index`): the most characters of
+ * one message, and the bytes of rows the owner sends for one page. The caller's tool cuts its own response to the same.
+ */
+export const ROUTED_AGENT_READ = Object.freeze({ textMax: 16_384, pageBytes: 64 * 1024 })
 
 /** The longest sender title an envelope carries. */
 export const ROUTED_AGENT_TITLE_MAX = 80
@@ -208,7 +239,13 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     since: { transcript: 2 }
   }),
   // Older messages of a long thread, a page at a time, newest first from `before` (a message id).
-  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit'], { version: 2, since: { after: 2 } }),
+  // Version 3: `index`, `textOffset` and `textMax`, the page an agent's `thread_read` reads on another computer: from
+  // the message at `index`, each message's text cut to `textMax` characters (the first one from `textOffset`), so only
+  // what the tool returns crosses (`ROUTED_AGENT_READ`).
+  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit', 'index', 'textOffset', 'textMax'], {
+    version: 3,
+    since: { after: 2, index: 3, textOffset: 3, textMax: 3 }
+  }),
   'thread.changesSince': read('thread', ['threadId', 'seq', 'epoch']),
   // The image of one message or queued message, by its place in it (the stream carries only the newest images' data).
   'thread.messageImage': read('thread', ['threadId', 'messageId', 'queueItemId', 'index'], {
@@ -217,6 +254,10 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'orchestrator.isTurnActive': read('thread', ['threadId']),
   'orchestrator.contextUsage': read('thread', ['threadId', 'draftInput', 'mode']),
   'orchestrator.pendingQuestions': read('thread', ['threadId']),
+  // Whether the owner accepted a send or steer with this request id: a window asks after a steer whose answer was lost.
+  'orchestrator.sendAccepted': read('thread', ['threadId', 'clientRequestId'], {
+    required: ['clientRequestId']
+  }),
   'queue.list': read('thread', ['threadId']),
   'runs.list': read('thread', ['threadId', 'limit']),
   'runs.get': read('thread', ['threadId', 'runId'], {
@@ -224,8 +265,14 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'runs.events': read('thread', ['threadId', 'afterSeq', 'limit']),
+  // Waits up to `timeoutMs` (at most `ROUTED_RUN_WAIT_MAX_MS`) for a run of the thread to end or to wait on a person,
+  // answered from the owner's run events: `thread_wait` on a thread of another computer (issue #1160). Without `runId`,
+  // the run that is active or paused now; a thread with a run that is preparing or a message waiting in its queue is
+  // never answered idle.
+  'runs.wait': read('thread', ['threadId', 'runId', 'timeoutMs'], { owned: { runId: 'run' } }),
   'activity.get': read('thread', ['threadId']),
   'subagents.list': read('thread', ['threadId']),
+  'threads.backgroundWork': read('thread', ['threadId']),
   'agents.list': read('thread', ['threadId']),
   'tasks.list': read('thread', ['threadId']),
   'workspace.getStatus': read('thread', ['threadId', GEN]),
@@ -251,17 +298,17 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'review.file': read('folder', [...FOLDER, 'scope', 'path', 'oldPath'], {
     required: ['scope', 'path']
   }),
-  'git.status': read('folder', [...FOLDER]),
+  'git.status': read('folder', [...FOLDER, ...GIT_READ], gitReadV2),
   // How far the branch and its upstream are apart on the remote now, read on the computer that has the folder.
   'git.checkUpstream': read('folder', [...FOLDER]),
   // HEAD → working tree as hunks, with what the next commit takes. A large answer is paged.
   'git.changes': read('folder', [...FOLDER, 'paths']),
   // The reverts of the folder its copies still let the person restore.
   'git.revertedList': read('folder', [...FOLDER]),
-  'git.diff': read('folder', [...FOLDER, 'path', 'staged'], { required: ['path'] }),
-  'git.log': read('folder', [...FOLDER, 'limit']),
-  'git.branches': read('folder', [...FOLDER]),
-  'git.diffStats': read('folder', [...FOLDER]),
+  'git.diff': read('folder', [...FOLDER, 'path', 'staged', ...GIT_READ], { ...gitReadV2, required: ['path'] }),
+  'git.log': read('folder', [...FOLDER, 'limit', ...GIT_READ], gitReadV2),
+  'git.branches': read('folder', [...FOLDER, ...GIT_READ], gitReadV2),
+  'git.diffStats': read('folder', [...FOLDER, ...GIT_READ], gitReadV2),
   'git.lastCommitMessage': read('folder', [...FOLDER]),
   'files.list': read('folder', [...FOLDER, 'path']),
   'files.read': read('folder', [...FOLDER, 'path'], { required: ['path'] }),
@@ -349,14 +396,16 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'conversationBranchId',
       'expect',
       ROUTED_SEND_WINDOW_KEY,
-      ROUTED_AGENT_KEY
+      ROUTED_AGENT_KEY,
+      ROUTED_DEADLINE_KEY
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
     // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
     // Version 5: `expect`, the model, mode and settings revision the sender saw; the owner runs nothing on other ones.
     // Version 6: `window`, set by the calling computer: a window sent this (`ROUTED_SEND_WINDOW_KEY`).
     // Version 7: `agent`, an agent's message (`ROUTED_AGENT_KEY`).
-    { required: ['content'], ...staging(['content', 'images']), version: 7, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6, [ROUTED_AGENT_KEY]: 7 } }
+    // Version 8: `deadlineMinutes`, the running time an agent's task may use there (`ROUTED_DEADLINE_KEY`).
+    { required: ['content'], ...staging(['content', 'images']), version: 8, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6, [ROUTED_AGENT_KEY]: 7, [ROUTED_DEADLINE_KEY]: ROUTED_DEADLINE_SINCE } }
   ),
   // Version 3 (both): `agent`, an agent's steer or Stop (`ROUTED_AGENT_KEY`).
   'orchestrator.steer': chat(
@@ -381,6 +430,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'orchestrator.retry': chat('thread', ['threadId']),
+  // Retry on a thread whose worktree could not be set up: sends the message it kept again.
+  'orchestrator.retrySetup': chat('thread', ['threadId']),
   'threads.clearContext': chat('thread', ['threadId']),
   'threads.compact': chat('thread', ['threadId', 'focus']),
   'threads.stopCompaction': chat('thread', ['threadId']),
@@ -437,6 +488,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'subagents.stopAll': chat('thread', ['threadId']),
+  'threads.stopBackground': chat('thread', ['threadId', 'id'], { required: ['id'] }),
   'agents.stop': chat('thread', ['threadId', 'agentId', 'merge'], { required: ['agentId'] }),
   'tasks.create': chat('thread', ['threadId', 'description', 'agentId', 'status'], {
     required: ['description']
@@ -498,7 +550,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'threads.delete': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
   'threads.regenerateTitle': write('thread', ['threadId']),
   'threads.setWorktreeEnabled': write('thread', ['threadId', 'enabled']),
-  // When the thread deletes itself for good, or null to keep it; the owner's daemon runs the delete.
+  // When the thread archives itself, or null for never; the owner's daemon archives it.
   'threads.setExpiry': write('thread', ['threadId', 'expiresAt', 'stopsRun']),
   'thread.fork': write(
     'thread',
@@ -942,6 +994,10 @@ export interface RoutedLocalRule {
  */
 export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
+    methods: ['git.heads'],
+    reason: 'The sidebar batches IDs owned by its local profile. Remote workspaces are looked up individually on their owners.'
+  },
+  {
     methods: [
       'health',
       'capabilities',
@@ -977,6 +1033,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['projects.icon', 'projects.setIcon'],
     reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
+  },
+  {
+    methods: ['appearance.wallpaperImport', 'appearance.wallpaperImportBytes', 'appearance.wallpaperRead', 'appearance.wallpaperSaveCopy'],
+    reason: 'A theme wallpaper is an image kept in the profile of the computer itself; a window of another computer shows the theme without it.'
   },
   {
     methods: ['files.root', 'files.writeDirect'],
@@ -1018,16 +1078,25 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'A workflow starts from a /workflow command in a routed send, and reconciling an uncertain effect is decided on the computer that ran it.'
   },
   {
+    methods: ['usage.history'],
     prefixes: ['settings.', 'stats.', 'storage.', 'scheduled.', 'mcp.', 'webTools.'],
     reason: 'Settings and services of the computer, not thread features.'
+  },
+  {
+    prefixes: ['computerUse.'],
+    reason: 'Cua Driver is found and installed on the computer itself; only a person at a window of that computer installs software.'
   },
   {
     methods: ['automations.asks.answer', 'automations.keep'],
     reason: 'An agent’s ask and Keep are answered on the computer that holds them.'
   },
   {
-    methods: ['secrets.requests.list', 'secrets.requests.answer', 'secrets.requests.useSaved', 'secrets.requests.decline', 'secrets.list', 'secrets.delete'],
+    methods: ['secrets.requests.list', 'secrets.requests.answer', 'secrets.requests.useSaved', 'secrets.requests.decline', 'secrets.list', 'secrets.delete', 'secrets.keepPasted'],
     reason: 'A secret is typed and kept on the computer that runs the thread; it never travels to another computer.'
+  },
+  {
+    methods: ['bugReports.draft','bugReports.file', 'bugReports.list', 'bugReports.revoke', 'bugReports.pending', 'bugReports.answer'],
+    reason: 'A bug report is drafted, filed and kept on the computer whose window shows it, with that computer’s logs and GitHub login.'
   },
   {
     methods: ['automations.request.resend', 'automations.keys.list', 'automations.keys.set'],
@@ -1047,7 +1116,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'Providers, accounts and usage belong to the computer that holds the sign-ins; the picker reads providers.snapshots.'
   },
   {
-    prefixes: ['net.', 'bridge.', 'profiles.', 'speech.host.'],
+    prefixes: ['net.', 'netEngine.', 'bridge.', 'profiles.', 'speech.host.'],
     reason: 'Networking, devices, profiles and speech relay are managed on each computer itself.'
   },
   {

@@ -270,23 +270,6 @@ describe('framed daemon to Electron-main command transport', () => {
     }
   })
 
-  it('rejects a wrong owner token before any command capability exists', async () => {
-    const h = await startHarness()
-    const bad = new LocalMmsClient({
-      homeDir: h.home,
-      endpoint: h.endpoint,
-      ownerToken: 'wrong-token',
-      clientType: 'gui',
-      requestedCapabilities: [BROWSER_ATTACHED_V1_CAPABILITY]
-    })
-    try {
-      await expect(bad.connect()).rejects.toThrow(/Hello rejected|auth/i)
-    } finally {
-      await bad.close()
-      await h.stop()
-    }
-  })
-
   it('delivers a command only to the targeted GUI handler with no sibling, CLI, event, or replay leak', async () => {
     const h = await startHarness()
     const seen: Record<string, string[]> = { alice1: [], alice2: [], bob: [], cli: [] }

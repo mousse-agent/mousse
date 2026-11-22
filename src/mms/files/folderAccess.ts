@@ -1,9 +1,12 @@
-import { execFile } from 'node:child_process'
 import { lstat, opendir, readlink, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { mousseGitEnv } from '../git/gitEnv'
+import { execFileGit } from '../git/gitSpawn'
 import { assertGitAllowed } from '../git/gitPolicy'
+import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { commonDirFromFiles } from '../git/gitDirFiles'
 
 /**
  * Waits, without blocking the daemon, until the folders a request or turn works in can be read.
@@ -65,19 +68,28 @@ async function readFolder(path: string): Promise<void> {
   }
 }
 
-function gitCommonDir(folder: string): Promise<string | null> {
+/**
+ * The folder's Git common directory: from its `.git` when that tells (`commonDirFromFiles`, no Git process, only the
+ * folder's own volume read), else from Git. A thread list of a hundred worktrees otherwise ran a Git process for each.
+ */
+async function gitCommonDir(folder: string): Promise<string | null> {
+  const known = await commonDirFromFiles(folder).catch(() => undefined)
+  return known !== undefined ? known : commonDirFromGit(folder)
+}
+
+function commonDirFromGit(folder: string): Promise<string | null> {
   return new Promise((settle) => {
     const args = ['rev-parse', '--path-format=absolute', '--git-common-dir']
     assertGitAllowed({ cwd: folder, args })
     try {
-      execFile('git', ['-c', 'core.fsmonitor=false', ...args], {
+      timeGitChild(() => execFileGit(gitFile(), ['-c', 'core.fsmonitor=false', ...args], {
         cwd: folder,
         encoding: 'utf8',
         windowsHide: true,
         // A Git that never answers (a hung drive) is ended in the end; the caller stopped waiting long before.
         timeout: 120_000,
-        env: mousseGitEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' })
-      }, (error, stdout) => settle(error ? null : stdout.trim() || null))
+        env: gitEnvFor(mousseGitEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' }))
+      }, (error, stdout) => settle(error ? null : stdout.trim() || null)))
     } catch {
       // A path that is no folder (a chosen icon file) can't be Git's working folder, so it has no repository.
       settle(null)

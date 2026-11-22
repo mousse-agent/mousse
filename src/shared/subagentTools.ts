@@ -1,8 +1,9 @@
 /**
- * The Mousse subagent tools as a transcript row records them. A row can name its tool four ways:
+ * The Mousse subagent tools as a transcript row records them. A row can name its tool five ways:
  * bare (`delegate_task`, the pi loop), as an MCP tool (`mcp__mousse__delegate_task`, Claude and
- * Codex), as `mousse.delegate_task` (a Codex row title) or as `Called mousse.delegate_task` (an
- * MCP call event). Older names that still dispatch map to the tool that replaced them.
+ * Codex; or `mcp_mousse_delegate_task`, Antigravity), as `mousse.delegate_task` (a Codex row
+ * title) or as `Called mousse.delegate_task` / `Run mcp_mousse_delegate_task` (an MCP call event).
+ * Older names that still dispatch map to the tool that replaced them.
  */
 
 export type SubagentToolName =
@@ -38,7 +39,7 @@ const TOOLS: Readonly<Record<string, SubagentToolName>> = {
  */
 export function subagentToolName(raw: string | null | undefined): SubagentToolName | null {
   if (!raw) return null
-  const name = raw.trim().replace(/^Called\s+/i, '').toLowerCase()
+  const name = raw.trim().replace(/^(?:Called|Run)\s+/i, '').toLowerCase()
   let server: string | null = null
   let tool = name
   if (name.startsWith('mcp__')) {
@@ -46,6 +47,9 @@ export function subagentToolName(raw: string | null | undefined): SubagentToolNa
     if (split === -1) return null
     server = name.slice('mcp__'.length, split)
     tool = name.slice(split + 2)
+  } else if (name.startsWith(`mcp_${MOUSSE_SERVER}_`)) {
+    server = MOUSSE_SERVER
+    tool = name.slice(`mcp_${MOUSSE_SERVER}_`.length)
   } else if (name.includes('.')) {
     const split = name.indexOf('.')
     server = name.slice(0, split)

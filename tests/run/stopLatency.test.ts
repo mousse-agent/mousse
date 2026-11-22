@@ -4,7 +4,8 @@
  * - the thread shows stopped as soon as the Stop is recorded, before the provider has let go, and what the provider
  *   sends after it never makes the thread look busy again;
  * - a message the person sends while the stopped turn still ends goes first and runs as soon as it has ended, and what
- *   they queued before the Stop stays queued behind it.
+ *   they queued before the Stop stays queued behind it;
+ * - the window hears that a Stop held the queue, and a turn a person stopped is told apart from one an agent stopped.
  * No wall-clock thresholds: each step waits for an event, never for a time.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -160,6 +161,51 @@ describe('Stop latency', () => {
     w.adapter.release()
     await waitFor(() => w.adapter.turns.length === 4 && !w.running() && w.pending().length === 0, 'every queued message to run')
     expect(w.adapter.turns.slice(1).map((turn) => turn.prompt.match(/A sent|B sent|queued before/)?.[0])).toEqual(['A sent', 'B sent', 'queued before'])
+  })
+
+  it('tells the window that a Stop held the queue, and lifts the hold when the next turn starts', async () => {
+    const w = world()
+    const updates: Array<Array<{ content: string; heldAfterStop?: boolean }>> = []
+    w.d.orch.on('queue-updated', (event: { threadId: string; items: Array<{ content: string; heldAfterStop?: boolean }> }) => {
+      if (event.threadId === w.thread.id) updates.push(event.items)
+    })
+    await w.d.orch.send(HOLD, false, { threadId: w.thread.id, clientRequestId: 'hold', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.holding, 'the turn to reach the provider')
+    await w.d.orch.send('queued before the Stop', false, { threadId: w.thread.id, clientRequestId: 'before', awaitMode: 'ack' })
+
+    await w.d.orch.stopThread(w.thread.id, 'user')
+    expect(updates.at(-1)).toEqual([expect.objectContaining({ content: 'queued before the Stop', heldAfterStop: true })])
+
+    w.adapter.release()
+    await waitFor(() => !w.running(), 'the stopped turn to end')
+    // The person's next message starts a turn, and the queue goes on after it.
+    await w.d.orch.send('next', false, { threadId: w.thread.id, clientRequestId: 'next', awaitMode: 'ack' })
+    await waitFor(() => w.pending().length === 0 && !w.running(), 'the held message to run after it')
+    expect(updates.some((items) => items.some((item) => item.content === 'queued before the Stop' && !item.heldAfterStop))).toBe(true)
+  })
+
+  it.each([
+    ['a person', 'user', {}, true],
+    ['an agent', 'task_cancel', { byAgent: true }, false]
+  ] as const)('marks a turn %s stopped as stopped by a person only when one did', async (_who, reason, opts, byPerson) => {
+    const w = world()
+    let markedWhenShown: boolean | undefined
+    w.d.orch.on('turn-state', (state: { threadId: string; phase: string }) => {
+      if (state.threadId === w.thread.id && state.phase === 'stopped') markedWhenShown ??= w.d.orch.stoppedByPerson(w.thread.id)
+    })
+    await w.d.orch.send(HOLD, false, { threadId: w.thread.id, clientRequestId: 'hold', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.holding && w.d.orch.getTurnState(w.thread.id).phase === 'streaming', 'the turn to stream')
+
+    await w.d.orch.stopThread(w.thread.id, reason, opts)
+    expect(markedWhenShown).toBe(byPerson)
+    w.adapter.release()
+    await waitFor(() => !w.running(), 'the stopped turn to end')
+    expect(w.d.orch.stoppedByPerson(w.thread.id)).toBe(byPerson)
+
+    // A later turn is not the stopped one.
+    await w.d.orch.send('next', false, { threadId: w.thread.id, clientRequestId: 'next', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.turns.length === 2 && !w.running(), 'the next turn to finish')
+    expect(w.d.orch.stoppedByPerson(w.thread.id)).toBe(false)
   })
 
   it('leaves a message sent with Queue queued behind a stopped turn, as before', async () => {

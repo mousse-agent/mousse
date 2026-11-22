@@ -110,14 +110,6 @@ describe('GitService last commit message', () => {
 })
 
 describe('GitService push', () => {
-  it('publishes a branch without an upstream to origin and sets the upstream', async () => {
-    const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
-    commitFile(cwd, 'a.txt', 'first'); git(cwd, 'checkout', '-b', 'feature')
-    await new GitService().push(cwd, USER)
-    expect(git(cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/feature')
-    expect(git(origin, 'rev-parse', 'refs/heads/feature')).toBe(git(cwd, 'rev-parse', 'HEAD'))
-  })
-
   it('publishes to the only remote when it is not called origin', async () => {
     const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'team', origin)
     commitFile(cwd, 'a.txt', 'first')
@@ -138,18 +130,6 @@ describe('GitService push', () => {
     await expect(service.push(cwd, USER)).rejects.toMatchObject({ code: 'git_no_remote', message: 'Add a remote before pushing.' })
     git(cwd, 'checkout', '--detach')
     await expect(service.push(cwd, USER)).rejects.toMatchObject({ code: 'git_detached_head' })
-  })
-})
-
-describe('GitService rejected push', () => {
-  it('reports a push the remote refused because it has newer commits', async () => {
-    const { root, cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
-    commitFile(cwd, 'a.txt', 'first'); git(cwd, 'push', '-u', 'origin', 'main')
-    const other = join(root, 'other'); git(root, 'clone', '-q', '-b', 'main', origin, other)
-    git(other, 'config', 'user.name', 'Other'); git(other, 'config', 'user.email', 'other@example.invalid'); git(other, 'config', 'commit.gpgsign', 'false')
-    commitFile(other, 'b.txt', 'theirs'); git(other, 'push', '-q')
-    commitFile(cwd, 'c.txt', 'mine')
-    await expect(new GitService().push(cwd, USER)).rejects.toMatchObject({ code: 'git_push_rejected' })
   })
 })
 

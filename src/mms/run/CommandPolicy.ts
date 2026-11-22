@@ -28,7 +28,8 @@ export function steerStrategy(caps: ProviderCapabilities, run: RunRecord | null)
  * What a drain of pending steers would do now (docs/design/steer-and-interruptions.md §2.2):
  * - `cut`: end the provider's current reply now and continue the turn with the text;
  * - `native`: the provider's own steer, or the next provider turn of the same run at a boundary;
- * - `hold`: take nothing; the steers stay pending until a foreground tool has its result.
+ * - `hold`: take nothing; the steers stay pending (an agent's steer or a notice until a foreground tool has its
+ *   result, anything during a compaction).
  */
 export type SteerDelivery = 'cut' | 'native' | 'hold'
 
@@ -49,28 +50,38 @@ export interface SteerTurnFacts {
   atBoundary: boolean
   /** Send now: the person asked for the held steer to go in at once. */
   forced: boolean
+  /** The provider compacts the turn's context: nothing goes in until it ends (a steer never stops a compaction). */
+  compacting?: boolean
 }
 
 /**
- * How pending steers reach a live turn. A person's steer waits for a foreground tool and cuts while
- * the model writes; an agent's steer or a subagent notice follows the provider's `steer` capability,
- * and on an `interrupt_restart` provider it also waits for a tool. A provider at `steerBoundary: 'none'`
- * keeps the behaviour from before the hold: a person's steer cuts, anything else follows the capability.
+ * How pending steers reach a live turn.
+ * - A person's steer goes in now: it cuts whatever the turn does (the model writing or thinking, a running command),
+ *   and the adapter stops a running tool so the turn goes on with the steer at once. It waits only for a compaction,
+ *   which a steer never stops, unless the person sent it now. At the provider's own turn end it goes in natively.
+ * - An agent's steer or a subagent notice never ends a command: it follows the provider's `steer` capability and, on an
+ *   `interrupt_restart` provider, waits for a foreground tool's result (and the release window after it).
+ * A provider at `steerBoundary: 'none'` has not adopted the hold: a person's steer cuts, anything else follows the
+ * capability.
  */
 export function steerDelivery(caps: Pick<ProviderCapabilities, 'steer' | 'steerBoundary'>, turn: SteerTurnFacts, steer: { person: boolean }): SteerDelivery {
   const capability: SteerDelivery = caps.steer === 'interrupt_restart' ? 'cut' : 'native'
   // Caps saved before the key existed read as `none`.
   const boundary: SteerBoundary = caps.steerBoundary ?? 'none'
   if (boundary === 'none') return steer.person ? 'cut' : capability
-  if (steer.person && turn.forced) return 'cut'
+  if (steer.person) {
+    if (turn.forced) return 'cut'
+    if (turn.compacting) return 'hold'
+    return turn.atBoundary && turn.foreground === 0 ? 'native' : 'cut'
+  }
   // A `native` provider takes an agent's steer at its next step by itself: it waits for the tool.
-  if (!steer.person && caps.steer === 'native') return 'native'
-  if (turn.foreground > 0 || turn.releaseOpen) return 'hold'
+  if (caps.steer === 'native') return 'native'
+  if (turn.compacting || turn.foreground > 0 || turn.releaseOpen) return 'hold'
   // Strict release keeps a steer that is already held held until the provider's turn ends. On an
   // `announce` provider every tool is known before it runs, so there is nothing to wait out.
   if (turn.strict && turn.held && boundary === 'start' && !turn.atBoundary) return 'hold'
   if (turn.atBoundary) return 'native'
-  return steer.person ? 'cut' : capability
+  return capability
 }
 
 /**

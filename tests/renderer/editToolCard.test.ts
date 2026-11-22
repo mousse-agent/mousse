@@ -71,8 +71,8 @@ describe('edit row', () => {
   it('shows the tool rows\' chevron, which turns when the row opens', () => {
     draw(edit)
     const chevron = () => toggle().querySelector('.an-edit-row-chevron')!
-    // After the line totals, inside the button.
-    expect(toggle().lastElementChild).toBe(chevron())
+    // After the line totals, inside the button (in a box that keeps its hit area as wide as before).
+    expect(toggle().lastElementChild).toBe(chevron().parentElement)
     // The shared Collapse chevron turns on data-open.
     expect(chevron().classList).toContain('ui-collapse-chevron')
     expect(chevron().getAttribute('data-open')).toBeNull()

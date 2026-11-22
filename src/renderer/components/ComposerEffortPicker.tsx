@@ -340,11 +340,17 @@ export function modelPickerRunSettings({ providers, selection, onSelect, onClose
       const resolved = resolveTarget(entry)
       return resolveReasoning(resolved.providerId, resolved.modelId, resolved.models).levels.length
     })),
-    // Under the picker: the highlighted model's speed on the left, `footerEnd` on the right.
-    footer: (target: ModelPickTarget | undefined) => {
+    // Under the picker: the highlighted model's speed on the left, `footerEnd` on the right. The bar
+    // stays while any listed model has speeds, so hovering one without (Fable after Opus) keeps the
+    // picker's size instead of sliding the rows under the pointer.
+    footer: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
+      const speedsOf = (entry: ModelPickTarget) => {
+        const resolved = resolveTarget(entry)
+        return getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models)
+      }
+      if (!footerEnd && !all.some((entry) => speedsOf(entry))) return null
       const resolved = target ? resolveTarget(target) : undefined
-      const speeds = resolved ? getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) : undefined
-      if (!speeds && !footerEnd) return null
+      const speeds = target ? speedsOf(target) : undefined
       return <>
         <div className="model-picker-footer-start">
           {resolved && speeds ? <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onSelect} onClose={onClose} /> : null}

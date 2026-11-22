@@ -1,16 +1,23 @@
+import { botActionRefusal } from '../../shared/bots/personal/actionRefusal'
 import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots } from '../../shared/bots/personal/definition'
+import type { NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows, type BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
 import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 import { keepEqualById } from '../lib/keepEqual'
+import { botRetryOf } from '../components/bots/botRetry'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
+import { clearBotLiveReplies, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
+import { adoptFilePreview } from '../components/bots/fileImageCache'
+import type { ChatReference } from '../../shared/chatReferences'
+import { threadLink } from '../../shared/threadLink'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -28,6 +35,8 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
   delete next[key]
   return next
 }
+
+export interface BotActionRefusal { reason: string; text: string }
 
 export const BOT_CHAT_PAGE = 50
 /** How long the face plays "done" after a working bot goes idle with a good outcome. */
@@ -68,6 +77,8 @@ export interface NewBotDraft {
   slots: BotShownRows | null
   /** The Images row (#1088): a model to make pictures with, or null (none, the default). */
   image: BotModelPick | null
+  /** The Devices row: every device (the default) or this computer alone; sent only to a service that takes it. */
+  access: NewBotAccess['mode']
   /** The step New bot shows, so closing and reopening returns to it. */
   step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
@@ -75,7 +86,7 @@ export interface NewBotDraft {
 }
 /** New bot's steps: the look, what it does (name and sentence), and where it runs. */
 export type NewBotStep = 'look' | 'about' | 'runsOn'
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, step: 'look', touched: false }
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, access: 'all', step: 'look', touched: false }
 
 /**
  * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service
@@ -109,10 +120,13 @@ interface BotsState {
   drafts: Record<string, string>
   /** The files in each bot's composer: picked, dropped or pasted. */
   attachments: Record<string, AttachedFile[]>
+  /** The thread pills in each bot's composer (Copy reference, pasted): sent as their links, which the bot reads by reference. */
+  references: Record<string, ChatReference[]>
   /** The message each bot's composer replies to (Reply on a message), shown above the box until sent or dismissed. */
   replyingTo: Record<string, BotChatQuote>
   /** The service has no `bots.chat.react` (an older one): messages show no reaction bar. */
   reactionsMissing: boolean
+  snoozeMissing: boolean
   /** The service has no `bots.questions.answer`: questions show no buttons, and the owner answers with Reply. */
   questionsMissing: boolean
   error: string | null
@@ -122,6 +136,8 @@ interface BotsState {
   newBotOpen: boolean
   newBotDraft: NewBotDraft
   aboutOpen: boolean
+  /** About brings this part into view once it opens: Pick a model's rows. */
+  aboutFocus: 'runs-on' | null
   dialog: BotDialog | null
   /** Each bot's memory as About and the Memory dialog show it: the entries every turn carries, with their words. */
   memory: Record<string, BotMemoryEntry[]>
@@ -148,17 +164,26 @@ interface BotsState {
   markRead(botId: string): void
   setDraft(botId: string, text: string): void
   setAttachments(botId: string, attachments: AttachedFile[]): void
+  addReference(botId: string, reference: ChatReference): void
+  removeReference(botId: string, referenceId: string): void
   /** Reply to a message (null: not any more). */
   setReplyingTo(botId: string, quote: BotChatQuote | null): void
   send(botId: string): Promise<void>
+  /**
+   * Retry on the bot's failed message `messageId`: the owner's words and files of the turn that failed are sent again
+   * (`botRetryOf`), once however often it is pressed. Nothing when that message offers no Retry.
+   */
+  retry(botId: string, messageId: string): Promise<void>
   stop(botId: string): Promise<void>
   /** Stops one piece of work (the line above the composer); the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
+  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<boolean>
   /**
    * The owner taps one of a question's answers: it is their reply to the question, which the bot answers. False when it
    * was not sent (the error says why, or the service has no buttons for questions).
    */
+  answerAction(botId: string, actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotActionRefusal | null>
   answerQuestion(botId: string, questionId: string, choice: string): Promise<boolean>
   /**
    * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses
@@ -178,10 +203,17 @@ interface BotsState {
   /** Moves New bot to a step; moving alone is not putting anything in. */
   setNewBotStep(step: NewBotStep): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary | null>
+  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
+  /**
+   * The owner edits the bot's prompt in About (its description; null: back to the default). Its next turn works under
+   * it. Why it failed, in words, or null; the failure stays with the editor, not the chat.
+   */
+  setPrompt(botId: string, description: string | null): Promise<string | null>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>
+  /** Make private: only this computer reaches the bot from now on (About's Devices, in one click). */
+  makePrivate(botId: string): Promise<void>
   remove(botId: string): Promise<boolean>
   loadDetail(botId: string): Promise<void>
   setPermission(botId: string, permissionId: string, enabled: boolean): Promise<void>
@@ -217,8 +249,30 @@ let refreshAgain = false
 let unsubscribe: Array<() => void> = []
 /** Each bot's last send whose words came back after a failure: sending the same words again reuses its request id. */
 const failedSends = new Map<string, { text: string; clientRequestId: string }>()
+/** Each failed message's Retry, by its id: the request id it sends with, so a second press is the same send. */
+const retrySends = new Map<string, string>()
 /** The id of the bubble shown while the message sent with `clientRequestId` is on its way. */
 const pendingId = (clientRequestId: string) => `pending:${clientRequestId}`
+/** Composer pictures already handed over (or revoked) while their message was being sent; `send` settles the rest. */
+const handedOver = new Set<string>()
+
+/**
+ * The composer's pictures of a message being sent, handed to its confirmed copy's files, so a pasted image stays in
+ * place from sending to sent instead of waiting empty for the file to be read. A picture with no matching file goes.
+ */
+function handOverPreviews(pending: readonly BotChatMessage[], incoming: readonly BotChatMessage[]): void {
+  for (const message of incoming) {
+    if (message.author !== 'owner' || !message.clientRequestId) continue
+    const sent = pending.find((entry) => entry.id === pendingId(message.clientRequestId!))
+    sent?.attachments?.forEach((file, index) => {
+      if (!file.previewUrl || handedOver.has(file.previewUrl)) return
+      handedOver.add(file.previewUrl)
+      const copy = message.attachments?.[index]
+      if (copy?.path && copy.name === file.name) adoptFilePreview(copy.path, file.previewUrl)
+      else URL.revokeObjectURL(file.previewUrl)
+    })
+  }
+}
 /** Each bot's page of older messages on its way. */
 const olderLoads = new Map<string, Promise<void>>()
 let pendingCreate: { key: string; clientRequestId: string } | undefined
@@ -283,7 +337,11 @@ export function watchBotDetail(botId: string): () => void {
 export const useBotsStore = create<BotsState>((set, get) => {
   const fail = (owner: number, cause: unknown, botId: string | null = null) => { if (owner === epoch) set({ error: errorText(cause), errorBotId: botId, busy: false }) }
   const cacheOf = (botId: string): BotChatCache => get().chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
-  const putMessages = (botId: string, incoming: BotChatMessage[]) => set((state) => {
+  const putMessages = (botId: string, incoming: BotChatMessage[]) => {
+    if (!removed.has(botId)) handOverPreviews(get().pending[botId] ?? [], incoming)
+    putConfirmed(botId, incoming)
+  }
+  const putConfirmed = (botId: string, incoming: BotChatMessage[]) => set((state) => {
     if (removed.has(botId)) return {}
     const cache = state.chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
     // A confirmed message clears only the bubble sent with its request id, so two identical messages on their way stay two.
@@ -317,7 +375,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
   const subscribe = () => {
     for (const stop of unsubscribe) stop()
     const events = personalBotsEvents()
+    // The bot's home thread streams its chat turn's reply: shown as it is written (botLiveReplies.ts).
+    const orchestrator = (window.mousse as Partial<typeof window.mousse> | undefined)?.orchestrator
     unsubscribe = [
+      orchestrator?.onThreadMessage?.(({ threadId, message }) => noteThreadMessage(threadId, message, true)),
+      orchestrator?.onThreadMessageUpdated?.(({ threadId, message }) => noteThreadMessage(threadId, message, false)),
       events.onChanged?.((event) => {
         void get().refresh()
         // About, and a chat card that shows one of the bot's automations (`watchBotDetail`), read its runs again.
@@ -340,8 +402,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
   }
 
   return {
-    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-    reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
+    reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {},
 
     activate(profileId) {
@@ -357,10 +419,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
       readSeq.clear()
       removed.clear()
       reactions.clear()
-      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-        reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+      clearBotLiveReplies()
+      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
+        reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
       subscribe()
+      void get().refresh()
     },
 
     async refresh() {
@@ -495,6 +559,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     setDraft(botId, text) { set((state) => ({ drafts: { ...state.drafts, [botId]: text } })) },
     setAttachments(botId, attachments) { set((state) => ({ attachments: { ...state.attachments, [botId]: attachments } })) },
+    addReference(botId, reference) {
+      set((state) => {
+        const current = state.references[botId] ?? []
+        if (current.some((entry) => entry.id === reference.id)) return {}
+        return { references: { ...state.references, [botId]: [...current, reference] } }
+      })
+    },
+    removeReference(botId, referenceId) {
+      set((state) => ({ references: { ...state.references, [botId]: (state.references[botId] ?? []).filter((entry) => entry.id !== referenceId) } }))
+    },
     setReplyingTo(botId, quote) {
       set((state) => {
         const replyingTo = { ...state.replyingTo }
@@ -505,9 +579,13 @@ export const useBotsStore = create<BotsState>((set, get) => {
     },
 
     async send(botId) {
-      const text = expandComposerQuotes(get().drafts[botId] ?? '').trim()
+      const typed = expandComposerQuotes(get().drafts[botId] ?? '').trim()
       const attachments = get().attachments[botId] ?? []
+      const references = get().references[botId] ?? []
       const replyTo = get().replyingTo[botId]
+      // Each thread pill goes as its link on a line of its own: the chat shows it as the thread's chip, and the bot reads
+      // the thread by reference.
+      const text = [typed, references.flatMap((reference) => (reference.threadId ? [threadLink(reference.threadId)] : [])).join('\n')].filter(Boolean).join('\n\n')
       if (!text && !attachments.length) return
       const refusal = attachmentsRefusal(attachments)
       if (refusal) {
@@ -522,23 +600,29 @@ export const useBotsStore = create<BotsState>((set, get) => {
       failedSends.delete(botId)
       const shown: BotChatMessage = {
         seq: Number.MAX_SAFE_INTEGER, id: pendingId(admission.clientRequestId), at: new Date().toISOString(), author: 'owner', kind: 'text',
-        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '' })) } : {}),
+        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '', ...(attached.previewUrl ? { previewUrl: attached.previewUrl } : {}) })) } : {}),
         ...(replyTo ? { replyTo } : {})
       }
       set((state) => ({
         error: null,
         drafts: { ...state.drafts, [botId]: '' },
         attachments: { ...state.attachments, [botId]: [] },
+        references: { ...state.references, [botId]: [] },
         replyingTo: withoutKey(state.replyingTo, botId),
         pending: { ...state.pending, [botId]: [...(state.pending[botId] ?? []), shown] }
       }))
       try {
         const files = await Promise.all(attachments.map(attachmentOf))
         const message = await bots().send(botId, text, admission.clientRequestId, files, replyTo?.id)
-        for (const attached of attachments) if (attached.previewUrl) URL.revokeObjectURL(attached.previewUrl)
+        // The pictures shown while sending go to the sent message's files (unless its copy came first and took them);
+        // any left over are no longer needed.
+        if (owner === epoch) handOverPreviews([shown], [message])
+        for (const attached of attachments) {
+          if (attached.previewUrl && !handedOver.delete(attached.previewUrl)) URL.revokeObjectURL(attached.previewUrl)
+        }
         if (owner !== epoch) return
         set((state) => ({ pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) } }))
-        putMessages(botId, [message])
+        putConfirmed(botId, [message])
       } catch (cause) {
         if (owner !== epoch) return
         // Nothing was sent: the words and files go back into the composer.
@@ -546,7 +630,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
         set((state) => ({
           error: errorText(cause),
           errorBotId: botId,
-          drafts: { ...state.drafts, [botId]: state.drafts[botId] || text },
+          drafts: { ...state.drafts, [botId]: state.drafts[botId] || typed },
+          // The unsent threads come back, before any pasted while it was sending.
+          references: { ...state.references, [botId]: [...references, ...(state.references[botId] ?? []).filter((entry) => !references.some((sent) => sent.id === entry.id))] },
           attachments: { ...state.attachments, [botId]: state.attachments[botId]?.length ? state.attachments[botId]! : attachments },
           replyingTo: replyTo && !state.replyingTo[botId] ? { ...state.replyingTo, [botId]: replyTo } : state.replyingTo,
           pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) }
@@ -554,8 +640,25 @@ export const useBotsStore = create<BotsState>((set, get) => {
       }
     },
 
+    async retry(botId, messageId) {
+      const messages = cacheOf(botId).messages
+      const failed = messages.find((message) => message.id === messageId)
+      const again = failed ? botRetryOf(messages, failed) : null
+      if (!again) return
+      const owner = epoch
+      const clientRequestId = retrySends.get(messageId) ?? crypto.randomUUID()
+      retrySends.set(messageId, clientRequestId)
+      set({ error: null })
+      try {
+        const message = await bots().send(botId, again.text, clientRequestId, again.attachments, again.replyTo)
+        if (owner !== epoch) return
+        putMessages(botId, [message])
+      } catch (cause) { fail(owner, cause, botId) }
+    },
+
     async stop(botId) {
       const owner = epoch
+      noteBotStopAsked(botId)
       try { await bots().stop(botId); if (owner === epoch) void get().refresh() } catch (cause) { fail(owner, cause, botId) }
     },
 
@@ -575,6 +678,40 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) { fail(owner, cause, botId) }
     },
 
+    async snoozeReminder(botId, messageId, choice) {
+      const owner = epoch
+      set({ error: null })
+      try {
+        const message = await bots().snoozeReminder(botId, messageId, choice)
+        if (owner !== epoch) return false
+        putMessages(botId, [message])
+        void get().refresh()
+        return true
+      } catch (cause) {
+        if (owner !== epoch) return false
+        if (missingMethod(cause)) set({ snoozeMissing: true })
+        else fail(owner, cause, botId)
+        void get().loadChat(botId)
+        return false
+      }
+    },
+    async answerAction(botId, actionId, digest, answer) {
+      const card = get().chats[botId]?.messages.find(message => message.action?.actionId === actionId)?.action
+      const names = { botName: get().bots.find(bot => bot.id === botId)?.name, serverName: card?.serverName }
+      const owner = epoch
+      try {
+        await bots().answerAction(actionId, digest, answer)
+        if (owner === epoch) { await get().loadChat(botId); void get().refresh() }
+        return null
+      } catch (cause) {
+        if (owner !== epoch) throw cause
+        await get().loadChat(botId)
+        const refusal = botActionRefusal(cause, names)
+        // A gone row unmounts its card, so its refusal belongs in the chat's existing notice.
+        if (owner === epoch && !get().chats[botId]?.messages.some(message => message.action?.actionId === actionId)) fail(owner, refusal ? { message: refusal.text } : cause, botId)
+        return refusal ?? { reason: String((cause as { code?: unknown } | null)?.code ?? 'request_failed'), text: errorText(cause) }
+      }
+    },
     async answerQuestion(botId, questionId, choice) {
       const owner = epoch
       set({ error: null })
@@ -760,6 +897,17 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) { fail(owner, cause, botId); return false }
     },
 
+    async setPrompt(botId, description) {
+      const owner = epoch
+      try {
+        const bot = await bots().update(botId, { description })
+        if (owner === epoch) putBot(bot)
+        return null
+      } catch (cause) {
+        return errorText(cause)
+      }
+    },
+
     async pause(botId) {
       const owner = epoch
       try { const bot = await bots().pause(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause, botId) }
@@ -768,6 +916,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
     async resume(botId) {
       const owner = epoch
       try { const bot = await bots().resume(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause, botId) }
+    },
+
+    async makePrivate(botId) {
+      const owner = epoch
+      try {
+        await bots().setDevices(botId, { mode: 'this_computer' })
+        if (owner !== epoch) return
+        // The list's lock shows at once; the service's `bots.changed` reads it again too.
+        set((state) => ({ bots: state.bots.map((bot) => (bot.id === botId ? { ...bot, reach: 'this_computer' } : bot)) }))
+      } catch (cause) { fail(owner, cause, botId) }
     },
 
     async remove(botId) {
@@ -829,6 +987,10 @@ export const useBotsStore = create<BotsState>((set, get) => {
     }
   }
 })
+
+// A live reply follows its bot's chat turn and its chat's messages: it goes once its message is posted.
+setBotLiveReplySources({ bots: () => useBotsStore.getState().bots, messages: (botId) => useBotsStore.getState().chats[botId]?.messages ?? [] })
+useBotsStore.subscribe((state, previous) => { if (state.bots !== previous.bots || state.chats !== previous.chats) noteBots() })
 
 /** Failures whose words come from the service and are meant for the owner as they are. */
 const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable', 'model_unavailable'])

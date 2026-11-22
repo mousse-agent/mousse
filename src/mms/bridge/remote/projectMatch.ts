@@ -48,6 +48,25 @@ export function matchProjectWithEvidence(
   return { id: possible[0]!.id, weak: true }
 }
 
+/**
+ * Every candidate that may be the same repository as `source`, for a caller that must choose when there is no single
+ * answer: a root commit in common and no remote that rules it out. `weak` when no remote is shared.
+ */
+export function possibleProjects(
+  source: ProjectIdentity,
+  candidates: ReadonlyArray<{ id: string; identity: ProjectIdentity | null }>
+): ProjectMatch[] {
+  const roots = new Set(source.roots)
+  const remotes = new Set(source.remotes)
+  return candidates.flatMap((candidate) => {
+    const identity = candidate.identity
+    if (!identity?.roots.some((root) => roots.has(root))) return []
+    const shares = identity.remotes.some((remote) => remotes.has(remote))
+    if (identity.remotes.length && source.remotes.length && !shares) return []
+    return [{ id: candidate.id, weak: !shares }]
+  })
+}
+
 /** `matchProjectWithEvidence` for a caller that wants only the id. */
 export function matchProject(
   source: ProjectIdentity,

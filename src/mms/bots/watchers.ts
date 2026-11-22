@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { killProcessTree } from '../execution/processTree'
 import { trackChildProcess } from '../diagnostics/liveCounts'
+import { countLineBreaks } from '../terminals/terminalText'
 
 /**
  * A bot's background watchers (`watch_start`): a command that runs on its own, beside the bot, until it exits, prints a
@@ -13,13 +14,16 @@ import { trackChildProcess } from '../diagnostics/liveCounts'
 /** How long a watcher runs unless the bot says otherwise, and the most it may. */
 export const DEFAULT_WATCHER_MINUTES = 60
 export const MAX_WATCHER_MINUTES = 6 * 60
-/** Most watchers one bot runs at once. */
-export const MAX_WATCHERS_PER_BOT = 3
 /** Most characters of the command and the match. */
 export const MAX_WATCHER_COMMAND_CHARS = 2_000
 export const MAX_WATCHER_MATCH_CHARS = 200
 /** Output kept for the wake: its last characters, and only this much of a line is matched or kept. */
 const TAIL_CHARS = 4_000
+/** All of a command's output the bot can read (`watch_list` with its id): its last characters. */
+export const WATCHER_OUTPUT_CHARS = 256_000
+/** A command that ended stays readable this long, the last few of each bot. */
+export const ENDED_WATCHER_KEEP_MS = 6 * 60 * 60 * 1000
+export const MAX_ENDED_WATCHERS_PER_BOT = 5
 const LINE_CHARS = 500
 /** How long a stopped command has to end before its tree is killed outright. */
 const KILL_GRACE_MS = 3_000
@@ -57,11 +61,36 @@ export interface WatcherView {
   lastLine?: string
 }
 
+/** A command's output as the bot reads it: running or ended, and how many lines fell out of the kept output. */
+export interface WatcherOutput {
+  id: string
+  title: string
+  command: string
+  startedAt: string
+  /** Absent while it runs. */
+  end?: WatcherEnd
+  endedAt?: string
+  output: string
+  droppedLines: number
+}
+
+interface Ended {
+  spec: WatcherSpec
+  startedAt: number
+  endedAt: number
+  end: WatcherEnd
+  output: string
+  droppedLines: number
+}
+
 interface Running {
   spec: WatcherSpec
   child: ChildProcess
   startedAt: number
   tail: string
+  /** Up to `WATCHER_OUTPUT_CHARS` of its output, and how many lines came before that. */
+  output: string
+  droppedLines: number
   partial: string
   lastLine?: string
   pattern?: RegExp
@@ -99,6 +128,8 @@ export function watcherMatchProblem(pattern: string): string | undefined {
 
 export class BotWatchers {
   private readonly running = new Map<string, Running>()
+  /** Commands that ended (stopped ones included), oldest first. */
+  private ended: Ended[] = []
 
   constructor(private readonly deps: BotWatchersDeps) {}
 
@@ -132,6 +163,20 @@ export class BotWatchers {
       }))
   }
 
+  /** The watchers running now with their process, folder and the end of their output: the running list (`RunningRegistry`). */
+  processes(): Array<{ id: string; botId: string; title: string; command: string; pid?: number; cwd: string; startedAt: number; output: string }> {
+    return [...this.running.values()].map((entry) => ({
+      id: entry.spec.id,
+      botId: entry.spec.botId,
+      title: entry.spec.title,
+      command: entry.spec.command,
+      ...(entry.child.pid !== undefined ? { pid: entry.child.pid } : {}),
+      cwd: entry.spec.cwd,
+      startedAt: entry.startedAt,
+      output: entry.tail
+    }))
+  }
+
   /** Starts `spec`'s command. Throws when it can't start (the shell is missing); then `onEnd` is never called. */
   start(spec: WatcherSpec): void {
     if (this.running.has(spec.id)) return
@@ -151,13 +196,15 @@ export class BotWatchers {
       child,
       startedAt: this.now(),
       tail: '',
+      output: '',
+      droppedLines: 0,
       partial: '',
       ...(spec.match ? { pattern: new RegExp(spec.match) } : {}),
       timer: (this.deps.setTimer ?? defaultTimer)(() => this.end(spec.id, { kind: 'time_limit' }), spec.limitMs),
       ended: false
     }
     this.running.set(spec.id, entry)
-    const read = (chunk: Buffer | string) => this.output(entry, typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
+    const read = (chunk: Buffer | string) => this.received(entry, typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
     child.stdout?.on('data', read)
     child.stderr?.on('data', read)
     child.once('error', (error) => this.end(spec.id, { kind: 'failed', message: error.message }))
@@ -176,11 +223,46 @@ export class BotWatchers {
     return true
   }
 
-  /** Stops every watcher of a bot; their ids. */
+  /** Stops every watcher of a bot, and forgets the output of its ended ones; their ids. */
   stopBot(botId: string): string[] {
     const ids = [...this.running.values()].filter((entry) => entry.spec.botId === botId).map((entry) => entry.spec.id)
     for (const id of ids) this.stop(id)
+    this.ended = this.ended.filter((entry) => entry.spec.botId !== botId)
     return ids
+  }
+
+  /** All of one of the bot's commands' kept output, while it runs and for a while after it ended; undefined when gone. */
+  output(botId: string, id: string): WatcherOutput | undefined {
+    this.pruneEnded()
+    const running = this.running.get(id)
+    if (running) {
+      if (running.spec.botId !== botId) return undefined
+      return { id, title: running.spec.title, command: running.spec.command, startedAt: new Date(running.startedAt).toISOString(), output: running.output, droppedLines: running.droppedLines }
+    }
+    const ended = this.ended.find((entry) => entry.spec.id === id && entry.spec.botId === botId)
+    if (!ended) return undefined
+    return {
+      id,
+      title: ended.spec.title,
+      command: ended.spec.command,
+      startedAt: new Date(ended.startedAt).toISOString(),
+      end: ended.end,
+      endedAt: new Date(ended.endedAt).toISOString(),
+      output: ended.output,
+      droppedLines: ended.droppedLines
+    }
+  }
+
+  private pruneEnded(): void {
+    const now = this.now()
+    this.ended = this.ended.filter((entry) => now - entry.endedAt < ENDED_WATCHER_KEEP_MS)
+    const perBot = new Map<string, number>()
+    for (let index = this.ended.length - 1; index >= 0; index--) {
+      const botId = this.ended[index].spec.botId
+      const count = (perBot.get(botId) ?? 0) + 1
+      perBot.set(botId, count)
+      if (count > MAX_ENDED_WATCHERS_PER_BOT) this.ended.splice(index, 1)
+    }
   }
 
   /** Mousse is closing: every watcher stops, and none wakes its bot (the next start tells it). */
@@ -191,11 +273,17 @@ export class BotWatchers {
       this.running.delete(entry.spec.id)
       this.kill(entry)
     }
+    this.ended = []
   }
 
-  private output(entry: Running, text: string): void {
+  private received(entry: Running, text: string): void {
     if (entry.ended) return
     entry.tail = (entry.tail + text).slice(-TAIL_CHARS)
+    const all = entry.output + text
+    if (all.length > WATCHER_OUTPUT_CHARS) {
+      entry.droppedLines += countLineBreaks(all.slice(0, all.length - WATCHER_OUTPUT_CHARS))
+      entry.output = all.slice(-WATCHER_OUTPUT_CHARS)
+    } else entry.output = all
     const lines = (entry.partial + text).split(/\r?\n/)
     entry.partial = (lines.pop() ?? '').slice(-LINE_CHARS * 4)
     for (const line of lines) {
@@ -216,6 +304,8 @@ export class BotWatchers {
     entry.ended = true
     entry.timer.clear()
     this.running.delete(id)
+    this.ended.push({ spec: entry.spec, startedAt: entry.startedAt, endedAt: this.now(), end, output: entry.output, droppedLines: entry.droppedLines })
+    this.pruneEnded()
     // A command that ended by itself has nothing left to kill.
     if (end.kind !== 'exit') this.kill(entry)
     try {

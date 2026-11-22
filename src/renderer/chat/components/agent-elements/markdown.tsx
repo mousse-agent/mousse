@@ -265,6 +265,8 @@ export type MarkdownProps = {
    * each update, and blocks that appear fade in. Off for everything already written.
    */
   streaming?: boolean;
+  /** With `streaming`: each word is its own element, so a word that shows fades in (a bot's live reply, `reply-flow.ts`). */
+  revealWords?: boolean;
   /** The images' own rule (`MarkdownImages`); absent: a thread's. */
   images?: MarkdownImages;
   /**
@@ -580,6 +582,35 @@ const literalTags = () => showUnknownTags;
 const threadPlugins = [literalTags, defaultRehypePlugins.raw!, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
 const imageRulePlugins = [literalTags, defaultRehypePlugins.raw!, markImages, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
 
+/** Elements whose text stays as it is: code (highlighted whole), links and chips (drawn from their text), math, SVG. */
+const UNWRAPPED_TAGS = new Set(["pre", "code", "a", "svg", "math", "script", "style", "kbd"]);
+
+function wrapWordsIn(node: Root | Element): void {
+  node.children = (node.children as ElementContent[]).flatMap((child): ElementContent[] => {
+    if (child.type === "element") {
+      const className = child.properties.className;
+      const math = Array.isArray(className) && className.some((name) => typeof name === "string" && /math|katex/.test(name));
+      if (!UNWRAPPED_TAGS.has(child.tagName) && !math) wrapWordsIn(child);
+      return [child];
+    }
+    if (child.type !== "text") return [child];
+    // Each run of non-space characters becomes its own element, the space between stays text.
+    return child.value.split(/(\s+)/).filter(Boolean).map((part): ElementContent =>
+      /^\s+$/.test(part)
+        ? { type: "text", value: part }
+        : { type: "element", tagName: "span", properties: { className: ["an-word"] }, children: [{ type: "text", value: part }] });
+  }) as typeof node.children;
+}
+
+/**
+ * Wraps each word of a live reply in its own `span.an-word`, after the sanitizer, so each word that shows can fade in
+ * (`revealWords`). Words are keyed by their place among their parent's spans, so words already drawn keep their
+ * element as the reply grows and only new ones fade.
+ */
+const wrapWords = () => wrapWordsIn;
+const threadPluginsWithWords = [...threadPlugins, wrapWords];
+const imageRulePluginsWithWords = [...imageRulePlugins, wrapWords];
+
 function unmarkImageSource(src: unknown): string | undefined {
   if (typeof src !== "string" || !src.startsWith(IMAGE_MARK)) return undefined;
   try {
@@ -636,12 +667,13 @@ function setupFor(images: MarkdownImages | undefined, override: Partial<Componen
   return made;
 }
 
-export const Markdown = memo(function Markdown({ content, className, streaming = false, images, components }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ content, className, streaming = false, revealWords = false, images, components }: MarkdownProps) {
   countRender("Markdown");
   const renderMath = useRenderMath();
   const math = renderMath && mayContainMath(content);
   const ruled = setupFor(images, components);
   const live = useLiveMarkdown();
+  const words = streaming && revealWords;
   // Math has a split of its own and is worked on whole; the live tail gives the same text and
   // blocks as the whole would, so the end of the stream changes nothing on screen.
   const incremental = streaming && !math;
@@ -671,11 +703,12 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       )}
       onCopy={math ? copyMathAsTex : undefined}
       data-streaming={streaming || undefined}
+      data-reveal-words={words || undefined}
     >
-      <MarkdownSetupContext.Provider value={`${ruled ? `${ruled.setup}:` : ""}${math ? "math" : "plain"}`}>
+      <MarkdownSetupContext.Provider value={`${ruled ? `${ruled.setup}:` : ""}${math ? "math" : "plain"}${words ? ":words" : ""}`}>
       <Streamdown
         components={ruled ? ruled[math ? "math" : "plain"] : math ? markdownMathComponents : markdownComponents}
-        rehypePlugins={images ? imageRulePlugins : threadPlugins}
+        rehypePlugins={words ? images ? imageRulePluginsWithWords : threadPluginsWithWords : images ? imageRulePlugins : threadPlugins}
         plugins={math ? markdownMathPlugins : markdownPlugins}
         BlockComponent={CachedBlock}
         parseMarkdownIntoBlocksFn={

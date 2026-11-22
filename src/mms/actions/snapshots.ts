@@ -1,6 +1,6 @@
-import { spawnSync } from 'node:child_process'
+import { spawnGitSync, withGitDiskAdmission } from '../git/gitSpawn'
 import { createHash, randomUUID } from 'node:crypto'
-import { lstatSync, type Stats } from 'node:fs'
+import { lstatSync, rmSync, type Stats } from 'node:fs'
 import { lstat, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
@@ -21,6 +21,11 @@ import { files as disk, runAsync, step, type Steps } from './steps'
 import type { DiscardGit } from './provenDiscard'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { retentionWindowText } from '../../shared/undoRetention'
+import { timeGitSync } from '../diagnostics/turnBoundary'
+import { turnBoundaryStep } from '../diagnostics/turnBoundary'
+import { branchOfHeadRef, repositoryFactsStep, type RepositoryFacts } from '../git/repositoryFacts'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { MOUSSE_COMMIT_EMAIL, MOUSSE_COMMIT_NAME } from '../git/mousseCommitIdentity'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
@@ -270,8 +275,8 @@ function candidateFiles(top: string): Steps<string[]> {
   const args = ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ...builtInPathspecs().exclude]
   const options = { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }
   return step(
-    () => listedCandidates(spawnSync('git', guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnv(top), ...options })),
-    async () => listedCandidates(await runGitProcess(await guardedAsync(top, args), { cwd: top, env: gitEnv(top), ...options }))
+    () => listedCandidates(timeGitSync(() => spawnGitSync(gitFile(), guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnvFor(gitEnv(top)), ...options }))),
+    () => withGitDiskAdmission(top, async () => listedCandidates(await runGitProcess(await guardedAsync(top, args), { cwd: top, env: gitEnv(top), ...options })))
   )
 }
 
@@ -361,7 +366,12 @@ interface PrivateFiles {
   infoAttributes?: string
 }
 
-function* privateFiles(top: string): Steps<PrivateFiles> {
+/** `rev-parse --show-toplevel`, from the turn's shared facts when they are open (`repositoryFacts.ts`). */
+function* topOf(cwd: string): Steps<string> {
+  return (yield* repositoryFactsStep(cwd))?.top ?? (yield* gitStep(cwd, ['rev-parse', '--show-toplevel']))
+}
+
+function* privateFiles(top: string, facts?: RepositoryFacts): Steps<PrivateFiles> {
   const store = activeHiddenStore(top)
   if (store) {
     // The store has no worktree index of anyone's, so its own is the persistent one: `git diff` against the folder reads it.
@@ -370,7 +380,7 @@ function* privateFiles(top: string): Steps<PrivateFiles> {
     return { directory, index: join(store.gitDir, 'index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json') }
   }
   // `--git-path` keeps names Git doesn't know in the worktree's own Git directory, so each linked worktree has its own.
-  const [mousse, info] = (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
+  const [mousse, info] = facts ? [facts.mousseDir, facts.infoAttributes] : (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
   const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
   return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
@@ -611,6 +621,8 @@ interface Conversion {
   filtered: Set<string>
   /** `.git/info/attributes` is there: it applies even with conversions off. */
   infoAttributes: boolean
+  /** `git config --null --list`, as read for the conversion, for the exact tree to read its drivers from. */
+  configListing?: string
 }
 
 /**
@@ -621,13 +633,16 @@ interface Conversion {
  * from a snapshot): `GIT_ATTR_SOURCE` from Git 2.40; before, any `.gitattributes` in the tree counts as converting.
  */
 function* conversionSteps(top: string, files: PrivateFiles, paths: readonly string[], source?: string): Steps<Conversion> {
-  const config = yield* tryGitStep(top, ['config', '--get-regexp', '^core\\.(autocrlf|eol)$'])
+  // Every setting, once: the exact tree reads its filter drivers from the same listing (`configListing`). Each entry is
+  // `key\nvalue`, or `key` alone for a bare key, ended by NUL.
+  const config = yield* tryGitStep(top, ['config', '--null', '--list'], undefined, LISTING)
   let converts = false
-  for (const line of config.ok ? config.stdout.split(/\r?\n/).filter(Boolean) : []) {
-    const space = line.indexOf(' ')
-    const key = (space < 0 ? line : line.slice(0, space)).toLowerCase()
+  for (const item of config.ok ? config.stdout.split('\0').filter(Boolean) : []) {
+    const newline = item.indexOf('\n')
+    const key = (newline < 0 ? item : item.slice(0, newline)).toLowerCase()
+    if (key !== 'core.autocrlf' && key !== 'core.eol') continue
     // A bare `autocrlf` key reads as true; `core.eol` counts whatever it says.
-    if (key !== 'core.autocrlf' || !/^(false|no|off|0)$/i.test(space < 0 ? '' : line.slice(space + 1).trim())) converts = true
+    if (key !== 'core.autocrlf' || !/^(false|no|off|0)$/i.test(newline < 0 ? '' : item.slice(newline + 1).trim())) converts = true
   }
   const infoAttributes = files.infoAttributes ? yield* nonEmpty(files.infoAttributes) : false
   const modern = yield* readsAttrSource(top)
@@ -640,7 +655,7 @@ function* conversionSteps(top: string, files: PrivateFiles, paths: readonly stri
     }
   }
   if (source && !modern && !converts) converts = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', source], undefined, undefined, LISTING)).some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))
-  return { converts, filtered, infoAttributes }
+  return { converts, filtered, infoAttributes, ...(config.ok ? { configListing: config.stdout } : {}) }
 }
 
 function* nonEmpty(path: string): Steps<boolean> {
@@ -675,6 +690,14 @@ const STORED_LATER = (): string => `not stored yet, as a snapshot stores at most
 /** One entry of `ls-tree -r -l`: its path, mode, blob and the blob's size. */
 interface SizedEntry { path: string; mode: string; sha: string; size: number }
 
+function* sizedTreeEntries(top: string, tree: string): Steps<SizedEntry[]> {
+  return nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '-l', '--full-tree', tree], undefined, undefined, LISTING)).map((line) => {
+    const tab = line.indexOf('\t')
+    const [mode, , sha, size] = line.slice(0, tab).split(/ +/) as [string, string, string, string]
+    return { path: line.slice(tab + 1), mode, sha, size: Number(size) }
+  })
+}
+
 /**
  * The exact tree of the files the snapshot's tree `normal` holds (see the note above), and the paths it keeps only in
  * Git's form, named as gaps. The paths come from `normal`, so the walk, the coverage-gap loop and `followTrackedFiles`
@@ -684,12 +707,7 @@ interface SizedEntry { path: string; mode: string; sha: string; size: number }
  */
 function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined): Steps<ExactResult | undefined> {
   if (!exactTreesRecorded) return undefined
-  // `<mode> <type> <object> <size>\t<path>`, the size padded with spaces.
-  const entries: SizedEntry[] = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '-l', '--full-tree', normal], undefined, undefined, LISTING)).map((line) => {
-    const tab = line.indexOf('\t')
-    const [mode, , sha, size] = line.slice(0, tab).split(/ +/) as [string, string, string, string]
-    return { path: line.slice(tab + 1), mode, sha, size: Number(size) }
-  })
+  const entries = yield* sizedTreeEntries(top, normal)
   const conversion = yield* conversionSteps(top, files, entries.filter((entry) => isFile(entry.mode)).map((entry) => entry.path))
   if (!conversion.converts) return { tree: normal, gaps: [] }
   const earlier = { head, previous: yield* readLast(files.last), directory: files.directory }
@@ -777,7 +795,8 @@ function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly Siz
   const empty = yield* emptyTreeSteps(top)
   const env = exactEnv(empty, index)
   // No filter driver runs while bytes are hashed, not even one `.git/info/attributes` names: every one is emptied.
-  const config = yield* gitStep(top, ['config', '--null', '--list'], undefined, undefined, LISTING)
+  // Read once for the conversion (`conversionSteps`); asked here only when that read failed.
+  const config = conversion.configListing ?? (yield* gitStep(top, ['config', '--null', '--list'], undefined, undefined, LISTING))
   const off = driversOffOf(config)
   const quiet = <T>(steps: Steps<T>): Steps<T> => withConfigSteps(off, steps)
   const links = entries.filter((entry) => entry.mode === '160000')
@@ -1064,7 +1083,7 @@ export function* worktreeTreeSteps(cwd: string): Steps<string> {
 
 /** The tree of the worktree's files right now, and their exact tree (see the exact-bytes note), without writing a commit. */
 export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = {}): Steps<{ tree: string; exactTree?: string }> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const files = yield* privateFiles(top)
   const { tree } = yield* indexTree(top, files.index, yield* headOf(top))
   if (options.exact === false || activeHiddenStore(top)) return { tree }
@@ -1090,16 +1109,23 @@ function* readLast(path: string): Steps<LastSnapshot | undefined> {
  * it works while a merge or rebase is in progress (the snapshot says so). When the files and HEAD are what the
  * previous snapshot had, that snapshot is returned. The caller holds the mutation locks.
  */
-export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Snapshot> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
-  const files = yield* privateFiles(top)
-  const head = yield* headOf(top)
+export function* takeSnapshotSteps(cwd: string, input: SnapshotInput, checkpointOperationId?: string): Steps<Snapshot> {
+  // A turn's start or end asks once for all its callers (`repositoryFacts.ts`); otherwise each is asked here.
+  const facts = yield* repositoryFactsStep(cwd)
+  const top = facts?.top ?? (yield* gitStep(cwd, ['rev-parse', '--show-toplevel']))
+  const files = yield* privateFiles(top, facts)
+  const head = facts ? facts.head : yield* headOf(top)
+  // Where a turn's snapshot spends its time (`turnBoundary.ts`): nothing when no turn boundary is measured.
+  turnBoundaryStep('snapshotHead')
   const { tree, gaps: coverageGaps } = yield* indexTree(top, files.index, head)
+  turnBoundaryStep('snapshotIndex')
   const hidden = activeHiddenStore(top) !== undefined
-  const branch = hidden ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
-  const operation = yield* operationInProgressSteps(top)
+  const branch = hidden ? undefined : facts ? branchOfHeadRef(yield* step(() => undefined, () => facts.headRef())) : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
+  const operation = yield* operationInProgressSteps(top, facts?.markers)
+  turnBoundaryStep('snapshotState')
   // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
   const exactResult = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
+  turnBoundaryStep('snapshotExact')
   const exactTree = exactResult && 'tree' in exactResult ? exactResult.tree : undefined
   // What only Git's form of is kept is named with the rest, and recorded under its own key (`x`), never as not covered:
   // a restore writes it.
@@ -1107,26 +1133,69 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const named = [...coverageGaps, ...exactGaps]
   const state = { tree, ...(exactTree ? { exactTree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(named.length ? { coverageGaps: named } : {}) }
   const { ignored, truncated } = yield* ignoredNow(top)
+  turnBoundaryStep('snapshotIgnored')
   const record = uncoveredRecord(coverageGaps, ignored, truncated, exactGaps)
   const uncovered = record.value
   const previous = yield* readLast(files.last)
   // Reused only when what it left out, and its exact bytes, are the same too: a restore reads both from the snapshot.
-  if (previous && previous.tree === tree && previous.exact === exactTree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok) return { sha: previous.sha, ...state }
+  const reused = previous && previous.tree === tree && previous.exact === exactTree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok
   const trailers = [
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
     head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
     record.any ? `${UNCOVERED_LINE}${uncovered}` : ''
   ]
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
-  const sha = yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
-  yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exactTree ? { exact: exactTree } : {}) } satisfies LastSnapshot))
-  return { sha, ...state }
+  const sha = reused ? previous.sha : yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
+  const snapshot = { sha, ...state }
+  // Publish the recovery record before updating the cache or returning the captured end to the caller.
+  if (checkpointOperationId) yield* pinCheckpointSnapshot(top, checkpointOperationId, snapshot)
+  if (!reused) {
+    try {
+      yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exactTree ? { exact: exactTree } : {}) } satisfies LastSnapshot))
+    } catch (error) {
+      // The checkpoint is already recoverable. A cache write failure must not turn it into an uncaptured end.
+      if (!checkpointOperationId) throw error
+    }
+  }
+  if (!reused || checkpointOperationId) turnBoundaryStep('snapshotCommit')
+  return snapshot
 }
 
 
 /** Records the worktree's files as a snapshot (see `takeSnapshotSteps`), without blocking the daemon. */
 export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Snapshot> {
   return runAsync(takeSnapshotSteps(cwd, input))
+}
+
+export function takeCheckpointSnapshotAsync(cwd: string, input: SnapshotInput & { operationId: string }): Promise<Snapshot> {
+  return runAsync(takeSnapshotSteps(cwd, input, input.operationId))
+}
+
+const checkpointRef = (operationId: string): string => `refs/mousse/checkpoints/${operationId}`
+
+/** The annotated tag records the capture and keeps the snapshot reachable in a single ref update. */
+function* pinCheckpointSnapshot(top: string, operationId: string, snapshot: Snapshot): Steps<void> {
+  const tag = yield* gitStep(top, ['mktag'], undefined, [
+    `object ${snapshot.sha}`, 'type commit', `tag ${operationId}`,
+    `tagger ${MOUSSE_COMMIT_NAME} <${MOUSSE_COMMIT_EMAIL}> ${Math.floor(Date.now() / 1_000)} +0000`, '', JSON.stringify(snapshot), ''
+  ].join('\n'))
+  yield* gitStep(top, ['update-ref', '--no-deref', checkpointRef(operationId), tag, '0'.repeat(tag.length)])
+}
+
+export async function readCheckpointSnapshotAsync(cwd: string, operationId: string): Promise<Snapshot | undefined> {
+  const ref = checkpointRef(operationId)
+  const record = await gitAsync(cwd, ['for-each-ref', '--format=%(refname)%00%(objecttype)%00%(*objectname)%00%(contents)', ref], undefined, undefined, LISTING)
+  if (!record) return undefined
+  const [name, type, target, json] = record.split('\0')
+  if (name !== ref || type !== 'tag' || !json) throw new Error('The interrupted checkpoint capture record is invalid.')
+  const snapshot = JSON.parse(json) as Snapshot
+  if (snapshot.sha !== target) throw new Error('The interrupted checkpoint capture does not match its pin.')
+  return snapshot
+}
+
+/** Release the temporary pin only after the receipt has retained the capture. */
+export async function releaseCheckpointSnapshotAsync(cwd: string, operationId: string): Promise<void> {
+  await gitAsync(cwd, ['update-ref', '--no-deref', '-d', checkpointRef(operationId)])
 }
 
 /**
@@ -1136,7 +1205,7 @@ export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Sn
  * (`plannedExactGapsSteps`), recorded and named as a snapshot taken of the files would.
  */
 export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotInput, exactTree?: string, exactGaps: CoverageGap[] = []): Steps<Snapshot> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const head = yield* headOf(top)
   const branch = activeHiddenStore(top) ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top)
@@ -1277,10 +1346,14 @@ function shasInWords(commits: string[]): string {
  * rewritten history. It is built from `original`, the turn's own action, since a Redo's target is the Undo's record,
  * whose commits are always empty. Commits are worded as history, and qualified when their branch has moved since.
  */
-export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource): Steps<string | undefined> {
+export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource, renamedTo: (branch: string) => string = (branch) => branch): Steps<string | undefined> {
   const { commits, git } = original
   const parts: string[] = []
-  const branch = git?.branchAfter
+  // Branches as they are named now: Mousse may have renamed the thread's branch since (`threadBranchRecord`), which is
+  // neither a switch nor a branch that is gone.
+  const named = (branch?: string): string | undefined => (branch ? renamedTo(branch) : branch)
+  const before = named(git?.branchBefore)
+  const branch = named(git?.branchAfter)
   const last = commits.at(-1)
   if (last) {
     const isAncestor = function* (ref: string): Steps<boolean> {
@@ -1298,9 +1371,9 @@ export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Red
       ? `, so Git now shows ${commits.length === 1 ? 'its' : 'their'} changes as ${operation === 'Undo' ? 'undone' : 'reverted'}` : ''
     parts.push(`${subject} ${where}${shown}.`)
   }
-  if (git && git.branchBefore !== git.branchAfter && (git.branchBefore || git.branchAfter)) {
+  if (git && before !== branch && (before || branch)) {
     const name = (value?: string) => value ?? 'a detached HEAD'
-    parts.push(`This turn switched from ${name(git.branchBefore)} to ${name(git.branchAfter)}; ${operation} leaves the checkout where it is.`)
+    parts.push(`This turn switched from ${name(before)} to ${name(branch)}; ${operation} leaves the checkout where it is.`)
   }
   if (git?.rewroteHistory) parts.push(`This turn rewrote the history of ${branch ?? 'HEAD'} (a reset or rebase); ${operation} leaves that history as it is.`)
   if (!parts.length) return undefined
@@ -1309,8 +1382,8 @@ export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Red
 }
 
 
-export function gitLeftInPlaceNoticeAsync(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource): Promise<string | undefined> {
-  return runAsync(gitLeftInPlaceNoticeSteps(cwd, operation, original))
+export function gitLeftInPlaceNoticeAsync(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource, renamedTo?: (branch: string) => string): Promise<string | undefined> {
+  return runAsync(gitLeftInPlaceNoticeSteps(cwd, operation, original, renamedTo))
 }
 
 /**
@@ -1401,7 +1474,7 @@ export interface RestoreChangeInput extends SnapshotInput {
  * so the caller can write it down for recovery.
  */
 export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, planned?: (tree: string, exactTree?: string) => void): Steps<RestoreResult> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const merged = yield* mergeTreesSteps(top, input.base, input.ours, input.theirs)
   if ('conflicts' in merged) return merged
   const ours = yield* treeOfSteps(top, input.ours)
@@ -1465,6 +1538,54 @@ function* entriesAt(top: string, tree: string, paths: Iterable<string>): Steps<M
   return map
 }
 
+/**
+ * An older first turn can start from a plain creation commit. For that Undo, derive checkout bytes from its own
+ * attributes, using a private index and a separate directory. Filtered and oversized files keep the regular Git
+ * restore path, which is also how snapshots restore files without exact bytes.
+ */
+function* checkoutExactTreeSteps(top: string, commit: string, tree: string): Steps<string | undefined> {
+  const body = yield* tryGitStep(top, ['log', '-1', '--format=%B', commit, '--'], undefined, LISTING)
+  if (!body.ok || body.stdout.startsWith(SUBJECT)) return undefined
+  const entries = (yield* sizedTreeEntries(top, tree)).filter((entry) => isFile(entry.mode))
+  const files = yield* privateFiles(top)
+  const conversion = yield* conversionSteps(top, files, entries.map((entry) => entry.path), tree)
+  if (!conversion.converts) return tree
+
+  const folder = join(files.directory, 'checkout-' + randomUUID())
+  const index = folder + '.index'
+  const env: NodeJS.ProcessEnv = { GIT_INDEX_FILE: index, GIT_ATTR_SOURCE: tree }
+  try {
+    yield* gitStep(top, ['read-tree', tree], env)
+    const filtered = new Set((yield* convertingAttributes(top, entries.map((entry) => entry.path), env, [], true))
+      .filter(([, attribute]) => attribute === 'filter').map(([path]) => path))
+    const checkout = entries.filter((entry) => !filtered.has(entry.path) && entry.size <= EXACT_LIMITS.fileBytes)
+    if (checkout.length) {
+      yield* gitStep(top, ['checkout-index', '-z', '--stdin', '--prefix=' + folder + '/'], env, checkout.map((entry) => entry.path).join('\0') + '\0')
+    }
+    const sizes = yield* fileSizes(checkout.map((entry) => join(folder, entry.path)))
+    const kept = checkout.filter((_entry, at) => (sizes[at] ?? Infinity) <= EXACT_LIMITS.fileBytes)
+    const batch = kept.filter((entry) => !/[\r\n]/.test(entry.path))
+    const shas = batch.length
+      ? (yield* gitStep(top, ['hash-object', '-w', '--no-filters', '--stdin-paths'], undefined, batch.map((entry) => join(folder, entry.path)).join('\n') + '\n')).split(/\r?\n/)
+      : []
+    const exact = new Map(batch.map((entry, at) => [entry.path, shas[at]!]))
+    for (const entry of kept) {
+      if (!exact.has(entry.path)) exact.set(entry.path, yield* gitStep(top, ['hash-object', '-w', '--no-filters', '--', join(folder, entry.path)]))
+    }
+    const lines = entries.flatMap((entry) => {
+      const sha = exact.get(entry.path)
+      if (sha === entry.sha) return []
+      return [(sha ? entry.mode + ' ' + sha : '0 ' + '0'.repeat(tree.length)) + '\t' + entry.path]
+    })
+    if (!lines.length) return tree
+    yield* gitStep(top, ['update-index', '-z', '--index-info'], env, lines.join('\0') + '\0')
+    return yield* gitStep(top, ['write-tree'], env)
+  } finally {
+    yield* step(() => rmSync(folder, { recursive: true, force: true }), () => rm(folder, { recursive: true, force: true }))
+    yield* disk.remove(index)
+  }
+}
+
 /** `{ path: [from, to] }` for each path two trees hold differently, as `mode sha` (absent where a tree has none). */
 function* treeChanges(top: string, from: string, to: string): Steps<Map<string, [string | undefined, string | undefined]>> {
   const raw = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', from, to], undefined, undefined, LISTING)).split('\0')
@@ -1488,8 +1609,9 @@ function* treeChanges(top: string, from: string, to: string): Steps<Map<string, 
 function* exactTargetSteps(top: string, input: RestoreChangeInput, ours: string, target: string): Steps<ExactMove | undefined> {
   const oursExact = yield* exactTreeOfSteps(top, input.ours)
   if (!oursExact) return undefined
-  const theirsExact = yield* exactTreeOfSteps(top, input.theirs)
   const theirs = yield* treeOfSteps(top, input.theirs)
+  // Older turns can have only a plain creation commit for their start.
+  const theirsExact = (yield* exactTreeOfSteps(top, input.theirs)) ?? (yield* checkoutExactTreeSteps(top, input.theirs, theirs))
   // Both sides' exact trees are their Git forms: no path's bytes on disk differed from Git's form. Then no change of
   // exact bytes alone can be restored, and `theirs`' exact entries are its own.
   const plain = oursExact === ours && theirsExact === theirs
@@ -2015,7 +2137,7 @@ export function moveOutcome(progress: MoveProgress): 'applied' | 'not-applied' |
 }
 
 export function* moveProgressSteps(cwd: string, from: string, to: string, exact?: ExactMove): Steps<MoveProgress> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const progress: MoveProgress = { moved: [], unmoved: [], other: [], emptied: [] }
   const listed = (top: string, a: string, b: string) => gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', a, b], undefined, undefined, LISTING)
   const paths = [...new Set([...nul(yield* listed(top, from, to)), ...(exact ? nul(yield* listed(top, exact.from, exact.to)) : [])])]

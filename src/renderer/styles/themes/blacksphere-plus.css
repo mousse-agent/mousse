@@ -25,7 +25,7 @@ html[data-theme='blacksphere-plus'] {
   --app-window-bg: var(--surface-base);
   --text-primary: #e6e6e6;
   --text-secondary: #a3a3a3;
-  --gradient-surface: #000000;
+  --gradient-surface: var(--surface-base);
   --vscode-activityBar-background: #000000;
   --vscode-activityBar-foreground: #e6e6e6;
   --vscode-activityBar-border: #242424;
@@ -94,30 +94,30 @@ html[data-theme='blacksphere-plus'] {
   --syntax-type: #87C3FF;
   --syntax-number: #EBC88D;
 
-  /* Agent-elements bridge — map chat/tool surfaces onto blacksphere neutrals
+  /* Agent-elements bridge — map chat/tool surfaces onto the theme's grays (which lean a tad toward the accent, useTheme)
      so cards (edit diff, code blocks, tool rows, bubbles) match the theme
      instead of the generic slate bridge in global.css. Higher specificity
      than the `:root` bridge, so these win whenever this theme is active. */
-  --an-background: #000000;
-  --an-background-secondary: #121212;
-  --an-background-tertiary: #050505;
+  --an-background: var(--surface-base);
+  --an-background-secondary: var(--surface-soft);
+  --an-background-tertiary: var(--surface-muted);
   --an-foreground: #e6e6e6;
   --an-foreground-muted: #969696;
   --an-foreground-subtle: #666666;
-  --an-border-color: #242424;
+  --an-border-color: color-mix(in srgb, #fff 14%, var(--surface-base));
   /* The user's bubble stands a clear step above the pure-black transcript (about #1c1c1c), lighter than
      tool cards (#0d0d0d) and the composer (#121212), so a prompt reads apart from the replies. */
-  --an-user-message-bg: color-mix(in srgb, var(--text-primary) 12%, var(--surface-base));
+  --an-user-message-bg: color-mix(in srgb, var(--ui-lift) 11%, var(--surface-base));
   --an-user-message-text: #e6e6e6;
-  --an-tool-background: #0d0d0d;
-  --an-tool-border-color: #242424;
+  --an-tool-background: color-mix(in srgb, var(--ui-lift) 5%, var(--surface-base));
+  --an-tool-border-color: color-mix(in srgb, #fff 14%, var(--surface-base));
   --an-tool-color: #e6e6e6;
   --an-tool-color-muted: #969696;
-  --an-input-background: #121212;
-  --an-input-border-color: #242424;
+  --an-input-background: var(--surface-soft);
+  --an-input-border-color: color-mix(in srgb, #fff 14%, var(--surface-base));
   --an-input-color: #e6e6e6;
   --an-input-placeholder-color: #7b7b7b;
-  --an-code-background: #0d0d0d;
+  --an-code-background: color-mix(in srgb, var(--ui-lift) 5%, var(--surface-base));
   --an-code-color: #e6e6e6;
 }
 

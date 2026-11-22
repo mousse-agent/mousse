@@ -37,6 +37,7 @@ files:
   - '!**/node_modules/node-pty/**/*.test.js'
 asarUnpack:
   - out/net-native/**
+  - node_modules/@koromix/**
   - out/browser-worker/**
   - out/pi-runtime/**
   - node_modules/node-pty/build/Release/**
@@ -45,16 +46,18 @@ asarUnpack:
   - node_modules/node-pty/prebuilds/linux-x64/**
   - node_modules/node-pty/third_party/**
   - node_modules/@node-datachannel/**
+  - node_modules/@koromix/koffi-win32-*/**
   - node_modules/@cursor/sdk-*/**
   - out/main/cursorHost.js
   - out/main/threadDbWorker.js
   - out/cli/threadDbWorker.js
+  - out/main/usageHistoryWorker.js
+  - out/cli/usageHistoryWorker.js
 npmRebuild: false
 win:
+  # The architecture of the computer that packages it, or --x64 / --arm64 (package.json "build" explains).
   target:
     - target: portable
-      arch:
-        - x64
   icon: resources/icon.ico
   signExecutable: false
   # The helper of the SSH endpoint (scripts/build-sshd-helper.mjs); without it Windows uses its own OpenSSH server.

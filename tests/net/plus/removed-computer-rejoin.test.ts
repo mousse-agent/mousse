@@ -142,8 +142,21 @@ it('the owner computer is never set aside, even when signing in', async () => {
 
   await owner.net.request('net.plus.login.begin', { configuration, deviceName: 'Desk', bindRoot: true })
 
+  // Alone on its network now, it signs in as a computer that may join the account's devices; its
+  // network is only left once Mousse ID shows another one to join, never when signing in begins.
+  expect(logins[0]).not.toHaveProperty('nodeId')
+  expect(readdirSync(owner.path).filter((name) => name.startsWith('net.'))).toEqual([])
+  expect(owner.net.runtime().identity.self()).toMatchObject({ node: self.node, isAuthority: true })
+}, 30000)
+
+it('an owner computer with other devices signs in with its own identity', async () => {
+  const { owner } = await devices()
+  const self = owner.net.runtime().identity.self()!
+  const { logins } = fakeMousseId()
+
+  await owner.net.request('net.plus.login.begin', { configuration, deviceName: 'Desk', bindRoot: true })
+
   expect(logins[0]).toMatchObject({ nodeId: self.node })
-  expect(asideOf(owner.path)).toEqual([])
   expect(owner.net.runtime().identity.self()).toMatchObject({ node: self.node, isAuthority: true })
 }, 30000)
 

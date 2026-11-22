@@ -1,5 +1,6 @@
 import { checkMessage } from '../../../../shared/bots/personal/walls'
 import { Type, type Tool } from '@earendil-works/pi-ai'
+import { resolveEffectiveSkills } from '../../../integrations/catalog/EffectiveIntegrationResolver'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { AppToolHost } from './host'
 import { disabledInSettings, plainSchema, truncateForModel, type AppToolTurn, type MousseTool } from './types'
@@ -36,11 +37,11 @@ export function toSkillSummary(skill: SkillDescriptor): Record<string, unknown> 
 }
 
 /**
- * The skill tools are offered when skills are enabled for the turn, outside Build and read-only
- * modes, as the pi loop always offered them.
+ * The skill tools are offered when skills are enabled for the turn, outside Build (whose skill is its mode). Plan and
+ * reader turns load skills too (docs/plans/tool-api.md §1.5): reading a skill changes nothing.
  */
 function offeredInMode(host: AppToolHost, turn: AppToolTurn): boolean {
-  return Boolean(host.skills?.()) && turn.enabledSkills.length > 0 && turn.mode !== 'build' && !turn.modeFacts.readOnly
+  return Boolean(host.skills?.()) && turn.enabledSkills.length > 0 && turn.mode !== 'build'
 }
 
 /** `list_skills` and `load_skill` over the turn's enabled skills. */
@@ -68,17 +69,33 @@ export function skillTools(host: AppToolHost): MousseTool[] {
       const requested = String(args.skill ?? '')
       const skill = available.find((candidate) =>
         candidate.id === requested ||
+        candidate.installationId === requested ||
         candidate.name === requested ||
         normalizeSkillName(candidate.name) === normalizeSkillName(requested))
       if (!skill) return { text: `Skill not found: ${requested}`, isError: true }
       const decided = check(skill)
       if (decided && !decided.ok) return { text: checkMessage(decided), isError: true }
-      if (skill['disable-model-invocation'])
-        return { text: `Skill ${skill.name} can only be loaded by explicit user invocation.`, isError: true }
       const registry = host.skills?.()
       if (!registry) return { text: `Skill not found: ${requested}`, isError: true }
       ctx.markEffect?.()
-      const result = await registry.readSkill(skill.installationId ?? skill.id, { projectPath: ctx.turn.projectPath })
+      const unavailable = { text: `Skill ${skill.name} is no longer available.`, isError: true }
+      const definition = ctx.turn.definition
+      const grant = definition?.grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)
+      if (definition && !grant) return unavailable
+      let result: Awaited<ReturnType<typeof registry.readSkillForModel>>
+      try {
+        result = await registry.readSkillForModel(skill, grant)
+      } catch {
+        return unavailable
+      }
+      // Disk I/O gave the owner time to change Settings or the bot's permission.
+      const settings = host.skillSettings?.()
+      const snapshot = { skills: [result.skill], sources: [], diagnostics: [] }
+      if (!settings || !resolveEffectiveSkills({ snapshot, settings, actor: ctx.turn.actor, grantSource: grant?.source }).length) return unavailable
+      const current = check(result.skill)
+      if (current && !current.ok) return { text: checkMessage(current), isError: true }
+      if (result.skill['disable-model-invocation'])
+        return { text: `Skill ${skill.name} can only be loaded by explicit user invocation.`, isError: true }
       ctx.timeline?.record({
         kind: 'skill_loaded',
         title: `Loaded skill ${result.skill.name}`,

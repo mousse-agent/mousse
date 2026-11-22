@@ -239,6 +239,45 @@ export class NetIdentityService implements IdentityService {
       (row) => row.kind === 'node' && row.subject === self.node && row.keyEpoch > through
     )
   }
+  /**
+   * Whether this computer may leave its devices for a new identity, and why. `removed`: see
+   * `selfRemoved`. `alone`: no other device holds an unexpired pass in the list this computer
+   * holds. `lapsed`: its own pass lapsed longer ago than the keeper can renew. Otherwise `live`
+   * names the devices that still rely on this list, and whether this computer keeps it.
+   */
+  startOver():
+    | { allowed: 'removed' | 'alone' | 'lapsed'; keeper: boolean }
+    | { allowed?: undefined; keeper: boolean; live: string[] }
+    | undefined {
+    const state = this.load(),
+      self = state.self
+    if (!self) return undefined
+    const keeper = state.writer === 'authority'
+    if (this.selfRemoved()) return { allowed: 'removed', keeper }
+    const user = state.users[self.user]
+    if (!user?.current) return { allowed: 'alone', keeper }
+    const now = this.clock.now(),
+      latest = new Map<NodeId, NodeDelegation>()
+    for (const row of this.delegations(this.rosterDocument(user.current, user.root)))
+      if (row.kind === 'node') {
+        const held = latest.get(row.subject)
+        if (!held || row.keyEpoch > held.keyEpoch || (row.keyEpoch === held.keyEpoch && row.issuedAt > held.issuedAt))
+          latest.set(row.subject, row)
+      }
+    const own = latest.get(self.node)
+    if (!keeper && (!own || now - own.expiresAt >= RENEW_LAPSED_MAX_MS)) return { allowed: 'lapsed', keeper }
+    const live = [...latest.values()]
+      .filter((row) => row.subject !== self.node && now < row.expiresAt)
+      .map((row) => row.name)
+    return live.length ? { keeper, live } : { allowed: 'alone', keeper }
+  }
+  /** Whether this computer's own list holds any bots. */
+  listsBots(): boolean {
+    const state = this.load(),
+      user = state.self ? state.users[state.self.user] : undefined
+    if (!user?.current) return false
+    return this.rosterDocument(user.current, user.root).bots.length > 0
+  }
   rosterState(user: UserId): RosterState {
     return this.load().users[user]?.state ?? 'ok'
   }
@@ -747,6 +786,51 @@ export class NetIdentityService implements IdentityService {
       else roster.revoked.push({ subject, throughKeyEpoch: epoch, revokedAt: this.clock.now() })
     })
   }
+  /**
+   * Whether this profile keeps its own network: it holds the root and node keys of its current roster, however
+   * long its own delegation has lapsed. A profile that joined another computer's network does not.
+   */
+  isKeeper(): boolean {
+    const self = this.load().self
+    return !!self && this.authorityKeysHeld(self, 'any')
+  }
+  /**
+   * Re-issues this profile's own delegation when it is due within `dueWithinMs`, however long it has lapsed: the
+   * profile is its own authority, so no other device has to vouch for it. Used by the engine service, which
+   * signs host records with this delegation while v1 networking (and its renewal) is off. Refused on a profile
+   * that is not its network's keeper. Answers the window of the own delegation in force afterwards.
+   *
+   * A delegation that starts more than `skewMs` from now (the clock went back after a renewal) is re-issued from
+   * now too, so the profile is never left with one that has not started.
+   */
+  renewSelf(dueWithinMs: number, skewMs = 0): { renewed?: Signed; issuedAt: number; expiresAt: number } {
+    const now = this.clock.now()
+    if (!Number.isSafeInteger(now) || now < 0)
+      throw new NetError('bad_request', 'Renewal must use the authority clock.')
+    const current = this.roster()
+    if (!current) throw new NetError('not_enrolled')
+    const self = this.load().self
+    if (!self || !this.authorityKeysHeld(self, 'any')) throw new NetError('forbidden')
+    const roster = this.rosterDocument(current, this.pinnedRootKey(self.user)!)
+    const own = this.delegations(roster)
+      .filter((row): row is NodeDelegation => row.kind === 'node' && row.subject === self.node)
+      .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
+    if (!own) throw new NetError('bad_delegation')
+    if (own.expiresAt - now > dueWithinMs && own.issuedAt <= now + skewMs)
+      return { issuedAt: own.issuedAt, expiresAt: own.expiresAt }
+    const renewed = this.authorityUpdate((next) => {
+      next.nodes = next.nodes.filter((row) => {
+        const prior = verifyDocument<NodeDelegation>(row, next.rootKey, 'nodeDelegation')
+        return prior.subject !== own.subject || prior.keyEpoch !== own.keyEpoch
+      })
+      next.nodes.push(
+        signedDocument({ ...own, issuedAt: now, expiresAt: now + NODE_DELEGATION_TTL_MS }, (bytes) =>
+          this.keys.signAsRoot(bytes)
+        )
+      )
+    }, 'any')
+    return { renewed, issuedAt: now, expiresAt: now + NODE_DELEGATION_TTL_MS }
+  }
   renewExpiring(): Signed | undefined {
     const now = this.clock.now()
     if (!Number.isSafeInteger(now) || now < 0)
@@ -1196,9 +1280,13 @@ export class NetIdentityService implements IdentityService {
 
   /**
    * Whether this profile holds the authority's root and node keys for its current roster, even
-   * when its own delegation has lapsed. Only renewal uses this: everything else needs a current one.
+   * when its own delegation has lapsed (or, with 'any', has not started). Only renewal uses this:
+   * everything else needs a current one.
    */
-  private authorityKeysHeld(self: { user: UserId; node: NodeId }): boolean {
+  private authorityKeysHeld(
+    self: { user: UserId; node: NodeId },
+    lapsed: true | 'any' = true
+  ): boolean {
     const state = this.load(),
       user = state.users[self.user]
     if (
@@ -1210,9 +1298,13 @@ export class NetIdentityService implements IdentityService {
     )
       return false
     const roster = this.rosterDocument(user.current, user.root)
-    return roster.authorityNode === self.node && this.localNodeMatches(roster, self.node, true)
+    return roster.authorityNode === self.node && this.localNodeMatches(roster, self.node, lapsed)
   }
-  private localNodeMatches(roster: Roster, node: NodeId, allowLapsed = false): boolean {
+  private localNodeMatches(
+    roster: Roster,
+    node: NodeId,
+    allowLapsed: boolean | 'any' = false
+  ): boolean {
     if (this.keys.state() !== 'unlocked') return false
     try {
       return (
@@ -1231,7 +1323,7 @@ export class NetIdentityService implements IdentityService {
     roster: Roster,
     node: NodeId,
     current = true,
-    allowLapsed = false
+    allowLapsed: boolean | 'any' = false
   ): NodeDelegation {
     if (!isId('node', node)) throw new NetError('bad_request')
     const rows = this.delegations(roster).filter(
@@ -1243,8 +1335,11 @@ export class NetIdentityService implements IdentityService {
       .filter(
         (row) =>
           row.keyEpoch === epoch &&
-          row.issuedAt <= at &&
-          (at < row.expiresAt || (allowLapsed && at - row.expiresAt < RENEW_LAPSED_MAX_MS))
+          // 'any' (the keeper renewing itself) also takes one that has not started: the clock went back.
+          (row.issuedAt <= at || allowLapsed === 'any') &&
+          (at < row.expiresAt ||
+            allowLapsed === 'any' ||
+            (allowLapsed && at - row.expiresAt < RENEW_LAPSED_MAX_MS))
       )
       .sort((a, b) => b.issuedAt - a.issuedAt)[0]
     if (
@@ -1647,7 +1742,7 @@ export class NetIdentityService implements IdentityService {
   }
   private authorityUpdate(
     change: (roster: Roster, self: { user: UserId; node: NodeId }) => void,
-    allowLapsed = false
+    allowLapsed: boolean | 'any' = false
   ): Signed {
     let result!: Signed, owner!: UserId
     this.transaction((state) => {

@@ -33,17 +33,22 @@ const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string>
   capability: (name) =>
     `This computer is not allowed to work on threads on ${name}. Turn on Works on threads for this computer in Settings, Devices, on the computer that manages your devices.`,
   terminal_off: terminalOffMessage,
+  not_connected: (name) => `${name} hasn't connected this computer.`,
+  work_off: (name) => `${name} lets this computer view threads and chat with bots only.`,
   unknown: (name) => `${name} refused this request.`
 }
 
 export function computerForbidden(
   computer: ComputerRef,
-  reason: ComputerForbiddenReason
+  reason: ComputerForbiddenReason,
+  /** The Net code the other computer refused with, when it says more than `reason` (`bad_delegation`). */
+  cause?: string
 ): DomainRpcError {
   return new DomainRpcError('computer_forbidden', FORBIDDEN_WORDS[reason](computer.name), {
     node: computer.node,
     name: computer.name,
-    reason
+    reason,
+    ...(cause ? { cause } : {})
   })
 }
 
@@ -116,7 +121,7 @@ export function translateNetError(
     case 'revoked':
     case 'not_enrolled':
     case 'bad_delegation':
-      return computerForbidden(computer, 'capability')
+      return computerForbidden(computer, 'capability', error.code)
     case 'peer_offline':
     case 'route_unreachable':
       return computerOffline(computer)

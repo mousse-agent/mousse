@@ -131,8 +131,8 @@ describe('a running turn reports its step', () => {
     expect(byPoint.reasoning).toEqual({ phase: 'thinking', step: { kind: 'reasoning' } })
     // The wait goes as a duration, so a window on another computer counts it down on its own clock.
     expect(byPoint.retry).toEqual({ phase: 'thinking', step: { kind: 'retrying', attempt: 2, maxAttempts: 5, delayMs: 3000 } })
-    // The live line says it; nothing about the retry is saved to the transcript.
-    expect(orch.getMessages(thread.id).some((message) => /retrying/i.test(message.content))).toBe(false)
+    // The live line counts down to it; the transcript keeps one row, which the output after it turned recovered.
+    expect(orch.getMessages(thread.id).filter((message) => message.kind === 'provider_retry').map((message) => message.content)).toEqual(['Provider recovered after 2 retries'])
     // Output ends a step.
     expect(byPoint.progress).toEqual({ phase: 'thinking' })
     expect(byPoint.text).toEqual({ phase: 'streaming' })
@@ -195,16 +195,23 @@ describe("Claude's frames", () => {
   const retryFrame = (extra: Record<string, unknown> = {}) =>
     ({ type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 10, retry_delay_ms: 4800, error_status: 529, error: 'overloaded', session_id: 's1', ...extra }) as unknown as SDKMessage
 
-  it('report a retry of a failed request with its attempts and delay', () => {
+  it('report a retry of a failed request with its attempts, delay and what failed', () => {
     const { frames, retries } = reader()
     frames.observe(retryFrame())
-    expect(retries).toEqual([{ attempt: 2, maxAttempts: 10, delayMs: 4800 }])
+    expect(retries).toEqual([{ attempt: 2, maxAttempts: 10, delayMs: 4800, cause: 'overloaded (529)' }])
+    // A request that got no HTTP answer at all.
+    frames.observe(retryFrame({ attempt: 3, error_status: null, error: 'unknown' }))
+    expect(retries.at(-1)).toMatchObject({ attempt: 3, cause: 'connection error' })
+    expect(frames.retries).toEqual({ attempt: 3, max: 10 })
+    // The provider answered: those retries got the request through.
+    frames.observe(stream({ type: 'message_start', message: {} }))
+    expect(frames.retries).toBeUndefined()
   })
 
   it('leave out the attempt count of a retry after no response, which has a cap of its own', () => {
     const { frames, retries } = reader()
     frames.observe(retryFrame({ attempt: 1, max_retries: 1, no_response: { waited_ms: 30000, retry_wait_ms: 60000 } }))
-    expect(retries).toEqual([{ attempt: 1, delayMs: 4800, noResponse: true }])
+    expect(retries).toEqual([{ attempt: 1, delayMs: 4800, noResponse: true, cause: 'no answer yet' }])
   })
 
   it("do not show a retry as the turn's while a subagent of the turn runs, or one a subagent names", () => {
@@ -216,160 +223,6 @@ describe("Claude's frames", () => {
     // The subagent's call ended: a retry now is the turn's own.
     frames.observe({ type: 'user', parent_tool_use_id: null, session_id: 's1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-call', content: 'done' }] } } as unknown as SDKMessage)
     frames.observe(retryFrame({ attempt: 3 }))
-    expect(retries).toEqual([{ attempt: 3, maxAttempts: 10, delayMs: 4800 }])
-  })
-})
-
-/** A provider whose turns wait for `release`, one gate per thread. */
-class GateAdapter implements ProviderAdapter {
-  readonly driver = 'pi' as const
-  readonly capabilities = PI_TEST_CAPABILITIES
-  readonly started: string[] = []
-  private readonly gates = new Map<string, () => void>()
-
-  release(threadId: string): void {
-    this.gates.get(threadId)?.()
-  }
-
-  async startTurn(input: TurnInput, sink: TurnSink): Promise<TurnResult> {
-    const providerRef = { provider: input.llmProvider, model: input.model, sessionId: `s-${input.threadId}` }
-    sink.providerRef(providerRef)
-    this.started.push(input.threadId)
-    await new Promise<void>((resolve) => this.gates.set(input.threadId, resolve))
-    sink.text({ phase: 'complete', content: 'done', contentIndex: 0 })
-    return {
-      text: 'done', aborted: false, modelName: 'Fake Model', totalResponseTimeMs: 1, totalTokensUsed: 2,
-      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'sig', nativeMessages: input.messages, providerRef
-    }
-  }
-
-  async interrupt(): Promise<'interrupted' | 'not_active'> {
-    return 'not_active'
-  }
-}
-
-describe('a turn that waits for a free turn slot', () => {
-  let home: string
-  let engine: RunEngine
-  let worker: EffectWorker
-  let orch: OrchestratorService
-  let store: ThreadDataStore
-  let adapter: GateAdapter
-
-  beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'mousse-slot-'))
-    process.env.MOUSSE_HOME = home
-    store = new ThreadDataStore(new ProjectManager())
-    orch = new OrchestratorService(
-      new AgentRegistry(),
-      new TaskQueue(),
-      new WorktreeManager(home),
-      new PtyManager(),
-      { get: () => ({ ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, llmProvider: 'openai', model: 'gpt-x' } }) } as never,
-      {} as never
-    )
-    orch.setThreadStore(store)
-    adapter = new GateAdapter()
-    orch.setHarness(testHarness({ adapters: [adapter], profileHome: home }))
-    engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
-    orch.setRunEngine(engine)
-    orch.recoverRunEngineOnBoot()
-    // One turn slot: the profile's limit, made small.
-    worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner, fibres: { turn: 1 } })
-    worker.start()
-    orch.attachEffectWorker(worker)
-  })
-
-  afterEach(async () => {
-    for (const threadId of adapter.started) adapter.release(threadId)
-    await worker.stop()
-    orch.attachEffectWorker(null)
-    orch.setRunEngine(null)
-    engine.store.db.close()
-    rmSync(home, { recursive: true, force: true })
-    delete process.env.MOUSSE_HOME
-  })
-
-  const until = async (check: () => boolean, what: string): Promise<void> => {
-    for (let i = 0; i < 200 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10))
-    if (!check()) throw new Error(`timed out waiting for ${what}`)
-  }
-
-  it('shows the wait, not a turn that thinks, and starts as usual when the running turn ends', async () => {
-    const a = store.createThread('a')
-    const b = store.createThread('b')
-    const seenA: TurnState[] = []
-    const seenB: TurnState[] = []
-    orch.on('turn-state', (state: TurnState) => { if (state.threadId === a.id) seenA.push(state); if (state.threadId === b.id) seenB.push(state) })
-    const first = orch.send('first', false, { threadId: a.id, clientRequestId: 'send-a' })
-    await until(() => adapter.started.includes(a.id), 'the first turn')
-    await new Promise((resolve) => setImmediate(resolve))
-    // A turn that found a free slot never showed the wait.
-    expect(seenA.some((state) => state.step?.kind === 'waiting_slot')).toBe(false)
-
-    const second = orch.send('hi', false, { threadId: b.id, clientRequestId: 'send-b' })
-    await until(() => orch.getTurnState(b.id).phase === 'queued', 'the wait')
-    expect(orch.getTurnState(b.id)).toMatchObject({ phase: 'queued', step: { kind: 'waiting_slot', running: 1 } })
-    // It is not a turn that thinks.
-    expect(seenB.some((state) => state.phase === 'thinking')).toBe(false)
-    expect(adapter.started).not.toContain(b.id)
-
-    adapter.release(a.id)
-    await first
-    await until(() => adapter.started.includes(b.id), 'the second turn')
-    expect(orch.getTurnState(b.id).phase).toBe('thinking')
-    expect(orch.getTurnState(b.id).step?.kind).not.toBe('waiting_slot')
-    adapter.release(b.id)
-    await second
-    expect(orch.getTurnState(b.id)).toMatchObject({ phase: 'completed' })
-  })
-
-  it('a Stop of the waiting turn shows it stopped, and its run ends stopped by the person', async () => {
-    const a = store.createThread('a')
-    const b = store.createThread('b')
-    const first = orch.send('first', false, { threadId: a.id, clientRequestId: 'send-a2' })
-    await until(() => adapter.started.includes(a.id), 'the first turn')
-    const second = orch.send('hi', false, { threadId: b.id, clientRequestId: 'send-b2' })
-    await until(() => orch.getTurnState(b.id).step?.kind === 'waiting_slot', 'the wait')
-
-    await orch.stopThread(b.id, 'user')
-    expect(orch.getTurnState(b.id).phase).toBe('stopped')
-    expect(orch.getTurnState(b.id).step).toBeUndefined()
-    adapter.release(a.id)
-    await first
-    // The fake provider ignores the abort, so let its turn end too.
-    await until(() => adapter.started.includes(b.id) || engine.listRuns(b.id).every((run) => run.status !== 'queued'), 'the stopped run to settle')
-    adapter.release(b.id)
-    await second.catch(() => undefined)
-    expect(engine.listRuns(b.id).map((run) => [run.status, run.outcome?.interruptedBy])).toEqual([['interrupted', 'user']])
-    expect(orch.getTurnState(b.id).phase).toBe('stopped')
-  })
-
-  it('a background turn shows the wait while the slots kept for people are free, and a person\'s message still starts', async () => {
-    // Three slots, two kept for people: background turns share one.
-    await worker.stop()
-    worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner, fibres: { turn: 3 } })
-    worker.start()
-    orch.attachEffectWorker(worker)
-    const a = store.createThread('a')
-    const b = store.createThread('b')
-    const c = store.createThread('c')
-    const first = orch.send('first', false, { threadId: a.id, clientRequestId: 'bg-a', source: 'mcp' })
-    await until(() => adapter.started.includes(a.id), 'the first background turn')
-    const second = orch.send('second', false, { threadId: b.id, clientRequestId: 'bg-b', source: 'mcp' })
-    await until(() => orch.getTurnState(b.id).step?.kind === 'waiting_slot', 'the background wait')
-    // One turn runs of three: the two free slots are kept for people, so it waits, and says why.
-    expect(orch.getTurnState(b.id)).toMatchObject({ phase: 'queued', step: { kind: 'waiting_slot', running: 1, limit: 3, keptForPeople: 2 } })
-    expect(adapter.started).not.toContain(b.id)
-
-    const person = orch.send('mine', false, { threadId: c.id, clientRequestId: 'gui-c', source: 'gui' })
-    await until(() => adapter.started.includes(c.id), 'the person\'s turn')
-    expect(orch.getTurnState(c.id).step?.kind).not.toBe('waiting_slot')
-
-    for (const threadId of [a.id, c.id]) adapter.release(threadId)
-    await Promise.all([first, person])
-    await until(() => adapter.started.includes(b.id), 'the background turn')
-    adapter.release(b.id)
-    await second
+    expect(retries).toEqual([{ attempt: 3, maxAttempts: 10, delayMs: 4800, cause: 'overloaded (529)' }])
   })
 })

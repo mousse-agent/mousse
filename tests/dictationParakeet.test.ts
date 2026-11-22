@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import { LOCAL_STT_MODELS, PARAKEET_TDT_110M, findLocalSttModel } from '../src/shared/dictation'
 import { detokenize, greedyTdtSearch, parseTokens } from '../src/renderer/dictation/tdtSearch'
 
 const BLANK = 3
@@ -99,17 +98,5 @@ describe('Parakeet tokens', () => {
     const vocabulary = parseTokens('<unk> 0\n▁hel 1\nlo 2\n▁world 3\n, 4\n<blk> 5\n')
     expect(vocabulary).toEqual(['<unk>', '▁hel', 'lo', '▁world', ',', '<blk>'])
     expect(detokenize(vocabulary, [1, 2, 4, 3])).toBe('hello, world')
-  })
-})
-
-describe('Parakeet TDT 110M manifest', () => {
-  it('is listed with its three models and vocabulary in the verified files', () => {
-    expect(LOCAL_STT_MODELS).toContain(PARAKEET_TDT_110M)
-    expect(findLocalSttModel('parakeet-tdt-110m')).toBe(PARAKEET_TDT_110M)
-    const paths = PARAKEET_TDT_110M.files.map((file) => file.path)
-    for (const path of [PARAKEET_TDT_110M.encoder, PARAKEET_TDT_110M.decoder, PARAKEET_TDT_110M.joiner, PARAKEET_TDT_110M.tokens]) {
-      expect(paths).toContain(path)
-    }
-    for (const file of PARAKEET_TDT_110M.files) expect(file.sha256).toMatch(/^[0-9a-f]{64}$/)
   })
 })

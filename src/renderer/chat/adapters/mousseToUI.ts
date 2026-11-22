@@ -3,14 +3,17 @@ import type { ChatMessage, TurnEnd } from '../../../shared/types'
 import { agentMessageWords } from '../../../shared/agentMessageWords'
 import type { UIMessage } from 'ai'
 import { isToolTimelineMessage, RESTART_INTERRUPTED_TEXT, TURN_STOPPED_TEXT } from '../../../shared/types'
+import { retriesOf, retriesPhrase } from '../../../shared/providerRetry'
 import {
   filterImageAttachmentNames,
   guessMimeTypeFromFilename,
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
 import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
+import { nativeSubagentInput } from './nativeSubagents'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
 import { splitExitCode } from '../components/agent-elements/utils/bash-output'
+import { getToolStatus } from '../components/agent-elements/utils/format-tool'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
 
@@ -177,12 +180,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
       return {
         type: isTask ? 'tool-Task' : 'tool-Agent',
         // The task id and the background flag let the card follow a background agent to its end.
-        input: compact({
-          subagent_type: activity.agentType,
-          description: activity.description,
-          run_in_background: activity.background ? true : undefined,
-          task_id: activity.nativeId,
-        }),
+        input: compact(nativeSubagentInput(activity)),
         output: running
           ? undefined
           : withInterruption(activity, compact({ totalDurationMs: activity.durationMs, summary: activity.summary, startedAt: activity.startedAt, endedAt: activity.endedAt })),
@@ -213,9 +211,9 @@ function mcpCustomType(rawName: string | undefined): string {
   return `tool-mcp__custom__${mcpToolSlug(rawName)}`
 }
 
-/** A runtime's full MCP tool name (`mcp__<server>__<tool>`, as Claude Code and Codex name them), split. */
+/** A runtime's full MCP tool name (`mcp__<server>__<tool>` for Claude/Codex, `mcp_mousse_<tool>` for Antigravity), split. */
 function splitMcpName(rawName: string | undefined): { server: string; tool: string } | undefined {
-  const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
+  const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/) ?? rawName?.match(/^mcp_(mousse-relay|mousse)_(.+)$/)
   return match ? { server: match[1]!, tool: match[2]! } : undefined
 }
 
@@ -234,7 +232,7 @@ const BUILTIN_TOOL_NAMES = new Set([
  * "Reading" is not one: it is guessed from below.
  */
 function titleIsToolName(title: string): boolean {
-  return /^mcp__\w+$/.test(title) || /^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(title) || (/^\w+$/.test(title) && knownToolName(title) !== undefined)
+  return /^mcp__\w+$/.test(title) || /^mcp_(?:mousse-relay|mousse)_\w+$/.test(title) || /^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(title) || (/^\w+$/.test(title) && knownToolName(title) !== undefined)
 }
 
 function fallbackToolName(msg: ChatMessage): string | undefined {
@@ -460,17 +458,6 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
-    // The note Mousse writes when this thread's agent started another thread: a quiet line of its own with that thread as
-    // a chip. An older note (no `launchedThread`) is not shown, as Mousse's other plain lines are not.
-    if (msg.role === 'system' && msg.launchedThread) {
-      base.role = 'assistant'
-      base.metadata = { ...(base.metadata as object | undefined), notice: true, launchedThread: msg.launchedThread }
-      base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
-      out.push(base)
-      lastAssistantText = null
-      continue
-    }
-
     // Thinking -> tool-Thinking so ThinkingTool renders with shimmer
     if (msg.kind === 'thinking' && msg.thinking) {
       const state = msg.thinking.status === 'processing' ? 'input-available' : 'output-available'
@@ -491,6 +478,13 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     if (isToolTimelineMessage(msg) && msg.toolCall) {
       const activity = msg.activity
       const part = toolPart(msg, msg.id)
+      // When a generic call (an MCP tool) started and when its result arrived: one that waits on the person
+      // (`secret_request`) waited that long. A subagent's call joins its root's message below, so the message's own
+      // time is not the call's. Typed cards keep their shape.
+      if (activity?.kind === 'generic' && activity.endedAt && activity.status !== 'running') {
+        part.startedAt = activity.startedAt
+        part.endedAt = activity.endedAt
+      }
       lastAssistantText = null
 
       // Work a subagent started renders under its row: the part joins the root subagent's message
@@ -516,6 +510,16 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
 
     if (msg.kind === 'context_handoff' && msg.contextHandoff) {
       base.metadata = { ...base.metadata as object, contextHandoff: msg.contextHandoff }
+      base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
+      base.role = 'assistant'
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
+    // A turn's provider retries: one quiet row that counts them, then says the provider recovered.
+    if (msg.kind === 'provider_retry' && msg.providerRetry) {
+      base.metadata = { ...base.metadata as object, providerRetry: msg.providerRetry }
       base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
       base.role = 'assistant'
       out.push(base)
@@ -555,6 +559,15 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         },
       } as unknown as UIMessage['parts'][number]]
       out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
+    // The message that delivers answers to a question the agent asked without waiting (a steer, or a turn of its own)
+    // shows nothing for them: the answers row was recorded when they were given. What else it carries (a subagent's
+    // result delivered with them) shows as usual.
+    const otherNotice = msg.role === 'user' ? msg.subagentNotice?.filter((item) => item.event !== 'answer') : msg.subagentNotice
+    if (msg.role === 'user' && msg.subagentNotice?.length && !otherNotice?.length) {
       lastAssistantText = null
       continue
     }
@@ -610,7 +623,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
     if (agentOrigin) base.metadata = { ...(base.metadata as object | undefined), origin: agentOrigin }
-    const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
+    const subagentNotice = msg.role === 'user' && otherNotice?.length ? otherNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.
     const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined
@@ -686,11 +699,16 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
   return markRecoveredFailures(mergeConsecutiveThoughts(out))
 }
 
-/** The title of a failed turn's error: "Provider error" when the provider refused the request, else "Request failed". */
-export function errorTitle(error: { code?: unknown } | undefined): string {
+/**
+ * The title of a failed turn's error: "Provider error" when the provider refused the request (with the retries it had,
+ * "Provider error after 10/10 retries"), else "Request failed".
+ */
+export function errorTitle(error: { code?: unknown; details?: unknown } | undefined): string {
   const code = typeof error?.code === 'string' ? error.code : ''
   if (code === 'provider_usage_limit') return 'Usage limit reached'
-  return code.startsWith('provider_') ? 'Provider error' : 'Request failed'
+  const retries = retriesOf(error?.details)
+  if (code.startsWith('provider_')) return retries ? `Provider error ${retriesPhrase(retries)}` : 'Provider error'
+  return retries ? `Request failed ${retriesPhrase(retries)}` : 'Request failed'
 }
 
 /** A failed turn's error text: its message, then the reference it was logged under when the message does not name it. */
@@ -729,8 +747,11 @@ export function markRecoveredFailures(messages: UIMessage[]): UIMessage[] {
         continue
       }
       if (isToolPartShape(part)) {
-        if (part.state === 'output-error') pending.push(part)
-        else if (part.state === 'output-available' && part.type !== 'tool-Thinking') settle(false)
+        if (part.type === 'tool-Thinking') continue
+        // The row's own rule: a call that ended with `success: false` in its output failed too.
+        const status = getToolStatus(part)
+        if (status.isError) pending.push(part)
+        else if (status.isSuccess) settle(false)
         continue
       }
       if (type === 'text' && typeof (part as { text?: unknown }).text === 'string' && (part as { text: string }).text.trim()) settle(false)

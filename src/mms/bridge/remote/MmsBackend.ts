@@ -7,7 +7,7 @@ import {
   sensitiveFolderHolding,
   type FolderRuleEnvironment
 } from '../../files/sensitiveFolders'
-import { matchProjectWithEvidence, type ProjectIdentity } from './projectMatch'
+import { matchProjectWithEvidence, possibleProjects, type ProjectIdentity } from './projectMatch'
 import { repositoryIdentitiesFor } from './repositoryIdentity'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
@@ -105,6 +105,8 @@ const WARM_PAGES_MAX = 4
 const MATCH_PROJECT_LIMIT = 256
 /** Folders read at once for a match. */
 const MATCH_CONCURRENCY = 4
+/** At most this many candidates are named when no single project matches. */
+const MATCH_CANDIDATES_SHOWN = 10
 
 /**
  * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
@@ -186,7 +188,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   }
   private async executeFor(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     // The mark of an agent's call is set only by another computer's daemon, through the routed API, never by a phone.
-    if (Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
+    // `usage.history` uses `agent` for its provider filter, validated by `dto.ts` against `USAGE_AGENT_LABELS`.
+    if (method !== 'usage.history' && Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     if (
@@ -207,7 +210,12 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (method === 'projects.match') return mmsJson(await this.matchProject(params))
     const composer = await this.composer(method, params, caller)
     if (composer !== undefined) return mmsJson(composer)
-    if (method === 'threads.create') return mmsJson(await this.createThread(params, caller))
+    if (method === 'threads.create') {
+      // Phones need the new thread to send its first message. The full inventory travels over
+      // the lists stream and can make this reply too large for the phone to read inline.
+      const { thread } = await this.createThread(params, caller)
+      return mmsJson({ thread })
+    }
     if (method === 'threads.regenerateTitle' || method === 'threads.setExpiry') {
       // An expected refusal (no title came back, an expired thread, a time out of range) reaches the phone in words,
       // as `{ ok: false, error }`: a mutating call that throws reports only that it may have happened.
@@ -241,7 +249,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     params: Record<string, unknown>,
     caller?: { node: NodeId },
     started?: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
-  ): Promise<unknown> {
+  ): Promise<{ thread: { id: string } } & Record<string, unknown>> {
     const { startedFromProjectId, ...create } = params
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
@@ -265,7 +273,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    */
   private async matchProject(
     params: Record<string, unknown>
-  ): Promise<{ projectId?: string; weak?: true }> {
+  ): Promise<{ projectId?: string; weak?: true; candidates?: Array<{ projectId: string; name: string; weak?: true }> }> {
     // Projects are matched by the repository they are in, not by their folder: a project that is a
     // subfolder, or is reached through a link, has the identity of its repository. When two projects are
     // the same repository, the one at its top folder stands for it (else the first), so they do not
@@ -301,7 +309,16 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       candidates
     )
     // A match that rests on the root commit alone says so: the caller does not group by it.
-    return found ? { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) } : {}
+    if (found) return { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) }
+    // No single answer: the projects that may be it, by id and name, so an agent can be told which to name.
+    const names = new Map(projects.map((project) => [project.id, project.name]))
+    const possible = possibleProjects(
+      { roots: params.roots as string[], remotes: (params.remotes as string[] | undefined) ?? [] },
+      candidates
+    ).slice(0, MATCH_CANDIDATES_SHOWN)
+    return possible.length
+      ? { candidates: possible.map(({ id, weak }) => ({ projectId: id, name: names.get(id) ?? '', ...(weak ? { weak: true as const } : {}) })) }
+      : {}
   }
   /**
    * Registers an existing directory on this machine as a project. The path comes from another

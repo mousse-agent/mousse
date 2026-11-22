@@ -49,6 +49,9 @@ function recordedLeftMerge(entry: ThreadJournalRecord): string | undefined {
   return entry.state === 'cancelled' && typeof folder === 'string' ? folder : undefined
 }
 
+/** For `ThreadJournal.latestWhere`: a module-level test, so the index keeps its results between calls. */
+const hasRecordedLeftMerge = (entry: ThreadJournalRecord): boolean => recordedLeftMerge(entry) !== undefined
+
 /**
  * A merge an earlier version started (a Publish into the primary checkout, a subagent result into the worktree) that
  * is still in progress in its folder. Its record was cancelled on upgrade and keeps the folder in `mergeInProgress`
@@ -56,12 +59,12 @@ function recordedLeftMerge(entry: ThreadJournalRecord): string | undefined {
  * the check Abort itself runs): once it was finished, aborted or replaced by another (even of the same commit at the
  * same HEAD), it is the person's or the agent's.
  */
-async function leftMerge(entry: ThreadJournalRecord, records: readonly ThreadJournalRecord[]): Promise<string | undefined> {
+async function leftMerge(entry: ThreadJournalRecord, history: readonly ThreadJournalRecord[]): Promise<string | undefined> {
   const folder = recordedLeftMerge(entry)
   if (!folder) return undefined
   await waitForFolderAccess([folder])
   if (!await access(folder).then(() => true, () => false)) return undefined
-  return await leftMergeRefusalAsync(folder, entry, records) ? undefined : folder
+  return await leftMergeRefusalAsync(folder, entry, history) ? undefined : folder
 }
 
 /**
@@ -71,9 +74,8 @@ async function leftMerge(entry: ThreadJournalRecord, records: readonly ThreadJou
  */
 export async function clearStaleLeftMerges(threadDirectory: string, beforeRecord?: () => void): Promise<void> {
   const journal = new ThreadJournal(threadDirectory)
-  const records = journal.list()
   for (const entry of journal.latestByOperation().values()) {
-    if (!recordedLeftMerge(entry) || await leftMerge(entry, records)) continue
+    if (!recordedLeftMerge(entry) || await leftMerge(entry, journal.history(entry.operationId))) continue
     // A caller holding no thread lease checks again here, after the Git reads, that no turn has started.
     beforeRecord?.()
     journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
@@ -83,14 +85,14 @@ export async function clearStaleLeftMerges(threadDirectory: string, beforeRecord
 /**
  * What a thread's worktree or its Publish is waiting on, or undefined when nothing is. `verified` is
  * `ThreadWorkspaceManager.verify()` of the stored metadata: `recovery_required` while a Mousse operation other than
- * Publish waits, or when Git cannot read the worktree. The branch and HEAD are the agent's to move and are never a
- * reason. With `inFlight`, `verified` must come from `verify(…, { inFlight })` too, so a skipped record does not come
+ * Publish waits, or when Git cannot read the worktree (a pause only when Mousse's own operation left it so). The branch
+ * and HEAD are the agent's to move and are never a reason. With `inFlight`, `verified` must come from `verify(…, { inFlight })` too, so a skipped record does not come
  * back as "Git cannot read the worktree".
  */
 export async function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata, options: RecoveryReadOptions = {}): Promise<WorkspaceRecovery | undefined> {
   const journal = new ThreadJournal(threadDirectory, { readOnly: true })
-  const records = journal.list()
-  const latest = [...journal.latestByOperation().values()]
+  // Only operations still open, and records of merges an earlier version left, are read: not every operation run.
+  const latest = journal.unsettled()
   const operationOf = (entry: ThreadJournalRecord) => ({ operationId: entry.operationId, operationType: entry.operationType })
   const errorOf = (entry: ThreadJournalRecord): string | undefined => {
     const error = (entry.details as { error?: unknown } | undefined)?.error
@@ -104,11 +106,15 @@ export async function describeRecovery(threadDirectory: string, verified: Thread
   const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && !settlesItself(entry.operationType) && !options.inFlight?.(entry))
   if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
   // A folder with no Git of its own (`snapshotOnly`) has no worktree for Git to read: only a waiting operation pauses it.
-  if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
+  // A worktree the agent or the person removed or emptied pauses nothing either: the thread's turns run in the project
+  // folder (`WorkspaceResolver`). Only one an operation of Mousse's own left unreadable waits to be recovered.
+  if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required' && await new ThreadWorkspaceManager(threadDirectory).ownOperationUnfinished(verified, options.inFlight)) {
+    return { kind: 'paused', reason: 'Git cannot read the worktree.' }
+  }
 
   // Nothing is refused, but Git keeps a merge open in that folder until it is aborted or finished.
-  for (const entry of latest) {
-    const folder = await leftMerge(entry, records)
+  for (const entry of journal.latestWhere(hasRecordedLeftMerge)) {
+    const folder = await leftMerge(entry, journal.history(entry.operationId))
     if (!folder) continue
     return {
       kind: 'merge',

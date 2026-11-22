@@ -144,13 +144,17 @@ describe('profile-owned file artifacts', () => {
     await expect(second.get(secondRef.id, 'profile-a')).rejects.toThrow('record directory must be a regular directory')
   })
 
-  it('rejects profile-root links at construction and blob links at read time', async () => {
+  it('rejects profile-root links at construction', () => {
     const actual = ownedRoot('actual-profile')
     const holder = ownedRoot('linked-profile-holder')
     const linked = join(holder, 'profile-link')
     symlinkSync(actual, linked, process.platform === 'win32' ? 'junction' : 'dir')
     expect(() => new FileArtifactStore({ profileId: 'profile-a', profileRoot: linked })).toThrow('profile root must be a regular directory')
+  })
 
+  it('rejects blob links at read time', async (context) => {
+    const actual = ownedRoot('actual-profile')
+    const holder = ownedRoot('linked-profile-holder')
     const store = new FileArtifactStore({ profileId: 'profile-a', profileRoot: actual })
     const ref = await put(store)
     const paths = artifactPaths(actual, ref.id)
@@ -160,7 +164,8 @@ describe('profile-owned file artifacts', () => {
     try {
       symlinkSync(outsideBlob, paths.blob, 'file')
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') return
+      // Creating a file symlink needs a privilege on Windows; skip visibly without it.
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') context.skip()
       throw error
     }
     await expect(store.get(ref.id, 'profile-a')).rejects.toThrow('blob must be a regular file')

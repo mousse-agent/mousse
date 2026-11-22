@@ -1,10 +1,11 @@
-import { useEffect } from 'react'
-import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
+import { useEffect, useState } from 'react'
+import { Edit, FolderPlus, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { TitleBarNav } from './TitleBarNav'
+import { NewThreadPicker } from './NewThreadPicker'
 import { IconButton } from './IconButton'
 import {
   applySideCardToggle,
@@ -15,7 +16,7 @@ import {
   useSideCardVisible
 } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
-import { useNeedsMeThreads } from '../lib/needsMe'
+import { useNeedsMeCounts } from '../lib/needsMe'
 import { useMainAreaAvailable } from '../lib/mainAreaAvailable'
 import { needsMeLabel } from '../../shared/threadAttention'
 import { channelForVersion } from '../../shared/updates'
@@ -35,7 +36,8 @@ export function TitleBar() {
   const sideCardVisible = useSideCardVisible()
   const sideCardMode = useSideCardMode()
   const sideCardUnavailable = useSideCardUnavailable()
-  const needsMeCount = useNeedsMeThreads().length
+  const needsMe = useNeedsMeCounts()
+  const needsMeCount = needsMe.threads + needsMe.bots
   // The sidebar shows who needs the person; while it is closed, its toggle carries the count.
   const showBadge = !threadsSidebarOpen && needsMeCount > 0
   // The dock or taskbar carries the same count while the window is in the background.
@@ -44,9 +46,15 @@ export function TitleBar() {
   }, [needsMeCount])
   // In the Chats tab, New starts an agent chat. Search is in the navigation rail.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
-  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMeCount)}` : 'Show sidebar'
+  // New thread asks which project first; with none to pick from, or the picker off, it starts the thread at once.
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+  const hasProjects = useAppStore((s) => s.projects.length > 0)
+  // Settings → General → Threads can turn the picker off, back to one click.
+  const pickerOn = useAppStore((s) => s.newThreadPicker)
+  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMe.threads, needsMe.bots)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
+  const addProjectTitle = useShortcutTitle('Add project', 'project.open')
   const detailsTitle = useShortcutTitle('Thread details', 'sideCard.toggle')
   // A disabled button explains why instead of offering its key.
   const sideCardTitle = sideCardUnavailable ? sideCardButtonTitle(sideCardUnavailable) : detailsTitle
@@ -99,6 +107,16 @@ export function TitleBar() {
                 </span>
               )}
             </IconButton>
+            {/* Projects hold threads, so the Chats tab has no use for it. */}
+            {!chatsMode && (
+              <IconButton
+                icon={FolderPlus}
+                label="Add project"
+                title={addProjectTitle}
+                variant="titlebar"
+                onClick={() => useAppStore.getState().setNewProjectOpen(true)}
+              />
+            )}
             <IconButton
               icon={Edit}
               label={chatsMode ? 'New chat' : 'New thread'}
@@ -106,6 +124,7 @@ export function TitleBar() {
               variant="titlebar"
               onClick={() => {
                 if (chatsMode) useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })
+                else if (hasProjects && pickerOn) setProjectPickerOpen(true)
                 else void createAndSelectThread()
               }}
             />
@@ -137,6 +156,7 @@ export function TitleBar() {
         <WindowCaptionButtons />
       </div>
     </header>
+    <NewThreadPicker open={projectPickerOpen} onClose={() => setProjectPickerOpen(false)} />
     </>
   )
 }

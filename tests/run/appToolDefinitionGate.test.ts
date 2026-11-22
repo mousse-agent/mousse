@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { recordAuthorizedCall, withoutTransportFields, type DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import type { AgentRuntimePolicy, AgentRuntimeToolApprovalRequest } from '../../src/shared/agents/execution'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -40,7 +41,7 @@ const grants = (...ids: string[]) => ({ skills: [], mcpTools: [], builtinTools: 
 describe('app tools under a definition’s authority (MCP)', () => {
   it('a tool outside the grants never reaches its handler', async () => {
     const s = await setup({ policy: policy(), grants: grants('create_task') })
-    expect(await s.registry.call('ask_user', { questions: [] }, s.ctx())).toEqual({ text: 'Tool "ask_user" is not granted to this agent definition.', isError: true })
+    expect(await s.registry.call('ask_user', { questions: [] }, s.ctx())).toEqual(refused('not_granted', 'Tool "ask_user" is not granted to this agent definition.'))
     expect(s.host.askUser).not.toHaveBeenCalled()
     expect((await s.registry.call('create_task', { description: 'fine' }, s.ctx())).isError).toBe(false)
   })
@@ -82,10 +83,10 @@ describe('app tools under a definition’s authority (MCP)', () => {
     expect((await s.call('create_task', { description: 'approved' }, 'call-1')).isError).toBe(false)
     expect(asked).toEqual([])
     // Taken once: the same id again goes through approval (denied here).
-    expect(await s.call('create_task', { description: 'approved' }, 'call-1')).toEqual({ text: 'asked again', isError: true })
+    expect(await s.call('create_task', { description: 'approved' }, 'call-1')).toEqual(refused('not_granted', 'asked again'))
     // Other arguments than the authorized ones: approval again.
     s.record('create_task', { description: 'approved' }, 'call-2')
-    expect(await s.call('create_task', { description: 'changed' }, 'call-2')).toEqual({ text: 'asked again', isError: true })
+    expect(await s.call('create_task', { description: 'changed' }, 'call-2')).toEqual(refused('not_granted', 'asked again'))
     expect(asked).toHaveLength(2)
   })
 
@@ -94,11 +95,11 @@ describe('app tools under a definition’s authority (MCP)', () => {
     const s = await handoff(async (request) => (asked.push(request.toolName), { status: 'denied', reason: 'no creation approved' }))
     // `list_tasks` was approved at the gate; a caller sends `create_task` with the same id and arguments.
     s.record('list_tasks', { description: 'unapproved task' }, 'model-call-1')
-    expect(await s.call('create_task', { description: 'unapproved task' }, 'model-call-1')).toEqual({ text: 'no creation approved', isError: true })
+    expect(await s.call('create_task', { description: 'unapproved task' }, 'model-call-1')).toEqual(refused('not_granted', 'no creation approved'))
     expect(s.tasks.list()).toHaveLength(0)
     // An authorization recorded under another turn's token does not cover this turn.
     s.record('create_task', { description: 'other turn' }, 'model-call-2', 'an-earlier-turn')
-    expect(await s.call('create_task', { description: 'other turn' }, 'model-call-2')).toEqual({ text: 'no creation approved', isError: true })
+    expect(await s.call('create_task', { description: 'other turn' }, 'model-call-2')).toEqual(refused('not_granted', 'no creation approved'))
     expect(s.tasks.list()).toHaveLength(0)
     expect(asked).toEqual(['create_task', 'create_task'])
   })

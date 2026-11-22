@@ -1,0 +1,185 @@
+/* The title bar's New thread picker: the search palette's surface, header and footer (thread-search.css), wider, with
+   the projects as a grid of cards. Rows follow the palette's menu style: a neutral background on hover, a firmer one on
+   the highlighted card, nothing at the edges. Muted text is the full secondary colour, as in the palette. */
+.thread-search-dialog.new-thread-picker {
+  width: min(720px, calc(100vw - 32px));
+}
+
+.new-thread-picker-computers {
+  flex-shrink: 0;
+}
+
+.new-thread-picker-results {
+  padding: 2px 6px 8px;
+}
+
+.new-thread-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.new-thread-picker-card {
+  position: relative;
+  min-width: 0;
+  border-radius: var(--ui-menu-row-radius);
+  transition: background 0.12s;
+}
+
+.new-thread-picker-card:hover {
+  background: var(--ui-hover);
+}
+
+.new-thread-picker-card.active {
+  background: var(--ui-pressed);
+}
+
+.new-thread-picker-card-main {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border-radius: inherit;
+  text-align: left;
+  color: var(--text-primary);
+}
+
+.new-thread-picker-card.unavailable .new-thread-picker-card-main {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The project's icon, or its initials in its hue as the Threads tab marks its cards. */
+.new-thread-picker-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.new-thread-picker-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+/* Only the name's line makes room for the star; the lines under it use the card's full width. */
+.new-thread-picker-name {
+  padding-right: 22px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-thread-picker-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.new-thread-picker-meta svg {
+  flex-shrink: 0;
+}
+
+.new-thread-picker-computer {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.new-thread-picker-when {
+  flex-shrink: 0;
+}
+
+.new-thread-picker-path {
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The star: the model picker's, shown on the hovered or highlighted card and always once starred. */
+.new-thread-picker-star {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--ui-menu-row-radius);
+  color: var(--ui-faint);
+  opacity: 0;
+  transition: background 0.12s, color 0.12s;
+}
+
+.new-thread-picker-card:is(:hover, .active) .new-thread-picker-star,
+.new-thread-picker-star:focus-visible,
+.new-thread-picker-star.active {
+  opacity: 1;
+}
+
+.new-thread-picker-star:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.new-thread-picker-star.active {
+  color: var(--text-secondary);
+}
+
+.new-thread-picker-footer {
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.new-thread-picker-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--ui-control-radius);
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background 0.12s, color 0.12s;
+}
+
+.new-thread-picker-action:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* "No project" is the sidebar's empty mark: a dashed square. */
+.new-thread-picker-no-project {
+  width: 12px;
+  height: 12px;
+  border: 1px dashed color-mix(in srgb, var(--text-secondary) 60%, transparent);
+  border-radius: 3px;
+}
+
+.new-thread-picker-hints {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  padding-right: 6px;
+}

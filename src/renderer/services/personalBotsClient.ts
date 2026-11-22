@@ -4,7 +4,7 @@ import type { BotMemoryEntry, BotMemoryListing } from '../../shared/bots/persona
 import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
 import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
-import type { BotDeviceAccess, BotDevicesView } from '../../shared/bots/personal/deviceAccess'
+import type { BotDeviceAccess, BotDevicesView, NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 
 /**
  * The Bot UI's methods (`bots.personal.v2`, Bot Phase 1 §5.11) over the host's profile-bound
@@ -15,11 +15,13 @@ export interface PersonalBotsClient {
   /**
    * `slots`: the rows picked on New bot (#673), all four, sent only to a service whose choices carry `providers`;
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
-   * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`.
+   * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`. `access`: the Devices
+   * row, sent only to a service whose choices carry `reachOnCreate`.
    */
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary>
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
-  update(botId: string, change: { name?: string; look?: BotLook }): Promise<BotSummary>
+  /** `description`: the bot's prompt, as the owner edits it in About; null resets it. An older service refuses it. */
+  update(botId: string, change: { name?: string; look?: BotLook; description?: string | null }): Promise<BotSummary>
   pause(botId: string): Promise<BotSummary>
   resume(botId: string): Promise<BotSummary>
   /** Archives the bot now; its chat and memory are erased at `purgeAt`. */
@@ -33,10 +35,12 @@ export interface PersonalBotsClient {
   /** The owner's reaction on one of the bot's messages: an emoji, or `null` to remove it. The message as it is now. */
   react(botId: string, messageId: string, emoji: string | null): Promise<BotChatMessage>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
+  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<BotsPersonalV2Result<'bots.reminders.snooze'>>
   /**
    * The owner taps one of a question's answers: their reply, and the question's bubble as it is now. An older service
    * lacks it and rejects; the owner answers with Reply there.
    */
+  answerAction(actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotsPersonalV2Result<'bots.actions.answer'>>
   answerQuestion(botId: string, questionId: string, choice: string, clientRequestId: string): Promise<BotsPersonalV2Result<'bots.questions.answer'>>
   setPermission(botId: string, permissionId: string, enabled: boolean): Promise<BotDetail>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
@@ -83,8 +87,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     transport.request<BotsPersonalV2Result<M>>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
-    create: async ({ look, name, description, clientRequestId, model, slots, image }) =>
-      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}) })).bot,
+    create: async ({ look, name, description, clientRequestId, model, slots, image, access }) =>
+      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}), ...(access ? { access } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
     pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,
@@ -98,6 +102,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     markRead: async (botId, seq) => { await call('bots.chat.markRead', { botId, seq }) },
     react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
+    snoozeReminder: (botId, messageId, choice) => call('bots.reminders.snooze', { botId, messageId, choice }),
+    answerAction: (actionId, digest, answer) => call('bots.actions.answer', { actionId, digest, answer }),
     answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
     setPermission: (botId, permissionId, enabled) => call('bots.permissions.set', { botId, permissionId, enabled }),
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),

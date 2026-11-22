@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import type { WarmStartView } from '../../shared/warmStart'
+import type { ProfilePublicDto } from '../../shared/profiles/types'
 import type { ExpiryPreset } from '../../shared/threadExpiry'
 import type { RunSettings } from '../../shared/settings'
 import type { ComposerWorkspace } from '../lib/newThread'
@@ -14,6 +16,7 @@ import type {
   Task,
   Thread,
   ThreadActivitySnapshot,
+  ThreadRowPayload,
   TurnState,
   TurnStateSnapshot,
   BrowserElementAttachment,
@@ -23,6 +26,7 @@ import { parseChatReference, type ChatReference } from '../../shared/chatReferen
 import { queueEditDraftsForStorage, queueEditDraftsFromStorage, type QueueEditDraft } from '../lib/queuedContent'
 import { isQualifiedId } from '../../shared/threadRef'
 import type { SubagentSummary } from '../../shared/subagents'
+import type { ThreadBackgroundWork } from '../../shared/backgroundWork'
 import type { AppletReference } from '../../shared/applets'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
@@ -33,6 +37,7 @@ import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
 import { parseCursor } from '../../shared/pageCursor'
 import { isThreadStarted } from '../../shared/threadTitle'
+import { withHeldModelPicks } from '../lib/modelPicks'
 import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
 
 /** What the command palette leads with when it opens. */
@@ -70,11 +75,48 @@ function takeCachedMessages(threadId: string): ChatMessage[] | undefined {
 let openingEarly: { threadId: string; messages: ChatMessage[] } | null = null
 
 /**
+ * The messages the warm start showed (`showWarmView`), by identity. The thread's first view replaces them; messages
+ * that arrived live meanwhile are joined to it as usual.
+ */
+let warmTranscript: { threadId: string; messages: WeakSet<ChatMessage> } | null = null
+
+/** A warm start's thread states: only a finished or waiting thread's, never Working (`WarmStartView.activity`). */
+function warmActivity(activity: unknown): ThreadActivitySnapshot {
+  const settled: ThreadActivitySnapshot = {}
+  if (!activity || typeof activity !== 'object') return settled
+  for (const [threadId, state] of Object.entries(activity)) {
+    if (state === 'completed' || state === 'awaiting_input') settled[threadId] = state
+  }
+  return settled
+}
+
+function isWarmAppInfo(info: unknown): info is NonNullable<AppState['appInfo']> {
+  const value = info as Record<string, unknown> | null | undefined
+  return Boolean(value && typeof value.platform === 'string' && typeof value.repoRoot === 'string' && typeof value.llmProvider === 'string')
+}
+
+/** A warm start's transcript as last known: nothing in it shows as still being written. */
+export function settleWarmMessages(messages: readonly ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => {
+    const thinking = message.thinking?.status === 'processing' ? { ...message.thinking, status: 'complete' as const } : message.thinking
+    const toolCall = message.toolCall?.status === 'processing' ? { ...message.toolCall, status: 'complete' as const } : message.toolCall
+    if (!message.streaming && thinking === message.thinking && toolCall === message.toolCall) return message
+    return { ...message, streaming: false, ...(thinking ? { thinking } : {}), ...(toolCall ? { toolCall } : {}) }
+  })
+}
+
+/**
  * The store update that shows thread `id`: its cached transcript when there is one, otherwise an empty one that
  * waits for its view (`transcriptPending`) unless the thread never started. Remembers the transcript left behind.
+ * `carry` moves messages shown here to `id`: they leave the transcript left behind and join the one shown.
  */
-function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string): Partial<AppState> {
-  if (s.activeThreadId && s.messages.length > 0) rememberMessages(s.activeThreadId, s.messages)
+function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string, carry: readonly ChatMessage[] = []): Partial<AppState> {
+  const carried = new Set(carry.map((message) => message.id))
+  const left = carried.size ? s.messages.filter((message) => !carried.has(message.id)) : s.messages
+  // The warm start's transcript is its newest part only: it is not kept as the thread's transcript.
+  const leftWarm = warmTranscript?.threadId === s.activeThreadId
+  if (leftWarm) warmTranscript = null
+  if (s.activeThreadId && !leftWarm && (left.length > 0 || carried.size > 0)) rememberMessages(s.activeThreadId, left)
   const cached = takeCachedMessages(id)
   const early = openingEarly?.threadId === id ? openingEarly.messages : []
   openingEarly = null
@@ -83,8 +125,9 @@ function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'
   return {
     activeThreadId: id,
     openingThreadId: null,
-    messages: early.reduce(upsertMessage, cached ?? []),
-    transcriptPending: !cached && !(target && !isThreadStarted(target)),
+    messages: carry.reduce(upsertMessage, early.reduce(upsertMessage, withoutLandedCopies(cached ?? [], early))),
+    // A carried message is the thread's newest: the view that comes joins what it holds.
+    transcriptPending: !cached && !carried.size && !(target && !isThreadStarted(target)),
     // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
     agents: [],
     tasks: [],
@@ -205,6 +248,31 @@ export function withNewerTimes(incoming: Thread[], held: readonly Thread[]): Thr
   return out ?? incoming
 }
 
+/**
+ * The list with one thread's row put in (`threads.row`): replacing the row of the same id, or added; or without the
+ * thread when it left the list. The sidebar sorts rows itself, so where a new row goes does not matter.
+ */
+export function withThreadRow(threads: readonly Thread[], row: Pick<ThreadRowPayload, 'thread' | 'removed'>): Thread[] {
+  if (row.thread) {
+    const thread = row.thread
+    const index = threads.findIndex((entry) => entry.id === thread.id)
+    if (index < 0) return [...threads, thread]
+    const next = threads.slice()
+    next[index] = thread
+    return next
+  }
+  return row.removed ? threads.filter((entry) => entry.id !== row.removed) : threads.slice()
+}
+
+/** Whether two rows count the same pull requests, each in the same state. */
+function samePullRequestRows(left: Thread, right: Thread): boolean {
+  if (left.pullRequest?.url !== right.pullRequest?.url) return false
+  const a = left.pullRequests ?? []
+  const b = right.pullRequests ?? []
+  return a.length === b.length && a.every((entry, index) =>
+    entry.url === b[index].url && entry.state === b[index].state && entry.isDraft === b[index].isDraft && entry.title === b[index].title)
+}
+
 /** Skip sidebar updates when a protocol event/reconciliation returns the same list. */
 export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
   if (a === b) return true
@@ -226,6 +294,8 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.permissionMode !== right.permissionMode ||
       left.settingsRevision !== right.settingsRevision ||
       left.firstSendPending !== right.firstSendPending ||
+      // Why its last message did not start: saved without touching `updatedAt`; each failure has its own time.
+      left.setupFailure?.at !== right.setupFailure?.at ||
       // A thread of another computer going offline (or coming back) changes its row.
       left.node !== right.node ||
       left.offline !== right.offline ||
@@ -239,7 +309,12 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.goal?.setAt !== right.goal?.setAt ||
       left.goal?.updatedAt !== right.goal?.updatedAt ||
       // Hidden or shown again (`Thread.hidden`) is saved without touching `updatedAt` too.
-      left.hidden !== right.hidden
+      left.hidden !== right.hidden ||
+      // So are the reply preview and the pull requests a row shows (`Thread.lastReply`, `Thread.pullRequests`).
+      left.lastReply !== right.lastReply ||
+      // And how its latest run ended, which its links show (`Thread.lastRun`).
+      left.lastRun !== right.lastRun ||
+      !samePullRequestRows(left, right)
     ) {
       return false
     }
@@ -267,6 +342,17 @@ interface AppState {
   profileId: string
   profileReady: boolean
   workspaceReady: boolean
+  /**
+   * What this window's profile showed last time (`showWarmView`), on screen until the workspace is ready. Display
+   * only: its profile id is never sent anywhere, and a binding to another profile drops it.
+   */
+  warmView: { profileId: string; profile?: ProfilePublicDto } | null
+  /** A message sent from the warm view: the thread whose draft is sent once the window is connected. */
+  warmSendThreadId: string | null
+  showWarmView: (view: WarmStartView) => void
+  holdWarmSend: (threadId: string) => void
+  /** Whether a send held for `threadId` was waiting; it is no longer held after this. */
+  takeWarmSend: (threadId: string | null) => boolean
   messages: ChatMessage[]
   agents: Agent[]
   tasks: Task[]
@@ -286,11 +372,23 @@ interface AppState {
   /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
   shortcuts: ShortcutOverrides
   setShortcuts: (shortcuts: ShortcutOverrides) => void
+  /**
+   * The bound profile's `notifications.botThreads`: threads a bot keeps out of the sidebar count in Needs me and the
+   * app badge like any thread. Off until the profile's settings say otherwise.
+   */
+  notifyBotThreads: boolean
+  setNotifyBotThreads: (on: boolean) => void
   /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
-  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). Kept on close. */
+  /** What the palette leads with: `messages` is Search everything, with commands last (the rail's search opens it so). Kept on close. */
   paletteMode: PaletteMode
   setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
+  /** New project (the title bar's Add project): clone, make or add a project. Not persisted. */
+  newProjectOpen: boolean
+  setNewProjectOpen: (open: boolean) => void
+  /** Where New project puts new and cloned projects, once chosen; unset: the folder most projects here are in. */
+  newProjectParent: string | null
+  setNewProjectParent: (path: string | null) => void
   /** The sidebar's tab. It and `sidebarMode` always agree (`agreeWithTab`): setting either moves the other. */
   threadsSidebarView: SidebarTab
   setThreadsSidebarView: (view: SidebarTab) => void
@@ -299,6 +397,10 @@ interface AppState {
   /** The order the Threads tab's rows were last dragged into (thread ids, top first); see `sortThreadFeed`. */
   threadFeedOrder: string[]
   setThreadFeedOrder: (ids: string[]) => void
+  /** The active profile's animation preferences from Labs. */
+  sidebarAnimations: boolean
+  newChatAnimations: boolean
+  shimmerAnimations: boolean
   /** The workspace beside the sidebar: the thread workspace, or `ChatWorkspace` under the Chats tab. */
   sidebarMode: WorkspaceMode
   setSidebarMode: (sidebarMode: WorkspaceMode) => void
@@ -316,13 +418,22 @@ interface AppState {
   /** Side card sections the user collapsed (true) or expanded (false) by hand, by section key; a missing key uses the section's default. */
   sideCardCollapsed: Record<string, boolean>
   setSideCardSectionCollapsed: (key: string, collapsed: boolean) => void
+  /** Chats sidebar sections (Bots, Groups, Recent) the user folded (true) or opened (false); a missing key is open. */
+  chatsSidebarCollapsed: Record<string, boolean>
+  setChatsSidebarSectionCollapsed: (key: string, collapsed: boolean) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
   threadActivity: ThreadActivitySnapshot
   /** Each thread's subagents as the daemon last reported them, by parent thread id. Not persisted. */
   subagentsByParent: Record<string, SubagentSummary[]>
+  /** Each thread's subagents whose thread is gone (`removed`), kept apart: only the transcript's cards read them. Not persisted. */
+  removedSubagentsByParent: Record<string, SubagentSummary[]>
+  /** Takes a thread's list as the daemon sent it: removed subagents go to `removedSubagentsByParent`, the rest to `subagentsByParent`. */
   setSubagents: (parentThreadId: string, subagents: SubagentSummary[]) => void
+  /** What each thread runs in the background besides its subagents, as the daemon last pushed it (`thread.backgroundWork`). Not persisted. */
+  backgroundWorkByThread: Record<string, ThreadBackgroundWork>
+  setBackgroundWork: (work: ThreadBackgroundWork) => void
   turnStates: TurnStateSnapshot
   /** Stops shown before the daemon confirmed them, by thread (`lib/optimisticStop`). Not persisted. */
   stopRequests: Record<string, StopRequest>
@@ -342,12 +453,17 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
+  /** The project last picked for a new thread here (none: no project), so New thread opens in it again. */
+  lastNewThreadProjectId: string | null
+  setLastNewThreadProjectId: (projectId: string | null) => void
+  /** Settings → Runs: when a new private chat archives itself; `never`: it does not. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** Where a new thread in a project with no remembered checkout starts (`runs.newThreadWorktree`). */
   newThreadWorktree: boolean
+  /** Whether the title bar's New thread asks for the project first (`runs.newThreadPicker`, absent counts as on). */
+  newThreadPicker: boolean
   /** The new-chat defaults from Settings → Runs. */
-  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry' | 'newThreadWorktree'>) => void
+  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry' | 'newThreadWorktree' | 'newThreadPicker'>) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -392,8 +508,9 @@ interface AppState {
    * held in `openingThreadId`, so its row shows as chosen at once while the chat goes on showing the thread before:
    * one with its messages cached (`'cached'`) until the next frame has been drawn (`showOpeningThread`), so the click
    * is answered before the transcript is drawn; one with nothing cached (`'held'`) until its view arrives.
+   * `keepWorkspace`: the workspace stays as it is (a bot's thread opened in its chat pane keeps Chats on screen).
    */
-  openThreadWhenReady: (id: string) => 'cached' | 'held' | false
+  openThreadWhenReady: (id: string, options?: { keepWorkspace?: boolean }) => 'cached' | 'held' | false
   /**
    * Shows the held thread now: a cached one once the frame that highlights its row has been drawn, or one whose view is
    * slow (another computer, a busy service), which then waits with an empty transcript.
@@ -406,6 +523,11 @@ interface AppState {
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
+  /**
+   * Takes message `id` out of thread `threadId`'s transcript, shown or kept for a later visit (`null`: the chat
+   * with no thread). For a copy painted at send whose send did not go ahead.
+   */
+  dropMessage: (threadId: string | null, id: string) => void
   updateMessage: (message: ChatMessage) => void
   /** Several updates of the selected thread in one store write (one frame of a stream). */
   updateMessages: (messages: ChatMessage[]) => void
@@ -428,7 +550,7 @@ interface AppState {
    * the main process's echo of a selection (and the thread it restores at launch) is not a request to open it.
    * That echo also leaves a held thread (`openingThreadId`) waiting for its view.
    */
-  switchToThread: (id: string, options?: { keepWorkspace?: boolean }) => void
+  switchToThread: (id: string, options?: { keepWorkspace?: boolean; carry?: readonly ChatMessage[] }) => void
   /** Apply daemon snapshot for the selected thread in a single paint. */
   applyThreadView: (view: ThreadViewSnapshot) => void
   setProjects: (projects: Project[]) => void
@@ -456,7 +578,7 @@ interface AppState {
   setActiveProjectTerminalTab: (threadId: string | null, tabId: string) => void
   updateProjectTerminalTab: (
     tabId: string,
-    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title'>>
+    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title' | 'quickAction'>>
   ) => void
   openDocument: (title: string, markdown: string) => string
   /** Shows a thread's applet in the side panel's Documents tab, reusing its tab when it is already open. */
@@ -568,6 +690,29 @@ function applyMessageUpdate(
   return upsertMessage(messages, message)
 }
 
+/** How far another computer's clock may lag this one's when it saves a message sent from here. */
+const COPY_CLOCK_SLACK_MS = 60_000
+
+/**
+ * `current` without the copy painted at send (an `optimistic:` id) of each user message in `incoming` that `current`
+ * does not hold yet: the saved message takes its place. One copy per saved message, and only one saved after the copy
+ * was painted (give or take another computer's clock), so the same text sent earlier never takes a new copy's place.
+ */
+export function withoutLandedCopies(current: ChatMessage[], incoming: readonly ChatMessage[]): ChatMessage[] {
+  if (!current.some((message) => message.id.startsWith('optimistic:'))) return current
+  const held = new Set(current.map((message) => message.id))
+  const dropped = new Set<string>()
+  for (const message of incoming) {
+    if (message.role !== 'user' || held.has(message.id) || message.id.startsWith('optimistic:')) continue
+    const savedAt = Date.parse(message.timestamp)
+    const copy = current.find((entry) =>
+      entry.id.startsWith('optimistic:') && !dropped.has(entry.id) && entry.role === 'user' && entry.content === message.content &&
+      savedAt >= Date.parse(entry.timestamp) - COPY_CLOCK_SLACK_MS)
+    if (copy) dropped.add(copy.id)
+  }
+  return dropped.size === 0 ? current : current.filter((message) => !dropped.has(message.id))
+}
+
 /**
  * Merge a full/paginated snapshot with live renderer state. Transcripts are append-only during
  * a session, so entries absent from an older snapshot are retained. This is important on long
@@ -578,7 +723,7 @@ export function reconcileMessageSnapshot(
   incoming: ChatMessage[]
 ): ChatMessage[] {
   if (current.length === 0) return sortMessagesDeterministic(incoming)
-  const merged = new Map(current.map((message) => [message.id, message]))
+  const merged = new Map(withoutLandedCopies(current, incoming).map((message) => [message.id, message]))
   for (const message of incoming) {
     const existing = merged.get(message.id)
     merged.set(message.id, existing ? newerMessageVersion(existing, message) : message)
@@ -600,9 +745,9 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'openedSurfaceKinds', 'sideCardCollapsed',
+  'openedSurfaceKinds', 'sideCardCollapsed', 'chatsSidebarCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
-  'reviewIgnoreWhitespace', 'queueEditDrafts'
+  'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId', 'newProjectParent'
 ] as const
 let profileActivated = false
 
@@ -640,6 +785,52 @@ function savePersonalWorkspace(state: AppState): void {
   } catch { /* quota/private mode */ }
 }
 
+/** A profile's own layout and drafts in this window (`savePersonalWorkspace`); defaults where none are saved. */
+function personalWorkspaceOf(profileId: string) {
+  let next = {
+    projectTerminalTabs: [],
+    activeProjectTerminalTabByThread: {},
+    browserTabs: [],
+    browserActiveTabByThread: {},
+    browserElementAttachmentsByThread: {},
+    // A saved tab and workspace that disagree are repaired as this update is applied: the workspace follows the tab.
+    threadsSidebarView: 'projects' as SidebarTab,
+    lastThreadListView: 'projects' as ThreadListTab,
+    threadFeedOrder: [] as string[],
+    sidebarAnimations: true,
+    newChatAnimations: true,
+    shimmerAnimations: true,
+    composerWorkspaceDrafts: {},
+    lastNewThreadProjectId: null as string | null,
+    newProjectParent: null as string | null,
+    composerDrafts: {},
+    composerReferences: {},
+    queueEditDrafts: {} as Record<string, QueueEditDraft>,
+    reviewIgnoreWhitespace: false,
+    sidebarMode: 'projects' as WorkspaceMode,
+    mainView: DEFAULT_MAIN_VIEW as MainView,
+    openedSurfaceKinds: [] as MainView[],
+    mainAreaWidth: null as number | null,
+    threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
+    threadsSidebarOpen: true,
+    mainAreaOpen: false,
+    sideCardCollapsed: {} as Record<string, boolean>,
+    chatsSidebarCollapsed: {} as Record<string, boolean>,
+    chatMode: DEFAULT_CHAT_MODE
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
+      if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
+      if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
+      if (typeof next.lastNewThreadProjectId !== 'string') next.lastNewThreadProjectId = null
+      if (typeof next.newProjectParent !== 'string') next.newProjectParent = null
+      next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
+    } catch { /* malformed profile-local state is discarded */ }
+  }
+  return next
+}
+
 /**
  * Browser tabs opened since the window started. Tabs restored from an earlier session are not in it: their pages
  * load when first shown (BrowserPanel), so restored tabs do not each start a page renderer at launch.
@@ -650,30 +841,64 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   profileId: 'default',
   profileReady: false,
   workspaceReady: false,
+  warmView: null,
+  warmSendThreadId: null,
+  showWarmView: (view) => set((state) => {
+    // Only before this window's profile is known; once it is, the service's lists are the ones shown.
+    if (profileActivated || state.profileReady || state.warmView || !view || typeof view.profileId !== 'string' || !Array.isArray(view.threads)) return state
+    const messages = settleWarmMessages(Array.isArray(view.messages) ? view.messages : [])
+    warmTranscript = view.activeThreadId ? { threadId: view.activeThreadId, messages: new WeakSet(messages) } : null
+    return {
+      ...state,
+      // The person's layout of that profile (sidebar, panel, drafts), as `activateProfile` would load it.
+      ...personalWorkspaceOf(view.profileId),
+      warmView: { profileId: view.profileId, ...(view.profile ? { profile: view.profile } : {}) },
+      threads: view.threads,
+      projects: Array.isArray(view.projects) ? view.projects : [],
+      activeThreadId: view.activeThreadId ?? null,
+      messages,
+      transcriptPending: false,
+      // The rows' Done and Input badges and provider marks, as they were: the live ones then change only what changed.
+      threadActivity: warmActivity(view.activity),
+      ...(isWarmAppInfo(view.appInfo) && !state.appInfo ? { appInfo: view.appInfo } : {})
+    }
+  }),
+  holdWarmSend: (threadId) => set((state) => (state.warmView && !state.workspaceReady ? { warmSendThreadId: threadId } : state)),
+  takeWarmSend: (threadId) => {
+    const held = get().warmSendThreadId
+    if (held === null) return false
+    set({ warmSendThreadId: null })
+    return held === threadId
+  },
   sidebarMode: 'projects',
   setSidebarMode: (sidebarMode) => set({ sidebarMode }),
   messages: [],
   transcriptPending: false,
   openingThreadId: null,
-  openThreadWhenReady: (id) => {
+  openThreadWhenReady: (id, options) => {
     const s = get()
+    const workspace = options?.keepWorkspace ? {} : { sidebarMode: 'projects' as const }
     if (s.activeThreadId === id) {
       // Back to the thread on screen while another was being opened: stop opening that one.
       if (s.openingThreadId) set({ openingThreadId: null })
       return false
     }
+    if (s.turnStates[id]?.phase === 'queued') {
+      set((current) => ({ ...workspace, ...switchPatch(current, id) }))
+      return false
+    }
     if (opensFromCache(s, id)) {
       // Its row shows as chosen in this update; its transcript, which takes a while to draw, comes in the next.
       openingEarly = null
-      set({ openingThreadId: id, sidebarMode: 'projects' })
+      set({ openingThreadId: id, ...workspace })
       return 'cached'
     }
     if (!opensEmpty(s, id)) {
-      get().switchToThread(id)
+      set((current) => ({ ...workspace, ...(current.openingThreadId ? { openingThreadId: null } : {}), ...switchPatch(current, id) }))
       return false
     }
     openingEarly = null
-    set({ openingThreadId: id, sidebarMode: 'projects' })
+    set({ openingThreadId: id, ...workspace })
     return 'held'
   },
   showOpeningThread: (threadId) =>
@@ -701,23 +926,50 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   shortcuts: {},
   // Settings events repeat the same map; keep the old object so nothing re-resolves for no change.
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
+  notifyBotThreads: false,
+  setNotifyBotThreads: (notifyBotThreads) => set((s) => (s.notifyBotThreads === notifyBotThreads ? s : { notifyBotThreads })),
   paletteOpen: false,
   paletteMode: 'all',
   // Closing keeps the mode, so the fading palette keeps its rows; each opening sets it again.
   setPaletteOpen: (paletteOpen, mode = 'all') => set(paletteOpen ? { paletteOpen, paletteMode: mode } : { paletteOpen }),
+  newProjectOpen: false,
+  setNewProjectOpen: (newProjectOpen) => set({ newProjectOpen }),
+  newProjectParent: null,
+  setNewProjectParent: (newProjectParent) => set({ newProjectParent }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
   sideCardFits: null,
   sideCardOverlayOpen: false,
   sideCardCollapsed: {},
+  chatsSidebarCollapsed: {},
   activeThreadId: null,
   projects: [],
   threads: [],
   threadActivity: {},
   subagentsByParent: {},
-  setSubagents: (parentThreadId, subagents) =>
-    set((s) => ({ subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: subagents } })),
+  removedSubagentsByParent: {},
+  backgroundWorkByThread: {},
+  setBackgroundWork: (work) => {
+    set((s) => {
+      const empty = work.items.length === 0 && !work.providerWork
+      if (empty && !s.backgroundWorkByThread[work.threadId]) return s
+      const next = { ...s.backgroundWorkByThread }
+      if (empty) delete next[work.threadId]
+      else next[work.threadId] = work
+      return { backgroundWorkByThread: next }
+    })
+  },
+  setSubagents: (parentThreadId, subagents) => {
+    const live = subagents.filter((row) => !row.removed)
+    const removed = subagents.filter((row) => row.removed)
+    set((s) => ({
+      subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: live },
+      ...(removed.length > 0 || s.removedSubagentsByParent[parentThreadId]
+        ? { removedSubagentsByParent: { ...s.removedSubagentsByParent, [parentThreadId]: removed } }
+        : {})
+    }))
+  },
   turnStates: {},
   stopRequests: {},
   mainView: DEFAULT_MAIN_VIEW,
@@ -753,10 +1005,16 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   lastThreadListView: 'projects',
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
+  sidebarAnimations: true,
+  newChatAnimations: true,
+  shimmerAnimations: true,
   composerWorkspaceDrafts: {},
+  lastNewThreadProjectId: null,
+  setLastNewThreadProjectId: (lastNewThreadProjectId) => set({ lastNewThreadProjectId }),
   privateThreadExpiry: 'never',
   newThreadWorktree: true,
-  setRunDefaults: ({ privateThreadExpiry, newThreadWorktree }) => set({ privateThreadExpiry, newThreadWorktree }),
+  newThreadPicker: true,
+  setRunDefaults: ({ privateThreadExpiry, newThreadWorktree, newThreadPicker }) => set({ privateThreadExpiry, newThreadWorktree, newThreadPicker: newThreadPicker !== false }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)
@@ -860,6 +1118,16 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
     }),
+  dropMessage: (threadId, id) => {
+    const kept = threadId ? messageCache.get(threadId) : undefined
+    if (threadId && kept?.some((message) => message.id === id)) messageCache.set(threadId, kept.filter((message) => message.id !== id))
+    set((s) => {
+      if (s.activeThreadId !== threadId || !s.messages.some((message) => message.id === id)) return s
+      const messages = s.messages.filter((message) => message.id !== id)
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
+    })
+  },
   updateMessage: (message) =>
     set((s) => {
       const messages = applyMessageUpdate(s, s.messages, message)
@@ -890,6 +1158,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setSideCardFits: (sideCardFits) => set({ sideCardFits }),
   setSideCardOverlayOpen: (sideCardOverlayOpen) => set({ sideCardOverlayOpen }),
   setSideCardSectionCollapsed: (key, collapsed) => set((s) => ({ sideCardCollapsed: { ...s.sideCardCollapsed, [key]: collapsed } })),
+  setChatsSidebarSectionCollapsed: (key, collapsed) => set((s) => ({ chatsSidebarCollapsed: { ...s.chatsSidebarCollapsed, [key]: collapsed } })),
   setTurnState: (state) => set((s) => {
     const request = s.stopRequests[state.threadId]
     if (!request) {
@@ -948,7 +1217,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (options?.keepWorkspace && s.openingThreadId === id) return s
       const opening = s.openingThreadId ? { openingThreadId: null } : {}
       if (s.activeThreadId === id) return options?.keepWorkspace && !s.openingThreadId ? s : { ...workspace, ...opening }
-      return { ...workspace, ...switchPatch(s, id) }
+      return { ...workspace, ...switchPatch(s, id, options?.carry) }
     }),
   applyThreadView: (view) =>
     set((current) => {
@@ -956,7 +1225,10 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       const opened = current.openingThreadId === view.threadId ? switchPatch(current, view.threadId) : null
       const s = opened ? { ...current, ...opened } : current
       if (s.activeThreadId !== view.threadId) return current
-      const reconciled = reconcileMessageSnapshot(s.messages, view.messages)
+      // The first view of the warm start's thread replaces what it showed, keeping only what arrived live since.
+      const warm = warmTranscript?.threadId === view.threadId ? warmTranscript.messages : null
+      if (warm) warmTranscript = null
+      const reconciled = reconcileMessageSnapshot(warm ? s.messages.filter((message) => !warm.has(message)) : s.messages, view.messages)
       rememberMessages(view.threadId, reconciled)
       const messagesUnchanged = sameMessageSnapshot(s.messages, reconciled)
       const agents = view.agents && !samePlainData(view.agents, s.agents) ? view.agents : s.agents
@@ -986,8 +1258,12 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       }
     }),
   setProjects: (projects) => set({ projects }),
-  setThreads: (threads) =>
-    set((state) => (sameThreadSnapshot(state.threads, threads) ? state : { threads })),
+  setThreads: (incoming) =>
+    set((state) => {
+      // A model pick still being saved stays as picked: a list read or pushed before it must not undo it.
+      const threads = withHeldModelPicks(incoming)
+      return sameThreadSnapshot(state.threads, threads) ? state : { threads }
+    }),
   upsertThread: (thread) =>
     set((s) => {
       const idx = s.threads.findIndex((entry) => entry.id === thread.id)
@@ -1126,54 +1402,42 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   activateProfile: (profileId) => set((state) => {
     if (!profileId) return state
     if (profileActivated && profileId === state.profileId) return state
+    // The trusted binding names the profile the warm start showed: what is on screen stays, and the service's
+    // lists and transcript replace it as they arrive.
+    const keepsWarmView = !profileActivated && state.warmView?.profileId === profileId
     if (profileActivated) savePersonalWorkspace(state)
     profileActivated = true
-    let next = {
-      projectTerminalTabs: [],
-      activeProjectTerminalTabByThread: {},
-      browserTabs: [],
-      browserActiveTabByThread: {},
-      browserElementAttachmentsByThread: {},
-      // A saved tab and workspace that disagree are repaired as this update is applied: the workspace follows the tab.
-      threadsSidebarView: 'projects' as SidebarTab,
-      lastThreadListView: 'projects' as ThreadListTab,
-      threadFeedOrder: [] as string[],
-      composerWorkspaceDrafts: {},
-      composerDrafts: {},
-      composerReferences: {},
-      queueEditDrafts: {} as Record<string, QueueEditDraft>,
-      reviewIgnoreWhitespace: false,
-      sidebarMode: 'projects' as WorkspaceMode,
-      mainView: DEFAULT_MAIN_VIEW as MainView,
-      openedSurfaceKinds: [] as MainView[],
-      mainAreaWidth: null as number | null,
-      threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
-      threadsSidebarOpen: true,
-      mainAreaOpen: false,
-      sideCardCollapsed: {} as Record<string, boolean>,
-      chatMode: DEFAULT_CHAT_MODE
-    }
-    if (typeof window !== 'undefined') {
-      try {
-        const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
-        if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
-        if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
-        next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
-      } catch { /* malformed profile-local state is discarded */ }
-    }
     messageCache.clear()
     messageCacheOrder.splice(0)
     openingEarly = null
+    if (keepsWarmView) {
+      return {
+        ...state,
+        profileId,
+        usageOpen: false,
+        profileReady: true,
+        workspaceReady: false,
+        shortcuts: {},
+        notifyBotThreads: false,
+        paletteOpen: false,
+        newProjectOpen: false
+      }
+    }
+    warmTranscript = null
     return {
       ...state,
       profileId,
       usageOpen: false,
       profileReady: true,
       workspaceReady: false,
+      warmView: null,
+      warmSendThreadId: null,
       // Another profile's shortcuts must not stay bound until its own settings arrive.
       shortcuts: {},
+      notifyBotThreads: false,
       paletteOpen: false,
-      ...next,
+      newProjectOpen: false,
+      ...personalWorkspaceOf(profileId),
       queueDraftNotices: {},
       messages: [],
       transcriptPending: false,
@@ -1185,6 +1449,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threads: [],
       threadActivity: {},
       subagentsByParent: {},
+      removedSubagentsByParent: {},
+      backgroundWorkByThread: {},
       turnStates: {},
       stopRequests: {},
       documentTabs: [],
@@ -1421,9 +1687,12 @@ useAppStore.subscribe((state, previous) => {
  * The side card overlay is temporary: it closes when the thread area widens
  * enough to dock the card (the card's switch stays on), when the thread changes,
  * when the app panel opens, and when a view without a thread replaces the
- * conversation. A narrow window therefore never opens it by itself.
+ * conversation (Chats counts as one unless a bot's thread shows in its pane,
+ * `botThreadShown`, the same test the card's visibility uses). A narrow window
+ * therefore never opens it by itself. The store subscriptions that apply this
+ * live in sideCardLogic.ts, which can read the bot's pane.
  */
-export function shouldCloseSideCardOverlay(state: AppState, previous: AppState): boolean {
+export function shouldCloseSideCardOverlay(state: AppState, previous: AppState, botThreadShown = false): boolean {
   if (!state.sideCardOverlayOpen) return false
   return state.sideCardFits !== false
     || state.mainAreaOpen
@@ -1431,9 +1700,5 @@ export function shouldCloseSideCardOverlay(state: AppState, previous: AppState):
     || state.settingsOpen
     || state.usageOpen
     || state.scheduledOpen
-    || state.sidebarMode === 'chats'
+    || (state.sidebarMode === 'chats' && !botThreadShown)
 }
-
-useAppStore.subscribe((state, previous) => {
-  if (shouldCloseSideCardOverlay(state, previous)) state.setSideCardOverlayOpen(false)
-})

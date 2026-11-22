@@ -196,8 +196,8 @@ describe('ProfileDatabase', () => {
     const rebuild = RUN_MIGRATIONS.find((migration) => migration.foreignKeys === 'off')!
     const older = RUN_MIGRATIONS.filter((migration) => migration.version < rebuild.version)
     const foreignKeys = (database: ProfileDatabase): number => Number(database.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys)
-    // The columns the rebuild copied; a later migration adds more (access_grant), which these tests do not compare.
-    const runs = (database: ProfileDatabase) => database.database.prepare('SELECT * FROM runs ORDER BY run_id').all().map(({ access_grant: _grant, ...row }) => row)
+    // The columns the rebuild copied; a later migration adds more (access_grant, owner_proof), which these tests do not compare.
+    const runs = (database: ProfileDatabase) => database.database.prepare('SELECT * FROM runs ORDER BY run_id').all().map(({ access_grant: _grant, owner_proof: _proof, ...row }) => row)
     const insertRun = (database: ProfileDatabase, status: string): void => {
       database.database
         .prepare(
@@ -244,10 +244,10 @@ describe('ProfileDatabase', () => {
       expect(database.database.prepare('SELECT * FROM run_attempts ORDER BY attempt_id').all()).toEqual(attempts)
       expect(database.database.prepare('PRAGMA foreign_key_check').all()).toEqual([])
       expect(database.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'runs_thread_status'").all()).toHaveLength(1)
-      // The rebuild's columns in order, then the one the next migration adds.
+      // The rebuild's columns in order, then the ones later migrations add.
       expect(database.database.prepare('PRAGMA table_info(runs)').all().map((column) => column.name)).toEqual([
         'run_id', 'thread_id', 'ordinal', 'status', 'epoch', 'active_attempt_id', 'source', 'client_request_id',
-        'user_message_id', 'requested_at', 'started_at', 'completed_at', 'outcome', 'heartbeat_at', 'stop_generation', 'access_grant'
+        'user_message_id', 'requested_at', 'started_at', 'completed_at', 'outcome', 'heartbeat_at', 'stop_generation', 'access_grant', 'owner_proof'
       ])
       // The new CHECK takes paused and still refuses anything else.
       insertRun(database, 'paused')

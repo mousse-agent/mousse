@@ -386,7 +386,13 @@ export type PullRequestPanelState =
   | { kind: 'loading' }
   /** The branch has no pull request. */
   | { kind: 'none'; branch: string | null }
-  /** The host could not be asked (GitHub CLI missing or not signed in, not a GitHub repository); `message` is the host's. */
+  /** The repository has no remote yet, so there is nowhere to look for pull requests. */
+  | { kind: 'no-remote' }
+  /** The repository's remote is not on GitHub. */
+  | { kind: 'not-github' }
+  /** GitHub CLI is not installed. */
+  | { kind: 'gh-missing' }
+  /** The host could not be asked for another reason; `message` is the host's. */
   | { kind: 'unavailable'; message: string }
   /** GitHub CLI is not signed in, so nothing could be read; `message` is the CLI's own, kept for Details. */
   | { kind: 'signed-out'; message: string }
@@ -408,9 +414,12 @@ export function pullRequestPanelState(input: {
   if (entry?.detail) return { kind: 'ready', detail: entry.detail, staleError: entry.error }
   if (!lookup) return { kind: 'loading' }
   if (lookup.state === 'unavailable') {
-    return isGitHubSignedOut({ reason: lookup.reason, message: lookup.message })
-      ? { kind: 'signed-out', message: lookup.message }
-      : { kind: 'unavailable', message: lookup.message }
+    if (isGitHubSignedOut({ reason: lookup.reason, message: lookup.message })) return { kind: 'signed-out', message: lookup.message }
+    if (lookup.reason === 'gh-missing') return { kind: 'gh-missing' }
+    // GitHub CLI's words for a repository with no remote at all ("no git remotes found").
+    if (/no git remotes? found/i.test(lookup.message)) return { kind: 'no-remote' }
+    if (lookup.reason === 'not-github') return { kind: 'not-github' }
+    return { kind: 'unavailable', message: lookup.message }
   }
   if (lookup.state === 'none') return { kind: 'none', branch: input.branch }
   if (entry?.error) {

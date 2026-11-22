@@ -13,7 +13,6 @@ import { BOT_ASK_REFUSED_TEXT, BotEngine } from '../../src/mms/bots/activation/B
 import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, holdClaudeBotTemp, removeClaudeBotTemp, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
-import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
@@ -194,14 +193,12 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
   })
 })
 
-describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claude Code and Codex entries)', () => {
-  const NOT_HERE = /^Not on this computer: "run commands" is switched off here/
-  let limit: BotComputerLimit
+describe('"Run commands" at each runtime\'s own gate (the owner\'s Claude Code and Codex entries)', () => {
+  const SWITCHED_OFF = /switched that off/
+  const switchCommandsOff = () => f.bots.service.setPermission(botId, f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id, false)
 
-  /** The owner allows commands while every switch is on. */
+  /** The owner allows commands. */
   beforeEach(async () => {
-    limit = { ...BOT_COMPUTER_OPEN }
-    f.host.computerLimit = () => limit
     const work = await run('grant')
     work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'The owner asked.' })
     await finish(f, work.payload, 'completed', { text: 'Asked.' })
@@ -209,20 +206,20 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     expect(f.store.openAsks(botId)).toEqual([])
   })
 
-  it('Run commands off in a turn already running: the next command is refused by Claude Code\'s gate and Codex\'s approval, with no ask', async () => {
+  it('Run commands switched off for the bot in a turn already running: the next command is refused by Claude Code\'s gate and Codex\'s approval, with no ask', async () => {
     const { prepared, payload } = await run('r1')
     const files = prepared.authority.workspace!.files!
     expect(claudeGate(prepared.authority).preToolUse('Bash', { command: 'ls' })).toEqual({ ok: true })
     expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toEqual({ decision: 'accept' })
-    limit = { ...limit, shell: false }
-    expect(claudeGate(prepared.authority).preToolUse('Bash', { command: 'ls' })).toMatchObject({ ok: false, reason: expect.stringMatching(NOT_HERE) })
-    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toMatchObject({ decision: 'decline', reason: expect.stringMatching(NOT_HERE) })
+    switchCommandsOff()
+    expect(claudeGate(prepared.authority).preToolUse('Bash', { command: 'ls' })).toMatchObject({ ok: false, reason: expect.stringMatching(SWITCHED_OFF) })
+    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toMatchObject({ decision: 'decline', reason: expect.stringMatching(SWITCHED_OFF) })
     expect(f.store.openAsks(botId)).toEqual([])
-    await finish(f, payload, 'completed', { text: 'Done.' })
+    await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
   })
 
-  it('Run commands off from the start: Claude Code is offered no Bash, and Codex starts with no command tool', async () => {
-    limit = { ...limit, shell: false }
+  it('Run commands switched off for the bot from the start: Claude Code is offered no Bash, and Codex starts with no command tool', async () => {
+    switchCommandsOff()
     const { prepared, payload } = await run('r1')
     expect(claudeLockedTools({ authority: prepared.authority, shellContained: true }, false).tools).not.toContain('Bash')
     // Nor a tool that opens a file by its path without asking (what else Codex offers: codexBotTools.test.ts).

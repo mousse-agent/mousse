@@ -62,7 +62,7 @@ Display:
 Launch visibility:
 
 - `ThreadStartedByBar` shows "Started by an agent in «title»", linked to the launcher, when `createdByThreadId` names a thread that is not a bot's.
-- The launcher's note carries a structured `launchedThread` field and draws as a thread chip: title and live status; a click switches to the thread and Back returns. Thread links exist (#1170: `mousse://thread/<id>`, opening on click, a toast for a missing thread). The chip with live status, Back, and links to a thread on another computer are #488's remaining boxes.
+- The launcher's note carries a structured `launchedThread` field. The chat drew it as a "Started" line with a thread chip until it was removed as a repeat of the agent's reply, which links the thread; the note stays in the record. Thread links exist (#1170: `mousse://thread/<id>`, opening on click, a toast for a missing thread). The chip with live status, Back, and links to a thread on another computer are #488's remaining boxes.
 
 Names Mousse derives from a thread's first message use the body, not the envelope. Today they use the whole stored text: a thread launched on 2026-11-15 with the first message "Hi" got the branch `mousse/message-from-an-agent-in-thread-cross`.
 

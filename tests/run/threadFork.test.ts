@@ -3,18 +3,27 @@
  * fork's first message resolving it — portable `full_summary` with the fork's own worktree seeded
  * from the source's checkpoint, and a native-capable adapter whose `forkSession` stub falls back.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { CommandRejection } from '../../src/mms/run/db/RunStoreError'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
-import { RunEngine, type ForkPointSeed, type RunTerminalStatus } from '../../src/mms/run/RunEngine'
+import { RunEngine, type ForkAccepted, type ForkPointSeed, type RunTerminalStatus } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
+import { MousseMainService } from '../../src/mms/MousseMainService'
+import { closeSharedThreadDbClient } from '../../src/mms/data/threadDb/threadDbClient'
+import { testHarness } from '../../src/mms/run/testkit/harness'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
-import { gitFoundationFixture } from '../fixtures/gitFoundation'
+import { acquireRepositoryLease } from '../../src/mms/git/RepositoryLease'
+import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
+import { ChangeReceiptService } from '../../src/mms/actions/ChangeReceiptService'
+import { ReceiptRefReleaseService } from '../../src/mms/actions/ReceiptRefReleaseService'
+import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
+import { UndoRetentionService } from '../../src/mms/actions/UndoRetentionService'
+import { git, gitFoundationFixture } from '../fixtures/gitFoundation'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /**
@@ -154,7 +163,7 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(d.orch.getThreadModelOverride(forked.threadId)).toEqual({ ...PI, instanceId: 'pi:openai', name: 'GPT-Replay' })
   })
 
-  it('resolves portably on the first message, in the fork\'s own worktree seeded from the source checkpoint', async () => {
+  it('resolves portably on the first message, from the accepted checkpoint even after its source receipt is released', async () => {
     foundation = gitFoundationFixture()
     const f = foundation
     const pi = piAdapter((input) => {
@@ -170,7 +179,55 @@ describe('thread fork (SPEC §16.2)', () => {
     const sourceWorktree = new ThreadWorkspaceManager(d.store.getThreadDir(source.id)).load()!.worktreePath
     expect(f.read(sourceWorktree)).toBe('two\n')
 
-    const forked = await d.engine.forkThread({ sourceThreadId: source.id, atRunOrdinal: 1, clientRequestId: 'fork-at-1' })
+    const beforeFork = git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/threads/')
+    const checkpoint = d.engine.store.db.checkpoint.bind(d.engine.store.db)
+    const fault = vi.spyOn(d.engine.store.db, 'checkpoint').mockImplementation((point) => {
+      if (point === 'fork.beforeCommit') {
+        expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/threads/')).toContain('/fork-checkpoint')
+        throw new Error('Fork transaction interrupted')
+      }
+      checkpoint(point)
+    })
+    try {
+      await expect(d.engine.forkThread({ sourceThreadId: source.id, atRunOrdinal: 1, clientRequestId: 'fork-cancelled' })).rejects.toThrow('Fork transaction interrupted')
+    } finally { fault.mockRestore() }
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/threads/')).toBe(beforeFork)
+    const checkoutLease = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
+    const created = Promise.withResolvers<string>()
+    const createThread = d.store.createThread.bind(d.store)
+    const capture = vi.spyOn(d.store, 'createThread').mockImplementation((...args) => {
+      const thread = createThread(...args)
+      created.resolve(thread.id)
+      return thread
+    })
+    const accepting = d.engine.forkThread({ sourceThreadId: source.id, atRunOrdinal: 1, clientRequestId: 'fork-at-1' })
+    try {
+      const id = await created.promise
+      const earlySend = d.orch.send('Send before acceptance', false, { threadId: id, clientRequestId: 'too-early' }).catch((error: unknown) => error)
+      expect(d.store.listAllThreads().some((thread) => thread.id === id)).toBe(false)
+      expect(await earlySend).toMatchObject({ message: `Thread not found: ${id}` })
+      expect(d.engine.listRuns(id)).toEqual([])
+    } finally {
+      checkoutLease.release()
+      capture.mockRestore()
+      // Wait for acceptance to finish even if an assertion failed.
+      await accepting.catch(() => undefined)
+    }
+    const forked = await accepting
+    const sourceDir = d.store.getThreadDir(source.id)
+    const sourceAction = new ThreadActionService(sourceDir).list().find((action) => action.turnId === forked.sourceRunId)!
+    const receipt = new ChangeReceiptService(sourceDir).list().find((candidate) => candidate.id === sourceAction.receiptId)!
+    const pin = 'refs/mousse/threads/' + forked.threadId + '/fork-checkpoint'
+    expect(git(f.repo, 'rev-parse', pin)).toBe(receipt.afterSha)
+    let now = Date.now()
+    const retention = new UndoRetentionService(sourceDir, () => now)
+    await retention.configure(sourceWorktree, { windowMs: 1, migrationGraceMs: 1, maxForwardStepMs: 60_000 }, true)
+    now += 10_000
+    await retention.sweep(sourceWorktree)
+    const released = await new ReceiptRefReleaseService(d.store.lifecycleStore, source.id, () => now).release(sourceWorktree)
+    expect(released.releasedRefs).toEqual(expect.arrayContaining(receipt.retainedRefs))
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', receipt.retainedRefs[1]!)).toBe('')
+    expect(git(f.repo, 'rev-parse', pin)).toBe(receipt.afterSha)
     const response = await d.orch.send({ content: 'What is in value.txt?', mode: 'agent' }, false, { threadId: forked.threadId, clientRequestId: 'fork-first' })
     expect(response.message).toBe('done: What is in value.txt?')
 
@@ -189,12 +246,171 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(turn.cwd?.startsWith(forkWorkspace.worktreePath)).toBe(true)
     expect(readFileSync(join(forkWorkspace.worktreePath, 'value.txt'), 'utf8')).toBe('one\n')
     expect(f.read(sourceWorktree)).toBe('two\n')
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', pin)).toBe('')
 
     const transfer = d.engine.transfers.get(forked.transferId)!
     expect(transfer).toMatchObject({ status: 'consumed', payload: { forkStrategy: 'portable', strategy: 'full_summary', seed: { kind: 'checkpoint' } } })
     expect(d.engine.handoffs.listForThread(forked.threadId)).toMatchObject([{ strategy: 'full_summary', status: 'delivered', coveredFromOrdinal: 1, coveredToOrdinal: 1 }])
     expect(d.orch.getMessages(forked.threadId).find((message) => message.kind === 'context_handoff')?.contextHandoff).toMatchObject({ transfer: 'fork', strategy: 'full_summary' })
-  }, 60_000)
+  }, 150_000)
+
+  it.each([
+    { availability: 'online', keepWork: true },
+    { availability: 'offline', keepWork: true },
+    { availability: 'online', keepWork: false },
+    { availability: 'offline', keepWork: false }
+  ] as const)('deletes a fork with keepWork=$keepWork when its checkpoint repository is $availability', async ({ availability, keepWork }) => {
+    const f = (foundation = gitFoundationFixture())
+    const pi = piAdapter((input) => {
+      writeFileSync(join(input.cwd!, 'value.txt'), 'fork checkpoint\n')
+      return 'done'
+    })
+    const service = await MousseMainService.create({ homeDir: f.home, headless: true, ownerKind: 'daemon', requireOwnership: false })
+    try {
+      service.orchestrator.setHarness(testHarness({ adapters: [pi], profileHome: service.threads.lifecycleStore.profileHome }))
+      await service.start()
+      service.afterReady()
+      await service.untilStartupLifecycleDone()
+
+      const project = service.projects.openProject(f.repo)
+      const source = service.threads.createThread('Source', project.id)
+      service.orchestrator.setThreadModelOverride(source.id, PI)
+      await service.orchestrator.send({ content: 'Make a checkpoint', mode: 'agent' }, false, { threadId: source.id, clientRequestId: 'delete-fork-source' })
+      const { threadId } = await service.runEngine.forkThread({ sourceThreadId: source.id, clientRequestId: 'delete-fork' })
+      const ref = 'refs/mousse/threads/' + threadId + '/fork-checkpoint'
+      const sha = git(f.repo, 'rev-parse', ref)
+      const trashed = await service.trashThread(threadId, 'trash-fork', undefined, keepWork)
+      const cleanup = service.lifecycle.cleanup
+      const online = await cleanup.preview(threadId, { keepWork })
+      expect(online.blockers).toEqual([])
+      const request = { taskId: threadId, operationId: 'purge-fork', expectedGeneration: online.generation, previewDigest: online.digest, keepWork }
+      const parked = join(f.root, 'offline-repository')
+      if (availability === 'offline') renameSync(f.repo, parked)
+      try {
+        if (availability === 'offline' && !keepWork) {
+          const offline = await cleanup.preview(threadId, { keepWork })
+          expect(offline.blockers).toContainEqual(expect.stringMatching(/fork checkpoint.*repository/i))
+          await expect(service.lifecycle.purge(request)).rejects.toThrow()
+          expect(service.threads.lifecycleStore.require(threadId)).toMatchObject({ state: 'trashed', location: trashed.location })
+        } else {
+          const preview = await cleanup.preview(threadId, { keepWork })
+          expect(preview.blockers).toEqual([])
+          const purged = await service.lifecycle.purge({ ...request, previewDigest: preview.digest })
+          expect(purged.state).toBe('purged')
+          if (keepWork) expect(purged.purge?.keptWork).toBe(true)
+        }
+      } finally {
+        if (availability === 'offline') renameSync(parked, f.repo)
+      }
+      if (availability === 'offline' && !keepWork) {
+        await expect(service.restoreThread(threadId, 'restore-fork')).resolves.toMatchObject({ state: 'active' })
+      }
+      if (keepWork || availability === 'offline') expect(git(f.repo, 'rev-parse', ref)).toBe(sha)
+      else expect(git(f.repo, 'for-each-ref', '--format=%(refname)', ref)).toBe('')
+    } finally {
+      await service.stop()
+      await service.threads.flushSearchIndex()
+      await closeSharedThreadDbClient()
+    }
+  }, 150_000)
+
+  it('daemon startup discards unaccepted forks, publishes accepted forks, and retires provisioned pins', async () => {
+    foundation = gitFoundationFixture()
+    const f = foundation
+    const pi = piAdapter((input) => {
+      writeFileSync(join(input.cwd!, 'value.txt'), 'selected checkpoint\n')
+      return 'done'
+    })
+    let pin: string | undefined
+    let lock: string | undefined
+    let service: MousseMainService | undefined
+    const boot = async () => {
+      service = await MousseMainService.create({ homeDir: f.home, headless: true, ownerKind: 'daemon', requireOwnership: false })
+      service.orchestrator.setHarness(testHarness({ adapters: [pi], profileHome: service.threads.lifecycleStore.profileHome }))
+      await service.start()
+      service.afterReady()
+      await service.untilStartupLifecycleDone()
+      return service
+    }
+    const stop = async () => {
+      try {
+        await service?.stop()
+        await service?.threads.flushSearchIndex()
+      } finally {
+        service = undefined
+        await closeSharedThreadDbClient()
+      }
+    }
+    try {
+      const d = await boot()
+      const project = d.projects.openProject(f.repo)
+      const source = d.threads.createThread('Source', project.id)
+      d.orchestrator.setThreadModelOverride(source.id, PI)
+      await d.orchestrator.send({ content: 'Make a checkpoint', mode: 'agent' }, false, { threadId: source.id, clientRequestId: 'restart-source' })
+
+      const abandoned = { sourceThreadId: source.id, clientRequestId: 'restart-abandoned-fork' }
+      const checkpoint = d.runEngine.store.db.checkpoint.bind(d.runEngine.store.db)
+      const fault = vi.spyOn(d.runEngine.store.db, 'checkpoint').mockImplementation((point) => {
+        if (point !== 'fork.beforeCommit') return checkpoint(point)
+        pin = git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/threads/').split(/\r?\n/).find((ref) => ref.endsWith('/fork-checkpoint'))
+        if (pin) {
+          lock = join(f.repo, '.git', ...pin.split('/')) + '.lock'
+          writeFileSync(lock, '')
+        }
+        throw new Error('Fork interrupted before acceptance')
+      })
+      await expect(d.runEngine.forkThread(abandoned)).rejects.toThrow('Fork interrupted before acceptance')
+      fault.mockRestore()
+      expect(pin).toBeDefined()
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', pin!)).toBe(pin)
+      const pendingId = pin!.split('/')[3]!
+      const pending = d.threads.lifecycleStore.require(pendingId)
+      expect(d.threads.getThread(pendingId)).toBeUndefined()
+      expect(existsSync(pending.location)).toBe(true)
+      expect(d.runEngine.store.getReceipt(abandoned.clientRequestId)).toBeNull()
+
+      const request = { sourceThreadId: source.id, clientRequestId: 'restart-accepted-fork' }
+      const publish = vi.spyOn(d.threads, 'publishPendingFork').mockImplementationOnce(() => { throw new Error('Fork interrupted after acceptance') })
+      await expect(d.runEngine.forkThread(request)).rejects.toThrow('Fork interrupted after acceptance')
+      publish.mockRestore()
+      const acceptance = d.runEngine.store.getReceipt(request.clientRequestId)
+      expect(acceptance?.status).toBe('accepted')
+      const accepted = acceptance!.result as ForkAccepted
+      expect(d.runEngine.transfers.get(accepted.transferId)?.status).toBe('pending')
+      expect(d.threads.lifecycleStore.require(accepted.threadId).pendingFork).toBe(true)
+      expect(d.threads.getThread(accepted.threadId)).toBeUndefined()
+
+      // The rejected fork's lock left its pin and staged thread on disk. Boot must discard it and publish the accepted fork.
+      unlinkSync(lock!)
+      lock = undefined
+      await stop()
+      const restarted = await boot()
+      expect(restarted.threads.lifecycleStore.get(pendingId)).toBeUndefined()
+      expect(existsSync(pending.location)).toBe(false)
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', pin!)).toBe('')
+      expect(restarted.threads.getThread(accepted.threadId)?.id).toBe(accepted.threadId)
+      expect(restarted.orchestrator.getMessages(accepted.threadId).map((message) => message.content)).toContain('Make a checkpoint')
+      expect(await restarted.runEngine.forkThread(request)).toMatchObject({ threadId: accepted.threadId, transferId: accepted.transferId, replayed: true })
+
+      const acceptedPin = `refs/mousse/threads/${accepted.threadId}/fork-checkpoint`
+      const acceptedSha = git(f.repo, 'rev-parse', acceptedPin)
+      lock = join(f.repo, '.git', ...acceptedPin.split('/')) + '.lock'
+      writeFileSync(lock, '')
+      await restarted.orchestrator.send('Use the checkpoint', false, { threadId: accepted.threadId, clientRequestId: 'restart-fork-first-send' })
+      expect(restarted.runEngine.transfers.get(accepted.transferId)?.payload.seed).toMatchObject({ kind: 'checkpoint', sha: acceptedSha })
+      expect(git(f.repo, 'rev-parse', acceptedPin)).toBe(acceptedSha)
+
+      unlinkSync(lock)
+      lock = undefined
+      await stop()
+      const resumed = await boot()
+      const workspace = new ThreadWorkspaceManager(resumed.threads.getThreadDir(accepted.threadId)).load()!
+      expect(readFileSync(join(workspace.worktreePath, 'value.txt'), 'utf8')).toBe('selected checkpoint\n')
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', acceptedPin)).toBe('')
+    } finally {
+      try { if (lock) unlinkSync(lock) } finally { await stop() }
+    }
+  }, 180_000)
 
   it('a native-fork-capable adapter whose forkSession returns null falls back to the portable handoff', async () => {
     const pi = piAdapter((input) => `reply to ${input.prompt}`, { fork: 'native' }, 'session-1')

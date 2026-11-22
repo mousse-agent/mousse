@@ -4,6 +4,7 @@
  * never expire; consults run one at a time per context thread; the startup pass settles what a crash
  * left; trashing a bot's thread ends its activation; a deleted bot is archived, then purged.
  */
+import { BOT_AUTOMATION_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,7 +25,9 @@ import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../sr
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
 import { type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
+import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
+import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 
 let base: string
 let profile: string
@@ -54,7 +57,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   mcp: [],
   skills: [],
   workspace: null,
-  budget: { maxActiveMs: 10 * 60_000 },
+  budget: { maxTurns: 3 },
   audience: 'owner',
   ...patch
 })
@@ -177,6 +180,11 @@ async function running(input = 'Fix the footer', id = 'c1', lane: 'chat' | 'run'
   return { activation, payload, prepared }
 }
 
+/** The dispatch uses up its 3 model requests: the 4th is over the limit, a budget wall. */
+const exhaust = (prepared: { authority: BotAuthority }) => {
+  for (let i = 0; i < 4; i += 1) prepared.authority.counters.charge('request')
+}
+
 /** The walled run ends as the executor ends it, and is settled. */
 async function endAtWall(payload: BotTurnPayload) {
   end(payload.runId, 'interrupted', { interruptedBy: 'bot_wall' })
@@ -221,7 +229,7 @@ describe('walls', () => {
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
     // Asks never expire: no expiry is armed (the only timers are the dispatch's deadline and its look).
-    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000, BOT_OFFLINE_WATCH_MS])
+    expect(timers.map((timer) => timer.ms)).toEqual([BOT_TURN_WINDOW_MS, BOT_OFFLINE_WATCH_MS])
   })
 
   it('escalate asks for a structured permission; a malformed one is refused, and a chat turn finishes before it waits', async () => {
@@ -305,17 +313,16 @@ describe('answers and continuations', () => {
     expect(store.overlays(activation.id)).toEqual([])
   })
 
-  it('a budget wall is answered with more time for this activation', async () => {
-    const { activation, payload } = await running()
-    timers[0].fn()
-    clock += 10 * 60_000
+  it('a budget wall is answered with more room for this activation', async () => {
+    const { activation, payload, prepared } = await running()
+    exhaust(prepared)
     await endAtWall(payload)
-    // The card offers the higher limit (twice the work time); the owner may give a different amount.
-    expect(bots.listEscalations(activation.id)[0]).toMatchObject({ kind: 'budget', permission: { budget: { key: 'maxActiveMs', amount: 10 * 60_000 } } })
-    await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_more', amount: 5 * 60_000 })
+    expect(bots.listEscalations(activation.id)[0]).toMatchObject({ kind: 'budget', permission: { budget: { key: 'maxTurns', amount: 3 } } })
+    await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_more', amount: 9 })
     const next = bots.prepare(payloadOf(store.dispatch(activation.id, 2)!.runId!))
     if ('refused' in next) throw new Error(next.refused)
-    expect(next.policy.budget).toMatchObject({ maxWallMs: 5 * 60_000 })
+    // The 9 more come on top of the 3 it had.
+    expect(next.policy.budget).toMatchObject({ maxTurns: 12 })
   })
 
   it('an answer waits for the walled run to end before anything is sent', async () => {
@@ -398,7 +405,8 @@ describe('consults', () => {
     expect(context).toMatchObject({ history: 'thread', authority: { role: 'context' } })
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
-    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, 'mcp_servers', 'read'].sort())
+    // What every bot has by default reaches it too: the automation tools and every skill.
+    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, 'list_skills', 'load_skill', 'mcp_servers', 'read', 'running_list'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)
@@ -483,21 +491,12 @@ describe('startup pass', () => {
     expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
     expect(store.counters(activation.id).activeMs).toBe(20_000)
     expect(store.get('SELECT committed_input, committed_output FROM bot_spend WHERE activation_id = ?', activation.id)).toEqual({ committed_input: 100, committed_output: 50 })
-    // Row 11: time left, so it carries on once by itself, with the rest of its time.
+    // Row 11: it carries on once by itself, in a fresh window.
     const next = store.dispatch(activation.id, 2)!
     expect(next.prompt.text).toContain('Mousse restarted')
     const again = bots.prepare(payloadOf(next.runId!))
     if ('refused' in again) throw new Error(again.refused)
-    expect(again.authority.time.deadline() - clock).toBe(10 * 60_000 - 20_000)
-  })
-
-  it('a dispatch whose last call came at its deadline is a budget wall after a crash, as at the deadline', async () => {
-    const { activation, payload, prepared } = await running()
-    callAt(prepared, T0 + 10 * 60_000 - 5_000)
-    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    await crash()
-    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 10 * 60_000 - 5_000 })
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', reason: 'This bot used up its work time.' } })
+    expect(again.authority.time.deadline() - clock).toBe(BOT_TURN_WINDOW_MS)
   })
 
   /** The live dispatch's look (`BOT_OFFLINE_WATCH_MS`) at `at`: it finds the dispatch working and records the moment. */
@@ -927,10 +926,24 @@ describe('round 1: smaller fixes', () => {
     expect(store.dispatches(activation.id).filter((dispatch) => dispatch.kind === 'consult' && dispatch.runId)).toHaveLength(1)
   })
 
-  it('denying a limit ends the activation blocked instead of asking again', async () => {
+  it('a chat wall for work time an older build left open is allowed this time when the profile opens, and the chat carries on', async () => {
     const { activation, payload } = await running()
-    timers[0].fn()
-    clock += 10 * 60_000
+    const raised = store.db.transaction(() => (bots as any).wallInTransaction(activation.id, ['running'], { dispatchN: 1, kind: 'budget', permission: { budget: { key: 'maxActiveMs', amount: 10 * 60_000 } }, reason: 'This bot used up its work time.' }))
+    await endAtWall(payload)
+    expect(bots.getActivation(activation.id).status).toBe('waiting_grant')
+    bots.close()
+    bots = makeEngine()
+    bots.releaseWorkTimeAsks()
+    await bots.reconcileOnStartup()
+    await tick()
+    expect(store.escalation(raised.escalation.id)).toMatchObject({ status: 'allowed_once' })
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed')
+  })
+
+  it('denying a limit ends the activation blocked instead of asking again', async () => {
+    const { activation, payload, prepared } = await running()
+    exhaust(prepared)
     await endAtWall(payload)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'deny' })
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'budget_denied' })
@@ -995,20 +1008,6 @@ describe('round 1: smaller fixes', () => {
 })
 
 describe('round 2', () => {
-  it('a time wall before the first dispatch started resends that dispatch\'s prompt after the answer', async () => {
-    const activation = await bots.enqueueChat('site-editor', 'chat:c1', 'Fix the footer')
-    store.run('UPDATE bot_counters SET active_ms = ? WHERE activation_id = ?', 10 * 60_000 - 5_000, activation.id)
-    const payload = payloadOf(store.dispatch(activation.id, 1)!.runId!)
-    expect(bots.prepare(payload)).toMatchObject({ code: 'active_time_exhausted' })
-    runs.markTerminal(payload.runId, 'cancelled', { error: 'active_time_exhausted' })
-    bots.settle(payload, {})
-    await tick()
-    await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_more', amount: 5 * 60_000 })
-    const next = store.dispatch(activation.id, 2)!
-    expect(next.prompt.text).toContain('The owner allowed')
-    expect(next.prompt.text).toContain('Fix the footer')
-  })
-
   it('a stored grant and draft are in the one canonical form', () => {
     const entry = bots.get('site-editor')
     const saved = bots.save({ ...entry.draft, permissions: { ...entry.draft.permissions, workspace: { roots: [root, other], access: 'write', rootAccess: { [root]: 'read' } } } }, entry.draftHash)

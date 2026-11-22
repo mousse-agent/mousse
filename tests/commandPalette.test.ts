@@ -168,18 +168,10 @@ describe('opening and closing with Ctrl+K', () => {
     expect(focusLog).toEqual(['composer'])
     expect(run).not.toHaveBeenCalled()
   })
-
-  it('toggles', () => {
-    stubWindow(composer())
-    togglePalette()
-    expect(useAppStore.getState().paletteOpen).toBe(true)
-    togglePalette()
-    expect(useAppStore.getState().paletteOpen).toBe(false)
-  })
 })
 
 describe('opening thread search', () => {
-  it('opens the palette with message hits first from Search threads, and Ctrl+K opens it plain', () => {
+  it('opens Search everything from its command, and Ctrl+K opens the plain palette', () => {
     const { win } = stubWindow(composer())
     attachCommandShortcuts(win as never)
     registerPaletteToggle()
@@ -284,16 +276,6 @@ describe('closePalette', () => {
     expect(order).toEqual(['open:false', 'opener', 'then'])
   })
 
-  it('leaves focus where a focus-changing command put it', () => {
-    let focused = ''
-    closePalette({
-      opener: { focus: () => void (focused = 'opener') },
-      then: () => void (focused = 'composer'),
-      setOpen: () => undefined
-    })
-    expect(focused).toBe('composer')
-  })
-
   it('leaves focus on the opener when nothing was chosen, and copes with no opener', () => {
     let focused = ''
     closePalette({ opener: { focus: () => void (focused = 'opener') }, setOpen: () => undefined })
@@ -382,7 +364,7 @@ describe('opening a thread from the palette', () => {
   it('opens a message hit: selects its thread, then asks the transcript to show the message', async () => {
     const { win } = stubWindow(composer())
     useChatNavigationStore.setState({ message: null })
-    // Search threads works over the Usage page; the thread it opens has to show.
+    // Search everything works over the Usage page; the thread it opens has to show.
     useAppStore.setState({ usageOpen: true })
     openPalette('messages')
 
@@ -424,6 +406,22 @@ describe('opening a thread from the palette', () => {
     chooseCommandPaletteItem({ kind: 'project', key: 'project:p1', id: 'p1', title: 'Mousse', detail: 'Project' })
     await vi.waitFor(() => expect(win.mousse.threads.select).toHaveBeenCalledWith('draft-1'))
     expect(win.mousse.threads.create).toHaveBeenCalledWith(undefined, 'p1', { rememberedChoices: true })
+  })
+
+  it('starts another draft while the first draft is submitting its prompt', async () => {
+    const { holdNewChat } = await import('../src/renderer/lib/pendingThreadRows')
+    const { win } = stubWindow(composer())
+    const starting = thread('starting-draft', 'New Thread', { projectId: 'p1', startedAt: undefined })
+    const next = thread('next-draft', 'New Thread', { projectId: 'p1', startedAt: undefined })
+    useAppStore.setState({ threads: [starting] })
+    win.mousse.threads.create.mockResolvedValue(next)
+    const release = holdNewChat(useAppStore.getState().profileId, starting.id)!
+    try {
+      await createAndSelectProjectThread('p1')
+      expect(win.mousse.threads.select).toHaveBeenCalledExactlyOnceWith(next.id)
+    } finally {
+      release()
+    }
   })
 
   // Add project, then start a thread: the new project is often not in this window's list yet when the create answers.

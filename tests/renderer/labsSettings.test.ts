@@ -14,6 +14,9 @@ import { SETTINGS_SEARCH_INDEX } from '../../src/renderer/lib/settingsSearch'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
+/** The rows Labs always shows, in order. */
+const LABS_TOP = ['Mousse ID (legacy)', 'Performance', 'Sidebar animations', 'New chat animations', 'Shimmer animations', 'Profiler']
+
 describe('Settings → Labs', () => {
   let root: Root
   let host: HTMLElement
@@ -50,9 +53,10 @@ describe('Settings → Labs', () => {
   const toggle = (label: string) => host.querySelector<HTMLButtonElement>(`[role="switch"][aria-label="${label}"]`)
   const titles = () => Array.from(host.querySelectorAll('.settings-item-title')).map((title) => title.textContent?.trim())
 
-  it('shows only the Profiler switch, off, until it is turned on, and asks the service nothing', () => {
+  it('shows Mousse ID (legacy) on and the Profiler switch off, and asks the service nothing', () => {
     show()
-    expect(titles()).toEqual(['Profiler'])
+    expect(titles()).toEqual(LABS_TOP)
+    expect(toggle('Mousse ID (legacy)')!.getAttribute('aria-checked')).toBe('true')
     expect(toggle('Profiler')!.getAttribute('aria-checked')).toBe('false')
     expect(memoryStatus).not.toHaveBeenCalled()
     expect(host.textContent).not.toContain('About')
@@ -62,7 +66,7 @@ describe('Settings → Labs', () => {
     show()
     act(() => toggle('Profiler')!.click())
     expect(store.get().experimental.profiler.enabled).toBe(true)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler'])
+    expect(titles()).toEqual([...LABS_TOP, 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler'])
     expect(memoryStatus).toHaveBeenCalled()
     // Memory sits under the switch; the rest is in a closed Advanced disclosure.
     expect(host.querySelector('[data-settings-anchor="labs-profiler-memory"]')!.closest('details')).toBeNull()
@@ -78,7 +82,7 @@ describe('Settings → Labs', () => {
     act(() => toggle('Agents can read the profiler')!.click())
     expect(store.get().experimental.profiler.agentAccess).toBe(true)
     const tools = PROFILER_TOOL_NAMES.map((name) => PROFILER_TOOL_LABELS[name].label)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools])
+    expect(titles()).toEqual([...LABS_TOP, 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools])
     for (const name of PROFILER_TOOL_NAMES) {
       expect(toggle(PROFILER_TOOL_LABELS[name].label)!.getAttribute('aria-checked')).toBe(name === 'profiler_heap_summary' ? 'false' : 'true')
       // What a tool is for is in its tooltip.
@@ -94,9 +98,52 @@ describe('Settings → Labs', () => {
 
     // Off hides everything again and keeps the choices below it.
     act(() => toggle('Profiler')!.click())
-    expect(titles()).toEqual(['Profiler'])
+    expect(titles()).toEqual(LABS_TOP)
     expect(host.querySelector('details.settings-advanced')).toBeNull()
     expect(store.get().experimental.profiler).toMatchObject({ enabled: false, agentAccess: true, tools: { profiler_watch: false } })
+  })
+
+  it('Performance is off at first, says what it does, and stores the 2D hybrid bot faces choice', () => {
+    show()
+    expect(toggle('Performance')!.getAttribute('aria-checked')).toBe('false')
+    expect(host.querySelector('[data-settings-anchor="labs-hybrid-bot-faces"]')!.textContent).toContain('Bots use less GPU using 2D hybrid rendering')
+    act(() => toggle('Performance')!.click())
+    expect(store.get().experimental.hybridBotFaces).toBe(true)
+    expect(toggle('Performance')!.getAttribute('aria-checked')).toBe('true')
+    act(() => toggle('Performance')!.click())
+    expect(store.get().experimental.hybridBotFaces).toBe(false)
+  })
+
+  it('saves the animation switches independently for the profile', () => {
+    show()
+    const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().experimental
+    const sidebar = toggle('Sidebar animations')!
+    const newChat = toggle('New chat animations')!
+    const shimmer = toggle('Shimmer animations')!
+    expect(sidebar.getAttribute('aria-checked')).toBe('true')
+    expect(newChat.getAttribute('aria-checked')).toBe('true')
+    expect(shimmer.getAttribute('aria-checked')).toBe('true')
+
+    act(() => sidebar.click())
+    expect(saved()).toMatchObject({ sidebarAnimations: false, newChatAnimations: true })
+    act(() => newChat.click())
+    expect(saved()).toMatchObject({ sidebarAnimations: false, newChatAnimations: false })
+    act(() => sidebar.click())
+    expect(saved()).toMatchObject({ sidebarAnimations: true, newChatAnimations: false, shimmerAnimations: true })
+    act(() => shimmer.click())
+    expect(saved()).toMatchObject({ sidebarAnimations: true, newChatAnimations: false, shimmerAnimations: false })
+  })
+
+  it('turns Mousse ID (legacy) off and on for the profile, leaving the profiler alone', () => {
+    show()
+    act(() => toggle('Mousse ID (legacy)')!.click())
+    expect(store.get().experimental.plusLegacy).toBe(false)
+    expect(toggle('Mousse ID (legacy)')!.getAttribute('aria-checked')).toBe('false')
+    expect(store.get().experimental.profiler.enabled).toBe(false)
+    // Saved with the profile: a store read again from disk keeps it off.
+    expect(new SettingsStore(MousseConfigStore.load(home)).get().experimental.plusLegacy).toBe(false)
+    act(() => toggle('Mousse ID (legacy)')!.click())
+    expect(store.get().experimental.plusLegacy).toBe(true)
   })
 
   it('asks before writing a heap snapshot', async () => {
@@ -113,10 +160,11 @@ describe('Settings → Labs', () => {
     expect(heapSnapshot).toHaveBeenCalledTimes(1)
   })
 
-  it('the settings search finds the profiler on Labs, and the rows under it once it is on', () => {
+  it('the settings search finds Mousse ID (legacy) and the profiler on Labs, and the rows under the profiler once it is on', () => {
     const labs = SETTINGS_SEARCH_INDEX.filter((entry) => entry.section === 'labs')
-    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents'])
-    for (const entry of labs.slice(1)) expect(entry.needs?.anchor).toBe('labs-profiler')
+    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-plus-legacy', 'labs-hybrid-bot-faces', 'labs-sidebar-animations', 'labs-new-chat-animations', 'labs-shimmer-animations', 'labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents'])
+    for (const entry of labs.slice(0, 6)) expect(entry.needs).toBeUndefined()
+    for (const entry of labs.slice(6)) expect(entry.needs?.anchor).toBe('labs-profiler')
     expect(SETTINGS_SEARCH_INDEX.some((entry) => entry.anchor.startsWith('general-memory'))).toBe(false)
   })
 })

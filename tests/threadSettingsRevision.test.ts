@@ -7,6 +7,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
+import * as executionLease from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ROUTED_METHODS, routedKeysAt } from '../src/shared/bridge/routed'
 import type { Thread } from '../src/shared/types'
@@ -187,22 +188,39 @@ describe('a send bound to what was shown (expect)', () => {
     expect(run.listRuns(thread.id)).toEqual([])
   })
 
-  it('a bound turn that loses the thread lease while it waits for its folders is refused with its run cancelled, never queued', async () => {
+  it.each(['lease timeout', 'Stop'] as const)('a bound turn whose lease wait ends with %s is cancelled and never queued', async (reason) => {
     const thread = await projectThread()
     mms.settings.set({ permissions: { defaultMode: 'ask' } })
-    const { tryAcquireExecutionLease } = await import('../src/mms/queue/ThreadExecutionLease')
-    let peer: { release?: () => void } | null = null
+    let peer: executionLease.ThreadLeaseHandle | null = null
     const waits = turnFolderWait(async () => {
-      // Another process takes the thread between the admission and the turn's own lease.
-      peer = tryAcquireExecutionLease(mms.threads.getThreadDir(thread.id), { source: 'test-peer' }) as never
+      peer = executionLease.tryAcquireExecutionLease(mms.threads.getThreadDir(thread.id), { source: 'test-writer' })
       return 'ready'
     })
-    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'ask' } })).rejects.toMatchObject({ code: 'thread_busy' })
-    expect(waits()).toBe(true)
-    expect(peer).not.toBeNull()
-    expect(mms.threads.loadMessageQueue(thread.id)).toEqual([])
-    expect(engine().listRuns(thread.id).map((entry) => entry.status)).toEqual(['cancelled'])
-    ;(peer as unknown as { release?: () => void })?.release?.()
+    let startedWaiting!: () => void
+    const waiting = new Promise<void>((resolve) => { startedWaiting = resolve })
+    const wait = executionLease.waitAcquireExecutionLease
+    vi.spyOn(executionLease, 'waitAcquireExecutionLease').mockImplementation((dir, opts) => {
+      startedWaiting()
+      return wait(dir, reason === 'lease timeout' ? { ...opts, tryOnce: true } : opts)
+    })
+    const sending = call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'ask' } })
+    void sending.catch(() => undefined)
+    try {
+      await waiting
+      if (reason === 'Stop') {
+        await call('orchestrator.abort', { threadId: thread.id })
+        await expect(sending).rejects.toThrow('cannot start (cancelled)')
+      } else {
+        await expect(sending).rejects.toMatchObject({ code: 'thread_busy' })
+      }
+      expect(waits()).toBe(true)
+      expect(peer).not.toBeNull()
+      expect(mms.threads.loadMessageQueue(thread.id)).toEqual([])
+      expect(mms.orchestrator.getMessages(thread.id).filter((message) => message.role === 'user')).toEqual([])
+      expect(engine().listRuns(thread.id).map((entry) => entry.status)).toEqual(['cancelled'])
+    } finally {
+      if (peer) executionLease.releaseExecutionLeaseHandle(peer)
+    }
   })
 
   it('a bound turn the profile shutdown stops while it waits for its folders is refused with its run cancelled, never queued', async () => {

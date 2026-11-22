@@ -42,11 +42,14 @@ it('captures default agent chat with tools available and restores exact context 
       await client.request('actions.undoLatest', { threadId: fixture.threadId, expectedJournalGeneration: state.journalGeneration, expectedTurnId: target.turnId })
       expect(main.orchestrator.getNativeContext(fixture.threadId).messages).toEqual(fixture.firstNativeMessages)
       expect(main.orchestrator.getMessages(fixture.threadId).filter(message => message.role === 'user')).toHaveLength(1)
+      // The sidebar row shows the reply that is still in the chat, not the undone one.
+      expect(main.threads.getThread(fixture.threadId)?.lastReply).toBe(fixture.replies[0])
       state = await history()
       expect(state.redoTarget?.turnId).toBe(target.turnId)
       await client.request('actions.redo', { threadId: fixture.threadId, expectedJournalGeneration: state.journalGeneration })
       expect(main.orchestrator.getNativeContext(fixture.threadId).messages).toEqual(fixture.fullNativeMessages)
       expect(main.orchestrator.getMessages(fixture.threadId).filter(message => message.role === 'user')).toHaveLength(2)
+      expect(main.threads.getThread(fixture.threadId)?.lastReply).toBe(fixture.replies[1])
     }
     const legacy = await client.request('actions.list', { threadId: fixture.legacyThreadId }) as History
     expect(legacy.undoTarget).toBeUndefined()

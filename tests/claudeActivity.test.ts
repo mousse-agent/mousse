@@ -97,6 +97,9 @@ describe('claudeActivityStart and claudeActivityComplete', () => {
     // Nothing is typed before the arguments are in, except a subagent call.
     expect(claudeActivityStart('Bash', undefined, true)).toBeUndefined()
     expect(claudeActivityStart('Agent', undefined, true)).toEqual({ kind: 'subagent' })
+    // The model a subagent call names is kept, for the subagent's row.
+    expect(claudeActivityStart('Agent', { description: 'Look', subagent_type: 'Explore', model: 'sonnet', prompt: 'p' }, true))
+      .toEqual({ kind: 'subagent', agentType: 'Explore', model: 'sonnet', description: 'Look' })
     // A Mousse delegation keeps its bounded record, not typed fields.
     expect(claudeActivityStart('mcp__mousse__delegate_task', { title: 'x', prompt: 'p' }, true)).toBeUndefined()
     expect(claudeActivityComplete(claudeCallContext('mcp__mousse__delegate_task', {}, true), undefined, 'x', false)).toEqual({ handedOff: false })

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   SYSTEMD_SERVICE_NAME,
-  SYSTEMD_UNIT_FILENAME,
   buildSystemctlDaemonReloadArgs,
   buildSystemctlEnableNowArgs,
   buildSystemctlIsActiveArgs,
@@ -11,7 +10,6 @@ import {
 } from '../src/mms/startup/linuxSystemd'
 import {
   MACOS_LABEL,
-  MACOS_PLIST_FILENAME,
   buildLaunchAgentPlist,
   buildLaunchctlBootstrapArgs,
   buildLaunchctlBootoutArgs,
@@ -112,7 +110,6 @@ describe('linux systemd startup generation', () => {
     expect(getSystemdUnitPath(homeDir)).toBe(
       '/home/alice/.config/systemd/user/mousse-mms.service'
     )
-    expect(SYSTEMD_UNIT_FILENAME).toBe(`${SYSTEMD_SERVICE_NAME}.service`)
   })
 
   it('builds a valid user unit file', () => {
@@ -166,7 +163,6 @@ describe('macos startup generation', () => {
     expect(getLaunchAgentPath(homeDir)).toBe(
       '/Users/alice/Library/LaunchAgents/com.ryspa.mousse.mms.plist'
     )
-    expect(MACOS_PLIST_FILENAME).toBe(`${MACOS_LABEL}.plist`)
   })
 
   it('builds a launchd plist with ProgramArguments and MOUSSE_HOME', () => {

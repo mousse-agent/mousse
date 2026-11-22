@@ -9,7 +9,7 @@ import type { ThreadDataStore } from './ThreadDataStore'
  */
 export class ChatReferenceMetadataResolver {
   constructor(
-    private readonly threads: Pick<ThreadDataStore, 'getThread' | 'getThreadDir'>,
+    private readonly threads: Pick<ThreadDataStore, 'getThread'>,
     private readonly projects: Pick<ProjectManager, 'getProject'>,
     private readonly profileHomeDir: string
   ) {}
@@ -18,13 +18,13 @@ export class ChatReferenceMetadataResolver {
     if (input.kind === 'thread' && input.threadId) {
       const thread = this.threads.getThread(input.threadId)
       if (!thread) return null
+      // No file path: the agent reads a thread with its thread tools, which hold it to what it may read.
       return {
         id: `thread:${thread.id}`,
         kind: 'thread',
-        title: input.title || thread.name,
+        title: thread.name || input.title,
         threadId: thread.id,
-        projectId: thread.projectId,
-        metadataPath: join(this.threads.getThreadDir(thread.id), 'meta.json')
+        projectId: thread.projectId
       }
     }
     if (input.kind === 'project' && input.projectId) {

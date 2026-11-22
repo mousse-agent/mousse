@@ -3,36 +3,49 @@ import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
 import { askUserTools } from './askUser'
 import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
+import { botItemTools } from './botItems'
+import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
+import { computerTools } from './computer'
+import { bugReportTools } from './bugReports'
 import { delegationTools } from './delegation'
+import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
+import { monitorTools } from './monitors'
 import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
-import { quickActionTools } from './quickActions'
+import { quickActionTools, runningTools } from './quickActions'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { scheduleTools } from './schedules'
 import { secretTools } from './secrets'
 import { automationTools } from './automations'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
+import { terminalTools } from './terminals'
 import { botThreadReach, lineageRelation, threadTools } from './thread'
+import { shareWakeTools, threadWakeTools } from './threadWakes'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
 export * from './types'
+export * from './refusal'
 export * from './registry'
+export { compileTool, heldBeforeArguments, holdsPerson, parentHolds, plannedFromAbove, toolNeeds, unattendedRefusal, type CompiledTool, type RunProvenance, type ToolEffect, type ToolNeeds } from './authority'
 export * from './turns'
-export type { AgentActionDetails, AgentApprovalResult, AgentArchiveResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
-export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, cleanRemoteSenderTitle, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessageText, isPersonMessage, personTurnRequest } from './agentMessage'
+export type { AgentAccessResult, AgentActionDetails, AgentApprovalResult, AgentArchiveResult, AgentArchiveOwnResult, AgentCreatedThread, AgentRemoteThreadRequest, AgentRemoteThreadResult, RemoteProjectCandidate, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, RemoteThreadsHost, ThreadSearchHit } from './host'
+export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, cleanRemoteSenderTitle, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessage, botMessageText, isPersonMessage, personTurnRequest } from './agentMessage'
 export type { BotAppToolDeps } from './bots'
 export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export { THEME_READ_TOOL, THEME_SET_TOOL, type AppearanceToolHost } from './appearance'
 export type { BotMemoryToolHost } from './botMemory'
+export { TERMINAL_READ_TOOL } from './terminals'
+export { MONITOR_PERMISSION_KEY, MONITOR_TOOL_NAMES } from './monitors'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export type { ProfilerToolHost } from './profiler'
+export type { ComputerUseToolHost } from './computer'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,
@@ -47,7 +60,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order runtimes are sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'computer', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance', 'terminals'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /** What the central check of `readsOthers` and `managesOthers` tools reads (SPEC §15.1), all of it at call time. */
@@ -60,9 +73,10 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       const lineage = lineageRelation(engine, caller.threadId, threadId)
       return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
     },
+    family: (caller, threadId) => familyRelation(threadFamily(host, engine), caller.threadId, threadId),
     // A personal bot: its own rule for threads; it reaches every project.
-    botReach: (caller, target) => {
-      if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId)
+    botReach: (caller, target, options) => {
+      if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId, options)
       return { scope: 'manage' }
     }
   }
@@ -84,17 +98,24 @@ export function createAppToolRegistry(input: {
   botMemory?: BotMemoryToolHost | (() => BotMemoryToolHost | undefined)
 }): { registry: ToolRegistry; families: Record<AppToolFamily, string[]> } {
   const { host, engine } = input
+  const botMemory = typeof input.botMemory === 'function' ? input.botMemory : () => input.botMemory as BotMemoryToolHost | undefined
   const registry = new ToolRegistry({
     activeRunId: (threadId) => (engine ? engine.getActiveRun(threadId)?.runId ?? null : null),
     awaitLiveRun: host.awaitLiveRun ? (threadId) => host.awaitLiveRun!(threadId) : undefined,
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined,
     threadCeiling: host.threadCeiling ? (threadId) => host.threadCeiling!(threadId) : undefined,
+    liveCeiling: host.liveCeiling ? (threadId) => host.liveCeiling!(threadId) : undefined,
+    subagentThread: host.subagentThread ? (threadId) => host.subagentThread!(threadId) : undefined,
+    personHeld: host.personHeld ? (caller) => host.personHeld!(caller) : undefined,
+    parentThread: host.parentThread ? (threadId) => host.parentThread!(threadId) : undefined,
+    reportLacks: host.reportLacks ? (report) => host.reportLacks!(report) : undefined,
     botRole: host.botRole ? (threadId) => host.botRole!(threadId) : undefined,
     permissionModeFor: host.permissionModeFor ? (runId) => host.permissionModeFor!(runId) : undefined,
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
     access: engine ? agentAccessPolicy(host, engine) : undefined,
+    botTimeZone: () => botMemory()?.memory?.zone(),
     ...input.options
   })
   const families = {} as Record<AppToolFamily, string[]>
@@ -103,19 +124,22 @@ export function createAppToolRegistry(input: {
     for (const tool of tools) registry.register(tool)
   }
   add('delegation', delegationTools(host))
-  add('questions', [...askUserTools(host), ...secretTools(host)])
+  add('questions', [...askUserTools(host), ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
-  add('quickActions', quickActionTools(host))
+  add('quickActions', [...quickActionTools(host), ...runningTools(host), ...monitorTools(host)])
   add('devGui', devGuiTools(host))
   add('web', webTools(host))
   add('browser', browserTools(host))
+  add('computer', computerTools(host))
   add('applets', appletTools())
-  add('bots', [...botTools(input.bots), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
+  // `wake`, `reminder_list` and `reminder_cancel` serve a bot's turn and any thread's (`shareWakeTools`).
+  add('bots', [...shareWakeTools(botTools(input.bots), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))
+  add('terminals', terminalTools(host))
   return { registry, families }
 }

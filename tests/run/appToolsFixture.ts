@@ -62,7 +62,6 @@ export function appTurn(overrides: Partial<AppToolTurn> & Pick<AppToolTurn, 'thr
     modeFacts: { readOnly: false, agent: true, build: false },
     modeCeiling: 'default',
     subagent: false,
-    discovery: false,
     actor: { kind: 'main' },
     enabledSkills: [],
     loadedSkills: [],
@@ -102,4 +101,33 @@ export function appToolRegistry(engine: RunEngine, host: AppToolHost, extra: Pic
     return { credential, toolCallId: input.toolCallId ?? `mcp:${Math.random()}`, signal: input.signal ?? new AbortController().signal }
   }
   return { registry, families, turns, request }
+}
+
+/**
+ * A refused call as tests read it (`refusal.ts`): `code` is the older code the refusal was thrown as (`data.reason`,
+ * such as `mousse_conflict`) or else its code, `details` the fields kept beside it (`data`), `message` its words.
+ * Undefined for a call that was not refused.
+ */
+export interface ReadRefusal {
+  code: string
+  message: string
+  details: Record<string, unknown>
+  refused: { code: string; message: string; retry: string; retryAfterSeconds?: number }
+}
+
+export function refusalOf(outcome: unknown): ReadRefusal | undefined {
+  const { text, isError } = (outcome ?? {}) as { text?: unknown; isError?: unknown }
+  if (isError !== true || typeof text !== 'string' || !text.startsWith('{"refused":')) return undefined
+  const { refused, data = {} } = JSON.parse(text) as { refused: ReadRefusal['refused']; data?: Record<string, unknown> }
+  return { code: typeof data.reason === 'string' ? data.reason : refused.code, message: refused.message, details: data, refused }
+}
+
+/** The refusal in a `tools/call` JSON-RPC response read over HTTP, or undefined when the call was not refused. */
+export function refusalOfResponse(response: { result?: { content?: Array<{ text?: string }>; isError?: boolean } }): ReadRefusal | undefined {
+  return refusalOf({ isError: response.result?.isError, text: response.result?.content?.[0]?.text })
+}
+
+/** The refusal a call came back with, or undefined when it was not refused. A thrown fault still rejects. */
+export function denied(promise: Promise<unknown>): Promise<ReadRefusal | undefined> {
+  return promise.then(refusalOf)
 }

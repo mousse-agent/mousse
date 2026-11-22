@@ -146,6 +146,51 @@ describe('RouteManager real transport/TLS paths', () => {
   })
 })
 
+describe('RouteManager remembered addresses', () => {
+  // Each route answers with its own key: a remembered address now held by another device, and the peer's signed route.
+  const racing = (remembered: string[] | undefined) => {
+    const clock = new FakeClock(),
+      right = Buffer.from(credentials.publicKeySpki).toString('base64url'),
+      other = Buffer.from(generateSelfSignedCert('another-device').publicKeySpki).toString('base64url'),
+      keyOf = new WeakMap<Duplex, string>()
+    const transport = fakeTransport(async (route) => {
+      const raw = new Duplex({ read() {}, write(_chunk, _encoding, done) { done() } })
+      keyOf.set(raw, route.address === 'stale' ? other : right)
+      return raw
+    })
+    const openChannel: OpenSecureChannel = async (raw) => fakeChannel(raw as Duplex, keyOf.get(raw as Duplex)!)
+    const manager = new RouteManagerImpl({ node, transports: [transport], credentials, clock, staggerMs: 250, openChannel })
+    const target: PeerRef = {
+      ...peer(right),
+      routes: [
+        { transport: 'memory', address: 'stale', priority: -5 },
+        { transport: 'memory', address: 'target', priority: 0 }
+      ],
+      ...(remembered ? { remembered } : {})
+    }
+    const connected = manager.connect(target, new AbortController().signal)
+    return { clock, manager, connected }
+  }
+
+  it('a remembered address answering with another key fails alone, and the signed route still opens', async () => {
+    const { clock, manager, connected } = racing(['stale'])
+    await tick()
+    clock.advance(250)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('target')
+    expect(manager.health(node).map((route) => [route.route.address, route.state, route.lastError])).toEqual([
+      ['stale', 'failing', 'peer_key_mismatch'],
+      ['target', 'ok', undefined]
+    ])
+  })
+
+  it('another key on a route that is not only remembered still ends the race', async () => {
+    const { connected } = racing(undefined)
+    await expect(connected).rejects.toMatchObject({ code: 'peer_key_mismatch' })
+  })
+})
+
 describe('RouteManager bounded phases and cancellation', () => {
   it.each(['resolve', 'connect', 'tls'] as const)(
     'budgets %s phase independently and cancels late work',
@@ -277,5 +322,77 @@ describe('RouteManager bounded phases and cancellation', () => {
     expect(manager.localRoutes()).toMatchObject({ version: 8, issuedAt: first.issuedAt })
     routes = [{ transport: 'memory', address: 'new', priority: 0 }]
     expect(manager.localRoutes().version).toBe(9)
+  })
+})
+
+describe('RouteManager local head start', () => {
+  // A LAN hint and the relay. The LAN dial answers after `lanMs`, or fails after it when `lanFails`.
+  const race = (lanMs: number, lanFails = false) => {
+    const clock = new FakeClock(),
+      key = Buffer.from(credentials.publicKeySpki).toString('base64url'),
+      dialled: string[] = []
+    const transport = fakeTransport(
+      (route) =>
+        new Promise((resolve, reject) => {
+          dialled.push(route.address)
+          const answer = () =>
+            resolve(new Duplex({ read() {}, write(_chunk, _encoding, done) { done() } }))
+          if (route.address === 'relay') answer()
+          else
+            clock.setTimeout(
+              () => (lanFails ? reject(new NetError('route_unreachable')) : answer()),
+              lanMs
+            )
+        })
+    )
+    const openChannel: OpenSecureChannel = async (raw) => fakeChannel(raw as Duplex, key)
+    const manager = new RouteManagerImpl({ node, transports: [transport], credentials, clock, staggerMs: 250, openChannel })
+    const connected = manager.connect(
+      {
+        ...peer(key),
+        routes: [
+          { transport: 'memory', address: 'relay', priority: 20 },
+          { transport: 'memory', address: 'lan', priority: -10 }
+        ]
+      },
+      new AbortController().signal
+    )
+    return { clock, dialled, connected }
+  }
+
+  it('a LAN dial slower than the stagger wins without the relay ever being dialled', async () => {
+    const { clock, dialled, connected } = race(1_000)
+    await tick()
+    clock.advance(250)
+    await tick()
+    expect(dialled).toEqual(['lan'])
+    clock.advance(750)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('lan')
+    clock.advance(5_000)
+    expect(dialled).toEqual(['lan'])
+  })
+
+  it('the relay is dialled as soon as every LAN route has failed', async () => {
+    const { clock, dialled, connected } = race(100, true)
+    await tick()
+    clock.advance(100)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('relay')
+    expect(dialled).toEqual(['lan', 'relay'])
+  })
+
+  it('the relay still starts after the head start when the LAN dial hangs', async () => {
+    const { clock, dialled, connected } = race(60_000)
+    await tick()
+    clock.advance(1_499)
+    await tick()
+    expect(dialled).toEqual(['lan'])
+    clock.advance(1)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('relay')
   })
 })

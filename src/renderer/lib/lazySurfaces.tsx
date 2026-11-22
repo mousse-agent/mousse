@@ -34,6 +34,7 @@ export const SettingsPage = lazyNamed(() => import('../components/SettingsPage')
 export const AutomationsPage = lazyNamed(() => import('../components/AutomationsPage'), 'AutomationsPage', AutomationsLoadFailed)
 export const SubscriptionUsagePage = lazyNamed(() => import('../components/SubscriptionUsagePage'), 'SubscriptionUsagePage')
 export const ChatWorkspace = lazyNamed(() => import('../components/chats/ChatWorkspace'), 'ChatWorkspace')
+export const BotThreadHeader = lazyNamed(() => import('../components/bots/BotThreadHeader'), 'BotThreadHeader')
 export const NewBotDialogHost = lazyNamed(() => import('../components/bots/NewBotDialog'), 'NewBotDialogHost', NewBotLoadFailed)
 
 export const FilesPanel = lazyNamed(() => import('../components/FilesPanel'), 'FilesPanel')
@@ -42,6 +43,7 @@ export const BrowserPanel = lazyNamed(() => import('../components/BrowserPanel')
 export const ChangesPanel = lazyNamed(() => import('../components/changes/ChangesPanel'), 'ChangesPanel')
 export const PullRequestPanel = lazyNamed(() => import('../components/PullRequestPanel'), 'PullRequestPanel')
 export const DocumentPanel = lazyNamed(() => import('../components/DocumentPanel'), 'DocumentPanel')
+export const SideChatsPanel = lazyNamed(() => import('../components/sideChats/SideChatsPanel'), 'SideChatsPanel')
 
 /** The panel area's tabs that stay mounted once mounted (their editors, PTYs and browser guests live there). */
 export type KeptPanel = 'files' | 'terminal' | 'browser'
@@ -81,11 +83,13 @@ export function preloadSplitSurfaces(): void {
     () => import('../chat/components/agent-elements/tools/edit-tool').then((module) => module.preloadEditDiff()),
     () => import('../components/editors/MarkdownPreview').then((module) => module.preloadMarkdownHighlight()),
     PullRequestPanel.preload,
+    SideChatsPanel.preload,
     DocumentPanel.preload,
     SettingsPage.preload,
     AutomationsPage.preload,
     SubscriptionUsagePage.preload,
     ChatWorkspace.preload,
+    BotThreadHeader.preload,
     NewBotDialogHost.preload
   ])
 }

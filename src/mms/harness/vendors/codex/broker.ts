@@ -17,18 +17,20 @@ import { encodeTokenResponse, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, parseTokenR
  *   token through the instance's sign-in (`access`), which refuses a changed key. Revoking an
  *   instance drops its leases; a request on a dropped lease is refused, also one in flight.
  * - Deadlines: reading an incomplete request, and every blocked response write, get `idleMs`
- *   (5 s). An admitted request gets `resolveMs` (75 s) for the lock wait, a refresh and the answer,
- *   inside the helper's 78 s and Codex's 80 s.
- * - At most 32 connections and 16 admitted jobs. Nothing is written before a complete request
- *   (Windows pipes admit read-only peers by default).
+ *   (5 s). A complete request gets `resolveMs` (75 s) for its wait for a job, the lock wait, a refresh
+ *   and the answer, inside the helper's 78 s and Codex's 80 s.
+ * - At most 512 connections and 256 jobs at once; a request beyond the jobs waits for one in arrival
+ *   order (within its deadline) instead of being refused, so many Codex turns starting together all
+ *   get their token. Nothing is written before a complete request (Windows pipes admit read-only
+ *   peers by default).
  *
  * The broker never logs or echoes a token.
  */
 
 export const BROKER_IDLE_MS = 5_000
 export const BROKER_RESOLVE_MS = 75_000
-export const BROKER_MAX_CONNECTIONS = 32
-export const BROKER_MAX_JOBS = 16
+export const BROKER_MAX_CONNECTIONS = 512
+export const BROKER_MAX_JOBS = 256
 /** POSIX socket paths are limited (104 bytes on macOS); stay below with room. */
 const MAX_SOCKET_PATH_BYTES = 100
 
@@ -64,7 +66,6 @@ interface Lease extends ChatGptLeaseInput {
 
 const REFUSED = {
   unknownLease: 'This Codex process is no longer allowed to use the ChatGPT sign-in. Mousse restarts it with the current sign-in.',
-  busy: 'Mousse is busy answering other token requests. Try again.',
   invalid: 'Mousse could not read the token request.',
   timeout: 'Mousse could not get a ChatGPT token in time.',
   failed: 'Mousse could not get a ChatGPT token. Sign in again in Settings → Providers.',
@@ -110,6 +111,8 @@ export class ChatGptTokenBroker {
   private readonly leases = new Map<string, Lease>()
   private readonly sockets = new Set<Socket>()
   private jobs = 0
+  /** Requests waiting for a job, oldest first (`admit`). */
+  private readonly waiting: Array<{ grant(): void }> = []
   private closed = false
   endpoint: string | undefined
 
@@ -223,14 +226,15 @@ export class ChatGptTokenBroker {
     if (!request) return this.respond(socket, { error: REFUSED.invalid })
     const lease = this.leases.get(request.leaseId)
     if (!lease) return this.respond(socket, { error: REFUSED.unknownLease })
-    if (this.jobs >= (this.options.maxJobs ?? BROKER_MAX_JOBS)) return this.respond(socket, { error: REFUSED.busy })
-    this.jobs += 1
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error(REFUSED.timeout)), this.options.resolveMs ?? BROKER_RESOLVE_MS)
     const onClose = (): void => controller.abort(new Error('The token helper went away.'))
     socket.once('close', onClose)
     let response: TokenResponse
+    let admitted = false
     try {
+      admitted = await this.admit(controller.signal)
+      if (!admitted) throw controller.signal.reason
       const deadline = new Promise<never>((_resolve, reject) => {
         controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true })
       })
@@ -244,9 +248,40 @@ export class ChatGptTokenBroker {
     } finally {
       clearTimeout(timer)
       socket.off('close', onClose)
-      this.jobs -= 1
+      if (admitted) this.release()
     }
     await this.respond(socket, response)
+  }
+
+  /** Takes one of the `maxJobs` jobs, waiting behind earlier requests when all are taken; false when `signal` ended the wait. */
+  private admit(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false)
+    if (this.jobs < (this.options.maxJobs ?? BROKER_MAX_JOBS) && !this.waiting.length) {
+      this.jobs += 1
+      return Promise.resolve(true)
+    }
+    return new Promise((resolve) => {
+      const onAbort = (): void => {
+        const index = this.waiting.indexOf(waiter)
+        if (index >= 0) this.waiting.splice(index, 1)
+        resolve(false)
+      }
+      const waiter = {
+        grant: (): void => {
+          signal.removeEventListener('abort', onAbort)
+          resolve(true)
+        }
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      this.waiting.push(waiter)
+    })
+  }
+
+  /** Ends a job: the oldest waiting request takes it over, else it is free. */
+  private release(): void {
+    const next = this.waiting.shift()
+    if (next) next.grant()
+    else this.jobs -= 1
   }
 
   private async respond(socket: Socket, response: TokenResponse): Promise<void> {

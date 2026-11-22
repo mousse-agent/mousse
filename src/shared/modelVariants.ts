@@ -1,4 +1,5 @@
 import { canonicalModelName } from './modelNames'
+import { ANTIGRAVITY_INSTANCE_ID } from './providerInstances'
 import type { LlmModelOption } from './settings'
 
 export interface ParsedModelVariant {
@@ -50,6 +51,12 @@ export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'
 export const REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'ultracode'] as const
 export const EFFORT_SUFFIXES = new Set<string>(['off', ...REASONING_LEVELS])
 const SPEED_SUFFIXES = new Set(['fast', 'slow'])
+
+/** Legacy Antigravity advertises Gemini levels as distinct IDs, which must reach ACP intact. */
+function antigravityModelEffort(providerId: string, modelId: string): string | undefined {
+  if (providerId !== ANTIGRAVITY_INSTANCE_ID) return undefined
+  return /^gemini-[\w.-]+-(low|medium|high|xhigh|max)$/.exec(modelId)?.[1]
+}
 
 export function parseThinkingSuffixFromModelId(modelId: string): {
   baseId: string
@@ -345,6 +352,7 @@ function groupFamilies(providerId: string, models: LlmModelOption[]): ModelFamil
 
   for (const model of models) {
     const parsed = parseModelVariant(model)
+    parsed.effort ??= antigravityModelEffort(providerId, model.id)
     const bucket = byFamily.get(parsed.familyLabel) ?? []
     bucket.push(parsed)
     byFamily.set(parsed.familyLabel, bucket)
@@ -562,7 +570,8 @@ export function resolveReasoning(providerId: string, modelId: string, models: Ll
   const model = models.find((entry) => entry.id === modelId) ?? models.find((entry) => entry.id === baseId)
   const efforts = getEffortsForModel(providerId, modelId, models)
   const known = model !== undefined && efforts.length > 0
-  const levels = known && model.thinkingOff !== false ? ['off', ...efforts] : known ? efforts : []
+  const fixedEffort = model && antigravityModelEffort(providerId, model.id)
+  const levels = known && !fixedEffort && model.thinkingOff !== false ? ['off', ...efforts] : known ? efforts : []
   const defaultLevel = model?.defaultEffort && efforts.includes(model.defaultEffort) ? model.defaultEffort : undefined
   const descriptions = model?.effortDescriptions ?? {}
   if (!known) {
@@ -570,7 +579,7 @@ export function resolveReasoning(providerId: string, modelId: string, models: Ll
     const family = providerId ? findModelFamily(providerId, models, modelId) : undefined
     return { levels, current: saved ?? family?.efforts[0] ?? (model ? parseModelVariant(model).effort ?? model.efforts?.[0] : undefined), descriptions }
   }
-  const fallback = defaultLevel ?? efforts[0]
+  const fallback = fixedEffort ?? defaultLevel ?? efforts[0]
   if (saved && !levels.includes(saved)) return { levels, current: fallback, ...(defaultLevel ? { defaultLevel } : {}), unsupported: saved, descriptions }
   return { levels, current: saved ?? fallback, ...(defaultLevel ? { defaultLevel } : {}), descriptions }
 }

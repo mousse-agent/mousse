@@ -52,8 +52,8 @@ export function agentThreadFingerprint(request: AgentThreadRequest): string {
     request.firstMessage === undefined ? null : request.mode ?? 'agent',
     // Only when set, so a creation stored before levels existed keeps its fingerprint.
     ...(request.effort ? [request.effort] : []),
-    // The same for a hidden thread (`Thread.hidden`).
-    ...(request.hidden ? [{ hidden: true }] : [])
+    // The same for a bot's choice of `Thread.hidden`.
+    ...(request.hidden !== undefined ? [{ hidden: request.hidden }] : [])
   ])
 }
 

@@ -49,7 +49,7 @@ describe('sending in a dirty thread workspace', () => {
     return { thread, directory: mms.threads.getThreadDir(thread.id) }
   }
 
-  it('runs the turn, and Undo leaves the user’s pending edits exactly as they were', async () => {
+  it('runs the turn over the user’s pending edits, which are the turn’s, and Undo goes back to where the last turn ended', async () => {
     const replies: Array<(cwd: string) => string> = [
       (cwd) => { writeFileSync(join(cwd, 'value.txt'), 'first turn\n'); return 'First.' },
       (cwd) => { writeFileSync(join(cwd, 'value.txt'), 'agent edit\n'); writeFileSync(join(cwd, 'agent.txt'), 'agent\n'); return 'Second.' }
@@ -64,21 +64,20 @@ describe('sending in a dirty thread workspace', () => {
     writeFileSync(join(worktree, 'screenshot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]))
     expect(await client.request('orchestrator.send', { threadId: thread.id, content: 'Second turn.', mode: 'agent' })).toMatchObject({ message: 'Second.' })
 
+    // A turn in the thread's own worktree starts where the last turn ended: edits made there since are the turn's (#1758).
     const actions = new ThreadActionService(directory).list()
-    const saved = actions.find((action) => action.turnId.startsWith('user-changes:'))!
-    const turn = actions.at(-1)!
-    expect(saved).toMatchObject({ actor: { kind: 'user' }, state: 'completed' })
-    expect(saved.changedPaths.map((item) => item.path).sort()).toEqual(['screenshot.png', 'value.txt'])
-    expect(turn.startSha).toBe(saved.endSha)
-    expect(turn.changedPaths.map((item) => item.path).sort()).toEqual(['agent.txt', 'value.txt'])
+    const [first, turn] = actions
+    expect(actions).toHaveLength(2)
+    expect(turn!.startSha).toBe(first!.endSha)
+    expect(turn!.changedPaths.map((item) => item.path).sort()).toEqual(['agent.txt', 'screenshot.png', 'value.txt'])
     // The turns are snapshots: the thread's branch has no commit of Mousse's.
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(head)
 
     await client.request('actions.undoLatest', { threadId: thread.id })
-    expect(f.read(worktree)).toBe('user edit\n')
-    expect(readFileSync(join(worktree, 'screenshot.png')).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]))).toBe(true)
+    expect(f.read(worktree)).toBe('first turn\n')
+    expect(existsSync(join(worktree, 'screenshot.png'))).toBe(false)
     expect(existsSync(join(worktree, 'agent.txt'))).toBe(false)
-    expect(git(worktree, 'status', '--porcelain', '--untracked-files=all')).toBe('M value.txt\n?? screenshot.png')
+    expect(git(worktree, 'status', '--porcelain', '--untracked-files=all')).toBe('M value.txt')
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(head)
   }, 45_000)
 

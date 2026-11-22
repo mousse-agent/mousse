@@ -149,12 +149,14 @@ describe('a card on a message', () => {
     expect(report.text).toBe('The Q7 wins.\n\nSteps\n[x] Find prices\n[-] Read reviews')
   })
 
-  it('holds at most 3 cards; a 4th is refused with what to do', async () => {
+  it('holds as many cards as fit in 8 KB; one past that is refused with what to do', async () => {
     const turn = await chatTurn('More.', 'm')
-    for (let i = 0; i < 3; i += 1) expect((await tool('show_card', turn.prepared, turn.payload.threadId, { card: SPECS })).isError).toBeFalsy()
-    expect(await tool('show_card', turn.prepared, turn.payload.threadId, { card: SPECS })).toMatchObject({ isError: true, text: expect.stringContaining(CARDS_FULL_TEXT) })
-    await finish(f, turn.payload, 'completed', { text: 'Three.' })
-    expect(chatOf(f, botId).at(-1)?.cards).toHaveLength(3)
+    for (let i = 0; i < 5; i += 1) expect((await tool('show_card', turn.prepared, turn.payload.threadId, { card: SPECS })).isError).toBeFalsy()
+    const big = { type: 'facts', title: 'Long', rows: Array.from({ length: 12 }, (_, i) => ({ label: `Row ${i}`, value: 'x'.repeat(300) })) }
+    expect((await tool('show_card', turn.prepared, turn.payload.threadId, { card: big })).isError).toBeFalsy()
+    expect(await tool('show_card', turn.prepared, turn.payload.threadId, { card: big })).toMatchObject({ isError: true, text: expect.stringContaining(CARDS_FULL_TEXT) })
+    await finish(f, turn.payload, 'completed', { text: 'Six.' })
+    expect(chatOf(f, botId).at(-1)?.cards).toHaveLength(6)
   })
 
   it('a malformed card is refused and nothing is shown', async () => {
@@ -210,6 +212,19 @@ describe('an automation the bot creates', () => {
     expect(reply.text.slice(reply.plainFrom)).toContain(`Automation: ${entry!.name} · every 60 minutes`)
     // Its runs in About name the job, so the card finds whether it is paused.
     expect(f.bots.service.get(botId).runs).toEqual([expect.objectContaining({ id: entry!.scheduleId, jobId: entry!.jobId })])
+  })
+})
+
+describe('a fixed-line automation card', () => {
+  it.each([undefined, '2030-11-21'])('shows the said line and end %s in the card and About', async (until) => {
+    const turn = await chatTurn('Tell me to take my pills every hour.', 'm1')
+    const added = await tool('bot_schedule_add', turn.prepared, turn.payload.threadId, { when: { kind: 'interval', minutes: 60 }, say: 'Take your pills', ...(until ? { until } : {}) })
+    expect(added.isError, added.text).toBeFalsy()
+    await finish(f, turn.payload, 'completed', { text: 'Every hour.' })
+    const expected = `Says “Take your pills” · every 60 minutes${until ? ' · until Thu 21 Nov' : ''}`
+    const reply = chatOf(f, botId).filter((row) => row.activationId === turn.activation.id && row.author === 'bot').at(-1)!
+    expect(reply.cards).toEqual([expect.objectContaining({ type: 'automation', label: expected })])
+    expect(f.bots.service.get(botId).runs[0]!.label).toBe(expected)
   })
 })
 
@@ -286,4 +301,20 @@ describe('forgetting a message with a card', () => {
     expect(rows).toEqual([expect.objectContaining({ kind: 'tool_call', text: 'show_card facts', json: { tool: 'show_card', card: 'facts' } })])
     expect(JSON.stringify(rows)).not.toContain('4417')
   })
+})
+
+it.each([
+  ['chat:owner', true], ['answer:owner', true], ['wake:timer', false],
+  ['botmsg:other', false], ['create:first', false], ['question:q:default', false]
+])('a fixed line needs owner words: %s', async (key, allowed) => {
+  const turn = await chatTurn('Say hello every hour.', 'owner-line')
+  f.store.run('UPDATE bot_activations SET idempotency_key = ? WHERE id = ?', key, turn.activation.id)
+  const result = await tool('bot_schedule_add', turn.prepared, turn.payload.threadId, { when: { kind: 'interval', minutes: 60 }, say: 'Hello' })
+  expect(Boolean(result.isError)).toBe(!allowed)
+  if (allowed) expect(f.scheduler.listJobs()[0]!.bot).toMatchObject({ say: 'Hello', ownerAsked: true })
+  if (!allowed) {
+    expect(result.text).toMatch(/prompt/)
+    expect(f.book.list(botId)).toEqual([])
+    expect((await tool('bot_schedule_add', turn.prepared, turn.payload.threadId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Say hello' })).isError).toBeFalsy()
+  }
 })

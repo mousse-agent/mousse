@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../../src/shared/types'
 import { AppToolTurns, McpToolError, ToolRegistry, TURN_TOKEN_KEY, type McpTurnBinding } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
+import type { Socket } from 'node:net'
+import { BOUNDARY_NOTICE_HEADER, MCP_ERROR_CODES, MousseMcpServer, type McpToolBoundary } from '../../src/mms/run/mcp/MousseMcpServer'
 import { runStdioBridge } from '../../src/mms/run/mcp/stdioBridge'
 import { PassThrough } from 'node:stream'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOfResponse } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
+import type { CallAttribution } from '../../src/mms/run/nativeHelpers'
 
 async function rpc(url: string, token: string | null, body: unknown) {
   const response = await fetch(url, {
@@ -34,13 +36,13 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     fx = undefined
   })
 
-  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}) => {
+  const setup = async (hostOverrides: Parameters<typeof fakeAppToolHost>[0] = {}, options: { boundary?: McpToolBoundary; attribute?: (threadId: string, meta: unknown) => Promise<CallAttribution> } = {}) => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const credentials = new McpCredentials(fx.store)
     const fake = fakeAppToolHost(hostOverrides)
     const { registry, turns } = appToolRegistry(fx.engine, fake.host)
-    server = new MousseMcpServer({ credentials, registry })
+    server = new MousseMcpServer({ credentials, registry, ...(options.boundary ? { boundary: options.boundary } : {}), ...(options.attribute ? { attribute: options.attribute } : {}) })
     await server.start()
     const registered = turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
     const bearer = (input: { runId?: string; instanceId?: string; modeCeiling?: 'plan' | 'default'; binding?: McpTurnBinding; generation?: string } = {}) =>
@@ -76,7 +78,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
     expect(names).toEqual(['answer_subagent', 'approval_respond', 'ask_user', 'continue_subagent', 'create_task', 'delegate_task', 'list_computers', 'list_models', 'list_subagents', 'list_tasks',
       'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list', 'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'task_cancel', 'task_status',
-      'thread_create', 'thread_fork', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_wait', 'update_task'])
+      'thread_archive', 'thread_create', 'thread_fork', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_update', 'thread_wait', 'update_task', 'withdraw_question'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))
     expect(read.body.result.isError).toBeUndefined()
@@ -85,11 +87,88 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(payload.events.map((event: { seq: number }) => event.seq)).toEqual(fx.engine.listEvents('thread-a').map((event) => event.seq))
 
     const scope = await rpc(server.url, attachment.token, call(5, 'queue_enqueue', { content: 'x', threadId: 'thread-b', expectedRevision: 'rev-0' }))
-    expect(scope.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied, data: { reason: 'mousse_scope_denied' } })
-    expect(scope.body.error.message).toMatch(/^mousse_scope_denied/)
+    expect(scope.body.error).toBeUndefined()
+    expect(refusalOfResponse(scope.body)).toMatchObject({ code: 'mousse_scope_denied', refused: { code: 'scope_denied', retry: 'never' } })
+    expect(refusalOfResponse(scope.body)!.message).not.toMatch(/^mousse_/)
 
     const get = await fetch(server.url, { headers: { Authorization: `Bearer ${attachment.token}`, Accept: 'text/event-stream' } })
     expect(get.status).toBe(405)
+  })
+
+  describe('notices handed over with a tool result (McpToolBoundary)', () => {
+    const stubBoundary = (onDeliver: () => void = () => undefined) => {
+      const release = vi.fn()
+      const boundary: McpToolBoundary = { deliver: vi.fn(() => (onDeliver(), { text: 'a subagent finished', release })) }
+      return { boundary, release }
+    }
+
+    it('come as their own block after the tool\'s result, and stay delivered once the response is written', async () => {
+      const { boundary, release } = stubBoundary()
+      const { server, attachment } = await setup({}, { boundary })
+      const read = await rpc(server.url, attachment.token, call(1, 'thread_read'))
+      expect(JSON.parse(read.body.result.content[0].text).threadId).toBe('thread-a')
+      expect(read.body.result.content[1]).toEqual({ type: 'text', text: `${BOUNDARY_NOTICE_HEADER}\n\na subagent finished` })
+      expect(boundary.deliver).toHaveBeenCalledWith({ threadId: 'thread-a', runId: expect.any(String) })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(release).not.toHaveBeenCalled()
+    })
+
+    it('are released when the connection closes after they were handed over and before the response is written', async () => {
+      // The connection drops at the one point that matters: inside `deliver`, before the server writes anything.
+      let sockets: Set<Socket> = new Set()
+      const { boundary, release } = stubBoundary(() => {
+        for (const socket of sockets) socket.destroy()
+      })
+      const { server, attachment } = await setup({}, { boundary })
+      sockets = (server as unknown as { sockets: Set<Socket> }).sockets
+      await expect(rpc(server.url, attachment.token, call(1, 'thread_read'))).rejects.toThrow()
+      expect(boundary.deliver).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1))
+    })
+  })
+
+  describe("a native helper's call under its hosting run's credential", () => {
+    const withMeta = (id: number, name: string, meta: Record<string, unknown>, args: Record<string, unknown> = {}) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args, _meta: meta } })
+    const attribution = (byToolUse: Record<string, CallAttribution>) => vi.fn(async (_threadId: string, meta: unknown) => byToolUse[String((meta as Record<string, unknown> | undefined)?.['claudecode/toolUseId'])] ?? { kind: 'host' as const })
+
+    it('holds delegable authority only and takes none of the run\'s notices; the run\'s own call keeps both', async () => {
+      const boundary: McpToolBoundary = { deliver: vi.fn(() => ({ text: 'a subagent finished', release: () => undefined })) }
+      const attribute = attribution({ toolu_h: { kind: 'helper', agentId: 'toolu_A' }, toolu_u: { kind: 'unattributed' } })
+      const { server, attachment } = await setup({}, { boundary, attribute })
+      for (const [id, toolUseId] of [[1, 'toolu_h'], [2, 'toolu_u']] as const) {
+        // Reading the hosting thread is delegable: it works, with no notice handed over.
+        const read = await rpc(server.url, attachment.token, withMeta(id, 'thread_read', { 'claudecode/toolUseId': toolUseId }))
+        expect(JSON.parse(read.body.result.content[0].text).threadId).toBe('thread-a')
+        expect(read.body.result.content).toHaveLength(1)
+        // Asking the person is the run's own: refused to a helper as to a subagent.
+        const ask = await rpc(server.url, attachment.token, withMeta(id + 10, 'ask_user', { 'claudecode/toolUseId': toolUseId }, { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+        expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
+      }
+      expect(boundary.deliver).not.toHaveBeenCalled()
+      expect(attribute).toHaveBeenCalledWith('thread-a', { 'claudecode/toolUseId': 'toolu_h' })
+      const own = await rpc(server.url, attachment.token, withMeta(3, 'thread_read', { 'claudecode/toolUseId': 'toolu_own' }))
+      expect(own.body.result.content[1]).toEqual({ type: 'text', text: `${BOUNDARY_NOTICE_HEADER}\n\na subagent finished` })
+    })
+
+    it('never holds person, in a run a person started; the run\'s own call does', async () => {
+      const archiveOwnThreadAfterTurn = vi.fn(() => ({ status: 'scheduled' as const }))
+      const attribute = attribution({ toolu_h: { kind: 'helper', agentId: 'toolu_A' } })
+      const { server, attachment } = await setup({ personHeld: () => true, archiveOwnThreadAfterTurn }, { attribute })
+      const helper = await rpc(server.url, attachment.token, withMeta(1, 'thread_archive', { 'claudecode/toolUseId': 'toolu_h' }, { threadId: 'thread-a' }))
+      expect(refusalOfResponse(helper.body)).toMatchObject({ refused: { code: 'lacks_capability', lacks: 'person' } })
+      expect(archiveOwnThreadAfterTurn).not.toHaveBeenCalled()
+      const own = await rpc(server.url, attachment.token, withMeta(2, 'thread_archive', { 'claudecode/toolUseId': 'toolu_own' }, { threadId: 'thread-a' }))
+      expect(JSON.parse(own.body.result.content[0].text)).toMatchObject({ threadId: 'thread-a', archived: 'after_this_turn' })
+      expect(archiveOwnThreadAfterTurn).toHaveBeenCalledTimes(1)
+    })
+
+    it('an attribution that fails holds delegable authority only', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const { server, attachment } = await setup({}, { attribute: async () => { throw new Error('lost') } })
+      const ask = await rpc(server.url, attachment.token, call(1, 'ask_user', { questions: [{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }], wait: false }))
+      expect(refusalOfResponse(ask.body)).toMatchObject({ refused: { code: 'unavailable', message: expect.stringContaining('a helper cannot use it') } })
+      warn.mockRestore()
+    })
   })
 
   it('rejects a missing, invalid or revoked token with 401, and every call after revokeThread', async () => {
@@ -194,7 +273,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(JSON.parse(read.body.result.content[0].text)).toMatchObject({ threadId: 'thread-b', scope: 'manage' })
   })
 
-  it('reports a conflict as -32006 with its details in the error data', async () => {
+  it('reports a conflict as a refusal result with its details beside it', async () => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const turns = new AppToolTurns()
@@ -208,12 +287,11 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     await server.start()
     const { token } = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
     const result = await rpc(server.url, token, call(1, 'stale'))
-    expect(MCP_ERROR_CODES.mousse_conflict).toBe(-32006)
-    expect(result.body.error).toMatchObject({
-      code: -32006,
+    expect(result.body.error).toBeUndefined()
+    expect(JSON.parse(result.body.result.content[0].text)).toEqual({
+      refused: { code: 'conflict', message: 'run 1 is no longer the active run', retry: 'after_change' },
       data: { reason: 'mousse_conflict', expectedRunId: 'run-1', activeRunId: 'run-2' }
     })
-    expect(result.body.error.message).toMatch(/^mousse_conflict/)
   })
 
   it('relays stdio JSON-RPC lines through the stdio bridge', async () => {
@@ -245,7 +323,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(bearer()).toBeNull()
   })
 
-  it('maps transport failures to HTTP statuses and a refused tool to its JSON-RPC code', async () => {
+  it('maps transport failures to HTTP statuses, an unknown tool to its JSON-RPC code, and a refused tool to a refusal result', async () => {
     const { server, attachment, bearer } = await setup()
     const post = (body: string, path = '/mcp') => fetch(`${server.url.replace(/\/mcp$/, '')}${path}`, {
       method: 'POST', body,
@@ -272,7 +350,8 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     server.revokeThread('thread-a')
     const plan = bearer({ instanceId: 'p', modeCeiling: 'plan' })
     const ceiling = await rpc(server.url, plan.token, call(5, 'thread_fork'))
-    expect(ceiling.body.error).toMatchObject({ code: -32004, data: { reason: 'mousse_ceiling_exceeded' } })
+    expect(ceiling.body.error).toBeUndefined()
+    expect(refusalOfResponse(ceiling.body)).toMatchObject({ code: 'mousse_ceiling_exceeded', refused: { code: 'lacks_capability', retry: 'after_change', lacks: 'threads.start' } })
   })
 
   describe('in-flight tool calls', () => {
@@ -345,6 +424,34 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       await server!.stop()
       await surviving
       expect(reasons.get('thread-b')).toBe('The Mousse MCP server stopped')
+    })
+    it('compacts tools/list schemas for Antigravity bearers so delegate_task stays well inside its eager tool budget, while keeping full schemas for other providers', async () => {
+      const { server, bearer } = await setup()
+      const codex = bearer({ instanceId: 'codex', generation: 'codex|default|0|0' })
+      const codexList = await rpc(server.url, codex.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+      expect(codexList.status).toBe(200)
+
+      const agy = bearer({ instanceId: 'antigravity', generation: 'antigravity|default|0|0' })
+      const agyList = await rpc(server.url, agy.token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+      expect(agyList.status).toBe(200)
+      const codexTools = codexList.body.result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+      const agyTools = agyList.body.result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+      expect(agyTools.map((t) => t.name)).toEqual(codexTools.map((t) => t.name))
+
+      const codexDelegate = codexTools.find((t) => t.name === 'delegate_task')!
+      const agyDelegate = agyTools.find((t) => t.name === 'delegate_task')!
+      // Full schema stays untouched on non-Antigravity providers.
+      expect(codexDelegate.description.length).toBeGreaterThan(1000)
+      // Antigravity gets a compact schema that keeps every parameter, enum and required field intact.
+      expect(agyDelegate.description.length).toBeLessThanOrEqual(120)
+      expect(JSON.stringify(agyDelegate).length).toBeLessThan(1000)
+      expect(JSON.stringify(agyTools).length).toBeLessThan(JSON.stringify(codexTools).length * 0.5)
+      const agyProps = (agyDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
+      const codexProps = (codexDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
+      expect(Object.keys(agyProps).sort()).toEqual(Object.keys(codexProps).sort())
+      expect((agyDelegate.inputSchema as { required: string[] }).required).toEqual((codexDelegate.inputSchema as { required: string[] }).required)
+      expect(agyProps.workspace).toEqual({ type: 'string', enum: ['isolated', 'shared'] })
+      expect(agyProps.wake).toEqual({ type: 'string', enum: ['always', 'settled_only'] })
     })
   })
 })

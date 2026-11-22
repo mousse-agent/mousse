@@ -3,7 +3,7 @@
  * @property, @keyframes, @font-face, @import, image-set(), attribute selectors), go through the app's own
  * `applyThemeCss` and make no request at all, while the safe rules in the same CSS still apply. The control puts the
  * same CSS on the page unchecked and sees it reach the leak server, so a leak would show. While a decision (an
- * approval's buttons) is on the page, the whole theme, colors included, is off.
+ * approval's buttons) or a guarded page is on screen, only the theme's CSS is off; its colors stay.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
@@ -16,6 +16,8 @@ import { expect, it } from 'vitest'
 type Evidence = {
   theme: { requested: string[]; leakHits: string[]; dropped: number; measured: Record<string, string> }
   decision: Record<'before' | 'during' | 'after', { sidebar: string; token: string; buttonAfter: string; paused: boolean }>
+  guarded: Record<'during' | 'decision' | 'after', { sidebar: string; token: string; buttonAfter: string; paused: boolean }>
+  plain: { during: boolean; after: boolean; off: boolean }
   control: { requested: string[]; leakHits: string[] }
   pageErrors: string[]
 }
@@ -61,11 +63,19 @@ it('applies the safe rules of a hostile theme and makes no request, pauses it wh
     expect(evidence.theme.measured).toMatchObject({ stringHiddenColor: 'rgb(25, 26, 27)', stringHiddenImage: 'none', braceColor: 'rgb(28, 29, 30)', braceImage: 'none', afterBraceColor: 'rgb(31, 32, 33)' })
     expect(evidence.theme.measured.escapedSvg).toContain('data:image/svg+xml')
 
-    // While a person is asked to decide, no theme rule or color applies: a theme cannot relabel Approve as Deny.
+    // While a person is asked to decide, the theme's own CSS is off, so it cannot relabel Approve as Deny; its colors
+    // stay, and the theme as a whole never goes off.
     expect(evidence.decision.before).toMatchObject({ sidebar: 'rgb(1, 2, 3)', token: '#010203', paused: false })
-    expect(evidence.decision.during).toMatchObject({ token: '', buttonAfter: 'none', paused: true })
+    expect(evidence.decision.during).toMatchObject({ token: '#010203', buttonAfter: 'none', paused: false })
     expect(evidence.decision.during.sidebar).not.toBe('rgb(1, 2, 3)')
     expect(evidence.decision.after).toMatchObject({ sidebar: 'rgb(1, 2, 3)', token: '#010203', paused: false })
+    // A guarded page (Settings, the Automations page, a bot's About panel) does the same, with or without a decision.
+    expect(evidence.guarded.during).toMatchObject({ token: '#010203', paused: false })
+    expect(evidence.guarded.during.sidebar).not.toBe('rgb(1, 2, 3)')
+    expect(evidence.guarded.decision).toMatchObject({ token: '#010203', paused: false })
+    expect(evidence.guarded.after).toMatchObject({ sidebar: 'rgb(1, 2, 3)', token: '#010203', paused: false })
+    // Nothing marks the theme as off, a theme with nothing but a wallpaper included (its wallpaper stays).
+    expect(evidence.plain).toEqual({ during: false, after: false, off: false })
 
     // The control: unchecked, the same CSS fetches from the leak server, by each of these routes.
     const reached = new Set(evidence.control.leakHits.map((hit) => hit.replace(/^\/leak/, '')))

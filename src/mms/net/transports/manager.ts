@@ -15,6 +15,7 @@ import { NetError, type Route } from '../../../shared/net'
 import { HOSTED_RELAY_TRANSPORT, canonicalHostedRelayAudience } from '../relay/hostedAudience'
 import type { HostedRelayTransports } from '../hosted'
 import { DirectTransport } from './direct'
+import { LanDiscovery, type LanPeer } from './lan'
 import { PreauthAdmission, inboundPrincipal } from './admission'
 import { TransportRegistry, type TransportConfiguration } from './registry'
 import { tailscaleAddon } from './tailscale'
@@ -63,6 +64,14 @@ export interface ManagedTransportStatus {
   detail?: string
 }
 
+function kept(store?: { kept(): number | undefined }): number | undefined {
+  try {
+    return store?.kept()
+  } catch {
+    return undefined
+  }
+}
+
 /** Profiles select listeners; verified remote endpoints remain dialable without local tunnel accounts/binaries. */
 export class ProfileTransports {
   readonly admission: PreauthAdmission
@@ -75,12 +84,17 @@ export class ProfileTransports {
   private readonly observed = new Map<string, { transport: Transport; off(): void }>()
   private readonly listeners = new Set<(status: TransportStatus) => void>()
   private stopping = false
+  private lan?: LanDiscovery
   constructor(
     private readonly options: {
       clock: Clock
       profileDir: string
       identity(): RelayIdentity
       onChanged?(): void
+      lanPeers?(): LanPeer[]
+      onLanChanged?(): void
+      /** Where the automatic LAN listener's port is kept across restarts. */
+      lanPort?: { kept(): number | undefined; keep(port: number): void }
       relayRendezvous?: RelayRendezvous
       addons?: TransportAddon[]
       /** Mousse ID relay carriers; without them hosted relay routes are refused. */
@@ -182,6 +196,43 @@ export class ProfileTransports {
       throw new NetError('bad_request')
     const checked = configurations.map((row) => this.validate(row))
     await this.direct.provision()
+    if (!this.lan && this.options.lanPeers) {
+      const lan = new LanDiscovery({
+        clock: this.options.clock,
+        peers: this.options.lanPeers,
+        changed: () => this.options.onLanChanged?.(),
+        port: kept(this.options.lanPort)
+      })
+      this.lan = lan
+      try {
+        await lan.start((raw, inbound) => {
+          const info = { ...inbound, lan: true }
+          if (this.stopping) {
+            raw.destroy()
+            return
+          }
+          const deadline = this.admission.reserve(raw, inboundPrincipal(info))
+          if (deadline === undefined) {
+            raw.destroy()
+            return
+          }
+          this.sockets.add(raw)
+          raw.once('close', () => this.sockets.delete(raw))
+          accept(raw, info, deadline)
+        })
+        const port = lan.listeningPort()
+        if (port && port !== kept(this.options.lanPort)) {
+          try {
+            this.options.lanPort?.keep(port)
+          } catch {
+            // Not kept this time: the next start chooses again, and peers learn the port by beacon or the next link.
+          }
+        }
+      } catch {
+        await lan.teardown()
+        this.lan = undefined
+      }
+    }
     for (const configuration of checked) {
       try {
         const transport = await this.registry.configure(configuration)
@@ -397,7 +448,15 @@ export class ProfileTransports {
           ['relay', 'plus-relay'].includes(transport.id) && transport.status().routes.length > 0
       )
   }
+  lanRoutes(node: import('../../../shared/net').NodeId): Route[] {
+    return this.lan?.routes(node) ?? []
+  }
+  /** The automatic LAN listener's port, told to peers on a session. */
+  lanPort(): number | undefined {
+    return this.stopping ? undefined : this.lan?.listeningPort()
+  }
   markAuthenticated(raw: Duplex): void {
+    this.lan?.markAuthenticated(raw)
     this.admission.release(raw)
     for (const transport of this.registry.transports())
       if ('markAuthenticated' in transport && typeof transport.markAuthenticated === 'function')
@@ -416,6 +475,7 @@ export class ProfileTransports {
     this.observed.clear()
     for (const raw of this.sockets) raw.destroy()
     await Promise.allSettled([
+      this.lan?.teardown(),
       this.registry.teardown(),
       this.direct.teardown(),
       ...[...this.dialRelays].map((relay) => relay.teardown())

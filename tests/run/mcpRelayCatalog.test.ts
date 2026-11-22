@@ -64,7 +64,7 @@ function setup(options: { servers?: McpServerConfig[] } = {}) {
       return () => listeners.delete(listener)
     }
   }
-  const catalog = new RelayCatalog({ manager, settings: () => settings, now: () => clock })
+  const catalog = new RelayCatalog({ manager, settings: () => settings, now: () => clock, monotonic: () => clock })
   return {
     catalog, manager, settings, state, listeners,
     advance: (ms: number) => { clock += ms },
@@ -324,4 +324,56 @@ describe('relayTurnContext (completeAppTurn)', () => {
     expect(await relayTurnContext(catalog, settings, {})).toBeUndefined()
     expect(manager.getEnabledToolsByServer).not.toHaveBeenCalled()
   })
+})
+
+it('refreshes only the Send server and keeps other listings and hints', async () => {
+  const t = setup({ servers: [echo, two] })
+  t.manager.getEnabledToolsByServer.mockImplementation(async (_project?: string, _actor?: unknown, options?: { installationId?: string }) => t.state.servers.filter(server => !options?.installationId || server.installationId === options.installationId).map(server => ({ installationId: server.installationId!, serverName: server.name, tools: t.state.tools.get(server.installationId!) ?? [] })))
+  await t.catalog.refresh()
+  const other = t.catalog.servers().find(server => server.installationId === 'inst-two')!
+  t.state.tools.set('inst-echo', [tool(echo, 'say', { readOnlyHint: false })])
+  t.state.tools.set('inst-two', [])
+  await t.catalog.refreshServer('inst-echo')
+  expect(t.catalog.servers().find(server => server.installationId === 'inst-echo')!.tools[0]!.readOnlyHint).toBe(false)
+  expect(t.catalog.servers().find(server => server.installationId === 'inst-two')!.tools).toEqual(other.tools)
+  expect(t.catalog.listing().map(tool => tool.toolName).sort()).toEqual(['add', 'say'])
+  t.catalog.dispose()
+})
+
+it('a targeted refresh does not make other stale server listings fresh', async () => {
+  const t = setup({ servers: [echo, two] })
+  await t.catalog.refresh()
+  t.advance(RELAY_LISTING_TTL_MS + 1)
+  await t.catalog.refreshServer('inst-echo')
+  t.manager.getEnabledToolsByServer.mockClear()
+  await t.catalog.ensure(undefined, 0)
+  await vi.waitFor(() => expect(t.manager.getEnabledToolsByServer).toHaveBeenCalled())
+  await t.catalog.refresh()
+  t.catalog.dispose()
+})
+
+it('timestamps only successful server answers, including targeted refreshes', async () => {
+  const t = setup()
+  await t.catalog.refresh()
+  expect(t.catalog.serverRefreshedAt('inst-echo')).toBe(1000)
+  expect(t.catalog.serverRefreshedWallAt('inst-echo')).toBe(1000)
+  t.advance(10_000)
+  await t.catalog.refreshServer('inst-echo')
+  expect(t.catalog.serverRefreshedAt('inst-echo')).toBe(11_000)
+  expect(t.catalog.serverRefreshedWallAt('inst-echo')).toBe(11_000)
+  t.advance(10_000); t.state.failing.add('inst-echo')
+  await t.catalog.refreshServer('inst-echo')
+  expect(t.catalog.serverRefreshedAt('inst-echo')).toBe(11_000)
+  expect(t.catalog.serverRefreshedWallAt('inst-echo')).toBe(11_000)
+})
+
+it('successful Send evidence uses the monotonic clock, independently of wall time', async () => {
+  const t = setup()
+  const mono = vi.spyOn(performance, 'now').mockReturnValue(1234)
+  const wall = vi.spyOn(Date, 'now').mockReturnValue(9_000_000)
+  const catalog = new RelayCatalog({ manager: t.manager, settings: () => t.settings })
+  try {
+    await catalog.refresh()
+    expect(catalog.serverRefreshedAt('inst-echo')).toBe(1234)
+  } finally { mono.mockRestore(); wall.mockRestore(); catalog.dispose() }
 })

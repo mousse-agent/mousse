@@ -37,7 +37,16 @@ describe('requestTimeoutFor', () => {
     expect(requestTimeoutFor('mcp.authenticate')).toBe(MMS_PROTOCOL_LOGIN_TIMEOUT_MS)
     // Provider sign-ins return an operation id at once (`providers.instances.signIn`).
     expect(requestTimeoutFor('providers.instances.signIn')).toBe(MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
+    // A pairing join waits for a person (the other computer's Yes, or a typed code) past the default.
+    for (const method of ['netEngine.join', 'netEngine.retry'])
+      expect(requestTimeoutFor(method), method).toBeGreaterThan(10 * 60_000)
   })
+})
+
+it('accepts the Git connection event only for the type the daemon sends', () => {
+  const event = { kind: 'connection_event', type: 'git.operation', profileId: 'p', profileEpoch: 1, data: { event: { phase: 'started' } } }
+  expect(parseEnvelope(event)).toMatchObject({ kind: 'connection_event', type: 'git.operation' })
+  expect(parseEnvelope({ ...event, type: 'git.other' })).toBeNull()
 })
 
 describe('Git mutations through the daemon', () => {
@@ -722,14 +731,6 @@ describe('Git mutations through the daemon', () => {
         expect(other.heard).toEqual([])
       }, 60_000)
 
-      it('sends nothing for a request that names no operation', async () => {
-        const scope = await projectScope(); withRemote()
-        const mine = listen(me)
-        write(f.repo, 'quiet.txt'); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'quiet')
-        await me.request('git.push', scope)
-        expect(mine).toEqual([])
-      })
-
       it('cancels a push during its hook for the client that started it only, and stops everything the hook started', async () => {
         const scope = await projectScope(); const origin = withRemote()
         const pidFile = join(f.root, 'pids')
@@ -750,10 +751,12 @@ describe('Git mutations through the daemon', () => {
         expect(git(origin, 'rev-parse', branchOf(f.repo))).toBe(remoteHead)
         await allDead(pidFile)
         expect(other.heard).toEqual([])
-        // The folder is free again.
+        // The folder is free again, and a push without an operation ID sends no events.
         rmSync(join(f.root, 'hooks', 'pre-push'))
+        const eventCount = mine.length
         await me.request('git.push', scope)
         expect(git(origin, 'rev-parse', branchOf(f.repo))).toBe(git(f.repo, 'rev-parse', 'HEAD'))
+        expect(mine).toHaveLength(eventCount)
       }, 60_000)
 
       it('cancels a commit in a thread worktree: nothing is committed or swept, the index stays, and the action is recorded as failed', async () => {
@@ -827,12 +830,6 @@ describe('Git mutations through the daemon', () => {
         await expect(fresh.request('git.pull', { ...scope, operationId: 'daemon-pull-gone' })).resolves.toMatchObject({ result: 'up-to-date' })
         await expect(fresh.request('git.cancelOperation', { operationId: 'daemon-pull-gone' })).resolves.toEqual({ cancelled: false })
       }, 60_000)
-
-      it('accepts the connection event only for the types the daemon sends', () => {
-        const event = { kind: 'connection_event', type: 'git.operation', profileId: 'p', profileEpoch: 1, data: { event: { phase: 'started' } } }
-        expect(parseEnvelope(event)).toMatchObject({ kind: 'connection_event', type: 'git.operation' })
-        expect(parseEnvelope({ ...event, type: 'git.other' })).toBeNull()
-      })
     })
   })
 })

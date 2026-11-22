@@ -8,13 +8,12 @@ import { SERVICE_HELP } from '../help'
 import {
   detectStartupPlatform,
   getMmsStartupStatus,
-  installMmsStartup,
   uninstallMmsStartup
 } from '../serviceLocator'
-import { resolveCliPathForInstall } from '../cliLaunch'
-import { HEADLESS_DISPLAY_SWITCHES } from '../../shared/headlessSwitches'
+import { installServiceEntry } from '../serviceInstall'
 import {
   canonicalizeHome,
+  DAEMON_OWNER_TOKEN_ENV,
   pollUntilRuntimeReady,
   publishOwnRuntimeRecord,
   readStopRequest,
@@ -26,21 +25,35 @@ import {
   SERVICE_STOP_TIMEOUT_MS
 } from '../mmsRuntime'
 import {
+  createOwnerToken,
   formatOwnerBusyMessage,
   MmsOwnerBusyError,
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
+import { capDaemonStartupOutput } from '../startupLog'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
 import { dropForeignAppImageMounts } from '../appImageMounts'
 import { MmsProtocolServer } from '../../mms/protocol'
 import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
+import { formatStartupTiming, startupPhase, startupTimingBegin, startupTimingEnd } from '../../mms/startup/startupTiming'
+import { logInfo } from '../../mms/log/diag'
+import { startDaemonExitWatchdog } from '../daemonExitWatchdog'
+import { resumeGitSpawnWorkers } from '../../mms/git/gitSpawn'
 import {
+  DAEMON_EXIT_DEADLINE_MS,
+  armDaemonExitDeadline,
   stopRunningDaemon,
   shutdownDaemonLifecycle,
   type DaemonLifecycleState
 } from '../daemonShutdown'
+
+/**
+ * How much longer than the main thread's exit deadline the watchdog thread waits, so the ordinary
+ * shutdown always gets the first chance to finish.
+ */
+const EXIT_WATCHDOG_SLACK_MS = 3_000
 
 export async function runService(args: ParsedArgs): Promise<void> {
   const { globals, subcommand } = args
@@ -82,6 +95,18 @@ export interface DaemonForegroundOptions {
   skipSignals?: boolean
   /** Test inject: aborting it stops the daemon like a signal would. */
   stopSignal?: AbortSignal
+  /**
+   * The owner token to take the home with, chosen by whoever started the daemon so it can send a
+   * stop before the lease exists. A new one when unset.
+   */
+  ownerToken?: string
+  /** Test inject: overrides the drain's retry delay and stuck deadline (see `DaemonLifecycleState.drainWait`). */
+  drainWait?: DaemonLifecycleState['drainWait']
+  /**
+   * How the process ends when it outlives `DAEMON_EXIT_DEADLINE_MS` after a stop. The production daemon
+   * exits the process; tests (`skipSignals`) have no deadline unless they pass one.
+   */
+  exitDeadline?: { ms?: number; exit: (code: number) => void }
   onLog?: (msg: string) => void
 }
 
@@ -90,9 +115,12 @@ export interface DaemonForegroundOptions {
  * Every failure after owner/MMS creation uses the same idempotent shutdown path.
  */
 export async function runDaemonForeground(opts: DaemonForegroundOptions): Promise<DaemonLifecycleState> {
+  await resumeGitSpawnWorkers()
   const homeDir = canonicalizeHome(opts.homeDir)
   const startedAt = new Date().toISOString()
   const startedAtMs = performance.now()
+  // Each step until ready is timed and logged at ready (`[info:startup]`), so a slow start shows where its time went.
+  startupTimingBegin()
   const log = opts.onLog ?? ((msg: string) => process.stderr.write(`${msg}\n`))
 
   let resolveLifetime!: () => void
@@ -104,20 +132,37 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     homeDir,
     mms: null,
     protocolServer: null,
-    ownerToken: null,
+    // Known from the start, so a stop request is read before the owner lease exists.
+    ownerToken: opts.ownerToken ?? createOwnerToken(),
     runtimeWritten: false,
     pollStop: null,
-    shuttingDown: false
+    shuttingDown: false,
+    ...(opts.drainWait ? { drainWait: opts.drainWait } : {})
   }
+  const ownerToken = state.ownerToken!
+  const exitDeadline = opts.exitDeadline ?? (opts.skipSignals ? undefined : { exit: (code: number) => process.exit(code) })
+  // The production daemon's deadline also runs off the main thread, where a long synchronous pass cannot hold it up.
+  const watchdog = opts.skipSignals
+    ? null
+    : startDaemonExitWatchdog({ homeDir, ownerToken, ms: (exitDeadline?.ms ?? DAEMON_EXIT_DEADLINE_MS) + EXIT_WATCHDOG_SLACK_MS })
 
   let memoryMonitor: ReturnType<typeof prepareMemoryMonitor> = null
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
     memoryMonitor?.stop()
     memoryMonitor = null
+    watchdog?.arm()
     if (state.shuttingDown) {
       // Already stopping: wait for teardown (and stop anything startup made since).
       await shutdownDaemonLifecycle(state)
       return
+    }
+    // Once asked to stop, the process ends within the deadline, even if a teardown step never answers.
+    if (exitDeadline) {
+      armDaemonExitDeadline(state, {
+        ...(exitDeadline.ms === undefined ? {} : { ms: exitDeadline.ms }),
+        exit: () => exitDeadline.exit(exitCode),
+        onLog: (msg) => log(`\n${msg}`)
+      })
     }
     await shutdownDaemonLifecycle(state, {
       reason,
@@ -145,15 +190,32 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     })
   }
 
+  // A stop request for this daemon starts the shutdown. Read from the start, so a stop
+  // sent while startup still runs is not left waiting for readiness.
+  const checkStopRequest = (): void => {
+    if (state.shuttingDown) return
+    if (!readStopRequest(homeDir, ownerToken)) return
+    void shutdown('stop-request')
+  }
+
   // A stop that arrives while startup is still running: stop what startup has
   // made so far and go no further.
   const stoppedDuringStartup = async (): Promise<boolean> => {
+    checkStopRequest()
     if (!state.shuttingDown) return false
     await shutdownDaemonLifecycle(state)
     return true
   }
 
+  // Teardown clears it.
+  state.pollStop = setInterval(checkStopRequest, SERVICE_POLL_INTERVAL_MS)
+
   try {
+    // A stop can arrive while startup is waiting for the previous daemon's Git helpers to drain.
+    if (opts.stopSignal?.aborted) {
+      await shutdown('stop-signal')
+      return state
+    }
     // Before owner creation, so an Electron quit during startup is held too.
     if (!opts.skipSignals) {
       releaseElectronQuit = await installElectronDaemonQuit(shutdown, error => {
@@ -161,21 +223,27 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
           `Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`
         )
       })
-      if (await stoppedDuringStartup()) return state
     }
+    // A stop sent before this daemon took the home: it never takes it.
+    if (await stoppedDuringStartup()) return state
 
     // Sole production owner construction path (kind: daemon).
-    const opened = await createDaemonOwner(
+    const opened = await startupPhase('create', () => createDaemonOwner(
       {
         homeDir,
         mode: 'text'
       },
-      { start: true }
-    )
-    state.mms = opened.mms
+      { start: false, ownerToken }
+    ))
+    // A stop that came while the owner was being created skips the start. One that comes
+    // during the start waits for it: teardown stops the owner only once it is on `state`.
+    try {
+      if (!(await stoppedDuringStartup())) await startupPhase('start', () => opened.mms.start())
+    } finally {
+      state.mms = opened.mms
+    }
     if (await stoppedDuringStartup()) return state
-    state.ownerToken = opened.mms.getOwnerLease()?.owner.token ?? null
-    if (!state.ownerToken) {
+    if (opened.mms.getOwnerLease()?.owner.token !== ownerToken) {
       throw new Error('Daemon started without owner lease')
     }
 
@@ -183,7 +251,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     const protocolServer = new MmsProtocolServer({
       mms: opened.mms,
       commandRouter: opened.mms.browserCommandRouter,
-      ownerToken: state.ownerToken,
+      ownerToken,
       version: tryReadPackageVersion()
     })
     state.protocolServer = protocolServer
@@ -195,7 +263,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         log(`memory monitor not started: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    const endpoint = await protocolServer.start()
+    const endpoint = await startupPhase('protocolServer', () => protocolServer.start())
     if (await stoppedDuringStartup()) return state
     if (opts.failAfter === 'protocol-start') {
       throw new Error('Injected protocol-start failure')
@@ -214,7 +282,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         throw new RuntimeOwnershipError('Injected runtime-publish failure')
       }
       publishOwnRuntimeRecord(homeDir, {
-        ownerToken: state.ownerToken,
+        ownerToken,
         startedAt,
         version: tryReadPackageVersion(),
         ownerKind: 'daemon'
@@ -229,19 +297,16 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       throw err
     }
 
+    const startupMs = performance.now() - startedAtMs
     log(
-      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint} startup=${Math.round(performance.now() - startedAtMs)}ms`
+      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint} startup=${Math.round(startupMs)}ms`
     )
+    const timing = startupTimingEnd()
+    if (timing) logInfo('startup', formatStartupTiming(timing, startupMs))
 
     memoryMonitor?.start()
-
-    state.pollStop = setInterval(() => {
-      if (state.shuttingDown) return
-      const req = readStopRequest(homeDir)
-      if (!req) return
-      if (req.token !== state.ownerToken) return
-      void shutdown('stop-request')
-    }, SERVICE_POLL_INTERVAL_MS)
+    // Work that must not delay readiness starts now, in the background.
+    opened.mms.afterReady()
 
     await lifetime
     return state
@@ -261,15 +326,23 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     await shutdown('startup-failed', 1)
     return state
   } finally {
+    startupTimingEnd()
     releaseElectronQuit?.()
   }
 }
 
 async function runForeground(homeFlag?: string): Promise<void> {
+  // Started by the app, whose startup log takes stdout and stderr for the daemon's whole life: keep it bounded.
+  capDaemonStartupOutput()
   // Before anything starts a program: the app that started the service may quit and take its mount with it.
   dropForeignAppImageMounts()
+  // The window client that started this daemon chose its owner token (`DAEMON_OWNER_TOKEN_ENV`).
+  // Dropped here so nothing the daemon starts inherits it.
+  const chosen = process.env[DAEMON_OWNER_TOKEN_ENV]
+  delete process.env[DAEMON_OWNER_TOKEN_ENV]
   await runDaemonForeground({
-    homeDir: resolveMousseHome(homeFlag)
+    homeDir: resolveMousseHome(homeFlag),
+    ...(chosen && /^[0-9a-f]{64}$/.test(chosen) ? { ownerToken: chosen } : {})
   })
 }
 
@@ -353,7 +426,7 @@ async function stopDaemon(
       exitWithError('MMS is not running.', mode)
       return
     case 'unreadable':
-      exitWithError('MMS runtime is present but unreadable; cannot send owner-checked stop request.', mode)
+      exitWithError('MMS home is held but its owner cannot be read; cannot send owner-checked stop request.', mode)
       return
     case 'stopped':
       writeOutput(mode, { stopped: true, pid: result.pid, running: false })
@@ -427,18 +500,10 @@ async function installService(
 ): Promise<void> {
   const homeDir = canonicalizeHome(resolveMousseHome(homeFlag))
 
-  await installMmsStartup({
-    cliPath: resolveCliPathForInstall(process.argv[1] ?? fileURLToPath(import.meta.url)),
+  await installServiceEntry({
     homeDir,
-    // The service shows no windows, so Chromium's sandbox protects nothing it uses; an unpacked
-    // headless build has no setuid helper and would not start without the opt-out.
-    ...(headless
-      ? {
-          environment: { ELECTRON_DISABLE_SANDBOX: '1' },
-          // No display either: the daemon would stop at "Missing X server or $DISPLAY".
-          execArguments: HEADLESS_DISPLAY_SWITCHES
-        }
-      : {})
+    headless,
+    scriptPath: process.argv[1] ?? fileURLToPath(import.meta.url)
   })
   const status = await getMmsStartupStatus()
   writeOutput(mode, { ...status, installed: true })
