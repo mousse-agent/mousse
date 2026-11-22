@@ -445,10 +445,10 @@ describe('the profiler tools', () => {
 
   it('keeps missing and mixed child measurements explicit in the child tool', async () => {
     const { service, monitor } = profilerFixture(home())
-    vi.spyOn(monitor, 'readChildrenNow').mockResolvedValue([
+    vi.spyOn(monitor, 'readChildTreeNow').mockResolvedValue({ discovery: 'complete', children: [
       { kind: 'codex', mb: 80 }, { kind: 'codex', mb: null },
       { kind: 'mcp', mb: 40, footprint: true }, { kind: 'mcp', mb: 20 }
-    ])
+    ].map((child) => ({ ...child, relationship: 'tracked' as const })) })
     try {
       const { value } = await call(toolsFor(() => ON, service), 'profiler_children')
       expect(value.totalMb).toBeNull()
@@ -628,7 +628,7 @@ describe('the profiler tools', () => {
     expect(gpu.value).toMatchObject({ gpu: { privateMb: 334, workingSetMb: 380 }, hints: { surfaceMb: 10.8, acrylic: true, webglContexts: 1, views: { applet: 1 } }, viewSizes: { applet: [{ w: 640, h: 480 }] } })
     expectNoPrivateData(gpu.outcome.text, dir)
     const children = await call(registry, 'profiler_children')
-    expect(children.value).toMatchObject({ processes: [{ kind: 'claude', mb: 210 }, { kind: 'other', mb: 12 }], totalMb: 222 })
+    expect(children.value).toMatchObject({ processes: [{ kind: 'claude', mb: 210 }, { kind: 'other', mb: 12 }], totalMb: null, measuredTotalMb: 222, discovery: 'unavailable' })
     expectNoPrivateData(children.outcome.text, dir)
   })
 
@@ -662,6 +662,20 @@ describe('the profiler tools', () => {
     expect(value.points.at(-1).atSeconds).toBeLessThanOrEqual(600)
     expect(value.points[0]).toMatchObject({ serviceMb: 150, loadedThreads: 1 })
     expectNoPrivateData(outcome.text, dir)
+  })
+
+  it('shows cached provider age in watch points without counting it as growth', async () => {
+    vi.useFakeTimers({ now: T0 })
+    const { service, monitor, now } = profilerFixture(home())
+    now.t = T0
+    const pending = call(toolsFor(() => ON, service), 'profiler_watch', { intervalSeconds: 30, minutes: 0.5 })
+    await vi.advanceTimersByTimeAsync(0)
+    now.t += 30_000
+    await vi.advanceTimersByTimeAsync(30_000)
+    const { value } = await pending
+    expect(value.points.map((point: { childrenSampledSecondsAgo: number }) => point.childrenSampledSecondsAgo)).toEqual([0, 30])
+    expect(value.change).not.toHaveProperty('childrenSampledSecondsAgo')
+    monitor.stop()
   })
 
   it('profiler_watch stops when the call is stopped', async () => {

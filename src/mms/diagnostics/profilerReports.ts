@@ -11,7 +11,6 @@ import {
   MEMORY_TOTAL_SCOPE,
   serviceMb,
   type AppHints,
-  type ChildMemory,
   type MemoryDetail,
   type MemorySample,
   type MemoryStatus,
@@ -21,6 +20,7 @@ import {
 import type { AppViewInfo, WindowCounters } from '../../shared/diagnostics/profiler'
 import type { AppWindowDetail } from './MemoryMonitor'
 import type { ThreadMemory } from './profilerService'
+import type { ChildTreeReading } from './processDescendants'
 
 const UNITS = `${MEMORY_TOTAL_SCOPE} MB fields use 1024^2 bytes. privateMb is a legacy field: desktop footprint on macOS, private bytes on Windows, platform-specific private/anonymous counters where available on Linux; never an RSS fallback. app.totalMb, appMb, serviceMb, gpuMb, largestWindowMb and trends retain the legacy alert measure (private/footprint with RSS fallback; app includes children and excludes service); do not use them as resident or private totals. Use memoryTotals or the explicit WorkingSetMb fields. CPU is percent of one core since the previous sample.`
 
@@ -200,23 +200,46 @@ export function gpuHintsReport(sample: MemorySample, detail: AppWindowDetail | n
   }
 }
 
-/** `profiler_children`. */
-export function childrenReport(children: readonly ChildMemory[]) {
+/** The child tool discovers process trees independently of periodic samples. */
+export function childTreeReport({ children, discovery }: ChildTreeReading) {
   const byKind = new Map<string, { count: number; mb: number; unavailable: number; metrics: Set<string> }>()
-  for (const child of children) {
+  const metrics = new Set<string>()
+  let measured = 0
+  let unavailable = 0
+  const processes = children.map((child) => {
     const kind = fixedName(child.kind)
-    const entry = byKind.get(kind) ?? { count: 0, mb: 0, unavailable: 0, metrics: new Set<string>() }
-    entry.count += 1
-    entry.mb += child.mb ?? 0
-    if (child.mb === null) entry.unavailable += 1
-    entry.metrics.add(child.footprint ? 'footprint' : 'working-set')
-    byKind.set(kind, entry)
-  }
+    const metric = child.footprint ? 'footprint' : 'working-set'
+    const group = byKind.get(kind) ?? { count: 0, mb: 0, unavailable: 0, metrics: new Set<string>() }
+    group.count += 1
+    if (child.mb === null) {
+      group.unavailable += 1
+      unavailable += 1
+    } else {
+      group.mb += child.mb
+      group.metrics.add(metric)
+      measured += child.mb
+      metrics.add(metric)
+    }
+    byKind.set(kind, group)
+    return { kind, mb: child.mb, metric, relationship: child.relationship }
+  })
+  const complete = discovery === 'complete'
+  const measuredTotalMb = metrics.size === 1 || (complete && children.length === 0) ? r1(measured) : null
   return {
-    processes: children.map((child) => ({ kind: fixedName(child.kind), mb: child.mb, metric: child.footprint ? 'footprint' : 'working-set' })),
-    byKind: [...byKind].map(([kind, entry]) => ({ kind, count: entry.count, mb: entry.unavailable || entry.metrics.size > 1 ? null : r1(entry.mb), measuredMb: entry.metrics.size > 1 ? null : r1(entry.mb), unavailable: entry.unavailable, metric: entry.metrics.size > 1 ? 'mixed' : [...entry.metrics][0] })).sort((a, b) => (b.measuredMb ?? 0) - (a.measuredMb ?? 0)),
-    totalMb: children.some((child) => child.mb === null) || new Set(children.map((child) => Boolean(child.footprint))).size > 1 ? null : r1(children.reduce((sum, child) => sum + child.mb!, 0)),
-    note: 'metric names the measurement: footprint or working-set (RSS). Null means unavailable or incompatible measurements; measuredMb is a subtotal. Only working sets enter resident workload totals. Shared pages can count more than once; untracked descendants are excluded.'
+    processes,
+    byKind: [...byKind].map(([kind, group]) => {
+      const measuredMb = group.metrics.size === 1 ? r1(group.mb) : null
+      return {
+        kind, count: group.count,
+        mb: complete && group.unavailable === 0 ? measuredMb : null,
+        measuredMb, unavailable: group.unavailable,
+        metric: group.metrics.size > 1 ? 'mixed' : [...group.metrics][0] ?? null
+      }
+    }).sort((a, b) => (b.measuredMb ?? 0) - (a.measuredMb ?? 0)),
+    totalMb: complete && unavailable === 0 ? measuredTotalMb : null,
+    measuredTotalMb,
+    discovery,
+    note: 'Tracked providers and tools plus their current descendants, each counted once. Descendants inherit the nearest tracked kind. Discovery is on demand and best effort. Reparented processes cannot be linked back to former parents. Measured subtotals use compatible readings. Working sets can count shared pages more than once. Descendants are only included in this report.'
   }
 }
 

@@ -39,6 +39,7 @@ import type { AppViewInfo, WindowCounters } from '../../shared/diagnostics/profi
 import { MemoryLog } from './memoryLog'
 import { readChildMemory, readHeapDetail, sampleOwnProcess } from './processMemory'
 import { liveChildProcesses } from './liveCounts'
+import { readChildTreeMemory, type ChildTreeReading } from './processDescendants'
 
 /** Child memory and the replay buffer's bytes are read on every Nth periodic sample. */
 const DETAIL_EVERY = 5
@@ -110,6 +111,7 @@ export class MemoryMonitor {
   private lastCpu: { usage: NodeJS.CpuUsage; at: number } | null = null
   private timer: NodeJS.Timeout | null = null
   private ticks = 0
+  private childTreeReading: Promise<ChildTreeReading> | null = null
   private running: Promise<void> | null = null
   private forcedTick: Promise<void> | null = null
   private lastReplayMb: number | undefined
@@ -245,6 +247,16 @@ export class MemoryMonitor {
   /** The children's memory, read now (one OS listing). */
   readChildrenNow(): Promise<ChildMemory[]> {
     return (this.options.readChildren ?? (() => readChildMemory(liveChildProcesses())))()
+  }
+
+  /** On-demand ancestry for profiler_children; simultaneous calls share one OS listing. */
+  readChildTreeNow(): Promise<ChildTreeReading> {
+    if (this.childTreeReading) return this.childTreeReading
+    this.childTreeReading = (this.options.readChildren
+      ? this.options.readChildren().then((children): ChildTreeReading => ({ children: children.map((child) => ({ ...child, relationship: 'tracked' })), discovery: 'unavailable' }))
+      : readChildTreeMemory(liveChildProcesses()))
+      .finally(() => { this.childTreeReading = null })
+    return this.childTreeReading
   }
 
   /** CPU use since the previous reading, percent of one core; undefined the first time. */

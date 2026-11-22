@@ -116,6 +116,24 @@ describe('provider rows between detailed readings', () => {
     f.monitor.stop()
   })
 
+  it('keeps the newer child reading when a slower read finishes after it', async () => {
+    trackChildProcess(process.pid, 'codex')
+    const f = fixture()
+    let finish!: (children: ChildMemory[]) => void
+    f.read.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const older = f.monitor.measure({ children: true })
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    f.now.t += 1_000
+    f.read.mockResolvedValueOnce([{ kind: 'codex', mb: 66 }])
+    await f.monitor.measure({ children: true })
+    finish([{ kind: 'codex', mb: 11 }])
+    await older
+    const next = await f.monitor.measure()
+    expect(next.children?.[0].mb).toBe(66)
+    expect(f.read).toHaveBeenCalledTimes(2)
+    f.monitor.stop()
+  })
+
   it('does not publish a provider that exited while its memory was being read', async () => {
     trackChildProcess(process.pid, 'codex')
     const f = fixture()
