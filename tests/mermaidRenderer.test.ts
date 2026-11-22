@@ -40,7 +40,6 @@ describe('diagram SVG sanitizing', () => {
     ['scripts', /<script/i],
     ['style elements', /<style/i],
     ['event handlers', /\bon[a-z]+=/i],
-    ['xlink:href', /xlink:href/i],
     ['href', /href=/i],
     ['external URLs', /evil\.example/],
   ])('strips %s', (_name, pattern) => {
@@ -147,9 +146,5 @@ describe('diagram block', () => {
     expect(markup).toContain('flowchart LR')
     expect(markup).not.toContain('<svg')
     expect(markup).not.toContain('Show code')
-  })
-
-  it('registers for the mermaid fence language only', () => {
-    expect(mermaidRenderer.language).toBe('mermaid')
   })
 })

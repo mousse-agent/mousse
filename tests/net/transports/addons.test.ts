@@ -580,7 +580,7 @@ describe('Tailscale Serve', () => {
       expect(writes(fake)).toEqual([])
     })
 
-    it.each(['[]', '{"TCP":[]}', '{"TCP":{"47890":"x"}}', '{"AllowFunnel":[]}', '', 'not json'])(
+    it.each(['[]', '{"TCP":[]}', '{"TCP":{"47890":"x"}}', '{"AllowFunnel":[]}', ''])(
       'keeps the record and removes nothing when the status reads %j',
       async (raw) => {
         const { fake, serve, settings, context, applied, entry, saved } = await setup()

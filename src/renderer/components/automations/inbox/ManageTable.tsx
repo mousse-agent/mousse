@@ -16,7 +16,7 @@ import { closePane, removeTuning, setInboxFilter, toggleTuning } from './inboxSt
 
 /** The When column: the schedule in words, or the trigger. */
 export function whenColumn(item: AutomationItem, now: Date): string {
-  return whenWords(item) ?? (item.schedule ? describeSchedule(item.schedule, now) : '')
+  return whenWords(item, now) ?? (item.schedule ? describeSchedule(item.schedule, now) : '')
 }
 
 /** One line of what an automation is: when it runs, who runs it when that is a bot, and where (a filtered list's head). */
@@ -109,7 +109,7 @@ export function ManageTable({ automations, inbox, expanded, toggling = {}, onTog
                       <button type="button" className="inbox-table-name" title={`${item.name}'s runs`} onClick={() => setInboxFilter({ automationId: item.id })}>{item.name}</button>
                       {item.where ? <span className="inbox-table-project">{item.where.name}</span> : null}
                     </td>
-                    <td><span className="inbox-cell" title={when}>{when}</span></td>
+                    <td><span className={`inbox-cell${item.trigger === 'time' && item.whenText ? ' is-page-watch' : ''}`} title={when}>{when}</span></td>
                     <td><span className="inbox-cell" title={item.who.name}>{item.who.kind === 'bot' ? item.who.name : 'Default'}</span></td>
                     <td data-testid="inbox-manage-next">
                       {pending !== undefined ? <span className="inbox-cell is-pending" role="status">{pending ? 'Resuming…' : 'Pausing…'}</span>

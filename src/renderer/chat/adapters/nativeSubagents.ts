@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai'
-import { BACKGROUND_SUMMARY } from '../../../shared/agentActivity'
+import { BACKGROUND_SUMMARY, isAcpSubagentTool, type AgentActivityItem } from '../../../shared/agentActivity'
 import type { BackgroundTaskNoticeItem, SubagentState } from '../../../shared/subagents'
 import type { ChatMessage } from '../../../shared/types'
 import type { SubagentCardModel } from './subagentCards'
@@ -16,10 +16,14 @@ import type { SubagentCardModel } from './subagentCards'
 export interface NativeSubagentInfo {
   /** The kind of agent the runtime ran ("Explore", "general-purpose"), when it said. */
   agentType: string | null
+  /** The model the call named for it ("sonnet"), when it named one. */
+  model: string | null
   /** The runtime's task id, which a continuation's notice names. */
   taskId: string | null
   /** What the agent reported when it ended, as Markdown with its line breaks, clipped by the daemon. */
   result: string | null
+  /** The provider reported a launch. Its child session is outside the transcript. */
+  acp?: { prompt: string | null; launched: boolean }
 }
 
 type Part = { type?: unknown; toolCallId?: unknown; state?: unknown; input?: unknown; output?: unknown }
@@ -82,9 +86,11 @@ export function nativeSubagentModel(
   const input = record(part.input) ?? {}
   const output = record(part.output)
   const state = nativeSubagentState(part, backgroundLive)
+  const launched = input.tool_name === 'invoke_subagent' && state === 'done'
   const agentType = text(input.subagent_type)
   const named = text(input.description) !== null || agentType !== null
-  const started = text(input.task_id) !== null || hasCalls || part.state === 'output-available' || part.state === 'output-error'
+  const acp = isAcpSubagentTool(input.tool_name)
+  const started = acp || text(input.task_id) !== null || hasCalls || part.state === 'output-available' || part.state === 'output-error'
   const spawning = live && state === 'working' && !(named && started)
   const startedAt = timeOf(output?.startedAt) ?? timeOf(createdAt)
   const duration = typeof output?.totalDurationMs === 'number' && Number.isFinite(output.totalDurationMs) ? output.totalDurationMs : null
@@ -99,7 +105,7 @@ export function nativeSubagentModel(
     childThreadId: null,
     delegationId: null,
     title: text(input.description) ?? agentType ?? 'Subagent',
-    state,
+    state: launched ? 'idle' : state,
     provider: null,
     model: null,
     continued: false,
@@ -110,7 +116,13 @@ export function nativeSubagentModel(
     completedAt: state === 'working' ? null : ended,
     ...(state === 'failed' && reported ? { error: reported } : {}),
     ...(spawning ? { spawning: true } : {}),
-    native: { agentType, taskId: text(input.task_id), result: state === 'done' ? reported : null }
+    native: {
+      agentType,
+      model: text(input.model),
+      taskId: text(input.task_id),
+      result: state === 'done' ? reported : null,
+      ...(acp ? { acp: { prompt: report(input.prompt), launched } } : {})
+    }
   }
 }
 
@@ -161,6 +173,17 @@ export function backgroundNoticeName(item: BackgroundTaskNoticeItem): string {
   return item.description?.replace(/\s+/g, ' ').trim() || 'Background task'
 }
 
+export function nativeSubagentInput(activity: Extract<AgentActivityItem, { kind: 'subagent' }>): Record<string, unknown> {
+  return {
+    subagent_type: activity.agentType,
+    model: activity.model,
+    description: activity.description,
+    run_in_background: activity.background || undefined,
+    task_id: activity.nativeId,
+    ...(isAcpSubagentTool(activity.toolName) ? { tool_name: activity.toolName, prompt: activity.prompt } : {})
+  }
+}
+
 type SavedMessage = Pick<ChatMessage, 'id' | 'role' | 'hidden' | 'timestamp' | 'activity'>
 
 /**
@@ -179,12 +202,7 @@ export function nativeSubagentsOfMessages(messages: readonly SavedMessage[], bac
     const part = {
       toolCallId: message.id,
       state: activity.status === 'failed' ? 'output-error' : activity.status === 'running' ? 'input-available' : 'output-available',
-      input: {
-        subagent_type: activity.agentType,
-        description: activity.description,
-        run_in_background: activity.background === true,
-        task_id: activity.nativeId
-      },
+      input: nativeSubagentInput(activity),
       output:
         activity.status === 'running'
           ? undefined

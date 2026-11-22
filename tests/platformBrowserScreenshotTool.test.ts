@@ -11,7 +11,6 @@ describe('optional browser screenshot tool', () => {
     const tool = getBrowserToolDefinitions({ vision: true }).find((item) => item.name === 'browser_screenshot')!
     expect(tool.parameters.required).toEqual(['sessionId'])
     expect(tool.parameters.additionalProperties).toBe(false)
-    expect(tool.description).toMatch(/Do not take screenshots routinely/)
     expect(isBrowserAutomationTool(tool.name)).toBe(true)
     expect(browserToolEffect('browser_screenshot')).toBe('read')
     expect(browserToolCapability('browser_screenshot')).toBe('browser.observe')

@@ -11,7 +11,9 @@ import { botTools, USE_MODEL_REFUSED, type BotAppToolDeps } from '../../src/mms/
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotLane, BotModelSlots, BotSchedule } from '../../src/shared/bots/personal/definition'
+import { MAX_BOT_SCHEDULES } from '../../src/shared/bots/personal/definition'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
+import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { botScheduleLabel } from '../../src/shared/scheduleLabel'
 import { fakeAppToolHost } from './appToolsFixture'
@@ -40,7 +42,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     // The owner's message the chat turn holds.
     ownerWords: () => options.owner ?? 'Please use Opus 4.6 from now on',
     rows: () => options.rows ?? ROWS_ON_SUB,
-    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
+    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined),
     schedules: {
       add: (_botId, s, from) => {
         const entry = { scheduleId: `s${schedules.length + 1}`, ...s, label: botScheduleLabel(s.when), ...(options.cards && from ? { from } : {}) }
@@ -69,9 +71,17 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
         return { watcherId: `rem_w${watched.length}`, until: '2026-11-08T10:00:00.000Z' }
       },
       list: () => watched.map((entry, index) => ({ id: `rem_w${index + 1}`, title: entry.input.title ?? 'x', command: entry.input.command, startedAt: '2026-11-08T09:00:00.000Z', until: '2026-11-08T10:00:00.000Z' })),
-      stop: (_botId, watcherId) => watcherId === 'rem_w1'
+      stop: (_botId, watcherId) => watcherId === 'rem_w1',
+      // An ended command's whole output: 300 lines, of which 1,000 fell out before them.
+      output: (_botId, watcherId) => watcherId === 'rem_w1'
+        ? { id: 'rem_w1', title: 'Nightly', command: 'gh run watch 123', startedAt: '2026-11-08T09:00:00.000Z', end: { kind: 'exit' as const, code: 1 }, endedAt: '2026-11-08T09:30:00.000Z', output: Array.from({ length: 300 }, (_, i) => `\u001b[32mjob ${1001 + i}\u001b[0m`).join('\n'), droppedLines: 1_000 }
+        : undefined
     },
     wakes: {
+      wait: async (_botId, from, input) => {
+        wakes.push({ from, input })
+        return { wakeId: 'wait1', dueAt: input.dueAt ?? '2026-11-08T09:00:00.000Z', label: '' }
+      },
       add: async (_botId, from, input) => {
         wakes.push({ from, input })
         return { wakeId: `w${wakes.length}`, dueAt: input.dueAt ?? '2026-11-08T09:00:00.000Z', label: input.event?.kind === 'pr' ? `when ${input.event.repo}#${input.event.number} merges` : input.event ? 'when "Fix login" finishes' : '' }
@@ -93,7 +103,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
   const ctx = (threadId = 'home', activationId = 'a1', appTools: readonly string[] = []): ToolCallContext => ({
     caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
-    turn: { threadId, bot: { activationId, appTools: new Set(appTools) } as unknown as BotAuthority } as ToolCallContext['turn'],
+    turn: { threadId, bot: { role: 'activation', activationId, appTools: new Set(appTools) } as unknown as BotAuthority } as ToolCallContext['turn'],
     toolCallId: 'call-1',
     signal: new AbortController().signal,
     transport: 'mcp'
@@ -115,6 +125,13 @@ describe('schedule tools', () => {
     expect(bots.activity.drain('d1')).toEqual([{ icon: 'schedule', text: 'every weekday · 09:00' }])
   })
 
+  it('passes a fixed line and its end through the schedule tool', async () => {
+    const bots = fakeBots()
+    const result = await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, say: 'Take your pills', until: '2030-11-21' })
+    expect(result.isError).toBeFalsy()
+    expect(bots.schedules[0]).toMatchObject({ say: 'Take your pills', until: '2030-11-21' })
+  })
+
   it('bot_schedule_add from a chat turn hands the turn to the host, which shows the automation as a card; no chip repeats it', async () => {
     const bots = fakeBots('chat', { cards: true })
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'bot_schedule_add', input: { when: { kind: 'interval', minutes: 30 }, prompt: 'Check the build' } })
@@ -123,12 +140,12 @@ describe('schedule tools', () => {
     expect(bots.activity.drain('d1')).toEqual([])
   })
 
-  it('refuses a ninth schedule, an interval under a minute, and a bad time', async () => {
+  it('refuses a schedule past the ceiling, an interval under a minute, and a bad time', async () => {
     const bots = fakeBots()
-    for (let n = 0; n < 8; n += 1) expect((await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 + n }, prompt: `task ${n}` })).isError).toBeFalsy()
-    const ninth = await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'one more' })
-    expect(ninth).toMatchObject({ isError: true, text: expect.stringContaining('8 schedules') })
-    expect(bots.schedules).toHaveLength(8)
+    for (let n = 0; n < MAX_BOT_SCHEDULES; n += 1) expect((await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 + n }, prompt: `task ${n}` })).isError).toBeFalsy()
+    const past = await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'one more' })
+    expect(past).toMatchObject({ isError: true, text: expect.stringContaining(`${MAX_BOT_SCHEDULES} schedules`) })
+    expect(bots.schedules).toHaveLength(MAX_BOT_SCHEDULES)
     const fresh = fakeBots()
     expect(await fresh.call('bot_schedule_add', { when: { kind: 'interval', minutes: 0 }, prompt: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining('at least 1') })
     expect(await fresh.call('bot_schedule_add', { when: { kind: 'cron', expr: '0 9 * *' }, prompt: 'x' })).toMatchObject({ isError: true })
@@ -139,7 +156,7 @@ describe('schedule tools', () => {
   it('lists and removes the bot\'s schedules', async () => {
     const bots = fakeBots()
     await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' })
-    expect((await bots.call('bot_schedule_list', {})).value).toEqual([{ scheduleId: 's1', label: 'every 30 minutes', nextAt: '2026-11-09T09:00:00.000Z' }])
+    expect((await bots.call('bot_schedule_list', {})).value).toMatchObject({ schedules: [{ scheduleId: 's1', label: 'every 30 minutes', nextAt: '2026-11-09T09:00:00.000Z' }] })
     expect((await bots.call('bot_schedule_remove', { scheduleId: 's1' })).value).toEqual({ removed: true })
     expect(await bots.call('bot_schedule_remove', { scheduleId: 's1' })).toMatchObject({ isError: true })
   })
@@ -147,7 +164,7 @@ describe('schedule tools', () => {
   it('an unattended run can look at its schedules but not change them', async () => {
     const bots = fakeBots('run')
     expect(await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining('owner') })
-    expect((await bots.call('bot_schedule_list', {})).value).toEqual([])
+    expect((await bots.call('bot_schedule_list', {})).value).toEqual({ schedules: [] })
   })
 
   it('acts only for the bot the engine names: another thread or activation is refused', async () => {
@@ -343,7 +360,7 @@ describe('ask_owner (#1123)', () => {
   function asking(lane: BotLane) {
     const bots = fakeBots(lane)
     const asked: unknown[] = []
-    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
+    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
     const tool = botTools(() => deps).find((entry) => entry.name === 'ask_owner')!
     return { asked, call: (args: Record<string, unknown>) => tool.handler(args, bots.ctx()) }
   }
@@ -378,11 +395,11 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
-    // With `botMemory`, WP6's memory tools follow them in the same family.
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
+    // With `botMemory`, WP6's memory tools and the open items' tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)
-    for (const name of withMemory.families.bots.slice(families.bots.length)) expect(BOT_MEMORY_TOOLS as readonly string[]).toContain(name)
+    for (const name of withMemory.families.bots.slice(families.bots.length)) expect([...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS] as readonly string[]).toContain(name)
   })
 
   it('without the engine wired, the bot\'s own tools refuse', async () => {
@@ -392,6 +409,19 @@ describe('registration', () => {
 })
 
 describe('wake', () => {
+  it.each(['checks', 'review'] as const)('passes the PR %s condition to the engine', async (on) => {
+    const bots = fakeBots()
+    await bots.call('wake', { brief: 'Report.', pr: 'acme/app#12', on })
+    expect(bots.wakes[0]?.input.event).toMatchObject({ kind: 'pr', on })
+  })
+  it('rejects an invalid condition or one without a pull request', async () => {
+    const bots = fakeBots()
+    for (const args of [{ pr: 'acme/app#12', on: 'other' }, { inMinutes: 2, on: 'review' }]) {
+      expect(await bots.call('wake', { brief: 'Report.', ...args })).toMatchObject({ isError: true })
+    }
+    expect(bots.wakes).toHaveLength(0)
+  })
+
   it('sets a wake at a time, on a pull request, or on a thread (with "use your threads"), from the chat turn, with a chip', async () => {
     const bots = fakeBots()
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'wake', input: {} })
@@ -436,6 +466,18 @@ describe('background commands', () => {
     expect(await bots.call('watch_stop', { watcherId: 'rem_w9' })).toMatchObject({ isError: true, text: expect.stringContaining('watch_list') })
   })
 
+  it('watch_list with a command\'s id reads its output a page at a time, from the end, without colors', async () => {
+    const bots = fakeBots()
+    const last = (await bots.call('watch_list', { watcherId: 'rem_w1', lines: 50 })).value as Record<string, unknown>
+    expect(last).toMatchObject({ watcherId: 'rem_w1', ended: { kind: 'exit', code: 1 }, fromLine: 1251, toLine: 1300, lastLine: 1300, more: expect.stringContaining('before 1251') })
+    expect(String(last.output).split('\n')).toHaveLength(50)
+    expect(String(last.output).split('\n')[0]).toBe('job 1251')
+    const back = (await bots.call('watch_list', { watcherId: 'rem_w1', lines: 500, before: 1251 })).value as Record<string, unknown>
+    expect(back).toMatchObject({ fromLine: 1001, toLine: 1250 })
+    expect(back.more).toBeUndefined()
+    expect(await bots.call('watch_list', { watcherId: 'rem_w9' })).toMatchObject({ isError: true, text: expect.stringContaining('no background command with that id') })
+  })
+
   it.each([
     ['no command', { brief: 'x' }, 'command'],
     ['no brief', { command: 'make' }, 'brief'],
@@ -452,4 +494,47 @@ describe('background commands', () => {
     expect(await bots.call('watch_stop', { watcherId: 'rem_w1' })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
     expect(bots.watched).toEqual([])
   })
+})
+
+describe('work_wait', () => {
+  it('uses the same PR and time forms, with why as the continuation brief', async () => {
+    const bots = fakeBots('run')
+    expect((await bots.call('work_wait', { why: 'Read the checks', pr: 'acme/app#12', on: 'checks' }, { ...bots.ctx(), turn: { ...bots.ctx().turn, bot: { ...bots.ctx().turn.bot!, role: 'activation' } } })).isError).toBeFalsy()
+    expect(bots.wakes[0]?.input).toMatchObject({ brief: 'Read the checks', event: { kind: 'pr', repo: 'acme/app', number: 12, on: 'checks' } })
+    expect((await bots.call('work_wait', { why: 'Later', inMinutes: 30 }, { ...bots.ctx(), turn: { ...bots.ctx().turn, bot: { ...bots.ctx().turn.bot!, role: 'activation' } } })).isError).toBeFalsy()
+    expect(bots.wakes[1]?.input.dueAt).toBeDefined()
+  })
+  it('tells chat to use wake', async () => {
+    expect(await fakeBots().call('work_wait', { why: 'Later', inMinutes: 30 })).toMatchObject({ isError: true, text: expect.stringContaining('Use wake') })
+  })
+})
+
+it('page-check schedules reject say and invalid URLs before saving, and keep the page setting', async () => {
+  const bots = fakeBots()
+  for (const onlyIfChanged of [{url:'file:///etc/passwd'},{url:'https://u:p@example.com'},{url:'https://example.com',contains:'x'.repeat(201)}]) {
+    expect((await bots.call('bot_schedule_add',{when:{kind:'interval',minutes:15},prompt:'Watch tickets',onlyIfChanged})).isError).toBe(true)
+  }
+  expect((await bots.call('bot_schedule_add',{when:{kind:'interval',minutes:15},say:'Hi',onlyIfChanged:{url:'https://example.com'}})).isError).toBe(true)
+  const result=await bots.call('bot_schedule_add',{when:{kind:'interval',minutes:15},prompt:'Watch tickets',onlyIfChanged:{url:'https://example.com',contains:'tickets'}})
+  expect(result.isError).toBeFalsy()
+  expect(bots.schedules[0]).toMatchObject({onlyIfChanged:{url:'https://example.com',contains:'tickets'}})
+})
+
+it('accepts the exact flattened let-alone request Codex sent in the live trial', async () => {
+  const tools = botTools()
+  const tool = tools.find(t => t.name === 'escalate')!
+  let permission: unknown
+  const ctx = fakeBots().ctx()
+  ctx.turn.bot!.escalate = request => { permission = request.permission; return 'Asked' }
+  const result = await tool.handler({ ask: 'let_alone', scheduleId: 's-67020d90', serverId: 'trial-drive.9be4eb770a', tool: 'upload_file', reason: 'Let it do that without asking.' }, ctx)
+  expect(result.text).toBe('Asked')
+  expect(permission).toEqual({ ask: 'let_alone', scheduleId: 's-67020d90', serverId: 'trial-drive.9be4eb770a', tool: 'upload_file' })
+})
+it.each([true, false])('the escalate definition describes the wrapped ask only with asks first on: %s', on => {
+  const tool = botTools().find(t => t.name === 'escalate')!
+  const ctx = fakeBots().ctx()
+  if (on) ctx.turn.bot!.holdMcp = () => ({ text: 'Held' })
+  const definition = tool.definition!(ctx.turn)
+  expect(definition.description.includes("permission: {ask:'let_alone', scheduleId, serverId, tool}")).toBe(on)
+  expect(JSON.stringify(definition.parameters).includes('let_alone')).toBe(on)
 })

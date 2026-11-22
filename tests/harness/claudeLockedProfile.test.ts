@@ -161,7 +161,7 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     query,
-    // A live process would be kept warm: a bot turn never takes one.
+    // Live processes are on: a bot turn without the chat's key (`BotAuthority.warm`) still never takes one.
     live: true,
     runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
     launchConfig: () => ({ binaryPath: binary, env: { USER_VARIABLE: 'from-settings' } })
@@ -170,7 +170,100 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
 }
 
 describe('a bot on the owner\'s own Claude Code entry', () => {
-  it('runs one query in Claude Code\'s asking mode with the owner\'s environment, none of their settings files, and no process of its own to supervise', async () => {
+  it.each(['owner', 'locked'] as const)('%s entry starts a bot without unrelated environment secrets', async (entry) => {
+    const secrets = ['GITHUB_TOKEN', 'OPENAI_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'MY_SECRET']
+    for (const name of secrets) vi.stubEnv(name, `planted-${name}`)
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'signin-token')
+    const root = temp('claude-clean-root-')
+    const scratch = temp('claude-clean-scratch-')
+    const { service, captured } = entry === 'owner' ? ownerService(async () => {}) : lockedService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ...(entry === 'owner' ? { ownerEntry: true as const } : {}), cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((options) => options.hooks)!.env!
+    for (const name of secrets) expect(env, name).not.toHaveProperty(name)
+    expect(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe('1')
+    // A bot turn always loads Mousse's tools on demand (its tool catalogue): the list it starts with is names only.
+    expect(env.ENABLE_TOOL_SEARCH).toBe('true')
+    if (entry === 'owner' && process.platform !== 'win32') expect(env.TMPDIR).toBe(join(scratch, 'tmp'))
+    if (entry === 'owner') {
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBe('signin-token')
+      expect(env.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
+    }
+  })
+
+  const cloudSignIns = {
+    aws: { AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', AWS_ACCESS_KEY_ID: 'aws-id', AWS_SECRET_ACCESS_KEY: 'aws-secret', AWS_SESSION_TOKEN: 'aws-session', AWS_BEARER_TOKEN_BEDROCK: 'aws-bearer' },
+    google: { GOOGLE_APPLICATION_CREDENTIALS: '/signin/google.json', CLOUDSDK_CONFIG: '/signin/gcloud', GCLOUD_PROJECT: 'project', GOOGLE_CLOUD_PROJECT: 'cloud-project', GOOGLE_CLOUD_LOCATION: 'global', GOOGLE_CLOUD_QUOTA_PROJECT: 'quota-project', CLOUD_ML_REGION: 'us-east5' },
+    azure: { AZURE_CLIENT_ID: 'client', AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_SECRET: 'azure-secret', AZURE_PASSWORD: 'azure-password', AZURE_AUTHORITY_HOST: 'https://login.microsoftonline.com', AZURE_FEDERATED_TOKEN_FILE: '/signin/token', AZURE_CLIENT_CERTIFICATE_PATH: '/signin/client.pem', AZURE_CLIENT_CERTIFICATE_PASSWORD: 'certificate-password', AZURE_CLIENT_SEND_CERTIFICATE_CHAIN: 'true', AZURE_ADDITIONALLY_ALLOWED_TENANTS: 'other-tenant', AZURE_USERNAME: 'test-user', AZURE_CONFIG_DIR: '/signin/azure', AZURE_TOKEN_CREDENTIALS: 'prod' }
+  }
+  it.each([
+    { route: '', cloud: {} },
+    { route: 'CLAUDE_CODE_USE_BEDROCK', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_MANTLE', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_ANTHROPIC_AWS', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_VERTEX', cloud: cloudSignIns.google },
+    { route: 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', cloud: cloudSignIns.google },
+    { route: 'CLAUDE_CODE_USE_FOUNDRY', cloud: cloudSignIns.azure }
+  ].flatMap((row) => ['environment', 'settings'].map((source) => ({ ...row, source }))))('keeps $route sign-in from $source only for the active cloud', async ({ route, cloud, source }) => {
+    const root = temp('claude-cloud-root-')
+    const scratch = temp('claude-cloud-scratch-')
+    const unrelated = { ...cloudSignIns.aws, ...cloudSignIns.google, ...cloudSignIns.azure,
+      GOOGLE_API_KEY: 'unrelated-google-key', GOOGLE_CLIENT_SECRET: 'unrelated-google-secret',
+      AZURE_OPENAI_API_KEY: 'unrelated-azure-key', AZURE_STORAGE_CONNECTION_STRING: 'unrelated-azure-storage',
+      GOOGLE_GENERATIVE_AI_API_KEY: 'unrelated-generative-key', AZURE_STORAGE_KEY: 'unrelated-storage-key',
+      GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
+    const variables = { ...unrelated, ...cloud, ...(route ? { [route]: '1' } : {}), ANTHROPIC_AUTH_TOKEN: 'signin-token' }
+    if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
+    else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((entry) => entry.hooks)!.env!
+    expect(env).toMatchObject({ ...cloud, ...(route ? { [route]: '1' } : {}), ANTHROPIC_AUTH_TOKEN: 'signin-token' })
+    for (const name of Object.keys(unrelated).filter((name) => !(name in cloud))) expect(env, name).not.toHaveProperty(name)
+  })
+
+  it.each(['', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
+    .flatMap((route) => ['environment', 'settings'].map((source) => ({ route, source }))))('keeps Claude configuration families from $source with route "$route"', async ({ route, source }) => {
+    const root = temp('claude-model-root-')
+    const scratch = temp('claude-model-scratch-')
+    const choices = {
+      ANTHROPIC_MODEL: 'proxy-primary', ANTHROPIC_DEFAULT_MODEL: 'proxy-default',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'profile/opus', ANTHROPIC_DEFAULT_SONNET_MODEL: 'profile/sonnet',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'profile/haiku', ANTHROPIC_DEFAULT_FABLE_MODEL: 'profile/fable',
+      ANTHROPIC_SMALL_FAST_MODEL: 'proxy-small', ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION: 'eu-west-1',
+      ANTHROPIC_CUSTOM_MODEL_OPTION: 'proxy-custom', ANTHROPIC_BEDROCK_REGION_PREFIX: 'eu',
+      ANTHROPIC_FOUNDRY_RESOURCE: 'my-resource', ANTHROPIC_GOOGLE_CLOUD_LOCATION: 'global',
+      ANTHROPIC_GOOGLE_CLOUD_PROJECT: 'google-project', ANTHROPIC_VERTEX_PROJECT_ID: 'vertex-project',
+      VERTEX_REGION_CLAUDE_4_6_SONNET: 'europe-west1',
+      ANTHROPIC_BASE_URL: 'https://proxy.test', ANTHROPIC_AWS_BASE_URL: 'https://aws.test',
+      ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock.test', ANTHROPIC_BEDROCK_MANTLE_BASE_URL: 'https://mantle.test',
+      ANTHROPIC_FOUNDRY_BASE_URL: 'https://foundry.test', ANTHROPIC_GOOGLE_CLOUD_BASE_URL: 'https://google.test',
+      ANTHROPIC_VERTEX_BASE_URL: 'https://vertex.test',
+      ANTHROPIC_FUTURE_SETTING: 'future-value', VERTEX_REGION_CLAUDE_FUTURE: 'europe-west1',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'effort,thinking',
+      ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES: 'effort,thinking',
+      ANTHROPIC_BEDROCK_SERVICE_TIER: 'flex', ENABLE_PROMPT_CACHING_1H_BEDROCK: '1',
+      ENABLE_PROMPT_CACHING_FUTURE: '1', CLAUDE_FUTURE_CONFIG_DIR: '/signin/future',
+      ANTHROPIC_CUSTOM_HEADERS: 'Authorization: Bearer proxy-key',
+      NODE_EXTRA_CA_CERTS: '/certs/extra.pem', SSL_CERT_FILE: '/certs/cert.pem', HTTPS_PROXY: 'https://proxy.test:8443',
+      ANTHROPIC_UNLISTED_MODEL: 'unknown', ANTHROPIC_DEFAULT_CUSTOM_MODEL: 'unknown',
+      ANTHROPIC_SMALL_FAST_MODEL_EXTRA: 'unknown', VERTEX_REGION_CLAUDE_UNKNOWN: 'unknown',
+      ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'display copy'
+    }
+    const excluded = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
+    const variables = { ...choices, ...excluded, ...(route ? { [route]: '1' } : {}) }
+    if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
+    else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((entry) => entry.hooks)!.env!
+    expect(env).toMatchObject(choices)
+    for (const name of Object.keys(excluded)) expect(env, name).not.toHaveProperty(name)
+  })
+
+  it('runs one query in Claude Code\'s asking mode with the owner\'s sign-in, none of their settings files, and no process of its own to supervise', async () => {
     const root = temp('claude-owner-root-')
     const scratch = temp('claude-owner-scratch-')
     const { service, captured } = ownerService(async () => {})
@@ -182,8 +275,8 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     // Mousse's own server only, over Claude Code's input; none on its command line (#358).
     expect(options.mcpServers).toEqual({})
     expect(Object.keys(registered.get(options) ?? {})).toEqual(['mousse'])
-    // The owner's own sign-in: their entry's environment, not a locked one.
-    expect(options.env?.USER_VARIABLE).toBe('from-settings')
+    // The owner's own sign-in, without unrelated launch variables.
+    expect(options.env).not.toHaveProperty('USER_VARIABLE')
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
     // One query per turn: no live process is kept for the bot's thread.
     expect(captured.filter((entry) => entry.hooks)).toHaveLength(1)
@@ -198,7 +291,7 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
     const options = captured.find((entry) => entry.hooks)!
     expect(options.settingSources).toEqual([])
-    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', USER_VARIABLE: 'from-settings' })
+    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' })
   })
 
   it('a failed turn reports Claude Code\'s own reason', async () => {
@@ -879,7 +972,7 @@ describe('locked Claude Code: its own spawn (item 1)', () => {
     // stdio as the SDK's own spawn: the CLI's error output is kept.
     expect(spawn).toHaveBeenCalledWith('/usr/bin/claude', ['--output-format', 'stream-json'], expect.objectContaining({ cwd: '/scratch', env: options.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }))
     expect(onProcess).toHaveBeenCalledWith(4242)
-    claudeLockedSpawn({ platform: 'win32', spawn: spawn as never, killTree: vi.fn() })(options)
+    claudeLockedSpawn({ platform: 'win32', spawn: spawn as never, onWindowsTree: vi.fn() })(options)
     expect(spawn.mock.calls[1]).toEqual(['/usr/bin/claude', options.args, expect.objectContaining({ detached: false })])
   })
 
@@ -912,20 +1005,6 @@ describe('locked Claude Code: its own spawn (item 1)', () => {
     expect(quiet).toEqual(['SIGTERM', 0])
   })
 
-  it('on Windows, ends the tree at the abort while the CLI runs, and never after its exit', () => {
-    const killTree = vi.fn()
-    const running = new AbortController()
-    claudeLockedSpawn({ platform: 'win32', spawn: (() => fakeChild(6161)) as never, killTree })({ command: 'c', args: [], env: {}, signal: running.signal })
-    running.abort()
-    expect(killTree).toHaveBeenCalledWith(6161)
-    const exited = fakeChild(7171)
-    const later = new AbortController()
-    claudeLockedSpawn({ platform: 'win32', spawn: (() => exited) as never, killTree })({ command: 'c', args: [], env: {}, signal: later.signal })
-    exited.emit('exit', 0, null)
-    later.abort()
-    expect(killTree).toHaveBeenCalledTimes(1)
-  })
-
   it('a process whose registration fails is killed at once, and the spawn fails (review: no unsupervised child)', () => {
     const sent: Array<NodeJS.Signals | 0> = []
     const child = fakeChild()
@@ -934,9 +1013,7 @@ describe('locked Claude Code: its own spawn (item 1)', () => {
     expect(sent).toEqual(['SIGKILL'])
     expect(child.stdin.destroy).toHaveBeenCalled()
     expect(child.stdout.destroy).toHaveBeenCalled()
-    const killTree = vi.fn()
-    expect(() => claudeLockedSpawn({ platform: 'win32', spawn: (() => fakeChild(8181)) as never, killTree, onProcess: () => { throw new Error('x') } })({ command: 'c', args: [], env: {}, signal: signal() })).toThrow('x')
-    expect(killTree).toHaveBeenCalledWith(8181)
+
   })
 
   it('keeps the tail of the CLI\'s error output for a failed turn', () => {

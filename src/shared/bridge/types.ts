@@ -7,6 +7,8 @@ import type {
   NetErrorCode
 } from '../net'
 import type { AgentExecutionBudget } from '../agents/execution'
+import type { UsageAgentId, UsageHistoryRange } from '../usageHistory'
+import { IMAGE_MAX_DATA_CHARS, INLINE_IMAGE_MIME_TYPES, MESSAGE_MAX_IMAGES, REMOTE_MESSAGE_IMAGES_MAX_DATA_CHARS } from '../imageLimits'
 export interface BridgeEntityRef {
   nodeId: NodeId
   entityId: string
@@ -21,13 +23,17 @@ export interface BridgeDispatchInput {
   fetch?: boolean
   push?: boolean
 }
-/** Images per message, as for local sends (MMS_PROTOCOL_MAX_IMAGES). */
-export const REMOTE_MAX_ATTACHMENTS = 16
+/** Images per message, as for local sends (`shared/imageLimits.ts`). */
+export const REMOTE_MAX_ATTACHMENTS = MESSAGE_MAX_IMAGES
 /** Base64 characters in one staged chunk; keeps each request well inside one 64 KiB frame. */
 export const REMOTE_ATTACHMENT_CHUNK_CHARS = 48 * 1024
-/** Base64 characters in one staged image (MMS_PROTOCOL_MAX_IMAGE_BASE64_CHARS). */
-export const REMOTE_ATTACHMENT_MAX_CHARS = 3 * 1024 * 1024
-export const REMOTE_ATTACHMENT_MIME = /^image\/(png|jpeg|gif|webp|bmp)$/
+/**
+ * Base64 characters in one staged image: as for local sends, within what one message to a thread on another computer
+ * carries (`shared/imageLimits.ts`), so no image is staged that its message would refuse.
+ */
+export const REMOTE_ATTACHMENT_MAX_CHARS = Math.min(IMAGE_MAX_DATA_CHARS, REMOTE_MESSAGE_IMAGES_MAX_DATA_CHARS)
+/** The image types a remote send stages: those every provider takes inline (`INLINE_IMAGE_MIME_TYPES`), as the service's validators require. */
+export const REMOTE_ATTACHMENT_MIME = new RegExp(`^(${INLINE_IMAGE_MIME_TYPES.join('|')})$`)
 /** A remote send or queued message: text, optional chat mode, and images staged with `attachments.stage`. */
 export interface BridgeChatInput {
   threadId: string
@@ -156,6 +162,7 @@ export interface BridgeRemoteParams {
     requestId: string
   }
   'storage.usage': Record<string, never>
+  'usage.history': { range: UsageHistoryRange; timeZone?: string; agent?: UsageAgentId }
   'bridge.thread.open': {
     threadId: string
   }
@@ -219,7 +226,8 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.result',
   'bridge.hub.cancel',
   'bridge.hub.requests',
-  'bridge.hub.storage'
+  'bridge.hub.storage',
+  'bridge.hub.usageHistory'
 ] as const
 export type BridgeHubLocalMethod = (typeof BRIDGE_HUB_LOCAL_METHODS)[number]
 /** Trusted local ingress uses the already authenticated network capability. */
@@ -319,6 +327,12 @@ export interface BridgeHubLocalParams {
   }
   'bridge.hub.storage': {
     target: NodeId
+  }
+  'bridge.hub.usageHistory': {
+    target: NodeId
+    range: UsageHistoryRange
+    timeZone?: string
+    agent?: UsageAgentId
   }
 }
 export type BridgeHubThreadEvent = import('./display').BridgeDisplayPart

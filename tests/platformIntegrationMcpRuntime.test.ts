@@ -563,3 +563,31 @@ describe('I03 managed MCP lifecycle', () => {
     }
   })
 })
+
+it.each(['disable', 'delete', 'edit', 'unauthorized', 'unreachable'])('managed config %s closes without reconnecting the old server', async change => {
+  const { root, context } = await makeTempProfile()
+  let connects = 0, broken = false
+  const registry = new McpRegistry(context)
+  const manager = new McpManager(registry, settingsStore() as never, async () => {}, {
+    context, clientFactory: injectedFactory({ onConnect: () => {
+      connects++
+      if (broken) throw new Error(change)
+    } })
+  })
+  try {
+    const lifecycle = new McpLifecycleService(registry, manager, context)
+    const created = await lifecycle.create({ name: 'managed', scope: 'global', transport: 'http', url: 'https://example.test/mcp', authMode: 'anonymous' })
+    await manager.listTools(created.installationId)
+    broken = change === 'unauthorized' || change === 'unreachable'
+    if (change === 'delete') await lifecycle.delete(created.installationId)
+    else if (change === 'disable') await lifecycle.enable(created.installationId, false)
+    else await lifecycle.update({ installationId: created.installationId, url: 'https://example.test/current' })
+    expect(connects).toBe(1)
+    expect(manager.getActiveCount()).toBe(0)
+    if (change !== 'delete') {
+      const current = await lifecycle.read(created.installationId)
+      expect(current.server.enabled).toBe(change !== 'disable')
+      if (change !== 'disable') expect(current.server.url).toBe('https://example.test/current')
+    }
+  } finally { await manager.shutdown(); await rm(root, { recursive: true, force: true }) }
+})

@@ -11,8 +11,7 @@ describe('Electron vault context', () => {
     expect(resolveElectronUserData(appData, { MOUSSE_HOME: globalHome }, [], globalHome)).toBe(join(appData, 'mousse'))
     expect(resolveElectronUserData(appData, {}, ['service', 'run', '--home', globalHome], globalHome)).toBe(join(appData, 'mousse'))
   })
-  it('recognizes Windows case variants of the global home', () => {
-    if (process.platform !== 'win32') return
+  it.runIf(process.platform === 'win32')('recognizes Windows case variants of the global home', () => {
     expect(resolveElectronUserData(appData, { MOUSSE_HOME: globalHome.toUpperCase() }, [], globalHome)).toBe(join(appData, 'mousse'))
   })
   it('uses the same custom-home context for GUI and dual-mode service commands', () => {

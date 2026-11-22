@@ -1,8 +1,8 @@
 import { memo, useSyncExternalStore } from 'react'
-import { CircleCheck, CircleDotDashed, Clock, Loader2, MessageQuestion, Pause, Shield } from '../lib/icons'
+import { CircleAlert, CircleCheck, CircleDotDashed, Clock, Loader2, MessageQuestion, Pause, Shield } from '../lib/icons'
 import { expiresInLabel } from '../../shared/threadExpiry'
 import { isThreadActivityActive, type Thread, type ThreadActivitySnapshot, type ThreadActivityState, type TurnPause } from '../../shared/types'
-import { threadStatus } from '../../shared/threadAttention'
+import { threadStatus, type ThreadLinkStatus } from '../../shared/threadAttention'
 import { isSubagentThread } from '../../shared/threadLineage'
 import { pausedStatusLabel } from '../lib/pausedRun'
 import { useAppStore } from '../stores/appStore'
@@ -35,18 +35,34 @@ interface RowStatusProps {
   live: boolean
   /** The input it waits for is a permission request. */
   awaitsApproval: boolean
+  /** Why its last message did not start (`Thread.setupFailure`); shown while nothing else is going on. */
+  setupFailed?: string
 }
 
+/** What a row says of a thread whose message did not start, as its tooltip. */
+const setupFailedTitle = (reason: string): string => `Didn't start. ${reason}`
+
 /** The icon at the end of a Projects tree row. Nothing for a quiet thread. */
-export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId, activity, live, awaitsApproval }: RowStatusProps) {
+export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId, activity, live, awaitsApproval, setupFailed }: RowStatusProps) {
   countRender(`SidebarStatus:${threadId}`)
   const status = threadStatus(useRowActivity(threadId, activity, live), awaitsApproval)
+  const animateWorking = useAppStore((s) => status === 'working' && s.sidebarAnimations)
   const pause = useOwnPause(threadId)
   // When the limit resets moves with the clock; the other icons show no time.
   useAgeClock(status === 'paused')
+  if (setupFailed && (status === 'quiet' || status === 'done')) {
+    const title = setupFailedTitle(setupFailed)
+    return <span className="threads-sidebar-status-icon threads-sidebar-status-icon--failed" title={title}><CircleAlert size={14} strokeWidth={2} aria-label={title} /></span>
+  }
   switch (status) {
     case 'working':
-      return <Loader2 size={14} strokeWidth={2} className="threads-sidebar-status-spinner icon-spin" aria-hidden="true" />
+      return animateWorking ? (
+        <Loader2 size={14} strokeWidth={2} className="threads-sidebar-status-spinner icon-spin" aria-hidden="true" />
+      ) : (
+        <span className="threads-sidebar-status-icon threads-sidebar-status-icon--working" role="img" aria-label="Agent is working" title="Working">
+          <span className="threads-sidebar-status-dot" aria-hidden="true" />
+        </span>
+      )
     case 'done':
       return <CircleCheck size={14} strokeWidth={2} className="threads-sidebar-status-icon threads-sidebar-status-icon--completed" aria-label="Agent finished" />
     case 'approval':
@@ -103,35 +119,42 @@ const noClock = (): (() => void) => () => {}
 
 /**
  * Renders again each minute of the shared clock while `enabled`: for what shows a time (an age, when a limit resets,
- * when a thread deletes itself). Rows that show none do not subscribe, so the clock renders nothing for them.
+ * when a thread archives itself). Rows that show none do not subscribe, so the clock renders nothing for them.
  */
 export function useAgeClock(enabled: boolean): void {
   useSyncExternalStore(enabled ? subscribeClock : noClock, readClock, readClock)
 }
 
-/** A row's "Deletes itself" mark; its tooltip says how long until then, kept current by the shared clock. */
+/** A row's "Archives itself" mark; its tooltip says how long until then, kept current by the shared clock. */
 export const ThreadExpiryIcon = memo(function ThreadExpiryIcon({ expiresAt, size }: { expiresAt: string; size: number }) {
   useAgeClock(true)
   return (
-    <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(expiresAt)}`}>
-      <Clock size={size} strokeWidth={2} aria-label="Deletes itself" />
+    <span className="thread-expiry-icon" title={`Archives ${expiresInLabel(expiresAt)}`}>
+      <Clock size={size} strokeWidth={2} aria-label="Archives itself" />
     </span>
   )
 })
 
-/** The status and age in a Threads tab card's top line: Working 5m, Waiting, Approval, Input, Paused, Done, or its age. */
-export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activity, live, awaitsApproval, updatedAt }: RowStatusProps & { updatedAt?: string }) {
+/**
+ * The status and age in a Threads tab card's top line: Working 5m, Waiting, Approval, Input, Paused, Done, or its age.
+ * `withAge` adds the age to Approval, Input, Done and Failed too (a thread link's card, which has no other time).
+ * `linkStatus`: the status a thread link shows (`threadLinkStatus`), which keeps Done and Failed once the thread is quiet.
+ */
+export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activity, live, awaitsApproval, updatedAt, withAge = false, setupFailed, linkStatus }: RowStatusProps & { updatedAt?: string; withAge?: boolean; linkStatus?: ThreadLinkStatus }) {
   countRender(`SidebarStatus:${threadId}`)
   useAgeClock(true)
   const shown = useRowActivity(threadId, activity, live)
   const startedAt = useAppStore((s) => s.turnStates[threadId]?.startedAt)
   const pause = useOwnPause(threadId)
   const age = threadAge(isThreadActivityActive(shown) ? startedAt ?? updatedAt : updatedAt)
-  const status = threadStatus(shown, awaitsApproval)
+  const status: ThreadLinkStatus = linkStatus ?? threadStatus(shown, awaitsApproval)
+  // Chat thread links share this card layout but have their own motion.
+  const animateWorking = useAppStore((s) => status === 'working' && (linkStatus !== undefined || s.sidebarAnimations))
+  const settledAge = withAge && age && age !== 'now' ? ` ${age}` : ''
   if (status === 'working') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
-        <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
+        {animateWorking && <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />}
         Working{age && age !== 'now' ? ` ${age}` : ''}
       </span>
     )
@@ -148,7 +171,7 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
         <Shield size={12} strokeWidth={2} aria-hidden="true" />
-        Approval
+        Approval{settledAge}
       </span>
     )
   }
@@ -156,7 +179,7 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
         <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
-        Input
+        Input{settledAge}
       </span>
     )
   }
@@ -168,11 +191,27 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
       </span>
     )
   }
+  if (setupFailed && (status === 'quiet' || status === 'done' || status === 'failed')) {
+    return (
+      <span className="threads-sidebar-card-status threads-sidebar-card-status-failed" title={setupFailedTitle(setupFailed)}>
+        <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
+        Didn't start
+      </span>
+    )
+  }
+  if (status === 'failed') {
+    return (
+      <span className="threads-sidebar-card-status threads-sidebar-card-status-failed">
+        <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
+        Failed{settledAge}
+      </span>
+    )
+  }
   if (status === 'done') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
         <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
-        Done
+        Done{settledAge}
       </span>
     )
   }

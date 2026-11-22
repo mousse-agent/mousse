@@ -89,11 +89,34 @@ function mixPercent(value: string | undefined, name: string): number {
   return +match[1]!
 }
 
+/**
+ * A raised surface: a colour, or white or the theme's lift light (--ui-lift) mixed over the page
+ * (`color-mix(in srgb, var(--ui-lift) N%, …var(--surface-base))`).
+ */
+function surfaceColor(value: string, page: Rgba, light: Rgba): Rgba {
+  if (value.trim() === 'var(--surface-base)') return page
+  const lift = value.match(/^color-mix\(in srgb, (#fff|var\(--ui-lift\)) ([\d.]+)%, (.+)\)$/)
+  if (lift) {
+    const color = lift[1] === '#fff' ? parseColor('#ffffff') : light
+    return mix(color, +lift[2]!, surfaceColor(lift[3]!, page, light))
+  }
+  return parseColor(value)
+}
+
+/** The theme's lift light: the accent taken toward white by --ui-lift, else plain white. */
+function liftColor(theme: string, accent: Rgba): Rgba {
+  const white = parseColor('#ffffff')
+  const value = token(polishCss, `html[data-theme='${theme}']`, '--ui-lift')
+  const share = value?.match(/^color-mix\(in srgb, var\(--accent\) ([\d.]+)%, white\)$/)
+  return share ? mix(accent, +share[1]!, white) : white
+}
+
 type Palette = {
   theme: ThemeId
   accent: string
   page: Rgba
   raised: Rgba
+  lift: Rgba
   text: Rgba
   secondary: Rgba
   accentColor: Rgba
@@ -125,11 +148,13 @@ function palette(theme: (typeof THEMES)[number], accent: string): Palette {
   const secondary =
     fixed?.['--text-secondary'] ?? token(themeCss, themeSelector, '--text-secondary')!
   const raised = token(polishCss, `html[data-theme='${theme}']`, '--ui-raised') ?? soft
+  const lift = liftColor(theme, parseColor(vars['--accent']!))
   return {
     theme,
     accent,
     page: parseColor(page),
-    raised: parseColor(raised),
+    raised: surfaceColor(raised, parseColor(page), lift),
+    lift,
     text: parseColor(text),
     secondary: parseColor(secondary),
     accentColor: parseColor(vars['--accent']!)
@@ -154,6 +179,8 @@ function groupSurface(p: Palette): Rgba {
     token(settingsCss, settingsSelector(p.theme), '--settings-surface') ??
     token(settingsCss, '.settings-page', '--settings-surface')!
   if (value === 'transparent') return p.page
+  if (value === 'var(--ui-raised)') return p.raised
+  if (value.includes('var(--ui-lift)')) return over(alpha(p.lift, mixPercent(value, '--ui-lift')), p.page)
   return over(alpha(p.text, mixPercent(value, '--text-primary')), p.page)
 }
 

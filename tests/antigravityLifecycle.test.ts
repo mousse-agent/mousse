@@ -8,6 +8,8 @@ import { antigravityAssistantMessage, antigravityHistory } from '../src/mms/harn
 import { LoginSession } from '../src/mms/providers/LoginSession'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { resolveBoundServices } from '../src/mms/profiles/admission'
+import { decideUsageLimit } from '../src/mms/run/pausePolicy'
+import { pausedLine } from '../src/mms/run/pauseText'
 import { PROFILES_V1_CAPABILITY } from '../src/shared/profiles/types'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import type { NativeLlmContext } from '../src/shared/types'
@@ -20,8 +22,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-/** `fail` may return the error a request rejects with. */
-function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown) {
+/** `fail` may return the error a request rejects with; `kind` is the agent that runs once installed. */
+function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown, kind: 'native' | 'legacy' = 'native') {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-lifecycle-'))
   homes.push(home)
   const processes: Array<ReturnType<typeof createProcess>> = []
@@ -35,7 +37,8 @@ function fixture(blockMethod?: string, installed = false, fail?: (method: string
   })
   services.push(service)
   vi.spyOn(service, 'configured').mockReturnValue(true)
-  if (installed) vi.spyOn(service as unknown as { binary: () => string }, 'binary').mockReturnValue(join(home, 'agy_acp_server'))
+  if (installed) vi.spyOn(service as unknown as { runtime: () => unknown }, 'runtime')
+    .mockReturnValue({ kind, binary: join(home, kind === 'native' ? 'agy' : 'agy_acp_server'), source: 'managed' })
   let finishPrompt: (() => void) | undefined
   function createProcess() {
     const abort = new AbortController()
@@ -127,7 +130,7 @@ describe('Antigravity turn lifecycle', () => {
   })
 
   it.each(['stop', 'logout'] as const)('releases profile-owned login work on %s while Google sign-in is pending', async (operation) => {
-    const { service, input, processes } = fixture(methods.agent.authenticate, true)
+    const { service, input, processes } = fixture(methods.agent.authenticate, true, undefined, 'legacy')
     const session = new LoginSession('setup')
     const pending = service.login(session, input.cwd)
     await vi.waitFor(() => expect(processes[0]?.connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, expect.anything()))
@@ -136,8 +139,8 @@ describe('Antigravity turn lifecycle', () => {
     expect(session.abort.signal.aborted).toBe(true)
   })
 
-  it('goes straight to Google sign-in once installed, without asking how to set up', async () => {
-    const { service, input, processes } = fixture(undefined, true)
+  it('goes straight to Google sign-in on the 1.1.1 server once installed, without asking how to set up', async () => {
+    const { service, input, processes } = fixture(undefined, true, undefined, 'legacy')
     const session = new LoginSession('setup')
     const events: unknown[] = []
     session.on('event', (event) => events.push(event))
@@ -146,8 +149,42 @@ describe('Antigravity turn lifecycle', () => {
     expect(processes[0].connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, { methodId: 'oauth-personal' })
     // A process that started before this sign-in can no longer sign the profile out.
     expect((service as unknown as { signInGeneration: number }).signInGeneration).toBe(1)
-    // Only the Google redirect-URL fallback may be offered; never a setup choice or a path prompt.
-    expect((events as Array<{ type: string }>).map((event) => event.type).filter((type) => type !== 'manual_code')).toEqual([])
+    // Only that it is starting: no setup choice or path prompt, and with no Google link printed, no paste field.
+    expect((events as Array<{ type: string }>).map((event) => event.type)).toEqual(['progress'])
+  })
+
+  it('signs in on agy without a Google flow when the agy on this computer is already signed in', async () => {
+    const { service, input, processes } = fixture(undefined, true)
+    const session = new LoginSession('setup')
+    const events: Array<{ type: string; message?: string }> = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: true, sessionId: 'setup' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method)).toEqual([methods.agent.initialize, methods.agent.session.new])
+    expect(events.map((event) => event.message)).toEqual(['Starting Antigravity…'])
+    expect(service.signedIn()).toBe(true)
+  })
+
+  it('runs Google sign-in on agy when it asks for one', async () => {
+    let asked = false
+    const { service, input, processes } = fixture(undefined, true, (method) => {
+      if (method !== methods.agent.session.new || asked) return undefined
+      asked = true
+      return RequestError.authRequired()
+    })
+    const session = new LoginSession('setup')
+    const events: Array<{ type: string; message?: string }> = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: true, sessionId: 'setup' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method))
+      .toEqual([methods.agent.initialize, methods.agent.session.new, methods.agent.authenticate, methods.agent.session.new])
+    expect(events.map((event) => event.message)).toEqual(['Starting Antigravity…', 'Starting Google sign-in…'])
+  })
+
+  it('does not start Google sign-in on agy for an error that is not a sign-in request', async () => {
+    const { service, input, processes } = fixture(undefined, true, (method) => method === methods.agent.session.new && new RequestError(-32603, 'network down'))
+    const session = new LoginSession('setup')
+    expect(await service.login(session, input.cwd)).toMatchObject({ success: false, error: 'network down' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method)).not.toContain(methods.agent.authenticate)
   })
 
   it('fails sign-in fast, without a prompt or an agent, when Antigravity is not installed', async () => {
@@ -161,9 +198,122 @@ describe('Antigravity turn lifecycle', () => {
   })
 })
 
+describe('Antigravity after a turn that did not finish', () => {
+  const promptsOf = (process: { connection: { agent: { request: { mock: { calls: unknown[][] } } } } }) => process.connection.agent.request.mock.calls
+    .filter(([name]) => name === methods.agent.session.prompt)
+    .map(([, params]) => (params as { prompt: Array<{ text?: string }> }).prompt.map((block) => block.text).join('\n'))
+  const quota = () => new RequestError(-32603, 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 4h29m13s.')
+
+  it('resumes the session after a failed prompt, sending only the new message', async () => {
+    let failing = false
+    const { service, input, processes } = fixture(undefined, false, (method) => failing && method === methods.agent.session.prompt && quota())
+    await service.chat({ ...input, prompt: 'first', history: 'old history' })
+    service.commitConversation(input.threadId, 'after first')
+    failing = true
+    await expect(service.chat({ ...input, prompt: 'second', history: 'after first' })).rejects.toThrow()
+    // The adapter reports the history the failed turn left: its request, no reply.
+    service.commitInterrupted(input.threadId, 'after first + second')
+    failing = false
+    await service.chat({ ...input, prompt: 'third', history: 'after first + second' })
+    expect(processes).toHaveLength(2)
+    expect(processes[1].connection.agent.request).toHaveBeenCalledWith(methods.agent.session.resume, expect.objectContaining({ sessionId: 'session-1' }))
+    expect(processes[1].connection.agent.request).not.toHaveBeenCalledWith(methods.agent.session.new, expect.anything())
+    expect(promptsOf(processes[1])).toEqual(['third'])
+  })
+
+  it('resumes the session after a stopped prompt', async () => {
+    const { service, input, processes } = fixture()
+    await service.chat({ ...input, prompt: 'first' })
+    service.commitConversation(input.threadId, 'after first')
+    const stop = new AbortController()
+    const first = processes[0]
+    const answer = first.connection.agent.request.getMockImplementation()!
+    first.connection.agent.request.mockImplementation(async (method: string, params: { prompt?: Array<{ text?: string }> }) => {
+      if (method !== methods.agent.session.prompt) return answer(method, params)
+      // The prompt is running when Stop closes the agent's process.
+      return new Promise<never>((_, reject) => {
+        first.connection.signal.addEventListener('abort', () => reject(first.connection.signal.reason), { once: true })
+        stop.abort()
+      })
+    })
+    await expect(service.chat({ ...input, prompt: 'second', history: 'after first', signal: stop.signal })).rejects.toThrow()
+    service.commitInterrupted(input.threadId, 'after first + second')
+    await service.chat({ ...input, prompt: 'third', history: 'after first + second' })
+    expect(processes[1].connection.agent.request).toHaveBeenCalledWith(methods.agent.session.resume, expect.objectContaining({ sessionId: 'session-1' }))
+    expect(promptsOf(processes[1])).toEqual(['third'])
+  })
+
+  it('hands the history over again when a new session failed its first prompt before the agent worked on it', async () => {
+    // That prompt carried the handed-over history; the agent may never have kept it.
+    let failing = true
+    const { service, input, processes } = fixture(undefined, false, (method) => failing && method === methods.agent.session.prompt && quota())
+    await expect(service.chat({ ...input, prompt: 'first', history: 'old history' })).rejects.toThrow()
+    service.commitInterrupted(input.threadId, 'old history + first')
+    failing = false
+    await service.chat({ ...input, prompt: 'second', history: 'old history + first' })
+    expect(processes[1].connection.agent.request).not.toHaveBeenCalledWith(methods.agent.session.resume, expect.anything())
+    expect(promptsOf(processes[1])[0]).toContain('old history + first')
+  })
+
+  it('hands the history over again when the failed prompt carried a steer the agent never showed it read', async () => {
+    // The steer goes back and runs again: the agent may hold it while Mousse's history does not.
+    let failing = false
+    const { service, input, processes } = fixture(undefined, false, (method) => failing && method === methods.agent.session.prompt && quota())
+    await service.chat({ ...input, prompt: 'first' })
+    service.commitConversation(input.threadId, 'after first')
+    failing = true
+    let steer: { text: string; token: string } | undefined = { text: 'also check the tests', token: 'steer-1' }
+    const returnSteer = vi.fn()
+    await expect(service.chat({ ...input, prompt: 'second', history: 'after first', drainSteerEntry: () => { const entry = steer; steer = undefined; return entry }, returnSteer })).rejects.toThrow()
+    expect(returnSteer).toHaveBeenCalledWith('also check the tests', 'steer-1')
+    service.commitInterrupted(input.threadId, 'after first + second')
+    failing = false
+    await service.chat({ ...input, prompt: 'third', history: 'after first + second' })
+    expect(processes[1].connection.agent.request).not.toHaveBeenCalledWith(methods.agent.session.resume, expect.anything())
+    expect(promptsOf(processes[1])[0]).toContain('after first + second')
+  })
+})
+
+describe('Antigravity quota answers', () => {
+  // agy 1.5's own words when the account's quota is spent (its session/prompt error).
+  const QUOTA = 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h29m13s.'
+  const pauseFor = async (error: unknown) => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.prompt && error)
+    const failure = await service.chat(input).then(() => undefined, (caught: unknown) => caught)
+    return decideUsageLimit({ error: failure, run: {}, lookup: () => null, cap: 3, autoResume: true, nowMs: Date.now() })
+  }
+
+  it.each([
+    ['as its message', new RequestError(-32603, QUOTA)],
+    ['as the data under the SDK label', new RequestError(-32603, 'Internal error', QUOTA)]
+  ])('pauses the run until the reset agy names (%s)', async (_, error) => {
+    const before = Date.now()
+    const decision = await pauseFor(error)
+    expect(decision?.action).toBe('pause')
+    const pause = decision?.action === 'pause' ? decision.pause : undefined
+    const resetMs = ((4 * 60 + 29) * 60 + 13) * 1000
+    expect(Date.parse(pause!.until) - before).toBeGreaterThanOrEqual(resetMs - 1000)
+    expect(Date.parse(pause!.until) - Date.now()).toBeLessThanOrEqual(resetMs + 1000)
+    expect(pause).toMatchObject({ estimated: false, provider: 'antigravity' })
+    expect(pausedLine(pause!)).toContain("Antigravity's usage limit was reached (time reported by Antigravity)")
+  })
+
+  it('pauses on an estimate when agy names no reset time', async () => {
+    const decision = await pauseFor(new RequestError(-32603, 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits.'))
+    expect(decision?.action === 'pause' && decision.pause).toMatchObject({ estimated: true, provider: 'antigravity' })
+  })
+
+  it.each([
+    'RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
+    'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 5s.'
+  ])('leaves a rate limit that clears in seconds as an ordinary failure: %s', async (text) => {
+    expect(await pauseFor(new RequestError(-32603, text))).toBeUndefined()
+  })
+})
+
 describe('Antigravity auth-required answers', () => {
   const authRequired = () => RequestError.authRequired()
-  const signedInSettings = { signedIn: true, models: [{ id: 'account-model', label: 'Account Model' }] }
+  const signedInSettings = { nativeSignedIn: true, models: [{ id: 'account-model', label: 'Account Model' }] }
   const arm = (service: AntigravityProviderService) => {
     ;(service as unknown as { settings: unknown }).settings = { ...signedInSettings }
     const changed = vi.fn()
@@ -176,7 +326,7 @@ describe('Antigravity auth-required answers', () => {
     const { service, input } = fixture(undefined, false, (name) => name === method && authRequired())
     const { changed, saved } = arm(service)
     await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
-    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(saved()).toMatchObject({ nativeSignedIn: false, models: [] })
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
@@ -188,7 +338,7 @@ describe('Antigravity auth-required answers', () => {
     const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && new RequestError(-32000, message, data))
     const { changed, saved } = arm(service)
     await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
-    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(saved()).toMatchObject({ nativeSignedIn: false, models: [] })
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
@@ -203,7 +353,7 @@ describe('Antigravity auth-required answers', () => {
     const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && authRequired())
     const { changed, saved } = arm(service)
     await expect(service.refreshModels(input.cwd)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
-    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(saved()).toMatchObject({ nativeSignedIn: false, models: [] })
     expect(changed).toHaveBeenCalledTimes(1)
   })
 

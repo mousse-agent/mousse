@@ -190,10 +190,11 @@ export interface WatchedBrowserUpdate {
 }
 
 /**
- * A large view: its picture up to 1920 px wide (the page's width at the screen's pixel ratio, when the
- * view sizes the page), at most 15 pictures a second, 30 while the person holds the browser.
+ * A large view: its picture up to 3840 px wide (the page's width at the screen's pixel ratio, when the view sizes
+ * the page, so a full-screen view on a large screen keeps its ratio), at most 15 pictures a second, 30 while the
+ * person holds the browser.
  */
-export const WATCHED_BROWSER_PANE = { maxWidth: 1920, fps: 15, heldFps: 30 } as const
+export const WATCHED_BROWSER_PANE = { maxWidth: 3840, fps: 15, heldFps: 30 } as const
 
 /**
  * The page's size, in CSS pixels, and its pixel ratio (`scale`): the default, and the bounds of the
@@ -203,9 +204,9 @@ export const WATCHED_BROWSER_PANE = { maxWidth: 1920, fps: 15, heldFps: 30 } as 
 export const WATCHED_BROWSER_PAGE = {
   default: { width: 1280, height: 720, scale: 1 },
   min: { width: 320, height: 240 },
-  max: { width: 1920, height: 2160 },
+  max: { width: 3840, height: 2160 },
   maxScale: 2,
-  maxPicture: { width: 1920, height: 2160 }
+  maxPicture: { width: 3840, height: 2160 }
 } as const
 
 /** The size a large view asks the page to have: its own, in CSS pixels, and the screen's pixel ratio. */

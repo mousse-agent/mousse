@@ -7,7 +7,7 @@ export interface StrayThread {
 }
 
 /** `nested`: named by another helper, not by the parent; the run waits for it and stops it, but shows none of its work. */
-type HelperState = { turnId?: string; running: boolean; seenActive: boolean; interruptedTurn?: string; nested?: boolean }
+type HelperState = { turnId?: string; running: boolean; seenActive: boolean; interruptedTurn?: string; nested?: boolean; stopWith?: (threadId: string, turnId: string) => void }
 
 /**
  * The native helpers (Codex's own subagents, separate Codex threads) one Codex turn started.
@@ -31,6 +31,11 @@ export class NativeHelpers {
   private waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = []
   private stopWith: ((threadId: string, turnId: string) => void) | undefined
   private closed: { reason: unknown } | undefined
+  /**
+   * The items each helper's own thread reported, by helper thread and item id (item ids are unique per thread only). An
+   * approval a helper asks for is read here, never from the parent's items.
+   */
+  private readonly items = new Map<string, Record<string, unknown>>()
   /** When a helper last reported anything: a spawn, or any event of its thread (the idle cap reads this). */
   lastActivityAt = Date.now()
 
@@ -85,6 +90,12 @@ export class NativeHelpers {
     this.lastActivityAt = Date.now()
     // The helper started a helper of its own, or reports on one: tracked like the helpers the parent names.
     const item = notification.method === 'item/started' || notification.method === 'item/completed' ? params?.item : undefined
+    if (item && typeof item.id === 'string') {
+      const key = `${threadId}\n${item.id}`
+      this.items.delete(key)
+      this.items.set(key, item)
+      if (this.items.size > 512) this.items.delete(this.items.keys().next().value as string)
+    }
     if (item?.type === 'subAgentActivity' || item?.type === 'collabAgentToolCall') this.noteItem(item as { type: string } & Record<string, unknown>, true)
     if (notification.method === 'turn/started' && params?.turn?.id) {
       helper.turnId = params.turn.id
@@ -96,6 +107,25 @@ export class NativeHelpers {
       if (params?.status?.type === 'active') helper.seenActive = true
       else if (params?.status?.type === 'idle' && helper.seenActive) this.set(threadId, helper, false)
     }
+  }
+
+  /** An item a helper's own thread reported (`threadId` the helper's thread), or undefined. */
+  item(threadId: string, itemId: string): Record<string, unknown> | undefined {
+    return this.items.get(`${threadId}\n${itemId}`)
+  }
+
+  /**
+   * Stops one helper (a Stop of its mirror thread): its running turn is interrupted with `send`, or, when its turn id
+   * is not known yet, as soon as it is. False when the helper is not running.
+   */
+  stopOne(threadId: string, send: (threadId: string, turnId: string) => void): boolean {
+    const helper = this.helpers.get(threadId)
+    if (!helper?.running) return false
+    if (helper.turnId) {
+      helper.interruptedTurn = helper.turnId
+      send(threadId, helper.turnId)
+    } else helper.stopWith = send
+    return true
   }
 
   /** A running helper has not reported its turn id yet, so a stop cannot reach it. */
@@ -111,9 +141,11 @@ export class NativeHelpers {
 
   /** Interrupts a running helper whose turn id is known, once per turn, if a stop was requested. */
   private interrupt(threadId: string, helper: HelperState): void {
-    if (!this.stopWith || !helper.running || !helper.turnId || helper.interruptedTurn === helper.turnId) return
+    const send = this.stopWith ?? helper.stopWith
+    if (!send || !helper.running || !helper.turnId || helper.interruptedTurn === helper.turnId) return
     helper.interruptedTurn = helper.turnId
-    this.stopWith(threadId, helper.turnId)
+    helper.stopWith = undefined
+    send(threadId, helper.turnId)
   }
 
   /** Resolves when no helper is running; rejects when the process is lost (`close`). */

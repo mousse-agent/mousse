@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liveCounts'
+import { turnTimingEnd, turnTimingFirstText, turnTimingMark } from '../../../diagnostics/turnTiming'
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -19,8 +20,10 @@ import type {
 import type { LlmModelOption, LlmProviderOption } from '../../../../shared/settings'
 import { promptCacheHourOn, type CredentialKind, type PromptCacheHour } from '../../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../../shared/types'
+import { providerTakesImage } from '../../../../shared/imageLimits'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
 import { applyEffortToModelId, parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
+import { ONE_SHOT_SPARE_IDLE_MS, ONE_SHOT_SPARE_SYSTEM, OneShotInput, oneShotLaunchKey, oneShotSpareMessage, oneShotUsesSpare, type OneShotSpare } from './oneShotSpare'
 import { AppError } from '../../../../shared/errors'
 import { PROVIDER_TURN_CAP } from '../../../../shared/harness/types'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
@@ -36,7 +39,7 @@ import type { McpAttachment, McpRelayAttachment } from '../../../run/mcp/MousseM
 import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
-import { withEnforced } from '../../env'
+import { lockedEnv, withEnforced } from '../../env'
 import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, CLAUDE_PLAN_TOOLS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
@@ -52,7 +55,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnVariable } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnCredentialKey, claudeTurnVariable } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -70,13 +73,18 @@ import {
 } from './mcpRegistration'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
+import { spawnProviderProcess, windowsProviderTree, type WindowsProviderTree } from '../../windowsProviderProcess'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
+import { spawnWindowsJobProcess, type WindowsJobProcess } from '../../windowsJobProcess'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
-import { providerApiError, readUsageLimit } from '../../../orchestrator/providerErrors'
+import { providerApiError, providerReportedError, providerStatusError, readUsageLimit } from '../../../orchestrator/providerErrors'
+import type { ProviderRetries } from '../../../../shared/providerRetry'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
 import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
+import { claudeMaskedToolOutput } from './secretOutput'
+import type { SecretMasker } from '../../../secrets/secretMasking'
 
 /**
  * How long a Claude Code process closed by Stop may take to exit by itself before its tree is killed. Claude Code ends
@@ -90,6 +98,11 @@ const CLAUDE_STOP_GRACE_MS = 1_000
  * steers it has not been seen reading are handed back. Longer than the grace, so a process `reapClosed` kills is gone by then.
  */
 const ONE_SHOT_STOP_DRAIN_MS = 1_500
+/**
+ * How long a one-shot query that answered may take to exit on its own (Claude Code writes its session and closes, about
+ * half a second) before it is closed. The turn does not wait for it; the thread's next start does (`oneShotExits`).
+ */
+const ONE_SHOT_EXIT_WAIT_MS = 15_000
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /**
@@ -99,8 +112,36 @@ export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
  * Mousse's server offers under it (the agent access level and the caller's policy, `McpAttachment.tools`) are: Claude
  * Code reconnects a server whose header changed and adds the tools it gains, but keeps offering the model the ones it
  * lost.
+ * A bot's chat turn adds what its process was started with (`claudeBotLaunchKey`): a change of any of it, the model
+ * and effort included, needs a new process. So does another account: a process holds the sign-in it started with.
  */
-const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy']
+const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy', 'bot launch', 'account', 'turn credentials']
+/** Where the account is in the key (`HARD_PARTS`). */
+const ACCOUNT_PART = HARD_PARTS.indexOf('account')
+const TURN_CREDENTIALS_PART = HARD_PARTS.indexOf('turn credentials')
+
+/** Removes the folder of a bot process's settings file (`claudeLockedSettingsFile`) once nothing reads it. Never throws. */
+function removeSettingsFolder(folder: string): void {
+  try {
+    rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  } catch (error) {
+    console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** How long a bot's warm chat process stays open with no turn before it is closed. */
+export const BOT_LIVE_IDLE_CLOSE_MS = 5 * 60_000
+
+/**
+ * What a bot's warm chat process is started with, as one digest (`HARD_PARTS`' `bot launch`): the bot's own key (lane,
+ * turn kind, compiled grant: `BotAuthority.warm`), the locked launch options (folder, environment, tools, the settings
+ * file's content, its system text) and the model and effort. A turn reuses the process only while all of it is equal.
+ * Functions (the grant gate, the spawn) are not part of it: they are read from the current turn on every call.
+ */
+export function claudeBotLaunchKey(warm: string, launch: Partial<Options>, flags: LiveFlags): string {
+  const plain = Object.fromEntries(Object.entries(launch).filter(([, value]) => typeof value !== 'function' && !(value instanceof AbortController)))
+  return createHash('sha256').update(JSON.stringify([warm, plain, flags])).digest('hex')
+}
 
 /** The MCP servers registered on a live process (`LiveSession.meta.mcp`), and the Mousse attachment among them. */
 interface RegisteredMcp {
@@ -128,6 +169,7 @@ interface LaunchContext {
   threadId: string
   signal?: AbortSignal
   timeoutMs: number
+  beforeStart(): void
   /** The user's servers that were left out: their registration failed. */
   leftOut(names: string[]): void
   /** The user's servers that were left out because this computer's Claude Code policy forbids added servers. */
@@ -150,6 +192,8 @@ type SavedSession = {
   usageBaseline?: ClaudeUsageBaseline
   /** Provider instance that owns the session; absent on sessions saved before instances existed. */
   instanceId?: string
+  /** Hash of the account and turn credential settings. Absent on older sessions, null for opaque settings. */
+  credentialIdentity?: string | null
   /**
    * The session's turns, oldest first (issue #360): an undo or an edit that returns the history to
    * what one of them left resumes the session cut after it. Absent on sessions saved before.
@@ -206,6 +250,8 @@ export type ClaudeSubscriptionChatInput = {
   threadId: string
   /** Provider instance running the turn; a saved session resumes only on the same instance. */
   instanceId?: string
+  /** The thread's secret masker, read at each tool result: Claude Code's tool results are masked before it keeps them. */
+  secretMasker?: () => SecretMasker | undefined
   cwd: string
   model: string
   prompt: string
@@ -253,9 +299,10 @@ export type ClaudeSubscriptionChatInput = {
   /**
    * A bot's turn (PR 6 §3): it runs under the locked profile's options (`claudeLockedOptions`:
    * Claude Code's asking mode, no settings files, plugins or user MCP servers) with Mousse's grant
-   * gate on every call, as one query that is never kept warm. On a locked instance it also runs in
-   * the locked environment; on the owner's own entry (`ownerEntry`) in that entry's environment,
-   * with their sign-in. Integrations, live processes and the thread's permission mode do not apply.
+   * gate on every call. On a locked instance it also runs in the locked environment, as one query; on the owner's own
+   * entry (`ownerEntry`) in that entry's environment, with their sign-in, where a chat turn without Bash runs on the
+   * chat's warm process (`botKeepsWarm`) and every other turn is one query. Integrations and the thread's permission
+   * mode do not apply.
    */
   locked?: ClaudeLockedTurn
   /**
@@ -270,7 +317,7 @@ export type ClaudeSubscriptionChatInput = {
   /** What Claude is doing while it shows nothing (`TurnFrameSink.onStatus`). */
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */
-  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean; cause?: string }) => void
   /** Claude Code compacts the session inside the turn (`TurnFrameSink.onCompaction`). */
   onCompaction?: (phase: 'start' | 'complete') => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
@@ -282,6 +329,8 @@ export type ClaudeSubscriptionChatInput = {
   returnSteer?: (text: string, token?: string) => void
   /** The turn ended at the aborted result of Send now's interrupt (`LiveRun.sendNowAbort`): what it wrote is all it says. */
   onSendNowCut?: () => void
+  /** A one-shot turn restarted with a steer ended with no words of the model's after it (`TurnResult.steerUnanswered`). */
+  onSteerUnanswered?: () => void
   /** A drained steer was pushed to Claude: its token is spent. */
   steerTaken?: (token?: string) => void
   /**
@@ -289,7 +338,7 @@ export type ClaudeSubscriptionChatInput = {
    * rows. With `expect`, it takes only when the orchestrator's decision is that one (`TurnControl.drainSteerEntry`);
    * `forced`: Send now asked for it, so the running tool is stopped.
    */
-  drainSteerEntry?: (opts?: { expect?: 'cut' }) => { text: string; token: string; forced?: boolean } | undefined
+  drainSteerEntry?: (opts?: { expect?: 'cut' }) => { text: string; token: string; forced?: boolean; images?: ChatImageAttachment[] } | undefined
   /** What a drain now would do, without taking anything (`TurnControl.peekSteer`): only `cut` is drained here. */
   peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
   /** The check right before the cut is sent (`TurnControl.mayCut`): false hands the drain back, and the hold resumes. */
@@ -369,6 +418,8 @@ type Dependencies = {
     env: NodeJS.ProcessEnv,
     signal?: AbortSignal
   ) => Promise<string>
+  /** The account of the CLI environment (default `claudeAccountSubject`). */
+  accountSubject?: typeof claudeAccountSubject
   /** `claude --version` lookups (tests). */
   versions?: CliVersionCache
   /**
@@ -408,7 +459,7 @@ type Dependencies = {
    * Replaces `claude auth status` for an instance whose sign-in Mousse holds itself (an API key):
    * what the instance runs on, read without starting Claude Code.
    */
-  probe?: (env: NodeJS.ProcessEnv) => AuthProbe
+  probe?: (env: NodeJS.ProcessEnv) => AuthProbe | Promise<AuthProbe>
   /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is kept for an hour only by the user's choice. */
   paysPerToken?: boolean
   /** What a turn says when the instance is not signed in (default: run the sign-in command). */
@@ -474,6 +525,12 @@ export type AuthProbe =
   | { kind: 'signed_in'; account?: ClaudeAccount }
   | { kind: 'signed_out'; message: string }
   | { kind: 'error'; message: string }
+
+function signInIdentity(result: AuthProbe | undefined): string | undefined {
+  if (result?.kind !== 'signed_in') return undefined
+  const { subject, credential } = result.account ?? {}
+  return subject && credential && credential !== 'unknown' ? JSON.stringify({ subject, credential }) : undefined
+}
 
 /** How long a live `claude auth status` result stands before it is checked again. */
 export const CLAUDE_AUTH_STATUS_TTL_MS = 5 * 60_000
@@ -579,6 +636,7 @@ export async function claudeModelExtras(query: Query, models: ModelInfo[], signa
     if (model.value === 'default') continue
     try {
       await query.setModel(model.value)
+      if (signal.aborted) break
       const applied = (await settingsOf())?.applied
       extras[model.value] = {
         ...(typeof applied?.effort === 'string' ? { defaultEffort: applied.effort } : {}),
@@ -803,6 +861,9 @@ export function claudeSubscriptionEnvironment(source: NodeJS.ProcessEnv = proces
 }
 
 /** Variables that send Claude Code's requests to a cloud provider, billed per token. */
+/** What a bot turn's Claude Code runs with so it always loads Mousse's tools on demand (docs/plans/bot-context.md §15). */
+export const CLAUDE_BOT_TOOL_SEARCH_ENV = { ENABLE_TOOL_SEARCH: 'true' } as const
+
 const CLAUDE_CLOUD_ROUTES = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
 /**
  * The client name (`CLAUDE_CODE_ENTRYPOINT`) Claude Code reports for every process Mousse starts. Without one it
@@ -927,6 +988,15 @@ const historyKey = (history: string) => createHash('sha256').update(history).dig
 function sessionBoundTo(saved: SavedSession, instanceId: string): boolean {
   return (saved.instanceId ?? CLAUDE_INSTANCE_ID) === instanceId
 }
+
+function sessionCredentialIdentity(identity: string | undefined, subject: string | undefined, credentialKey: string | undefined): string | null {
+  return credentialKey ? historyKey(JSON.stringify([identity, subject, credentialKey])) : null
+}
+
+function sessionUsesCredential(saved: SavedSession, identity: string | null): boolean {
+  // Legacy sessions have no proof of which credential opened them. Opaque settings cannot prove a match either.
+  return identity !== null && saved.credentialIdentity === identity
+}
 /** The session now holds `history`: the next turn resumes it, and an undo back to here can cut it after its latest turn. */
 function fingerprintSession(saved: SavedSession, history: string): void {
   saved.historyKey = historyKey(history)
@@ -966,6 +1036,16 @@ export class ClaudeSubscriptionProviderService {
   private settingsFrozen = false
   private stopped = false
   private readonly queries = new Map<string, Query>()
+  /** One-shot queries that answered and are still exiting, by thread: the thread's next start waits for its exit. */
+  private readonly oneShotExits = new Map<string, { query: Query; exited: Promise<void> }>()
+  /** The Claude Code process started ahead for the next title or branch name (`oneShotSpare.ts`). */
+  private oneShotSpare: OneShotSpare | undefined
+  /** The account and launch one-shots run under: a sign-out, a reconnect or a stop starts a new one (`oneShot`). */
+  private oneShotGeneration = 0
+  private latestOneShotKey: string | undefined
+  /** Title/branch one-shot process trees being ended (`reapOneShot`); `logout` waits for them. */
+  private readonly oneShotReaping = new Set<Promise<void>>()
+  private readonly oneShotClosers = new Set<(reason?: unknown) => void>()
   /** Live queries by thread: the Claude processes that outlive a turn. Null disables them (one query per turn). */
   private readonly live = new Map<string, LiveSession<TurnContext>>()
   private readonly liveConfig: LiveTimings | null
@@ -986,6 +1066,10 @@ export class ClaudeSubscriptionProviderService {
   private readonly activeThreads = new Set<string>()
   /** Last live `claude auth status` check. */
   private cliProbe?: { at: number; result: AuthProbe }
+  private signInRead = 0
+  private signInObserved = 0
+  private signInEpoch = 0
+  private signInAccount?: string
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
   /** The loaded settings already record the terminal sign-in; otherwise `status()` saves the migration. */
@@ -1094,11 +1178,11 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * What `claude auth status` says in this instance's environment now, whatever Mousse recorded (a
-   * disconnect included) and without touching the recorded state. `unknown`: it did not answer.
+   * disconnect included). `unknown`: it did not answer.
    */
   async authState(): Promise<'signed_in' | 'signed_out' | 'unknown'> {
     if (!this.binary()) return 'unknown'
-    const result = await this.probe(this.environment())
+    const { result } = await this.readSignIn(this.environment())
     return result.kind === 'signed_in' ? 'signed_in' : result.kind === 'signed_out' ? 'signed_out' : 'unknown'
   }
   /** The terminal command that signs this instance in. */
@@ -1137,7 +1221,7 @@ export class ClaudeSubscriptionProviderService {
       const sessionId = randomUUID()
       this.settings.sessions = {
         ...this.settings.sessions,
-        [threadId]: { sessionId, cwd: saved.cwd, ...(saved.model ? { model: saved.model } : {}), instanceId, turns: turns.slice(0, index + 1), fork: { from: saved.sessionId, at } }
+        [threadId]: { sessionId, cwd: saved.cwd, ...(saved.model ? { model: saved.model } : {}), instanceId, credentialIdentity: saved.credentialIdentity, turns: turns.slice(0, index + 1), fork: { from: saved.sessionId, at } }
       }
       this.save()
       return sessionId
@@ -1184,9 +1268,25 @@ export class ClaudeSubscriptionProviderService {
     let compacted = false
     try {
       throwIfStopped()
-      if (this.checkDue()) await this.status()
+      if (this.stopped || this.settingsError || this.signedOut() || !this.binary()) return false
+      const policy = await this.dependencies.turnSettings?.(saved.cwd)
       throwIfStopped()
-      if (!this.configured()) return false
+      if (policy?.refuse) return false
+      const compactionEnv = () => this.finalEnv({
+        ...this.environment(),
+        ...this.compactionEntrypoint(saved),
+        ...(options.cacheCold ? { DISABLE_PROMPT_CACHING: '1' } : {})
+      })
+      const env = compactionEnv()
+      const signIn = await this.readSignIn(env, controller.signal)
+      throwIfStopped()
+      if (signIn.result.kind !== 'signed_in') return false
+      const subject = this.probedSubject(env, signIn.result)
+      const canResume = () => this.settings.sessions?.[threadId] === saved &&
+        !this.stopped && !this.signedOut() && signIn.epoch === this.signInEpoch &&
+        subject === this.accountSubject(compactionEnv()) &&
+        sessionUsesCredential(saved, sessionCredentialIdentity(signIn.identity, subject, this.turnCredentialKey(saved.cwd, policy?.settings)))
+      if (!canResume()) return false
       // A live process holds the conversation as it was; it is closed so the next turn resumes the compacted one.
       const live = this.live.get(threadId)
       if (live && !live.dead) {
@@ -1194,18 +1294,17 @@ export class ClaudeSubscriptionProviderService {
         live.close('closed')
         this.live.delete(threadId)
       }
-      sent = true
       query = await this.createQuery(`/compact${focus ? ` ${focus}` : ''}`, {
-        ...this.options(saved.cwd, controller, this.finalEnv({
-          ...this.environment(),
-          ...this.compactionEntrypoint(saved),
-          ...(options.cacheCold ? { DISABLE_PROMPT_CACHING: '1' } : {})
-        })),
+        ...this.options(saved.cwd, controller, env, [], policy?.settings),
         resume: saved.sessionId,
         ...(saved.model ? { model: saved.model } : {}),
         includePartialMessages: false,
         // Compaction runs no tools.
         canUseTool: async () => ({ behavior: 'deny', message: 'No tools run while compacting.' })
+      }, undefined, () => {
+        throwIfStopped()
+        if (!canResume()) throw new Error('The Claude Code session or sign-in changed before compaction could start. Try again.')
+        sent = true
       })
       for await (const message of query) {
         if (message.type === 'system' && message.subtype === 'compact_boundary') compacted = true
@@ -1238,45 +1337,231 @@ export class ClaudeSubscriptionProviderService {
    * commit message on the chosen model (`oneShotOptions`): one turn, no tools, no saved session (it
    * never shows in the user's `claude --resume`), and nothing of the user's setup that could run a
    * command. It never retries.
+   *
+   * A title or branch name (`oneShotUsesSpare`) runs on a process started ahead when one is waiting with the same launch
+   * (`oneShotSpare.ts`), with its instructions in its message. Only New Thread or Send can leave a spare behind.
+   * Both belong to the account and launch they were started under (`oneShotGeneration`): after a sign-out, a reconnect or
+   * a stop, the request ends and nothing is started for it again. A process started ahead that ended before it said
+   * anything, under the same account, is not a request: the request then starts its own.
    */
   async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
-    if (this.checkDue()) await this.status()
-    signal.throwIfAborted()
-    if (!this.configured())
-      throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
-    const controller = new AbortController()
-    this.controllers.add(controller)
-    const abort = (): void => controller.abort(signal.reason)
-    signal.addEventListener('abort', abort, { once: true })
-    let query: Query | undefined
-    try {
-      // A one-shot runs at the standard speed.
-      const model = claudeSpeedOf(spec.model).model
-      const { baseId } = parseThinkingSuffixFromModelId(model)
-      // A level the model does not offer runs at the model's default; Ultracode is a turn setting, not a level.
-      const level = spec.effort ?? supportedEffortOf(model, this.listedByClaude() ? this.models() : [], CLAUDE_EFFORTS)
-      const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
-      query = await this.createQuery(spec.prompt, {
-        ...this.oneShotOptions(controller),
-        model: baseId,
-        ...(effort ? { effort } : {}),
-        systemPrompt: spec.system
-      })
-      for await (const message of query) {
-        spec.onActivity()
-        if (message.type !== 'result') continue
-        const failure = resultFailure(message)
-        if (failure) throw failure
-        return { text: message.subtype === 'success' ? message.result : '' }
-      }
+    const generation = this.oneShotGeneration
+    const requireCurrent = (): void => {
       signal.throwIfAborted()
-      throw new Error('Claude Code ended without an answer.')
-    } finally {
-      query?.close()
-      signal.removeEventListener('abort', abort)
-      this.controllers.delete(controller)
+      if (generation !== this.oneShotGeneration) {
+        throw new Error('Claude Code was signed out or stopped before it answered.')
+      }
     }
+    if (this.checkDue()) await this.status()
+    requireCurrent()
+    if (!this.configured()) {
+      this.dropOneShotSpare()
+      throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+    }
+    const { model, effort } = this.oneShotModel(spec)
+    const spared = oneShotUsesSpare(spec.task)
+    const controller = new AbortController()
+    const options: Options = { ...this.oneShotOptions(controller), model, ...(effort ? { effort } : {}), systemPrompt: spared ? ONE_SHOT_SPARE_SYSTEM : spec.system }
+    if (!spared) return this.runOneShot(spec.prompt, options, controller, spec, signal)
+    // The terminal can switch accounts between status checks without changing any launch setting.
+    const account = this.accountSubject()
+    if (!account) {
+      this.latestOneShotKey = undefined
+      this.dropOneShotSpare()
+      return this.runOneShot(spec.prompt, { ...options, systemPrompt: spec.system }, controller, spec, signal)
+    }
+    const requireSameAccount = (): void => {
+      requireCurrent()
+      if (this.signedOut() || this.accountSubject() !== account || this.cliProbe?.result.kind !== 'signed_in') {
+        throw new Error('The Claude Code sign-in changed before it answered.')
+      }
+    }
+    const message = oneShotSpareMessage(spec.system, spec.prompt)
+    const key = oneShotLaunchKey(options, account)
+    this.latestOneShotKey = key
+    const spare = this.takeOneShotSpare(key)
+    let answer = spare ? await this.answerOnSpare(spare, message, spec, signal, requireSameAccount) : undefined
+    if (!answer) {
+      if (spare) requireSameAccount()
+      answer = await this.runOneShot(message, options, controller, spec, signal)
+    }
+    requireSameAccount()
+    if (this.latestOneShotKey === key && (spec.namingOrigin === 'new_thread' || spec.namingOrigin === 'send')) this.startOneShotSpare(key, generation, options)
+    return answer
+  }
+  /**
+   * The model and reasoning level a one-shot runs on, at the standard speed. A level the model does not offer runs at the
+   * model's default; Ultracode is a turn setting, not a level. A title or branch name whose selection names no level runs
+   * at the lowest the model offers (`low`), and at the model's default when it does not offer it: the title model stays
+   * the one chosen, and its answer comes sooner.
+   */
+  private oneShotModel(spec: Pick<OneShotSpec, 'model' | 'effort' | 'task'>): { model: string; effort?: Options['effort'] } {
+    const model = claudeSpeedOf(spec.model).model
+    const { baseId, effort: suffix } = parseThinkingSuffixFromModelId(model)
+    const listed = this.listedByClaude() ? this.models() : []
+    let level = spec.effort ?? supportedEffortOf(model, listed, CLAUDE_EFFORTS)
+    if (!level && !suffix && oneShotUsesSpare(spec.task)) {
+      const offered = (listed.find((entry) => entry.id === baseId) ?? listed.find((entry) => entry.id === model))?.efforts
+      if (offered?.includes('low')) level = 'low'
+    }
+    const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
+    return { model: baseId, ...(effort ? { effort } : {}) }
+  }
+  /** One request on a process of its own, started now, with `prompt` as its input. */
+  private async runOneShot(prompt: string, options: Options, controller: AbortController, spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    const { query, close } = this.openOneShot(prompt, options, controller, oneShotUsesSpare(spec.task))
+    const abort = (): void => close(signal.reason)
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+    try {
+      const started = await query
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      const answer = await this.readOneShot(started, spec, controller.signal)
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      return answer
+    } finally {
+      close()
+      signal.removeEventListener('abort', abort)
+    }
+  }
+  /** The answer a one-shot's query gives: its result's text, or its failure. */
+  private async readOneShot(query: Query, spec: OneShotSpec, signal: AbortSignal, heard?: () => void): Promise<{ text: string }> {
+    // A loop's implicit iterator return may close the SDK transport before its process tree is inventoried.
+    const messages = query[Symbol.asyncIterator]()
+    for (let next = await messages.next(); !next.done; next = await messages.next()) {
+      const message = next.value
+      heard?.()
+      spec.onActivity()
+      if (message.type !== 'result') continue
+      const failure = resultFailure(message)
+      if (failure) throw failure
+      return { text: message.subtype === 'success' ? message.result : '' }
+    }
+    signal.throwIfAborted()
+    throw new Error('Claude Code ended without an answer.')
+  }
+  /**
+   * The request on a process started ahead. Undefined when the process ended (or could not start) before it said
+   * anything: the request has not been made, and the caller decides whether it may start its own. The process is closed
+   * afterwards either way.
+   */
+  private async answerOnSpare(spare: OneShotSpare, message: string, spec: OneShotSpec, signal: AbortSignal, requireSameAccount: () => void): Promise<{ text: string } | undefined> {
+    const abort = (): void => spare.close(signal.reason)
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+    let heard = false
+    try {
+      const query = await spare.query
+      if (spare.controller.signal.aborted || signal.aborted) return undefined
+      requireSameAccount()
+      spare.input.push(message)
+      return await this.readOneShot(query, spec, spare.controller.signal, () => { heard = true })
+    } catch (error) {
+      if (heard || signal.aborted) throw error
+      return undefined
+    } finally {
+      signal.removeEventListener('abort', abort)
+      this.closeOneShotSpare(spare)
+    }
+  }
+  /** The process started ahead for `key` under the current account, taken; any other is closed. */
+  private takeOneShotSpare(key: string): OneShotSpare | undefined {
+    const spare = this.oneShotSpare
+    if (!spare) return undefined
+    this.oneShotSpare = undefined
+    if (spare.key === key && spare.generation === this.oneShotGeneration) {
+      clearTimeout(spare.timer)
+      return spare
+    }
+    this.closeOneShotSpare(spare)
+    return undefined
+  }
+  /** Closes the process waiting ahead, if it is `spare` (or any, without one). */
+  private dropOneShotSpare(spare = this.oneShotSpare): void {
+    if (!spare || this.oneShotSpare !== spare) return
+    this.oneShotSpare = undefined
+    this.closeOneShotSpare(spare)
+  }
+  /**
+   * Starts a process ahead for the next naming request on the launch `options` describes (the request that just answered
+   * read them; nothing is read again), unless one is waiting for it already or the account changed since `generation`.
+   */
+  private startOneShotSpare(key: string, generation: number, options: Options): void {
+    if (this.stopped || generation !== this.oneShotGeneration) return
+    if (this.oneShotSpare?.key === key && this.oneShotSpare.generation === generation) return
+    this.dropOneShotSpare()
+    const controller = new AbortController()
+    const input = new OneShotInput()
+    const { query, close } = this.openOneShot(input, { ...options, abortController: controller }, controller, true, () => input.end())
+    const spare: OneShotSpare = { key, generation, input, controller, query, close, timer: setTimeout(() => this.dropOneShotSpare(spare), ONE_SHOT_SPARE_IDLE_MS) }
+    spare.timer.unref?.()
+    // One that could not start is dropped; a request that took it meanwhile starts its own.
+    query.catch(() => this.dropOneShotSpare(spare))
+    this.oneShotSpare = spare
+  }
+  /** Ends a process started ahead and every process it started. */
+  private closeOneShotSpare(spare: OneShotSpare): void {
+    clearTimeout(spare.timer)
+    spare.close()
+  }
+  /**
+   * Owns pending and running one-shots. Register cleanup as soon as a query is closed or aborted, so logout
+   * and shutdown wait even when the SDK has not returned the query yet.
+   */
+  private openOneShot(prompt: string | OneShotInput, options: Options, controller: AbortController, naming: boolean, end?: () => void): { query: Promise<Query>; close: (reason?: unknown) => void } {
+    let job: WindowsJobProcess | undefined
+    let closing = false
+    if (naming && process.platform === 'win32') {
+      const stderr = options.stderr
+      options = { ...options, spawnClaudeCodeProcess: (target) => {
+        if (closing || job) throw new Error('The Windows naming process is already started or closed')
+        job = spawnWindowsJobProcess(target)
+        const child = job.child
+        child.on('message', (pid) => {
+          if (typeof pid === 'number') trackChildProcess({ pid, once: (_event, listener) => child.once('exit', listener) }, 'claude')
+        })
+        child.stderr.setEncoding('utf8').on('data', (data: string) => stderr?.(data))
+        return child
+      } }
+    }
+    const query = this.createQuery(prompt, options)
+    const report = (error: unknown): void => console.warn('[claude-subscription] a one-shot process could not be ended', { error: error instanceof Error ? error.message : String(error) })
+    const close = (reason?: unknown): void => {
+      if (!this.oneShotClosers.delete(close)) return
+      closing = true
+      const abort = (): void => { controller.abort(reason); end?.() }
+      let stopped: Promise<void>
+      if (job) {
+        // The job is ours even if the query has not returned, or its process already exited. Its stop never uses stdin.
+        stopped = job.stop()
+        abort()
+        void query.then((started) => started.close()).catch(report)
+      } else {
+        stopped = query.then((started) => this.reapOneShot(started, abort), abort).catch(report)
+      }
+      const reaping = stopped.finally(() => this.oneShotReaping.delete(reaping))
+      void reaping.catch(report)
+      this.oneShotReaping.add(reaping)
+    }
+    this.oneShotClosers.add(close)
+    return { query, close }
+  }
+  /** Inventories the tree before SDK shutdown can close its root. */
+  private async reapOneShot(query: Query, abort: () => void): Promise<void> {
+    const target = claudeQueryProcess(query)
+    const close = (): void => {
+      try { query.close() } catch { /* The reaper still ends the process. */ }
+      finally { abort() }
+    }
+    if (!target) { close(); return }
+    const reap = this.dependencies.reap
+    if (reap) close()
+    const outcome = reap ? await reap(target.pid, target.root) : await reapProcessTree(target.pid, { graceMs: CLAUDE_STOP_GRACE_MS, root: target.root, close })
+    if (outcome === 'killed' || outcome === 'survived') console.warn('[claude-subscription] a one-shot process did not exit when closed', { pid: target.pid, outcome })
   }
   /**
    * The options of a one-shot. Claude Code loads no settings files (`settingSources: []`), so no hook,
@@ -1418,6 +1703,7 @@ export class ClaudeSubscriptionProviderService {
       kind: 'error',
       message: 'Claude Code did not report its sign-in status. Update the Claude Code CLI and recheck.'
     }
+    const subjectBefore = this.accountSubject(env)
     let output: string
     try {
       output = await this.runClaude(['auth', 'status'], env, signal)
@@ -1443,7 +1729,9 @@ export class ClaudeSubscriptionProviderService {
     const method = text(status.authMethod)
     const plan = text(status.subscriptionType)
     const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
-    const subject = claudeAccountSubject(env)
+    const subject = this.accountSubject(env)
+    if (subject !== subjectBefore)
+      return { kind: 'error', message: 'The Claude Code sign-in changed during its check. Try again.' }
     const apiProvider = text(status.apiProvider)
     const credential = claudeCredentialKind({ ...(method ? { authMethod: method } : {}), ...(apiProvider ? { apiProvider } : {}) })
     return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}), credential } }
@@ -1454,8 +1742,8 @@ export class ClaudeSubscriptionProviderService {
     return result?.kind === 'signed_in' ? result.account : undefined
   }
   /** The account this instance runs as (`claudeAccountSubject`), read without starting Claude Code. */
-  accountSubject(): string | undefined {
-    return claudeAccountSubject(this.environment())
+  accountSubject(env = this.environment()): string | undefined {
+    return (this.dependencies.accountSubject ?? claudeAccountSubject)(env)
   }
   /**
    * Whether the user's Claude settings forbid `bypassPermissions` (`claudeBypassDisabled`) or turn auto
@@ -1559,11 +1847,53 @@ export class ClaudeSubscriptionProviderService {
   /** Checks the sign-in with the environment the caller captured for its turn. */
   private async authenticated(signal?: AbortSignal, env = this.environment()): Promise<boolean> {
     if (!this.binary()) return false
-    const result = await this.probe(env, signal)
-    signal?.throwIfAborted()
-    this.cliProbe = { at: Date.now(), result }
-    return result.kind === 'signed_in'
+    return (await this.readSignIn(env, signal)).result.kind === 'signed_in'
   }
+
+  private async readSignIn(env: NodeJS.ProcessEnv, signal?: AbortSignal, owner = true) {
+    const read = ++this.signInRead
+    let result = await this.probe(env, signal)
+    signal?.throwIfAborted()
+    const identity = signInIdentity(result)
+    if (owner && !this.stopped) {
+      if (read < this.signInObserved) {
+        // An overlapping sign-out makes even the newer reading unsafe. Recheck before sending
+        // anything else and retire the processes that still hold credentials.
+        if (result.kind === 'signed_out') {
+          this.signInEpoch += 1
+          this.signInAccount = undefined
+          this.cliProbe = undefined
+          this.dropOneShotSpare()
+          this.closeLive()
+        } else if (!identity || identity !== this.signInAccount) {
+          result = { kind: 'error', message: 'The Claude Code sign-in changed during its check. Try again.' }
+        }
+      } else {
+        this.signInObserved = read
+        if (identity !== this.signInAccount || result.kind !== 'signed_in') {
+          this.signInEpoch += 1
+          // A spare one-shot process belongs to the account that started it.
+          this.dropOneShotSpare()
+        }
+        this.signInAccount = identity
+        this.cliProbe = { at: Date.now(), result }
+        for (const live of this.live.values()) {
+          if (!identity || live.meta.hardParts?.[ACCOUNT_PART] !== identity) this.closeLiveSession(live.threadId, live)
+        }
+      }
+    }
+    return { result, identity, epoch: this.signInEpoch }
+  }
+  private probedSubject(env: NodeJS.ProcessEnv, result: Extract<AuthProbe, { kind: 'signed_in' }>): string | undefined {
+    return this.dependencies.probe ? this.accountSubject(env) : result.account?.subject
+  }
+
+  private turnCredentialKey(cwd: string, settings?: SdkSettings): string | undefined {
+    const extraArgs = claudeExtraArgs(storedCliArgs(this.launchSettings()))
+    if ('settings' in extraArgs || 'setting-sources' in extraArgs) return undefined
+    return claudeTurnCredentialKey(cwd, this.dependencies.settingSources, settings)
+  }
+
   /** A live check is due: the last terminal sign-in result is missing or stale. */
   private checkDue(): boolean {
     if (this.stopped || this.settingsError || this.signedOut()) return false
@@ -1572,9 +1902,8 @@ export class ClaudeSubscriptionProviderService {
   }
   private async refreshStatus(): Promise<void> {
     if (!this.binary() || this.stopped) return
-    const result = await this.probe(this.environment())
+    const { result } = await this.readSignIn(this.environment())
     if (this.stopped) return
-    this.cliProbe = { at: Date.now(), result }
     if (result.kind === 'signed_in' && !this.listedByClaude() && !this.modelDiscoveryStarted) {
       this.modelDiscoveryStarted = true
       void this.refreshModels(this.dir).catch(
@@ -1591,12 +1920,11 @@ export class ClaudeSubscriptionProviderService {
   async status(options: { force?: boolean } = {}): Promise<ClaudeSubscriptionStatus> {
     if (options.force) {
       await this.probing
-      this.cliProbe = undefined
       if (this.settingsError) this.loadSettings()
     }
     // Persist the migration to the terminal sign-in.
     if (!this.policyStored && !this.stopped) this.save()
-    if (this.checkDue()) {
+    if (this.checkDue() || (options.force && !this.stopped && !this.settingsError && !this.signedOut())) {
       this.probing ??= this.refreshStatus()
         .catch(() => {
           /* reported as not checked yet */
@@ -1708,18 +2036,20 @@ export class ClaudeSubscriptionProviderService {
   private async createQuery(
     prompt: string | AsyncIterable<SDKUserMessage>,
     options: Options,
-    startup?: { servers: ClaudeMcpServers; piped?: boolean; stderr?: ClaudeStderrTail }
+    startup?: { servers: ClaudeMcpServers; piped?: boolean; stderr?: ClaudeStderrTail },
+    beforeStart?: () => void
   ): Promise<Query> {
     if (this.stopped) throw new Error('Claude provider is stopped')
     // The SDK wraps the process without its pid; it reports the pid when it starts it, so Stop can end the process
     // tree (`reapClosed`). When it was reported anchors the process's creation time, so a later kill never reaches
     // another program given the pid since. The callback is the SDK's own, not in its published types. Mousse's own
     // spawn (the startup channel) reports it the same way.
-    let spawned: { pid: number; spawnedAt: number } | undefined
+    let spawned: { pid: number; spawnedAt: number; windowsTree?: WindowsProviderTree } | undefined
     let created: Query | undefined
     const reported = (options as { onProcessSpawned?: (pid: number) => void }).onProcessSpawned
-    const onSpawned = (pid: number) => {
-      spawned = { pid, spawnedAt: Date.now() }
+    const onSpawned = (pid: number, windowsTree?: WindowsProviderTree) => {
+      if (spawned?.pid === pid) return
+      spawned = { pid, spawnedAt: Date.now(), windowsTree }
       // Counted for the memory monitor until the SDK's process exits.
       trackChildProcess(pid, 'claude')
       queueMicrotask(() => { if (created) untrackClaudeOnExit(created, pid) })
@@ -1745,6 +2075,7 @@ export class ClaudeSubscriptionProviderService {
       given = { ...given, stderr: (data: string) => { tail.push(data); own?.(data) } }
     }
     if (this.dependencies.query) {
+      beforeStart?.()
       created = await this.dependencies.query({ prompt, options: given })
       if (startup?.piped) noteClaudeQuerySpawn(created, () => spawned)
       return created
@@ -1752,6 +2083,23 @@ export class ClaudeSubscriptionProviderService {
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     options.abortController?.signal.throwIfAborted()
     if (this.stopped) throw new Error('Claude provider is stopped')
+    if (process.platform === 'win32' && !given.spawnClaudeCodeProcess) {
+      const stderr = given.stderr
+      given = {
+        ...given,
+        spawnClaudeCodeProcess: ({ command, args, cwd, env, signal }) => {
+          if (this.stopped) throw new Error('Claude provider is stopped')
+          const child = spawnProviderProcess(command, args, { cwd, env, signal })
+          const tree = windowsProviderTree(child)!
+          this.trackWindowsTree(tree)
+          child.stderr.on('data', (chunk: Buffer) => stderr?.(chunk.toString()))
+          child.stderr.once('close', () => tail?.end())
+          if (child.pid !== undefined) onSpawned(child.pid, tree)
+          return child
+        }
+      }
+    }
+    beforeStart?.()
     created = sdk.query({ prompt, options: { ...given, onProcessSpawned: onSpawned } as Options })
     noteClaudeQuerySpawn(created, () => spawned)
     return created
@@ -1800,7 +2148,7 @@ export class ClaudeSubscriptionProviderService {
     const stderr = new ClaudeStderrTail(() => known)
     const startup = { servers: mcp.startup, piped: false, stderr }
     // Held until the servers are registered: a start that fails leaves `prompt` unread, for the start that follows.
-    const query = await this.createQuery(promptAfter(ready, prompt), options, startup)
+    const query = await this.createQuery(promptAfter(ready, prompt), options, startup, context.beforeStart)
     try {
       let servers = claudeLiteralServers(mcp.registered, 'input')
       if (Object.keys(servers).length > 0) {
@@ -1816,6 +2164,31 @@ export class ClaudeSubscriptionProviderService {
       this.closeUnstarted(query, context.threadId)
       throw error
     }
+  }
+  /**
+   * A one-shot query that answered: what it still writes is read (and dropped) until it exits on its own, or it is closed
+   * after `ONE_SHOT_EXIT_WAIT_MS`. Never rejects. The thread's next start waits for it (`oneShotExits`).
+   */
+  private awaitOneShotExit(threadId: string, query: Query, output: AsyncIterator<SDKMessage>): Promise<void> {
+    const exited = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const expired = new Promise<'expired'>((resolve) => { timer = setTimeout(() => resolve('expired'), ONE_SHOT_EXIT_WAIT_MS) })
+      try {
+        for (;;) {
+          const next = await Promise.race([output.next().catch((): IteratorResult<SDKMessage> => ({ done: true, value: undefined })), expired])
+          if (next === 'expired' || next.done) break
+        }
+      } finally {
+        clearTimeout(timer)
+        const target = claudeQueryProcess(query)
+        query.close()
+        this.reapClosed(threadId, target)
+      }
+    })().catch(() => undefined)
+    const entry = { query, exited }
+    this.oneShotExits.set(threadId, entry)
+    void exited.then(() => { if (this.oneShotExits.get(threadId) === entry) this.oneShotExits.delete(threadId) })
+    return exited
   }
   /** Closes a query that never started its turn, and ends its process tree as the other closes do (`reapClosed`). */
   private closeUnstarted(query: Query, threadId: string): void {
@@ -1869,6 +2242,8 @@ export class ClaudeSubscriptionProviderService {
     // The append flags travel in `systemPrompt.append` (see claudeLaunchAppendSystemPrompt).
     const extraArgs = claudeExtraArgs(storedCliArgs(this.launchSettings()))
     for (const name of [...APPEND_SYSTEM_PROMPT_ARGS, ...(this.dependencies.droppedArgs ?? [])]) delete extraArgs[name]
+    // Only Mousse can select a native session, after it verifies the credential that opened it.
+    for (const name of ['resume', 'continue', 'from-pr', 'resume-session-at', 'fork-session', 'session-id']) delete extraArgs[name]
     const appendText = append.filter(Boolean).join('\n\n')
     return {
       cwd,
@@ -1918,7 +2293,13 @@ export class ClaudeSubscriptionProviderService {
     this.controllers.add(controller)
     const cancel = () => controller.abort()
     signal?.addEventListener('abort', cancel, { once: true })
-    const timer = setTimeout(cancel, 15_000)
+    const timeout = new Error('Claude Code model discovery timed out')
+    const timer = setTimeout(() => controller.abort(timeout), 15_000)
+    const aborted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true })
+    })
+    // Cancellation can occur before there is an SDK request to race.
+    void aborted.catch(() => {})
     let query: Query | undefined
     // Once the live list is saved, the older-model check may take the idle query over.
     let handedOver = false
@@ -1931,26 +2312,38 @@ export class ClaudeSubscriptionProviderService {
           controller.signal.addEventListener('abort', () => resolveIdle(), { once: true })
         )
       }
-      query = await this.createQuery(idle(), {
+      const pending = this.createQuery(idle(), {
         ...this.housekeepingOptions(cwd, controller),
         tools: [],
         canUseTool: async () => ({ behavior: 'deny', message: 'Model discovery cannot run tools' })
+      }).then((created) => {
+        if (controller.signal.aborted) created.close()
+        return created
       })
-      const listed = await query.supportedModels()
+      query = await Promise.race([pending, aborted])
+      controller.signal.throwIfAborted()
+      const listed = await Promise.race([query.supportedModels(), aborted])
       controller.signal.throwIfAborted()
       // A model whose catalog route needs a newer Mousse is not offered, even when Claude Code lists it.
       const { read, gated } = this.catalogs()
       const models = claudeLiveModelsForThisMousse(listed, read, gated)
       // A listing whose every model is gated still replaces the saved one: it is empty, not unknown.
       if (listed.length) {
-        const extras = models.length ? await claudeModelExtras(query, models, controller.signal) : {}
-        controller.signal.throwIfAborted()
+        const extras = models.length
+          ? await Promise.race([claudeModelExtras(query, models, controller.signal), aborted]).catch((error) => {
+              // Discovering optional reasoning settings can time out after the live list arrived.
+              if (error !== timeout) throw error
+              return {}
+            })
+          : {}
+        signal?.throwIfAborted()
+        if (controller.signal.reason !== timeout) controller.signal.throwIfAborted()
         this.settings.models = claudeModelOptions(models, extras)
         this.settings.modelRoutes = Object.fromEntries(models.flatMap((model) => (model.resolvedModel ? [[model.value, bareModelId(model.resolvedModel)]] : [])))
         this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
         try {
-          handedOver = this.startOlderCheck(query, controller, listed)
+          if (!controller.signal.aborted) handedOver = this.startOlderCheck(query, controller, listed)
         } catch {
           // The live list is saved; the older models wait for the next refresh.
         }
@@ -2183,7 +2576,19 @@ export class ClaudeSubscriptionProviderService {
       return 'Claude Subscription is disconnected. Reconnect it in Settings → Providers.'
     return this.dependencies.signedOutMessage?.() ?? `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
   }
-  private abortInFlight(): void {
+  /** Ends one-shots before the account is removed or the profile shuts down. */
+  async stopOneShots(): Promise<void> {
+    this.oneShotGeneration++
+    this.dropOneShotSpare()
+    for (const close of this.oneShotClosers) close()
+    await Promise.all([...this.oneShotReaping])
+  }
+
+  private abortInFlight(): Promise<void> {
+    const oneShotsStopped = this.stopOneShots()
+    this.signInEpoch += 1
+    this.signInObserved = this.signInRead + 1
+    this.signInAccount = undefined
     for (const controller of this.controllers) controller.abort()
     for (const threadId of this.activeThreads) this.questions.dismissAllForThread(threadId)
     for (const session of this.loginSessions) session.abort.abort()
@@ -2191,6 +2596,7 @@ export class ClaudeSubscriptionProviderService {
     this.queries.clear()
     this.closeLive()
     this.readyToCommit.clear()
+    return oneShotsStopped
   }
   commitConversation(threadId: string, history: string): void {
     // The turn committed, so the background-task notifications it consumed are done.
@@ -2265,6 +2671,36 @@ export class ClaudeSubscriptionProviderService {
     return Boolean(live && !live.dead)
   }
 
+  /**
+   * Whether a bot's turn runs on a warm process kept between its turns (`acquireLive` with `bot`), as threads do: a chat
+   * turn (the engine marks it, `BotAuthority.warm`) on the owner's own entry, where the process is the SDK's and the turn's
+   * signal ends it. A turn may be offered commands: one that runs a command marks its process to close when it ends
+   * (`ClaudeLockedGate`'s `onCommand`, before the call is let through), and the close ends everything it started
+   * (`closeBotLive`), so nothing a command started runs on into a later turn. A turn on a locked entry, whose processes
+   * the bot supervisor holds per dispatch, and every work or run turn stay one process per turn.
+   */
+  private botKeepsWarm(turn: ClaudeLockedTurn): boolean {
+    return Boolean(this.liveConfig && turn.ownerEntry && turn.authority.warm)
+  }
+  /** Closes a live process and ends everything it started. */
+  private closeLiveSession(threadId: string, live: LiveSession<TurnContext>, reason: 'closed' | 'idle' | 'idle-cap' = 'closed'): void {
+    const target = live.process()
+    live.close(reason)
+    if (this.live.get(threadId) === live) this.live.delete(threadId)
+    if (!live.reaped) this.reapClosed(threadId, target)
+  }
+  /**
+   * A bot's warm chat process on `threadId` is closed: its bot was paused or deleted, or its permissions or model changed.
+   * One running a turn closes when that turn ends, which keeps the permissions it started with. True when there was one.
+   */
+  releaseBotProcess(threadId: string): boolean {
+    const live = this.live.get(threadId)
+    if (!live || live.dead || !live.meta.bot) return false
+    if (this.activeThreads.has(threadId) || live.busy) live.meta.closeAfterTurn = true
+    else this.closeLiveSession(threadId, live)
+    return true
+  }
+
   stopThread(threadId: string): 'stopped' | 'not_active' {
     this.liveCommits.delete(threadId)
     const live = this.live.get(threadId)
@@ -2292,34 +2728,60 @@ export class ClaudeSubscriptionProviderService {
     const { pid, root } = target
     // The process is known by its handle and the time it was started, so a pid given to another program meanwhile is never killed.
     const reap = this.dependencies.reap ?? ((at: number, known?: SpawnedRoot) => reapProcessTree(at, { graceMs: CLAUDE_STOP_GRACE_MS, ...(known ? { root: known } : {}) }))
-    void reap(pid, root).then(
+    // Tracked until it settles: `stop` waits for every one.
+    const reaping: Promise<void> = reap(pid, root).then(
       (outcome) => {
         if (outcome === 'killed') console.warn('[claude-subscription] Claude Code did not exit after Stop; its processes were killed', { threadId, pid })
         if (outcome === 'survived')
           this.notifyHost(() => this.liveHost?.notice?.(threadId, `Stop could not end Claude Code's process for this chat (process ${pid}). It, or a command it started, may still be running.`))
       },
       (error: unknown) => console.warn('[claude-subscription] could not end a stopped Claude Code process', { threadId, pid, error: error instanceof Error ? error.message : String(error) })
-    )
+    ).finally(() => this.reaping.delete(reaping))
+    this.reaping.add(reaping)
   }
+  /** Process trees being ended (`reapClosed`). */
+  private readonly reaping = new Set<Promise<void>>()
+  private readonly windowsTrees = new Set<WindowsProviderTree>()
+
+  private trackWindowsTree(tree: WindowsProviderTree): void {
+    this.windowsTrees.add(tree)
+    void tree.exited.then(() => this.windowsTrees.delete(tree), (error: unknown) => {
+      this.windowsTrees.delete(tree)
+      console.warn('[claude-subscription] Windows provider drain failed', String(error))
+    })
+  }
+
   /** Threads that hold a live Claude process (diagnostics and tests). */
   liveThreadIds(): string[] {
     return [...this.live].filter(([, live]) => !live.dead).map(([threadId]) => threadId)
   }
   private closeLive(reason: 'closed' | 'idle' | 'idle-cap' = 'closed'): void {
-    for (const live of [...this.live.values()]) live.close(reason)
+    for (const live of this.live.values()) this.closeLiveSession(live.threadId, live, reason)
     this.live.clear()
     this.liveCommits.clear()
+  }
+  /** Live processes that are idle with no background work: the only ones Mousse closes early. A busy or pinned one never is. */
+  private idleLive(): LiveSession<TurnContext>[] {
+    return [...this.live.values()].filter(
+      (live) => !live.dead && !live.busy && live.pendingRuns === 0 && live.obligations.size === 0 && !this.activeThreads.has(live.threadId)
+    )
+  }
+  /**
+   * No cap on busy or pinned processes; only idle ones past a generous count (`maxIdleSessions`) close early, least
+   * recently used first. Checked when a process is started and whenever one goes idle.
+   */
+  private trimIdleLive(): void {
+    const cap = this.liveConfig?.maxIdleSessions
+    if (cap === undefined || this.stopped) return
+    let excess = this.idleLive().length - cap
+    while (excess-- > 0 && this.evictIdleLive()) { /* the oldest is closed */ }
   }
   /** Closes the least recently used idle process with no background work; false when every one is needed. */
   private evictIdleLive(): boolean {
     let victim: LiveSession<TurnContext> | undefined
-    for (const live of this.live.values()) {
-      if (live.dead || live.busy || live.pendingRuns > 0 || live.obligations.size > 0 || this.activeThreads.has(live.threadId)) continue
-      if (!victim || live.lastUsed < victim.lastUsed) victim = live
-    }
+    for (const live of this.idleLive()) if (!victim || live.lastUsed < victim.lastUsed) victim = live
     if (!victim) return false
-    victim.close('idle')
-    this.live.delete(victim.threadId)
+    this.closeLiveSession(victim.threadId, victim, 'idle')
     return true
   }
   /**
@@ -2331,7 +2793,7 @@ export class ClaudeSubscriptionProviderService {
    */
   private reusableLive(threadId: string, hard: readonly unknown[], resume: string | undefined, historyNow: string): LiveSession<TurnContext> | undefined {
     const live = this.live.get(threadId)
-    if (!live || live.dead || live.sessionId === undefined) return undefined
+    if (!hard[ACCOUNT_PART] || !hard[TURN_CREDENTIALS_PART] || !live || live.dead || live.sessionId === undefined) return undefined
     if (JSON.stringify(hard) !== JSON.stringify(live.meta.hardParts)) return undefined
     // The history this request carries must be the one the process holds: the saved fingerprint says
     // so, or, after a turn that did not finish, the boundary that turn left (`expectedKey`). A history
@@ -2340,18 +2802,22 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * The thread's live query for this turn: the open one when it is still the right one, a new one
-   * otherwise, or undefined when the turn has to run as a one-shot query (live queries are at their
-   * cap). The open one switches to the turn's model and effort in place (issue #359), and takes a Mousse credential
+   * otherwise, or undefined when the turn has to run as a one-shot query (live queries are off, or at
+   * a cap set for tests). The open one switches to the turn's model and effort in place (issue #359), and takes a Mousse credential
    * renewed for the same tools in place (#358); one that cannot is replaced. A new one has its MCP servers before it is
    * returned (`launch`). A query that has background work is never replaced silently: a change that needs a new
    * process is refused, naming the change, because it would end that work.
+   *
+   * `bot`: a bot's warm chat process (`botKeepsWarm`). It closes after `BOT_LIVE_IDLE_CLOSE_MS` with no turn, and what
+   * `create` leaves in `meta.cleanup` (its settings file) goes when it ends.
    */
   private async acquireLive(
     threadId: string,
     key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string; entrypoint?: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options,
-    mcp: { servers: () => TurnMcp; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal; leftOut(names: string[]): void; policy(names: string[]): void }
+    mcp: Omit<LaunchContext, 'threadId'> & { servers: () => TurnMcp; mousse: McpAttachment | null },
+    bot?: { idleCloseMs: number }
   ): Promise<LiveSession<TurnContext> | undefined> {
     const timings = this.liveConfig
     if (!timings) return undefined
@@ -2420,10 +2886,10 @@ export class ClaudeSubscriptionProviderService {
           errorInfo: { category: 'unavailable', retryable: false }
         })
       }
-      live.close('closed')
-      this.live.delete(threadId)
+      this.closeLiveSession(threadId, live)
     }
     if (this.live.size >= timings.maxSessions && !this.evictIdleLive()) return undefined
+    this.trimIdleLive()
     const created = new LiveSession<TurnContext>(
       threadId,
       {
@@ -2433,12 +2899,17 @@ export class ClaudeSubscriptionProviderService {
         taskEnded: (info) => this.notifyHost(() => this.liveHost?.taskEnded?.(threadId, info)),
         ended: () => {
           if (this.live.get(threadId) === created) this.live.delete(threadId)
+          const cleanup = created.meta.cleanup as (() => void) | undefined
+          created.meta.cleanup = undefined
+          cleanup?.()
         },
-        reap: (target) => this.reapClosed(threadId, target)
+        reap: (target) => this.reapClosed(threadId, target),
+        // Claude's own turn (a background result) ended too: the count of idle processes is checked again.
+        idle: () => queueMicrotask(() => this.trimIdleLive())
       },
-      timings
+      bot ? { ...timings, idleCloseMs: bot.idleCloseMs } : timings
     )
-    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags, entrypoint: key.entrypoint }
+    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags, entrypoint: key.entrypoint, ...(bot ? { bot: true } : {}) }
     this.live.set(threadId, created)
     try {
       // Before its output is read or a prompt pushed (#358): the SDK takes Claude Code's answer by itself.
@@ -2446,6 +2917,7 @@ export class ClaudeSubscriptionProviderService {
         threadId,
         timeoutMs: mcp.timeoutMs,
         ...(mcp.signal ? { signal: mcp.signal } : {}),
+        beforeStart: mcp.beforeStart,
         leftOut: mcp.leftOut,
         policy: mcp.policy
       })
@@ -2515,6 +2987,12 @@ export class ClaudeSubscriptionProviderService {
    * process clears them (Claude has read them by then) or Stop or the cap ends the process.
    */
   private continuationStarted(live: LiveSession<TurnContext>, run: LiveRun, info: ContinuationInfo): void {
+    // A bot's warm process never runs a turn nobody gave it: it is stopped, and the process with it.
+    if (live.meta.bot) {
+      live.discardContinuation(run)
+      this.closeLiveSession(live.threadId, live)
+      return
+    }
     const host = this.liveHost
     if (host?.continuationStarted) {
       try {
@@ -2564,6 +3042,8 @@ export class ClaudeSubscriptionProviderService {
                   const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason } })
                   // Fails closed: Claude Code reads a hook that throws as no decision, and would go on.
                   try {
+                    // No turn runs (between a warm process's turns): nothing is decided, and nothing runs.
+                    if (turn.controller.signal.aborted) return deny('No turn of this bot is running, so this call does not run.')
                     const args = (event.tool_input ?? {}) as Record<string, unknown>
                     const decided = turn.locked.preToolUse(event.tool_name, args)
                     if (!decided.ok) return deny(decided.reason)
@@ -2625,9 +3105,14 @@ export class ClaudeSubscriptionProviderService {
                 if (event.hook_event_name === 'PostToolUse') {
                   turnOf().locked?.committed(event.tool_use_id)
                   await turnOf().editCounter.success(event.tool_use_id, event.tool_response)
+                  // A secret the thread may use is hidden in the result before the model sees it and before Claude
+                  // Code saves it in its session file (a read of the secret's own file included).
+                  const masked = claudeMaskedToolOutput(event.tool_response, turnOf().input.secretMasker?.())
+                  const rewrite = masked === undefined ? {} : { updatedToolOutput: masked }
                   // A bot's file read is framed as data, like its thread and MCP results.
                   if (turnOf().locked && CLAUDE_FILE_TEXT_TOOLS.has(event.tool_name))
-                    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: CLAUDE_BOT_FILE_DATA_NOTE } }
+                    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: CLAUDE_BOT_FILE_DATA_NOTE, ...rewrite } }
+                  if (masked !== undefined) return { hookSpecificOutput: { hookEventName: 'PostToolUse', ...rewrite } }
                 }
                 return {}
               }
@@ -2803,9 +3288,11 @@ export class ClaudeSubscriptionProviderService {
    * prompt; a fork's first turn that cannot open its branch fails, and the resend forks again.
    */
   async chat(input: ClaudeSubscriptionChatInput): Promise<string> {
+    turnTimingMark(input.threadId, 'provider')
     try {
       return await this.chatTurn(input, true)
     } catch (error) {
+      if (error instanceof ClaudeTurnCredentialsChanged) return this.chatTurn(input, false, true)
       if (!(error instanceof CutRefused)) throw error
       if (error.fork) {
         this.forgetConversation(input.threadId)
@@ -2815,8 +3302,14 @@ export class ClaudeSubscriptionProviderService {
       return this.chatTurn(input, false)
     }
   }
-  private async chatTurn(input: ClaudeSubscriptionChatInput, branching: boolean): Promise<string> {
+  private async chatTurn(input: ClaudeSubscriptionChatInput, branching: boolean, fresh = false): Promise<string> {
     input.signal?.throwIfAborted()
+    // The thread's last one-shot query answered but may still be writing its session: it is resumed once it has exited.
+    const previousExit = this.oneShotExits.get(input.threadId)
+    if (previousExit) {
+      await previousExit.exited
+      input.signal?.throwIfAborted()
+    }
     if (this.checkDue()) {
       // Reserve the thread while the sign-in check runs so a second turn cannot slip in.
       if (this.activeThreads.has(input.threadId))
@@ -2862,17 +3355,18 @@ export class ClaudeSubscriptionProviderService {
     // The compaction threshold is set over both: Claude Code's own session holds the tool calls and
     // results that fill its context, so only its auto-compact can keep it under the threshold.
     const compaction = { ...claudeAutoCompactEnv(input.autoCompactTokens), ...this.promptCacheEnv(input.promptCacheHour, locked ? undefined : input.cwd) }
-    // A bot turn on the owner's own entry runs in that entry's environment (their sign-in), without
-    // the variables of the user's MCP servers, which it never gets. It loads no settings files, so
-    // the `env` of the owner's Claude settings, where a proxy sign-in often lives, is applied here.
-    // The client name is Mousse's unless that environment names its own (`entrypointEnv`).
+    // Bot turns start with the platform allowlist. The owner's entry keeps only its sign-in,
+    // including one stored in Claude settings, since the turn loads none of those settings.
+    const ownerEnv = this.environment()
     const baseEnv = locked && !locked.ownerEntry
       ? this.dependencies.lockedEnv!(locked.cwd)
       : locked
-        ? claudeEffectiveEnvironment(this.environment())
-        : this.environment()
+        ? claudeSignInEnvironment(ownerEnv, {}, lockedEnv({ platform: process.platform, base: ownerEnv, driver: 'claude', credential: 'subscription', scratch: locked.authority.workspace?.scratch ?? locked.cwd }))
+        : ownerEnv
     const entrypoint = this.entrypointEnv(baseEnv)
-    const turnEnv = this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint })
+    // A bot turn always defers Mousse's tools behind Claude Code's tool search (the bot's tool catalogue, docs/plans/
+    // bot-context.md §15): its tool list stays names only, whatever the size of the list or Claude Code's own default.
+    const turnEnv: NodeJS.ProcessEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1', ...CLAUDE_BOT_TOOL_SEARCH_ENV } : {}) }
     // A bot turn's commands (Linux): Claude Code keeps its temporary files in a private folder, and
     // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
     const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined
@@ -2887,6 +3381,8 @@ export class ClaudeSubscriptionProviderService {
     const controller = new AbortController()
     this.controllers.add(controller)
     let query: Query | undefined
+    /** A one-shot query that answered and is still exiting (`awaitOneShotExit`): what it uses is let go after it exits. */
+    let exiting: Promise<void> | undefined
     let live: LiveSession<TurnContext> | undefined
     let liveRun: LiveRun | undefined
     /** The turn failed with a usage limit: its request is in the session, whatever evidence classified it. */
@@ -2931,25 +3427,13 @@ export class ClaudeSubscriptionProviderService {
       this.forgetConversation(input.threadId)
       stored = undefined
     }
-    const saved = stored && sessionBoundTo(stored, instanceId) ? stored : undefined
+    const candidate = stored && sessionBoundTo(stored, instanceId) ? stored : undefined
     const historyNow = historyKey(input.history ?? '')
-    // A model change resumes the session too (issue #359): Claude Code takes a session made on another model, as its
-    // own model switch does, so the conversation keeps its thinking, images and tool calls.
-    const sameSetup = saved?.cwd === resolve(input.cwd)
-    const resume = !saved?.fork && sameSetup && saved?.historyKey === historyNow ? saved.sessionId : undefined
-    /**
-     * Issue #360: the session resumed cut, into a new session (`id`) so the one it came from stays
-     * whole. A fork's first turn makes its branch (whatever the thread's history holds: every turn
-     * since the branch was made ran here and did not finish); an undo or an edit cuts the session
-     * after the turn whose history this one carries.
-     */
+    let saved: SavedSession | undefined
+    let resume: string | undefined
     let branch: { from: string; at: string; id: string; turns: SessionTurn[]; fork: boolean } | undefined
-    if (saved?.fork && branching) branch = { ...saved.fork, id: saved.sessionId, turns: saved.turns ?? [], fork: true }
-    else if (saved && !saved.fork && !resume && sameSetup && branching && !input.continuation && !locked) {
-      const cut = cutForHistory(saved, historyNow, claudeHomeOf(env))
-      if (cut) branch = { from: saved.sessionId, at: cut.at, id: randomUUID(), turns: cut.turns, fork: false }
-    }
-    const metrics = new ClaudeMetricsCollector(resume ?? branch?.from, saved?.usageBaseline)
+    let credentialIdentity: SavedSession['credentialIdentity']
+    const metrics = new ClaudeMetricsCollector()
     const editCounter = new ClaudeNativeEditCounter(input.cwd, input.onLineEdits)
     const savedHistoryKey = stored?.historyKey
     if (stored) {
@@ -2970,7 +3454,10 @@ export class ClaudeSubscriptionProviderService {
      * compaction resumes the session with; `previous` when the turn started no process at all.
      */
     const ranEntrypoint = (previous?: string): { entrypoint?: string } => {
-      const name = live ? live.meta.entrypoint as string | undefined : query ? env.CLAUDE_CODE_ENTRYPOINT : previous
+      let name = previous
+      if (live) name = live.meta.entrypoint as string | undefined
+      // A finished one-shot detaches its query before saving the session.
+      else if (query || frames.sessionId) name = env.CLAUDE_CODE_ENTRYPOINT
       return name ? { entrypoint: name } : {}
     }
     const turnsBefore = (sessionId: string): SessionTurn[] =>
@@ -2978,7 +3465,7 @@ export class ClaudeSubscriptionProviderService {
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     /**
-     * A one-shot query's steers (no live session: a turn past the live-process cap, or a bot's turn, which takes its
+     * A one-shot query's steers (no live session: live queries turned off, or a bot's one-query turn, which takes its
      * owner's notes and its pack after a compaction this way; nobody else steers a bot's thread), collected and waiting
      * to go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
      */
@@ -3070,6 +3557,8 @@ export class ClaudeSubscriptionProviderService {
       const drained = input.drainSteerEntry ? input.drainSteerEntry(holds ? { expect: 'cut' } : undefined) : undefined
       const steer = (drained ? drained.text : holds ? undefined : input.drainSteer?.())?.trim()
       if (!steer) return
+      // A steer sent with images goes in with them.
+      const images = drained?.images ?? []
       const forced = drained?.forced === true
       // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting. On a
       // bot's turn, so does a call its gate let start that Mousse has not seen announced yet (`ClaudeLockedGate.busy`).
@@ -3090,7 +3579,7 @@ export class ClaudeSubscriptionProviderService {
           pushedSteers.set(id, { text: steer, ...(drained ? { token: drained.token } : {}), steered, settled: false, placed: false })
           frames.atNextMessage(() => steerPlace(id))
         }
-        void live.steer(liveRun, steer, pushed, {
+        void live.steer(liveRun, steerContent(steer, images), pushed, {
           forced,
           subagents: frames.foregroundSubagents(),
           // Moved once: a later steer does not ask again.
@@ -3115,7 +3604,7 @@ export class ClaudeSubscriptionProviderService {
       }
       // Taken, not accepted: it is accepted only once the restarted query reads it, and handed back if the turn ends first.
       input.steerTaken?.(drained?.token)
-      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), steered })
+      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), ...(images.length ? { images } : {}), steered })
       if (query && !interruptRequested) {
         interruptRequested = true
         // From the cut's check to the interrupt landing, a bot's gate lets no call start: none is cut mid-run.
@@ -3157,18 +3646,49 @@ export class ClaudeSubscriptionProviderService {
     const threadMode: ThreadPermissionMode = (requestedMode === 'full' && bypassDisabled) || (requestedMode === 'auto' && claudeAutoModeDisabled(this.environment(), { cwd: input.cwd }))
       ? 'accept_edits'
       : requestedMode
-    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp)) } : {}) }
+    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp), () => { if (live?.meta.bot) live.meta.closeAfterTurn = true }) } : {}) }
     // The bot's private temporary folder is in use until this turn ends; the last of its turns to end empties it.
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
     let lockedSettingsFolder: string | undefined
     try {
-      const signedIn = await this.authenticated(controller.signal, env)
-      if (!signedIn)
-        throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      const owner = !locked || locked.ownerEntry === true
+      const signIn = await this.readSignIn(env, controller.signal, owner)
+      if (signIn.result.kind !== 'signed_in')
+        throw new AppError({ code: 'claude_subscription_sign_in_required', message: signIn.result.message, errorInfo: { category: 'unavailable', retryable: false } })
+      const turnCredentials = () => locked ? 'locked' : this.turnCredentialKey(input.cwd, turnSettings)
+      const credentialKey = turnCredentials()
+      const probedSubject = this.probedSubject(env, signIn.result)
+      const assertSignIn = (dispatch?: 'live' | 'fresh') => {
+        // The sign-in subject covers managed settings and their drop-ins. Reread it after warm SDK setup.
+        if (credentialKey !== turnCredentials() || (dispatch && probedSubject !== this.accountSubject(env))) {
+          const previous = this.live.get(input.threadId)
+          if (previous) this.closeLiveSession(input.threadId, previous)
+          if (dispatch === 'live' && !input.continuation && (!owner || !this.signedOut()))
+            throw new ClaudeTurnCredentialsChanged()
+          throw new Error('The Claude Code sign-in changed before the turn could be sent. Try again.')
+        }
+        if (owner && (signIn.epoch !== this.signInEpoch || this.signedOut()))
+          throw new Error('The Claude Code sign-in changed before the turn could be sent. Try again.')
+      }
+      assertSignIn()
+      // Settings and sign-in can change during setup, even if the adapter admitted the turn on the
+      // previous account. Compare with the credential that actually opened the saved session.
+      credentialIdentity = sessionCredentialIdentity(signIn.identity, probedSubject, credentialKey)
+      if (candidate && sessionUsesCredential(candidate, credentialIdentity)) saved = candidate
+      const sameSetup = saved?.cwd === resolve(input.cwd)
+      // A model change can still continue the same session (issue #359).
+      if (!fresh && saved && !saved.fork && sameSetup && savedHistoryKey === historyNow) resume = saved.sessionId
+      // Issue #360: fork from a saved boundary or cut back to an earlier turn on undo or edit.
+      if (saved?.fork && branching) branch = { ...saved.fork, id: saved.sessionId, turns: saved.turns ?? [], fork: true }
+      else if (saved && !saved.fork && !resume && sameSetup && branching && !input.continuation && !locked) {
+        const cut = cutForHistory(saved, historyNow, claudeHomeOf(env))
+        if (cut) branch = { from: saved.sessionId, at: cut.at, id: randomUUID(), turns: cut.turns, fork: false }
+      }
+      metrics.beginQuery(resume ?? branch?.from, saved?.usageBaseline)
+      if (locked) turnTimingMark(input.threadId, 'signIn')
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
-      controller.signal.throwIfAborted()
       const chosen = claudeSpeedOf(input.model)
       const selected = parseThinkingSuffixFromModelId(chosen.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
@@ -3190,6 +3710,8 @@ export class ClaudeSubscriptionProviderService {
       const permissionMode: PermissionMode = restricted ? 'default' : CLAUDE_PERMISSION_MODES[threadMode]
       const launchAppend = locked ? [] : claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
+      // A bot's chat turn on the owner's entry runs on a warm process (`botKeepsWarm`), started with exactly this launch.
+      const botWarm = lockedTurn && this.botKeepsWarm(lockedTurn) ? lockedTurn.authority.warm : undefined
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
       const hard = [
         instanceId,
@@ -3197,30 +3719,20 @@ export class ClaudeSubscriptionProviderService {
         appendTexts.filter(Boolean).join('\n\n'),
         // Not the token: a new one for the same tools is given to the running process (`renewMousseServer`).
         input.mcp ? [input.mcp.url, input.mcp.tools ?? null] : null,
-        readOnlyChild
+        readOnlyChild,
+        botWarm ? claudeBotLaunchKey(botWarm, claudeLockedOptions(lockedTurn!, { env, mousseTools: Boolean(input.mcp) }), flags) : null,
+        signIn.identity ?? null,
+        credentialKey ?? null
       ]
-      const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
+      const reusable = input.continuation || fresh ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
       /** The prompt, with the history in front when no session holds it: none resumed, cut or kept warm. */
       const contentFor = (reuse: boolean): SDKUserMessage['message']['content'] => {
         const prompt = (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') +
           (!resume && !branch && !reuse && input.history
             ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
             : '') + input.prompt
-        const built: SDKUserMessage['message']['content'] = [
-          { type: 'text', text: prompt || '(image attachment)' }
-        ]
-        for (const image of input.images ?? []) {
-          if (
-            !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) ||
-            Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024
-          )
-            throw new Error(`Unsupported Claude image: ${image.name}`)
-          built.push({
-            type: 'image',
-            source: { type: 'base64', media_type: image.mimeType as 'image/png', data: image.data }
-          })
-        }
-        return built
+        for (const image of input.images ?? []) if (!claudeTakesImage(image)) throw new Error(`Unsupported Claude image: ${image.name}`)
+        return [{ type: 'text', text: prompt || '(image attachment)' }, ...claudeImageBlocks(input.images ?? [])]
       }
       // A process that holds this history already is the conversation; nothing is cut. A new process started
       // in its place (`acquireLive` could not switch its model) is told again below.
@@ -3280,6 +3792,11 @@ export class ClaudeSubscriptionProviderService {
         this.notifyHost(() => this.liveHost?.notice?.(input.threadId, claudeMcpPolicyText(names)))
       }
       const observe = (message: SDKMessage): void => {
+        turnTimingMark(input.threadId, 'firstFrame')
+        if (message.type === 'stream_event' && !message.parent_tool_use_id) {
+          if (message.event.type === 'message_start') turnTimingMark(input.threadId, 'messageStart')
+          else if (message.event.type === 'content_block_delta' && message.event.delta.type === 'text_delta') turnTimingFirstText(input.threadId)
+        }
         if (userServers.size > 0) {
           const left = claudeMcpLeftOut(message, userServers)
           if (left?.length) noteLeftOut(left)
@@ -3310,18 +3827,23 @@ export class ClaudeSubscriptionProviderService {
         }
       }
       // A locked turn: the locked profile over everything above, and nothing that would widen it.
-      const lockedOptions = (sdkController: AbortController, turnOf: () => TurnContext): Options => {
-        // Made before the options: a sandbox that closes Mousse's entries in the temporary folder closes this one too.
-        lockedSettingsFolder ??= mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
+      const lockedOptions = (settingsFolder: string, sdkController: AbortController, turnOf: () => TurnContext): Options => {
         const base = buildOptions(sdkController, turnOf, false)
+        const spawnLocked = locked!.ownerEntry ? undefined : claudeLockedSpawn({
+          onProcess: locked!.onProcess,
+          onWindowsTree: (tree) => this.trackWindowsTree(tree)
+        })
         const own = claudeLockedOptions(lockedTurn!, {
           env,
           mousseTools: Boolean(input.mcp),
           // On the owner's entry the process is the turn's own and the SDK's: the turn's signal ends it.
-          ...(locked!.ownerEntry ? {} : { spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {}) })
+          ...(spawnLocked ? { spawn: (options) => {
+            if (this.stopped) throw new Error('Claude provider is stopped')
+            return spawnLocked(options)
+          } } : {})
         })
         const settings = { ...(typeof base.settings === 'object' ? base.settings : {}), ...(own.settings as SdkSettings) }
-        const options: Options = { ...base, ...own, settings: claudeLockedSettingsFile(settings, lockedSettingsFolder) }
+        const options: Options = { ...base, ...own, settings: claudeLockedSettingsFile(settings, settingsFolder) }
         for (const name of CLAUDE_LOCKED_REMOVED_OPTIONS) delete options[name]
         // The same thread's own session resumes; nothing else is carried over.
         if (resume) options.resume = resume
@@ -3343,7 +3865,10 @@ export class ClaudeSubscriptionProviderService {
       if (input.continuation) {
         // Claude started this turn itself: it joins the one already in flight and pushes no prompt.
         live = this.live.get(input.threadId)
-        const wake = live && !live.dead ? live.claimContinuation(input.continuationId) : undefined
+        const sameCredentials = signIn.identity && credentialKey && live &&
+          live.meta.hardParts?.[ACCOUNT_PART] === signIn.identity && live.meta.hardParts[TURN_CREDENTIALS_PART] === credentialKey
+        if (live && !sameCredentials) this.closeLiveSession(input.threadId, live)
+        const wake = sameCredentials && live && !live.dead ? live.claimContinuation(input.continuationId) : undefined
         if (!live || !wake) throw new Error('Claude has no turn of its own to continue for this thread')
         liveRun = wake
         live.current = turn
@@ -3368,15 +3893,28 @@ export class ClaudeSubscriptionProviderService {
           })
         }
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
+        assertSignIn('live')
         liveRun.attach(observe)
       } else {
         const key = { hard, soft: this.launchKey(env, integrations, launchSettings, input.mcp?.relay ?? null), mode: permissionMode, flags, historyNow, entrypoint: env.CLAUDE_CODE_ENTRYPOINT }
         try {
-          // A bot's process is never kept warm: a locked turn is one query.
-          live = locked ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
+          // A bot's chat turn on the owner's entry runs on its warm process (`botWarm`); every other bot turn is one query.
+          // The warm process's settings file lives as long as it does, in a folder of its own.
+          if (!credentialKey) {
+            const previous = this.live.get(input.threadId)
+            if (previous) this.closeLiveSession(input.threadId, previous)
+          }
+          live = fresh || (locked && !botWarm) || !signIn.identity || !credentialKey ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
+            assertSignIn('live')
             created.current = turn
-            return buildOptions(created.lifetime, () => created.current ?? turn, true)
-          }, { servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal, leftOut, policy })
+            if (!botWarm) return buildOptions(created.lifetime, () => created.current ?? turn, true)
+            const folder = mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
+            created.meta.cleanup = () => removeSettingsFolder(folder)
+            return lockedOptions(folder, created.lifetime, () => created.current ?? turn)
+          }, {
+            servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal,
+            beforeStart: () => assertSignIn('live'), leftOut, policy
+          }, botWarm ? { idleCloseMs: BOT_LIVE_IDLE_CLOSE_MS } : undefined)
         } catch (error) {
           // A refused change started nothing: the conversation is as it was, so the next request can resume it.
           // Mousse keeps the refused message in the transcript, so the history the next request carries has
@@ -3398,6 +3936,7 @@ export class ClaudeSubscriptionProviderService {
           }
           throw error
         }
+        if (live) turnTimingMark(input.threadId, live === reusable ? 'processWarm' : 'processNew')
         if (live && live === reusable) branch = undefined
         // The process found holding the conversation was replaced (its launch settings changed, or it could not switch
         // its model), or the turn runs as a one-shot query: the prompt carries what no resumed session does.
@@ -3418,7 +3957,9 @@ export class ClaudeSubscriptionProviderService {
             // A cancel under way (another turn was cut off) would sweep this prompt up; wait for it.
             for (;;) {
               try {
+                assertSignIn('live')
                 promptId = live.push(liveRun, userMessage(live.sessionId ?? resume ?? branch?.id ?? ''))
+                turnTimingMark(input.threadId, 'prompt')
                 break
               } catch (error) {
                 if (!(error instanceof CancelInProgress)) throw error
@@ -3463,11 +4004,12 @@ export class ClaudeSubscriptionProviderService {
           // Send now's interrupt cut the steer's own request (it landed after Claude Code took the steer): the person
           // asked for that, so the turn ends with what the model wrote, not as a failure. Only a usage limit still fails it.
           sendNowCut = result === liveRun.sendNowAbort
-          const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits)
+          const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits, frames.retries)
           if (failure) throw failure
           if (sendNowCut) input.onSendNowCut?.()
-          if (frames.segmentEmpty && 'result' in result) {
-            frames.text += result.result
+          const resultText = 'result' in result ? frames.resultText(result.result) : ''
+          if (frames.segmentEmpty && resultText) {
+            frames.text += resultText
             input.onText(frames.text)
           }
         } else if (liveRun.rateLimits.hold) {
@@ -3492,8 +4034,21 @@ export class ClaudeSubscriptionProviderService {
         // A one-shot query: the prompt ends with the turn, which ends the process.
         startSteering()
         promptId = randomUUID()
-        let nextPrompt: AsyncIterable<SDKUserMessage> = messages()
-        const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
+        // The same for a bot's one-shot query: no wait while the last reading said signed in (`signInFresh`).
+        const threadId = input.threadId
+        let nextPrompt: AsyncIterable<SDKUserMessage> = (async function* (): AsyncGenerator<SDKUserMessage> {
+          assertSignIn('fresh')
+          turnTimingMark(threadId, 'prompt')
+          yield* messages()
+        })()
+        /** The query that answered, still exiting (`awaitOneShotExit`). */
+        let detached: Promise<void> | undefined
+        /** The query runs on a steer: the turn restarted with it. */
+        let resumedWithSteer = false
+        /** The last query ran on a steer and ended with no words of the model's after it (`onSteerUnanswered`). */
+        let steerUnanswered = false
+        // Made before the options: a sandbox that closes Mousse's entries in the temporary folder closes this one too.
+        const options = locked ? lockedOptions(lockedSettingsFolder ??= mkdtempSync(join(tmpdir(), 'mousse-claude-settings-')), controller, () => turn) : buildOptions(controller, () => turn, false)
         /**
          * Stop ended a query whose prompt carries steers it had not been seen reading, and sent its process SIGTERM
          * (`endOneShot`). What the process wrote before it died is still read, until its output ends or
@@ -3518,11 +4073,13 @@ export class ClaudeSubscriptionProviderService {
           const turnTextLength = frames.text.length
           // Checked right before the start: a steer a Stop came before is handed back, and no process ever gets it.
           controller.signal.throwIfAborted()
+          assertSignIn('fresh')
           // Each process the turn starts (a steer restarts it) gets the turn's MCP servers before its prompt (#358).
           query = (await this.launch(nextPrompt, options, turnServers(), {
             threadId: input.threadId,
             signal: controller.signal,
             timeoutMs: claudeMcpRegistrationMs(env),
+            beforeStart: () => assertSignIn('fresh'),
             leftOut,
             policy
           })).query
@@ -3549,12 +4106,20 @@ export class ClaudeSubscriptionProviderService {
                   (message.subtype !== 'success' || message.is_error || frames.rateLimits.hold) &&
                   !(interruptRequested && steers.length)
                 )
-                  throw claudeResultFailure(message, frames.rateLimits)
-                if (frames.text.length === turnTextLength && 'result' in message) {
-                  frames.text += message.result
+                  throw claudeResultFailure(message, frames.rateLimits, frames.retries)
+                const resultText = 'result' in message ? frames.resultText(message.result) : ''
+                if (frames.text.length === turnTextLength && resultText) {
+                  frames.text += resultText
                   input.onText(frames.text)
                 }
+                steerUnanswered = resumedWithSteer && !frames.text.slice(turnTextLength).trim()
                 success = true
+                // The answer is complete. Claude Code still writes its session and exits, which the turn does not wait
+                // for: the thread's next start does. A steer taken meanwhile restarts the query once it has exited.
+                if (!steers.length && !interruptRequested) {
+                  detached = exiting = this.awaitOneShotExit(input.threadId, query, output)
+                  break
+                }
               }
             }
           } catch (error) {
@@ -3570,8 +4135,13 @@ export class ClaudeSubscriptionProviderService {
           const completed = query
           query = undefined
           collectSteer()
-          completed.close()
-          if (!steers.length) break
+          if (!detached) completed.close()
+          if (!steers.length) {
+            if (steerUnanswered) input.onSteerUnanswered?.()
+            break
+          }
+          if (detached) await detached
+          detached = undefined
           controller.signal.throwIfAborted()
           const sessionId = frames.sessionId
           if (!sessionId) throw new Error('Claude steering could not identify the active session')
@@ -3585,8 +4155,9 @@ export class ClaudeSubscriptionProviderService {
           const sending = [...(carried?.steers ?? []), ...steers.splice(0)]
           const guidanceId = randomUUID()
           carried = { id: guidanceId, steers: sending }
-          const guidance = sending.map((steer) => steer.text).join('\n')
+          const guidance = steerContent(sending.map((steer) => steer.text).join('\n'), sending.flatMap((steer) => steer.images ?? []))
           nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+            assertSignIn()
             yield {
               type: 'user',
               message: { role: 'user', content: guidance },
@@ -3598,16 +4169,19 @@ export class ClaudeSubscriptionProviderService {
           interruptRequested = false
           turn.locked?.cut(false)
           success = false
+          resumedWithSteer = true
+          steerUnanswered = false
           if (frames.text) frames.text += '\n\n'
         }
       }
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
+      assertSignIn()
       const sessionId = frames.sessionId
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
         ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, turns: withTurn(sessionId), ...ranEntrypoint() }
+        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, credentialIdentity, turns: withTurn(sessionId), ...ranEntrypoint() }
       }
       this.save()
       this.readyToCommit.add(input.threadId)
@@ -3620,11 +4194,14 @@ export class ClaudeSubscriptionProviderService {
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
       throw error
     } finally {
+      turnTimingEnd(input.threadId)
       // Only this turn's controller: a live query is not the turn's to abort.
       controller.abort()
       // Background helpers keep calling tools after the turn ended, or was cancelled: they are checked by
       // this turn's policy under a controller of their own, until the next turn replaces it.
-      if (live && live.current === turn) live.current = { ...turn, controller: new AbortController() }
+      // A bot's warm process has none: between its turns it runs nothing, and any call it made would be denied (an ended
+      // turn's controller), since only the next turn's own grant gate may decide one.
+      if (live && live.current === turn) live.current = { ...turn, controller: live.meta.bot ? controller : new AbortController() }
       if (live && liveRun) {
         // A turn that ended without finishing still read what its result carried; a cancelled one did not.
         if (!liveRun.settled) live.abandon(liveRun)
@@ -3635,6 +4212,9 @@ export class ClaudeSubscriptionProviderService {
         if (!success && liveRun.ids.size > 0) live.meta.pushedFailed = true
         liveRun.onRead = undefined
       } else query?.close()
+      // A bot's warm process outlives only a turn that finished: one that failed, was stopped or reached its deadline ends
+      // with its process, and the next turn starts a fresh one. So does one asked to close meanwhile (`releaseBotProcess`).
+      if (live?.meta.bot && (!success || live.meta.closeAfterTurn)) this.closeLiveSession(input.threadId, live)
       // No steer is collected after the abort above: a one-shot turn's steers Claude Code never read go back now.
       returnUnreadOneShotSteers()
       // After the cancel above has started: a steer Claude Code has not read is accepted or handed back before the turn
@@ -3647,18 +4227,22 @@ export class ClaudeSubscriptionProviderService {
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
-      releaseBotTemp?.()
-      // Claude Code read the settings when it started; nothing reads them once the turn ended.
-      if (lockedSettingsFolder) {
-        try {
-          rmSync(lockedSettingsFolder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-        } catch (error) {
-          console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
-        }
+      this.trimIdleLive()
+      const settingsFolder = lockedSettingsFolder
+      const release = (): void => {
+        releaseBotTemp?.()
+        // Claude Code read the settings when it started; nothing reads them once the turn ended.
+        if (settingsFolder) removeSettingsFolder(settingsFolder)
       }
+      if (exiting) void exiting.then(release)
+      else release()
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
-      const report = metrics.report()
+      const quota = (liveRun?.rateLimits ?? frames.rateLimits).planUse()
+      // Asked to resume a session, Claude Code ran the turn in another one: the conversation it held is not there.
+      const resumeLost = resume !== undefined && frames.sessionId !== undefined && frames.sessionId !== resume
+      if (resumeLost) console.warn('[claude-subscription] Claude Code was asked to resume a session and started another one', { threadId: input.threadId })
+      const report = { ...metrics.report(), ...(quota.length ? { quota } : {}), ...(resumeLost ? { resumeLost: true as const } : {}) }
       try {
         const baseline = metrics.snapshot()
         const sessionId = frames.sessionId
@@ -3687,6 +4271,7 @@ export class ClaudeSubscriptionProviderService {
               model: parseThinkingSuffixFromModelId(claudeSpeedOf(input.model).model).baseId,
               ...(baseline ? { usageBaseline: baseline } : {}),
               instanceId,
+              ...(credentialIdentity !== undefined ? { credentialIdentity } : {}),
               ...ranEntrypoint(_ranWith)
             }
           }
@@ -3731,7 +4316,7 @@ export class ClaudeSubscriptionProviderService {
     this.settings.sessions = {}
     // Everything running stops first, whatever saving does next: a turn, a warm process and its
     // helpers, a sign-in. A failed save is reported after.
-    this.abortInFlight()
+    await this.abortInFlight()
     this.save()
   }
   /**
@@ -3748,12 +4333,17 @@ export class ClaudeSubscriptionProviderService {
    * the home reads signed in.
    */
   async reconnect(): Promise<boolean> {
-    this.abortInFlight()
+    await this.abortInFlight()
     this.cliProbe = undefined
     return this.authenticated()
   }
-  stop(): void {
+  /**
+   * Stops the service for good. Resolves once every Claude Code process it kept open has exited, a tree that outlived
+   * the grace killed with everything it started (`reapClosed`), so a daemon that stops never leaves one running.
+   */
+  async stop(): Promise<void> {
     this.stopped = true
+    const oneShotsStopped = this.stopOneShots()
     for (const controller of this.controllers) controller.abort()
     for (const session of this.loginSessions) session.abort.abort()
     for (const [threadId, query] of this.queries) {
@@ -3761,14 +4351,43 @@ export class ClaudeSubscriptionProviderService {
       this.questions.dismissAllForThread(threadId)
     }
     this.queries.clear()
+    for (const { query } of this.oneShotExits.values()) query.close()
     for (const threadId of this.live.keys()) this.questions.dismissAllForThread(threadId)
     this.closeLive()
     this.readyToCommit.clear()
+    const drain = [...this.windowsTrees].map((tree) => tree.stop())
+    const results = await Promise.allSettled([...this.reaping, ...drain, oneShotsStopped])
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Claude processes could not be stopped')
   }
 }
 
-/** A steer a one-shot query took: its text, its drain's token when it had one, and its acceptance. */
-type OneShotSteer = { text: string; token?: string; steered: () => void }
+/** A steer a one-shot query took: its text and images, its drain's token when it had one, and its acceptance. */
+type OneShotSteer = { text: string; token?: string; images?: ChatImageAttachment[]; steered: () => void }
+
+/** The images Claude takes: JPEG, PNG, GIF or WebP within the per-image size (`shared/imageLimits.ts`). */
+function claudeTakesImage(image: ChatImageAttachment): boolean {
+  return providerTakesImage(image)
+}
+
+/** Images as Claude's base64 image blocks (each one `claudeTakesImage` accepts). */
+function claudeImageBlocks(images: readonly ChatImageAttachment[]): Exclude<SDKUserMessage['message']['content'], string> {
+  return images.filter(claudeTakesImage).map((image) => ({
+    type: 'image' as const,
+    source: { type: 'base64' as const, media_type: image.mimeType as 'image/png', data: image.data }
+  }))
+}
+
+/**
+ * A steer's message content: its text alone, or its text and its images as blocks. An image Claude does not take is
+ * left out with a warning: the text still goes in now, and the transcript keeps the image.
+ */
+export function steerContent(text: string, images: readonly ChatImageAttachment[]): SDKUserMessage['message']['content'] {
+  if (!images.length) return text
+  const blocks = claudeImageBlocks(images)
+  if (blocks.length < images.length) console.warn('[claude] a steer image Claude does not take was left out', { left: images.length - blocks.length })
+  return blocks.length ? [{ type: 'text', text }, ...blocks] : text
+}
 
 /**
  * The model answered the prompt a one-shot query was started with (`id`): it streams or writes a message, Claude Code's
@@ -3799,6 +4418,9 @@ function oneShotPromptRead(message: unknown, id: string): boolean {
 /** The model Claude Code names on a message it made up itself, with no request to the model. */
 const SYNTHETIC_MODEL = '<synthetic>'
 
+/** The prompt is still unsent, so it can be retried with the transcript in a fresh process. */
+class ClaudeTurnCredentialsChanged extends Error {}
+
 /** Claude Code could not resume a session cut (`cutRefused`); `fork` when the cut was a fork's branch. */
 class CutRefused extends Error {
   constructor(message: string, readonly fork: boolean) {
@@ -3807,12 +4429,16 @@ class CutRefused extends Error {
 }
 
 /** `resultFailure`, except that a plan usage limit (or a turn Mousse ended because Claude Code held it) is a `provider_usage_limit`. */
-function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows): Error | undefined {
-  return usageLimitFromResult(message, seen) ?? resultFailure(message)
+function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows, retries?: ProviderRetries): Error | undefined {
+  return usageLimitFromResult(message, seen) ?? resultFailure(message, retries)
 }
 
-/** The error a result frame stands for, or undefined when the turn succeeded. */
-function resultFailure(message: SDKResultMessage): Error | undefined {
+/**
+ * The error a result frame stands for, or undefined when the turn succeeded. A provider's failure (`API Error: …`, or
+ * any failure after retries) keeps the provider's words as its message (redacted, see `providerMessageText`); `retries`
+ * are the retries Claude Code made of the request before it gave up.
+ */
+export function resultFailure(message: SDKResultMessage, retries?: ProviderRetries): Error | undefined {
   if (message.subtype === 'success' && !message.is_error) return undefined
   // Only a bot's turn sets `maxTurns`: reaching it ends this turn, not the work, which a bot carries on in its next one.
   if (message.subtype === 'error_max_turns') return new AppError({ code: PROVIDER_TURN_CAP, message: 'Claude Code reached the most steps one turn may take.', errorInfo: { category: 'internal', retryable: false } })
@@ -3825,6 +4451,20 @@ function resultFailure(message: SDKResultMessage): Error | undefined {
       errorInfo: { category: 'unavailable', retryable: true }
     })
   }
+  const details = retries ? { retries } : undefined
   // The provider refused the request (`API Error: 400 …`): the transcript shows its status and message.
-  return providerApiError(failure, 'claude') ?? new Error(failure)
+  const refused = providerApiError(failure, 'claude', details)
+  if (refused) return refused
+  // The request got no answer at all (`API Error: Connection refused …`, a timeout): the provider is unreachable.
+  const unreachable = NO_STATUS_API_ERROR.exec(failure.trim())
+  if (unreachable)
+    return providerStatusError(undefined, unreachable[1]!, {
+      provider: 'claude', code: 'provider_unavailable', errorInfo: { category: 'unavailable', retryable: true }, ...(details ? { details } : {})
+    })
+  // After retries the text is the provider's last failure; any other text may be an internal exception of Claude Code's,
+  // which keeps Mousse's generic line and its reference.
+  return details ? providerReportedError(failure, { provider: 'claude', details }) : new Error(failure)
 }
+
+/** Claude Code's report of a request that got no HTTP answer: `API Error: <reason>`, with no status first. */
+const NO_STATUS_API_ERROR = /^API Error:\s*(?![1-5]\d{2}\b)(\S[\s\S]*)$/

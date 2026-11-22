@@ -79,6 +79,8 @@ export interface ThreadWorkspaceMetadata {
   lastVerifiedAt: string
   workspaceId?: string
   generation?: number
+  /** The checkout is being restored. Cleared in the same write that publishes its new generation. */
+  rebuilding?: true
   provenance?: WorkspaceProvenance
   integrationTarget?: { checkoutPath: string; baseSha: string }
   /**
@@ -92,6 +94,13 @@ export interface ThreadWorkspaceMetadata {
    * thread with no project). Only the Undo, review and retention code sees this; it is never written to `workspace.json`.
    */
   snapshotOnly?: true
+  /**
+   * The worktree was made for a new thread before its first message was sent, and no message has claimed it yet. `at`:
+   * when it was started; `readyAt`: when its files were all written (absent while it is `provisioning`); `startNote`:
+   * what the first turn is told (see `WorkspaceExecutionContext.startNote`), read when it was made. Removed when the
+   * first message claims it.
+   */
+  prepared?: { at: string; layout: string; trust: string; sourceCheckout?: string; effectiveCheckout?: string; folder?: string; disconnectedFolder?: string; readyAt?: string; startNote?: string }
 }
 
 export interface WorkspaceExecutionContext {
@@ -114,11 +123,16 @@ export interface WorkspaceExecutionContext {
    * uncommitted changes the worktree (cut from HEAD) does not have. The turn's record keeps it as `startNote`.
    */
   startNote?: string
+  /**
+   * Set only when the thread's worktree is gone or no longer a Git repository and the turn runs in the project folder:
+   * the line the agent is told, with the first such turn's message.
+   */
+  workspaceNote?: string
 }
 
 /**
  * What a thread is waiting on; `workspace.getStatus` returns it until it is settled.
- * - `paused`: an operation other than Publish did not finish, or Git cannot read the worktree. Every turn, Undo and
+ * - `paused`: an operation other than Publish did not finish, or one left the worktree unreadable. Every turn, Undo and
  *   Publish are refused until `operations.recover` settles it.
  * - `merge`: a merge an earlier version of Mousse started is still in progress in `folder`. Nothing is refused;
  *   `operations.abort` with `operationId` aborts it.

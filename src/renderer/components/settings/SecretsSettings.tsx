@@ -6,7 +6,7 @@ import { ConfirmRemoveButton } from './IconButtons'
 import { MoreDetails, SettingsGroup, SettingsRow } from './SettingsRow'
 
 export const SECRETS_HELP =
-  "An agent that needs a key, token or password asks for it with a private card in its thread. What you type there goes to Mousse's secret store on this computer, never into the conversation, and the agent uses it only by name: in a command Mousse runs for it, whose output is masked, or as ${secret:NAME} in an MCP server's settings. Keys you save for automations are listed here too. Removing one here deletes it at once; a thread that used it can no longer."
+  "An agent that needs a key, token or password asks for it with a private card in its thread. What you type there goes to Mousse's secret store on this computer, never into the conversation. The agent gets its name and a private file holding it, which only your account on this computer can open: it uses the value in its commands, settings and logins, and never shows it in the thread (any output that holds it is masked). ${secret:NAME} reads it in an MCP server's settings. A secret bound to a service stays with Mousse: the agent gets no file and cannot use it in commands or MCP settings. Keys you save for automations are listed here too. Removing one here deletes it at once; a thread that used it can no longer."
 
 function when(iso: string | undefined): string | undefined {
   if (!iso) return undefined
@@ -24,6 +24,7 @@ export function secretEntryLine(entry: SecretEntryView): string {
         ? 'This thread only'
         : `Until ${when(entry.expiresAt) ?? 'tomorrow'}`
   const parts = [kept]
+  if (entry.binding) parts.push(entry.binding.unavailable ? 'bound, service unavailable' : `for ${entry.binding.service ?? entry.binding.host}, read only`)
   if (entry.threadId) parts.push(`asked for in ${entry.threadTitle ? `“${entry.threadTitle}”` : 'a deleted thread'}`)
   const used = when(entry.lastUsedAt)
   parts.push(used ? `last used ${used}` : 'not used yet')
@@ -62,7 +63,7 @@ export function SecretsSettings() {
       icon={Lock}
       anchor="agents-secrets"
       description={<>
-        Keys, tokens and passwords you gave agents, kept on this computer. Agents use them by name only.
+        Keys, tokens and passwords you gave agents, kept on this computer. Agents use them but never show them in a thread.
         <MoreDetails>{SECRETS_HELP}</MoreDetails>
       </>}
     >

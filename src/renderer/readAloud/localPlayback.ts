@@ -11,8 +11,19 @@ export const SILENCE_THRESHOLD = 0.005
 /** Silence kept before the first and after the last loud sample, so onsets and decays stay whole. */
 export const LEAD_SECONDS = 0.02
 export const TRAIL_SECONDS = 0.06
-/** Pause added between two clips. */
+/** Pause added between two clips at a sentence end. */
 export const CLIP_GAP_SECONDS = 0.1
+/**
+ * Pause added where a long sentence was cut in two. The silence kept around each clip (about 0.08 s)
+ * is already about a comma's pause.
+ */
+export const CUT_GAP_SECONDS = 0
+
+/** The pause after a segment: shorter when its sentence goes on in the next one. */
+export function gapAfter(segment: { endsMidSentence: boolean }): number {
+  return segment.endsMidSentence ? CUT_GAP_SECONDS : CLIP_GAP_SECONDS
+}
+
 /** Longest wait for synthesis to get ahead before the first clip plays anyway. */
 export const MAX_START_DELAY_SECONDS = 5
 

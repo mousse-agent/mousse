@@ -1,3 +1,4 @@
+import { isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type {
   BlobId,
@@ -140,9 +141,22 @@ export interface SyncSessionOptions {
   ) => boolean
   localRoutes?: () => Signed
   onPeerRoutes?: (routes: Signed, peer: SyncSession['peer']) => void
+  /**
+   * The port of this computer's automatic LAN listener, told to a peer of the same user once the session is open
+   * (`lan.port.v1`). Without it the capability is not offered.
+   */
+  lanPort?: () => number | undefined
+  /** A peer of the same user told its LAN listener port; at most once per session. */
+  onPeerLanPort?: (port: number, peer: SyncSession['peer']) => void
   /** Bounded retained evidence for a prepared Space snapshot; never grants a pin. */
   retainRosterEvidence?: (roster: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
+  /**
+   * Whether this computer opens a session with the peer at all, asked once the peer is authenticated and its routes
+   * are kept, before this side acknowledges its hello. Throwing refuses it: the peer is sent a `goAway` carrying the
+   * error (and its refusal reason), and the session ends.
+   */
+  admitPeer?: (peer: SyncSession['peer']) => void
   /** The inbound carrier this session arrived on, passed to RPC handlers. */
   carrier?: string
   signal?: AbortSignal
@@ -177,12 +191,20 @@ const equalKey = (a: string, b: string): boolean => {
 }
 /** Why a routed call was refused; the only detail of a refusal that crosses the wire. */
 const FORBIDDEN_REASON_PREFIX = 'forbidden.'
+const APPLICATION_REASON_PREFIX = 'application.'
 function wireError(error: unknown): WireError {
   const code = error instanceof NetError ? error.code : 'internal'
   // Do not serialize arbitrary provider/OS messages, credentials or payloads. A refusal of a routed
   // call says which kind it was (a fixed word), in the cause slot older peers already accept.
   const reason =
     error instanceof NetError && code === 'forbidden' ? forbiddenReason(error.details) : undefined
+  // Like forbidden reasons: only a known application code crosses, never names or error text.
+  const actionReason = code === 'conflict' && error instanceof NetError
+    ? (error.details as { reason?: unknown } | undefined)?.reason : undefined
+  if (isBotActionRefusalCode(actionReason)) return {
+    code, message: NET_ERRORS[code].message, retryable: NET_ERRORS[code].retryable,
+    cause: [{ code: APPLICATION_REASON_PREFIX + actionReason, message: NET_ERRORS[code].message }]
+  }
   return {
     code,
     message: NET_ERRORS[code].message,
@@ -195,6 +217,11 @@ function wireError(error: unknown): WireError {
   }
 }
 const remoteError = (error: WireError): NetError => {
+  const actionReason = error.code === 'conflict'
+    ? error.cause?.find(entry => entry.code?.startsWith(APPLICATION_REASON_PREFIX))?.code?.slice(APPLICATION_REASON_PREFIX.length)
+    : undefined
+  if (isBotActionRefusalCode(actionReason))
+    return new NetError('conflict', undefined, { details: { reason: actionReason } })
   const reason =
     error.code === 'forbidden'
       ? error.cause
@@ -219,6 +246,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   private localCaps: SessionCapability[]
   private negotiatedCaps: SessionCapability[] = []
   private negotiatedMinor = NET_PROTO_MINOR
+  private lanPortTold = false
   private preauthBytes = 0
   private handshakeTimer: { cancel(): void }
   private pingTimer?: { cancel(): void }
@@ -301,10 +329,19 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       ...(options.tunnels ? ['tunnel.v1' as const] : []),
       ...(options.discovery || options.spaceIdentity ? ['space.discovery.v1' as const] : [])
     ]
-    // Added before duplicates are removed: a caller that lists it too still offers it once.
+    // Added before duplicates are removed: a caller that lists it too still offers it once. `lan.port.v1` is offered
+    // only by a session that can tell a port.
     this.localCaps = [
-      ...new Set([...caps, ...(caps.includes('streams.v1') ? ['snapshot.stale.v1' as const] : [])])
-    ].filter((cap) => cap !== 'presence.v1' || !!options.verifyPresence)
+      ...new Set<SessionCapability>([
+        ...caps,
+        ...(caps.includes('streams.v1') ? ['snapshot.stale.v1' as const] : []),
+        ...(options.lanPort ? ['lan.port.v1' as const] : [])
+      ])
+    ].filter(
+      (cap) =>
+        (cap !== 'presence.v1' || !!options.verifyPresence) &&
+        (cap !== 'lan.port.v1' || !!options.lanPort)
+    )
     this.opened = new Promise((resolve, reject) => {
       this.openResolve = resolve
       this.openReject = reject
@@ -792,6 +829,12 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   close(code: NetErrorCode = 'cancelled'): void {
     this.fail(new NetError(code), true)
   }
+  /** Ends the session and tells the peer why: a `goAway` carrying `error` (and its refusal reason), then the close. */
+  async goAway(error: NetError): Promise<void> {
+    if (this.currentState === 'closed' || this.currentState === 'closing') return
+    await this.send({ t: 'goAway', error: wireError(error) }).catch(() => {})
+    this.fail(error, true)
+  }
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
   publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
@@ -1241,6 +1284,13 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       }
       case 'revoked':
         return // Hint only. Independently verified roster controls teardown.
+      case 'lan.port':
+        this.requireCap('lan.port.v1')
+        // A hint between the user's own computers; another user's device is never dialled from it.
+        if (this.lanPortTold || this.peer.user !== this.options.identity.self()?.user) return
+        this.lanPortTold = true
+        this.options.onPeerLanPort?.(h.port, this.peer)
+        return
       case 'subscribe':
         this.requireCap('streams.v1')
         {
@@ -1579,6 +1629,15 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       delegation: current.document
     }
     if (h.routes) this.options.onPeerRoutes?.(h.routes, this.authenticatedPeer)
+    if (this.options.admitPeer) {
+      try {
+        this.options.admitPeer(this.authenticatedPeer)
+      } catch (error) {
+        // The peer is told why, so it waits instead of giving up or dialling again at once.
+        await this.send({ t: 'goAway', error: wireError(error) }).catch(() => {})
+        throw error
+      }
+    }
     this.negotiatedCaps = this.localCaps.filter(
       (cap) => h.caps.includes(cap) && SESSION_CAPABILITIES.includes(cap)
     )
@@ -1621,6 +1680,19 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     this.openResolve()
     this.schedulePing()
     this.refreshExpiry()
+    this.tellLanPort()
+  }
+  /** Tells a peer of the same user where this computer's LAN listener is, so it can dial back. Best effort. */
+  private tellLanPort(): void {
+    try {
+      if (!this.negotiatedCaps.includes('lan.port.v1')) return
+      if (this.peer.user !== this.options.identity.self()?.user) return
+      const port = this.options.lanPort?.()
+      if (!port || !Number.isInteger(port) || port > 65535) return
+      void this.send({ t: 'lan.port', port }).catch(() => {})
+    } catch {
+      // A hint only: the session works without it.
+    }
   }
   private refreshExpiry(): void {
     this.expiryTimer?.cancel()

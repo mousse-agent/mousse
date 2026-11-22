@@ -107,7 +107,7 @@
   background-image: var(--ui-focus-layer);
 }
 
-/* Above the transcript of a long thread of another computer. */
+/* Above the transcript of a long thread, only when its older messages failed to load. */
 .earlier-messages-bar {
   flex: 0 0 auto;
   display: flex;
@@ -118,7 +118,7 @@
   color: var(--ui-faint);
 }
 
-/* A text action beside the count, not a second boxed control. */
+/* Retry: a text action beside the reason, not a boxed control. */
 .earlier-messages-load {
   padding: 0;
   border: 0;
@@ -128,13 +128,8 @@
   cursor: pointer;
 }
 
-.earlier-messages-load:hover:not(:disabled) {
+.earlier-messages-load:hover {
   text-decoration: underline;
-}
-
-.earlier-messages-load:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .earlier-messages-error {

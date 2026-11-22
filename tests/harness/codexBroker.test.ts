@@ -180,15 +180,44 @@ describe('ChatGPT token broker and helper', () => {
     await Promise.all(idle.map((client) => client.closed))
     await vi.waitFor(() => expect((broker as unknown as { sockets: Set<unknown> }).sockets.size).toBe(0))
 
+    // A request beyond the jobs waits for one instead of being refused, and gets its token when the job before ends.
     let release!: () => void
     const held = lease(broker, () => new Promise((done) => (release = () => done('held-token'))))
     const first = helper(endpoint, held.leaseId)
     await vi.waitFor(() => expect(release).toBeTypeOf('function'))
-    const second = await helper(endpoint, lease(broker, async () => 'other').leaseId)
-    expect(second.code).toBe(1)
-    expect(second.stderr).toMatch(/busy/)
+    let otherAsked = false
+    const second = helper(endpoint, lease(broker, async () => {
+      otherAsked = true
+      return 'other'
+    }).leaseId)
+    await delay(100)
+    expect(otherAsked).toBe(false)
+    release()
+    expect(await first).toEqual({ code: 0, stdout: 'held-token', stderr: '' })
+    expect(await second).toEqual({ code: 0, stdout: 'other', stderr: '' })
+  })
+
+  it('drops a waiting request whose helper went away, so the job passes to the next one', async () => {
+    const { broker, endpoint } = await startBroker({ maxJobs: 1 })
+    let release!: () => void
+    const held = lease(broker, () => new Promise((done) => (release = () => done('held-token'))))
+    const first = helper(endpoint, held.leaseId)
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    let goneAsked = false
+    const gone = rawClient(endpoint)
+    gone.socket.write(encodeTokenRequest(lease(broker, async () => {
+      goneAsked = true
+      return 'gone'
+    }).leaseId))
+    await delay(50)
+    const next = helper(endpoint, lease(broker, async () => 'next').leaseId)
+    await delay(50)
+    gone.socket.destroy()
+    await gone.closed
     release()
     expect((await first).stdout).toBe('held-token')
+    expect(await next).toEqual({ code: 0, stdout: 'next', stderr: '' })
+    expect(goneAsked).toBe(false)
   })
 
   it.skipIf(process.platform === 'win32')('makes a private socket folder and removes only its own', async () => {

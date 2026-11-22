@@ -430,6 +430,78 @@ const qa = {
     render()
   },
   lastTurn: () => turnCount - 1,
+  /** Opens turns `from` to `to - 1`: the newest part of a long thread, as it arrives. */
+  async mountRange(from: number, to: number): Promise<void> {
+    turnCount = to
+    messages = Array.from({ length: to - from }, (_, index) => turnMessages(from + index)).flat()
+    epoch += 1
+    streaming = false
+    render()
+    await frames(3)
+  },
+  /**
+   * Adds turns `from` to `to - 1` above the ones shown (an earlier page coming in) and reports where `sentinel` sits
+   * right after the commit and after each of `count` frames, with the scroll position.
+   */
+  async prependRun(from: number, to: number, sentinel: string, count = 24) {
+    const el = container()
+    const start = { top: targetTop(sentinel), scrollTop: el.scrollTop, windowed: qa.windowed() }
+    messages = [...Array.from({ length: to - from }, (_, index) => turnMessages(from + index)).flat(), ...messages]
+    render()
+    const sample = () => ({ top: targetTop(sentinel), scrollTop: el.scrollTop })
+    const samples = [sample()]
+    for (let index = 0; index < count; index += 1) {
+      await new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)))
+      samples.push(sample())
+    }
+    return { start, samples, windowed: qa.windowed() }
+  },
+  /**
+   * Appends a turn that is still running: a thought, six steps of narration and a command, then a tall answer of twelve
+   * paragraphs (`fold-<n>-0` to `-11`). `foldRun` ends it.
+   */
+  addWorkTurn() {
+    const n = turnCount
+    const thought = 'Reading how the cache key is built'
+    const work = [
+      assistant(`k-${n}`, [{ type: 'tool-Thinking', toolCallId: `think-${n}`, state: 'output-available', input: { thought }, output: thought }]),
+      ...Array.from({ length: 6 }, (_, step) => [
+        assistant(`n-${n}-${step}`, [text(`work-${n}-${step} ${prose(n + step, 220)}`)]),
+        assistant(`c-${n}-${step}`, [tool(`c-${n}-${step}`, step)]),
+      ]).flat(),
+    ]
+    const answer = assistant(`a-${n}`, [text(Array.from({ length: 12 }, (_, p) => `fold-${n}-${p} ${prose(n + p, 420)}`).join('\n\n'))])
+    messages = [...messages, user(n), ...work, answer]
+    turnCount += 1
+    streaming = true
+    render()
+  },
+  /**
+   * Ends the running turn, so its work folds behind its "Worked" line, and reports where `sentinel` sits each frame until
+   * the fold has closed: right after the commit, then after each frame's own work (the list's holders write in
+   * requestAnimationFrame), as the frame is painted.
+   */
+  async foldRun(sentinel: string, count = 40) {
+    const el = container()
+    const n = turnCount - 1
+    const start = { top: targetTop(sentinel), scrollTop: el.scrollTop, gap: endGap() }
+    streaming = false
+    render()
+    const sample = () => ({ top: targetTop(sentinel), scrollTop: el.scrollTop, gap: endGap(), hold: el.hasAttribute('data-fold-hold') })
+    const samples = [sample()]
+    for (let index = 0; index < count; index += 1) {
+      await new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)))
+      samples.push(sample())
+    }
+    return {
+      start,
+      samples,
+      windowed: qa.windowed(),
+      /** The turn shows one "Worked" line, closed, and its work is no longer on the page; null when the turn is not mounted. */
+      folded: row(n) ? row(n)!.querySelector('button.turn-work-toggle')?.getAttribute('aria-expanded') === 'false' : null,
+      workMounted: targetTop(`work-${n}-0`) !== null,
+    }
+  },
   streamAppend(extra: string) {
     streaming = true
     const last = messages[messages.length - 1]!

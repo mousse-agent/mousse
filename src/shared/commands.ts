@@ -29,10 +29,12 @@ export type CommandId =
   | 'mainArea.toggle'
   | 'terminal.open'
   | 'theme.builtIn'
+  | 'window.reload'
   | 'settings.open'
   | 'automations.open'
   | 'usage.open'
   | 'composer.focus'
+  | 'composer.dictate'
   | 'files.quickOpen'
   | 'files.textSearch'
   | 'surface.browser'
@@ -40,6 +42,7 @@ export type CommandId =
   | 'surface.files'
   | 'surface.git'
   | 'surface.pullRequest'
+  | 'surface.sideChats'
   | 'model.pick1'
   | 'model.pick2'
   | 'model.pick3'
@@ -232,9 +235,9 @@ export const COMMANDS: readonly CommandDefinition[] = [
   },
   {
     id: 'threads.search',
-    title: 'Search threads',
+    title: 'Search everything',
     category: 'Threads',
-    searchTerms: ['find', 'chat', 'messages'],
+    searchTerms: ['find', 'threads', 'chats', 'bots', 'archived', 'messages'],
     defaultBinding: `${MOD}+Shift+O`,
     scope: 'global',
     textInput: 'allow',
@@ -289,18 +292,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
-    // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
-    // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
+    // The transcript's own find bar, in a thread or (under the Chats tab) a bot's chat. A text field may be
+    // focused (the composer); a terminal or the browser surface keeps the key, and the handler also leaves
+    // Monaco its own find widget.
     id: 'chat.findInThread',
     title: 'Find in thread',
     category: 'Threads',
-    searchTerms: ['search', 'text', 'messages', 'transcript'],
+    searchTerms: ['search', 'text', 'messages', 'transcript', 'chat'],
     defaultBinding: `${MOD}+F`,
     scope: 'global',
     textInput: 'allow',
     terminal: 'deny',
     guest: 'deny',
-    when: threadIsOpen
+    when: (ctx) => ctx.threadOpen || !ctx.projectsMode
   },
   {
     id: 'run.stop',
@@ -400,6 +404,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
+    // Recovers a broken layout without quitting. Saves autosaved edits first and refuses while unsaved edits remain.
+    // No key: a slip of the hand must not reload the window.
+    id: 'window.reload',
+    title: 'Reload window',
+    category: 'View',
+    searchTerms: ['refresh', 'restart', 'layout', 'developer'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'allow',
+    guest: 'allow'
+  },
+  {
     id: 'settings.open',
     title: 'Open settings',
     category: 'Go',
@@ -445,6 +462,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     when: threadIsOpen
   },
   {
+    // Starts dictation in the shown composer, and pressed again while recording finishes it (Done: the text goes
+    // in). Its handler is enabled only while the composer offers the microphone or is recording.
+    id: 'composer.dictate',
+    title: 'Start or finish dictation',
+    category: 'Composer',
+    searchTerms: ['dictate', 'voice', 'microphone', 'speech', 'record', 'talk'],
+    defaultBinding: `${MOD}+Shift+Space`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny'
+  },
+  {
     // Only while the key is typed inside the Files panel (its tree, search box or editor): Ctrl/Cmd+P
     // elsewhere, such as the composer, is left to whatever the page does with it.
     id: 'files.quickOpen',
@@ -475,6 +505,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   surfaceCommand('surface.files', 'Open Files', 'F'),
   surfaceCommand('surface.git', 'Open Changes', 'D'),
   surfaceCommand('surface.pullRequest', 'Open Pull request', 'P'),
+  surfaceCommand('surface.sideChats', 'Open Side chats', 'S'),
   modelCommand('model.pick1', 1),
   modelCommand('model.pick2', 2),
   modelCommand('model.pick3', 3),
@@ -588,7 +619,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
 ]
 
 /** Rows that lead their group where commands are listed, in this order; the rest follow in table order. */
-const LEADING_ROWS: readonly CommandId[] = ['palette.open', 'thread.back', 'thread.forward', 'composer.focus', 'composer.steer', 'composer.switchSendMode']
+const LEADING_ROWS: readonly CommandId[] = ['palette.open', 'thread.back', 'thread.forward', 'composer.focus', 'composer.dictate', 'composer.steer', 'composer.switchSendMode']
 
 /**
  * The commands as the Shortcuts page and the palette list them: by group (`COMMAND_CATEGORIES`), the

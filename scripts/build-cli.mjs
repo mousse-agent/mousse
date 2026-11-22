@@ -67,6 +67,22 @@ export function getThreadDbWorkerBuildOptions(projectRoot = root, outDir = 'out/
   }
 }
 
+/**
+ * The usage history worker (`src/mms/usageHistory/usageHistoryReader.ts`), beside each bundle that starts it like the
+ * thread database worker. It reads the agents' logs off the daemon's main thread; Node built-ins only.
+ */
+export function getUsageHistoryWorkerBuildOptions(projectRoot = root, outDir = 'out/cli') {
+  return {
+    entryPoints: [resolve(projectRoot, 'src/mms/usageHistory/usageHistoryWorkerMain.ts')],
+    outfile: resolve(projectRoot, outDir, 'usageHistoryWorker.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    sourcemap: false
+  }
+}
+
 /** The ChatGPT token helper on its own (`out/cli/chatgpt-token.js`): Node built-ins only. */
 export function getChatgptTokenBuildOptions(projectRoot = root) {
   return {
@@ -133,6 +149,8 @@ export async function buildCli(opts = {}) {
     await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor', reuse })
     await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/cli'), { projectRoot: root, name: 'thread-db-worker-cli', reuse })
     await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/main'), { projectRoot: root, name: 'thread-db-worker-main', reuse })
+    await cachedBuild(getUsageHistoryWorkerBuildOptions(root, 'out/cli'), { projectRoot: root, name: 'usage-history-worker-cli', reuse })
+    await cachedBuild(getUsageHistoryWorkerBuildOptions(root, 'out/main'), { projectRoot: root, name: 'usage-history-worker-main', reuse })
     if (log) console.log(`${cli.reused ? 'Reused' : 'Built'} ${outfile}`)
     return { cliReused: cli.reused, workerReused: worker.reused }
   }
@@ -165,6 +183,8 @@ export async function buildCli(opts = {}) {
   await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor' })
   await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/cli'), { projectRoot: root, name: 'thread-db-worker-cli' })
   await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/main'), { projectRoot: root, name: 'thread-db-worker-main' })
+  await cachedBuild(getUsageHistoryWorkerBuildOptions(root, 'out/cli'), { projectRoot: root, name: 'usage-history-worker-cli' })
+  await cachedBuild(getUsageHistoryWorkerBuildOptions(root, 'out/main'), { projectRoot: root, name: 'usage-history-worker-main' })
   const browserOptions = getBrowserWorkerBuildOptions(root)
   let browserContext
   try {

@@ -298,6 +298,16 @@ export class SpaceLocalService {
       throw new NetError('keystore_locked')
     if (!this.profile.options.net.status().enabled) throw new NetError('route_unreachable')
   }
+  /** The Spaces this computer hosts or is still a member of, by name; Start over names them. */
+  memberships(): Array<{ name: string; host: boolean }> {
+    const self = this.profile.options.runtime.identity.self()
+    if (!self) return []
+    return this.spaces().flatMap((space) => {
+      const host = this.isHost(space)
+      if (!host && (this.leave(space) || !this.profile.meta.member(space, self.user))) return []
+      return [{ name: this.profile.meta.position(space)?.settings?.name ?? 'Space', host }]
+    })
+  }
   private spaces(): SpaceId[] {
     const ids = new Set<SpaceId>(this.profile.client.list().map((b) => b.space))
     for (const stream of this.profile.store.listStreams({ kind: 'space.meta' }))

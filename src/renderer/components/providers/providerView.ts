@@ -39,6 +39,12 @@ export interface DriverInfo {
    * arguments or variables to set. Its sign-in is a key Mousse keeps.
    */
   bundled?: boolean
+  /** What a chosen executable may be, when that is not obvious: the tooltip of the Add step's choice. */
+  executableHint?: string
+  /** The Add step's line before Mousse has looked for the agent, when it is not simply found on this computer. */
+  addHint?: string
+  /** The Sign out tooltip, when signing out reaches beyond Mousse. */
+  signOutHint?: string
   /** Also added from the ACP registry: the Add dialog offers it as its own choice ("More ACP agents…"). */
   registry?: { addLabel: string; description: string }
   /**
@@ -78,9 +84,12 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     label: 'Antigravity',
     iconId: 'google',
     family: 'agent',
-    description: "Google's official Antigravity agent, with its own Google sign-in.",
+    description: "Google's Antigravity CLI (agy), signed in with your Google account.",
     multiInstance: false,
-    customModels: false
+    customModels: false,
+    executableHint: "agy, or Google's 1.1.1 ACP server",
+    addHint: 'Mousse uses agy on this computer, or installs it after adding.',
+    signOutHint: 'Also signs out agy on this computer'
   },
   cursor: {
     label: 'Cursor',

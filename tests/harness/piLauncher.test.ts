@@ -148,6 +148,13 @@ describe('Pi launcher: environment', () => {
 describe('Pi launcher: credentials', () => {
   const everyKey = Object.fromEntries(PI_ENV_KEYS.map((name) => [name, `value-of-${name}`]))
 
+  it('starts a bot without the provider key or unrelated environment secrets', () => {
+    const secrets = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', AWS_SECRET_ACCESS_KEY: 'aws', MY_SECRET: 'arbitrary', OPENROUTER_API_KEY: 'provider' }
+    const env = launch({ base: secrets, locked: { credential: 'api_key', scratch: '/scratch', platform: 'linux' } }).env
+    for (const name of Object.keys(secrets)) expect(env, name).not.toHaveProperty(name)
+    expect(env.PI_CODING_AGENT_DIR).toBe(join(stateDir, 'home'))
+  })
+
   it('inherits no provider key except the instance\'s own', () => {
     const env = launch({ base: { ...everyKey, PATH: '/bin' } }).env
     expect(PI_ENV_KEYS.filter((name) => name in env)).toEqual(['OPENROUTER_API_KEY'])

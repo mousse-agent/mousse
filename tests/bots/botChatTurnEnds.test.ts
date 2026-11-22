@@ -53,8 +53,11 @@ describe('a chat turn that ends without its reply', () => {
     expect(rows[0]!.text).toMatch(/^Your turn failed before it finished: \[provider_error\] 529 Overloaded at request \(api\.js:12\) x+…$/)
     expect(rows[0]!.text).not.toContain('\n')
     expect(rows[0]!.text.length).toBeLessThan(260)
-    // The owner's chat is as before: its own plain error line, never the provider's words.
-    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: 'Something went wrong, so I stopped. Try again.' } })
+    // The owner's chat says what the provider said, on one line and capped.
+    const shown = chatOf(f, botId).at(-1)
+    expect(shown).toMatchObject({ kind: 'error' })
+    expect(shown!.error!.text).toMatch(/^The provider failed, so I stopped: 529 Overloaded at request \(api\.js:12\) x+…$/)
+    expect(shown!.error!.text.length).toBeLessThan(260)
 
     const pack = await nextPack()
     expect(pack).toMatch(/\] Owner: What came in today\?\n\[j\d+ · [^\]]+\] Mousse: Your turn failed before it finished: \[provider_error\] 529 Overloaded/)

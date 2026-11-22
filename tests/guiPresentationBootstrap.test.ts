@@ -51,12 +51,12 @@ describe('subscribed window presentation bootstrap', () => {
 
   describe('startup selection', () => {
     const subagent = (id: string, parentThreadId: string) => ({ id, lineage: { parentThreadId, rootThreadId: parentThreadId, relationship: 'subagent' } })
-    const selectFrom = async (threads: unknown[], saved?: string) => {
+    const selectFrom = async (threads: unknown[], saved?: string, preferThreadId?: string) => {
       const gui = controller()
       gui.request.mockImplementation(async (method: string) => method === 'threads.list' ? { threads } : { projects: [] })
       const state = new PresentationState()
       if (saved) state.setActiveThreadId(saved)
-      await bootstrapPresentation(gui as unknown as GuiMmsController, state, vi.fn())
+      await bootstrapPresentation(gui as unknown as GuiMmsController, state, vi.fn(), { preferThreadId })
       return state.getActiveThreadId()
     }
 
@@ -70,6 +70,17 @@ describe('subscribed window presentation bootstrap', () => {
 
     it('keeps a restored selection that is a subagent', async () => {
       expect(await selectFrom([{ id: 'parent' }, subagent('child', 'parent')], 'child')).toBe('child')
+    })
+
+    // The thread this profile's window showed last time (the warm start shows it before the service answers).
+    it.each([
+      ['opens it when it is still open', [{ id: 'newest' }, { id: 'last-shown' }], undefined, 'last-shown'],
+      ['opens the first thread when it was archived since', [{ id: 'newest' }, { id: 'last-shown', settledAt: '2026-11-20T00:00:00Z' }], undefined, 'newest'],
+      ['opens the first thread when it was deleted since', [{ id: 'newest' }], undefined, 'newest'],
+      ['opens the first thread rather than a subagent', [{ id: 'newest' }, { id: 'parent' }, subagent('last-shown', 'parent')], undefined, 'newest'],
+      ['keeps the selection the window restored itself', [{ id: 'newest' }, { id: 'last-shown' }, { id: 'restored' }], 'restored', 'restored']
+    ])('the thread shown last time: %s', async (_case, threads, saved, expected) => {
+      expect(await selectFrom(threads, saved, 'last-shown')).toBe(expected)
     })
   })
 

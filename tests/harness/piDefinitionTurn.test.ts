@@ -120,12 +120,12 @@ describe('agent definition turns on the Pi RPC engine (real pinned Pi child)', (
     expect(readFileSync(threadsFile, 'utf8')).toBe(savedBefore)
   }, 120_000)
 
-  it('is offered exactly its grants, and never a delegation tool even when granted', async () => {
+  // Which Mousse tools a definition's turn holds is the registry's (`listForTurn`, tested there): the engine sends what
+  // it lists, and keeps only the granted built-ins.
+  it('is offered its granted built-ins and the Mousse tools listed for its turn', async () => {
     const { engine, recorder, project } = await setup({
       mousseTools: () => [
-        { name: 'create_task', description: 'Create a task', inputSchema: { type: 'object', properties: {} }, class: 'mutation' },
-        { name: 'list_tasks', description: 'List tasks', inputSchema: { type: 'object', properties: {} }, class: 'read' },
-        { name: 'delegate_task', description: 'Delegate', inputSchema: { type: 'object', properties: {} }, class: 'delegation' }
+        { name: 'list_tasks', description: 'List tasks', inputSchema: { type: 'object', properties: {} }, class: 'read' }
       ]
     })
     recorder.respond(script([{ text: 'ok' }]))

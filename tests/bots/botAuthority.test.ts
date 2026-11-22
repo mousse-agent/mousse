@@ -46,7 +46,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   mcp: [],
   skills: ['release-notes'],
   workspace: null,
-  budget: { maxActiveMs: 15 * 60_000, maxTurns: 40 },
+  budget: { maxTurns: 40 },
   audience: 'owner',
   ...patch
 })
@@ -90,7 +90,7 @@ describe('compileBotThread', () => {
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy).toEqual({
       // Granted skills bring the skill tools.
-      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'web_search', 'write'] },
+      tools: { allow: ['edit', 'find', 'grep', 'list_skills', 'load_skill', 'ls', 'read', 'running_list', 'web_search', 'write'] },
       approvals: 'grants',
       approve: 'host',
       budget: { maxWallMs: 600_000, maxTurns: 40 },
@@ -136,13 +136,37 @@ describe('compileBotThread', () => {
     expect(chat.permissions.appTools).toContain('mcp_servers')
   })
 
+  it('every skill unless switched off for the bot, and a thread narrowed to some skills has just those', () => {
+    const all = compile({ grant: manifest({ skills: [] }), allSkills: true })
+    if (!all.ok) throw new Error(all.error.message)
+    expect(all.permissions).toMatchObject({ allSkills: true, skills: [], appTools: expect.arrayContaining(['list_skills', 'load_skill']) })
+    expect(authorityOf(all).check({ kind: 'skill', skill: 'any-skill' })).toEqual({ ok: true })
+    const narrowed = compile({ grant: manifest({ skills: [] }), allSkills: true, thread: { narrow: { skills: ['release-notes'] } } })
+    if (!narrowed.ok) throw new Error(narrowed.error.message)
+    expect(narrowed.permissions.allSkills).toBeUndefined()
+    expect(narrowed.permissions.skills).toEqual(['release-notes'])
+    expect(authorityOf(narrowed).check({ kind: 'skill', skill: 'any-skill' }).ok).toBe(false)
+    const off = compile({ grant: manifest({ skills: [] }), thread: { narrow: { skills: ['release-notes'] } } })
+    if (!off.ok) throw new Error(off.error.message)
+    expect(off.permissions).toMatchObject({ skills: [], appTools: expect.not.arrayContaining(['list_skills']) })
+  })
+
+  it('offers secret_fetch in work with no grant, never in the chat', () => {
+    const grant = manifest()
+    for (const frontDesk of [false, true]) {
+      const compiled = compile({ grant, botTools: { escalate: true, consult: false, memory: true, owner: true, frontDesk } })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      expect(compiled.permissions.appTools.includes('secret_fetch')).toBe(!frontDesk)
+    }
+  })
+
   it('compiles the published revision held inside the grant: a narrower revision really narrows', () => {
-    const grant = manifest({ budget: { maxActiveMs: 60 * 60_000, maxTurns: 100 } })
-    const revision = manifest({ tools: ['read'], appTools: [], budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
+    const grant = manifest({ budget: { maxTurns: 100 } })
+    const revision = manifest({ tools: ['read'], appTools: [], budget: { maxTurns: 10 } })
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read'] })
-    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill'] })
+    expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read', 'running_list'] })
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill', 'running_list'] })
     // A revision can never name more than the grant: what the grant lacks is dropped.
     const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
     if (!wider.ok) throw new Error(wider.error.message)

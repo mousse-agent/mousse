@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
@@ -24,7 +24,7 @@ import { CODEX_BOT_SETUP_UNREADABLE_TEXT, CODEX_BOT_VERSION_TEXT, codexBotSettin
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
-import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
+import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer, replayCodexEnv } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, readTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
 import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
 import { holdControl, type HoldControl } from '../support/steerHoldControl'
@@ -107,11 +107,13 @@ function transport(frames: TranscriptFrame[], onCue?: (frame: unknown) => void |
 
 let home: string
 let work: string
+let env: () => NodeJS.ProcessEnv
 let questions: UserQuestionService
 const services: CodexProviderService[] = []
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'mousse-codex-adapter-'))
+  env = replayCodexEnv(home)
   work = join(home, 'work')
   mkdirSync(work)
   questions = new UserQuestionService()
@@ -130,7 +132,7 @@ function service(replay: ReplayTransport, settings: Record<string, unknown> = {}
   chmodSync(binary, 0o755)
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }], ...settings }))
-  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
+  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env, launch: () => ({ binaryPath: binary }) })
   services.push(created)
   return created
 }
@@ -360,7 +362,7 @@ describe('CodexAdapter', () => {
     // The turn committed: the Codex thread is saved with the canonical history it now holds.
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, unknown> }
     // Bound to the instance that started it (the default `codex` instance here).
-    expect(saved.threads['thread-1']).toEqual({ codexThreadId: T, cwd: work, historyKey: sha('history+Hello'), instanceId: 'codex' })
+    expect(saved.threads['thread-1']).toEqual({ account: expect.stringMatching(/^[a-f0-9]{64}$/), codexThreadId: T, cwd: work, historyKey: sha('history+Hello'), instanceId: 'codex' })
   })
 
   it('continues the loaded thread, resumes it from a new process, and starts fresh when resume fails', async () => {
@@ -384,7 +386,7 @@ describe('CodexAdapter', () => {
       ...message('msg-3', ['three'], 'turn-3'),
       completed('completed', 'turn-3')
     ])
-    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) }, { env, launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(reopened)
     const third = await new CodexAdapter(() => reopened).startTurn(input({ prompt: 'third', nativeHistory: 'history+two' }), recordingSink(), control(), host())
     resumed.assertDone()
@@ -403,7 +405,7 @@ describe('CodexAdapter', () => {
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-4', status: 'completed', error: null } })
     ])
-    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) }, { env, launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(recovering)
     const fourth = await new CodexAdapter(() => recovering).startTurn(input({ prompt: 'fourth', nativeHistory: 'history+three' }), recordingSink(), control(), host())
     broken.assertDone()
@@ -478,8 +480,8 @@ describe('CodexAdapter', () => {
       out({ id: 6, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ config: mcpConfig('new'), developerInstructions }) } }),
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 7, result: { status: 'unsubscribed' } }),
       out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('again'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      inn({ id: 7, result: { status: 'unsubscribed' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } }),
@@ -591,8 +593,8 @@ describe('CodexAdapter', () => {
       out({ id: 6, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ approvalPolicy: 'never', sandbox: 'danger-full-access' }) } }),
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 7, result: { status: 'unsubscribed' } }),
       out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('two'), approvalPolicy: 'never', sandboxPolicy: FULL, model: 'gpt-x' } }),
+      inn({ id: 7, result: { status: 'unsubscribed' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } })
@@ -918,16 +920,18 @@ describe('CodexAdapter', () => {
         out({ id: 4, method: 'thread/start', params: threadParams() }),
         cue({ action: 'stop' }),
         inn({ id: 4, result: threadResult() }),
-        // The next turn starts a new thread with the history as a preamble.
-        ...threadStart(5),
-        out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
-        inn({ id: 6, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+        // The stopped open leaves its load state unknown. A new server gets the history as a preamble.
+        ...handshake(),
+        ...threadStart(4),
+        out({ id: 5, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        inn({ id: 5, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
         ...message('msg-2', ['two'], 'turn-2'),
         completed('completed', 'turn-2')
       ], () => controller.abort(new Error('stopped while the thread opened')))
       const codex = service(replay)
       const adapter = new CodexAdapter(() => codex)
       await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), stoppedHost())).rejects.toThrow('stopped while the thread opened')
+      await replay.idle()
       expect(savedThreads()?.['thread-1']).toBeUndefined()
       const next = await adapter.startTurn(input({ prompt: 'again', nativeHistory: STOPPED }), recordingSink(), control(), host())
       replay.assertDone()
@@ -1034,7 +1038,7 @@ describe('CodexAdapter', () => {
       mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
       writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
       const launch = replayCodexAppServer(replay)
-      const created = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid }), ...dependencies }, { launch: () => ({ binaryPath: binary }) })
+      const created = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid }), ...dependencies }, { env, launch: () => ({ binaryPath: binary }) })
       services.push(created)
       return created
     }
@@ -1142,7 +1146,7 @@ describe('CodexAdapter', () => {
       return { killed: [listed[0]!], survivors: [] }
     })
     // A grace far longer than the test: the kill must not wait for it.
-    const codex = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid: process.pid }), listProcesses, stopCommands, stopGraceMs: 600_000 }, { launch: () => ({ binaryPath: binary }) })
+    const codex = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid: process.pid }), listProcesses, stopCommands, stopGraceMs: 600_000 }, { env, launch: () => ({ binaryPath: binary }) })
     services.push(codex)
     const adapter = new CodexAdapter(() => codex)
     await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
@@ -1358,6 +1362,45 @@ describe('CodexAdapter', () => {
     expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Focus on tests', 'And lint'])
   })
 
+  it("sends a steer's images with it: by turn/steer, and in the next turn when the steer arrives too late", async () => {
+    const png = (data: string) => ({ name: `${data}.png`, mimeType: 'image/png', data })
+    const image = (data: string) => ({ type: 'image', url: `data:image/png;base64,${data}` })
+    const steers: Array<{ text: string; images: ReturnType<typeof png>[] }> = []
+    const replay = transport(
+      [
+        ...handshake(),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
+        cue({ steer: 'Match this', image: 'AAAA' }),
+        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: [...text('Match this'), image('AAAA')] } }),
+        inn({ id: 6, result: { turnId: 'turn-1' } }),
+        cue({ steer: 'And this', image: 'BBBB' }),
+        out({ id: 7, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: [...text('And this'), image('BBBB')] } }),
+        completed('completed'),
+        inn({ id: 7, error: { code: -32600, message: 'no active turn to steer' } }),
+        out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: T, input: [...text('And this'), image('BBBB')], approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+        note('turn/started', { threadId: T, turn: { id: 'turn-2', status: 'inProgress', error: null } }),
+        completed('completed', 'turn-2')
+      ],
+      (frame) => {
+        const cued = frame as { steer: string; image: string }
+        steers.push({ text: cued.steer, images: [png(cued.image)] })
+      }
+    )
+    let drains = 0
+    const ctl: TurnControl = {
+      drainSteer: () => undefined,
+      drainSteerEntry: () => {
+        const entry = steers.shift()
+        return entry ? { ...entry, token: `drain-${++drains}`, cut: false } : undefined
+      },
+      heartbeat: () => {}
+    }
+    await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+    replay.assertDone()
+  })
+
   describe('a native steer counts as read only once Codex has it', () => {
     /** A control whose steers join the turn natively, with every take and hand-back recorded by token. */
     function steerControl(queue: string[]) {
@@ -1571,6 +1614,36 @@ describe('CodexAdapter', () => {
       expect(returned).toEqual([])
     })
 
+    it("starts the next turn with the message's images", async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          out({
+            id: 7,
+            method: 'turn/start',
+            params: { summary: 'auto', threadId: T, input: [...text('Use pnpm'), { type: 'image', url: 'data:image/png;base64,AAAA' }], approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' }
+          }),
+          inn({ id: 7, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+          note('turn/started', { threadId: T, turn: { id: 'turn-2', status: 'inProgress', error: null } }),
+          completed('completed', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const ctl: TurnControl = {
+        drainSteer: () => undefined,
+        drainSteerEntry: () => {
+          const text = steers.shift()
+          return text ? { text, token: 'drain-1', cut: true, images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] } : undefined
+        },
+        heartbeat: () => {}
+      }
+      await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+      replay.assertDone()
+    })
+
     it('hands the message back when Stop lands before the next turn starts', async () => {
       const controller = new AbortController()
       const steers: string[] = []
@@ -1695,14 +1768,12 @@ describe('CodexAdapter', () => {
     })
   })
 
-  describe("the hold: a person's steer waits for a running command (docs/design/steer-and-interruptions.md §2.5)", () => {
+  describe("on the hold: a person's steer cuts in at once, even during a command (docs/design/steer-and-interruptions.md §2.5)", () => {
     const STEER = 'Use pnpm, not npm'
     const commandItem = (id: string, command: string, status: string, extra: Record<string, unknown> = {}) => ({
       type: 'commandExecution', id, command, cwd: '/w', processId: '4242', status, commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null, ...extra
     })
     const started = (id: string, command = 'npm test', turn = 'turn-1') => note('item/started', { threadId: T, turnId: turn, item: commandItem(id, command, 'inProgress') })
-    const finished = (id: string, command = 'npm test', turn = 'turn-1') =>
-      note('item/completed', { threadId: T, turnId: turn, item: commandItem(id, command, 'completed', { aggregatedOutput: 'ok\n', exitCode: 0, durationMs: 5 }) })
     const interrupt = (id: number, turn = 'turn-1') => out({ id, method: 'turn/interrupt', params: { threadId: T, turnId: turn } })
     /** The run goes on with the steer as its next turn, which answers it. */
     const answers = (id: number, steer = STEER): TranscriptFrame[] => [
@@ -1710,28 +1781,19 @@ describe('CodexAdapter', () => {
       ...message('msg-2', ['Switching to pnpm'], 'turn-2'),
       completed('completed', 'turn-2')
     ]
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-    /**
-     * Cue actions: `steer` (a person's message arrives; `agent: true` for an agent's), `held` (it must be held, not
-     * drained), `drained` (wait until the adapter drained it), `now` (Send now), `sleep` (let time pass).
-     */
+    /** Cue actions: `steer` (a person's message arrives), `drained` (wait until the adapter drained it), `ask`. */
     /** Mousse's own questions asked in the thread (`ask` cue), as its MCP server's `ask_user` asks them. */
     const asked: Array<Promise<unknown>> = []
     const cues = (hold: HoldControl) => async (frame: unknown) => {
-      const action = frame as { action: string; text?: string; agent?: boolean; ms?: number }
+      const action = frame as { action: string; text?: string }
       if (action.action === 'ask') {
         const answer = questions.requestAnswers([{ id: 'q', prompt: 'Which package manager?', options: [{ id: 'npm', label: 'npm' }, { id: 'skip', label: 'Skip' }] }], 'thread-1')
         answer.catch(() => undefined)
         asked.push(answer)
         await vi.waitFor(() => expect(questions.listPendingForThread('thread-1')).toHaveLength(1))
-      } else if (action.action === 'steer') hold.steer(action.text ?? STEER, { person: !action.agent })
-      else if (action.action === 'held') {
-        await vi.waitFor(() => expect(hold.held()).toBe(true))
-        expect(hold.drained()).not.toContain(action.text ?? STEER)
-      } else if (action.action === 'drained') await vi.waitFor(() => expect(hold.drained()).toContain(action.text ?? STEER))
-      else if (action.action === 'now') hold.sendNow()
-      else if (action.action === 'sleep') await sleep(action.ms ?? 0)
+      } else if (action.action === 'steer') hold.steer(action.text ?? STEER)
+      else if (action.action === 'drained') await vi.waitFor(() => expect(hold.drained()).toContain(action.text ?? STEER))
       else throw new Error(`unknown cue ${JSON.stringify(frame)}`)
     }
     const run = async (frames: TranscriptFrame[] | 'fixture', options: { strict?: boolean; settleMs?: number } = {}) => {
@@ -1761,189 +1823,20 @@ describe('CodexAdapter', () => {
     }
     const head = (prompt = 'Run the tests'): TranscriptFrame[] => [...handshake(), ...threadStart(4), ...turnStart(5, prompt)]
 
-    it('the fixture: a steer during a command waits for its result and the window, then cuts once, taken by the next turn', async () => {
-      const { hold, sink, result, events } = await run('fixture')
+    it('the fixture: a steer during a command interrupts the turn at once, before the command\'s result, and the next turn carries it once', async () => {
+      const { hold, result, events, sent } = await run('fixture')
       expect(result.text).toBe('Switching to pnpm')
-      // The command ran to its end: its result is in the transcript before the steer.
-      const commandEnd = sink.calls.find(([name, value]) => name === 'tool' && (value as { phase: string; callId: string }).phase === 'complete' && (value as { callId: string }).callId === 'cmd-1')
-      expect(commandEnd?.[1]).toMatchObject({ activity: { exitCode: 0 } })
-      before(events, 'tool:complete:cmd-1', `drain:${STEER}`)
-      // Not before the window after the result closed: a second command of the same response would start inside it.
-      expect(hold.at('drain')! - hold.at('tool', 'complete:cmd-1')!).toBeGreaterThanOrEqual(232 - 10)
-      expect(hold.at('drain')! - hold.at('tool', 'complete:cmd-1')!).toBeLessThan(232 + 500)
+      // Nothing waited for the command: the cut went out while it ran, and it never reported a result before the cut.
+      expect(hold.held()).toBe(false)
+      before(events, 'tool:start:cmd-1', `drain:${STEER}`)
+      if (events.includes('tool:complete:cmd-1')) before(events, `drain:${STEER}`, 'tool:complete:cmd-1')
+      expect(sent.filter((method) => method === 'turn/interrupt')).toHaveLength(1)
+      expect(sent).not.toContain('turn/steer')
       // Checked at dispatch, then taken only once the turn that carries it is accepted.
       before(events, `drain:${STEER}`, 'mayCut:true')
       before(events, 'mayCut:true', 'taken:drain-1')
       expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
       expect(events.filter((event) => event.startsWith('returned:'))).toEqual([])
-    })
-
-    it('strict release: the held steer waits past the window and the model\'s text, for turn/completed, and goes in with no interrupt', async () => {
-      const { events, sent } = await run([
-        ...head(),
-        started('cmd-1'),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        ...message('msg-1', ['All 12 passed.']),
-        cue({ action: 'sleep', ms: 400 }),
-        cue({ action: 'held' }),
-        completed('completed'),
-        ...answers(6)
-      ], { strict: true })
-      before(events, 'boundary:', `drain:${STEER}`)
-      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
-      // interrupted: the turn is already over, and the next turn/start carries it.
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
-      before(events, 'boundary:', 'mayCut:true')
-      expect(sent).not.toContain('turn/interrupt')
-      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
-    })
-
-    it('Send now during the command interrupts at once, before the command\'s result', async () => {
-      const { events } = await run([
-        ...head(),
-        started('cmd-1', 'sleep 20'),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        cue({ action: 'now' }),
-        interrupt(6),
-        inn({ id: 6, result: {} }),
-        completed('interrupted'),
-        ...answers(7)
-      ])
-      // The command never reported a result: the cut ended it (its row is closed when the run ends).
-      if (events.includes('tool:complete:cmd-1')) before(events, `drain:${STEER}`, 'tool:complete:cmd-1')
-      before(events, `drain:${STEER}`, 'mayCut:true')
-      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
-    })
-
-    it('text between two commands closes the window: the steer cuts there (the documented best-effort window)', async () => {
-      const { hold, events } = await run([
-        ...head(),
-        started('cmd-1'),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        cue({ action: 'held' }),
-        ...message('msg-1', ['Now the build:']),
-        interrupt(6),
-        inn({ id: 6, result: {} }),
-        completed('interrupted'),
-        ...answers(7)
-      ], { settleMs: 5_000 })
-      // A long window: only the model's output can have closed it.
-      expect(hold.at('drain')! - hold.at('text', 'Now the build:')!).toBeLessThan(1_000)
-      before(events, 'text:Now the build:', `drain:${STEER}`)
-    })
-
-    it('strict release: text between two commands keeps the steer held through the second command, to the turn\'s end', async () => {
-      const { events, sent } = await run([
-        ...head(),
-        started('cmd-1'),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        ...message('msg-1', ['Now the build:']),
-        cue({ action: 'sleep', ms: 300 }),
-        cue({ action: 'held' }),
-        started('cmd-2', 'npm run build'),
-        finished('cmd-2', 'npm run build'),
-        completed('completed'),
-        ...answers(6)
-      ], { strict: true })
-      before(events, 'tool:complete:cmd-2', `drain:${STEER}`)
-      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
-      // interrupted: the turn is already over, and the next turn/start carries it.
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
-      before(events, 'boundary:', 'mayCut:true')
-      expect(sent).not.toContain('turn/interrupt')
-    })
-
-    it('a delayed start notification: the next command\'s start reaches Mousse after the window, so the cut meets it (the documented best-effort window)', async () => {
-      const { events } = await run([
-        ...head(),
-        started('cmd-1'),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        // Codex is already running cmd-2; Mousse hears of it only after the window closed and the cut went out.
-        interrupt(6),
-        started('cmd-2', 'npm run build'),
-        inn({ id: 6, result: {} }),
-        completed('interrupted'),
-        ...answers(7)
-      ])
-      before(events, `drain:${STEER}`, 'tool:start:cmd-2')
-      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
-    })
-
-    it('strict release: a delayed start notification finds the steer still held, and it goes in at the turn\'s end', async () => {
-      const { events, sent } = await run([
-        ...head(),
-        started('cmd-1'),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        cue({ action: 'sleep', ms: 400 }),
-        cue({ action: 'held' }),
-        started('cmd-2', 'npm run build'),
-        finished('cmd-2', 'npm run build'),
-        completed('completed'),
-        ...answers(6)
-      ], { strict: true })
-      before(events, 'tool:complete:cmd-2', `drain:${STEER}`)
-      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
-      // interrupted: the turn is already over, and the next turn/start carries it.
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
-      before(events, 'boundary:', 'mayCut:true')
-      expect(sent).not.toContain('turn/interrupt')
-    })
-
-    it('a command that starts while the cut waits behind an earlier steer is not interrupted: the steer is held again', async () => {
-      const { events } = await run([
-        ...head(),
-        started('cmd-1'),
-        // An agent's steer joins natively; its turn/steer is not answered yet.
-        cue({ action: 'steer', text: 'Subagent finished', agent: true }),
-        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Subagent finished') } }),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        // The person's steer is drained after the window; its cut waits behind the unanswered turn/steer.
-        cue({ action: 'drained' }),
-        started('cmd-2', 'npm run build'),
-        inn({ id: 6, result: { turnId: 'turn-1' } }),
-        cue({ action: 'held' }),
-        finished('cmd-2', 'npm run build'),
-        interrupt(7),
-        inn({ id: 7, result: {} }),
-        completed('interrupted'),
-        ...answers(8)
-      ])
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:false', 'mayCut:true'])
-      before(events, 'tool:start:cmd-2', 'mayCut:false')
-      before(events, 'mayCut:false', `returned:${STEER}`)
-      before(events, 'tool:complete:cmd-2', 'mayCut:true')
-      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual(['accepted:Subagent finished@drain-1', `accepted:${STEER}@drain-3`])
-    })
-
-    it('a command that ends right before the turn does: the turn\'s end closes the window, so the steer starts the next turn of the same run', async () => {
-      const { events, sent } = await run([
-        ...head(),
-        started('cmd-1'),
-        cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        completed('completed'),
-        ...answers(6)
-      ])
-      before(events, 'boundary:', `drain:${STEER}`)
-      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
-      // interrupted: the turn is already over, and the next turn/start carries it.
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
-      before(events, 'boundary:', 'mayCut:true')
-      expect(sent).not.toContain('turn/interrupt')
     })
 
     it('the boundary ends when the next server turn starts: a steer before that turn writes anything cuts it', async () => {
@@ -1952,16 +1845,18 @@ describe('CodexAdapter', () => {
         ...head(),
         started('cmd-1'),
         cue({ action: 'steer' }),
-        cue({ action: 'held' }),
-        finished('cmd-1'),
-        completed('completed'),
-        ...turnStart(6, STEER, 'turn-2'),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        // The cut turn's end is a boundary...
+        completed('interrupted'),
+        // ...which the turn that carries the steer ends.
+        ...turnStart(7, STEER, 'turn-2'),
         // Turn 2 has shown nothing yet: a person's steer is not a native one for the turn that ended.
         cue({ action: 'steer', text: LATER }),
-        interrupt(7, 'turn-2'),
-        inn({ id: 7, result: {} }),
+        interrupt(8, 'turn-2'),
+        inn({ id: 8, result: {} }),
         completed('interrupted', 'turn-2'),
-        ...turnStart(8, LATER, 'turn-3'),
+        ...turnStart(9, LATER, 'turn-3'),
         ...message('msg-3', ['Keeping it'], 'turn-3'),
         completed('completed', 'turn-3')
       ])
@@ -1987,54 +1882,25 @@ describe('CodexAdapter', () => {
       expect(events).toContain('awaiting:patch-1:false')
     })
 
-    describe('a question for the person: the steer cuts and answers it, under either release', () => {
-      const userInput = (id: string) =>
-        inn({ id, method: 'item/tool/requestUserInput', params: { threadId: T, turnId: 'turn-1', itemId: 'ask-1', isBlocking: true, autoResolutionMs: null, questions: [{ id: 'q1', header: 'Scope', question: 'Which module?', isOther: false, isSecret: false, options: [{ label: 'run', description: '' }, { label: 'Skip', description: '' }] }] } })
-      const askItem = note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'dynamicToolCall', id: 'ask-1', tool: 'request_user_input', arguments: {}, status: 'inProgress', contentItems: null, success: null, durationMs: null } })
+    describe('a question for the person: the steer cuts and answers it', () => {
       const mousseAsk = (status: string, extra: Record<string, unknown> = {}) => ({ type: 'mcpToolCall', id: 'mcp-ask', server: 'mousse', tool: 'ask_user', arguments: { questions: [] }, status, result: null, error: null, durationMs: null, ...extra })
 
-      it.each([['best effort', false], ['strict', true]] as const)('%s: Codex\'s own question (requestUserInput) does not hold a steer already held for a command', async (_name, strict) => {
+      it('a steer during Codex\'s own question (requestUserInput) cuts and answers it as the person', async () => {
         const { events } = await run([
           ...head(),
-          started('cmd-1'),
+          note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'dynamicToolCall', id: 'ask-1', tool: 'request_user_input', arguments: {}, status: 'inProgress', contentItems: null, success: null, durationMs: null } }),
+          inn({ id: 'srv-1', method: 'item/tool/requestUserInput', params: { threadId: T, turnId: 'turn-1', itemId: 'ask-1', isBlocking: true, autoResolutionMs: null, questions: [{ id: 'q1', header: 'Scope', question: 'Which module?', isOther: false, isSecret: false, options: [{ label: 'run', description: '' }, { label: 'Skip', description: '' }] }] } }),
           cue({ action: 'steer' }),
-          cue({ action: 'held' }),
-          finished('cmd-1'),
-          askItem,
-          userInput('srv-1'),
           interrupt(6),
           // The steer answered the question as the person: the reject-like option.
           out({ id: 'srv-1', result: { answers: { q1: { answers: ['Skip'] } } } }),
           inn({ id: 6, result: {} }),
           completed('interrupted'),
           ...answers(7)
-        ], { strict })
+        ])
         before(events, 'awaiting:ask-1:true', `drain:${STEER}`)
         expect(events).toContain('awaiting:ask-1:false')
         expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
-        expect(questions.listPendingForThread('thread-1')).toEqual([])
-      })
-
-      it.each([['best effort', false], ['strict', true]] as const)('%s: Mousse\'s ask_user over MCP does not hold a steer already held for a command', async (_name, strict) => {
-        asked.length = 0
-        const { events } = await run([
-          ...head(),
-          started('cmd-1'),
-          cue({ action: 'steer' }),
-          cue({ action: 'held' }),
-          finished('cmd-1'),
-          note('item/started', { threadId: T, turnId: 'turn-1', item: mousseAsk('inProgress') }),
-          cue({ action: 'ask' }),
-          interrupt(6),
-          inn({ id: 6, result: {} }),
-          note('item/completed', { threadId: T, turnId: 'turn-1', item: mousseAsk('failed', { error: { message: 'dismissed' } }) }),
-          completed('interrupted'),
-          ...answers(7)
-        ], { strict })
-        before(events, 'tool:start:mcp-ask', `drain:${STEER}`)
-        expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
-        // Answered as the person by the steer's cut: its reject-like option.
-        await expect(asked[0]).resolves.toEqual({ q: 'skip' })
         expect(questions.listPendingForThread('thread-1')).toEqual([])
       })
 
@@ -2245,11 +2111,102 @@ describe('a bot turn on Codex', () => {
       check: (call: { kind: string; tool: string; args: Record<string, unknown> }) => {
         calls.push({ tool: call.tool, args: call.args })
         if (call.tool === 'shell') return { ok: false, refused: { text: 'The owner has not allowed this yet.', askId: 'ask-1' } }
-        return String(call.args.path ?? '').startsWith(`${files}/`) ? { ok: true } : { ok: false, wall: { kind: 'escalated', permission: 'change files' } }
+        return String(call.args.path ?? '').startsWith(files + sep) ? { ok: true } : { ok: false, wall: { kind: 'escalated', permission: 'change files' } }
       }
     }
     return { bot, calls }
   }
+
+  it.each(['mousse', 'mousse-relay'])('switches off the owner server %s without an attachment', async (name) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: { [name]: { url: 'https://owner.invalid/mcp', enabled: true } } }, layers: [] } }),
+      ...threadStart(5, threadParams({ config: { [`mcp_servers.${name}.enabled`]: false, ...NO_COMMANDS, model_provider: 'openai' } })),
+      ...turnStart(6, 'go'),
+      completed('completed')
+    ])
+    await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: bot as never })
+    replay.assertDone()
+  })
+
+  // Hand-authored wire replays: owner names × attachments × enabled/disabled entries.
+  // Refused cases must never send thread/start (nor let leftover owner keys reach Codex).
+  const reservedCases = [[], ['mousse'], ['mousse-relay'], ['mousse', 'mousse-relay'], ['mousse-relay', 'mousse']].flatMap((names) =>
+    ['none', 'mousse', 'both'].flatMap((attachment) => [true, false].flatMap((enabled) =>
+      ['effective', 'active layer', 'ignored layer', 'user and project', 'ancestor project'].map((source) => ({ names, attachment, enabled, source }))))
+    // With no owner servers, enabled and source cannot change the outcome: one row per attachment is enough.
+    .filter((row) => names.length > 0 || (row.enabled && row.source === 'effective')))
+  it.each(reservedCases)('contains reserved names $names with attachment $attachment, enabled=$enabled, $source', async ({ names, attachment, enabled, source }) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const mcp = attachment === 'none' ? null : {
+      url: 'http://127.0.0.1:4000/mcp', token: 'run-token',
+      ...(attachment === 'both' ? { relay: { url: 'http://127.0.0.1:4000/relay', revision: 'rev-1' } } : {})
+    }
+    const servers = Object.fromEntries(names.map((name) => [name, {
+      enabled, url: 'https://owner.invalid/mcp', enabled_tools: ['owner_tool'],
+      http_headers: { Owner: 'leftover' }, bearer_token_env_var: 'OWNER_TOKEN'
+    }]))
+    const activeNames = source === 'ignored layer' ? [] : names
+    const collisions = ['mousse', 'mousse-relay'].filter((name) => activeNames.includes(name) && mcp && (name === 'mousse' || attachment === 'both'))
+    const config = {
+      ...Object.fromEntries(enabled ? activeNames.map((name) => [`mcp_servers.${name}.enabled`, false]) : []),
+      ...NO_COMMANDS, model_provider: 'openai',
+      ...(mcp ? {
+        'mcp_servers.mousse.url': mcp.url,
+        'mcp_servers.mousse.http_headers': { Authorization: 'Bearer run-token' },
+        'mcp_servers.mousse.tool_timeout_sec': 3600,
+        'mcp_servers.mousse.default_tools_approval_mode': 'approve',
+        ...(mcp.relay ? {
+          'mcp_servers.mousse-relay.url': mcp.relay.url,
+          'mcp_servers.mousse-relay.http_headers': { Authorization: 'Bearer run-token' },
+          'mcp_servers.mousse-relay.tool_timeout_sec': 3600,
+          'mcp_servers.mousse-relay.default_tools_approval_mode': 'approve'
+        } : {})
+      } : {})
+    }
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: {
+        config: { mcp_servers: source === 'effective' ? servers : {} },
+        layers: source === 'effective' ? [] : [
+          ...(source === 'user and project' ? [{ name: { type: 'user', file: '/owner/.codex/config.toml', profile: null }, disabledReason: null, config: { mcp_servers: servers } }] : []),
+          { name: { type: 'project', dotCodexFolder: join(source === 'ancestor project' ? home : files, '.codex') }, disabledReason: source === 'ignored layer' ? 'untrusted' : null, config: { mcp_servers: servers } }
+        ]
+      } }),
+      ...(!collisions.length ? [
+        ...threadStart(5, threadParams({ config, ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {}) })),
+        ...turnStart(6, 'go'), completed('completed')
+      ] : []),
+      // The same owner's next thread still runs, with exactly the usual attachment overrides.
+      ...threadStart(collisions.length ? 5 : 7, threadParams({
+        config: Object.fromEntries(Object.entries(config).filter(([key]) => key === 'model_provider' || (key.startsWith('mcp_servers.') && !key.endsWith('.enabled')))),
+        ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {})
+      })),
+      ...turnStart(collisions.length ? 6 : 8, 'owner'), completed('completed')
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    const run = adapter.startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
+    if (collisions.length) {
+      const plural = collisions.length > 1
+      const namesText = collisions.map((name) => `"${name}"`).join(' and ')
+      const file = source === 'user and project' ? "Codex's config.toml and the project's .codex/config.toml"
+        : source === 'ancestor project' ? "the project's ../.codex/config.toml"
+        : source === 'active layer' ? "the project's .codex/config.toml" : "Codex's config.toml"
+      await expect(run).rejects.toMatchObject({ code: 'policy_unenforceable', message:
+        `Your Codex config has ${plural ? 'MCP servers' : 'an MCP server'} named ${namesText}, ${plural ? 'names' : 'a name'} Mousse needs for my work. Rename ${plural ? 'them' : 'it'} in ${file} to let me work on Codex.` })
+    }
+    else await run
+    await adapter.startTurn(input({ prompt: 'owner', threadId: 'owner-thread' }), recordingSink(), control(), host(mcp))
+    replay.assertDone()
+  })
 
   it('runs in Ask with the user\'s MCP servers off, in its files folder; its authority answers every approval and nobody is asked', async () => {
     const files = join(home, 'files')
@@ -2341,9 +2298,9 @@ describe('a bot turn on Codex', () => {
     const mcp = { url: 'http://127.0.0.1:4000/mcp', token: 'run-token', relay: { url: 'http://127.0.0.1:4000/relay', revision: 'rev-1' } }
     const replay = transport([
       ...handshake(),
-      // The owner's own Codex servers, one of them named like Mousse's relay: theirs are switched off, Mousse's stay.
+      // The owner's ordinary Codex server is switched off; only Mousse supplies the reserved names.
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
-      inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true }, 'mousse-relay': { enabled: true } } }, layers: [] } }),
+      inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true } } }, layers: [] } }),
       ...threadStart(5, threadParams({
         config: {
           'mcp_servers.github.enabled': false,
@@ -2426,10 +2383,10 @@ describe('a bot turn on Codex', () => {
       // The owner allowed the web: the system text changed. The loaded thread, which keeps its old developer instructions,
       // is let go, and a new one starts under the new text, never with the old permissions as its system text.
       ...setup(9),
-      out({ id: 10, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 10, result: { status: 'unsubscribed' } }),
-      out({ id: 11, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: after }) }),
-      inn({ id: 11, result: threadResult('thr-2') }),
+      out({ id: 10, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: after }) }),
+      out({ id: 11, method: 'thread/unsubscribe', params: { threadId: T } }),
+      inn({ id: 11, result: { status: 'unsubscribed' } }),
+      inn({ id: 10, result: threadResult('thr-2') }),
       out({ id: 12, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+two\n\nCurrent request:\nthree'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 12, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),

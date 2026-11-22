@@ -11,7 +11,6 @@ export async function openThread(threadId: string): Promise<void> {
   if (!await confirmNavigation()) return
   const state = useAppStore.getState()
   state.setSidebarMode('projects')
-  if (state.activeThreadId === threadId && !state.openingThreadId) return
   await openAndSelect(threadId)
 }
 

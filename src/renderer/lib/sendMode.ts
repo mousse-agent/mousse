@@ -4,43 +4,39 @@ import { profilePreferenceKey } from './profilePreferences'
 import type { SendMode } from './steerKey'
 
 /**
- * Each thread's send mode (`SendMode`): the threads the person set to Steer, newest last, as a personal preference
- * of the profile on this computer. It changes only what Enter does in this composer, never the run or the agent, so
- * it is not one of the thread's run settings. A thread that is not listed queues, so a new thread starts in Queue.
+ * The send mode (`SendMode`) last chosen in any thread's composer, as a personal preference of the profile on this
+ * computer. Every thread follows it, so switching threads or restarting keeps the choice. It changes only what Enter
+ * does in the composer, never the run or the agent, so it is not one of a thread's run settings. Until the person
+ * picks Steer, every thread queues.
  */
-const PREFERENCE_NAME = 'steerThreads.v1'
-/** More threads than anyone keeps in Steer; past it the oldest choice is dropped. */
-const MAX_STEER_THREADS = 500
+const PREFERENCE_NAME = 'sendMode.v1'
 
-let cached: { key: string; ids: readonly string[] } | null = null
+let cached: { key: string; mode: SendMode } | null = null
 const listeners = new Set<() => void>()
 
-function steerThreads(key: string): readonly string[] {
-  if (cached?.key === key) return cached.ids
-  let ids: string[] = []
+function storedMode(key: string): SendMode {
+  if (cached?.key === key) return cached.mode
+  let mode: SendMode = 'queue'
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? '[]')
-    if (Array.isArray(parsed)) ids = parsed.filter((id): id is string => typeof id === 'string')
-  } catch { /* Unreadable or unavailable storage: every thread queues. */ }
-  cached = { key, ids }
-  return ids
+    if (localStorage.getItem(key) === 'steer') mode = 'steer'
+  } catch { /* Unavailable storage: every thread queues. */ }
+  cached = { key, mode }
+  return mode
 }
 
-/** The thread's send mode; `queue` until the person switches it. */
-export function threadSendMode(profileId: string, threadId: string): SendMode {
-  if (!profileId || !threadId) return 'queue'
-  return steerThreads(profilePreferenceKey(profileId, PREFERENCE_NAME)).includes(threadId) ? 'steer' : 'queue'
+/** The profile's send mode; `queue` until the person switches it. */
+export function profileSendMode(profileId: string): SendMode {
+  if (!profileId) return 'queue'
+  return storedMode(profilePreferenceKey(profileId, PREFERENCE_NAME))
 }
 
-/** Keeps the thread's send mode across restarts. */
-export function setThreadSendMode(profileId: string, threadId: string, mode: SendMode): void {
-  if (!profileId || !threadId) return
+/** Keeps the send mode for every thread of the profile, across restarts. */
+export function setProfileSendMode(profileId: string, mode: SendMode): void {
+  if (!profileId) return
   const key = profilePreferenceKey(profileId, PREFERENCE_NAME)
-  const others = steerThreads(key).filter((id) => id !== threadId)
-  const ids = mode === 'steer' ? [...others, threadId].slice(-MAX_STEER_THREADS) : others
-  cached = { key, ids }
+  cached = { key, mode }
   try {
-    if (ids.length) localStorage.setItem(key, JSON.stringify(ids))
+    if (mode === 'steer') localStorage.setItem(key, mode)
     else localStorage.removeItem(key)
   } catch { /* Storage can be unavailable; the mode still holds until the app quits. */ }
   for (const listener of listeners) listener()
@@ -66,12 +62,12 @@ function subscribe(listener: () => void): () => void {
   }
 }
 
-/** The thread's send mode and how to change it; without a thread it is always `queue`. */
+/** The profile's send mode and how to change it; without a thread it is always `queue`. */
 export function useThreadSendMode(threadId: string | undefined): [SendMode, (mode: SendMode) => void] {
   const profileId = useAppStore((state) => state.profileId)
-  const mode = useSyncExternalStore(subscribe, () => (threadId ? threadSendMode(profileId, threadId) : 'queue'))
+  const mode = useSyncExternalStore(subscribe, () => (threadId ? profileSendMode(profileId) : 'queue'))
   const setMode = useCallback((next: SendMode) => {
-    if (threadId) setThreadSendMode(profileId, threadId, next)
+    if (threadId) setProfileSendMode(profileId, next)
   }, [profileId, threadId])
   return [mode, setMode]
 }

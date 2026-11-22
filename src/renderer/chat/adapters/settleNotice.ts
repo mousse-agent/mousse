@@ -30,6 +30,8 @@ export function settleNoticeOutcome(item: Pick<SettleNoticeItem, 'event' | 'stat
       return { verb: 'never ran your message', tone: 'stopped' }
     case 'deleted':
       return { verb: 'was deleted', tone: 'stopped' }
+    case 'unreachable':
+      return { verb: 'can no longer be followed from here', tone: 'stopped' }
     default:
       return { verb: `ended (${item.status ?? 'unknown'})`, tone: 'stopped' }
   }

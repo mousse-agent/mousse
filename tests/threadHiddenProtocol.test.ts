@@ -1,6 +1,6 @@
 /**
  * Show in sidebar (`threads.setHidden`): the owner brings back a thread one of their bots keeps out of the sidebar
- * (`Thread.hidden`), through the protocol a window uses. The bot's own `thread_hide` is in botThreadsDaemon.test.ts; the
+ * (`Thread.hidden`), through the protocol a window uses, and a person's message in it does the same. The bot's own `thread_hide` is in botThreadsDaemon.test.ts; the
  * sidebar and the bot chat's list are in the renderer tests.
  */
 import { mkdtempSync, rmSync } from 'fs'
@@ -58,5 +58,22 @@ describe('showing a hidden thread in the sidebar (threads.setHidden)', () => {
     await expect(gui.request('threads.setHidden', { threadId: owners.id, hidden: true })).rejects.toMatchObject({ code: 'invalid_params' })
     expect(mms.threads.getThread(owners.id)!.hidden).toBeUndefined()
     await expect(gui.request('threads.setHidden', { threadId: 'missing', hidden: false })).rejects.toMatchObject({ code: 'thread_not_found' })
+  })
+
+  it('shows a hidden thread once a person writes in it from a window; a script\'s message leaves it hidden', async () => {
+    const started = mms.threads.createThread('Quick check', undefined, undefined, { started: true, startedByBot: { botId: 'b1', name: 'Alpha' }, hidden: true })
+    const cli = new LocalMmsClient({ homeDir: home, ownerToken: mms.getOwnerLease()!.owner.token, endpoint: server.endpoint!, clientType: 'cli' })
+    await cli.connect()
+    try {
+      // Whether the turn itself runs (no model is set up here) is not what this checks.
+      await cli.request('orchestrator.send', { threadId: started.id, content: 'From a script.' }).catch(() => undefined)
+      expect(mms.threads.getThread(started.id)!.hidden).toBe(true)
+    } finally {
+      await cli.close()
+    }
+
+    await gui.request('orchestrator.send', { threadId: started.id, content: 'I will take it from here.' }).catch(() => undefined)
+    expect(mms.threads.getThread(started.id)!.hidden).toBeUndefined()
+    expect(mms.threads.threadOnDisk(started.id)?.hidden).toBeUndefined()
   })
 })

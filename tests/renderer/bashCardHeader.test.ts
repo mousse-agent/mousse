@@ -48,7 +48,6 @@ describe('the command row', () => {
     const multi = 'npx vitest run tests/checkout.test.ts --sequence.shuffle -t "adds  items" --reporter=dot'
     const text = mount({ bashCommand: multi }).querySelector('button .font-mono.truncate')!
     expect(text.textContent).toBe('npx vitest run tests/checkout.test.ts --sequence.shuffle -t "adds items" --reporter=dot')
-    expect(text.textContent).toContain('test.ts --sequence')
     expect(text.className).toContain('[font-variant-ligatures:none]')
   })
 

@@ -81,6 +81,8 @@ export interface XaiHooks {
   awaiting?: () => ((callId: string, waiting: boolean) => void) | undefined
   /** `session/prompt_complete` for a prompt Mousse tagged, with its params (`stopReason`, an error). */
   promptComplete(promptId: string, params: Record<string, unknown>): void
+  /** Called when an idle process sends an interactive request outside any running turn. */
+  onOutsideTurn?(): void
 }
 
 /** Stop reasons of a prompt that finished as asked (ACP's, plus `cancelled`). */
@@ -112,6 +114,10 @@ export function xaiHandlers(hooks: XaiHooks): Pick<AcpClientHandlers, 'extReques
   return {
     extRequests: {
       ...both('ask_user_question', async (params: unknown) => {
+        if (!hooks.scope.threadId) {
+          hooks.onOutsideTurn?.()
+          return { outcome: 'cancelled' }
+        }
         const callId = xaiParams(params).toolCallId
         const awaiting = typeof callId === 'string' && callId ? hooks.awaiting?.() : undefined
         awaiting?.(callId as string, true)

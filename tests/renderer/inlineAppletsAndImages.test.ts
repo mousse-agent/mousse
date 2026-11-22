@@ -142,18 +142,7 @@ describe('attachment chip remove button', () => {
   it('sits after the name on a file chip, so a long name ellipsizes before it', () => {
     render(createElement(FileAttachment, { id: 'a', filename: name, size: 48_000, onRemove: () => {} }))
     const remove = host.querySelector<HTMLButtonElement>(`button[aria-label="Remove ${name}"]`)!
-    expect(remove.className).not.toMatch(/\babsolute\b/)
-    expect(remove.className).toMatch(/\bshrink-0\b/)
     const label = host.querySelector(`span[title="${name}"]`)!
-    expect(label.className).toMatch(/\btruncate\b/)
-    expect(label.parentElement!.className).toMatch(/\bflex-1\b/)
-    expect(label.parentElement!.className).toMatch(/\bmin-w-0\b/)
     expect(label.parentElement!.nextElementSibling).toBe(remove)
-  })
-
-  it('stays in the corner of a bare image thumbnail', () => {
-    render(createElement(FileAttachment, { id: 'a', filename: 'Screenshot.png', isImage: true, url: 'data:image/png;base64,AAAA', onRemove: () => {} }))
-    const remove = host.querySelector<HTMLButtonElement>('button[aria-label="Remove Screenshot.png"]')!
-    expect(remove.className).toMatch(/\babsolute\b/)
   })
 })

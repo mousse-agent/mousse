@@ -62,7 +62,7 @@ export function toUIMessage(msg: ChatMessage): MousseUIMessage {
       output: msg.toolCall.response,
       title: msg.toolCall.title,
     })
-  } else if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction' || msg.kind === 'context_cleared') {
+  } else if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction' || msg.kind === 'context_cleared' || msg.kind === 'provider_retry') {
     parts.push({ type: `data-${msg.kind}` as string, data: msg.content } as DataPart)
   } else if (msg.role === 'assistant' && msg.streaming) {
     parts.push({ type: 'text', text: msg.content, state: 'streaming' })

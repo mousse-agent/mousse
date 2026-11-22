@@ -17,7 +17,7 @@ export function customExpiryMs(amount: string, unit: 'hours' | 'days'): number |
 }
 
 /**
- * Picks when a thread deletes itself (`Thread.expiresAt`): never, after 1 hour, 24 hours, 7 days, 30 days,
+ * Picks when a thread archives itself (`Thread.expiresAt`): never, after 1 hour, 24 hours, 7 days, 30 days,
  * or a custom time, and whether a run still going then is stopped. `selectedMs` marks the preset in use for
  * a new chat; an existing thread's menu marks none, since every pick counts from now.
  */
@@ -114,7 +114,7 @@ export function ExpiryMenu({ trigger, triggerTitle, triggerClassName, selectedMs
               className="composer-workspace-menu-item"
               onClick={() => pick(null)}
             >
-              <span>{hasExpiry ? 'Keep it' : 'Never'}</span>
+              <span>Never</span>
               {!hasExpiry && selectedMs === undefined && <Check size={14} className="composer-workspace-menu-check" aria-hidden="true" />}
             </button>
             {EXPIRY_PRESETS.map((preset) => (

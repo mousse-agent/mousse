@@ -25,6 +25,8 @@ export interface SavedCursorAgent {
   historyKey?: string
   /** Runs Mousse started on the agent for this thread (most recent last), for active-run recovery. */
   runIds: string[]
+  /** Hash of the session instructions the agent was given in its first prompt. */
+  instructionsHash?: string
 }
 
 export interface CursorSessionStore {
@@ -59,6 +61,11 @@ export interface CursorChatInput {
   signal?: AbortSignal
   mcp?: McpAttachment | null
   orchestrationInstructions?: string
+  /**
+   * A bot's turn: its session instructions are its system text (the owner's words, what it may use), so an agent given
+   * other ones is not reopened. A new agent gets them and the history in its first prompt, as Codex starts a new thread.
+   */
+  bot?: true
   onText(text: string): void
   onThinking?(text: string): void
   onTool?(event: CursorToolEvent): void
@@ -68,7 +75,7 @@ export interface CursorChatInput {
    * one of those deliveries. A drain is read (`steerTaken`, then `onSteer` with its token) only once the run that
    * carries it started, and handed back (`returnSteer`) when that never happens.
    */
-  drainSteerEntry?(opts?: { expect?: Array<'cut' | 'native' | 'hold'> }): { text: string; token: string } | undefined
+  drainSteerEntry?(opts?: { expect?: Array<'cut' | 'native' | 'hold'> }): { text: string; token: string; images?: ChatImageAttachment[] } | undefined
   /** The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. */
   peekSteer?(): { delivery: 'cut' | 'native' | 'hold' } | undefined
   /** The check right before the run is cancelled for a drained steer (`TurnControl.mayCut`): false hands it back. */
@@ -306,10 +313,11 @@ interface Turn {
   handBack?: () => void
 }
 
-/** A steer the turn drained; `token` names its drain when it had one. */
+/** A steer the turn drained, with the images sent with it; `token` names its drain when it had one. */
 interface DrainedSteer {
   text: string
   token?: string
+  images?: ChatImageAttachment[]
 }
 
 /** What a turn produced so far; kept when it ends early. */
@@ -481,7 +489,10 @@ export class CursorSessions {
     // A Stop that came first opens nothing (and starts no host).
     if (stop.aborted) throw new TurnStopped()
     const saved = store.saved(input.threadId)
-    const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey
+    const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
+    // An agent reads the instructions in its first prompt only: a bot's agent given other ones is replaced.
+    const stale = input.bot === true && instructionsHash !== undefined && saved?.instructionsHash !== instructionsHash
+    const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey && !stale
     const live = this.live.get(input.threadId)
     if (live && live.generation === this.generation && matches && live.agentId === saved?.agentId) return { agentId: live.agentId, resumed: true }
     if (live) this.closeLive(input.threadId)
@@ -517,7 +528,7 @@ export class CursorSessions {
       if (error instanceof TurnStopped) this.abandon(creating, { prune: true })
       throw error
     }
-    store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [] })
+    store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [], ...(instructionsHash ? { instructionsHash } : {}) })
     if (saved && saved.agentId !== agentId) this.prune([saved.agentId])
     this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
     return { agentId, resumed: false }
@@ -753,7 +764,7 @@ export class CursorSessions {
         }
         const steer = entry?.text.trim()
         if (!entry || !steer) return
-        const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}) }
+        const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}), ...(entry.images?.length ? { images: entry.images } : {}) }
         // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
         if (running && !cancelling && drained.token && input.mayCut && !input.mayCut(drained.token)) {
           input.returnSteer?.(drained.text, drained.token)
@@ -816,7 +827,8 @@ export class CursorSessions {
       if (!pendingSteers.length) return { text: progress.text, interrupted: false, ...(progress.usage ? { usage: progress.usage } : {}) }
       carried = pendingSteers.splice(0)
       prompt = carried.map((entry) => entry.text).join('\n')
-      images = []
+      // The run a steer becomes carries its images.
+      images = carried.flatMap((entry) => entry.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType }))
     }
   }
 

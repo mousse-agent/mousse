@@ -1,13 +1,14 @@
 import type { BotAllowedObserver, NormalisedCall } from '../../../shared/bots/personal/authority'
 import type { BotChip } from '../../../shared/bots/personal/chat'
-import { actedChip, chipForCall, rollUpChips, type BotChipCall, type BotChipContext } from '../../../shared/bots/personal/chips'
+import { actedChip, chipForCall, rollUpChips, WORKING_LIVE_CHIP, type BotChipCall, type BotChipContext } from '../../../shared/bots/personal/chips'
 import { stableStringify } from '../../run/json'
-import type { BotActivityContext, BotActivitySink } from '../seams'
+import type { BotActivityCalls, BotActivityContext, BotActivitySink } from '../seams'
 
 /**
  * Activity chips in the daemon (Bot Phase 1 §5.8). Every call a bot's authority allows lands here
  * (`observer`, wired into `createBotAuthority`'s `onAllowed`): it is kept for its dispatch and shown
- * at once as a live chip (`bots.activity`, at most four a second per activation). App tools report
+ * at once as a live chip (`bots.activity`, at most four a second per activation); a call Mousse has no
+ * words for shows "working", never its tool's name. App tools report
  * their results (`onAppResult`) for outcome chips. When the dispatch settles, `drain` rolls its calls
  * up into the chips of the message row and clears the live chip. Nothing is stored: a daemon that
  * restarts mid-dispatch loses that dispatch's chips, not its message.
@@ -92,8 +93,8 @@ export class BotActivityLog implements BotActivitySink {
       if (first !== undefined && at - first < BOT_ACTIVITY_SAME_CALL_MS) return
       dispatch.seen.set(key, at)
       dispatch.calls.push({ tool: call.tool, input: call.input })
-      const chip = chipForCall(call.tool, call.input, dispatch.chipContext)
-      if (chip) this.show(ctx, chip)
+      // A call with no words of its own still replaces what was shown: the bot is no longer doing that.
+      this.show(ctx, chipForCall(call.tool, call.input, dispatch.chipContext) ?? WORKING_LIVE_CHIP)
     } catch (error) {
       // An observer of the authority never fails the call it watched.
       console.warn('[bots] could not record activity', { activationId: ctx.activationId, error: error instanceof Error ? error.message : String(error) })
@@ -117,15 +118,19 @@ export class BotActivityLog implements BotActivitySink {
   }
 
   drain(dispatchId: string): BotChip[] {
+    return this.drainCalls(dispatchId).chips
+  }
+
+  drainCalls(dispatchId: string): { chips: BotChip[]; calls?: BotActivityCalls } {
     const dispatch = this.dispatches.get(dispatchId)
-    if (!dispatch) return []
+    if (!dispatch) return { chips: [] }
     this.dispatches.delete(dispatchId)
     const { activationId, botId } = dispatch.ctx
     if (this.current.get(activationId) === dispatchId) {
       this.current.delete(activationId)
       this.clearLive(activationId, botId)
     }
-    return rollUpChips(dispatch.calls, dispatch.chipContext)
+    return { chips: rollUpChips(dispatch.calls, dispatch.chipContext), calls: { calls: dispatch.calls, context: dispatch.chipContext } }
   }
 
   /** The activation's live chip now, for `bots.chat.list`. */

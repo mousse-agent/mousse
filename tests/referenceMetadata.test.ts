@@ -14,21 +14,21 @@ afterEach(() => {
 })
 
 describe('ChatReferenceMetadataResolver', () => {
-  it('uses the authoritative thread directory and active profile registry', () => {
+  it('names a thread by its own record and a project by the active profile registry', () => {
     const profileHome = join(tmpdir(), 'profile-a')
     const projectPath = join(tmpdir(), 'project')
     const threads = {
-      getThread: (id: string) => id === 't1' ? { id, name: 'Thread', projectId: 'p1' } : undefined,
-      getThreadDir: (id: string) => join(profileHome, 'thread-data', 'repositories', 'p1', id)
+      getThread: (id: string) => id === 't1' ? { id, name: 'Thread', projectId: 'p1' } : undefined
     }
     const projects = {
       getProject: (id: string) => id === 'p1' ? { id, name: 'Project', path: projectPath } : undefined
     }
     const resolver = new ChatReferenceMetadataResolver(threads as never, projects as never, profileHome)
 
-    expect(resolver.resolve({ kind: 'thread', title: 'Thread', threadId: 't1' })).toEqual(expect.objectContaining({
-      metadataPath: join(profileHome, 'thread-data', 'repositories', 'p1', 't1', 'meta.json')
-    }))
+    // A thread is named by its id and title, with no file: the agent reads it with its thread tools.
+    expect(resolver.resolve({ kind: 'thread', title: 'Old title', threadId: 't1' })).toEqual({
+      id: 'thread:t1', kind: 'thread', title: 'Thread', threadId: 't1', projectId: 'p1'
+    })
     expect(resolver.resolve({ kind: 'project', title: 'Project', projectId: 'p1' })).toEqual(expect.objectContaining({
       path: projectPath, metadataPath: join(profileHome, 'projects.json')
     }))
@@ -40,7 +40,6 @@ describe('ChatReferenceMetadataResolver', () => {
     const thread = { id: 't1', name: 'Thread', projectId: 'p1' }
     const threads = {
       getThread: (id: string) => id === 't1' ? thread : undefined,
-      getThreadDir: (id: string) => join(profileHome, 'threads', id),
       // A caller that is not on this computer has private threads left out (#678).
       listAllThreads: () => [thread]
     }
@@ -52,10 +51,10 @@ describe('ChatReferenceMetadataResolver', () => {
       globalSequence: () => 0
     }, 'chatReferences.resolve', {
       reference: { id: 'drag:t1', kind: 'thread', title: 'Thread', threadId: 't1' }
-    }) as { reference: { metadataPath: string } }
+    }) as { reference: Record<string, unknown> }
 
     expect(PROTOCOL_METHODS).toContain('chatReferences.resolve')
-    expect(result.reference.metadataPath).toBe(join(profileHome, 'threads', 't1', 'meta.json'))
+    expect(result.reference).toEqual({ id: 'thread:t1', kind: 'thread', title: 'Thread', threadId: 't1', projectId: 'p1' })
   })
 
   it('rejects non-project/thread payloads at the protocol boundary', async () => {

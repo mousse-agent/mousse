@@ -82,7 +82,9 @@ describe('reading the computers', () => {
   const asked: string[] = []
   let status: Record<string, unknown>
   let nodes: Device[]
+  let engine: Record<string, unknown> | undefined
   beforeEach(() => {
+    engine = undefined
     asked.length = 0
     status = { enabled: true, self: { node: 'nod_self' }, keystore: 'unlocked', features: { netBridge: true, netSpaces: true, netBridgeThreads: true } }
     nodes = [device(), device({ node: 'nod_self' as Device['node'], self: true })]
@@ -94,6 +96,8 @@ describe('reading the computers', () => {
             asked.push(method)
             if (method === 'net.status') return status
             if (method === 'bridge.nodes') return { nodes }
+            // A daemon without the new networking has no such method.
+            if (method === 'netEngine.status' && engine) return engine
             throw new Error('unexpected ' + method)
           }
         }
@@ -104,7 +108,7 @@ describe('reading the computers', () => {
 
   it('reads the status and the devices, and keeps the computers by node', async () => {
     await refreshComputers()
-    expect(asked).toEqual(['net.status', 'bridge.nodes'])
+    expect(asked).toEqual(['net.status', 'netEngine.status', 'bridge.nodes'])
     expect(useComputersStore.getState()).toMatchObject({ loaded: true, routed: true, byNode: { nod_studio: { name: 'Studio', online: true } } })
     expect(Object.keys(useComputersStore.getState().byNode)).toEqual(['nod_studio'])
   })
@@ -112,13 +116,26 @@ describe('reading the computers', () => {
   it('asks for no devices while threads of other computers are not routed, or Net is locked', async () => {
     status = { ...status, features: { netBridge: true, netSpaces: true, netBridgeThreads: false } }
     await refreshComputers()
-    expect(asked).toEqual(['net.status'])
+    expect(asked).toEqual(['net.status', 'netEngine.status'])
     expect(useComputersStore.getState()).toMatchObject({ loaded: true, routed: false, byNode: {} })
     asked.length = 0
     status = { ...status, features: { netBridge: true, netSpaces: true, netBridgeThreads: true }, keystore: 'locked' }
     await refreshComputers()
-    expect(asked).toEqual(['net.status'])
+    expect(asked).toEqual(['net.status', 'netEngine.status'])
     expect(useComputersStore.getState().byNode).toEqual({})
+  })
+
+  it('lists the computers of the new networking with v1 networking off', async () => {
+    status = { enabled: false, keystore: 'unlocked', features: { netBridge: false, netSpaces: false, netBridgeThreads: false } }
+    engine = { enabled: true, on: false, helper: { state: 'starting' }, devices: [] }
+    await refreshComputers()
+    expect(asked).toEqual(['net.status', 'netEngine.status'])
+    expect(useComputersStore.getState()).toMatchObject({ loaded: true, routed: false, byNode: {} })
+    asked.length = 0
+    engine = { ...engine, on: true }
+    await refreshComputers()
+    expect(asked).toEqual(['net.status', 'netEngine.status', 'bridge.nodes'])
+    expect(useComputersStore.getState()).toMatchObject({ loaded: true, routed: true, byNode: { nod_studio: { name: 'Studio' } } })
   })
 
   it('shares one read among callers that arrive while it runs, and reads once more afterwards', async () => {

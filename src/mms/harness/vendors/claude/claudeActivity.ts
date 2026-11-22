@@ -222,9 +222,11 @@ export function claudeActivityStart(name: string, input: unknown, isRoot: boolea
     case 'Task': {
       const agentType = str(args.subagent_type)
       const description = str(args.description)
+      const model = str(args.model)
       return {
         kind: 'subagent',
         ...(agentType ? { agentType } : {}),
+        ...(model ? { model } : {}),
         ...(description ? { description: clip(description.replace(/\s+/g, ' ').trim(), ACTIVITY_DESCRIPTION_CHARS) } : {}),
         ...(args.run_in_background === true ? { background: true } : {})
       }

@@ -3,15 +3,16 @@ import { join, resolve } from 'node:path'
 import type { WorktreeFolderEntry } from '../../shared/settings'
 import type { WorktreeFolderStatus } from '../../shared/storage'
 import type { SettingsStore } from '../settings/SettingsStore'
-import { checkWorktreeFolder, folderConnected, setWorktreeFolders, worktreeFolderStillNeeded } from './worktreeLayout'
+import { checkWorktreeFolder, folderConnected, setWorktreeFolders, shortWorktreeRoot, worktreeFolderStillNeeded } from './worktreeLayout'
 import { readThreadRecord, threadRecordPath } from '../data/threadRecords'
 
 /** What Settings → Storage shows of the worktree folder. Each folder is looked at once its volume answers, never waited on. */
-export async function worktreeFolderStatus(settings: SettingsStore, home: string): Promise<WorktreeFolderStatus> {
+export async function worktreeFolderStatus(settings: SettingsStore, home: string, profileHome = home): Promise<WorktreeFolderStatus> {
   const { worktreeFolder, previousWorktreeFolders } = settings.get().storage
   return {
     folder: worktreeFolder?.path ?? null,
-    defaultFolder: join(home, 'repositories'),
+    // On Windows new worktrees go to the profile's short folder by default (`shortWorktreeRoot`).
+    defaultFolder: shortWorktreeRoot(profileHome)?.path ?? join(home, 'repositories'),
     connected: worktreeFolder ? await folderConnected(worktreeFolder.path) : true,
     previous: await Promise.all(previousWorktreeFolders.map(async (entry) => ({ folder: entry.path, connected: await folderConnected(entry.path) })))
   }
@@ -34,7 +35,7 @@ export async function chooseWorktreeFolder(settings: SettingsStore, profileHome:
   for (const candidate of candidates) if (await worktreeFolderStillNeeded(candidate, named)) previous.push(candidate)
   const saved = settings.set({ storage: { worktreeFolder: next, previousWorktreeFolders: previous } })
   setWorktreeFolders(profileHome, saved.storage)
-  return await worktreeFolderStatus(settings, home)
+  return await worktreeFolderStatus(settings, home, profileHome)
 }
 
 /**

@@ -59,10 +59,15 @@ export function definitionProblem(definition: BotDefinition): string | undefined
   if (typeof definition.description !== 'string' || definition.description.length > MAX_BOT_DESCRIPTION_CHARS) return 'The description is too long.'
   const look = definition.look as Partial<BotLook> | undefined
   if (!look || typeof look.colour !== 'string' || typeof look.accessory !== 'string' || look.colour.length > 40 || look.accessory.length > 40 ||
-      (look.kind !== undefined && (typeof look.kind !== 'string' || look.kind.length > 40)) || (look.eyes !== undefined && (typeof look.eyes !== 'string' || look.eyes.length > 40))) return 'The bot needs a look.'
+      (look.kind !== undefined && (typeof look.kind !== 'string' || look.kind.length > 40)) || (look.eyes !== undefined && (typeof look.eyes !== 'string' || look.eyes.length > 40)) ||
+      (look.eyeColour !== undefined && (typeof look.eyeColour !== 'string' || look.eyeColour.length > 40))) return 'The bot needs a look.'
   if (definition.owner?.kind !== 'person' || definition.owner.id !== 'self') return 'Bots for a team are not available yet.'
   if (definition.placement?.kind !== 'this_computer') return 'Bots run on this computer only for now.'
   if (typeof definition.role !== 'string' || definition.role.length > 64 * 1024) return 'The role is invalid.'
+  const before = definition.promptDefault as Partial<{ description: unknown; role: unknown }> | undefined
+  if (before !== undefined && (!before || typeof before !== 'object' || typeof before.description !== 'string' || before.description.length > MAX_BOT_DESCRIPTION_CHARS || typeof before.role !== 'string' || before.role.length > 64 * 1024))
+    return 'The default prompt is invalid.'
+  if (definition.promptChangedAt !== undefined && (typeof definition.promptChangedAt !== 'string' || Number.isNaN(Date.parse(definition.promptChangedAt)))) return 'The prompt change time is invalid.'
   const thread = threadProblem(definition.main)
   if (thread) return thread
   if (!Array.isArray(definition.context)) return 'The context threads are invalid.'

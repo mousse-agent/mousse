@@ -1,5 +1,5 @@
 /**
- * Issue #920: a steer into a Claude Code turn that runs as one query, as a person's turn does past the live-process cap.
+ * Issue #920: a steer into a Claude Code turn that runs as one query, as a person's turn does with live queries turned off.
  * The steer interrupts the query and goes in as the prompt of a query that restarts the turn. A Stop must not let that
  * query's process go on to send the steer to the model while Mousse hands it back to be sent again: the process is sent
  * SIGTERM at once, and what it wrote before it died decides whether the steer was read (accepted) or not (handed back).
@@ -11,6 +11,7 @@ import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import type { ChatImageAttachment } from '../src/shared/types'
 
 const dirs: string[] = []
 const temp = (prefix: string): string => {
@@ -46,10 +47,10 @@ async function firstMessage(prompt: AsyncIterable<SDKUserMessage>): Promise<SDKU
 }
 
 /**
- * A person's turn past the live-process cap (no slot, so one query per run of the turn), each query from `scripts`
+ * A person's turn with no live session (live queries turned off, so one query per run of the turn), each query from `scripts`
  * in order. `beforeStart(n)` runs as query `n` is being started, before the turn has it.
  */
-function cappedTurn(scripts: Script[], steersQueued: { text: string; token: string }[], beforeStart?: (index: number) => void, mcp?: { url: string; token: string }) {
+function cappedTurn(scripts: Script[], steersQueued: { text: string; token: string; images?: ChatImageAttachment[] }[], beforeStart?: (index: number) => void, mcp?: { url: string; token: string }) {
   const home = temp('one-shot-steer-home-')
   const binary = join(home, 'claude')
   writeFileSync(binary, 'fixture')
@@ -102,7 +103,7 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
     launchConfig: () => ({ binaryPath: binary }),
     query,
     reap,
-    // Every live slot is taken: the turn runs as one query, as a person's turn past the cap does.
+    // No live session is allowed: the turn runs as one query.
     live: { maxSessions: 0 },
     runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
   })
@@ -113,7 +114,8 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
     drainSteerEntry: vi.fn(() => pending.shift()),
     steerTaken: vi.fn((token?: string) => { events.push(`taken ${token}`) }),
     onSteer: vi.fn((text: string, token?: string) => { events.push(`accepted ${text} ${token}`) }),
-    returnSteer: vi.fn((text: string, token?: string) => { events.push(`returned ${text} ${token}`) })
+    returnSteer: vi.fn((text: string, token?: string) => { events.push(`returned ${text} ${token}`) }),
+    onSteerUnanswered: vi.fn()
   }
   const run = () => service.chat({ threadId: 'thread', cwd, model: 'sonnet', prompt: 'go', signal: stop.signal, onText: vi.fn(), ...(mcp ? { mcp } : {}), ...steer })
   return { run, stop, steer, queries, prompts, events, order, pending, reap }
@@ -255,6 +257,28 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 
+  // Hand-authored frames: Claude Code's resume writes its own "No response requested." and the result repeats it.
+  // Only then is the steer unanswered (`onSteerUnanswered`), which a bot's turn answers in a continuation.
+  it.each([
+    ['repeats the line Claude Code made up', 'No response requested.', '', true],
+    ['is the model\'s own', 'All tests pass.', 'All tests pass.', false]
+  ])('the restarted query wrote nothing; its result %s: the turn\'s text is %j', async (_name, result, text, unanswered) => {
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        if (result === 'No response requested.')
+          yield { type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: result }] }, session_id: SESSION }
+        yield { ...done, result }
+      }
+    ], ONE)
+    expect((await turn.run()).trim()).toBe(text)
+    expect(turn.steer.onSteerUnanswered).toHaveBeenCalledTimes(unanswered ? 1 : 0)
+  })
+
   it('a taken steer the model answered before the Stop is accepted once and not handed back', async () => {
     let turn!: ReturnType<typeof cappedTurn>
     turn = cappedTurn([
@@ -317,6 +341,26 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     await turn.run()
     expect(turn.order).toEqual(['servers 0: mousse', 'prompt 0', 'servers 1: mousse', 'prompt 1'])
     expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  it('a steer sent with an image goes into the restarted query with the image', async () => {
+    const data = Buffer.from('png bytes').toString('base64')
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        yield answer
+        yield done
+      }
+    ], [{ text: 'look at this', token: 'drain-1', images: [{ mimeType: 'image/png', data, name: 'shot.png' }] }])
+    await turn.run()
+    expect(turn.prompts[1]!.message.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'look at this' }),
+      expect.objectContaining({ type: 'image', source: expect.objectContaining({ type: 'base64', media_type: 'image/png', data }) })
+    ])
   })
 
   it('a stopped process that never ends its output is read no longer than the drain deadline, and the steer is handed back once', async () => {

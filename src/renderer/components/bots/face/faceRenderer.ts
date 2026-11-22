@@ -1,4 +1,4 @@
-import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_COLOURS, BOT_EYES, BOT_KINDS, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_COLOURS, BOT_EYES, BOT_KINDS, botEyeColourOf, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
 import { browserFrameCodec, hashText, indexedDbFrameBackend, SavedFaceFrames, type FaceFrameStore } from './faceFrameStore'
 import { FaceMotion, faceUniforms, stillPose, WHISKER_MIN_SIZE, type FaceUniforms } from './facePoses'
@@ -214,6 +214,17 @@ const FRAME_TICKS: Record<BotFaceState, number> = {
   idle: 2,
   paused: 2
 }
+/**
+ * Faces smaller than this (the sidebar's, the chat header's) draw at most 15 frames a second in every state. At that size
+ * a busy face's motion reads the same at 15 as at 30, and a sidebar of busy bots then costs half as many draws and
+ * presented frames. Larger faces (a bot's About panel, the empty chat) keep 30.
+ */
+export const SMALL_FACE_PX = 40
+
+/** Shared ticks between frames of a face drawn as `spec`. */
+export function frameTicks(spec: Pick<FaceSpec, 'state' | 'size'>): number {
+  return Math.max(FRAME_TICKS[spec.state], spec.size < SMALL_FACE_PX ? 2 : 1)
+}
 /** Display frames come every few milliseconds; a frame due within this much of one draws on it. */
 const FRAME_SLACK = 1 / 240
 /**
@@ -239,10 +250,10 @@ export function faceDrawSide(size: number, pixelRatio: number): number {
   return Math.max(1, Math.round(size * (size < WHISKER_MIN_SIZE ? MAX_PIXEL_RATIO : pixelRatio)))
 }
 
-/** The key of a face's still frame, in memory and saved: its look, state, view and size, and its canvas's side in device pixels. */
+/** The key of a face's still frame, in memory and saved: its look (with the eye colour it shows), state, view and size, and its canvas's side in device pixels. */
 export function stillFrameKey(spec: Pick<FaceSpec, 'look' | 'state' | 'view' | 'size'>, px: number): string {
   const { look } = spec
-  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${spec.state}|${spec.view}|${spec.size}|${px}`
+  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${botEyeColourOf(look)}|${spec.state}|${spec.view}|${spec.size}|${px}`
 }
 
 const ART_STATES: readonly BotFaceState[] = ['idle', 'working', 'needs_you', 'stuck', 'paused', 'happy']
@@ -532,7 +543,7 @@ export class FaceRenderer {
     const prev = slot.spec
     if (
       prev.look.colour === next.look.colour && prev.look.accessory === next.look.accessory && prev.look.kind === next.look.kind &&
-      prev.look.eyes === next.look.eyes && prev.state === next.state &&
+      prev.look.eyes === next.look.eyes && prev.look.eyeColour === next.look.eyeColour && prev.state === next.state &&
       prev.size === next.size && prev.view === next.view && prev.still === next.still
     ) return
     slot.spec = next
@@ -914,7 +925,7 @@ export class FaceRenderer {
       slot.lastT = t
       // Every face's next frame is on the shared grid, whenever this one was drawn, so faces due
       // together draw together; a face that fell behind skips the ticks it missed.
-      slot.nextAt = gridAfter(t, SHARED_TICK * FRAME_TICKS[spec.state])
+      slot.nextAt = gridAfter(t, SHARED_TICK * frameTicks(spec))
       jobs.push({ slot, uniforms: faceUniforms(spec.look, slot.motion.frame(t, dt), view), x: 0, y: 0 })
     }
     // A moving face's still pose is drawn once too, with what the budget leaves, and saved: a later
@@ -1190,7 +1201,8 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       const glY = canvas.height - y - side
       context.viewport(x, glY, side, side)
       context.uniform2f(uniforms.uRes, side, side)
-      context.uniform2f(uniforms.uOrg, x, glY)
+      // The picture's origin, moved by its pan: the shader draws the scene beyond it, so nothing is cut off.
+      context.uniform2f(uniforms.uOrg, x + u.pan[0] * side, glY + u.pan[1] * side)
       context.uniform3fv(uniforms.uCol, u.uCol)
       context.uniform4fv(uniforms.uAC, u.uAC)
       context.uniform1f(uniforms.uAcc, u.uAcc)
@@ -1200,7 +1212,7 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       context.uniform4fv(uniforms.uE, u.uE)
       context.uniform4fv(uniforms.uE2, u.uE2)
       context.uniform4fv(uniforms.uV, u.uV)
-      context.uniform3fv(uniforms.uK, u.uK)
+      context.uniform4fv(uniforms.uK, u.uK)
       context.drawArrays(context.TRIANGLES, 0, 3)
     },
     timer: timerExt

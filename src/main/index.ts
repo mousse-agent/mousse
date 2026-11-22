@@ -1,7 +1,8 @@
 import { attachLinuxWindowShape } from './linuxWindowShape'
-import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
+import { WarmStartCache } from './warmStartCache'
 
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { configureElectronContext, configureWindowlessElectron, finishElectronCli } from '../cli/electronContext'
@@ -13,7 +14,9 @@ import { canonicalizeHome, SERVICE_STOP_TIMEOUT_MS } from '../cli/mmsRuntime'
 import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { GuiMmsController } from './mms/GuiMmsController'
-import { GuiConnectionLog } from './mms/guiConnectionLog'
+import { stopServiceForQuit } from './mms/stopServiceForQuit'
+import { createTrayQuit } from './trayQuit'
+import { GuiConnectionLog, logErrorReferences } from './mms/guiConnectionLog'
 import { registerRendererErrorIpc, RendererErrorLog } from './diagnostics/rendererErrorLog'
 import { PresentationState } from './mms/PresentationState'
 import {
@@ -60,6 +63,9 @@ import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGui
 import { startDevGuiPoller } from './devgui/devGuiPoller'
 import { configureLinuxGraphics, configureLinuxVsync, configureLinuxWindowing, linuxTransparencyOptions } from './linuxRendering'
 import { addToSwitchList, KEEP_GPU_PROGRAMS_FEATURE } from '../shared/chromiumSwitches'
+import { watchKeepAwake } from './keepAwake'
+import { createServiceTray, usesServiceTray } from './serviceTray'
+import { attachPairLinks, PAIR_LINK_IPC } from './pairLink'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -142,6 +148,9 @@ if (isChatgptTokenCommand) {
  * Phase 3 GUI: connect to standalone MMS daemon via local protocol.
  * Electron never acquires the MMS owner lease and never stops the daemon on quit.
  */
+/** The longest a quit waits for the warm start file to be written. */
+const WARM_START_QUIT_WAIT_MS = 500
+
 function startGuiApp(): void {
   if (configureLinuxWindowing(app, process.platform, process.env)) return
   configureLinuxGraphics(app, process.platform, process.env)
@@ -163,6 +172,12 @@ function startGuiApp(): void {
   let resumeRecoveryAttached = false
   let devGuiPollerStop: (() => void) | null = null
   let desktopUpdater: DesktopUpdater | null = null
+  let serviceTray: import('electron').Tray | null = null
+  let mousseHome: string | null = null
+  /** What each profile's window last showed; read once here, written in the background (see WarmStartCache). */
+  let warmStart: WarmStartCache | null = null
+  /** Set by the tray's Quit: this quit also stops the background service. */
+  let stopServiceOnQuit = false
 
   const browserView = new BrowserViewManager()
   const presentation = new PresentationState()
@@ -174,13 +189,84 @@ function startGuiApp(): void {
     return
   }
 
-  app.on('second-instance', () => {
-    if (mainWindow) {
+  // `mousse://pair` links (design 1b §5.2): the launch argv, a second instance's argv, and macOS `open-url`.
+  const pairLinks = attachPairLinks({
+    app,
+    ipc: ipcMain,
+    argv: process.argv,
+    env: process.env,
+    notify: () => {
+      if (isQuitting || quitAndStopService.closing) return
+      for (const window of BrowserWindow.getAllWindows())
+        if (!window.isDestroyed()) window.webContents.send(PAIR_LINK_IPC.arrived)
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore()
+        mainWindow.show()
+        mainWindow.focus()
+      } else if (app.isReady()) openWindowFromBackground()
+    }
+  })
+
+  app.on('second-instance', (_event, argv) => {
+    // Quitting: nothing comes back on screen.
+    if (isQuitting || quitAndStopService.closing) return
+    if (pairLinks.fromArgv(argv)) return
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()
       mainWindow.focus()
+    } else {
+      openWindowFromBackground()
     }
   })
+
+  function openWindowFromBackground(): void {
+    if (isQuitting) return
+    if (bootstrapComplete && guiMms) {
+      void createWindow().catch((error) => console.error('Failed to create Mousse window:', error))
+    } else {
+      void bootstrap()
+    }
+  }
+
+  /** The tray's way to end everything: Mousse goes at once and its background service stops itself. */
+  const quitAndStopService = createTrayQuit({
+    windows: () => BrowserWindow.getAllWindows(),
+    isQuitting: () => isQuitting,
+    destroyTray: () => {
+      serviceTray?.destroy()
+      serviceTray = null
+    },
+    quit: () => {
+      stopServiceOnQuit = true
+      void beginQuit()
+    }
+  })
+
+  /**
+   * An update install does not start once the tray's quit began: the installer would start Mousse
+   * again after the person stopped it. While the tray's quit is still closing windows, the installer
+   * waits for it and starts only if a window kept Mousse open.
+   */
+  async function installUnlessQuitting(prepare: () => Promise<void>): Promise<void> {
+    if (stopServiceOnQuit) throw new Error('Mousse is quitting.')
+    await prepare()
+    if (stopServiceOnQuit || await quitAndStopService.decided()) throw new Error('Mousse is quitting.')
+  }
+
+  function ensureServiceTray(): void {
+    if (serviceTray || !usesServiceTray()) return
+    const iconPath = getAppIconPath()
+    if (!iconPath) return
+    try {
+      serviceTray = createServiceTray(iconPath, {
+        open: openWindowFromBackground,
+        quitAndStop: quitAndStopService
+      })
+    } catch (error) {
+      console.error('Tray icon could not start:', error instanceof Error ? error.message : String(error))
+    }
+  }
 
   async function createWindow(): Promise<void> {
     if (!settings) return
@@ -319,6 +405,7 @@ function startGuiApp(): void {
     bootstrapPromise = (async () => {
       const homeDir = resolveMousseHome(process.env.MOUSSE_HOME)
       process.env.MOUSSE_HOME = homeDir
+      mousseHome = homeDir
       const repoRoot =
         process.env.MOUSSE_REPO_ROOT || (app.isPackaged ? homedir() : process.cwd())
 
@@ -339,6 +426,8 @@ function startGuiApp(): void {
         controller.setConnectionLog(connectionLog)
         // A start after an update shows as a new version here; the restart itself has no other trace in main.
         connectionLog.write('app.start', { version: app.getVersion(), packaged: app.isPackaged, pid: process.pid })
+        // Each "Something went wrong … Reference: <id>" main shows can be found here, with its redacted causes.
+        logErrorReferences(connectionLog)
         const startedLog = connectionLog
         app.once('will-quit', () => startedLog.flushSync())
         controller.on('error', (error: Error) => {
@@ -349,9 +438,17 @@ function startGuiApp(): void {
           request: (sender, method, params) => controller.requestAttachedBrowser(sender, method, params)
         })
         controller.setAttachedBrowserHost(attachedBrowserHost)
+        // While the service reports working runs, the computer does not sleep (Settings → General → Threads).
+        watchKeepAwake(controller)
         guiMms = controller
       }
       const browserMms = guiMms
+
+      if (!warmStart) {
+        warmStart = new WarmStartCache(join(app.getPath('userData'), 'warm-start.json'))
+        // Read while the window loads; the window asks for it once its page runs.
+        void warmStart.load()
+      }
 
       if (!ipcRegistered) {
         registerFontIpc()
@@ -367,7 +464,8 @@ function startGuiApp(): void {
             requestAppRestart: () => coordinatedRestart(),
             connectionLog,
             // Development only: see `createDevTurnEndDropper`. An installed build never reads the variable.
-            devDropTurnEnd: !app.isPackaged && process.env.MOUSSE_DEV_DROP_TURN_END === '1'
+            devDropTurnEnd: !app.isPackaged && process.env.MOUSSE_DEV_DROP_TURN_END === '1',
+            warmStart
           },
           () => mainWindow
         )
@@ -388,7 +486,7 @@ function startGuiApp(): void {
       try {
         desktopUpdater ??= startDesktopUpdates({
           // The installer replaces Mousse.exe, which also hosts the background service.
-          prepareInstall: () => prepareUpdateInstall({
+          prepareInstall: () => installUnlessQuitting(() => prepareUpdateInstall({
             controller: guiMms,
             stopService: () => stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS }),
             // Services of other clients or earlier sessions, `mousse-cli` commands and the voice engine run the same
@@ -405,12 +503,14 @@ function startGuiApp(): void {
                 kill: (pid) => process.kill(pid)
               })
             }
-          }),
+          })),
           // The installer is running: quit even when a window would hold the quit back.
           onInstallStarted: () => {
             setTimeout(() => app.exit(0), INSTALL_QUIT_DEADLINE_MS).unref()
           },
           recoverInstall: async () => {
+            // The tray's quit began: nothing starts again.
+            if (stopServiceOnQuit) return
             await recoverUpdateInstall({ controller: guiMms })
             for (const window of BrowserWindow.getAllWindows()) {
               if (!window.isDestroyed()) window.webContents.reload()
@@ -425,6 +525,7 @@ function startGuiApp(): void {
       // requests and their in-window Retry action rather than a splash/modal.
       // Restore the exact window's chats only after its renderer subscribes.
       await createWindow()
+      ensureServiceTray()
       const chromeSettings = settings
       void browserMms.start().then(async () => {
         if (isQuitting) return
@@ -455,17 +556,26 @@ function startGuiApp(): void {
     if (shutdownPromise) return shutdownPromise
     isQuitting = true
     shutdownPromise = (async () => {
+      // What the windows showed is written while the connection closes; a slow disk never holds the quit.
+      const warmStartWritten = Promise.race([
+        warmStart?.flush().catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, WARM_START_QUIT_WAIT_MS).unref())
+      ])
       try {
         if (devGuiPollerStop) {
           devGuiPollerStop()
           devGuiPollerStop = null
         }
         desktopUpdater?.dispose()
-        if (guiMms) await guiMms.stop()
+        if (stopServiceOnQuit) await stopServiceForQuit(guiMms, mousseHome)
+        else if (guiMms) await guiMms.stop()
       } catch (err) {
         console.error('guiMms.stop failed during shutdown:', err)
       }
       guiMms = null
+      await warmStartWritten
+      serviceTray?.destroy()
+      serviceTray = null
       try {
         browserView.destroy()
       } catch {
@@ -505,6 +615,8 @@ function startGuiApp(): void {
 
   app.on('window-all-closed', () => {
     if (process.platform === 'darwin') return
+    // The tray icon keeps the app reachable while the background service runs.
+    if (serviceTray && !isQuitting) return
     // No embedded MMS work to retain — quit disconnects client only.
     void beginQuit()
   })

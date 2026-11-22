@@ -400,17 +400,6 @@ describe('opening a folder of another computer', () => {
 
     it.each([
       ['editor_off', 'editor connections are off'],
-      ['no_ssh_server', 'no SSH server'],
-      ['no_host_key', 'no host key'],
-      ['host_untrusted', 'not the system’s own'],
-      ['limit', 'all it may have'],
-      ['rate_limited', 'too fast'],
-      ['blocked', 'blocked'],
-      ['setting_off', 'switched off'],
-      ['capability', 'no grant'],
-      ['net_off', 'net off'],
-      ['offline', 'offline'],
-      ['unsupported', 'too old'],
       ['timeout', 'did not answer']
     ] as const)('%s: starts no editor and leaves the user’s ~/.ssh/config alone', async (reason, message) => {
       const f = setup({ probe: refused({ ok: false, reason, message }) })

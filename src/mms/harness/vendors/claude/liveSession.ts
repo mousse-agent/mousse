@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import type { WindowsProviderTree } from '../../windowsProviderProcess'
+import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
 import type { SpawnedRoot } from '../../stopProcesses'
@@ -18,8 +20,12 @@ import type { SpawnedRoot } from '../../stopProcesses'
  * the query and drives the runs.
  */
 
-/** How long a thread with no background work keeps its idle process before it is closed. */
-export const LIVE_IDLE_CLOSE_MS = 3 * 60_000
+/**
+ * How long a thread with no background work keeps its idle process before it is closed. A new process costs about a
+ * second before it takes the prompt (two at p90), so a reply written after reading the last answer should still find it
+ * open; at most `LIVE_MAX_IDLE_SESSIONS` stay open idle. `MOUSSE_CLAUDE_IDLE_CLOSE_MS` sets it.
+ */
+export const LIVE_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CLAUDE_IDLE_CLOSE_MS', 15 * 60_000)
 /** With background work pending: how long the thread may be silent before the release is reconsidered. */
 export const LIVE_IDLE_RELEASE_MS = 30 * 60_000
 /**
@@ -28,8 +34,12 @@ export const LIVE_IDLE_RELEASE_MS = 30 * 60_000
  * turn that is in flight.
  */
 export const LIVE_MAX_PIN_MS = 4 * 60 * 60_000
-/** Live Claude processes across threads. Beyond it a turn runs as a one-shot query, as before. */
-export const LIVE_MAX_SESSIONS = 4
+/**
+ * Idle live Claude processes with no background work kept across threads. When a new process starts and more than this
+ * many sit idle, the least recently used idle one is closed early (its thread resumes the session on its next turn).
+ * Busy processes and ones holding background work never count and are never closed for it.
+ */
+export const LIVE_MAX_IDLE_SESSIONS = 8
 /** A task finished and Claude never started its own turn: the wake ends after this long. */
 export const WAKE_TURN_START_DEADLINE_MS = 2 * 60_000
 /** How long a task the next turn cleared on a guess (its wake never came) is remembered, in case the wake still comes. */
@@ -51,7 +61,13 @@ export interface LiveTimings {
   idleCloseMs: number
   idleReleaseMs: number
   maxPinMs: number
+  /**
+   * Live processes across threads; at it a turn runs as a one-shot query unless an idle one can be closed. Unlimited by
+   * default: every thread that wants a live process gets one. 0 makes every turn a one-shot query (tests).
+   */
   maxSessions: number
+  /** See `LIVE_MAX_IDLE_SESSIONS`. */
+  maxIdleSessions: number
   wakeDeadlineMs: number
   backgroundMoveMs: number
   /** How long one step of a cancel (an interrupt and its receipt) may take before the process is given up. */
@@ -68,7 +84,8 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   idleCloseMs: LIVE_IDLE_CLOSE_MS,
   idleReleaseMs: LIVE_IDLE_RELEASE_MS,
   maxPinMs: LIVE_MAX_PIN_MS,
-  maxSessions: LIVE_MAX_SESSIONS,
+  maxSessions: Number.POSITIVE_INFINITY,
+  maxIdleSessions: LIVE_MAX_IDLE_SESSIONS,
   wakeDeadlineMs: WAKE_TURN_START_DEADLINE_MS,
   backgroundMoveMs: STEER_BACKGROUND_MOVE_MS,
   noticeDelayMs: 1_000,
@@ -78,10 +95,11 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
 }
 
 /** A query's Claude Code as the SDK reported it at spawn: its pid and when Mousse heard of it (`noteClaudeQuerySpawn`). */
-const SPAWNED = new WeakMap<object, () => { pid: number; spawnedAt: number } | undefined>()
+type ClaudeSpawn = { pid: number; spawnedAt: number; windowsTree?: WindowsProviderTree }
+const SPAWNED = new WeakMap<object, () => ClaudeSpawn | undefined>()
 
 /** Records where the spawn of `query`'s Claude Code is read from once it has started. */
-export function noteClaudeQuerySpawn(query: object, spawned: () => { pid: number; spawnedAt: number } | undefined): void {
+export function noteClaudeQuerySpawn(query: object, spawned: () => ClaudeSpawn | undefined): void {
   SPAWNED.set(query, spawned)
 }
 
@@ -114,7 +132,7 @@ export function claudeQueryProcess(query: unknown): ClaudeProcess | undefined {
     pid,
     ...(typeof handle?.kill === 'function' ? { terminate: () => { try { handle.kill!('SIGTERM'); return true } catch { return false } } } : {}),
     root: {
-      ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt } : {}),
+      ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt, windowsTree: noted.windowsTree } : {}),
       exited: () => (knowsExit ? handle!.exitCode !== null || handle!.signalCode !== null : undefined),
       ...(typeof handle?.kill === 'function' ? { kill: () => { try { handle.kill!('SIGKILL') } catch { /* gone meanwhile */ } } } : {})
     }
@@ -641,6 +659,8 @@ export interface LiveSessionHooks {
   notice?(text: string): void
   /** The process ended or was released. */
   ended(reason: 'closed' | 'idle' | 'idle-cap' | 'died'): void
+  /** A run ended and nothing else runs on the process: it waits for the next turn. */
+  idle?(): void
   /**
    * The session sent the process SIGTERM itself (`terminate`): the owner kills it with everything it started if it is
    * still running after the grace, as after Stop.
@@ -728,7 +748,7 @@ export class LiveSession<Turn = unknown> {
   sessionId: string | undefined
   dead = false
   /** What the owner keyed this query on (model, folder, instructions...); the service compares it. */
-  meta: Record<string, unknown> = {}
+  meta: Record<string, unknown> & { hardParts?: readonly unknown[] } = {}
   private query: Query | undefined
   private readonly runs: LiveRun[] = []
   private continuation: LiveRun | undefined
@@ -937,7 +957,8 @@ export class LiveSession<Turn = unknown> {
    *   that cannot be moved (the call throws, answers false or does not answer in time) is reported
    *   (`options.notMovable`) and the steer is not pushed: it waits for that subagent. Right before the push,
    *   `options.mayCut` is asked again; a tool that started meanwhile keeps the steer waiting.
-   * - `options.forced` (Send now): pushed at once, with no move; then the foreground tools are stopped, since an
+   * - `options.forced` (a person's steer, or Send now): foreground subagents are moved as above, then the steer is
+   *   pushed; then the foreground tools left (commands, and a subagent that could not be moved) are stopped, since an
    *   immediate message waits for a running command on Claude Code (spike S1). Each is stopped as its task
    *   (`stopTask`) when Claude Code reported one for every call (`task_started`, about 3 s after a command starts);
    *   otherwise the turn is interrupted, which ends the command and leaves the pushed steer queued, so it runs once.
@@ -947,22 +968,22 @@ export class LiveSession<Turn = unknown> {
    *
    * Pushed is not read, and taken (`run.read`, a `started` lifecycle) is not read either: `run.answered` and `onRead`
    * say when the model answers it, and `unreadFate` what became of one it had not answered when the turn ended.
-   * `pushed` is told the id at the moment of the push, before anything else can run.
+   * `pushed` is told the id at the moment of the push, before anything else can run. `content` is the steer's text, or
+   * its text and images as content blocks.
    */
-  async steer(run: LiveRun, text: string, pushed?: (id: string) => void, options: SteerOptions = {}): Promise<string | false> {
+  async steer(run: LiveRun, content: SDKUserMessage['message']['content'], pushed?: (id: string) => void, options: SteerOptions = {}): Promise<string | false> {
     const query = this.query
     if (!query || run.settled || run.abandoned || this.dead) return false
     run.steerInFlight++
     try {
-      if (!options.forced) {
-        for (const callId of options.subagents ?? []) {
-          if (await this.moveToBackground(query, callId)) {
-            options.moved?.(callId)
-            continue
-          }
-          options.notMovable?.(callId)
-          return false
+      for (const callId of options.subagents ?? []) {
+        if (await this.moveToBackground(query, callId)) {
+          options.moved?.(callId)
+          continue
         }
+        options.notMovable?.(callId)
+        // Sent now: a subagent that stays in the foreground is stopped with the turn's commands below.
+        if (!options.forced) return false
       }
       // The turn's result may have arrived while the foreground work moved; settling waited for this
       // steer, but a steer never starts a turn the run no longer owns: it is the next queued turn.
@@ -976,7 +997,7 @@ export class LiveSession<Turn = unknown> {
         try {
           id = this.push(run, {
             type: 'user',
-            message: { role: 'user', content: text },
+            message: { role: 'user', content },
             parent_tool_use_id: null,
             priority: 'now',
             session_id: this.sessionId ?? ''
@@ -2165,11 +2186,16 @@ export class LiveSession<Turn = unknown> {
       clearTimeout(this.capTimer)
       this.capTimer = undefined
     }
-    if (!this.busy) this.armIdle()
+    if (!this.busy) {
+      this.armIdle()
+      if (!active) this.hooks.idle?.()
+    }
   }
 
   private afterRunEnded(): void {
-    if (!this.busy && !this.dead) this.armIdle()
+    if (this.busy || this.dead) return
+    this.armIdle()
+    this.hooks.idle?.()
   }
 
   /** Provider activity restarts the idle clock. It does not move the cap on how long work may stay owed. */

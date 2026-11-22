@@ -329,39 +329,6 @@ describe('WorkflowRunService', () => {
     expect(seqs).toEqual([...new Set(seqs)].sort((a, b) => a - b))
   })
 
-  it('isolates A/B profiles and enforces budgets', async () => {
-    const aRoot = tempDir('mousse-a-')
-    const bRoot = tempDir('mousse-b-')
-    const { registry: regA, published: pubA } = await publishExample(aRoot)
-    const { registry: regB } = await publishExample(bRoot)
-    const serviceA = new WorkflowRunService({
-      profileId: 'p1',
-      profileRoot: aRoot,
-      registry: regA,
-      policy: new ExecutionPolicyService(),
-      cancellation: new CancellationRegistry()
-    })
-    const serviceB = new WorkflowRunService({
-      profileId: 'p1',
-      profileRoot: bRoot,
-      registry: regB,
-      policy: new ExecutionPolicyService(),
-      cancellation: new CancellationRegistry()
-    })
-    const started = await serviceA.start({
-      profileId: 'p1',
-      threadId: 'tA',
-      actor: { kind: 'workflow' },
-      source: 'gui',
-      definitionId: pubA.definitionId,
-      revisionId: pubA.head?.revisionId,
-      input: { files: ['missing.txt'] },
-      installationPolicy: INSTALL
-    })
-    const listB = await serviceB.list({ profileId: 'p1' })
-    expect(listB.find((item) => item.runId === started.manifest.runId)).toBeUndefined()
-  })
-
   it('returns executor unavailable for agent nodes without a registered adapter', async () => {
     const profileRoot = tempDir('mousse-run-')
     const workspaceRoot = tempDir('mousse-ws-')

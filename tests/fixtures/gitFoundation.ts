@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative } from 'node:path'
+import { delimiter, isAbsolute, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { committedGitTemplate } from '../support/gitBase'
 
 export function git(cwd: string, ...args: string[]): string {
@@ -53,11 +54,24 @@ export function gitFoundationFixture() {
   }
 }
 
+/** The repository's packages, for a crash-child bundle written outside the repository. */
+const REPOSITORY_PACKAGES = fileURLToPath(new URL('../../node_modules', import.meta.url))
+
 /**
- * Banner for an ESM crash-child bundle: bundled CommonJS dependencies (simple-git's `@kwsites/file-exists`)
- * call `require`, which an ES module does not have.
+ * Banner for an ESM crash-child bundle: bundled CommonJS dependencies call `require`, which an ES module does not have.
+ * The bundle is written outside the repository, so a package it loads when it runs (koffi, for Git on Windows) is
+ * found in the repository's packages. The child names itself in `MOUSSE_TEST_CRASH_PID` ({@link KILL_CRASH_CHILD}).
  */
-export const CRASH_CHILD_REQUIRE = "import { createRequire as crashChildRequire } from 'node:module'; const require = crashChildRequire(import.meta.url);"
+export const CRASH_CHILD_REQUIRE = "import { createRequire as crashChildRequire, Module as CrashChildModule } from 'node:module'; " +
+  "process.env.MOUSSE_TEST_CRASH_PID = String(process.pid); " +
+  "process.env.NODE_PATH = [" + JSON.stringify(REPOSITORY_PACKAGES) + ", process.env.NODE_PATH].filter(Boolean).join(" + JSON.stringify(delimiter) + "); " +
+  "CrashChildModule._initPaths(); const require = crashChildRequire(import.meta.url);"
+
+/**
+ * Shell that kills a crash child (SIGKILL) from a Git it started, as the computer turning off would stop Mousse. Not
+ * `$PPID`: Git's parent is the helper process that starts Git (`gitSpawn.ts`), not Mousse itself.
+ */
+export const KILL_CRASH_CHILD = 'kill -9 "$MOUSSE_TEST_CRASH_PID"'
 
 export const contextBoundary = {
   messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const, safeBoundaryProof: 'fixture'

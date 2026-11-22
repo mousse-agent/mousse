@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
 import type { BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
+import { BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -10,8 +10,12 @@ import { BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THREADS_PERMISSION
  */
 
 /** The limits a budget wall can raise for one activation. */
-export const BOT_BUDGET_WALL_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
-export type BotBudgetWallKey = (typeof BOT_BUDGET_WALL_KEYS)[number]
+export const BOT_BUDGET_WALL_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
+/**
+ * A limit an ask names. `maxActiveMs` (work time) only in an ask an older build wrote: work time has no limit now, so
+ * none is raised or asked for, and an open one is answered when the profile opens (`BotEngine.releaseWorkTimeAsks`).
+ */
+export type BotBudgetWallKey = (typeof BOT_BUDGET_WALL_KEYS)[number] | 'maxActiveMs'
 
 /**
  * What a wall asks the owner to allow. A `path` request ("use files on this computer") is only ever read from rows an
@@ -55,9 +59,7 @@ export interface BotMcpAsk {
  * An ask that grants nothing (Bot Phase 1 §5.11): `export_memory` ("Save my memory to a folder").
  * Allow opens a folder picker in the renderer, which calls `bots.memory.export`.
  */
-export interface BotSpecialAsk {
-  ask: 'export_memory'
-}
+export type BotSpecialAsk = { ask: 'export_memory' } | { ask: 'let_alone'; scheduleId: string; serverId: string; tool: string }
 
 /** What the bot may ask its owner for with `escalate`: a permission, or a special ask. */
 export type BotAskRequest = BotPermissionRequest | BotSpecialAsk
@@ -154,7 +156,7 @@ const BUDGET_WORDS: Record<BotBudgetWallKey, string> = {
  * "use the browser" (`{tool: 'browser'}`), so it has one card, one fingerprint and one grant.
  */
 export function grantRequestOf<T extends BotAskRequest>(request: T): T {
-  if (!('tool' in request) || typeof request.tool !== 'string') return request
+  if (isSpecialAsk(request) || !('tool' in request) || typeof request.tool !== 'string') return request
   const tool = botGrantTool(request.tool)
   return (tool === request.tool ? request : { tool }) as T
 }
@@ -162,8 +164,8 @@ export function grantRequestOf<T extends BotAskRequest>(request: T): T {
 /** A permission request in plain words. */
 export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_COMPUTER_PERMISSION) return 'Use the computer'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) return 'Use your threads'
-  if ('tool' in permission && botGrantTool(permission.tool) === BOT_PROFILER_PERMISSION) return 'Use the profiler'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
@@ -172,8 +174,7 @@ export function permissionText(permission: BotPermissionRequest): string {
     return permission.mcp.tool ? `Use the MCP tool \`${permission.mcp.tool}\`` : 'Use the tools of an MCP server'
   }
   const { key, amount } = permission.budget
-  if (amount === undefined) return `More ${BUDGET_WORDS[key]}`
-  if (key === 'maxActiveMs') return `${Math.max(1, Math.round(amount / 60_000))} more minutes of work`
+  if (amount === undefined || key === 'maxActiveMs') return `More ${BUDGET_WORDS[key]}`
   if (key === 'maxUsd') return `$${amount} more spend`
   return `${amount} more ${BUDGET_WORDS[key]}`
 }
@@ -208,15 +209,23 @@ export function permissionProblem(value: unknown): string | undefined {
   }
   if (keys.length === 1 && keys[0] === 'budget') {
     const budget = entry.budget as Record<string, unknown> | null
-    if (!budget || typeof budget !== 'object' || !BOT_BUDGET_WALL_KEYS.includes(budget.key as BotBudgetWallKey)) return 'The limit is invalid.'
+    if (!budget || typeof budget !== 'object' || !(BOT_BUDGET_WALL_KEYS as readonly string[]).includes(budget.key as string)) return 'The limit is invalid.'
     if (budget.amount !== undefined && (typeof budget.amount !== 'number' || !Number.isFinite(budget.amount) || budget.amount <= 0)) return 'The amount is invalid.'
     return undefined
   }
   return 'The permission is not one a bot can ask for.'
 }
 
+/** What a bot is told it may ask for, after an ask it wrote wrongly. */
+export const WHAT_TO_ASK_TEXT = "Ask for a tool, a limit, or to export your memory: your owner's MCP servers and skills need no asking."
+export const WHAT_TO_ASK_ALONE_TEXT = " To let one automation act without asking, use permission: {ask:'let_alone', scheduleId, serverId, tool}."
+
 /** Why a value is not something `escalate` may ask for, or undefined when it is one. */
 export function askProblem(value: unknown): string | undefined {
+  if (value && typeof value === 'object' && 'ask' in value && value.ask === 'let_alone') {
+    const request = value as Record<string, unknown>
+    return Object.keys(request).length === 4 && ['scheduleId', 'serverId', 'tool'].every(k => typeof request[k] === 'string' && (request[k] as string).trim().length > 0) ? undefined : 'The automation ask is invalid.'
+  }
   if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && 'ask' in value)
     return (value as { ask: unknown }).ask === 'export_memory' ? undefined : 'The ask is not one a bot can make.'
   return permissionProblem(value)

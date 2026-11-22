@@ -1,3 +1,5 @@
+import { heldCalls } from '../actions/lifecycle'
+import { requestJournalRows } from './requestFrames'
 import { createHash } from 'node:crypto'
 import type { ProfileDatabase } from '../../run/db/ProfileDatabase'
 import type { BotLane } from '../../../shared/bots/personal/definition'
@@ -32,10 +34,10 @@ import {
   type BotMemoryWrittenIn
 } from '../../../shared/bots/personal/memory'
 import type { BotJournalInput, BotStoreTx } from '../seams'
-import { type ChatSummaryState, foldChatSummary } from './chatSummary'
+import { CHAT_DIGEST_KEY, type ChatDigest, type ChatSummaryState, chatFingerprint, foldChatSummary, staleDigests } from './chatSummary'
 import { shortChipText } from '../../../shared/bots/personal/chips'
-import { guardMemoryText, relativeDateRefusal } from './guard'
-import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from './render'
+import { classifyMemorySearchText, guardMemoryText, maskMemoryCredentials, relativeDateRefusal } from './guard'
+import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens, zonedDayBound } from './render'
 
 /**
  * The bot memory store (docs/plans/bot-context.md §3, §6–§8) over `bots.db`: the journal (append,
@@ -45,7 +47,7 @@ import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from '.
  */
 
 /** The `bots.db` connection the store works on (`BotStore.db`). */
-export type BotMemoryDb = Pick<ProfileDatabase, 'statement' | 'inTransaction' | 'transaction'>
+export type BotMemoryDb = Pick<ProfileDatabase, 'statement' | 'inTransaction' | 'transaction' | 'database'>
 
 /** Capture or a journal write failed: the dispatch fails, and the bot is stuck until it can save again. */
 export class BotJournalError extends Error {
@@ -96,6 +98,7 @@ export interface BotMemorySave {
   kind: 'owner' | 'note'
   text: string
   replaces?: string
+  merges?: string[]
   validFrom?: string
   expiresAt?: string
   activationId?: string
@@ -204,6 +207,7 @@ export function entryOf(version: BotMemoryVersion): BotMemoryEntry {
     ...(version.expiresAt ? { until: version.expiresAt } : {}),
     learnedAt: version.learnedAt,
     by: version.writtenIn === 'run' ? 'a run' : version.writtenIn === 'dream' ? 'cleanup' : 'you said',
+    ...(version.reason?.startsWith('merged into ') ? { absorbedBy: version.reason.slice(12) } : {}),
     status: version.status
   }
 }
@@ -251,10 +255,29 @@ export class BotMemoryStore {
 
   constructor(options: BotMemoryStoreOptions) {
     this.db = options.db
+    // Connection-local only: no persistent schema, data or database-version change.
+    let lastQuery = ''
+    let queryTerms: string[] = []
+    this.db.database.function('bot_memory_search_class', { deterministic: true }, (text, query, allWords) => {
+      if (typeof text !== 'string' || typeof query !== 'string') return 0
+      if (query !== lastQuery) {
+        lastQuery = query
+        queryTerms = query.split('\n')
+      }
+      return classifyMemorySearchText(text, queryTerms, allWords === 1)
+    })
     this.clock = options.clock ?? Date.now
     this.timeZone = options.timeZone ?? (() => undefined)
     this.log = options.log ?? (() => {})
     this.redactMessage = options.redactMessage ?? defaultRedactMessage
+    // Profile-wide repair, deliberately separate from the bots.db schema version.
+    this.write(() => {
+      const key = 'request_frames_external_v1'
+      if (this.getState('', key)) return
+      this.run(`UPDATE bot_journal SET external = 1 WHERE kind IN ('notice', 'run_start')
+        AND (instr(text, '[output]') > 0 OR instr(text, '[data from ') > 0 OR instr(text, '[Message from the bot "') > 0)`)
+      this.setState('', key, true)
+    })
     if (options.checkIndexes !== false) this.checkIndexes()
   }
 
@@ -337,7 +360,8 @@ export class BotMemoryStore {
     const existing = this.get('SELECT seq, json, redacted_at FROM bot_journal WHERE bot_id = ? AND source_key = ?', row.botId, row.sourceKey)
     const json = { ...((row.json as Record<string, unknown> | undefined) ?? {}), sha256: sha256(row.text), ...(partial ? { partial: true } : {}) }
     if (!existing) {
-      this.appendInTx(this.db, { ...row, json }, row.at)
+      for (const part of row.kind === 'notice' ? requestJournalRows({ ...row, json }) : [{ ...row, json }])
+        this.appendInTx(this.db, part, row.at)
       return
     }
     const stored = parseJson(existing.json)
@@ -356,6 +380,19 @@ export class BotMemoryStore {
     return row ? journalRowOf(row) : undefined
   }
 
+  /** The journal provenance of a chat message, including service lines shown with a bot author. */
+  journalMessage(botId: string, messageId: string): BotJournalRow | undefined {
+    const row = this.get('SELECT * FROM bot_journal WHERE bot_id = ? AND source_key = ?', botId, `bm:${messageId}`)
+    return row ? journalRowOf(row) : undefined
+  }
+
+  /** Searchable messages, without loading their text or counting tool and bookkeeping rows. */
+  messageHistory(botId: string): { count: number; since?: string } {
+    const row = this.get(`SELECT COUNT(*) AS n, MIN(at) AS since FROM bot_journal
+      WHERE bot_id = ? AND kind IN ('owner_msg', 'bot_msg', 'run_report') AND redacted_at IS NULL`, botId)!
+    return { count: num(row.n) ?? 0, ...(typeof row.since === 'string' ? { since: row.since } : {}) }
+  }
+
   /** Every journal row of a bot, oldest first (export). */
   journal(botId: string): BotJournalRow[] {
     return this.all('SELECT * FROM bot_journal WHERE bot_id = ? ORDER BY seq', botId).map(journalRowOf)
@@ -368,7 +405,7 @@ export class BotMemoryStore {
   windowRows(botId: string, fromSeq: number): BotJournalRow[] {
     return this.all(`SELECT * FROM bot_journal WHERE bot_id = ? AND seq >= ? AND (
         (kind IN ('owner_msg','bot_msg','run_report') AND source_key LIKE 'bm:%')
-        OR (kind = 'notice' AND substr(source_key, 1, ?) = ?)
+        OR (kind = 'notice' AND (substr(source_key, 1, ?) = ? OR substr(source_key, 1, 13) = 'bm:bm_action_'))
       ) ORDER BY seq`, botId, fromSeq, BOT_CHAT_TURN_END_KEY.length, BOT_CHAT_TURN_END_KEY).map(journalRowOf)
   }
 
@@ -426,11 +463,17 @@ export class BotMemoryStore {
     return row ? journalRowOf(row) : undefined
   }
 
+  /** The bot's journal rows of `kind` after `afterSeq`, oldest first. */
+  rowsOfKindAfter(botId: string, kind: BotJournalKind, afterSeq: number): BotJournalRow[] {
+    return this.all('SELECT * FROM bot_journal WHERE bot_id = ? AND kind = ? AND seq > ? ORDER BY seq', botId, kind, afterSeq).map(journalRowOf)
+  }
+
   // -- Search and read ---------------------------------------------------------------------------
 
   /**
-   * `memory_search` (bot-context.md §6): memory hits first, then journal rows, each ranked by bm25
-   * with recency breaking ties, filtered to the bot before the limit. Every word must match first;
+   * `memory_search` (bot-context.md §6): ordinary memory hits first, then ordinary journal rows,
+   * in full-index FTS relevance order. Credential-bearing survivors follow by recency, never by
+   * raw relevance. Every word must match first;
    * when that finds too few, any word may. No query: the latest by date.
    */
   search(botId: string, input: BotMemorySearchInput): BotMemoryHit[] {
@@ -438,9 +481,9 @@ export class BotMemoryStore {
     this.expireMemories(botId)
     const limit = Math.min(Math.max(1, Math.floor(input.limit ?? BOT_MEMORY_SEARCH_LIMIT)), MAX_BOT_MEMORY_SEARCH_LIMIT)
     const kinds = new Set<BotMemorySearchKind>(input.kinds?.length ? input.kinds : ['chat', 'run', 'tool', 'memory'])
-    const since = isoOrUndefined(input.since) ?? ''
-    // A bare date as `until` includes that day.
-    const until = isoOrUndefined(input.until && /^\d{4}-\d{2}-\d{2}$/.test(input.until.trim()) ? `${input.until.trim()}T23:59:59.999Z` : input.until) ?? '9999'
+    // A bare date is the owner's day, in their zone (the times the bot reads are in it too); as `until` it includes that day.
+    const since = (input.since && zonedDayBound(input.since, this.zone())) ?? isoOrUndefined(input.since) ?? ''
+    const until = (input.until && zonedDayBound(input.until, this.zone(), true)) ?? isoOrUndefined(input.until) ?? '9999'
     const terms = ftsTerms(input.query ?? '')
     const journalKinds = (['chat', 'run', 'tool'] as const).filter((kind) => kinds.has(kind)).map((kind) => SEARCH_KIND_SQL[kind])
     const hits: BotMemoryHit[] = []
@@ -453,21 +496,29 @@ export class BotMemoryStore {
       seen.add(hit.ref)
       hits.push(hit)
     }
+    // FTS snippets can cut a credential or insert highlights inside it. Mask the full text
+    // first; when it contains a secret, use that safe text rather than the raw FTS excerpt.
+    const snippet = (row: Row, fallback: (text: string) => string): string => {
+      const text = row.text as string
+      const masked = maskMemoryCredentials(text)
+      return masked === text ? str(row.snip) ?? fallback(text) : cut(masked, 240)
+    }
     const memoryHit = (row: Row): BotMemoryHit => ({
       ref: memoryRef(row.id as string, num(row.version)!),
       at: row.learned_at as string,
       ago: agoLabel(row.learned_at as string, now),
       kind: `memory:${row.kind as string}${row.status === 'expired' ? ' (expired)' : ''}`,
       who: row.written_in === 'run' ? 'bot' : 'owner',
-      snippet: str(row.snip) ?? (row.text as string)
+      snippet: snippet(row, (text) => text)
     })
     const journalHit = (row: Row): BotMemoryHit => ({
       ref: `j${num(row.seq)!}`,
       at: row.at as string,
       ago: agoLabel(row.at as string, now),
-      kind: row.kind as string,
+      // A digest of the chat is a notice row of its own key: the hit says what it is.
+      kind: String(row.source_key).startsWith(CHAT_DIGEST_KEY) ? 'chat digest' : row.kind as string,
       who: row.who as string,
-      snippet: str(row.snip) ?? cut(row.text as string, 240)
+      snippet: snippet(row, (text) => cut(text, 240))
     })
     const journalWhere = `j.bot_id = ? AND j.redacted_at IS NULL AND j.kind NOT IN (${HIDDEN_KINDS}) AND (${journalKinds.join(' OR ')}) AND j.at >= ? AND j.at <= ?`
     if (!terms.length) {
@@ -479,18 +530,65 @@ export class BotMemoryStore {
           push(journalHit(row), row.text)
       return hits
     }
-    for (const match of terms.length > 1 ? [terms.join(' AND '), terms.join(' OR ')] : [terms[0]!]) {
-      if (hits.length >= limit) break
-      if (kinds.has('memory'))
-        for (const row of this.all(`SELECT m.*, snippet(bot_memories_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_memories_fts) AS score
+    // Classify each raw match once before sorting, so hidden matches cannot change
+    // which ordinary rows reach the iterator or its stopping condition.
+    const query = terms.map((term) => term.slice(1, -1)).join('\n')
+    const candidates = (memory: boolean, allWords: boolean): { ordinary: Row[]; guarded: Row[] } => {
+      const match = terms.join(allWords ? ' AND ' : ' OR ')
+      const ordinary: Row[] = []
+      const guarded: Row[] = []
+      const unique = new Set<string>()
+      const rows = memory
+        ? this.db.statement(`WITH classified AS MATERIALIZED (
+          SELECT m.*, snippet(bot_memories_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_memories_fts) AS score,
+            bot_memory_search_class(m.text, ?, ?) AS search_class
           FROM bot_memories_fts JOIN bot_memories m ON m.row_id = bot_memories_fts.rowid
           WHERE bot_memories_fts MATCH ? AND m.bot_id = ? AND m.status IN ('active','expired') AND m.learned_at >= ? AND m.learned_at <= ?
-          ORDER BY score, m.learned_at DESC LIMIT ?`, match, botId, since, until, limit)) push(memoryHit(row), row.text)
-      if (journalKinds.length)
-        for (const row of this.all(`SELECT j.*, snippet(bot_journal_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_journal_fts) AS score
+        ) SELECT * FROM classified WHERE search_class > 0
+          ORDER BY search_class, CASE WHEN search_class = 1 THEN score ELSE 0 END, learned_at DESC, row_id DESC`)
+          .iterate(query, allWords ? 1 : 0, match, botId, since, until)
+        : this.db.statement(`WITH classified AS MATERIALIZED (
+          SELECT j.*, snippet(bot_journal_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_journal_fts) AS score,
+            bot_memory_search_class(j.text, ?, ?) AS search_class
           FROM bot_journal_fts JOIN bot_journal j ON j.seq = bot_journal_fts.rowid
-          WHERE bot_journal_fts MATCH ? AND ${journalWhere} ORDER BY score, j.seq DESC LIMIT ?`, match, botId, since, until, limit * 2))
-          push(journalHit(row), row.text)
+          WHERE bot_journal_fts MATCH ? AND ${journalWhere}
+        ) SELECT * FROM classified WHERE search_class > 0
+          ORDER BY search_class, CASE WHEN search_class = 1 THEN score ELSE 0 END, seq DESC`)
+          .iterate(query, allWords ? 1 : 0, match, botId, since, until)
+      try {
+        for (const entry of rows) {
+          const row = entry as Row
+          const text = row.text as string
+          const masked = num(row.search_class) === 2
+          const ref = memory ? memoryRef(row.id as string, num(row.version)!) : `j${num(row.seq)!}`
+          const key = `t:${sha256(text.trim())}`
+          if (seen.has(ref) || seen.has(key)) continue
+          if (unique.has(key)) continue
+          unique.add(key)
+          if (masked) guarded.push(row)
+          else ordinary.push(row)
+          // SQLite emits all ordinary rows before guarded rows, which are already by
+          // date. No cutoff depends on how many hidden-only raw matches there were.
+          if (ordinary.length + guarded.length >= limit - hits.length) break
+        }
+        return { ordinary, guarded }
+      } finally {
+        rows.return?.()
+      }
+    }
+    for (const allWords of terms.length > 1 ? [true, false] : [true]) {
+      if (hits.length >= limit) break
+      const deferred: Array<{ row: Row; memory: boolean }> = []
+      for (const memory of [true, false]) {
+        if (hits.length >= limit) break
+        if (memory ? !kinds.has('memory') : !journalKinds.length) continue
+        const result = candidates(memory, allWords)
+        for (const row of result.ordinary) push(memory ? memoryHit(row) : journalHit(row), row.text)
+        deferred.push(...result.guarded.map((row) => ({ row, memory })))
+      }
+      deferred.sort((a, b) => String(b.memory ? b.row.learned_at : b.row.at).localeCompare(String(a.memory ? a.row.learned_at : a.row.at)) ||
+        num(b.row[b.memory ? 'row_id' : 'seq'])! - num(a.row[a.memory ? 'row_id' : 'seq'])!)
+      for (const { row, memory } of deferred) push(memory ? memoryHit(row) : journalHit(row), row.text)
     }
     return hits
   }
@@ -500,15 +598,18 @@ export class BotMemoryStore {
    * (`m12`), or one activation's rows page by page. A page holds about 8k tokens at most; a
    * redacted row shows its tombstone.
    */
-  read(botId: string, input: { ref: string; before?: number; after?: number } | { activationId: string; cursor?: string }): { rows: BotMemoryRow[]; cursor?: string } | { error: string } {
+  read(botId: string, input: { ref: string; before?: number; after?: number } | { activationId: string; cursor?: string }): { rows: BotMemoryRow[]; cursor?: string; guidance?: string } | { error: string } {
     const budget = BOT_MEMORY_READ_PAGE_TOKENS * 4
-    const rowOf = (row: BotJournalRow, max: number): BotMemoryRow => ({
-      ref: `j${row.seq}`,
-      at: row.at,
-      kind: row.kind,
-      who: row.who,
-      text: row.text.length > max ? `${row.text.slice(0, max)}\n…[${row.text.length - max} more characters: read j${row.seq} alone]` : row.text
-    })
+    const rowOf = (row: BotJournalRow, max: number): BotMemoryRow => {
+      const text = maskMemoryCredentials(row.text)
+      return {
+        ref: `j${row.seq}`,
+        at: row.at,
+        kind: row.kind,
+        who: row.who,
+        text: text.length > max ? `${text.slice(0, max)}\n…[${text.length - max} more characters: read j${row.seq} alone]` : text
+      }
+    }
     if ('activationId' in input) {
       const after = input.cursor ? Number(/^j(\d+)$/.exec(input.cursor)?.[1] ?? NaN) : 0
       if (!Number.isFinite(after)) return { error: 'That cursor is not one memory_read gave.' }
@@ -528,13 +629,15 @@ export class BotMemoryStore {
     if (memory) {
       const versions = this.versions(botId, memory.id)
       if (!versions.length) return { error: `There is no memory entry ${input.ref}.` }
+      const guidance = this.copyAdvice(botId, versions.at(-1)!)
       return {
+        ...(guidance ? { guidance } : {}),
         rows: versions.map((version) => ({
           ref: memoryRef(version.id, version.version),
           at: version.learnedAt,
-          kind: `memory:${version.kind} (${version.status})`,
+          kind: `memory:${version.kind} (${version.status}${version.reason?.startsWith('merged into ') ? `, ${version.reason}` : ''})`,
           who: version.writtenIn === 'run' ? 'bot' : 'owner',
-          text: version.text ?? '[removed at your request]'
+          text: maskMemoryCredentials(version.text ?? '[removed at your request]')
         }))
       }
     }
@@ -554,6 +657,66 @@ export class BotMemoryStore {
 
   // -- Memory entries ---------------------------------------------------------------------------
 
+  /** Same retirement representation as memory_save.merges, including the Forget links. */
+  private absorb(botId: string, entry: BotMemoryVersion, absorbedBy: string): void {
+    this.run("UPDATE bot_memories SET status = 'superseded', reason = ? WHERE bot_id = ? AND id = ? AND status = 'active'", `merged into ${absorbedBy}`, botId, entry.id)
+    this.run(`INSERT INTO bot_memories(id, version, bot_id, kind, text, text_hash, learned_at, valid_from, expires_at, written_in, source_seq, status, reason)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', ?)`,
+    entry.id, entry.version + 1, botId, entry.kind, entry.text, entry.textHash, entry.learnedAt,
+    entry.validFrom, entry.expiresAt, entry.writtenIn, entry.sourceSeq, `merged into ${absorbedBy}`)
+  }
+
+  /** A copy points to the version that absorbed it; later corrections keep that identity. */
+  private copyAdvice(botId: string, entry: BotMemoryVersion): string | undefined {
+    if (entry.status !== 'superseded' || !entry.reason?.startsWith('merged into ')) return undefined
+    const ref = parseMemoryRef(entry.reason.slice(12))
+    if (!ref) return undefined
+    const absorbedInto = this.get('SELECT text_hash FROM bot_memories WHERE bot_id = ? AND id = ? AND version = ?', botId, ref.id, ref.version ?? 1)
+    if (absorbedInto?.text_hash !== entry.textHash) return undefined
+    const kept = this.current(botId, ref.id)
+    if (!kept || (kept.status !== 'active' && kept.status !== 'expired')) return undefined
+    const target = memoryRef(kept.id, kept.version)
+    return `${entry.id} was put away as a copy of ${target}. To change these words, replace ${target}.`
+  }
+
+  /** Exact hashes only. Both chat and run packs load all three kinds in full. */
+  tidyDuplicates(botId: string, canTidy?: () => boolean): number {
+    const rows = this.all(`SELECT m.* FROM bot_memories m JOIN (
+      SELECT text_hash FROM bot_memories WHERE bot_id = ? AND status = 'active'
+      AND (expires_at IS NULL OR expires_at > ?) GROUP BY text_hash HAVING COUNT(*) > 1
+    ) duplicates ON duplicates.text_hash = m.text_hash
+    WHERE m.bot_id = ? AND m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > ?)`,
+    botId, this.now(), botId, this.now()).map(versionOf)
+    // The activity guard and retirement stay synchronous, so refs cannot change mid-turn.
+    if (!rows.length || (canTidy && !canTidy())) return 0
+    const rank = { owner: 0, note: 1, run_note: 2 }
+    rows.sort((a, b) => rank[a.kind] - rank[b.kind]
+      || Number(b.writtenIn === 'owner_ui') - Number(a.writtenIn === 'owner_ui') || a.learnedAt.localeCompare(b.learnedAt)
+      || Number(a.id.slice(1)) - Number(b.id.slice(1)))
+    const kept = new Map<string, BotMemoryVersion>()
+    const retired: Array<{ entry: BotMemoryVersion; into: string }> = []
+    for (const entry of rows) {
+      const winner = kept.get(entry.textHash)
+      if (!winner) { kept.set(entry.textHash, entry); continue }
+      if (winner.validFrom && (!entry.validFrom || winner.validFrom > entry.validFrom)) continue
+      if (winner.expiresAt && (!entry.expiresAt || winner.expiresAt < entry.expiresAt)) continue
+      retired.push({ entry, into: memoryRef(winner.id, winner.version) })
+    }
+    if (!retired.length) return 0
+    return this.write(() => {
+      for (const { entry, into } of retired) this.absorb(botId, entry, into)
+      const refs = retired.map(({ entry, into }) => ({ ref: memoryRef(entry.id, entry.version), into }))
+      this.appendInTx(this.db, {
+        botId, kind: 'memory_op', who: 'mousse',
+        sourceKey: `tidy:${refs.map(({ ref }) => ref).join(':')}`,
+        text: `put away · ${refs.map(({ ref, into }) => `${ref} merged into ${into}`).join(', ')}`,
+        json: { op: 'tidy', merges: refs }
+      })
+      this.dropPacks(botId)
+      return retired.length
+    })
+  }
+
   /** Moves entries whose `expires_at` passed to `expired`: out of the pack, still listed and searchable. */
   expireMemories(botId: string): void {
     const now = this.now()
@@ -570,9 +733,9 @@ export class BotMemoryStore {
     return row ? versionOf(row) : undefined
   }
 
-  /** The active entries, oldest first: what every pack injects. */
+  /** The active entries, first learned first: corrections keep their place in every pack. */
   active(botId: string): BotMemoryEntry[] {
-    return this.all("SELECT * FROM bot_memories WHERE bot_id = ? AND status = 'active' ORDER BY learned_at, row_id", botId).map((row) => entryOf(versionOf(row)))
+    return this.all("SELECT current.* FROM bot_memories current JOIN bot_memories first ON first.bot_id = current.bot_id AND first.id = current.id AND first.version = 1 WHERE current.bot_id = ? AND current.status = 'active' ORDER BY first.learned_at, first.row_id", botId).map((row) => entryOf(versionOf(row)))
   }
 
   /** `memory_list` / `bots.memory.list`: current entries (active and expired), or every version with `history`. */
@@ -635,18 +798,41 @@ export class BotMemoryStore {
         const ref = parseMemoryRef(input.replaces)
         replaced = ref ? this.current(botId, ref.id) : undefined
         if (!ref || !replaced) return { error: 'refused', reason: `There is no memory entry ${input.replaces}.` }
+        const advice = this.copyAdvice(botId, replaced)
+        if (advice) return { error: 'refused', reason: advice }
         if (replaced.status === 'forgotten') return { error: 'refused', reason: `${ref.id} was forgotten: save a new entry instead.` }
-        if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run can only replace its own run notes. Ask the owner in the chat.' }
+        if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' }
         if ((ref.version ?? 1) !== replaced.version)
-          return { error: 'stale', current: { id: replaced.id, version: replaced.version, ref: memoryRef(replaced.id, replaced.version), text: replaced.text ?? '' } }
+          return { error: 'stale', current: { id: replaced.id, version: replaced.version, ref: memoryRef(replaced.id, replaced.version), text: replaced.text ?? '', ...(replaced.reason?.startsWith('merged into ') ? { absorbedBy: replaced.reason.slice(12) } : {}) } }
       }
-      const duplicate = this.get("SELECT * FROM bot_memories WHERE bot_id = ? AND text_hash = ? AND status = 'active' AND kind = ? LIMIT 1", botId, hash, kind)
-      if (duplicate && !replaced) {
+      const absorbed = new Map<string, BotMemoryVersion>()
+      for (const value of input.merges ?? []) {
+        const ref = parseMemoryRef(value)
+        const entry = ref ? this.current(botId, ref.id) : undefined
+        if (!ref || !entry) return { error: 'refused', reason: `There is no memory entry ${value}.` }
+        const advice = this.copyAdvice(botId, entry)
+        if (advice) return { error: 'refused', reason: advice }
+        if ((ref.version ?? 1) !== entry.version)
+          return { error: 'stale', current: { id: entry.id, version: entry.version, ref: memoryRef(entry.id, entry.version), text: entry.text ?? '', ...(entry.reason?.startsWith('merged into ') ? { absorbedBy: entry.reason.slice(12) } : {}) } }
+        if (entry.status !== 'active') return { error: 'refused', reason: entry.reason?.startsWith('merged into ') ? `${value} was ${entry.reason}. Read that entry instead.` : `${value} is not an active memory entry.` }
+        if (input.lane === 'run' && (entry.kind !== 'run_note' || entry.writtenIn === 'owner_ui'))
+          return { error: 'refused', reason: 'A run or a turn you started yourself can only absorb run notes that the owner has not edited. Ask the owner in the chat.' }
+        if (entry.kind !== kind) return { error: 'refused', reason: 'Absorbed entries must be of the same kind as the saved entry.' }
+        if (entry.id !== replaced?.id) absorbed.set(entry.id, entry)
+      }
+      const duplicates = this.all("SELECT * FROM bot_memories WHERE bot_id = ? AND text_hash = ? AND status = 'active'", botId, hash)
+      const outside = duplicates.find((entry) => entry.id !== replaced?.id && !absorbed.has(entry.id as string))
+      if (outside && input.merges?.length) {
+        const entry = versionOf(outside)
+        return { error: 'refused', reason: `That text is already active as ${memoryRef(entry.id, entry.version)}.` }
+      }
+      const duplicate = duplicates.find((entry) => entry.kind === kind)
+      if (duplicate && !replaced && !absorbed.size) {
         const version = versionOf(duplicate)
         return { id: version.id, version: version.version, ref: memoryRef(version.id, version.version), gauge: this.gauge(botId, input.lane) }
       }
       const active = this.active(botId)
-      const others = active.filter((entry) => entry.kind === kind && entry.id !== replaced?.id)
+      const others = active.filter((entry) => entry.kind === kind && entry.id !== replaced?.id && !absorbed.has(entry.id))
       if (usedTokens(others) + estimateTokens(text) > BOT_MEMORY_CAPS[kind])
         return {
           error: 'over_cap',
@@ -660,6 +846,10 @@ export class BotMemoryStore {
       this.run(`INSERT INTO bot_memories(id, version, bot_id, kind, text, text_hash, learned_at, valid_from, expires_at, written_in, source_seq, status)
         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
       id, version, botId, kind, text, hash, at, validFrom ?? null, expiresAt ?? null, writtenIn, this.sourceSeq(botId, input.lane, input.activationId))
+      const absorbedBy = memoryRef(id, version)
+      for (const entry of absorbed.values()) {
+        this.absorb(botId, entry, absorbedBy)
+      }
       this.appendInTx(this.db, {
         botId,
         kind: 'memory_op',
@@ -668,11 +858,14 @@ export class BotMemoryStore {
         sourceKey: `mem:${id}:v${version}`,
         who: input.lane === 'owner_ui' ? 'owner' : 'bot',
         text: `remembered · ${text}`,
-        json: { op: 'save', memId: id, version, kind, ...(replaced ? { replaces: memoryRef(replaced.id, replaced.version) } : {}) }
+        json: { op: 'save', memId: id, version, kind, ...(absorbed.size ? { merges: [...absorbed.values()].map((entry) => memoryRef(entry.id, entry.version)) } : {}), ...(replaced ? { replaces: memoryRef(replaced.id, replaced.version) } : {}) }
       }, at)
       // The next dispatch of every activation, a resumed one too, carries the new entry.
       this.dropPacks(botId)
-      return { id, version, ref: memoryRef(id, version), gauge: this.gauge(botId, input.lane) }
+      return {
+        id, version, ref: memoryRef(id, version), gauge: this.gauge(botId, input.lane),
+        ...(absorbed.size ? { absorbed: [...absorbed.values()].map((entry) => ({ ref: memoryRef(entry.id, entry.version), text: entry.text ?? '' })) } : {})
+      }
     })
   }
 
@@ -683,7 +876,7 @@ export class BotMemoryStore {
    * is blanked; the entry's `memory_op` rows are redacted; the chat summary and the frozen packs
    * lose it too. The reason is not stored: it often restates what was forgotten.
    */
-  forget(botId: string, input: BotMemoryForget): BotMemoryForgetResult | { error: string } {
+  forget(botId: string, input: BotMemoryForget): BotMemoryForgetResult | { error: string; holders?: BotMemoryEntry[] } {
     const ids = new Set<string>()
     const seqs = new Set<number>()
     for (const value of [...(input.id === undefined ? [] : [input.id]), ...(input.refs ?? [])]) {
@@ -701,9 +894,19 @@ export class BotMemoryStore {
       const tombstone = `[removed at your request · ${dayLabel(at, this.zone())}]`
       const redacted: string[] = []
       const redactedSeqs = new Set<number>()
+      const forgottenTexts: string[] = []
       const redact = (row: BotJournalRow) => {
         if (row.redactedAt || redactedSeqs.has(row.seq)) return
+        forgottenTexts.push(row.text)
         this.run("UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = ? WHERE seq = ?", tombstone, at, row.seq)
+        // Treat review copies as cited rows too, so folds/digests sourced only from them are invalidated.
+        if (/^bm:bm_action_[a-zA-Z0-9-]+$/.test(row.sourceKey)) {
+          const statusPrefix = `${row.sourceKey}:status:`
+          const copies = this.all(`SELECT * FROM bot_journal WHERE bot_id = ? AND redacted_at IS NULL
+            AND (source_key IN (?, ?) OR substr(source_key, 1, ?) = ?)`,
+          botId, `${row.sourceKey}_n1`, `${row.sourceKey}_n2`, statusPrefix.length, statusPrefix).map(journalRowOf)
+          for (const copy of copies) redact(copy)
+        }
         if (row.sourceKey.startsWith('bm:')) this.redactMessage(this.db, botId, row.sourceKey.slice(3), tombstone)
         redacted.push(`j${row.seq}`)
         redactedSeqs.add(row.seq)
@@ -718,26 +921,95 @@ export class BotMemoryStore {
       for (const seq of seqs) {
         const row = this.journalRow(botId, seq)!
         const copies = row.redactedAt ? [] : copiesOf(row.text, seq)
-        redact(row)
-        copies.forEach(redact)
         for (const copy of copies) cited.add(copy.seq)
       }
       for (const seq of cited)
         for (const memory of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(memory.id as string)
+      // Require upward holders through every historical version. Downward retirement
+      // only follows current superseded entries: put-back co-sources belong to the owner again.
+      const upward = new Map<string, Set<string>>()
+      const downward = new Map<string, Set<string>>()
+      const current = new Map<string, BotMemoryVersion | undefined>()
+      const entry = (id: string) => {
+        if (!current.has(id)) current.set(id, this.current(botId, id))
+        return current.get(id)
+      }
+      const connect = (links: Map<string, Set<string>>, from: string, to: string) => {
+        if (!links.has(from)) links.set(from, new Set())
+        links.get(from)!.add(to)
+      }
+      for (const row of this.all("SELECT DISTINCT id, reason FROM bot_memories WHERE bot_id = ? AND reason LIKE 'merged into %'", botId)) {
+        const target = parseMemoryRef((row.reason as string).slice(12))
+        if (!target) continue
+        const id = row.id as string
+        connect(upward, id, target.id)
+        const latest = entry(id)
+        if (latest?.status === 'superseded' && latest.reason?.startsWith('merged into ')
+          && parseMemoryRef(latest.reason.slice(12))?.id === target.id)
+          connect(downward, target.id, id)
+      }
+      const required = new Set(ids)
+      for (const id of required)
+        for (const holder of upward.get(id) ?? []) required.add(holder)
+      const holders = [...required].map(entry)
+        .filter((value): value is BotMemoryVersion => !!value && (value.status === 'active' || value.status === 'expired'))
+        .sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)))
+      if (holders.some((value) => !ids.has(value.id))) {
+        const refs = holders.map((value) => memoryRef(value.id, value.version)).join(', ')
+        const advice = [...ids].map((id) => entry(id)).filter((value): value is BotMemoryVersion => !!value)
+          .map((value) => this.copyAdvice(botId, value)).filter(Boolean).join(' ')
+        return { error: `${advice ? `${advice} ` : ''}This memory is held by ${refs}, including earlier versions. Name all these entries together in one Forget in the chat, then save again what should stay.`, holders: holders.map(entryOf) }
+      }
+      for (const id of ids)
+        for (const absorbed of downward.get(id) ?? []) ids.add(absorbed)
+      for (const seq of cited) redact(this.journalRow(botId, seq)!)
       for (const id of ids) {
         // Every version's words go from wherever they were copied: rows that hold them (a memory call
         // captured with its text by an older build) and the chip of the message that saved them.
         const texts = this.all('SELECT text FROM bot_memories WHERE bot_id = ? AND id = ? AND text IS NOT NULL', botId, id).map((row) => row.text as string)
+        // source_seq is approximate. It can identify a short exact copy, but never justifies
+        // removing an unrelated owner message or run prompt, or copies of that whole prompt.
+        for (const source of this.all('SELECT DISTINCT source_seq FROM bot_memories WHERE bot_id = ? AND id = ? AND source_seq IS NOT NULL', botId, id)) {
+          const row = this.journalRow(botId, num(source.source_seq)!)
+          if (row && texts.some((text) => text.trim() && row.text.includes(text.trim()))) redact(row)
+        }
         this.run("UPDATE bot_memories SET text = NULL, status = 'forgotten', reason = 'forgotten' WHERE bot_id = ? AND id = ?", botId, id)
         for (const op of this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'memory_op' AND json_extract(json, '$.memId') = ?", botId, id))
           redact(journalRowOf(op))
+        forgottenTexts.push(...texts)
         for (const text of texts) {
           copiesOf(text).forEach(redact)
           this.memoryCallsOf(botId, id, text).forEach(redact)
           this.dropChip(botId, shortChipText(text))
         }
       }
-      this.dropForgotten(botId, redactedSeqs)
+      const progressRows = this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND json_extract(json, '$.op') = 'progress' AND redacted_at IS NULL", botId).map(journalRowOf)
+      const matches = (text: string) => [...text.matchAll(/\bj(\d+)\b/g)].some((match) => redactedSeqs.has(Number(match[1])))
+        || forgottenTexts.some((forgotten) => forgotten.trim().length >= MIN_COPY_CHARS && text.includes(forgotten.trim().replace(/\s+/g, ' ')))
+      // All versions matter: the latest value may no longer cite what an older note still holds.
+      for (const row of progressRows) if (matches(row.text) || redactedSeqs.has(row.seq)) redact(row)
+      for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND (key LIKE 'progress:%' OR key LIKE 'progress_pending:%')", botId)) {
+        const progress = parseJson(row.value) as { text?: string; seq?: number } | undefined
+        if (!progress?.text) continue
+        if (matches(progress.text) || (progress.seq !== undefined && redactedSeqs.has(progress.seq))) {
+          this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, row.key as string)
+          if (progress.seq !== undefined) {
+            const source = this.journalRow(botId, progress.seq)
+            if (source) redact(source)
+          }
+        }
+      }
+      // An open item that came from a redacted row, or says what was forgotten, goes with it, and so do the rows that
+      // repeat its words (the call that listed it).
+      for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key >= 'item:' AND key < 'item;'", botId)) {
+        const item = parseJson(row.value) as { text?: string; note?: string; links?: string[]; source?: number } | undefined
+        if (!item) continue
+        const words = [item.text, item.note, ...(Array.isArray(item.links) ? item.links : [])].filter((part): part is string => typeof part === 'string' && Boolean(part))
+        if (!(typeof item.source === 'number' && redactedSeqs.has(item.source)) && !matches(words.join('\n'))) continue
+        this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, row.key as string)
+        if (item.text) copiesOf(item.text).forEach(redact)
+      }
+      this.dropForgotten(botId, redactedSeqs, { holds: matches, redact })
       const memIds = [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
       const removed = [...memIds, ...redacted]
       this.appendInTx(this.db, {
@@ -780,8 +1052,12 @@ export class BotMemoryStore {
       if (!Array.isArray(chips)) return undefined
       let changed = false
       const next = chips.map((chip) => {
-        const value = chip as { icon?: unknown; highlight?: unknown }
-        if (value?.icon !== 'memory' || value.highlight !== highlight) return chip
+        const value = chip as { icon?: unknown; highlight?: unknown; title?: unknown }
+        if (value?.icon !== 'memory') return chip
+        const matches = value.highlight === highlight
+          || (typeof value.highlight === 'string' && value.highlight.startsWith(`${highlight} · put away `))
+          || (typeof value.title === 'string' && value.title.split('\n').includes(highlight))
+        if (!matches) return chip
         changed = true
         return { icon: 'memory', text: 'remembered something' }
       })
@@ -796,25 +1072,94 @@ export class BotMemoryStore {
   }
 
   /**
-   * After a forget, in its transaction: the chat summary is folded again from the rows left when
-   * one of its lines came from a redacted row, and every frozen pack is dropped (each may carry a
-   * forgotten entry or row), so the activation's next dispatch builds its pack from what is left.
+   * After a forget, in its transaction: a digest that used a redacted row or holds forgotten words is marked to be
+   * written again (its row in the journal is redacted, and it shows the deterministic lines of what is left until then),
+   * the chat summary's lines are folded again from the rows left when one of them came from a redacted row, a digest
+   * being prepared is dropped, and every frozen pack is dropped (each may carry a forgotten entry or row), so the
+   * activation's next dispatch builds its pack from what is left.
    */
-  private dropForgotten(botId: string, redacted: ReadonlySet<number>): void {
-    const summary = this.getState<ChatSummaryState>(botId, 'chat_summary')
+  private dropForgotten(botId: string, redacted: ReadonlySet<number>, forgotten: { holds: (text: string) => boolean; redact: (row: BotJournalRow) => void }): void {
+    let summary = this.getState<ChatSummaryState>(botId, 'chat_summary')
+    if (summary?.digests?.length) {
+      const result = staleDigests(summary, {
+        fingerprintOf: (digest) => chatFingerprint(this.digestRows(botId, digest)),
+        holdsForgotten: forgotten.holds,
+        rowsOf: (digest) => this.digestRows(botId, digest)
+      }, this.zone(), this.now())
+      for (const digest of result.stale) {
+        const row = digest.seq === undefined ? undefined : this.journalRow(botId, digest.seq)
+        if (row) forgotten.redact(row)
+      }
+      if (result.stale.length) {
+        this.setState(botId, 'chat_summary', result.state)
+        summary = result.state
+      }
+    }
     const sources = summary?.sources
     // A line of unknown source (a summary from before sources were kept) may come from any folded row.
-    const stale = summary && [...redacted].some((seq) => seq <= summary.throughSeq && (!sources || sources.includes(seq) || sources.includes(0)))
+    const stale = summary && [...redacted].some((seq) => seq <= summary!.throughSeq && (!sources || sources.includes(seq) || sources.includes(0)))
     if (summary && stale) {
-      const folded = this.windowRows(botId, 0).filter((row) => row.seq <= summary.throughSeq)
-      this.setState(botId, 'chat_summary', { ...foldChatSummary(folded, undefined, this.zone(), this.now()), throughSeq: summary.throughSeq })
+      const folded = this.windowRows(botId, 0).filter((row) => row.seq <= summary!.throughSeq)
+      this.setState(botId, 'chat_summary', { ...foldChatSummary(folded, { lines: [], ...(summary.digests ? { digests: summary.digests } : {}) }, this.zone(), this.now()), throughSeq: summary.throughSeq })
     }
+    // A digest being written may have read what was forgotten: it is dropped, and asked for again from what is left.
+    this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key = 'chat_digest_pending'", botId)
     this.dropPacks(botId)
+    // Privacy beats the cache: the chat's runtime conversation may hold what was forgotten, so its epoch ends now and the
+    // next chat turn starts from a cleared context (docs/plans/bot-context.md §14).
+    this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key = 'chat_epoch'", botId)
+  }
+
+  /** The chat rows a digest summarised (`windowRows` of its range), as they are now. */
+  digestRows(botId: string, digest: Pick<ChatDigest, 'fromSeq' | 'throughSeq'>): BotJournalRow[] {
+    return this.windowRows(botId, digest.fromSeq).filter((row) => row.seq <= digest.throughSeq)
   }
 
   /** Drops every frozen pack of the bot: each activation's next dispatch builds its pack again. */
   private dropPacks(botId: string): void {
     this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 5) = 'pack:'", botId)
+  }
+
+  stageProgress(botId: string, scheduleId: string, activationId: string, text: string): void {
+    this.write(() => this.setState(botId, `progress_pending:${activationId}`, { scheduleId, text: text.trim().replace(/\s+/g, ' ') }))
+  }
+
+  finishProgress(botId: string, activationId: string, done: boolean): void {
+    this.write(() => {
+      const key = `progress_pending:${activationId}`
+      const pending = this.getState<{ scheduleId: string; text: string }>(botId, key)
+      if (pending && done) this.saveProgress(botId, pending.scheduleId, activationId, pending.text)
+      this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)
+    })
+  }
+
+  /** A schedule's own cursor. Kept outside AutomationRuns so Forget reaches every copy. */
+  saveProgress(botId: string, scheduleId: string, activationId: string, text: string): void {
+    text = text.trim().replace(/\s+/g, ' ')
+    this.write(() => {
+      const seq = this.appendInTx(this.db, {
+        botId, kind: 'notice', lane: 'run', activationId,
+        sourceKey: `progress:${scheduleId}:${activationId}:${sha256(text)}`,
+        who: 'bot', text, json: { op: 'progress', scheduleId, writtenIn: 'run' }
+      }, this.now())
+      this.setState(botId, `progress:${scheduleId}`, { text, seq })
+      this.dropPacks(botId)
+    })
+  }
+
+  progress(botId: string, scheduleId: string): string | undefined {
+    return this.getState<{ text: string }>(botId, `progress:${scheduleId}`)?.text
+  }
+
+  /** Shared scheduler deletion covers the bot, the owner and removing all of a bot's schedules. */
+  removeProgressForJob(jobId: string): void {
+    this.write(() => {
+      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE (key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?) OR (key LIKE 'progress_pending:%' AND bot_id || '--' || json_extract(value, '$.scheduleId') = ?) OR key = ? OR (key LIKE 'schedule-said:%' AND bot_id || '--' || substr(key, 15) = ?)", jobId, jobId, `schedule-ended:${jobId}`, jobId)
+      for (const row of rows) {
+        this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.bot_id as string, row.key as string)
+        this.dropPacks(row.bot_id as string)
+      }
+    })
   }
 
   // -- State -----------------------------------------------------------------------------------
@@ -832,6 +1177,10 @@ export class BotMemoryStore {
   setState(botId: string, key: string, value: unknown): void {
     this.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value',
       botId, key, JSON.stringify(value))
+  }
+
+  deleteState(botId: string, key: string): void {
+    this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)
   }
 
   /** Keeps the newest `keep` state rows (by their `at`) whose key starts with `prefix`: the frozen packs. */
@@ -923,8 +1272,10 @@ export class BotMemoryStore {
   /**
    * A fresh start for the bot's memory, in one transaction: every journal row (with its search rows, by trigger) and the
    * memory state go, but the capture cursors (`cursor:<threadId>`), so capture never copies the bot's threads in again.
+   * `BotStore` also writes `cursor:create:<clientRequestId>` records, not capture cursors; `cursor:` keeps them here too.
    * `keepSaved` (`bots.memory.wipe` with `keep: 'saved'`): the owner's entries and the bot's notes stay as they are,
-   * forgotten ones as tombstones; only entries that are run notes now go, every version. Without it every entry goes.
+   * forgotten ones as tombstones; only entries that are run notes now go, every version. Schedule delivery markers
+   * also stay with keepSaved, until their shared job is removed. Without it every entry goes.
    * Returns how many current entries went. Entries never need the journal rows they came from (`source_seq`).
    */
   wipe(botId: string, keepSaved: boolean): number {
@@ -942,9 +1293,30 @@ export class BotMemoryStore {
         this.run('DELETE FROM bot_memories WHERE bot_id = ?', botId)
       }
       this.run('DELETE FROM bot_journal WHERE bot_id = ?', botId)
-      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 7) <> 'cursor:'", botId)
+      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key <> 'asks-first:introduced' AND substr(key, 1, 7) <> 'cursor:' AND (? = 0 OR (key NOT LIKE 'schedule-said:%' AND key NOT LIKE 'schedule-ended:%' AND key NOT LIKE 'pagecheck:%'))", botId, keepSaved ? 1 : 0)
       return removed
     })
+  }
+
+  /** Whether capture must mask tool arguments of this work, including after its action settled. */
+  hasStoredActions(activationId: string): boolean {
+    return Boolean(this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")
+      && this.get('SELECT 1 FROM bot_actions WHERE activation_id = ? LIMIT 1', activationId))
+  }
+
+  storedActionDigests(activationId: string): ReadonlySet<string> {
+    if (!this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")) return new Set()
+    return new Set(this.all('SELECT args_digest FROM bot_actions WHERE activation_id = ?', activationId).map(row => String(row.args_digest)))
+  }
+
+  /** Export the masked call record, never the exact executable arguments. */
+  actions(botId: string): Array<Record<string, unknown>> {
+    if (!this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")) return []
+    return this.all(`SELECT id, call_key, bot_id, activation_id, lane, kind, target_json,
+      args_json, NULL AS args_digest, binding_json, NULL AS place_json, card_json,
+      CASE WHEN json_valid(bot_note) THEN CASE WHEN json_type(bot_note, '$.digests') = 'object' AND json_type(bot_note, '$.keys') = 'array' THEN NULL ELSE bot_note END ELSE bot_note END AS bot_note, status, result_json,
+      message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ran_at
+      FROM bot_actions WHERE bot_id = ? ORDER BY created_at, rowid`, botId)
   }
 
   /** Every memory version of a bot, in write order (export). */
@@ -1030,6 +1402,7 @@ function redactQuestionCopies(tx: BotStoreTx, has: (table: string) => boolean, b
 }
 
 function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, text: string): void {
+  heldCalls(tx)?.forgetMessage(botId, messageId)
   const has = (table: string) => Boolean(tx.statement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
   if (!has('bot_messages')) return
   tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, messageId, botId)
@@ -1048,12 +1421,17 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
       tx.statement('UPDATE bot_messages SET cards_json = NULL, attachments_json = ? WHERE id = ? AND bot_id = ?').run(kept.length ? JSON.stringify(kept) : null, messageId, botId)
     }
   }
-  // A forgotten message keeps no reaction, so the bot is never told of one on it.
+  // A forgotten message keeps neither a reaction nor its legacy notification receipt.
   const reactions = Boolean(tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'owner_reaction'").get())
-  const clearReaction = (id: string) => {
+  const clearMessageState = (id: string) => {
+    if (has('bot_memory_state')) tx.statement('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?').run(botId, `cursor:telling-legacy:${id}`)
     if (reactions) tx.statement('UPDATE bot_messages SET owner_reaction = NULL, owner_reaction_at = NULL WHERE id = ? AND bot_id = ?').run(id, botId)
   }
-  clearReaction(messageId)
+  clearMessageState(messageId)
+  // A held draft can quote even a one-word owner message. Drop the whole draft by its turn,
+  // before removing other copies, rather than guessing from the length of the quoted text.
+  if (has('bot_memory_state')) tx.statement(`DELETE FROM bot_memory_state WHERE bot_id = ? AND key IN
+    (SELECT 'draft:' || activation_id FROM bot_messages WHERE bot_id = ? AND id = ? AND author = 'owner')`).run(botId, botId, messageId)
   // What the forgotten message asked for keeps no copy of its words (docs/plans/bot-always-free.md): a reminder it set
   // is cancelled and its text removed, and work it started keeps neither its brief nor the notes passed to it.
   const redactJournal = (sourceKey: string) => {
@@ -1065,7 +1443,7 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
     const said = tx.statement('SELECT message_id FROM bot_reminders WHERE bot_id = ? AND reply_to = ? AND message_id IS NOT NULL').all(botId, messageId) as Array<{ message_id: string }>
     for (const row of said) {
       tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, row.message_id, botId)
-      clearReaction(row.message_id)
+      clearMessageState(row.message_id)
       redactJournal(`bm:${row.message_id}`)
     }
   }

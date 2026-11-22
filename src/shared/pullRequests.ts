@@ -405,3 +405,63 @@ export function relinked(previous: ThreadPullRequestLink | undefined, next: Thre
   if (next.watch !== undefined || !previous?.watch || !sameLinkedPullRequest(previous, next)) return next
   return { ...next, watch: previous.watch }
 }
+
+/**
+ * A pull request a thread has been linked to, as its sidebar row shows it (`Thread.pullRequests`). Kept in the thread's
+ * own metadata, so the list never asks the host. `state` and `title` are as last read: at the link, or when the app read,
+ * merged or closed it since.
+ */
+export interface ThreadPullRequestSummary {
+  number: number
+  url: string
+  nameWithOwner: string
+  title?: string
+  state?: GitPullRequestInfo['state']
+  isDraft?: true
+}
+
+/** The most pull requests a thread keeps in its list; past it the oldest leaves. */
+export const MAX_THREAD_PULL_REQUESTS = 20
+const SUMMARY_TITLE_CHARS = 120
+
+const sameUrl = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+
+/** What the host said about a pull request, as a summary's fields. */
+export function pullRequestSummaryFields(info: { title?: string; state?: GitPullRequestInfo['state']; isDraft?: boolean }): Pick<ThreadPullRequestSummary, 'title' | 'state' | 'isDraft'> {
+  const title = info.title?.replace(/\s+/g, ' ').trim()
+  return {
+    ...(title ? { title: [...title].length > SUMMARY_TITLE_CHARS ? `${[...title].slice(0, SUMMARY_TITLE_CHARS - 1).join('')}…` : title } : {}),
+    ...(info.state ? { state: info.state } : {}),
+    ...(info.isDraft ? { isDraft: true as const } : {})
+  }
+}
+
+/** The summary of a link, before anything else is known about it. */
+export function summaryOfLink(link: Pick<ThreadPullRequestLink, 'number' | 'url' | 'nameWithOwner'>): ThreadPullRequestSummary {
+  return { number: link.number, url: link.url, nameWithOwner: link.nameWithOwner }
+}
+
+/**
+ * The list with `entry` in it: an entry of the same pull request (by URL) takes what `entry` knows and keeps the rest, in
+ * its place; a new one goes last, and the oldest leaves past `MAX_THREAD_PULL_REQUESTS`.
+ */
+export function withThreadPullRequest(list: readonly ThreadPullRequestSummary[], entry: ThreadPullRequestSummary): ThreadPullRequestSummary[] {
+  const at = list.findIndex((known) => sameUrl(known.url, entry.url))
+  if (at < 0) return [...list, entry].slice(-MAX_THREAD_PULL_REQUESTS)
+  const merged = { ...list[at], ...entry }
+  if (entry.state && !entry.isDraft) delete merged.isDraft
+  const next = list.slice()
+  next[at] = merged
+  return next
+}
+
+/**
+ * Every pull request the thread has been linked to, oldest first. A thread linked before the list was kept has only its
+ * `pullRequest`; that link counts as its one entry.
+ */
+export function threadPullRequestsOf(thread: { pullRequest?: ThreadPullRequestLink; pullRequests?: ThreadPullRequestSummary[] }): ThreadPullRequestSummary[] {
+  const list = thread.pullRequests ?? []
+  const link = thread.pullRequest
+  if (!link || list.some((entry) => sameUrl(entry.url, link.url))) return list
+  return [...list, summaryOfLink(link)]
+}

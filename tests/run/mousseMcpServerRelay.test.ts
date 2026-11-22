@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { MCP_ERROR_CODES, MousseMcpServer, RELAY_PATH } from '../../src/mms/run/mcp/MousseMcpServer'
+import { MCP_ERROR_CODES, MousseMcpServer, RELAY_PATH, type McpToolBoundary } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { RelayCatalog } from '../../src/mms/run/mcp/relay/catalog'
 import { RELAY_INSTRUCTIONS, RelayHandler, type RelayHost } from '../../src/mms/run/mcp/relay/handler'
 import type { RelayTool } from '../../src/mms/run/mcp/relay/names'
@@ -49,7 +49,7 @@ describe('MousseMcpServer relay path', () => {
     fx = undefined
   })
 
-  const setup = async (options: { relay?: boolean } = {}) => {
+  const setup = async (options: { relay?: boolean; boundary?: McpToolBoundary } = {}) => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const credentials = new McpCredentials(fx.store)
@@ -60,7 +60,7 @@ describe('MousseMcpServer relay path', () => {
       callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => ({ content: [{ type: 'text' as const, text: `said ${JSON.stringify(args)}` }], isError: false }))
     }
     const relay = new RelayHandler({ catalog: catalog as unknown as RelayCatalog, manager: manager as unknown as RelayHost['manager'], registry, projectPathFor: () => undefined })
-    server = new MousseMcpServer({ credentials, registry, ...(options.relay === false ? {} : { relay }) })
+    server = new MousseMcpServer({ credentials, registry, ...(options.relay === false ? {} : { relay }), ...(options.boundary ? { boundary: options.boundary } : {}) })
     await server.start()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
     const attachment = server.bearerForTurn({
@@ -97,6 +97,17 @@ describe('MousseMcpServer relay path', () => {
     expect(manager.callTool).toHaveBeenCalledTimes(1)
     // The runtime announced one call to Mousse's servers and Mousse received one: the turn drained.
     expect(server.turnEnded({ threadId: 'thread-a', runId: run.runId, tokenHash: attachment.tokenHash, settlement: { status: 'completed', drain: { mousseCalls: 1, toolsSettled: true } } })).toBe('kept')
+  })
+
+  it('a relayed result never carries notices: the boundary is not asked, while a mousse tool\'s result on the same bearer is', async () => {
+    const boundary: McpToolBoundary = { deliver: vi.fn(() => ({ text: 'a subagent finished', release: vi.fn() })) }
+    const { server, attachment } = await setup({ boundary })
+    const relayed = await rpc(attachment.relayUrl, attachment.token, callSay({ text: 'hi' }))
+    expect(relayed.body.result.content).toHaveLength(1)
+    expect(boundary.deliver).not.toHaveBeenCalled()
+    const own = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'thread_read', arguments: {} } })
+    expect(own.body.result.content).toHaveLength(2)
+    expect(boundary.deliver).toHaveBeenCalledTimes(1)
   })
 
   it('a relay call the runtime did not announce leaves the turn undrained', async () => {

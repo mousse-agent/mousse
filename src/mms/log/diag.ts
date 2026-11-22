@@ -9,7 +9,7 @@
  * when passed through logFields (details argument).
  */
 
-export type DiagLevel = 'debug' | 'warn' | 'error'
+export type DiagLevel = 'debug' | 'info' | 'warn' | 'error'
 
 const REDACT_KEY_PATTERN = /token|secret|password|credential|apikey|api_key|authorization/i
 
@@ -79,6 +79,11 @@ export function logDebug(module: string, message: string, error?: unknown, field
   if (!isDiagDebugEnabled()) return
   const extra = fields ? ` ${JSON.stringify(redactFields(fields))}` : ''
   emit('debug', `[diag:${module}] ${message}${extra}${error ? ` :: ${formatError(error)}` : ''}`)
+}
+
+/** A measurement worth keeping in the daemon log in every build, such as where the start spent its time. */
+export function logInfo(module: string, message: string): void {
+  emit('info', `[info:${module}] ${message}`)
 }
 
 export function logWarn(module: string, message: string, error?: unknown, fields?: Record<string, unknown>): void {

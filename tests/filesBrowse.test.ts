@@ -69,6 +69,7 @@ describe('a typed or pasted path', () => {
 describe('paths between the thread’s folder and the folder shown', () => {
   it('compares Windows paths without case or separator style', () => {
     expect(samePath('C:\\Users\\Me\\', 'c:/users/me')).toBe(true)
+    expect(samePath('\\\\NAS\\media\\Films', '//nas/MEDIA/films')).toBe(true)
     expect(samePath('/home/Me', '/home/me')).toBe(false)
   })
 
@@ -77,11 +78,15 @@ describe('paths between the thread’s folder and the folder shown', () => {
     expect(pathInside('C:\\Users\\me', 'C:\\Users\\me')).toBe('')
     expect(pathInside('C:\\Users\\meta\\a.ts', 'C:\\Users\\me')).toBeNull()
     expect(pathInside('a.ts', 'C:\\Users\\me')).toBeNull()
+    expect(pathInside('//NAS/media/Films/a.ts', '\\\\nas\\MEDIA\\films')).toBe('a.ts')
+    expect(pathInside('//nas/other/Films/a.ts', '\\\\nas\\media\\films')).toBeNull()
   })
 
   it('joins a tree entry to the folder in that folder’s spelling', () => {
     expect(joinFolder('C:\\Users\\me', 'src/a.ts')).toBe('C:\\Users\\me\\src\\a.ts')
     expect(joinFolder('/', 'etc')).toBe('/etc')
+    expect(joinFolder('/', 'etc/hosts')).toBe('/etc/hosts')
+    expect(joinFolder('//nas/media', 'films/a.ts')).toBe('\\\\nas\\media\\films\\a.ts')
   })
 
   it('reads a file outside the thread’s folder from its own folder, and a relative one as it is', () => {

@@ -43,7 +43,7 @@ import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { agentJobExpiredReason, isExpired } from './agentJobLimits'
 import { computeNextRun, nextOccurrenceAfter, occurrencesSince } from './computeNextRun'
-import { botJobThreadGuard } from './botJobs'
+import { botJobThreadGuard, schedulePrompt } from './botJobs'
 import { withFileLock } from './fileLock'
 import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
 import {
@@ -195,8 +195,10 @@ function atomicWriteEpoch(path: string, at: Date = new Date()): void {
   renameSync(tmpPath, path)
 }
 
-export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir(), at: Date = new Date()): void {
+export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir(), at: Date = new Date(), downtime?: SchedulerDowntime): void {
   try {
+    // Write the gap first: advancing the heartbeat must not erase why pending claims are late.
+    if (downtime) atomicWriteJson(join(homeDir, 'scheduled', 'ticker_downtime.json'), downtime)
     atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat'), at)
     if (success) {
       atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_last_success'), at)
@@ -206,7 +208,7 @@ export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDi
   }
 }
 
-export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt: string | null; successAt: string | null } {
+export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt: string | null; successAt: string | null; downtime?: SchedulerDowntime } {
   const readEpoch = (path: string): string | null => {
     try {
       if (!existsSync(path)) return null
@@ -219,9 +221,16 @@ export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt
     }
   }
 
+  let downtime: SchedulerDowntime | undefined
+  try {
+    const saved = JSON.parse(readFileSync(join(homeDir, 'scheduled', 'ticker_downtime.json'), 'utf-8'))
+    if (typeof saved?.from === 'string' && typeof saved?.to === 'string' && Number.isFinite(Date.parse(saved.from)) && Number.isFinite(Date.parse(saved.to)) && Date.parse(saved.from) < Date.parse(saved.to))
+      downtime = { from: saved.from, to: saved.to }
+  } catch { /* Older profiles have no saved downtime; an unreadable sidecar does not stop ticks. */ }
   return {
     heartbeatAt: readEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat')),
-    successAt: readEpoch(join(homeDir, 'scheduled', 'ticker_last_success'))
+    successAt: readEpoch(join(homeDir, 'scheduled', 'ticker_last_success')),
+    ...(downtime ? { downtime } : {})
   }
 }
 
@@ -314,6 +323,10 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
 
   return {
     ...definition,
+    // say can only be created in an owner's turn (or edited by the owner). Older
+    // writers can lose the provenance key alone: the intact line preserves it.
+    ...(definition.bot?.say !== undefined && definition.bot.ownerAsked === undefined
+      ? { bot: { ...definition.bot, ownerAsked: true } } : {}),
     state: runtime?.state ?? (definition.enabled ? 'scheduled' : 'paused'),
     // Preserve explicit null (e.g. interrupted one-shot) — do not recompute.
     nextRunAt:
@@ -542,9 +555,24 @@ export class ScheduledJobStore {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const restored: string[] = []
+      let droppedStaleSay = false
       for (const job of jobs) {
-        const fields = kept[job.id]
-        if (!fields || typeof fields !== 'object') continue
+        const saved = kept[job.id]
+        if (!saved || typeof saved !== 'object') continue
+        const fields = { ...saved, ...(saved.bot ? { bot: { ...saved.bot } } : {}) }
+        if (fields.bot?.say !== undefined && job.prompt !== schedulePrompt({ say: fields.bot.say })) {
+          // The older writer changed Do. Its newer prompt wins over the kept fixed words,
+          // whether it dropped just say or the whole bot link.
+          delete fields.bot.say
+          droppedStaleSay = true
+        }
+        if (job.bot && fields.bot && job.bot.botId === fields.bot.botId && job.bot.scheduleId === fields.bot.scheduleId) {
+          const missing = Object.entries(fields.bot).filter(([key]) => (key === 'say' || key === 'ownerAsked') && !(key in job.bot!))
+          if (missing.length) {
+            Object.assign(job.bot, Object.fromEntries(missing))
+            restored.push(job.id)
+          }
+        }
         if (Object.keys(keptFieldsOf(job)).length) continue
         Object.assign(job, fields)
         if (fields.bot) {
@@ -558,7 +586,7 @@ export class ScheduledJobStore {
         if (fields.draft) Object.assign(job, { enabled: false, ...(job.state === 'running' ? {} : { state: 'paused' as const }), nextRunAt: null, resumeAt: undefined })
         restored.push(job.id)
       }
-      if (restored.length) this.saveJobs(jobs)
+      if (restored.length || droppedStaleSay) this.saveJobs(jobs)
       return restored
     })
   }
@@ -594,7 +622,7 @@ export class ScheduledJobStore {
       createThread: input.createThread,
       selection: input.selection,
       ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
-      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
+      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.ownerAsked !== undefined ? { ownerAsked: input.bot.ownerAsked } : {}), ...(input.bot.say !== undefined ? { say: input.bot.say } : {}), ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
       mode: input.mode,
       workspace: input.workspace,
       permissionMode,
@@ -1129,7 +1157,7 @@ export class ScheduledJobStore {
           if (job.expiresAt && job.state !== 'completed' && isExpired(job, now)) {
             job.state = 'completed'
             job.nextRunAt = null
-            job.lastError = agentJobExpiredReason(lifetimeDays)
+            job.lastError = job.bot ? 'Ended, as planned.' : agentJobExpiredReason(lifetimeDays)
             dirty = true
             continue
           }
@@ -1416,16 +1444,16 @@ export class ScheduledJobStore {
    * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
    * Mousse was closed collapse into this one, so a backlog never runs.
    */
-  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string }, now: Date = new Date()): ScheduledJob | null {
+  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string; occurrenceAt?: string; checked?: boolean }, now: Date = new Date()): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
       const claim = job?.runClaim
       if (!job?.bot || !claim || job.state !== 'running' || claim.token !== claimToken) return null
-      const occurrenceAt = claim.occurrenceKey
+      const occurrenceAt = outcome.occurrenceAt ?? claim.occurrenceKey
       job.runClaim = undefined
       job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
-      if (!outcome.skipped) {
+      if (!outcome.skipped && !outcome.checked) {
         job.lastRunAt = occurrenceAt
         job.lastStatus = 'ok'
         job.lastError = undefined
@@ -1647,6 +1675,18 @@ export class ScheduledJobStore {
       const claim = job.runClaim
       // Legacy running without claim, or dead owner → interrupt.
       if (claim && isOwnerLive(claim)) continue
+
+      // Bot handover commits its activation separately. Replay the same occurrence so findOccurrence
+      // can recover it before admission or a new fetch; never turn that handover into an interrupted run.
+      if (job.bot && claim?.occurrenceKey && Number.isFinite(Date.parse(claim.occurrenceKey)) && webhookIdOfOccurrence(claim.occurrenceKey) === undefined && !threadEventsOfOccurrence(claim.occurrenceKey)) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.nextRunAt = claim.occurrenceKey
+        job.updatedAt = nowIso
+        interrupted.push({ ...job })
+        dirty = true
+        continue
+      }
 
       if (claim?.workflowInvocationId && WORKFLOW_UUID_PATTERN.test(claim.workflowInvocationId)) {
         job.runClaim = undefined

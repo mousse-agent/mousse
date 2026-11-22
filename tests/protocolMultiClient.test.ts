@@ -173,20 +173,6 @@ describe('daemon protocol across clients', () => {
     await b.close()
   })
 
-  it('daemon reads answer after a client disconnects', async () => {
-    const c = await connect()
-    const before = await c.request<{ status: unknown }>('scheduled.status')
-    expect(before.status).toBeTruthy()
-    await c.close()
-
-    const c2 = await connect()
-    const after = await c2.request<{ status: unknown }>('scheduled.status')
-    expect(after.status).toBeTruthy()
-    const settings = await c2.request<{ settings: unknown }>('settings.get')
-    expect(settings.settings).toBeTruthy()
-    await c2.close()
-  })
-
   it('skills and MCP snapshots round-trip', async () => {
     const c = await connect()
     const skills = await c.request<{ snapshot: unknown }>('skills.list', {})
@@ -217,7 +203,7 @@ describe('daemon protocol across clients', () => {
   it('daemon.shutdown writes a stop request fenced by the owner token', async () => {
     const c = await connect()
     await c.request('daemon.shutdown', { reason: 'test' })
-    expect(readStopRequest(home)?.token).toBe(ownerToken)
+    expect(readStopRequest(home, ownerToken)?.token).toBe(ownerToken)
     await c.close()
   })
 

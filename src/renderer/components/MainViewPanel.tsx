@@ -1,7 +1,8 @@
+import { useActiveFileWorkspace } from '../hooks/useActiveFileWorkspace'
 import { useInboxShowsThread } from './automations/inbox/inboxStore'
 import { Suspense, useEffect } from 'react'
 // Each surface is its own chunk, loaded when the panel first draws it and preloaded once the window has painted.
-import { BrowserPanel, ChangesPanel, DocumentPanel, FilesPanel, ProjectTerminalPanel, PullRequestPanel, mountKeptPanel, useKeptPanel } from '../lib/lazySurfaces'
+import { BrowserPanel, ChangesPanel, DocumentPanel, FilesPanel, ProjectTerminalPanel, PullRequestPanel, SideChatsPanel, mountKeptPanel, useKeptPanel } from '../lib/lazySurfaces'
 // Shared markdown rules, once loaded here with the Documents panel: kept in place so the stylesheet's order holds.
 import '../styles/chat-markdown.css'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
@@ -33,7 +34,9 @@ export function MainViewPanel({ open = true }: { open?: boolean }) {
   const documentTabs = useAppStore((s) => s.documentTabs)
   const documentsTabVisible = useAppStore((s) => s.documentsTabVisible)
   const documents = documentsTabVisible ? documentTabs : []
+  const { workspace } = useActiveFileWorkspace()
   const items = surfaceTabItems({
+    files: workspace?.openPaths,
     opened,
     terminals: terminals.filter((tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null),
     browsers: browsers.filter((tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null),
@@ -47,7 +50,7 @@ export function MainViewPanel({ open = true }: { open?: boolean }) {
   // Files, Terminal and Browser stay mounted once mounted. Each mounts the first time it shows, has tabs to keep
   // (restored or opened by an agent while hidden), or the idle warm-up after the first paint reaches it.
   const visible = mainAreaOpen && !overlayOpen
-  const filesMounted = useKeptPanel('files', mainView === 'files' && visible)
+  const filesMounted = useKeptPanel('files', (mainView === 'files' && visible) || Boolean(workspace?.openPaths.length))
   const terminalMounted = useKeptPanel('terminal', (mainView === 'terminal' && visible) || terminals.length > 0)
   const browserMounted = useKeptPanel('browser', (mainView === 'browser' && visible) || browsers.length > 0)
   useHeldFileLinks()
@@ -58,6 +61,7 @@ export function MainViewPanel({ open = true }: { open?: boolean }) {
     switch (mainView) {
       case 'git': return <ChangesPanel />
       case 'pullRequest': return <PullRequestPanel />
+      case 'sideChats': return <SideChatsPanel />
       case 'documents': return <DocumentPanel />
       default: return null
     }

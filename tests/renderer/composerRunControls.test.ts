@@ -38,7 +38,7 @@ function provider(models: LlmModelOption[], autoPermissionMode = true, label = '
   return { id, label, models, caps: { toolControl: 'exact', autoPermissionMode, contextUsage: 'none' } as ProviderWithStatus['caps'] }
 }
 
-function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; open?: boolean; readOnly?: boolean; providers?: ProviderWithStatus[]; footer?: Partial<ComposerFooterProps> } = {}) {
+function render(options: { models?: LlmModelOption[]; modelId?: string; providerId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; open?: boolean; readOnly?: boolean; providers?: ProviderWithStatus[]; footer?: Partial<ComposerFooterProps> } = {}) {
   const onModelMenuOpenChange = vi.fn()
   const onModelSelect = vi.fn()
   const onPermission = vi.fn()
@@ -46,7 +46,7 @@ function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: P
     ...options.footer,
     run: {
       providers: options.providers ?? [provider(options.models ?? [opus, sonnet, plain], options.auto ?? true, options.agent)],
-      selectedProviderId: 'claude-subscription',
+      selectedProviderId: options.providerId ?? 'claude-subscription',
       selectedModelId: options.modelId ?? 'opus:high',
       modelMenuOpen: options.open ?? true,
       onModelMenuOpenChange,
@@ -106,6 +106,31 @@ async function hover(name: string) {
 }
 
 describe('composer model picker', () => {
+  // Model IDs and reasoning levels advertised by the legacy Antigravity ACP catalogue.
+  it.each([
+    { name: 'Neon', levels: ['High', 'Extra high', 'Medium', 'Low'] },
+    { name: 'Hydrogen', levels: ['High', 'Extra high', 'Medium', 'Low'] },
+    { name: 'Argon', levels: ['Medium', 'High', 'Low'] }
+  ])('uses each advertised Gemini 4 $name model ID for its reasoning level', ({ name, levels: offered }) => {
+    const id = 'antigravity'
+    const model = `gemini-4-${name.toLowerCase()}`
+    const models = offered.map((level) => ({
+      id: `${model}-${level === 'Extra high' ? 'xhigh' : level.toLowerCase()}`,
+      label: `Gemini 4 ${name} (${level === 'Extra high' ? 'XHigh' : level})`
+    }))
+    const { onModelSelect } = render({
+      providerId: id,
+      modelId: `${model}-high`,
+      providers: [provider(models, false, 'Google Antigravity', id)]
+    })
+
+    expect(columnModel()).toBe(`Gemini 4 ${name}`)
+    expect(levels()).toEqual(['Low', 'Medium', 'High', ...(offered.includes('Extra high') ? ['Extra high'] : [])])
+    expect(checkedLevel()).toBe('High')
+    act(() => level('Low').click())
+    expect(onModelSelect).toHaveBeenCalledWith(id, `${model}-low`, undefined)
+  })
+
   it('shows "Opus 5.5 High" with no separator, the level apart, and opens one picker', () => {
     const { onModelMenuOpenChange } = render({ open: false })
     expect(host.querySelector('.composer-run-controls')!.textContent).toBe('Opus 5.5High')
@@ -229,6 +254,18 @@ describe('composer model picker', () => {
     expect(speeds().map((segment) => segment.getAttribute('aria-checked'))).toEqual(['true', 'false'])
     act(() => row('Fast 1').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
     expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'fast-model:high', undefined)
+  })
+
+  it('keeps the footer while another listed model has speeds, so hovering one without never resizes the picker', async () => {
+    render({ models: [opus, standardSpeed, fastSpeed], modelId: 'opus:high' })
+    // Opus has one speed: the bar is there, empty.
+    expect(footer()).not.toBeNull()
+    expect(speeds()).toHaveLength(0)
+    await hover('Fast 1')
+    expect(speeds()).toHaveLength(2)
+    await hover('Opus 5.5')
+    expect(footer()).not.toBeNull()
+    expect(speeds()).toHaveLength(0)
   })
 
   it('adds a faster tier to the Speed toggle only when the model lists it', () => {

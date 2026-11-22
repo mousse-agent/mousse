@@ -27,7 +27,7 @@ export interface AcpRequestScope {
   cwd?: string
   /** The turn's approvals policy, from its prompter: `never` refuses writes and questions without asking. */
   readonly approvals?: 'never'
-  /** The permission mode of the turn running now; absent outside a turn (everything asks). */
+  /** The permission mode of the turn running now; defaults to Ask when omitted on a turn scope. */
   permissionMode?: PermissionMode
   /** The turn was stopped, or the connection closed. */
   aborted(): boolean
@@ -144,8 +144,9 @@ export type PermissionApprovals = 'ask' | 'grants' | 'never'
  * approvals are `never` (a refusing prompter) rejects with the once-only reject option without
  * asking, whatever the mode. The user picks one of the options the preset shows, and only the agent's
  * once-only options are shown: a native "always" or "session" option would let the agent remember the
- * decision past this thread's mode (Mousse records "Always for this thread" itself). A request outside
- * a turn asks. An answer that matches no shown option, or a stopped turn, is `cancelled`.
+ * decision past this thread's mode (Mousse records "Always for this thread" itself). A request without
+ * a running turn (absent `threadId` or aborted), an answer that matches no shown option, or a stopped
+ * turn is `cancelled`.
  */
 export async function answerPermission(
   prompter: PermissionPrompter,
@@ -246,7 +247,7 @@ export async function writeWorkspaceFile(
   // Full access writes anything in the workspace without asking, so there is nothing to tell apart.
   const write = permissionModeAllows(mode, 'command') ? { action: 'edit' as const } : await permissionActionForWrite(scope.cwd, path)
   scope.throwIfAborted()
-  // Edits go ahead under Auto-accept edits and Full access, Git's files only under Full access; a write outside a turn asks.
+  // Edits go ahead under Auto-accept edits and Full access, Git's files only under Full access; Ask (or an omitted mode) asks.
   if (!permissionModeAllows(mode, write.action)) {
     const prompt = write.action === 'command'
       ? `Allow ${label} to change Git's own files (${write.gitFile})?`

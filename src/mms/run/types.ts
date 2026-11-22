@@ -82,12 +82,6 @@ export interface RunOutcome {
    */
   sentByAgent?: true
   agentHops?: number
-  /**
-   * A person's steer that missed its turn and runs as a `steer-followup` turn of its own. The source is shared
-   * with agents' leftover steers and carried subagent results, so this marks the person's: its `turn.start`
-   * takes a free turn slot ahead of background turns, as a message from the window does.
-   */
-  sentByPerson?: true
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -223,7 +217,13 @@ export const TERMINAL_EFFECT_STATUSES: ReadonlySet<EffectStatus> = new Set<Effec
 
 export interface EffectKindSpec {
   class: EffectClass
+  /** How long one attempt may run, and the lease it holds while it runs (renewed every third of it). */
   timeoutMs: number
+  /**
+   * `false`: `timeoutMs` is the lease only, never a deadline on the work. A turn runs as long as it makes progress; what
+   * ends a hung one is its own no-progress check (`TURN_STALL_MS`), not its total time.
+   */
+  deadline?: false
   /**
    * SPEC §12.2: a kind with no producer yet. Enqueueing one fails at once (`bad_request`); the
    * worker has no executor for it either.
@@ -242,10 +242,10 @@ export interface EffectKindSpec {
 export const DEFAULT_EFFECT_MAX_ATTEMPTS = 5
 
 /**
- * Which worker fibres may claim an effect kind (SPEC §12.3): `turn` fibres run `turn.start` (one
- * per live turn, so their count caps a profile's concurrent turns), `control` fibres run the
- * interrupts, steers and answers that must reach a live turn, and `replaySafe` fibres run the
- * replay-safe kinds. A long turn can therefore never starve a Stop.
+ * Which part of the worker may claim an effect kind (SPEC §12.3): the turn claimer runs `turn.start`
+ * (every due turn at once, no limit), `control` fibres run the interrupts, steers and answers that
+ * must reach a live turn, and `replaySafe` fibres run the replay-safe kinds. A turn can therefore
+ * never hold up a Stop.
  */
 export type EffectLaneClass = 'turn' | 'control' | 'replaySafe'
 
@@ -267,7 +267,7 @@ export function effectLaneClass(kind: EffectKind): EffectLaneClass {
  * replay-safe kinds use the default retry budget.
  */
 export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
-  'turn.start': { class: 'process_bound', timeoutMs: 6 * 60 * 60_000, maxAttempts: 1 },
+  'turn.start': { class: 'process_bound', timeoutMs: 6 * 60 * 60_000, deadline: false, maxAttempts: 1 },
   'turn.interrupt': { class: 'process_bound', timeoutMs: 30_000, lane: 'control' },
   'turn.steer': { class: 'process_bound', timeoutMs: 30_000, maxAttempts: 1, lane: 'control' },
   // Delivers a saved approval request's answer to the provider callback waiting in this process (SPEC §17.4).
@@ -478,8 +478,117 @@ export interface ChildQuestionPayload {
   delegationId?: string
 }
 
+/**
+ * Payload of a `reconcile_notice` row that tells a thread a subagent below it was refused a capability it lacks
+ * (docs/plans/tool-api.md §2.4): its parent when the parent holds it (`to: 'parent'`), else the root of its tree, which
+ * is told what would give it (`fix`). Written once per capability of the subagent's work.
+ */
+export interface ChildLacksPayload {
+  kind: 'child_lacks'
+  childThreadId: string
+  childRunId: string
+  tool: string
+  lacks: string
+  fix?: string
+  to: 'parent' | 'root'
+  delegationId?: string
+}
+
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
+}
+
+/**
+ * Payload of a `reconcile_notice` row that carries another agent's note (docs/plans/tool-api.md §2.2): information that
+ * grants nothing, labelled with who sent it and what it may do. It is delivered as any notice is: steered into a native
+ * run, handed over with a Mousse tool's result on a runtime that restarts its reply, or with the thread's next turn.
+ */
+export interface AgentNotePayload {
+  kind: 'agent_note'
+  senderThreadId: string
+  senderRunId: string
+  senderTitle: string | null
+  /** What the sender may do, for the label: a read-only subagent, a Plan ceiling, or an agent that may change files. */
+  senderAccess: 'read_only' | 'plan' | 'agent'
+  /** Who the sender is to the receiver; `bot` is the owner's personal bot that started the receiving thread. */
+  from: 'parent' | 'ancestor' | 'subagent' | 'sibling' | 'bot'
+  text: string
+  /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn. */
+  attention: 'needed' | 'none'
+}
+
+export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'agent_note'
+}
+
+/** What a thread agent started in the background (`monitor_start`, `background_run`, `keep_working`). */
+export type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
+import type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
+
+/**
+ * Payload of a `reconcile_notice` row that carries what a thread's monitor or background command reported
+ * (`ThreadMonitors`): a batch of its events, and on the last one how it ended. It is delivered as an agent note is:
+ * steered into a native run, handed over with a Mousse tool's result on a runtime that restarts its reply, or as a wake
+ * turn of an idle thread. Its events are outside text: the notice quotes them.
+ */
+export interface MonitorEventPayload {
+  kind: 'monitor_event'
+  monitorId: string
+  monitorKind: MonitorKind
+  /** The agent's short description of it. */
+  description: string
+  /** What it printed or received since the last notice, one entry per line or message, each cut. */
+  events: string[]
+  /** Events left out of this notice because it was full. */
+  droppedEvents?: number
+  /** Set on its last notice. */
+  end?: MonitorEnd
+  /** A background command's last output, on its end notice. */
+  tail?: string
+  /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn (after a Stop). */
+  attention: 'needed' | 'none'
+}
+
+export function isMonitorEventRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'monitor_event'
+}
+
+/**
+ * Payload of a `reconcile_notice` row that carries a thread agent's own wake-up (`wake`, `ThreadWakes`): it was due, or
+ * what it waited on happened (another thread finished its turn, a pull request merged, its checks settled or it got a
+ * review), or it ended without it. It is delivered as an agent note is, and grants nothing: an idle thread starts a turn
+ * no person started, a running turn takes it as a steer or with its next Mousse tool call, and it waits while the thread
+ * waits on a person's answer. `text` is the whole notice the agent reads (`wakeInput`); the rest is for the app's row.
+ * One with `attention: none` says the thread's wake-ups were cancelled (its Stop or archive) and waits for its next turn.
+ */
+export interface ThreadWakePayload {
+  kind: 'thread_wake'
+  wakeId: string
+  /** What happened, in a few words: "Following up · acme/app#12 merged" (`wakeFiredLabel`). */
+  label: string
+  /** What the agent wrote for itself. */
+  brief: string
+  text: string
+  attention: 'needed' | 'none'
+}
+
+export function isThreadWakeRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'thread_wake'
+}
+
+/**
+ * A row that waits while the thread waits on a person's answer: an agent's note, a monitor's event or a wake-up. A live
+ * provider settles a pending request when it takes a steer, and none of them answers one.
+ */
+export function waitsForAnswer(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return isAgentNoteRow(row) || isMonitorEventRow(row) || isThreadWakeRow(row)
+}
+
+/** A note, a monitor's notice or a wake-up's sent with `attention: none`: it never starts a turn of its own. */
+export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  if (isAgentNoteRow(row)) return (row.payload as AgentNotePayload).attention === 'none'
+  if (isThreadWakeRow(row)) return (row.payload as ThreadWakePayload).attention === 'none'
+  return isMonitorEventRow(row) && (row.payload as MonitorEventPayload).attention === 'none'
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

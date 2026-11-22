@@ -1,7 +1,14 @@
+import { MarkdownFileSpeechControls } from '../readAloud/MarkdownFileSpeechControls'
+import { setReferenceDragData } from '../../shared/chatReferences'
+import { filesEntryReference } from '../utils/fileReference'
+import { useFileWorkspaceStore } from '../stores/filesStore'
+import { closeFileTab, fileTabRoot, useFileTabStatus } from '../services/fileTabs'
+import { useActiveFileWorkspace } from '../hooks/useActiveFileWorkspace'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { MainView } from '../../shared/types'
-import { BrowserTab, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
+import { BrowserTab, ChevronLeft, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, MessagesSquare, Plus, Terminal, X } from '../lib/icons'
+import { sideChatTitle, useOpenSideChat, useSideChatsStore } from '../stores/sideChatsStore'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
@@ -16,6 +23,7 @@ const TAB_ICONS = {
   files: FolderOpen,
   git: GitCompare,
   pullRequest: GitPullRequest,
+  sideChats: MessagesSquare,
   documents: FileText
 } as const
 
@@ -33,6 +41,7 @@ export function MainViewTabs() {
   const activeTerminalId = useAppStore((state) => state.activeProjectTerminalTabByThread[state.activeThreadId ?? '__standalone__'])
   const activeBrowserId = useAppStore((state) => state.browserActiveTabByThread[state.activeThreadId ?? '__standalone__'])
   const activeDocumentId = useAppStore((state) => state.activeDocumentTabId)
+  const openSideChat = useOpenSideChat(activeThreadId)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })
   const addRef = useRef<HTMLDivElement>(null)
@@ -56,11 +65,15 @@ export function MainViewTabs() {
     node: tab.ownerThreadId ? threads.find((thread) => thread.id === tab.ownerThreadId)?.node : undefined
   }))
   const { byNode } = useComputers(terminalNodes.some((entry) => entry.node))
+  const { scope, workspace } = useActiveFileWorkspace()
+  const dirtyPaths = useFileTabStatus((s) => s.dirtyPaths[scope])
   const items = surfaceTabItems({
+    files: workspace?.openPaths,
     opened,
     terminals: visibleTerminals,
     browsers: visibleBrowsers,
     documents,
+    ...(openSideChat ? { openSideChat: sideChatTitle(openSideChat) } : {}),
     terminalLocations: terminalLocations(terminalNodes.map(({ tab, node }) => ({
       id: tab.id,
       cwd: tab.cwd,
@@ -100,11 +113,21 @@ export function MainViewTabs() {
   if (items.length === 0) return null
 
   const select = async (item: SurfaceTabItem) => {
+    // The open side chat's tab, shown: back to the list.
+    if (item.back && item.view === useAppStore.getState().mainView && activeThreadId) {
+      useSideChatsStore.getState().open(activeThreadId, null)
+      return
+    }
     // Leaving the current view may discard an unsaved agent draft.
     if (item.view !== useAppStore.getState().mainView && !await confirmNavigation()) return
     const store = useAppStore.getState()
     store.setMainView(item.view)
     store.setMainAreaOpen(true)
+    if (item.view === 'files') {
+      const files = useFileWorkspaceStore.getState()
+      if (item.resourceId) files.activateFile(scope, item.resourceId)
+      else files.deactivateFile(scope)
+    }
     if (item.view === 'terminal' && item.resourceId) {
       store.setActiveProjectTerminalTab(store.activeThreadId, item.resourceId)
     }
@@ -118,6 +141,13 @@ export function MainViewTabs() {
 
   const close = (item: SurfaceTabItem) => {
     const store = useAppStore.getState()
+    // Closing the last tab closes the panel with it.
+    const last = items.length === 1
+    const closePanelIfLast = () => { if (last) useAppStore.getState().setMainAreaOpen(false) }
+    if (item.view === 'files' && item.resourceId) {
+      void closeFileTab(scope, item.resourceId).then((closed) => { if (closed) closePanelIfLast() })
+      return
+    }
     if (item.view === 'terminal' && item.resourceId) {
       const tab = store.projectTerminalTabs.find((entry) => entry.id === item.resourceId)
       if (tab?.ptyId) void window.mousse.pty.kill(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => {})
@@ -126,6 +156,7 @@ export function MainViewTabs() {
         (tab) => tab.id !== item.resourceId && (tab.ownerThreadId === store.activeThreadId || tab.ownerThreadId === null)
       )
       if (remaining.length === 0) store.closeSurfaceKind('terminal')
+      closePanelIfLast()
       return
     }
     if (item.view === 'browser' && item.resourceId) {
@@ -134,19 +165,23 @@ export function MainViewTabs() {
         (tab) => tab.id !== item.resourceId && (tab.ownerThreadId === store.activeThreadId || tab.ownerThreadId === null)
       )
       if (remaining.length === 0) store.closeSurfaceKind('browser')
+      closePanelIfLast()
       return
     }
     if (item.view === 'documents' && item.resourceId) {
       store.closeDocumentTab(item.resourceId)
+      closePanelIfLast()
       return
     }
     store.closeSurfaceKind(item.view)
+    closePanelIfLast()
   }
 
   const active = (item: SurfaceTabItem) => {
     if (item.view !== mainView) return false
     if (item.view === 'terminal') return item.resourceId === activeTerminalId || (!activeTerminalId && item === items.find((entry) => entry.view === 'terminal'))
     if (item.view === 'browser') return item.resourceId === activeBrowserId || (!activeBrowserId && item === items.find((entry) => entry.view === 'browser'))
+    if (item.view === 'files') return (item.resourceId ?? null) === (workspace?.activePath ?? null)
     if (item.view === 'documents') return item.resourceId === activeDocumentId
     return true
   }
@@ -163,13 +198,20 @@ export function MainViewTabs() {
     <div className="header">
     <nav className="main-view-tabs" aria-label="Main area view">
       {items.map((item) => {
-        const Icon = item.everyThread ? BrowserTab : TAB_ICONS[item.view]
+        const Icon = item.everyThread ? BrowserTab : item.back ? ChevronLeft : item.view === 'files' && item.resourceId ? FileText : TAB_ICONS[item.view]
+        const dirty = item.view === 'files' && item.resourceId && dirtyPaths?.includes(item.resourceId)
         const selected = active(item)
         const name = item.detail ? `${item.label} · ${item.detail}` : item.label
         return (
           <div
             key={item.key}
-            className={`main-view-tab${selected ? ' active' : ''}`}
+            className={`main-view-tab${selected ? ' active' : ''}${item.back ? ' is-side-chat' : ''}${item.view === 'browser' ? ' is-browser' : ''}`}
+            onKeyDown={(event) => {
+              if (item.view === 'files' && item.resourceId && event.key === 'Delete') {
+                event.preventDefault()
+                close(item)
+              }
+            }}
             // Middle-click closes a tab; stopping the press keeps Chromium's autoscroll away.
             onMouseDown={item.closable ? (event) => { if (event.button === 1) event.preventDefault() } : undefined}
             onAuxClick={item.closable ? (event) => { if (event.button === 1) close(item) } : undefined}
@@ -179,13 +221,22 @@ export function MainViewTabs() {
               className="main-view-tab-select"
               aria-current={selected ? 'page' : undefined}
               aria-label={item.detail ? name : undefined}
-              title={item.title ?? (item.everyThread ? 'Kept in every thread' : undefined)}
+              title={dirty ? `${item.title} (unsaved)` : item.title ?? (item.everyThread ? 'Kept in every thread' : item.label)}
+              draggable={item.view === 'files' && Boolean(item.resourceId)}
+              onDragStart={item.view === 'files' && item.resourceId ? (event) => {
+                setReferenceDragData(event.dataTransfer, filesEntryReference({
+                  path: item.resourceId!, name: item.label, kind: 'file', filesRoot: fileTabRoot(scope),
+                  threadId: activeThreadId, projectId: threads.find((thread) => thread.id === activeThreadId)?.projectId ?? null
+                }))
+                event.dataTransfer.setData('text/plain', item.resourceId!)
+              } : undefined}
               onClick={() => void select(item)}
             >
               <Icon size={14} strokeWidth={2} className="main-view-tab-icon" />
-              <span className="main-view-tab-label">{item.label}</span>
+              <span className="main-view-tab-label">{item.label}{dirty ? ' •' : ''}</span>
               {item.detail && <span className="main-view-tab-detail">{item.detail}</span>}
             </button>
+            {item.view === 'files' && item.resourceId && <MarkdownFileSpeechControls scope={scope} path={item.resourceId} />}
             {item.closable && (
               <button
                 type="button"

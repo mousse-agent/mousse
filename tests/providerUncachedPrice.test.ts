@@ -30,8 +30,8 @@ describe('the price of re-reading a cold cache', () => {
 
   it('falls back to the input price where the catalogue has no cache write price', async () => {
     const auth = service()
-    const model = auth.models.getModels('openai').find((entry) => entry.cost.cacheWrite === 0 && entry.cost.input > 0)
-    if (!model) return
+    const model = auth.models.getModels('openai').find((entry) => entry.cost.cacheWrite === 0 && entry.cost.input > 0)!
+    expect(model).toBeDefined()
     await auth.setApiKey('openai', 'sk-test-key')
     expect(auth.uncachedInputPrice('openai', model.id)).toBe(model.cost.input)
   })

@@ -1,3 +1,5 @@
+import { dirname, join, relative, sep } from 'node:path'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../../shared/harness/mcpNames'
 import type { CodexConnection } from './CodexAppServerClient'
 
 /**
@@ -7,6 +9,10 @@ import type { CodexConnection } from './CodexAppServerClient'
 export interface CodexUserSetup {
   /** Names of every enabled MCP server in the effective config; null when it cannot be read. */
   mcpServers: string[] | null
+  /** Reserved names defined in any active layer, including disabled entries whose keys still merge. */
+  reservedMcpServers?: string[]
+  /** Files to rename a reserved server in, as named by active config layers. */
+  reservedMcpFiles?: Record<string, string[]>
   /** The features of the effective config (`config.features`); null when it cannot be read. */
   features: Record<string, unknown> | null
 }
@@ -30,10 +36,28 @@ export async function readCodexUserSetup(conn: CodexConnection, cwd: string | nu
   try {
     const response = await conn.request('config/read', { ...(cwd ? { cwd } : {}), includeLayers: true }, { timeoutMs: 15_000 })
     const names = new Set(enabledServers(response.config.mcp_servers))
-    for (const layer of response.layers ?? [])
-      if (!layer.disabledReason) for (const name of enabledServers(layer.config?.mcp_servers)) names.add(name)
+    const reserved = new Set<string>()
+    const reservedFiles: Record<string, string[]> = {}
+    const collectReserved = (servers: Record<string, ServerEntry> | null | undefined, file?: string): void => {
+      for (const name of Object.keys(servers ?? {}))
+        if (name === MOUSSE_MCP_SERVER_NAME || name === MOUSSE_RELAY_SERVER_NAME) {
+          reserved.add(name)
+          if (file) reservedFiles[name] = [...new Set([...(reservedFiles[name] ?? []), file])]
+        }
+    }
+    collectReserved(response.config.mcp_servers)
+    for (const layer of response.layers ?? []) {
+      if (layer.disabledReason) continue
+      for (const name of enabledServers(layer.config?.mcp_servers)) names.add(name)
+      // Codex 0.162.1 ConfigLayerSource: project sources carry dotCodexFolder, user sources a file.
+      const folder = layer.name?.type === 'project' ? layer.name.dotCodexFolder : undefined
+      const file = folder
+        ? `the project's ${relative(cwd ?? dirname(folder), join(folder, 'config.toml')).split(sep).join('/')}`
+        : "Codex's config.toml"
+      collectReserved(layer.config?.mcp_servers, file)
+    }
     const features = response.config.features
-    return { mcpServers: [...names], features: features && typeof features === 'object' ? features as Record<string, unknown> : {} }
+    return { mcpServers: [...names], reservedMcpServers: [...reserved], reservedMcpFiles: reservedFiles, features: features && typeof features === 'object' ? features as Record<string, unknown> : {} }
   } catch {
     return { mcpServers: null, features: null }
   }

@@ -7,6 +7,7 @@ import { Download, Gauge, Logout, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, FieldWithAction, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
+  DRIVER_INFO,
   binaryOverrideOf,
   formatArgs,
   formatVersion,
@@ -170,7 +171,7 @@ export function SetupRow({
     </button>
   )
   const signOut = account && auth.canSignOut && (
-    <button type="button" className="settings-btn" disabled={!idle} onClick={() => void run('signout', actions.signOut)}>
+    <button type="button" className="settings-btn" disabled={!idle} title={DRIVER_INFO[snapshot.driver].signOutHint} onClick={() => void run('signout', actions.signOut)}>
       <Logout size={14} />
       Sign out
     </button>

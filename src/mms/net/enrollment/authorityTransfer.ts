@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { NodeId, Roster, RpcId, Signed } from '../../../shared/net'
 import { NetError, newId } from '../../../shared/net'
 import type { RpcContext, RpcDispatcher, RpcMethod } from '../contracts'
+import { v1Caller } from '../contracts'
 import { FileKeyStore, NetIdentityService } from '../identity'
 import type { AuthorityTransferOffer } from '../identity/NetIdentityService'
 import { decodeBase64 } from '../identity/crypto'
@@ -237,7 +238,7 @@ export class AuthorityTransferDelivery {
             .find(
               (row) =>
                 row.subject === context.caller.node &&
-                row.keyEpoch === context.caller.delegation.keyEpoch
+                row.keyEpoch === v1Caller(context.caller).delegation.keyEpoch
             )
           if (!source) throw new NetError('bad_delegation')
           const offer = this.options.identity.verifySigned<AuthorityTransferOffer>(

@@ -1,4 +1,4 @@
-import { execFile, spawn as nodeSpawn } from 'node:child_process'
+import { spawn as nodeSpawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -16,13 +16,16 @@ import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../../run/m
 import type { ToolLedger } from '../../run/mcp/appTools/types'
 import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
+import { spawnProviderProcess, windowsProviderTree, type WindowsProviderTree } from '../windowsProviderProcess'
 import { trackChildProcess } from '../../diagnostics/liveCounts'
+import { LINUX_RUN_KEPT_OPEN, LINUX_SYSTEM_FOLDERS } from '../linuxFolders'
 
 /**
  * How a bot's turn runs on Claude Code (PR 6 §3), on either kind of entry:
  * - the owner's own entry (the one their chats use, with their sign-in): the turn runs in that
- *   entry's environment, as one query that is never kept warm, and its process is the turn's own:
- *   the deadline ends it through the turn's signal, never the bot supervisor (`ownerEntry`);
+ *   locked environment plus its sign-in, and its process is the turn's own: the deadline ends it through the turn's
+ *   signal, never the bot supervisor (`ownerEntry`). A chat turn without Bash runs on the chat's warm process, kept
+ *   between turns while its launch stays the same; every other turn is one query;
  * - a `locked` entry (`config.profile: 'locked'`), which runs in a home of its own and only bot
  *   turns, in the locked environment, with its process group under the bot supervisor.
  * Every interactive turn keeps the user's own setup, untouched.
@@ -39,8 +42,8 @@ import { trackChildProcess } from '../../diagnostics/liveCounts'
 export const CLAUDE_LOCKED_PROFILE = 'locked'
 
 /**
- * One `query` is one dispatch: a backstop on its model turns, not a policy claim. A bot's budget is its work time
- * (and its turn budget, when its grant has one); a dispatch that reaches this cap ends with `provider_turn_cap` and
+ * One `query` is one dispatch: a backstop on its model turns, not a policy claim. A bot's only budget is what its
+ * grant sets (turns, tool calls, tokens or spend), when it sets one; a dispatch that reaches this cap ends with `provider_turn_cap` and
  * the bot carries the work on in its next dispatch, so the cap only bounds one query, never the work.
  */
 export const CLAUDE_LOCKED_MAX_TURNS = 300
@@ -136,7 +139,7 @@ export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
 export interface ClaudeLockedTurn {
   authority: BotAuthority
   /**
-   * The turn runs on the owner's own entry, not a locked one: their environment and sign-in, the
+   * The turn runs on the owner's own entry, not a locked one: only their sign-in over the locked environment, the
    * SDK's own process handling, and no organisation-policy reading. Every call still goes through
    * the grant gate, and Claude Code runs in its asking mode with none of the user's settings files.
    */
@@ -278,30 +281,6 @@ export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'sh
   const tools = [...offered].sort()
   return { tools, disallowedTools: CLAUDE_BUILTIN_TOOLS.filter((name) => !offered.has(name)) }
 }
-
-/**
- * The top folders of a Linux system that hold its own programs, libraries, settings and kernel views, which commands
- * need to run. Every other top folder (`/home`, `/mnt`, `/media`, `/opt`, `/srv`, `/var`, `/root`, `/run`, …) is
- * unreadable to a bot's commands, as Codex's `:minimal` profile keeps them. `/run` holds removable
- * drives (`/run/media/<user>`) and each signed-in user's runtime folder (`/run/user/<uid>`: network mounts, sign-in
- * sockets); commands need nothing there but NixOS's programs (`LINUX_RUN_KEPT_OPEN`).
- *
- * `/tmp` stays readable, not writable (it is denied with the other temporary folders): Claude Code's sandbox keeps its
- * own sockets there. Mousse still keeps some folders of its own there, each private to this user (mode 700), which a
- * bot's command can read since it runs as the same user: the ChatGPT token broker's socket folder (its socket can't be
- * used: the sandbox refuses every connect to a Unix socket), and for the seconds a task runs, `mousse-pr-*` (the title
- * and text of a pull request the owner opens), `mousse-pathspec-*` (the paths of files the owner stages or discards),
- * `mousse-trace-*` (Git's trace of the hooks of the owner's commit or push) and `mousse-acp-*` (the working folder of an
- * ACP agent's check). docs/bots.md lists them under what remains.
- */
-export const LINUX_SYSTEM_FOLDERS: readonly string[] = ['/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32', '/usr', '/etc', '/proc', '/dev', '/sys', '/tmp', '/nix']
-
-/**
- * What stays readable under the closed `/run` when it exists: on NixOS the system's programs are on the PATH through
- * `/run/current-system/sw/bin`, and the setuid wrappers (`sudo`, `ping`, …) through `/run/wrappers`, both leading into
- * `/nix`, which is open. Without them no command finds its programs there. Nothing else under `/run` is opened.
- */
-export const LINUX_RUN_KEPT_OPEN: readonly string[] = ['/run/current-system/sw/bin', '/run/wrappers']
 
 /** `LINUX_RUN_KEPT_OPEN` that exist here, on Linux. */
 function keptOpenUnderRun(platform: NodeJS.Platform, exists: (path: string) => boolean): string[] {
@@ -620,8 +599,17 @@ export class ClaudeLockedGate {
   constructor(
     private readonly turn: ClaudeLockedTurn,
     /** The Mousse MCP server is attached to the turn. */
-    private readonly mcp: boolean
+    private readonly mcp: boolean,
+    /**
+     * Told before a shell call is let through, in the hook and again in `canUseTool`: a command may outlive the call
+     * that started it, so the process that ran one is not kept for another turn.
+     */
+    private readonly onCommand?: () => void
   ) {}
+
+  private noteCommand(classified: Classified | undefined): void {
+    if (classified?.kind === 'builtin' && classified.neutral.includes('shell')) this.onCommand?.()
+  }
 
   private classify(toolName: string): Classified {
     if (this.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { kind: 'app', tool: toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) }
@@ -699,6 +687,7 @@ export class ClaudeLockedGate {
     try {
       const decided = this.decide(toolName, args)
       if (!decided.ok) return decided
+      this.noteCommand(decided.classified)
       if (decided.classified?.kind === 'builtin') this.turn.authority.counters.charge('tool')
       return { ok: true }
     } catch (error) {
@@ -728,6 +717,7 @@ export class ClaudeLockedGate {
     const decided = this.decide(toolName, args)
     if (!decided.ok) return decided
     const classified = decided.classified!
+    this.noteCommand(classified)
     if (classified.kind === 'app' || classified.kind === 'mcp') return { ok: true }
     const idempotent = classified.kind === 'tool_search' || (classified.kind === 'builtin' && classified.neutral.every(neutralToolIdempotent))
     const row = this.turn.ledger?.start({ type: 'toolCall', id: toolUseId, name: toolName, arguments: args } as ToolCall, { idempotent })
@@ -798,26 +788,21 @@ export interface ClaudeLockedSpawnOptions {
   spawn?: typeof nodeSpawn
   /** Signals the process group `pid` leads (POSIX); throws when it has no member left. */
   signalGroup?: (pid: number, signal: NodeJS.Signals | 0) => void
-  /** Ends the process tree `pid` heads (Windows), without waiting for it. */
-  killTree?: (pid: number) => void
+  onWindowsTree?: (tree: WindowsProviderTree) => void
   graceMs?: number
   /** Where a failed turn's error output goes (default: the log). */
   onStderr?: (tail: string, code: number | null) => void
 }
 
 const defaultSignalGroup = (pid: number, signal: NodeJS.Signals | 0) => process.kill(-pid, signal)
-// `taskkill` runs on its own: the daemon's loop never waits for it.
-const defaultKillTree = (pid: number) => {
-  execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5_000 }, () => undefined)
-}
 
 /**
  * The spawn of a locked turn's Claude Code (`spawnClaudeCodeProcess`): the SDK's command,
  * arguments, folder and environment unchanged, in a process group of its own on POSIX, reported to
  * `onProcess`. The SDK's forwarded abort (after its own close grace) and the CLI's exit end the whole
  * group: SIGTERM, then SIGKILL after a short grace, with plain signals and no process listing on the
- * daemon's loop. On Windows the tree is ended by a `taskkill` that runs on its own, and only while the
- * CLI still runs (a pid may be reused once it is gone). A process whose registration fails is ended
+ * daemon's loop. On Windows the supervisor drains the whole Job Object, including detached
+ * descendants. A process whose registration fails is ended
  * at once and the spawn fails: nothing runs unsupervised. The CLI's error output is kept, and its
  * tail is logged when it fails.
  */
@@ -825,7 +810,6 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
   const platform = options.platform ?? process.platform
   const spawn = options.spawn ?? nodeSpawn
   const signalGroup = options.signalGroup ?? defaultSignalGroup
-  const killTree = options.killTree ?? defaultKillTree
   const graceMs = options.graceMs ?? CLAUDE_LOCKED_KILL_GRACE_MS
   const onStderr = options.onStderr ?? ((tail: string, code: number | null) => console.warn(`[claude-locked] Claude Code exited with code ${code}: ${tail}`))
   const send = (pid: number, signal: NodeJS.Signals | 0): boolean => {
@@ -837,14 +821,13 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
     }
   }
   return (spawnOptions) => {
-    const child = spawn(spawnOptions.command, spawnOptions.args, {
-      ...(spawnOptions.cwd ? { cwd: spawnOptions.cwd } : {}),
-      env: spawnOptions.env as NodeJS.ProcessEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: platform !== 'win32',
-      windowsHide: true
-    })
+    const { command, args, cwd, env, signal } = spawnOptions
+    signal.throwIfAborted()
+    const child = platform === 'win32' && !options.spawn
+      ? spawnProviderProcess(command, args, { cwd, env })
+      : spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: platform !== 'win32', windowsHide: true })
     trackChildProcess(child, 'claude')
+    const tree = windowsProviderTree(child)
     const pid = child.pid
     let exited = false
     let ended = false
@@ -858,7 +841,7 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
       if (ended || pid === undefined) return
       ended = true
       if (platform === 'win32') {
-        if (!exited) killTree(pid)
+        if (!exited) child.kill()
         return
       }
       if (now || !send(pid, 'SIGTERM')) {
@@ -880,15 +863,14 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
       // On POSIX the group outlives its leader and is ended too.
       end()
     })
-    if (pid !== undefined && options.onProcess) {
-      try {
-        options.onProcess(pid)
-      } catch (error) {
-        end(true)
-        child.stdin?.destroy?.()
-        child.stdout?.destroy?.()
-        throw error
-      }
+    try {
+      if (tree) options.onWindowsTree?.(tree)
+      if (pid !== undefined) options.onProcess?.(pid)
+    } catch (error) {
+      end(true)
+      child.stdin?.destroy?.()
+      child.stdout?.destroy?.()
+      throw error
     }
     return child as unknown as SpawnedProcess
   }

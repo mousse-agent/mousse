@@ -52,13 +52,49 @@ const commonErrors = createErrorProvider({
   cancelled: { category: 'cancelled', retryable: false, message: 'The operation was cancelled.' }
 })
 
-/** Unknown text is never made public merely because it has a code property. */
-export function normalizeAppError(error: unknown, fallbackCode = 'internal_error'): AppError {
+/** A call to Mousse's background service whose connection dropped before it answered. */
+export const SERVICE_STOPPED_ANSWERING = 'Mousse’s background service stopped answering. Try again.'
+/** A call to Mousse's background service that got no answer in time; the work may still have happened. */
+export const SERVICE_ANSWERED_LATE = 'Mousse’s background service didn’t answer in time. Try again.'
+
+/** A generic failure's reference, its code, what was being done and its redacted causes: one line of a local log. */
+export interface ErrorReferenceEntry {
+  reference: string
+  code: string
+  operation?: string
+  cause?: string
+}
+
+let errorReferenceSink: ((entry: ErrorReferenceEntry) => void) | null = null
+
+/**
+ * Where the process writes each `Reference: <id>` it hands out, so the id can be looked up later. Main and the
+ * background service each set one that writes to a log file under `<home>/logs`; null stops it.
+ */
+export function setErrorReferenceSink(sink: ((entry: ErrorReferenceEntry) => void) | null): void {
+  errorReferenceSink = sink
+}
+
+/**
+ * Unknown text is never made public merely because it has a code property. The public message ends with a
+ * reference; the cause behind it goes, redacted, only to the process's error reference log (`operation` says
+ * what was being done, such as the request's method).
+ */
+export function normalizeAppError(error: unknown, fallbackCode = 'internal_error', operation?: string): AppError {
   if (error instanceof AppError) return error
   if (error instanceof Error && error.name === 'AbortError') return commonErrors.create('cancelled', error)
   const supportId = globalThis.crypto.randomUUID()
   const result = commonErrors.create('internal_error', error, { supportId })
-  return new AppError({ ...serializeAppError(result), code: fallbackCode, message: `${result.message} Reference: ${supportId}`, errorInfo: result.errorInfo }, error)
+  const normalized = new AppError({ ...serializeAppError(result), code: fallbackCode, message: `${result.message} Reference: ${supportId}`, errorInfo: result.errorInfo }, error)
+  if (errorReferenceSink) {
+    try {
+      const cause = errorCauseText(normalized)
+      errorReferenceSink({ reference: supportId, code: normalized.code, ...(operation ? { operation: operation.slice(0, 96) } : {}), ...(cause ? { cause } : {}) })
+    } catch {
+      // A log that cannot be written never changes the error.
+    }
+  }
+  return normalized
 }
 
 /** Known domain errors retain their audited messages and legacy codes. */
@@ -102,9 +138,13 @@ export function redactSecrets(text: unknown, secrets: Iterable<string> = []): st
     .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, '[redacted]')
 }
 
-const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'pointer', 'pointers', 'runtimeKind', 'hostBindings', 'workspace', 'projectBound', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs', 'resetsAt', 'estimated', 'limitKind', 'missing', 'kind', 'retriesExhausted', 'files', 'conflict', 'discard',
+const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'pointer', 'pointers', 'runtimeKind', 'hostBindings', 'workspace', 'projectBound', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs', 'resetsAt', 'estimated', 'limitKind', 'missing', 'kind', 'retriesExhausted', 'promptTaken', 'files', 'conflict', 'discard',
   // A browser page that failed (`BrowserProblem`): its class, the site's host name and why the browser can't start.
-  'problem', 'host', 'cause'])
+  'problem', 'host', 'cause',
+  // Which threads a device's agents may change on the computer that refused (`agent_reach`): none, launched or all.
+  'reach',
+  // How many retries a provider's failed request had (`ProviderRetries`): `{ attempt, max }`.
+  'retries', 'max'])
 
 /** Explicit safe detail vocabulary. New domain fields need an audited addition. */
 export function safeErrorDetails(value: unknown): unknown {

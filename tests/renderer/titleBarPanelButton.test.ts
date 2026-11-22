@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const stub = (testId: string) => () => createElement('div', { 'data-testid': testId })
+// The composer's microphone needs audio APIs jsdom lacks; the warm start's composer is in App's own chunk.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/services/navigationGuards', () => ({ confirmNavigation: vi.fn(async () => true) }))
 vi.mock('../../src/renderer/components/downloads/DownloadsIndicator', () => ({ DownloadsIndicator: () => null }))
 vi.mock('../../src/renderer/components/WindowCaptionButtons', () => ({ WindowCaptionButtons: () => null }))
@@ -49,6 +51,7 @@ const { default: App } = await import('../../src/renderer/App')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { runCommand } = await import('../../src/renderer/commands/commandRegistry')
+const { setAnimationSpeed } = await import('../../src/renderer/lib/motion')
 
 let host: HTMLDivElement
 let root: Root
@@ -71,6 +74,7 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   useChatsStore.setState({ activeBotId: null })
+  setAnimationSpeed('normal')
   vi.unstubAllGlobals()
 })
 
@@ -83,6 +87,8 @@ describe('the title bar panel button', () => {
     await settle()
     expect(panelOpen()).toBe(true)
     expect(panelButton()!.getAttribute('aria-label')).toBe('Hide panel')
+    // Closing, the panel stays laid out while it slides out; with motion off it goes at once.
+    setAnimationSpeed('off')
     act(() => panelButton()!.click())
     await settle()
     expect(panelOpen()).toBe(false)

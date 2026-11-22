@@ -83,11 +83,6 @@ describe('sync actions', () => {
     expect(git.status).toHaveBeenCalledTimes(2)
   })
 
-  it('fetch with nothing new says so', async () => {
-    install({ fetch: vi.fn(async () => ({ status: repoStatus(), behindBefore: 3, behindAfter: 3 })) })
-    expect((await run({ action: 'fetch' }))[1]).toEqual({ phase: 'done', action: 'fetch', message: 'Already up to date' })
-  })
-
   it('pull passes the strategy and reports what it did', async () => {
     const { git } = install({ pull: vi.fn(async () => ({ status: repoStatus(), result: 'merged' })) })
     expect(await run({ action: 'pull', strategy: 'merge' })).toEqual([

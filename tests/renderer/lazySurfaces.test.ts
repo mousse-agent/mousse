@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const stub = (testId: string) => () => createElement('div', { 'data-testid': testId })
+// The composer's microphone needs audio APIs jsdom lacks; the warm start's composer is in App's own chunk.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/services/navigationGuards', () => ({ confirmNavigation: vi.fn(async () => true) }))
 vi.mock('../../src/renderer/components/downloads/DownloadsIndicator', () => ({ DownloadsIndicator: () => null }))
 vi.mock('../../src/renderer/components/TitleBar', () => ({ TitleBar: () => null }))
@@ -61,6 +63,7 @@ vi.mock('../../src/renderer/components/BrowserPanel', () => ({ BrowserPanel: stu
 vi.mock('../../src/renderer/components/changes/ChangesPanel', () => ({ ChangesPanel: stub('changes') }))
 vi.mock('../../src/renderer/components/PullRequestPanel', () => ({ PullRequestPanel: stub('pull-request') }))
 vi.mock('../../src/renderer/components/DocumentPanel', () => ({ DocumentPanel: stub('documents') }))
+vi.mock('../../src/renderer/components/sideChats/SideChatsPanel', () => ({ SideChatsPanel: stub('side-chats') }))
 
 /** Every bridge call stays pending and every subscription returns a no-op unsubscribe. */
 function pendingBridge(): unknown {
@@ -124,13 +127,12 @@ afterEach(() => {
 /** Lets the dynamic imports resolve and Suspense show what they loaded. */
 const settle = () => act(async () => { for (let i = 0; i < 10; i += 1) await new Promise((done) => setTimeout(done, 0)) })
 const shown = (testId: string) => host.querySelector(`[data-testid="${testId}"]`)
-const openFile = (detail: unknown) => window.dispatchEvent(new CustomEvent('mousse:open-file', { detail }))
 
 describe('split-out surfaces', () => {
   it('each resolves to the component it names', async () => {
     const lazy = [surfaces.SettingsPage, surfaces.AutomationsPage, surfaces.SubscriptionUsagePage, surfaces.ChatWorkspace,
       surfaces.NewBotDialogHost, surfaces.FilesPanel, surfaces.ProjectTerminalPanel, surfaces.BrowserPanel,
-      surfaces.ChangesPanel, surfaces.PullRequestPanel, surfaces.DocumentPanel]
+      surfaces.ChangesPanel, surfaces.PullRequestPanel, surfaces.DocumentPanel, surfaces.SideChatsPanel]
     for (const component of lazy) {
       const loaded = await component.preload() as Record<string, unknown>
       expect(Object.values(loaded).some((value) => typeof value === 'function')).toBe(true)
@@ -174,23 +176,6 @@ describe('split-out surfaces', () => {
     expect(shown('browser')).not.toBeNull()
     expect(shown('terminal')).toBeNull()
     expect(shown('files')).toBeNull()
-  })
-
-  it('keeps file links that arrive before the Files tab has mounted, and hands them over once it listens', async () => {
-    act(() => root.render(createElement(MainViewPanel)))
-    await settle()
-    expect(shown('files')).toBeNull()
-    act(() => {
-      openFile({ path: 'a.ts' })
-      openFile({ path: 'b.ts', line: 3 })
-    })
-    await settle()
-    expect(shown('files')).not.toBeNull()
-    expect(fileLinks).toEqual([{ path: 'a.ts' }, { path: 'b.ts', line: 3 }])
-    // Later links go straight to the tab, once each.
-    act(() => openFile({ path: 'c.ts' }))
-    await settle()
-    expect(fileLinks).toEqual([{ path: 'a.ts' }, { path: 'b.ts', line: 3 }, { path: 'c.ts' }])
   })
 
   it('the idle warm-up mounts the kept panels after the first paint', async () => {

@@ -1,15 +1,19 @@
+import { fetchWithSecret, prepareSecretFetch } from './secretFetch'
 import type { SecretToolHost } from '../run/mcp/appTools/secrets'
 import type { SecretRequests } from './SecretRequests'
 import type { SecretVault } from './SecretVault'
 import { runWithSecrets } from './runWithSecrets'
+import type { BotSecretContainment } from './botSecretCommand'
 
 /**
  * What `secret_request` and `secret_run` reach (#595): the profile's open requests and its vault. A command gets the
  * named secrets only when the thread may use them, and its output is masked with every secret the thread may use.
  */
-export function createSecretToolHost(input: { vault: SecretVault; requests: SecretRequests; scratchRoot: string; baseEnv?: NodeJS.ProcessEnv }): SecretToolHost {
+export function createSecretToolHost(input: { vault: SecretVault; requests: SecretRequests; scratchRoot: string; baseEnv?: NodeJS.ProcessEnv; containment?: BotSecretContainment }): SecretToolHost {
   const { vault, requests } = input
   return {
+    prepareFetch: request => prepareSecretFetch(vault, request),
+    fetch: request => fetchWithSecret(vault, request),
     request: (threadId, request, signal) => requests.request(threadId, request, { signal }),
     endThread: (threadId) => requests.endThread(threadId),
     usableIn: (name, threadId) => vault.usableIn(name, threadId),
@@ -17,6 +21,8 @@ export function createSecretToolHost(input: { vault: SecretVault; requests: Secr
     run: async (run) => {
       const secrets = run.secrets.map((entry) => {
         if (!vault.usableIn(entry.name, run.threadId)) throw new Error(`This thread has no secret named ${entry.name}.`)
+        const binding = vault.bindingFor(entry.name)
+        if (binding) throw new Error(`${entry.name} is bound to ${binding.service ?? new URL(binding.origin).host}; use secret_fetch.`)
         const value = vault.value(entry.name)
         if (value === undefined) throw new Error(`The secret ${entry.name} is gone (it expired or was removed).`)
         return { ...entry, value }
@@ -30,7 +36,9 @@ export function createSecretToolHost(input: { vault: SecretVault; requests: Secr
         scratchRoot: input.scratchRoot,
         timeoutMs: run.timeoutMs,
         signal: run.signal,
-        ...(input.baseEnv ? { baseEnv: input.baseEnv } : {})
+        ...(input.baseEnv ? { baseEnv: input.baseEnv } : {}),
+        // A personal bot's command: its locked environment plus the named secrets, in the sandbox where there is one.
+        ...(run.contain ? { contain: { ...run.contain, ...(input.containment ? { containment: input.containment } : {}) } } : {})
       })
     }
   }

@@ -22,6 +22,14 @@ async function fixture() {
   return { ...base, factory }
 }
 
+/** The LAN listener on the computer's one private address: offered next to WebRTC. */
+const lanOf = (net: NetService) => ({
+  v: 1,
+  addresses: [
+    `ws://192.168.0.86:${(net as unknown as { transport: { lanPort(): number } }).transport.lanPort()}/mousse-net`
+  ]
+})
+
 /** Request aliases and execution records of the WebRTC methods in the test profile. */
 const storedRows = (net: NetService) =>
   ['net_rpc_aliases WHERE method', 'net_executions WHERE target'].map((table) =>
@@ -38,12 +46,13 @@ const storedRows = (net: NetService) =>
 describe('WebRTC direct path in the Net service', () => {
   it('is offered only to sessions that came through Mousse ID or WebRTC, and opens a full session', async () => {
     const { computer, phone, computerNode, mousseId, factory } = await fixture()
-    // A session over the ordinary direct listener learns nothing and may not offer.
+    // A session that did not come through Mousse ID learns no WebRTC path and may not offer.
     await vi.waitFor(
-      async () =>
-        expect(await rpc(phone.net.session(computerNode), PHONE_ENDPOINTS_METHOD, {})).toEqual({
-          endpoints: []
-        }),
+      async () => {
+        const answer = await rpc(phone.net.session(computerNode), PHONE_ENDPOINTS_METHOD, {})
+        expect(answer.endpoints).toEqual([])
+        expect(answer).not.toHaveProperty('webrtc')
+      },
       { timeout: 10_000, interval: 100 }
     )
     await expect(
@@ -54,7 +63,8 @@ describe('WebRTC direct path in the Net service', () => {
     const relayed = await relayedSession(phone.net, computer.net, mousseId)
     expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toEqual({
       endpoints: [],
-      webrtc: { v: 1 }
+      webrtc: { v: 1 },
+      lan: lanOf(computer.net)
     })
     for (const params of [{ sdp: fakeOffer() }, { sdp: fakeOffer(), v: 2 }, { sdp: 1, v: 1 }])
       await expect(rpc(relayed, PHONE_WEBRTC_OFFER_METHOD, params)).rejects.toMatchObject({
@@ -79,7 +89,8 @@ describe('WebRTC direct path in the Net service', () => {
     // Over the WebRTC session itself: the same answer, and re-offers are allowed.
     expect(await rpc(direct, PHONE_ENDPOINTS_METHOD, {})).toEqual({
       endpoints: [],
-      webrtc: { v: 1 }
+      webrtc: { v: 1 },
+      lan: lanOf(computer.net)
     })
     await rpc(direct, PHONE_WEBRTC_OFFER_METHOD, { sdp: fakeOffer('10.0.0.9'), v: 1 })
     expect(computer.net.phoneWebRtcCounts()).toEqual({ pending: 1, live: 1 })
@@ -143,7 +154,11 @@ describe('WebRTC direct path in the Net service', () => {
     await rpc(relayed, PHONE_WEBRTC_OFFER_METHOD, { sdp: fakeOffer(), v: 1 })
     mousseId.setDirect({ webrtc: false, stun: [] })
     expect(factory.peers[0].closed).toBe(true)
-    expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toEqual({ endpoints: [] })
+    // The LAN path does not depend on Mousse ID.
+    expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toEqual({
+      endpoints: [],
+      lan: lanOf(computer.net)
+    })
     await expect(
       rpc(relayed, PHONE_WEBRTC_OFFER_METHOD, { sdp: fakeOffer(), v: 1 })
     ).rejects.toMatchObject({ code: 'disabled' })
@@ -170,7 +185,11 @@ describe('WebRTC direct path in the Net service', () => {
     mousseId.relay().drop()
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(factory.peers[0].closed).toBe(false)
-    expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toEqual({ endpoints: [], webrtc: { v: 1 } })
+    expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toEqual({
+      endpoints: [],
+      webrtc: { v: 1 },
+      lan: lanOf(computer.net)
+    })
   }, 40_000)
 
   it('closes everything when the Net service shuts down', async () => {

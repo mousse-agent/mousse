@@ -1,15 +1,18 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
+import type { NodeId } from '../../shared/net'
 import { expiryPresetMs } from '../../shared/threadExpiry'
-import { composerWorkspaceFor, rememberedChoiceOf, workspaceWithPrivate } from './newThread'
+import { composerWorkspaceFor, newThreadWorktree, rememberedChoiceOf, workspacePendingKey, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
-import type { NewThreadChoice, Thread } from '../../shared/types'
+import { isTurnActivePhase, type NewThreadChoice, type Project, type Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
-import { afterNextPaint } from './pendingThreadRows'
+import { afterNextPaint, newChatHeld, startingThreadIds } from './pendingThreadRows'
 import { runWithToast } from './actionToast'
+import { showProjectInSidebar } from './sidebarReveal'
+import { markPendingArchive } from './archiveMotion'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /**
@@ -27,36 +30,66 @@ export async function selectThread(threadId: string): Promise<void> {
   // A page opened from the rail covers the workspace; the thread has to be visible.
   store.setScheduledOpen(false)
   store.setUsageOpen(false)
-  if (threadId === store.activeThreadId && !store.openingThreadId) return
   await openAndSelect(threadId)
 }
 
 /**
  * Shows a thread and asks main to select it. Its row shows as chosen at once. A cached thread shows with its messages
  * once that frame has been drawn; a started one with nothing cached stays held until its view arrives
- * (`openThreadWhenReady`), so it never shows without them.
+ * (`openThreadWhenReady`), so it never shows without them. `keepWorkspace`: Chats stays on screen (a bot's thread in its pane).
  */
-export async function openAndSelect(threadId: string): Promise<void> {
-  const opening = useAppStore.getState().openThreadWhenReady(threadId)
+export async function openAndSelect(threadId: string, options?: { keepWorkspace?: boolean }): Promise<void> {
+  const store = useAppStore.getState()
+  if (threadId === store.activeThreadId && !store.openingThreadId && !store.transcriptPending) {
+    const thread = store.threads.find((entry) => entry.id === threadId)
+    // A failed read can leave the row selected with an empty transcript. Opening it again asks the service again.
+    if (store.messages.length > 0 || (thread && !isThreadStarted(thread))) return
+  }
+  const opening = store.openThreadWhenReady(threadId, options)
   if (opening === 'held') setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
   if (opening === 'cached') void afterNextPaint().then(() => useAppStore.getState().showOpeningThread(threadId))
   await selectOrSettle(threadId)
 }
 
+let selectionRequest = 0
+
 /** Asks main to select a thread the store already switched to. A failed select sends no view, so the chat stops waiting for one. */
 export async function selectOrSettle(threadId: string): Promise<void> {
+  const request = ++selectionRequest
+  const { profileId } = useAppStore.getState()
   try {
     await window.mousse.threads.select(threadId)
   } catch (error) {
-    useAppStore.getState().settleTranscript(threadId)
+    const store = useAppStore.getState()
+    if (selectionRequest === request && store.profileId === profileId) store.settleTranscript(threadId)
     throw error
   }
 }
 
-/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. A private draft is never reused for it. */
+/**
+ * Opens the newest empty draft thread, or creates one, and selects it, in the project last picked for a new thread
+ * (`lastNewThreadProjectId`) while it is still listed. The sidebar stays on its tab. A private draft is never reused for it.
+ */
 export async function createAndSelectThread(): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
+  // The project last picked for a new thread, while this computer still lists it.
+  const remembered = store.lastNewThreadProjectId
+  if (remembered && store.projects.some((project) => project.id === remembered && !project.node)) {
+    await createAndSelectProjectThread(remembered)
+    return
+  }
+  await openNoProjectThread()
+}
+
+/** The New thread picker's "No project": a thread on this computer without a project, remembered for the next new thread. */
+export async function createAndSelectNoProjectThread(): Promise<void> {
+  useAppStore.getState().setLastNewThreadProjectId(null)
+  await openNoProjectThread()
+}
+
+async function openNoProjectThread(): Promise<void> {
+  const store = useAppStore.getState()
+  const thread = findUnstartedThread(draftCandidates(store).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
 }
@@ -65,7 +98,7 @@ export async function createAndSelectThread(): Promise<void> {
 export async function createAndSelectPrivateThread(): Promise<void> {
   const store = useAppStore.getState()
   const thread =
-    findUnstartedThread(visibleThreads(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
+    findUnstartedThread(draftCandidates(store).filter((entry) => entry.localOnly && !entry.node)) ??
     await window.mousse.threads.create(undefined, undefined, { localOnly: true })
   store.upsertThread(thread)
   // The command means private, with the private-chat expiry from Settings unless one was picked; a reused draft
@@ -115,6 +148,21 @@ function usableRemembered(remembered: NewThreadChoice | undefined, projectId: st
 }
 
 /**
+ * The threads New thread may open as an empty draft. Never one a send is starting or has started: a Send holding it
+ * (`holdNewChat`), preparing it (`workspacePending`), listed as its pending row, or with a turn admitted. Each of those
+ * is a thread of its own already, even before the service lists it started.
+ */
+function draftCandidates(store: ReturnType<typeof useAppStore.getState>): Thread[] {
+  const { profileId, threads, workspacePending, turnStates } = store
+  const starting = startingThreadIds(profileId)
+  return visibleThreads(threads).filter((entry) =>
+    !starting.has(entry.id) &&
+    !newChatHeld(profileId, entry.id) &&
+    !workspacePending[workspacePendingKey(profileId, entry.id)] &&
+    !isTurnActivePhase(turnStates[entry.id]?.phase ?? 'idle'))
+}
+
+/**
  * Opens the newest empty draft thread of a project, or creates one there with the project's remembered choices, and
  * selects it. An empty thread is reused only while it matches those choices; otherwise a new one is made with them
  * (setting them on the old one would also make its model the profile's last-used one).
@@ -123,9 +171,12 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   // Decided from the store as it is now, with nothing awaited first.
   const store = useAppStore.getState()
   const profileId = store.profileId
+  store.setLastNewThreadProjectId(projectId)
+  const node = store.projects.find((project) => project.id === projectId)?.node
+  if (node) return openRemoteProjectDraft(projectId, node as NodeId)
   // A project just added (Add project) may not be listed in this window yet when the create answers.
   const listedBefore = store.projects.some((project) => project.id === projectId)
-  const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
+  const empty = findUnstartedThread(draftCandidates(store).filter((entry) => !entry.localOnly), projectId)
   const remembered = usableRemembered(rememberedChoiceOf(store.projects, projectId), projectId)
   if (empty && matchesRememberedChoices(empty, remembered)) {
     await selectThread(empty.id)
@@ -142,10 +193,37 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   await selectThread(thread.id)
 }
 
-/** Asks for a project folder, then opens a new thread in it. Nothing happens when the picker is cancelled. */
+/**
+ * A new chat in a project of another computer: an empty draft here whose composer runs on that computer, in that
+ * project, as if both were picked in it. The thread is made there when its first message is sent.
+ */
+async function openRemoteProjectDraft(projectId: string, node: NodeId): Promise<void> {
+  const store = useAppStore.getState()
+  const profileId = store.profileId
+  const thread = findUnstartedThread(draftCandidates(store).filter((entry) => !entry.localOnly && !entry.node)) ?? await window.mousse.threads.create()
+  const current = useAppStore.getState()
+  if (current.profileId !== profileId) return
+  current.upsertThread(thread)
+  current.setComposerWorkspaceDraft(thread.id, { projectId, node, worktreeEnabled: newThreadWorktree(current.projects, projectId) })
+  await selectThread(thread.id)
+}
+
+/**
+ * Asks for a project folder, then opens a new thread in it. The project is listed at once, and an open sidebar shows
+ * its group. Nothing happens when the picker is cancelled.
+ */
 export async function addProjectAndStartThread(): Promise<void> {
   const project = await window.mousse.projects.open()
   if (!project) return
+  await listProjectAndStartThread(project)
+}
+
+/** A project just added (opened, cloned, made, or on another computer): listed at once, and a new thread opened in it. */
+export async function listProjectAndStartThread(project: Project): Promise<void> {
+  const store = useAppStore.getState()
+  // The service also pushes the list, but that can come after the new thread is open.
+  if (!store.projects.some((entry) => entry.id === project.id)) store.setProjects([...store.projects, project])
+  if (store.threadsSidebarOpen) showProjectInSidebar(project.id)
   await createAndSelectProjectThread(project.id)
 }
 
@@ -175,6 +253,21 @@ export function setThreadHidden(threadId: string, hidden: boolean): Promise<bool
   }, { retry: true })
 }
 
+/**
+ * Hide bot threads, Hide all bot threads: takes threads the owner's bots started out of the sidebar at once. Each bot's
+ * chat still lists them, with Show in sidebar. A failure shows as one toast with Retry. Resolves to whether all went through.
+ */
+export function hideThreads(threadIds: readonly string[]): Promise<boolean> {
+  return runWithToast(threadIds.length === 1 ? 'hide the thread' : 'hide the threads', async () => {
+    const results = await Promise.allSettled(threadIds.map((threadId) =>
+      window.mousse.platformRequest.request<{ thread?: Thread }>('threads.setHidden', { threadId, hidden: true })))
+    const store = useAppStore.getState()
+    for (const result of results) if (result.status === 'fulfilled' && result.value?.thread) store.upsertThread(result.value.thread)
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failed) throw failed.reason
+  }, { retry: true })
+}
+
 /** Archives the open thread, and opens the next one in its project (see `archiveThread`). */
 export async function archiveOpenThread(): Promise<void> {
   const thread = openStartedThread()
@@ -182,18 +275,45 @@ export async function archiveOpenThread(): Promise<void> {
   await archiveThread(thread.id)
 }
 
+/** How long a confirmed archive is still shown from here when the thread's update has not arrived. */
+const ARCHIVE_UPDATE_WAIT_MS = 3000
+
+/**
+ * Archives (or unarchives) a thread through the service, and shows it so in the sidebar from the call on
+ * (`markPendingArchive`): its row starts to move at once. A failure throws, and the row moves back.
+ */
+export async function setThreadArchived(threadId: string, archived: boolean): Promise<void> {
+  const release = markPendingArchive(threadId, archived)
+  try {
+    await window.mousse.threads.settle(threadId, archived)
+  } catch (error) {
+    release()
+    throw error
+  }
+  // Shown from here until the thread's update arrives, so the row does not move back and forth meanwhile.
+  const arrived = () => Boolean(useAppStore.getState().threads.find((thread) => thread.id === threadId)?.settledAt) === archived
+  if (arrived()) return release()
+  const finish = () => {
+    clearTimeout(timer)
+    unsubscribe()
+    release()
+  }
+  const timer = setTimeout(finish, ARCHIVE_UPDATE_WAIT_MS)
+  const unsubscribe = useAppStore.subscribe(() => { if (arrived()) finish() })
+}
+
 /**
  * Archives a thread. When it is the thread open in the pane (or the parent of the open subagent thread), the pane then
  * opens the next thread in its project, or the one before it when it was the last; a project's only thread stays
- * open. A failed archive throws and changes nothing. The sidebar's rows move when the thread's update arrives, as for
- * an archive from anywhere else (`useArchiveMoves`).
+ * open. A failed archive throws and changes nothing. The sidebar's rows start to move at the call
+ * (`setThreadArchived`); an archive from anywhere else moves them when its update arrives (`useArchiveMoves`).
  */
 export async function archiveThread(threadId: string): Promise<void> {
   const { projects, threads, activeThreadId } = useAppStore.getState()
   const openRow = activeThreadId ? (openSubagentParentRow(activeThreadId, threads) ?? activeThreadId) : null
   const excluded = new Set(useChatsStore.getState().snapshot.chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : [])))
   const next = openRow === threadId ? threadAfterArchive({ projects, threads, threadId, excluded }) : null
-  await window.mousse.threads.settle(threadId, true)
+  await setThreadArchived(threadId, true)
   // Only when the person has not moved on to another thread in the meantime.
   const now = useAppStore.getState().activeThreadId
   const stillOpen = now ? (openSubagentParentRow(now, useAppStore.getState().threads) ?? now) === threadId : false

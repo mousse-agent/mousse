@@ -1,0 +1,61 @@
+/* A to-do list (the side card's To-dos, a bot's checklist): quiet rows, the step in progress filled. */
+
+/* About seven and a half one-line rows (24.8px each, 1px apart): the cut row shows there is more, which scrolls. */
+.todo-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 194px;
+  margin: 0 -6px;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+.todo-checklist-row {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  transition: background-color var(--ui-dur) ease, color var(--ui-dur) ease;
+}
+
+.todo-checklist-row[data-status='in_progress'] {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.todo-checklist-row[data-status='completed'],
+.todo-checklist-row[data-status='cancelled'] {
+  color: var(--ui-faint);
+}
+
+.todo-checklist-row[data-status='completed'] .todo-checklist-text {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.todo-checklist-row[data-status='failed'] .todo-checklist-icon {
+  color: var(--error, #e79090);
+}
+
+.todo-checklist-icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.todo-checklist-text {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}

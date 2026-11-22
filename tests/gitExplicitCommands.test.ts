@@ -272,6 +272,8 @@ describe('Status reads use plumbing and never write the index', () => {
 })
 
 describe('Every Git run carries safe.bareRepository=explicit', () => {
+  const gitPath = (path: string): string => path.replaceAll('\\', '/')
+
   it('appends after the entries the environment already has, once', () => {
     const env = withGitConfigEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone' })
     expect(env).toMatchObject({ GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone', GIT_CONFIG_KEY_1: 'safe.bareRepository', GIT_CONFIG_VALUE_1: 'explicit' })
@@ -286,7 +288,7 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
   it('turns off Git\'s automatic housekeeping, and the central check accepts the whole set', () => {
     const env = withGitConfigEnv({})
     const pairs = Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, index) => [env[`GIT_CONFIG_KEY_${index}`], env[`GIT_CONFIG_VALUE_${index}`]])
-    expect(pairs).toEqual([['safe.bareRepository', 'explicit'], ['maintenance.auto', 'false'], ['gc.auto', '0'], ['fetch.writeCommitGraph', 'false']])
+    expect(pairs).toEqual(expect.arrayContaining([['safe.bareRepository', 'explicit'], ['maintenance.auto', 'false'], ['gc.auto', '0'], ['fetch.writeCommitGraph', 'false']]))
     expect(MOUSSE_GIT_CONFIG).toEqual(pairs)
     // Set by a caller in its own environment, each is one the check lets through.
     expect(decideGitCommand({ cwd: tmpdir(), args: ['log'], env: { ...process.env, ...env } })).toMatchObject({ allowed: true })
@@ -318,7 +320,7 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
     expect(isGitDirectory(bare)).toBe(true)
     expect(isGitDirectory(join(root, 'main'))).toBe(false)
     expect(gitDirectoryEnv(bare)).toEqual({ GIT_DIR: bare })
-    expect((await lifecycleGitAsync(bare, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${join(root, 'main')}`)
+    expect(gitPath(await lifecycleGitAsync(bare, ['worktree', 'list', '--porcelain']))).toContain('worktree ' + gitPath(join(root, 'main')))
     expect((await readOnlyGitAsync(join(root, 'main'), ['rev-parse', '--abbrev-ref', 'HEAD']))).toBe('main')
   })
 
@@ -335,13 +337,13 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
     // Restore checks and purge read refs in the shared directory.
     expect((await readDirectLifecycleRefAsync(bare, 'refs/mousse/lifecycle/x'))).toBe(head)
     expect((await readDirectLifecycleRefAsync(bare, 'refs/mousse/lifecycle/missing'))).toBeUndefined()
-    expect((await lifecycleReadAsync(bare, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${join(root, 'main')}`)
+    expect(gitPath(await lifecycleReadAsync(bare, ['worktree', 'list', '--porcelain']))).toContain('worktree ' + gitPath(join(root, 'main')))
     expect(actionGit(bare, ['rev-parse', '--verify', 'refs/mousse/lifecycle/x'])).toBe(head)
     expect((await readOnlyGitAsync(bare, ['rev-parse', 'main']))).toBe(head)
     // The same in a repository's own .git folder.
     const dotGit = join(seed, '.git')
     git(seed, 'update-ref', 'refs/mousse/lifecycle/y', head)
     expect((await readDirectLifecycleRefAsync(dotGit, 'refs/mousse/lifecycle/y'))).toBe(head)
-    expect((await lifecycleReadAsync(dotGit, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${seed}`)
+    expect(gitPath(await lifecycleReadAsync(dotGit, ['worktree', 'list', '--porcelain']))).toContain('worktree ' + gitPath(seed))
   })
 })

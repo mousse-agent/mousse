@@ -30,7 +30,7 @@ export function threadToastKey(threadId: string): string {
 /** The toast for a thread event: the thread's name, what happened and its project; clicking it opens the thread. */
 export function threadToastInput(toast: ThreadToastPayload, open: (threadId: string) => void = (id) => void openThread(id)): ToastInput {
   const name = toast.threadName?.trim() || 'Untitled thread'
-  const what = toast.subagent && toast.kind === 'question' ? 'A subagent needs you' : KIND_LINES[toast.kind]
+  const what = toast.kind !== 'question' ? KIND_LINES[toast.kind] : toast.sideChat ? 'A side chat needs you' : toast.subagent ? 'A subagent needs you' : KIND_LINES[toast.kind]
   return {
     key: threadToastKey(toast.threadId),
     title: name,

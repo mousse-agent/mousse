@@ -24,7 +24,11 @@ export type FileAttachmentProps = {
   /** A pasted text kept as a file: a button puts it into the message box instead. */
   onInsertText?: () => void;
   onRemove?: () => void;
+  /** Makes the chip draggable: dragged out of the window, it drops the file. */
+  onDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
   className?: string;
+  /** What getting the file ready to send came to: one short line on the chip, the details in its tooltip. */
+  status?: { tone: "pending" | "info" | "error"; label: string; title: string };
   display?: "chip" | "image-only";
   /**
    * When true (default) clicking the image thumbnail opens a fullscreen
@@ -127,7 +131,9 @@ export function FileAttachment({
   onOpen,
   onInsertText,
   onRemove,
+  onDragStart,
   className,
+  status,
   display = "chip",
   enableImagePreview = true,
 }: FileAttachmentProps) {
@@ -158,8 +164,16 @@ export function FileAttachment({
           : "flex items-center gap-2 pl-1 pr-2 py-1 min-w-[120px] max-w-[200px]",
         className,
       )}
-      title={isImageOnly ? filename : undefined}
+      title={isImageOnly ? (status ? `${filename}: ${status.title}` : filename) : undefined}
+      data-status={status?.tone}
+      draggable={onDragStart ? true : undefined}
+      onDragStart={onDragStart}
     >
+      {isImageOnly && status && (
+        <div className="composer-attachment-status-overlay">
+          <span className="composer-attachment-status" data-tone={status.tone}>{status.label}</span>
+        </div>
+      )}
       {isImageOnly ? (
         <PreviewTarget
           canPreview={canPreview}
@@ -197,11 +211,15 @@ export function FileAttachment({
           <div className="flex flex-col flex-1 min-w-0">
             <span
               className="text-sm font-medium text-an-foreground truncate"
-              title={title ?? filename}
+              title={status ? `${filename}: ${status.title}` : (title ?? filename)}
             >
               {filename}
             </span>
-            {size !== undefined && (
+            {status ? (
+              <span className="composer-attachment-status self-start" data-tone={status.tone} title={status.title}>
+                {status.label}
+              </span>
+            ) : size !== undefined && (
               <span className="text-[10px] text-an-foreground-muted">
                 {formatFileSize(size)}
               </span>

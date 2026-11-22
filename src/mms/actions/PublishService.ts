@@ -388,7 +388,7 @@ export class PublishService {
 
   /** The intent a publish recorded before it moved the primary, and where it ran. */
   private intentOf(operationId: string): { expected: PublishIntent; paths: { threadWorkspace?: string; primaryCheckout?: string; holding?: PublishHolding } } | undefined {
-    const intent = [...this.journal.list()].reverse().find((entry) => entry.operationId === operationId && entry.state === 'prepared')
+    const intent = [...this.journal.history(operationId)].reverse().find((entry) => entry.state === 'prepared')
     const expected = intent?.expectedPreState as PublishIntent | undefined
     if (!expected?.prePublishSha || !expected.sourceSha || !expected.targetBranch) return undefined
     return { expected, paths: (intent!.details ?? {}) as { threadWorkspace?: string; primaryCheckout?: string; holding?: PublishHolding } }

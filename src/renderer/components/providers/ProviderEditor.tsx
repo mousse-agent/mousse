@@ -22,7 +22,7 @@ import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup, modelsFreshness }
 const DEVICE_WIDE = 'Applies to this device, in every project.'
 
 /** Agents whose subscription usage the Subscription usage page shows. */
-const USAGE_DRIVERS: ReadonlySet<InstanceSnapshot['driver']> = new Set(['claude', 'codex'])
+const USAGE_DRIVERS: ReadonlySet<InstanceSnapshot['driver']> = new Set(['claude', 'codex', 'antigravity'])
 
 /** Leaves Settings for the Usage page; an integrations draft is asked about first, as on any navigation. */
 function openUsagePage() {

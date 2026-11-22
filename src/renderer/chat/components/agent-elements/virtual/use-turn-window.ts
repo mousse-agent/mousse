@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FollowMode } from "./follow-mode";
+import { foldHoldActive } from "./fold-hold";
 import {
   DEFAULT_VIEWPORT,
   INITIAL_SETTLE,
@@ -11,6 +12,7 @@ import {
   nextScrollTop,
   pickReadingNode,
   reconcileWindow,
+  shiftWindow,
   stepSettle,
   windowSpacers,
   type AnchorEdge,
@@ -317,12 +319,13 @@ function createEngine(
     container: HTMLElement,
     rows: HTMLElement,
     containerTop: number,
+    keyOf: (el: Element) => string | undefined = (el) => keyOfEl.get(el),
   ): HeldAnchor | null => {
     const topEdge = containerTop + container.clientTop;
     let rowEl: Element | null = null;
     let lastRow: Element | null = null;
     for (const child of Array.from(rows.children)) {
-      if (!keyOfEl.has(child)) continue;
+      if (keyOf(child) === undefined) continue;
       lastRow = child;
       if (child.getBoundingClientRect().bottom > topEdge) {
         rowEl = child;
@@ -331,7 +334,7 @@ function createEngine(
     }
     rowEl ??= lastRow;
     if (!rowEl) return null;
-    const key = keyOfEl.get(rowEl)!;
+    const key = keyOf(rowEl)!;
     const root = domNode(rowEl, rowEl.getBoundingClientRect(), true);
     const { node: picked, edge } = pickReadingNode(root, topEdge);
     const rect = picked.el.getBoundingClientRect();
@@ -373,7 +376,9 @@ function createEngine(
     // A landing in progress re-aims at its target every frame; correcting
     // under it would only add a second writer. Following the end still has to
     // hold within the frame, so it is never skipped.
-    if (anchor && (!navigation.active || options.modeRef.current === "following-end")) {
+    // A finished turn folding its work holds the view itself (fold-hold.ts): one writer at a time. The reading
+    // point is still re-picked below, so the hold hands over a current one when it ends.
+    if (anchor && !foldHoldActive(container) && (!navigation.active || options.modeRef.current === "following-end")) {
       const scrollTop = container.scrollTop;
       // With a follower, what is on screen is held here and the follower takes the view to the
       // end, gliding while a turn runs.
@@ -391,6 +396,56 @@ function createEngine(
       follower?.();
     }
     anchor = pickReadingPoint(container, rows, containerTop);
+  };
+
+  /** The reading point of a list that renders every row, picked before turns were added above it, and the scroll position then. */
+  let unwindowedHold: { held: HeldAnchor; scrollTop: number } | null = null;
+
+  /**
+   * Called while rendering a commit that adds turns above the rows of a list that rendered every row (an earlier page
+   * of a long thread): picks the reading point on the rows still on the page. The rows are not registered, so their
+   * keys are read from the page. A list that this commit windows holds it as any windowed commit does (the commit
+   * switches the browser's own anchoring off). One that stays short holds it in `holdUnwindowed`: the browser's own
+   * anchoring does nothing for a list scrolled to its very top, which is where a reader asks for the earlier page.
+   */
+  const pickBeforeOpen = (windowing: boolean) => {
+    const options = getOptions();
+    const container = options.containerRef.current;
+    const rows = options.rowsRef.current;
+    unwindowedHold = null;
+    if (!container || !rows || options.modeRef.current === "following-end") return;
+    const held = pickReadingPoint(
+      container,
+      rows,
+      container.getBoundingClientRect().top,
+      (el) => el.getAttribute("data-turn-key") ?? undefined,
+    );
+    if (windowing) anchor = held;
+    else if (held) unwindowedHold = { held, scrollTop: container.scrollTop };
+  };
+
+  /**
+   * After the commit that added turns above a list that renders every row: the reading point goes back to where it
+   * was on screen. Measured on screen, not in the content, so a move the browser's anchoring already made is not
+   * made twice.
+   */
+  const holdUnwindowed = () => {
+    const pending = unwindowedHold;
+    unwindowedHold = null;
+    const options = getOptions();
+    const container = options.containerRef.current;
+    if (!pending || !container || options.modeRef.current === "following-end") return;
+    const { held, scrollTop } = pending;
+    const target = held.target;
+    if (target instanceof Range ? !target.startContainer.isConnected || target.collapsed : !target.isConnected) return;
+    const rect = target.getBoundingClientRect();
+    const containerTop = container.getBoundingClientRect().top;
+    const onScreen = scrollSpace(container, containerTop, held.edge === "bottom" ? rect.bottom : rect.top) - container.scrollTop;
+    const delta = onScreen - (held.pos - scrollTop);
+    if (Math.abs(delta) >= 1) {
+      options.onProgrammaticScroll();
+      container.scrollTop += delta;
+    }
   };
 
   /**
@@ -650,6 +705,8 @@ function createEngine(
     subscribe,
     commit,
     attach,
+    pickBeforeOpen,
+    holdUnwindowed,
   };
 }
 
@@ -684,15 +741,30 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
   engineRef.current ??= createEngine(() => optionsRef.current, setStored);
   const engine = engineRef.current;
 
+  // Whether the last commit was windowed (if not, it rendered every row).
+  const openedRef = useRef(false);
   const keysRef = useRef(options.keys);
   const versionRef = useRef(0);
+  const n = options.keys.length;
+  let current = stored;
   if (!sameKeys(keysRef.current, options.keys)) {
+    const prevKeys = keysRef.current;
     keysRef.current = options.keys;
     versionRef.current += 1;
+    // Turns that arrived above the mounted rows (an earlier page of a long thread) do not change which turns are
+    // mounted: the window moves with its rows, so the reading point stays in the document and the commit below holds
+    // it where it was on screen. A list that rendered every row had them all mounted.
+    const prevN = prevKeys.length;
+    const previous = openedRef.current ? stored : { start: Math.min(1, prevN), end: Math.max(Math.min(1, prevN), prevN - 1), n: prevN };
+    const moved = shiftWindow(previous, prevKeys, options.keys);
+    if (moved && options.enabled) {
+      current = moved;
+      setStored(moved);
+    }
+    if (moved && !openedRef.current) engine.pickBeforeOpen(options.enabled);
   }
   const keysVersion = versionRef.current;
 
-  const n = options.keys.length;
   // The turn count of the last commit. A transcript that showed two turns or
   // fewer (empty while its thread loads) mounted no rows between the first and
   // the last, so it has no window to keep. When a long thread arrives in it,
@@ -701,11 +773,10 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
   // grows past the threshold one turn at a time had every row mounted, and
   // keeps them for that commit so they are measured.
   const committedCountRef = useRef<number | null>(null);
-  let current = stored;
   if (
     options.enabled &&
     n > 2 &&
-    stored.n !== n &&
+    current.n !== n &&
     committedCountRef.current !== null &&
     committedCountRef.current <= 2
   ) {
@@ -719,12 +790,12 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
     committedCountRef.current = n;
   });
 
-  const openedRef = useRef(false);
   const seenVersionRef = useRef(keysVersion);
   const { enabled } = options;
   useLayoutEffect(() => {
     if (!enabled) {
       openedRef.current = false;
+      engine.holdUnwindowed();
       return;
     }
     const opening = !openedRef.current;

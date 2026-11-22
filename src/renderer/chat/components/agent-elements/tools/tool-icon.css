@@ -56,6 +56,33 @@
   opacity: 0.7;
 }
 
+/* An edit row's actions show while keyboard focus is on the row or on one of them. The :has() sits on the actions
+   themselves: on an ancestor with any element as its subject (Tailwind's `group-has-*`), Chromium restyles the whole
+   window each time an element is added anywhere. */
+.an-tool-row-line > :focus-visible ~ .an-edit-row-actions,
+.an-edit-row-actions:has(:focus-visible) {
+  opacity: 1;
+}
+
+/* A disclosure chevron in the chat (a tool row or group, a thought, the live row, "Worked for"): a light 13px glyph at
+   70% of the secondary text colour, centred in the 18px box the row keeps for it, so the row's click target and
+   layout stay as they were. */
+.an-row-chevron {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
+}
+
+.an-row-chevron-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
 @keyframes an-tool-icon-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }

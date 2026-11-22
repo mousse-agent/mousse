@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
-import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
+import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
@@ -37,6 +38,8 @@ export interface BotPermissions {
   appTools: string[]
   mcp: Array<`${string}::${string}`>
   skills: string[]
+  /** Every skill the owner has (skills are on by default; About can switch them off): `skills` lists none of them. */
+  allSkills?: true
   /**
    * The bot's own folders: its scratch folder and its files folder (`files`), both writable, and nothing else. A bot
    * has no folder beyond them ("use files on this computer" was removed), so `roots` and `writeRoots` are empty, and a
@@ -47,8 +50,22 @@ export interface BotPermissions {
   browser?: true
   /** "Use your threads": `appTools` holds the thread tools of this turn, to read (`read`) or also to start, message and stop (`all`). */
   threads?: 'read' | 'all'
-  /** "Use the profiler": `appTools` holds the profiler tools of this turn. */
+  /** The profiler: `appTools` holds the profiler tools of this turn. */
   profiler?: true
+  /** Mousse's look: `appTools` holds the theme tools of this turn. */
+  themes?: true
+  /** The owner's scheduled jobs: `appTools` holds the scheduled-job tools of this turn (`read`: the list only). */
+  schedules?: 'read' | 'all'
+  /** Secrets the owner gives: `appTools` holds the secret tools of this turn. */
+  secrets?: true
+  /** Quick actions: `appTools` holds `create_quick_action`. */
+  quickActions?: true
+  /**
+   * How this turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search`, Claude Code's own tool search,
+   * which loads any listed tool; `use_tool`, Codex and Pi, whose thread lists only the core set and calls the rest
+   * through `use_tool`. Absent: no catalogue (a consult, a subagent).
+   */
+  catalogue?: 'search' | 'use_tool'
 }
 
 export interface CompileInput {
@@ -74,6 +91,11 @@ export interface CompileInput {
    */
   filesFolder?: string
   /**
+   * Every skill the owner has, beside the ones the grant names: skills are on by default, unless the owner switched them
+   * off for the bot in About (`BOT_SKILLS_SWITCH`).
+   */
+  allSkills?: boolean
+  /**
    * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
    * `consult` on the activation thread of a bot with context threads. `memory`: the five
    * `memory_*` tools (Bot Phase 1 §5.10) and the listing of the owner's MCP servers (`mcp_servers`), always on and
@@ -86,7 +108,11 @@ export interface CompileInput {
     escalate: boolean
     consult: boolean
     memory?: boolean
+    /** Only the main turn of a scheduled run ends its own schedule. Never grantable. */
+    scheduled?: boolean
     frontDesk?: boolean
+    /** A chat turn may start an unsandboxed background command. */
+    watcherStart?: boolean
     /**
      * What "use your threads" gives this turn, when the grant holds it: `read` (list, search, read, wait: work, a
      * reminder's work, a schedule, a chat turn the owner's message did not start), or `all`, which adds starting,
@@ -94,10 +120,24 @@ export interface CompileInput {
      */
     threads?: 'read' | 'all'
     /**
-     * A main turn, chat or work: "use the profiler", when the grant holds it, gives it the profiler tools (in the chat
-     * all but `profiler_watch`, which samples for minutes). Absent: none (a consult; a subagent never has them).
+     * A main turn, chat or work, or a subagent: the profiler tools, whatever the grant says (in the chat all but
+     * `profiler_watch`, which samples for minutes). Each call is held to Settings → Labs. Absent: none (a consult).
      */
     profiler?: boolean
+    /** A main turn, chat or work: the theme tools, whatever the grant says. Absent: none (a consult; a subagent never has them). */
+    themes?: boolean
+    /**
+     * A main turn, chat or work: the owner's scheduled jobs, secrets and quick actions, whatever the grant says:
+     * `schedule_list`, and the tools that make and change jobs in a turn whose `threads` is `all` (one that may act on
+     * the owner's threads); `secret_request`, and `secret_run` where it also holds "run commands" (never the chat);
+     * `create_quick_action`. Absent: none (a consult; a subagent never has them).
+     */
+    owner?: boolean
+    /**
+     * The task list of the turn's own thread (`BOT_TASK_TOOLS`): always on, on main turns and subagents. Absent: none (a
+     * consult).
+     */
+    tasks?: boolean
     /** `make_image` (#1088): the owner picked a model in Runs on's Images row. Chat and work alike; never a consult or a subagent. */
     images?: boolean
     /** `publish_applet` (`BOT_APPLET_TOOL`): a main turn, chat or work, publishes applets; they need no permission. Never a consult. */
@@ -107,10 +147,19 @@ export interface CompileInput {
      * (`work_models`). Never the chat, a consult or a subagent.
      */
     subagents?: boolean
+    /** Only work (including a reminder's work) may park on time or events. */
+    workWaiting?: boolean
+    /**
+     * A main turn's tool catalogue (`BotPermissions.catalogue`): `tool_catalogue` on every runtime, and `use_tool` where
+     * the runtime has no tool search of its own (Codex, Pi). Never a consult or a subagent.
+     */
+    catalogue?: 'search' | 'use_tool'
     /**
      * This turn is one of a run's subagents: it holds what its work holds of the built-ins, files, MCP tools and skills,
-     * and of the app tools only the web and the browser (`subagentManifest`). Every other bot tool is left out whatever
-     * the rest of `botTools` says: no asks, memory, schedules, reminders, pictures, work, threads or subagents of its own.
+     * and of the app tools what a thread's subagent may use (`subagentManifest`): the web, the browser, and, as `threads`,
+     * `profiler` and `tasks` here say, the owner's threads, the profiler and its task list. Every other bot tool is left
+     * out whatever the rest of `botTools` says: no asks, memory, schedules, reminders, pictures, work, secrets or subagents
+     * of its own.
      */
     subagent?: true
     /**
@@ -120,12 +169,12 @@ export interface CompileInput {
     questions?: boolean
     /** `show_card` (`BOT_CARD_TOOL`): small fixed cards on the turn's next message; they grant nothing. Main turns only. */
     cards?: boolean
+    /**
+     * `bot_list` and `bot_send` (`BOT_MESSAGE_TOOLS`): messages to the owner's other bots; they grant nothing. A chat turn
+     * and work the owner asked for.
+     */
+    bots?: boolean
   }
-  /**
-   * What this computer lets bots do (Settings → What bots may do here): what it has switched off is taken out of the
-   * thread's permissions before anything is compiled, whatever the grant holds. Absent: everything.
-   */
-  limit?: BotComputerLimit
 }
 
 export type CompileResult =
@@ -158,16 +207,19 @@ export function systemTempDirs(): string[] {
 
 export function compileBotThread(input: CompileInput): CompileResult {
   const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
-  // This computer's ceiling, before the tools, the sandbox's folders and the browser are compiled from it.
-  const held = input.limit ? withinComputerLimit(narrowed, input.limit) : narrowed
-  // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools.
+  // A tool bots no longer have, still listed by a grant an older build approved, gives nothing.
+  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)) }
+  // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools
+  // but what a thread's subagent may use (the owner's threads, the profiler, its task list).
   const subagent = input.botTools?.subagent === true
   const own = subagent ? undefined : input.botTools
+  const shared = subagent ? { threads: input.botTools?.threads, profiler: input.botTools?.profiler, tasks: input.botTools?.tasks } : own
   const manifest = subagent ? subagentManifest(held) : own?.frontDesk ? frontDeskManifest(held) : held
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return unenforceable(`The Mousse tool ${refusedApp} would reach other threads, act in your name or ask you.`)
-  // The owner's MCP tools (granted per server, stored per tool) reach every runtime through Mousse, which checks each
+  // The owner's MCP tools (every server set up now unless switched off for the bot, `BotEngine.effectiveManifest`, and any
+  // an older grant names per tool) reach every runtime through Mousse, which checks each
   // call against these pairs before the server sees it: the MCP relay on Claude Code and Codex, the user MCP proxy on
   // Pi. Each turn is offered only the granted tools of servers set up now (`BotMcp.offered`); a chat turn none.
   // `shell` ("run commands") is one permission, granted as a whole: each runtime runs its commands
@@ -190,26 +242,54 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // Granted skills come with the skill tools that list and load them; the browser is its tools, and the owner's threads
   // are the thread tools this turn may use (none unless the caller says which), as the profiler is its tools on a main turn.
   const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
-  const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? own?.threads : undefined
-  const profiler = manifest.appTools.includes(BOT_PROFILER_PERMISSION) && own?.profiler === true
+  const computer = manifest.appTools.includes(BOT_COMPUTER_PERMISSION)
+  const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? shared?.threads : undefined
+  // The profiler, Mousse's look, the owner's scheduled jobs, secrets and quick actions need no grant (a name an older
+  // build's grant still lists gives nothing more): a main turn's, chat or work, and the profiler a subagent's too; never a
+  // consult's.
+  const profiler = shared?.profiler === true
+  const themes = own?.themes === true
+  const schedules = own?.owner === true ? (own.threads === 'all' ? 'all' as const : 'read' as const) : undefined
+  const secrets = own?.owner === true
+  const quickActions = own?.owner === true
+  // Every skill, unless the owner switched skills off for the bot; a thread narrowed to some skills has just those.
+  const narrowSkills = input.thread.narrow?.skills
+  const allSkills = input.allSkills === true && !narrowSkills
+  const skills = [...new Set([...manifest.skills, ...(input.allSkills === true && narrowSkills ? narrowSkills : [])])].sort()
   const appTools = [...new Set([
-    ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION),
+    ...manifest.appTools.filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
+    ...(themes ? BOT_THEME_TOOLS : []),
     ...(profiler ? (own?.frontDesk ? BOT_PROFILER_CHAT_TOOLS : BOT_PROFILER_TOOLS) : []),
     ...(browser ? BOT_BROWSER_TOOLS : []),
+    ...(computer ? BOT_COMPUTER_TOOLS : []),
     ...(threads ? BOT_THREAD_READ_TOOLS : []),
     ...(threads === 'all' ? BOT_THREAD_ACT_TOOLS : []),
-    ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
+    ...(schedules ? BOT_SCHEDULE_READ_TOOLS : []),
+    ...(schedules === 'all' ? BOT_SCHEDULE_ACT_TOOLS : []),
+    // A secret's command is a command: only where the turn runs commands (work with "run commands"; never the chat).
+    ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => (tool !== 'secret_run' || manifest.tools.includes('shell')) && (tool !== 'secret_fetch' || own?.frontDesk !== true)) : []),
+    ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
+    ...(shared?.tasks ? BOT_TASK_TOOLS : []),
+    ...(skills.length || allSkills ? ['list_skills', 'load_skill'] : []),
     ...(own?.escalate ? ['escalate'] : []),
     ...(own?.consult ? ['consult'] : []),
+    ...(own?.workWaiting ? ['work_wait'] : []),
+    ...(own?.scheduled ? ['schedule_done'] : []),
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
-    ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
-    ...(own?.frontDesk ? BOT_WORK_TOOLS : []),
+    ...(own?.memory ? [...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, BOT_MCP_LIST_TOOL] : []),
+    // What runs in its folders, on every turn (chat, work, consults and subagents alike), so it reuses a running server
+    // instead of starting another: it only reads.
+    BOT_RUNNING_TOOL,
+    ...(own?.frontDesk ? BOT_WORK_TOOLS.filter((tool) => tool !== 'watch_start' || own.watcherStart === true) : []),
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),
     ...(own?.questions ? [BOT_QUESTION_TOOL, ...(own.frontDesk ? [BOT_QUESTION_ANSWER_TOOL] : [])] : []),
-    ...(own?.cards ? [BOT_CARD_TOOL] : []),
+    ...(own?.cards ? [BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL] : []),
+    ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
-    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
+    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : []),
+    // The catalogue's own tools: they reach nothing themselves, and every tool called through them is held to this list.
+    ...(own?.catalogue ? [BOT_CATALOGUE_TOOL, ...(own.catalogue === 'use_tool' ? [BOT_USE_TOOL] : [])] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {
@@ -226,10 +306,16 @@ export function compileBotThread(input: CompileInput): CompileResult {
       tools: [...new Set(manifest.tools)].sort(),
       appTools,
       mcp,
-      skills: [...new Set(manifest.skills)].sort(),
+      skills,
+      ...(allSkills ? { allSkills: true as const } : {}),
       ...(browser ? { browser: true as const } : {}),
       ...(threads ? { threads } : {}),
       ...(profiler ? { profiler: true as const } : {}),
+      ...(themes ? { themes: true as const } : {}),
+      ...(schedules ? { schedules } : {}),
+      ...(secrets ? { secrets: true as const } : {}),
+      ...(quickActions ? { quickActions: true as const } : {}),
+      ...(own?.catalogue ? { catalogue: own.catalogue } : {}),
       workspace: files !== undefined ? { roots: [], access: 'read', writeRoots: [], scratch, files } : null
     }
   }

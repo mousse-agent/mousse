@@ -494,12 +494,6 @@ describe('choosing what to commit', () => {
     expect(showIncludeChecks({ canInclude: false, choosing: true, selection: some })).toBe(false)
   })
 
-  it('reads Commit 2 of 3 once a file is left out, and Commit all when everything is back in', () => {
-    const file = (path: string, included: 'yes' | 'no' | 'partial') => ({ path, included }) as never
-    expect(commitLabel(selectionFromChanges({ selection: { state: 'chosen', token: 't' }, files: [file('a', 'yes'), file('b', 'partial'), file('c', 'no')] }))).toBe('Commit 2 of 3')
-    expect(commitLabel(selectionFromChanges({ selection: { state: 'chosen', token: 't' }, files: [file('a', 'yes'), file('b', 'yes')] }))).toBe('Commit all 2')
-  })
-
   it('follows the turns that would make a write refuse with thread_busy', () => {
     const threads = [
       { id: 'own', projectId: 'p1', worktreeEnabled: true },

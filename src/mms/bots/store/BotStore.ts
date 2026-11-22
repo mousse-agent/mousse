@@ -1,3 +1,5 @@
+import { heldCalls } from '../actions/lifecycle'
+import type { ActionRow } from '../actions/BotActions'
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
@@ -11,7 +13,8 @@ import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
-import type { BotWakeEvent, BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { WAKE_LINE_PREFIX, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { BOT_JOB_ENDED, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
@@ -370,8 +373,126 @@ ALTER TABLE bot_reminders ADD COLUMN fired_json TEXT;
 ALTER TABLE bot_reminders ADD COLUMN chain INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX bot_reminders_wakes ON bot_reminders(bot_id, wake, created_at);
 `
+  },
+  {
+    // All columns for always-on bots phase 1. Behavior is added by later items; old rows keep their meaning.
+    // bot_registry.tell_json held the removed Tells you setting; nothing reads or writes it any more.
+    version: 10,
+    sql: `
+ALTER TABLE bot_reminders ADD COLUMN snoozed_from TEXT;
+ALTER TABLE bot_reminders ADD COLUMN owner_set INTEGER CHECK(owner_set IN (0, 1));
+ALTER TABLE bot_messages ADD COLUMN tell TEXT CHECK(tell IN ('now', 'soon', 'later'));
+ALTER TABLE bot_messages ADD COLUMN tell_at TEXT CHECK(tell IS NULL OR tell_at IS NOT NULL);
+ALTER TABLE bot_messages ADD COLUMN told_at TEXT;
+CREATE INDEX bot_messages_tell_due ON bot_messages(bot_id, tell_at) WHERE tell IS NOT NULL AND told_at IS NULL;
+ALTER TABLE bot_registry ADD COLUMN tell_json TEXT;
+`
+  },
+  {
+    // Storage for always-on bots phases 2 and 3; later items supply the writers.
+    version: 11,
+    sql: `
+CREATE TABLE bot_actions(
+  id TEXT PRIMARY KEY,
+  call_key TEXT NOT NULL UNIQUE,
+  bot_id TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  lane TEXT NOT NULL CHECK(lane IN ('chat','run')),
+  kind TEXT NOT NULL CHECK(kind IN ('mcp','secret_fetch')),
+  target_json TEXT NOT NULL,
+  exec_args TEXT CHECK(exec_args IS NULL OR status IN ('open','approved','running')),
+  args_json TEXT NOT NULL,
+  args_digest TEXT NOT NULL,
+  binding_json TEXT NOT NULL,
+  place_json TEXT,
+  card_json TEXT,
+  bot_note TEXT,
+  status TEXT NOT NULL CHECK(status IN ('open','approved','declined','expired','withdrawn','running','done','failed','uncertain')),
+  result_json TEXT,
+  message_id TEXT,
+  next_at TEXT,
+  nudges INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT,
+  answered_at TEXT,
+  answered_device TEXT,
+  created_at TEXT NOT NULL,
+  ran_at TEXT,
+  CHECK(status <> 'open' OR expires_at IS NOT NULL)
+) STRICT;
+CREATE INDEX bot_actions_due ON bot_actions(status, next_at);
+CREATE INDEX bot_actions_bot ON bot_actions(bot_id, status);
+CREATE INDEX bot_actions_activation ON bot_actions(activation_id);
+ALTER TABLE bot_reminders ADD COLUMN work_id TEXT;
+`
+  },
+  {
+    // What each main turn of a bot cost and carried (docs/plans/bot-context.md, phase 0): one row per dispatch, which
+    // its runtime's usage reports add to. `context_gen` names the runtime context the turn ran in; `started_by` what
+    // started it; `fresh_context` whether it began from a cleared context. Measurements only: nothing reads it to decide.
+    version: 12,
+    sql: `
+CREATE TABLE bot_turn_usage(
+  activation_id TEXT NOT NULL,
+  dispatch_n INTEGER NOT NULL,
+  bot_id TEXT NOT NULL,
+  lane TEXT NOT NULL CHECK(lane IN ('chat','run')),
+  started_by TEXT NOT NULL,
+  instance_id TEXT,
+  model TEXT,
+  context_gen TEXT NOT NULL,
+  fresh_context INTEGER NOT NULL,
+  started_at INTEGER NOT NULL,
+  gap_ms INTEGER,
+  system_chars INTEGER NOT NULL,
+  preamble_chars INTEGER NOT NULL,
+  prompt_chars INTEGER NOT NULL,
+  tools INTEGER,
+  tools_chars INTEGER,
+  reports INTEGER NOT NULL DEFAULT 0,
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  last_prompt INTEGER,
+  context_window INTEGER,
+  cache_ttl_ms INTEGER,
+  last_request_at INTEGER,
+  compactions INTEGER NOT NULL DEFAULT 0,
+  quota_json TEXT,
+  PRIMARY KEY(activation_id, dispatch_n)
+) STRICT;
+CREATE INDEX bot_turn_usage_by_bot ON bot_turn_usage(bot_id, lane, started_at);
+`
+  },
+  {
+    // The ledger (docs/plans/bot-context.md §16): one row per job a bot handed to one of its owner's threads, with the
+    // request that caused it, who asked, how it stands and a one-line result. `notices`: how many notices the bot had.
+    version: 13,
+    sql: `
+CREATE TABLE bot_jobs(
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  project TEXT,
+  request TEXT NOT NULL,
+  asked_by TEXT NOT NULL CHECK(asked_by IN ('owner','schedule','bot','self')),
+  state TEXT NOT NULL CHECK(state IN ('running','needs_input','done','failed','stopped','gone')),
+  line TEXT,
+  notices INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT
+) STRICT;
+CREATE INDEX bot_jobs_by_bot ON bot_jobs(bot_id, updated_at);
+CREATE INDEX bot_jobs_open ON bot_jobs(thread_id) WHERE ended_at IS NULL;
+`
   }
 ]
+
+/** The `end_reason` of a queued notice a chat turn took in and answered (`BotDispatchRow.prompt.merged`): it never ran. */
+export const MERGED_END_REASON = 'merged'
 
 /** The `end_reason` of a running activation that waits for the internet. */
 export const BOT_OFFLINE_REASON = 'waiting_for_internet'
@@ -383,12 +504,7 @@ export const BOT_OFFLINE_REASON = 'waiting_for_internet'
  * the run lane is free, `usage_limit` goes on when the bot's usage pause ends, `question` waits for the owner's answer
  * to the question it asked (`ask_owner`), and `question_answered` was answered and goes on when the run lane is free.
  */
-export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed', 'usage_limit', 'question', 'question_answered'])
-
-/** Whether an activation is work that waits to go on (`BOT_WORK_WAIT_REASONS`). */
-export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'>): boolean {
-  return row.status === 'blocked' && row.lane === 'run' && row.trigger.kind === 'work' && row.endReason !== null && BOT_WORK_WAIT_REASONS.has(row.endReason)
-}
+export { BOT_WORK_WAIT_REASONS, workWaits } from '../activation/workWaiting'
 
 /** The `bots.db` schema version this build writes. */
 export const BOTS_DB_VERSION = BOTS_MIGRATIONS.at(-1)!.version
@@ -494,6 +610,10 @@ export interface BotMessageRow {
   questionId?: string
   /** A bot message's cards (`show_card`, a question's card), as the bot made them (`cards_json`, v8); absent for none. */
   cards?: BotCard[]
+  /** Telling class (v10); null means this row is never told. Unused until telling is implemented. */
+  tell?: 'now' | 'soon' | 'later' | null
+  tellAt?: string | null
+  toldAt?: string | null
 }
 
 /** One of a bot's questions to its owner (`bot_questions`, v8). */
@@ -579,6 +699,12 @@ export interface BotReminderRow {
   fired: BotWakeFired | null
   /** How many wakes in a row, with no owner's message between them, this one ends (1 for one the owner's turn set). */
   chain: number
+  /** The reminder this one was snoozed from (v10); null for none. */
+  snoozedFrom?: string | null
+  /** Whether the owner's message or tap started the turn that set it (v10); null preserves pre-v10 behavior. */
+  ownerSet?: boolean | null
+  /** The work this timer wakes (v11); existing writers leave it null. */
+  workId?: string | null
 }
 
 function jsonOf<T>(value: unknown): T | null {
@@ -608,7 +734,10 @@ function reminderOf(row: Row): BotReminderRow {
     wake: num(row.wake) === 1,
     event: jsonOf<BotWakeEvent>(row.event_json),
     fired: jsonOf<BotWakeFired>(row.fired_json),
-    chain: num(row.chain) ?? 0
+    chain: num(row.chain) ?? 0,
+    workId: str(row.work_id),
+    snoozedFrom: str(row.snoozed_from),
+    ownerSet: num(row.owner_set) === null ? null : num(row.owner_set) === 1
   }
 }
 
@@ -628,6 +757,9 @@ function messageOf(row: Row): BotMessageRow {
     attachments: json<BotMessageRow['attachments']>(row.attachments_json),
     clientRequestId: str(row.client_request_id),
     replyTo: str(row.reply_to),
+    tell: str(row.tell) as BotMessageRow['tell'],
+    tellAt: str(row.tell_at),
+    toldAt: str(row.told_at),
     ...(str(row.owner_reaction) && str(row.owner_reaction_at) ? { ownerReaction: { emoji: row.owner_reaction as string, at: row.owner_reaction_at as string } } : {}),
     ...(str(row.question_id) ? { questionId: row.question_id as string } : {}),
     ...(cardsOf(row.cards_json) ? { cards: cardsOf(row.cards_json)! } : {})
@@ -723,7 +855,22 @@ export interface BotDispatchRow {
   runId: string | null
   threadId: string
   /** `subagent`: what a subagent's turn runs as, on its every dispatch (`BotSubagentSpec`). */
-  prompt: { text: string; subagent?: BotSubagentSpec }
+  prompt: {
+    text: string
+    subagent?: BotSubagentSpec
+    /** Stored updates are told only after model output or a completed dispatch. */
+    workTold?: 'pending' | 'output' | 'completed'
+    workWaitIds?: string[]
+    workActionIds?: string[]
+    workRefusalIds?: string[]
+    /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
+    workDelivery?: { answers: string[]; notes: number[]; question?: string }
+    /**
+     * A chat turn's first dispatch: the queued notices it took in with its own input (`BotEngine.noticeBatchInTx`). They
+     * stay queued while it runs, and end as `merged` when it ends done (`moveActivation`); else they run after it.
+     */
+    merged?: string[]
+  }
   policyDigest: string
   deadlineMs: number | null
   prepaidMs: number | null
@@ -746,6 +893,8 @@ export interface BotDispatchRow {
     usageRetry?: boolean
     /** A continuation after the previous dispatch reached its runtime's cap on model turns. */
     turnCap?: boolean
+    /** A chat turn going on to answer the owner after its reply was the runtime's placeholder (at most once). */
+    unanswered?: boolean
   }
 }
 
@@ -803,6 +952,84 @@ function escalationOf(row: Row): BotEscalationRow {
   }
 }
 
+/** A plan usage window a runtime reported with a turn (Claude Code, Codex): how much of it is used, and when it resets. */
+export interface BotQuotaWindow {
+  /** The window as the runtime names it (`five_hour`, `seven_day`, `primary`, `secondary`). */
+  kind: string
+  /** 0-100. */
+  usedPercent: number
+  /** Epoch seconds, when reported. */
+  resetsAt?: number
+}
+
+export interface BotTurnUsageStart {
+  activationId: string
+  dispatchN: number
+  botId: string
+  lane: BotLane
+  /** What started the turn: the chat's start key (`chat`, `answer`, `botmsg`, `create`...) or the run's trigger. */
+  startedBy: string
+  instanceId?: string
+  model?: string
+  /** The runtime context the turn runs in: today the activation (each chat activation starts from a cleared context). */
+  contextGen: string
+  freshContext: boolean
+  startedAt: number
+  /** Since the bot's previous request in this lane, when there was one. */
+  gapMs?: number
+  systemChars: number
+  preambleChars: number
+  promptChars: number
+}
+
+export interface BotTurnUsageRow extends BotTurnUsageStart {
+  tools: number | null
+  toolsChars: number | null
+  reports: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  lastPrompt: number | null
+  contextWindow: number | null
+  cacheTtlMs: number | null
+  lastRequestAt: number | null
+  compactions: number
+  quota: BotQuotaWindow[] | null
+}
+
+function turnUsageOf(row: Row): BotTurnUsageRow {
+  return {
+    activationId: row.activation_id as string,
+    dispatchN: num(row.dispatch_n)!,
+    botId: row.bot_id as string,
+    lane: row.lane as BotLane,
+    startedBy: row.started_by as string,
+    ...(str(row.instance_id) ? { instanceId: str(row.instance_id)! } : {}),
+    ...(str(row.model) ? { model: str(row.model)! } : {}),
+    contextGen: row.context_gen as string,
+    freshContext: num(row.fresh_context) === 1,
+    startedAt: num(row.started_at)!,
+    ...(num(row.gap_ms) !== null ? { gapMs: num(row.gap_ms)! } : {}),
+    systemChars: num(row.system_chars)!,
+    preambleChars: num(row.preamble_chars)!,
+    promptChars: num(row.prompt_chars)!,
+    tools: num(row.tools),
+    toolsChars: num(row.tools_chars),
+    reports: num(row.reports)!,
+    input: num(row.input)!,
+    output: num(row.output)!,
+    cacheRead: num(row.cache_read)!,
+    cacheWrite: num(row.cache_write)!,
+    lastPrompt: num(row.last_prompt),
+    contextWindow: num(row.context_window),
+    cacheTtlMs: num(row.cache_ttl_ms),
+    lastRequestAt: num(row.last_request_at),
+    compactions: num(row.compactions)!,
+    quota: json<BotQuotaWindow[]>(row.quota_json)
+  }
+}
+
 export interface BotCountersRow {
   requests: number
   toolCalls: number
@@ -811,8 +1038,53 @@ export interface BotCountersRow {
   activeMs: number
 }
 
+// Completed outcomes also recognize dispatches written before the explicit output marker existed.
+const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR (json_extract(d.prompt_json, '$.workTold') IS NULL AND d.outcome IS 'completed'))"
+
+const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
+  prompt.workRefusalIds?.length || prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
+  prompt.workDelivery?.answers.length || prompt.workDelivery?.question
+)
+
+/** Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. */
+const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question'): string => `
+  EXISTS (SELECT 1 FROM bot_dispatches carried, json_each(carried.prompt_json, '$.workDelivery.${member}') item
+    WHERE carried.activation_id = ${table}.activation_id AND item.value = ${table}.id)
+  AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') item
+    WHERE d.activation_id = ${table}.activation_id AND item.value = ${table}.id AND ${WORK_TOLD})`
+
 type Row = Record<string, unknown>
+
+function jobOf(row: Row): BotJob {
+  return {
+    id: String(row.id),
+    botId: String(row.bot_id),
+    activationId: String(row.activation_id),
+    threadId: String(row.thread_id),
+    title: String(row.title),
+    ...(typeof row.project === 'string' ? { project: row.project } : {}),
+    request: String(row.request),
+    askedBy: String(row.asked_by) as BotJobAsker,
+    state: String(row.state) as BotJobState,
+    ...(typeof row.line === 'string' ? { line: row.line } : {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {})
+  }
+}
 type Param = string | number | null
+
+/**
+ * The chat rows the owner sees: every one but an event's line (`outOfSightRow`): a thread's message to the bot, kept
+ * for its guard, and the lines older versions posted for a wake-up or a thread's notice. Those events are the bot's to
+ * act on, not the owner's to read; only what the bot says shows.
+ */
+const SHOWN_MESSAGE = String.raw`NOT (kind = 'notice' AND id LIKE 'bm\_wake\_%' ESCAPE '\')`
+
+/** Whether a chat row is one the owner never sees (`SHOWN_MESSAGE`): a notice whose id starts `bm_wake_`. */
+export function outOfSightRow(kind: string, id: string): boolean {
+  return kind === 'notice' && id.startsWith(WAKE_LINE_PREFIX)
+}
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 const num = (value: unknown): number | null => (typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : null)
@@ -904,6 +1176,11 @@ export type BotStoreTx = Pick<ProfileDatabase, 'statement' | 'inTransaction'>
 /** The profile's `bots.db`: typed reads and the writes the bot engine and its scopes make. */
 export class BotStore {
   readonly db: ProfileDatabase
+  /**
+   * Told when what a bot's turns start with changes: its grant (approved, revoked, moved), its published revision (model,
+   * instructions), a pause, or its deletion. The engine closes the process kept warm for the bot's chat then. Must not throw.
+   */
+  launchChanged?: (botId: string) => void
 
   constructor(options: { profileHome: string; clock?: () => number; fault?: ProfileDatabaseFault }) {
     this.db = new ProfileDatabase({ profileHome: options.profileHome, name: 'bots', ...(options.clock ? { clock: options.clock } : {}), ...(options.fault ? { fault: options.fault } : {}) })
@@ -979,6 +1256,15 @@ export class BotStore {
     if (reason === null && options.keepStreak) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL WHERE bot_id = ?', botId)
     else if (reason === null) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL, failure_streak = 0 WHERE bot_id = ?', botId)
     else this.run('UPDATE bot_registry SET paused_reason = ?, paused_until = ? WHERE bot_id = ?', reason, until ?? null, botId)
+    if (reason !== null) this.changedLaunch(botId)
+  }
+
+  private changedLaunch(botId: string): void {
+    try {
+      this.launchChanged?.(botId)
+    } catch (error) {
+      console.warn("a bot's launch change could not be passed on", { botId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** Adds one failed run (or resets with 0); the streak after the change. */
@@ -1014,8 +1300,27 @@ export class BotStore {
     this.run('INSERT INTO bot_registry(bot_id, created_at) VALUES(?, ?) ON CONFLICT(bot_id) DO NOTHING', botId, this.now())
   }
 
+  /** Creation metadata shares the durable cursor namespace, so clearing memory cannot erase a request's identity. */
+  recordCreation(botId: string, key: string, input: string): void {
+    this.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `cursor:${key}`, JSON.stringify(input))
+  }
+
+  botCreation(key: string): { botId: string; input: string } | undefined {
+    const row = this.get('SELECT bot_id, value FROM bot_memory_state WHERE key = ?', `cursor:${key}`)
+    return row ? { botId: row.bot_id as string, input: JSON.parse(row.value as string) as string } : undefined
+  }
+
+  unfinishedCreations(): Array<{ botId: string; key: string }> {
+    return this.all(`SELECT s.bot_id, s.key FROM bot_memory_state s
+      JOIN bot_registry b ON b.bot_id = s.bot_id AND b.deleted_at IS NULL
+      WHERE substr(s.key, 1, 14) = 'cursor:create:'
+      AND NOT EXISTS (SELECT 1 FROM bot_activations a WHERE a.idempotency_key = substr(s.key, 8))`)
+      .map((row) => ({ botId: row.bot_id as string, key: (row.key as string).slice(7) }))
+  }
+
   setPublished(botId: string, revision: string): void {
     this.run('UPDATE bot_registry SET revision = ? WHERE bot_id = ? AND deleted_at IS NULL', revision, botId)
+    this.changedLaunch(botId)
   }
 
   setHomeThread(botId: string, threadId: string): void {
@@ -1024,6 +1329,7 @@ export class BotStore {
 
   markDeleted(botId: string): void {
     this.run('UPDATE bot_registry SET deleted_at = ? WHERE bot_id = ? AND deleted_at IS NULL', this.now(), botId)
+    this.changedLaunch(botId)
   }
 
   // -- Grants ----------------------------------------------------------------------------------
@@ -1057,12 +1363,19 @@ export class BotStore {
       const at = this.now()
       this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', at, botId)
       this.run('INSERT INTO bot_grants(bot_id, digest, manifest_json, approved_at) VALUES(?, ?, ?, ?)', botId, digest, JSON.stringify(manifest), at)
+      heldCalls(this.db)?.grantChanged(botId)
+      this.changedLaunch(botId)
       return { botId, digest, manifest, approvedAt: at }
     })
   }
 
   revoke(botId: string): boolean {
-    return this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', this.now(), botId) > 0
+    return this.db.transaction(() => {
+      const revoked = this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', this.now(), botId) > 0
+      if (revoked) heldCalls(this.db)?.grantChanged(botId)
+      if (revoked) this.changedLaunch(botId)
+      return revoked
+    })
   }
 
   // -- Threads ---------------------------------------------------------------------------------
@@ -1109,10 +1422,10 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, ...statuses).map(activationOf)
   }
 
-  /** Activations of a bot's lane in `statuses`, oldest first. */
+  /** Activations of a bot's lane in `statuses`, oldest first (two made in the same millisecond in the order they were made). */
   laneActivations(botId: string, lane: BotLane, statuses: readonly BotActivationStatus[]): BotActivationRow[] {
     const marks = statuses.map(() => '?').join(', ')
-    return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, lane, ...statuses).map(activationOf)
+    return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, rowid`, botId, lane, ...statuses).map(activationOf)
   }
 
   /** A lane's newest activation, in the order they were made (two made in the same millisecond keep it). */
@@ -1121,10 +1434,22 @@ export class BotStore {
     return row ? activationOf(row) : undefined
   }
 
-  /** The bot's most recent activation that ended, if any. */
+  /** The bot's most recent activation that ended, if any; a notice another turn took in (`merged`) never ran, and is not one. */
   lastEndedActivation(botId: string): BotActivationRow | undefined {
-    const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
+    const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') AND end_reason IS NOT 'merged' ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
     return row ? activationOf(row) : undefined
+  }
+
+  /** When each of the bot's schedules last ran to an end, and how that run ended, by schedule id. */
+  lastScheduleRuns(botId: string): Map<string, { endedAt: string; status: 'done' | 'failed' | 'cancelled' }> {
+    // SQLite gives a bare column the values of the row that holds MAX(): each schedule's latest ended run.
+    const rows = this.all(
+      `SELECT json_extract(trigger_json, '$.scheduleId') AS schedule_id, status, MAX(ended_at) AS ended_at FROM bot_activations
+       WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') AND ended_at IS NOT NULL AND json_extract(trigger_json, '$.kind') = 'schedule'
+       GROUP BY schedule_id`,
+      botId
+    )
+    return new Map(rows.filter((row) => typeof row.schedule_id === 'string').map((row) => [row.schedule_id as string, { endedAt: row.ended_at as string, status: row.status as 'done' | 'failed' | 'cancelled' }]))
   }
 
   /**
@@ -1185,13 +1510,21 @@ export class BotStore {
    * Compare-and-set of an activation's status; false when it was not in `from`. Only a running activation waits for the
    * internet. One that fails or is cancelled (a Stop, a failure, the bot deleted) withdraws the questions it asked and never
    * posted, in the same statement's transaction: no reply carries them now. Work that ends, however it ends, withdraws
-   * the question it still waited on: nothing would carry on with its answer.
+   * the question it still waited on: nothing would carry on with its answer. A chat turn that ends done ends the queued
+   * notices its first dispatch took in (`merged`) with it, in the same transaction: they were answered.
    */
   moveActivation(id: string, from: readonly BotActivationStatus[], to: BotActivationStatus, patch: { endReason?: string | null; result?: string | null; threadId?: string; scratch?: string } = {}): boolean {
     if (to === 'failed' || to === 'cancelled' || to === 'done') return this.db.transaction(() => {
       const moved = this.moveActivationRow(id, from, to, patch)
       if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
-      if (moved) this.withdrawWorkQuestions(id)
+      if (moved && to === 'done') for (const merged of this.dispatch(id, 1)?.prompt.merged ?? []) this.moveActivation(merged, ['queued'], 'cancelled', { endReason: MERGED_END_REASON })
+      if (moved) {
+        this.withdrawWorkQuestions(id)
+        heldCalls(this.db)?.endWork(id)
+        const refusalPrefix = `cursor:action-refusal:${id}:`
+        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?) OR substr(key, 1, ?) = ?', `cursor:action-note:${id}`, `cursor:action-owner:${id}`, refusalPrefix.length, refusalPrefix)
+        this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
+      }
       return moved
     })
     return this.moveActivationRow(id, from, to, patch)
@@ -1219,7 +1552,7 @@ export class BotStore {
   }
 
   deleteActivation(id: string): void {
-    for (const table of ['bot_counters', 'bot_spend', 'bot_spend_reservations', 'bot_unknown_calls', 'bot_dispatches'])
+    for (const table of ['bot_counters', 'bot_spend', 'bot_spend_reservations', 'bot_unknown_calls', 'bot_turn_usage', 'bot_dispatches'])
       this.run(`DELETE FROM ${table} WHERE activation_id = ?`, id)
     this.run('DELETE FROM bot_activations WHERE id = ?', id)
   }
@@ -1251,9 +1584,10 @@ export class BotStore {
   }
 
   insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number; send?: BotDispatchRow['send'] }): void {
+    const prompt = hasWorkUpdates(row.prompt) ? { ...row.prompt, workTold: row.prompt.workTold ?? 'pending' } : row.prompt
     this.run(
       'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest, send_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      row.activationId, row.n, row.kind === 'subagent' ? 'consult' : row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
+      row.activationId, row.n, row.kind === 'subagent' ? 'consult' : row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
     )
   }
 
@@ -1290,6 +1624,153 @@ export class BotStore {
       activeMs: num(row.active_ms) ?? 0,
       limits: JSON.parse(row.limits_json as string) as Record<string, number>
     }
+  }
+
+  // -- Turn usage (v12): what each main turn cost and carried ----------------------------------
+
+  /** A main dispatch began: its row, before any usage is reported. A second start of the same dispatch changes nothing. */
+  startTurnUsage(row: BotTurnUsageStart): void {
+    this.run(
+      `INSERT INTO bot_turn_usage(activation_id, dispatch_n, bot_id, lane, started_by, instance_id, model, context_gen, fresh_context, started_at, gap_ms, system_chars, preamble_chars, prompt_chars)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(activation_id, dispatch_n) DO NOTHING`,
+      row.activationId, row.dispatchN, row.botId, row.lane, row.startedBy, row.instanceId ?? null, row.model ?? null, row.contextGen,
+      row.freshContext ? 1 : 0, row.startedAt, row.gapMs ?? null, row.systemChars, row.preambleChars, row.promptChars
+    )
+  }
+
+  /** One usage report of the turn's runtime (a request, or a whole turn where the runtime sums them), added to its row. */
+  addTurnUsage(activationId: string, n: number, usage: { input: number; output: number; cacheRead: number; cacheWrite: number; at: number }): void {
+    const whole = (value: number): number => (Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
+    this.run(
+      `UPDATE bot_turn_usage SET reports = reports + 1, input = input + ?, output = output + ?, cache_read = cache_read + ?, cache_write = cache_write + ?,
+         last_request_at = MAX(COALESCE(last_request_at, 0), ?) WHERE activation_id = ? AND dispatch_n = ?`,
+      whole(usage.input), whole(usage.output), whole(usage.cacheRead), whole(usage.cacheWrite), usage.at, activationId, n
+    )
+  }
+
+  /**
+   * What the runtime said of its context at the end of a request or turn: the prompt it last sent (input, cache read and
+   * cache write together), its window, the cache lifetime it wrote, the model it really ran and the plan's usage windows.
+   */
+  turnContext(activationId: string, n: number, context: { lastPrompt?: number; contextWindow?: number; cacheTtlMs?: number; at?: number; model?: string; quota?: readonly BotQuotaWindow[] }): void {
+    const positive = (value: number | undefined): number | null => (value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : null)
+    const at = positive(context.at)
+    this.run(
+      `UPDATE bot_turn_usage SET last_prompt = COALESCE(?, last_prompt), context_window = COALESCE(?, context_window), cache_ttl_ms = COALESCE(?, cache_ttl_ms),
+         last_request_at = CASE WHEN ? IS NULL THEN last_request_at ELSE MAX(COALESCE(last_request_at, 0), ?) END, model = COALESCE(?, model), quota_json = COALESCE(?, quota_json)
+       WHERE activation_id = ? AND dispatch_n = ?`,
+      positive(context.lastPrompt), positive(context.contextWindow), positive(context.cacheTtlMs), at, at,
+      context.model ?? null, context.quota?.length ? JSON.stringify(context.quota) : null, activationId, n
+    )
+  }
+
+  /** The Mousse tools the turn's runtime was offered: how many, and the characters of their names, descriptions and schemas. */
+  turnTools(activationId: string, n: number, tools: number, chars: number): void {
+    this.run('UPDATE bot_turn_usage SET tools = ?, tools_chars = ? WHERE activation_id = ? AND dispatch_n = ? AND tools IS NULL', tools, chars, activationId, n)
+  }
+
+  // -- Jobs (v13): the ledger of work a bot handed to its owner's threads ----------------------
+
+  /**
+   * A job handed to `threadId`. A thread that still works on an earlier job of the same bot takes the new message as
+   * part of it: that row is kept (and touched), and no second one opens. A follow-up the bot did not hand off (no
+   * turn: `activationId` empty, opened when the thread worked again) becomes this hand-off: its turn, request and asker
+   * are this one's. Returns the job's row.
+   */
+  openJob(row: Pick<BotJob, 'id' | 'botId' | 'activationId' | 'threadId' | 'title' | 'request' | 'askedBy'> & { project?: string }): BotJob {
+    return this.db.transaction(() => {
+      const open = this.get('SELECT * FROM bot_jobs WHERE bot_id = ? AND thread_id = ? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1', row.botId, row.threadId)
+      const now = this.now()
+      if (open && String(open.activation_id) === '' && row.activationId) {
+        this.run('UPDATE bot_jobs SET updated_at = ?, title = ?, activation_id = ?, request = ?, asked_by = ? WHERE id = ?', now, row.title, row.activationId, row.request, row.askedBy, String(open.id))
+        return this.job(String(open.id))!
+      }
+      if (open) {
+        this.run('UPDATE bot_jobs SET updated_at = ?, title = ? WHERE id = ?', now, row.title, String(open.id))
+        return jobOf({ ...open, updated_at: now, title: row.title })
+      }
+      this.run(
+        `INSERT INTO bot_jobs(id, bot_id, activation_id, thread_id, title, project, request, asked_by, state, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+        row.id, row.botId, row.activationId, row.threadId, row.title, row.project ?? null, row.request, row.askedBy, now, now
+      )
+      return this.job(row.id)!
+    })
+  }
+
+  job(id: string): BotJob | undefined {
+    const row = this.get('SELECT * FROM bot_jobs WHERE id = ?', id)
+    return row ? jobOf(row) : undefined
+  }
+
+  /** The bot's jobs whose thread still works or waits for a person, oldest first. */
+  openJobsOf(botId: string): BotJob[] {
+    return this.all("SELECT * FROM bot_jobs WHERE bot_id = ? AND ended_at IS NULL AND state IN ('running', 'needs_input') ORDER BY created_at, rowid", botId).map(jobOf)
+  }
+
+  /** The jobs not ended on `threadId`, of any bot. */
+  openJobsOn(threadId: string): BotJob[] {
+    return this.all('SELECT * FROM bot_jobs WHERE thread_id = ? AND ended_at IS NULL ORDER BY created_at', threadId).map(jobOf)
+  }
+
+  /** The bot's newest job on `threadId`, ended or not. */
+  latestJobOn(botId: string, threadId: string): BotJob | undefined {
+    const row = this.get('SELECT * FROM bot_jobs WHERE bot_id = ? AND thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', botId, threadId)
+    return row ? jobOf(row) : undefined
+  }
+
+  /** Every job not ended, oldest first: what the startup pass checks. */
+  openJobs(limit = 500): BotJob[] {
+    return this.all('SELECT * FROM bot_jobs WHERE ended_at IS NULL ORDER BY created_at LIMIT ?', limit).map(jobOf)
+  }
+
+  /** The bot's newest jobs, by when they last changed; `since`: only those changed after it. */
+  recentJobs(botId: string, limit: number, since?: string): BotJob[] {
+    return (since
+      ? this.all('SELECT * FROM bot_jobs WHERE bot_id = ? AND updated_at > ? ORDER BY updated_at DESC, created_at DESC LIMIT ?', botId, since, limit)
+      : this.all('SELECT * FROM bot_jobs WHERE bot_id = ? ORDER BY updated_at DESC, created_at DESC LIMIT ?', botId, limit)).map(jobOf)
+  }
+
+  /**
+   * The job moved from `from` to `state` (with its result line, when it has one); false when it was not in `from` any
+   * more (another pass moved it first). An ending state keeps its end time; a notice is counted with `notice`.
+   */
+  moveJob(id: string, from: BotJobState, state: BotJobState, change: { line?: string; notice?: boolean } = {}): boolean {
+    const now = this.now()
+    return this.run(
+      `UPDATE bot_jobs SET state = ?, line = COALESCE(?, line), updated_at = ?, ended_at = ?, notices = notices + ? WHERE id = ? AND state = ? AND ended_at IS NULL`,
+      state, change.line ?? null, now, BOT_JOB_ENDED.has(state) ? now : null, change.notice ? 1 : 0, id, from
+    ) > 0
+  }
+
+  /** The runtime compacted the turn's context. */
+  turnCompacted(activationId: string, n: number): void {
+    this.run('UPDATE bot_turn_usage SET compactions = compactions + 1 WHERE activation_id = ? AND dispatch_n = ?', activationId, n)
+  }
+
+  turnUsage(activationId: string, n: number): BotTurnUsageRow | undefined {
+    const row = this.get('SELECT * FROM bot_turn_usage WHERE activation_id = ? AND dispatch_n = ?', activationId, n)
+    return row ? turnUsageOf(row) : undefined
+  }
+
+  /** The bot's latest turn in `lane` that reached its model, other than `except` (the turn now starting). */
+  lastTurnUsage(botId: string, lane: BotLane, except?: { activationId: string; n: number }): BotTurnUsageRow | undefined {
+    const row = this.get(
+      `SELECT * FROM bot_turn_usage WHERE bot_id = ? AND lane = ? AND last_request_at IS NOT NULL AND NOT (activation_id = ? AND dispatch_n = ?)
+       ORDER BY last_request_at DESC LIMIT 1`,
+      botId, lane, except?.activationId ?? '', except?.n ?? -1
+    )
+    return row ? turnUsageOf(row) : undefined
+  }
+
+  /** The bot's turns in `lane` that ran in the runtime context `contextGen` (a chat epoch), oldest first. */
+  turnUsageOfContext(botId: string, lane: BotLane, contextGen: string): BotTurnUsageRow[] {
+    return this.all('SELECT * FROM bot_turn_usage WHERE bot_id = ? AND lane = ? AND context_gen = ? ORDER BY started_at, dispatch_n', botId, lane, contextGen).map(turnUsageOf)
+  }
+
+  /** The bot's turns in `lane` since `since` (ms) that reported usage, oldest first. */
+  turnUsageSince(botId: string, lane: BotLane, since: number): BotTurnUsageRow[] {
+    return this.all('SELECT * FROM bot_turn_usage WHERE bot_id = ? AND lane = ? AND started_at >= ? AND reports > 0 ORDER BY started_at', botId, lane, since).map(turnUsageOf)
   }
 
   // -- Unknown calls ---------------------------------------------------------------------------
@@ -1345,24 +1826,6 @@ export class BotStore {
   countNewAsks(botId: string, input: { activationId?: string; since?: string }): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE bot_id = ? AND mode = 'ask' AND (? IS NULL OR activation_id = ?) AND created_at >= ?",
       botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
-  }
-
-  /**
-   * The subagents a bot's work started since `since` (wall-clock milliseconds), across all its activations: each one's
-   * first turn, by the time its spec records (`BotSubagentSpec.at`). Turns that started before `since` are not read.
-   */
-  countSubagentsStarted(botId: string, since: number): number {
-    const threads = new Set<string>()
-    for (const row of this.all("SELECT d.thread_id, d.client_request_id, d.prompt_json FROM bot_dispatches d JOIN bot_activations a ON a.id = d.activation_id WHERE a.bot_id = ? AND d.kind = 'consult' AND (d.started_at IS NULL OR d.started_at >= ?)", botId, since)) {
-      if (!SUBAGENT_DISPATCH.test(row.client_request_id as string)) continue
-      try {
-        const at = (JSON.parse(row.prompt_json as string) as { subagent?: { at?: unknown } }).subagent?.at
-        if (typeof at === 'number' && at >= since) threads.add(row.thread_id as string)
-      } catch {
-        // Not a subagent's prompt.
-      }
-    }
-    return threads.size
   }
 
   countEscalations(activationId: string): number {
@@ -1453,15 +1916,15 @@ export class BotStore {
     return this.escalations({ botId, status: 'open' })
   }
 
-  /** The answered escalation whose continuation has not been sent yet. */
+  /** The answered escalation whose continuation has not been applied yet. */
   pendingAnswer(activationId: string): BotEscalationRow | undefined {
-    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
+    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND (status IN ('allowed_bot', 'allowed_once', 'denied') OR (status = 'withdrawn' AND json_extract(permission_json, '$.ask') = 'let_alone')) AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
     return row ? escalationOf(row) : undefined
   }
 
-  /** Every answered wall of an activation whose continuation has not been sent yet, oldest first. */
+  /** Every answered wall of an activation whose continuation has not been applied yet, oldest first. */
   pendingAnswers(activationId: string): BotEscalationRow[] {
-    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
+    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND (status IN ('allowed_bot', 'allowed_once', 'denied') OR (status = 'withdrawn' AND json_extract(permission_json, '$.ask') = 'let_alone')) AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
   }
 
   markApplied(id: string): void {
@@ -1586,6 +2049,7 @@ export class BotStore {
     this.run(`UPDATE bot_dispatches SET policy_digest = ? WHERE policy_digest = ? AND started_at IS NULL AND activation_id IN
       (SELECT id FROM bot_activations WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled'))`, toDigest, fromDigest, botId, fromDigest)
     this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
+    this.changedLaunch(botId)
   }
 
   // -- Chat (bot_messages) ----------------------------------------------------------------------
@@ -1594,7 +2058,7 @@ export class BotStore {
    * Inserts a chat row; inside the caller's transaction, so its journal row joins it. False when a
    * row with the same id or client request id exists already.
    */
-  insertMessage(row: Omit<BotMessageRow, 'seq'>): boolean {
+  insertMessage(row: Omit<BotMessageRow, 'seq' | 'tell' | 'tellAt' | 'toldAt'>): boolean {
     return this.run(
       'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to, question_id, cards_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, row.at, row.author, row.kind, row.text, JSON.stringify(row.chips), row.askId, row.error ? JSON.stringify(row.error) : null,
@@ -1643,19 +2107,25 @@ export class BotStore {
   /** A page of a bot's chat, oldest first: the `limit` rows before `beforeSeq` (the newest without it). */
   messages(botId: string, options: { beforeSeq?: number; limit: number }): BotMessageRow[] {
     const rows = options.beforeSeq === undefined
-      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT ?', botId, options.limit)
-      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', botId, options.beforeSeq, options.limit)
+      ? this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.limit)
+      : this.all(`SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT ?`, botId, options.beforeSeq, options.limit)
     return rows.map(messageOf).reverse()
   }
 
   lastMessage(botId: string): BotMessageRow | undefined {
-    const row = this.get('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT 1', botId)
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
+    return row ? messageOf(row) : undefined
+  }
+
+  /** The bot's latest message with text, for the preview of its row in the Bots list. */
+  lastBotReply(botId: string): BotMessageRow | undefined {
+    const row = this.get(`SELECT * FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND COALESCE(text, '') != '' AND ${SHOWN_MESSAGE} ORDER BY seq DESC LIMIT 1`, botId)
     return row ? messageOf(row) : undefined
   }
 
   /** The bot's messages after the owner's read marker. */
   unread(botId: string, readSeq: number): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ?", botId, readSeq)?.n ?? 0)
+    return Number(this.get(`SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ? AND ${SHOWN_MESSAGE}`, botId, readSeq)?.n ?? 0)
   }
 
   /** The 30-day purge: every row of a bot's asks, activations (with their dispatches, counts and spend), grants and context generations. */
@@ -1670,6 +2140,8 @@ export class BotStore {
     this.run('DELETE FROM bot_reminders WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_work_notes WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_questions WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_jobs WHERE bot_id = ?', botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
   }
 
@@ -1723,8 +2195,10 @@ export class BotStore {
   }
 
   /** The open question of any bot whose follow-up is due soonest. */
-  nextQuestionDue(): BotQuestionRow | undefined {
-    const row = this.get("SELECT * FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL AND message_id IS NOT NULL ORDER BY next_at, rowid LIMIT 1")
+  nextQuestionDue(botId?: string): BotQuestionRow | undefined {
+    const row = this.get(`SELECT * FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL AND message_id IS NOT NULL
+      AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
+      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY next_at, rowid LIMIT 1`, ...(botId === undefined ? [] : [botId]))
     return row ? questionOf(row) : undefined
   }
 
@@ -1816,6 +2290,11 @@ export class BotStore {
   }
 
   /** A continuation told the turn about these questions. */
+  /** Questions whose answer the work never read after all (a note it did not take): unread again, so it carries them. */
+  markQuestionsUnread(ids: readonly string[]): void {
+    for (const id of ids) this.run('UPDATE bot_questions SET read_at = NULL WHERE id = ?', id)
+  }
+
   markQuestionsRead(ids: readonly string[]): void {
     const at = this.now()
     for (const id of ids) this.run('UPDATE bot_questions SET read_at = ? WHERE id = ? AND read_at IS NULL', at, id)
@@ -1853,16 +2332,21 @@ export class BotStore {
 
   /**
    * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
-   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`).
+   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`). With read=false,
+   * only the copy is recorded here; the carrying dispatch start marks it read.
    */
-  markAnswerSent(questionId: string, n: number, line: string): void {
-    this.run("UPDATE bot_questions SET read_at = ?, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", this.now(), n, line, questionId)
+  markAnswerSent(questionId: string, n: number, line: string, read = true): void {
+    this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)
   }
 
-  /** The bot's questions that work waits on now (the work is `blocked` with `question`), oldest first. */
+  /**
+   * The bot's questions that work waits on now (the work is `blocked` with `question`), and the ones running work asked
+   * without waiting (`wait: false`, issue #1372), still open: each needs the owner's answer. Oldest first.
+   */
   waitingQuestions(botId: string): BotQuestionRow[] {
     return this.all(`SELECT q.* FROM bot_questions q JOIN bot_activations a ON a.id = q.activation_id WHERE q.bot_id = ? AND q.lane = 'run'
-      AND q.status = 'open' AND q.message_id IS NOT NULL AND a.status = 'blocked' AND a.end_reason = 'question' ORDER BY q.created_at, q.rowid`, botId).map(questionOf)
+      AND q.status = 'open' AND q.message_id IS NOT NULL AND ((a.status = 'blocked' AND a.end_reason = 'question')
+        OR (a.status = 'running' AND json_extract(q.spec_json, '$.wait') = 0)) ORDER BY q.created_at, q.rowid`, botId).map(questionOf)
   }
 
   /**
@@ -1875,17 +2359,133 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain'>>): void {
+  insertReminder(row: Omit<BotReminderRow, 'workId' | 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom' | 'workId'>>): void {
     this.run(
-      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)",
+      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain, owner_set, snoozed_from, work_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?)",
       row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,
-      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0
+      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0, row.ownerSet == null ? null : row.ownerSet ? 1 : 0, row.snoozedFrom ?? null, row.workId ?? null
     )
   }
 
-  /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */
-  wakesSince(botId: string, since: string): number {
-    return num(this.get('SELECT COUNT(*) AS n FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at > ?', botId, since)?.n) ?? 0
+  /** Latest wait, retained after delivery until its continuation is dispatched. */
+  workWait(workId: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE work_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', workId)
+    return row ? reminderOf(row) : undefined
+  }
+
+  /** Delivery is not telling: only model output or completion of a carrying dispatch consumes it. */
+  unreadWorkWaits(workId: string): BotReminderRow[] {
+    return this.all(`SELECT r.* FROM bot_reminders r WHERE r.work_id = ? AND r.status = 'delivered'
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workWaitIds') told
+        WHERE d.activation_id = r.work_id AND ${WORK_TOLD} AND told.value = r.id)
+      ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
+  }
+
+  /** Model output or completion consumes an outcome. Continuation admission restores running before this read; inactive terminal work has nobody to tell. */
+  unreadWorkActions(workId: string): ActionRow[] {
+    return this.all(`SELECT a.* FROM bot_actions a WHERE a.kind = 'mcp' AND a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
+      AND EXISTS (SELECT 1 FROM bot_activations w WHERE w.id = a.activation_id AND w.status NOT IN ('done', 'failed', 'cancelled'))
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
+        WHERE d.activation_id = a.activation_id AND ${WORK_TOLD} AND told.value = a.id)
+      ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
+  }
+
+  pruneWorkRefusals(): void {
+    const prefix = 'cursor:action-refusal:'
+    if (!this.get('SELECT 1 FROM bot_memory_state WHERE substr(key, 1, ?) = ? LIMIT 1', prefix.length, prefix)) return
+    this.run(`DELETE FROM bot_memory_state AS s WHERE substr(s.key, 1, ?) = ? AND NOT EXISTS (
+      SELECT 1 FROM bot_activations a WHERE a.bot_id = s.bot_id AND a.status NOT IN ('done', 'failed', 'cancelled')
+      AND substr(s.key, 1, length(? || a.id || ':')) = ? || a.id || ':')`, prefix.length, prefix, prefix, prefix)
+  }
+
+  recordWorkRefusal(workId: string, botId: string, id: string, text: string): void {
+    this.run('INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId,
+      `cursor:action-refusal:${workId}:${id}`, JSON.stringify({ at: this.now(), text }))
+  }
+
+  /** Mousse updates are neither owner notes nor a reason to start another turn. */
+  unreadWorkRefusals(workId: string): Array<{ id: string; at: string; text: string }> {
+    const prefix = `cursor:action-refusal:${workId}:`
+    return this.all(`SELECT s.key, s.value FROM bot_memory_state s WHERE substr(s.key, 1, ?) = ?
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workRefusalIds') told
+        WHERE d.activation_id = ? AND ${WORK_TOLD} AND told.value = s.key) ORDER BY s.rowid`, prefix.length, prefix, workId)
+      .map(row => ({ id: String(row.key), ...JSON.parse(String(row.value)) as { at: string; text: string } }))
+  }
+
+  /** Confirmation controls replay only; existing carried/read markers are not changed here. */
+  confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
+    const needsConfirmation = (dispatch: BotDispatchRow | undefined): boolean => Boolean(dispatch && dispatch.startedAt !== null &&
+      dispatch.prompt.workTold !== 'output' && dispatch.prompt.workTold !== 'completed' && hasWorkUpdates(dispatch.prompt))
+    // A chat turn or empty continuation costs a read, never BEGIN IMMEDIATE on its first output.
+    if (!needsConfirmation(this.dispatch(activationId, n))) return
+    this.db.transaction(() => {
+      if (!needsConfirmation(this.dispatch(activationId, n))) return
+      this.run("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.workTold', ?) WHERE activation_id = ? AND n = ?", why, activationId, n)
+      for (const id of this.dispatch(activationId, n)?.prompt.workRefusalIds ?? []) this.run('DELETE FROM bot_memory_state WHERE key = ?', id)
+    })
+  }
+
+  /** Pending or carried-but-unconfirmed additions, used only to build the next work prompt. */
+  unreadWorkAnswers(activationId: string): BotEscalationRow[] {
+    return this.all(`SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'
+      AND status IN ('allowed_bot', 'allowed_once', 'denied') AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_escalations', 'answers')}))
+      ORDER BY created_at, rowid`, activationId).map(escalationOf)
+  }
+  unreadWorkQuestion(activationId: string): BotQuestionRow | undefined {
+    const row = this.get(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
+      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question')}))
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`, activationId)
+    return row ? questionOf(row) : undefined
+  }
+  /** Notes in a started prompt may have reached the model even without confirmed output. */
+  carriedWorkNoteIds(activationId: string): Set<number> {
+    return new Set(this.all(`SELECT DISTINCT item.value AS id FROM bot_dispatches d,
+      json_each(d.prompt_json, '$.workDelivery.notes') item
+      WHERE d.activation_id = ? AND d.started_at IS NOT NULL`, activationId).map(row => num(row.id)!))
+  }
+  unreadWorkNotes(activationId: string): ReturnType<BotStore['pendingWorkNotes']> {
+    return this.all(`SELECT id, text, at, from_message FROM bot_work_notes WHERE activation_id = ?
+      AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_work_notes', 'notes')})) ORDER BY id`, activationId)
+      .map(row => ({ id: num(row.id)!, text: row.text as string, at: row.at as string, fromMessage: str(row.from_message) }))
+  }
+
+  /** When the owner last wrote to a bot (their newest message in its chat), or '' when they never have. */
+  ownerLastWroteAt(botId: string): string {
+    return str(this.get("SELECT MAX(at) AS at FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.at) ?? ''
+  }
+
+  /**
+   * The wakes a bot set at or after `since`, cancelled ones too, with their briefs and events (loop detection): its chat's
+   * own (`workId` undefined), or the waits of one piece of work.
+   */
+  wakesSetSince(botId: string, since: string, workId?: string): Array<Pick<BotReminderRow, 'text' | 'event'>> {
+    return this.all('SELECT * FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at >= ? AND work_id IS ?', botId, since, workId ?? null).map(reminderOf).map(({ text, event }) => ({ text, event }))
+  }
+
+  /**
+   * Where the owner last wrote to a bot: the `seq` of their newest message in its chat, or 0 when they never have. `seq`
+   * orders every chat's rows together, so what came after it is known even within one millisecond.
+   */
+  ownerLastWroteSeq(botId: string): number {
+    return num(this.get("SELECT MAX(seq) AS seq FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.seq) ?? 0
+  }
+
+  /** How many messages from other bots reached bot `botId`'s chat after row `afterSeq` (the ping-pong guard). */
+  botMessagesReceivedAfter(botId: string, afterSeq: number): number {
+    return num(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND seq > ?", botId, afterSeq)?.n) ?? 0
+  }
+
+  /** How many of bot `botId`'s chat rows whose id starts with `prefix` came after row `afterSeq`. */
+  chatRowsAfter(botId: string, prefix: string, afterSeq: number): number {
+    return num(this.get('SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND substr(id, 1, ?) = ? AND seq > ?', botId, prefix.length, prefix, afterSeq)?.n) ?? 0
+  }
+
+  /**
+   * Whether bot `botId`'s chat got a message from another bot reading exactly `text` (`botMessageRowText`: the sender's
+   * name and the message) after row `afterSeq` (loop detection).
+   */
+  botMessageRowAfter(botId: string, text: string, afterSeq: number): boolean {
+    return this.get("SELECT 1 AS hit FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND text = ? AND seq > ? LIMIT 1", botId, text, afterSeq) !== undefined
   }
 
   /** Every bot's waiting wakes on an event that has not happened yet, oldest first. */
@@ -1899,6 +2499,20 @@ export class BotStore {
    */
   fireWake(id: string, fired: BotWakeFired, dueAt: string): boolean {
     return this.run("UPDATE bot_reminders SET fired_json = ?, due_at = ? WHERE id = ? AND status = 'waiting' AND wake = 1 AND fired_json IS NULL", JSON.stringify(fired), dueAt, id) > 0
+  }
+
+  messageForgotten(botId: string, messageId: string): boolean {
+    return !!this.get('SELECT 1 FROM bot_journal WHERE bot_id = ? AND source_key = ? AND redacted_at IS NOT NULL', botId, `bm:${messageId}`)
+  }
+
+  reminderForMessage(botId: string, messageId: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE bot_id = ? AND message_id = ?', botId, messageId)
+    return row ? reminderOf(row) : undefined
+  }
+
+  snoozedCopy(botId: string, reminderId: string): BotReminderRow | undefined {
+    const row = this.get("SELECT * FROM bot_reminders WHERE bot_id = ? AND snoozed_from = ? AND status != 'cancelled' LIMIT 1", botId, reminderId)
+    return row ? reminderOf(row) : undefined
   }
 
   reminder(id: string): BotReminderRow | undefined {
@@ -1917,8 +2531,11 @@ export class BotStore {
   }
 
   /** The soonest reminder still to come, of any bot. */
-  nextReminder(): BotReminderRow | undefined {
-    const row = this.get("SELECT * FROM bot_reminders WHERE status = 'waiting' ORDER BY due_at, id LIMIT 1")
+  nextReminder(botId?: string): BotReminderRow | undefined {
+    const row = this.get(`SELECT * FROM bot_reminders WHERE status = 'waiting'
+      AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
+      AND (work_id IS NULL OR due_at > ? OR work_id IN (SELECT id FROM bot_activations WHERE status = 'blocked' AND end_reason = 'waiting'))
+      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT 1`, this.now(), ...(botId === undefined ? [] : [botId]))
     return row ? reminderOf(row) : undefined
   }
 
@@ -1948,7 +2565,7 @@ export class BotStore {
     for (const id of ids) this.run("UPDATE bot_messages SET activation_id = ? WHERE id = ? AND activation_id = ? AND author = 'owner'", to, id, from)
   }
 
-  /** The notes are in the dispatch just written (inside its transaction). */
+  /** Marks these notes consumed, inside the caller's transaction. */
   applyWorkNotes(ids: readonly number[]): void {
     const at = this.now()
     for (const id of ids) this.run('UPDATE bot_work_notes SET applied_at = ? WHERE id = ? AND applied_at IS NULL', at, id)
@@ -1960,7 +2577,10 @@ export class BotStore {
   }
 
   deleteMessages(botId: string): void {
-    this.run('DELETE FROM bot_messages WHERE bot_id = ?', botId)
+    this.db.transaction(() => {
+      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'cursor:telling-legacy:*'", botId)
+      this.run('DELETE FROM bot_messages WHERE bot_id = ?', botId)
+    })
   }
 
   // -- Schedules (bot_schedules: where earlier builds kept them; the shared store holds them now) -------

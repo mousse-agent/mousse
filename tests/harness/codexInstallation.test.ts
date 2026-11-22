@@ -63,7 +63,7 @@ describe('Codex release table', () => {
     expect(Object.keys(CODEX_RELEASES).sort()).toEqual(['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-arm64', 'win32-x64'])
     for (const release of Object.values(CODEX_RELEASES)) {
       expect(release.sha256).toMatch(/^[0-9a-f]{64}$/)
-      expect(release.url).toBe(`https://github.com/openai/codex/releases/download/rust-v0.162.1/codex-package-${release.target}.tar.gz`)
+      expect(release.url).toBe(`https://github.com/openai/codex/releases/download/rust-v${CODEX_MANAGED_VERSION}/codex-package-${release.target}.tar.gz`)
     }
     expect(codexReleaseFor('win32', 'x64')?.windows).toBe(true)
     expect(codexReleaseFor('linux', 'x64')?.target).toBe('x86_64-unknown-linux-musl')
@@ -133,12 +133,12 @@ describe('CodexInstallation', () => {
 
   it('fails when the manifest names another version', async () => {
     const archive = tarGzOf(packageEntries({ manifest: manifest({ version: '0.162.0' }) }))
-    await expect(installation(archive).install(() => {})).rejects.toThrow(/not version 0\.162\.1/)
+    await expect(installation(archive).install(() => {})).rejects.toThrow(new RegExp(`not version ${CODEX_MANAGED_VERSION.replaceAll('.', '[.]')}`))
   })
 
   it('fails when codex --version prints another version', async () => {
     const archive = tarGzOf(packageEntries())
-    await expect(installation(archive, { runVersion: async () => 'codex-cli 0.163.0\n' }).install(() => {})).rejects.toThrow(/instead of codex-cli 0\.162\.1/)
+    await expect(installation(archive, { runVersion: async () => 'codex-cli 0.163.0\n' }).install(() => {})).rejects.toThrow(new RegExp(`instead of codex-cli ${CODEX_MANAGED_VERSION.replaceAll('.', '[.]')}`))
     expect(existsSync(join(codexDir(), CODEX_MANAGED_VERSION))).toBe(false)
   })
 

@@ -129,3 +129,32 @@ describe('answers to the agent\'s questions', () => {
     expect(ui.find((each) => each.id === 'qa')?.role).toBe('user')
   })
 })
+
+describe('answers to a question the agent asked without waiting (issue #1372)', () => {
+  const answered = { delegationId: '', childThreadId: 't1', title: null, runStatus: 'answered', fullyShown: true, event: 'answer' as const, requestId: 'q_1', answers: [{ prompt: 'Which colour for the badge?', chosen: ['Green'] }] }
+  const result = { delegationId: 'd1', childThreadId: 'child-1', title: 'Icons', runStatus: 'completed', fullyShown: true }
+  /**
+   * The answers row is recorded when the person answers (`qa`); the agent gets them later in the message that delivers
+   * them (`wake`: a steer, or a turn of its own).
+   */
+  const delivered = (notice: NonNullable<ChatMessage['subagentNotice']>): ChatMessage[] => [
+    message('u1', 'user', 'Build the badge.', 0, { turnId: 'run-1' }),
+    message('a1', 'assistant', 'Asked about the colour; building the rest.', 1),
+    message('qa', 'user', 'Q: …\nA: …', 2, { questionAnswers: answered.answers }),
+    message('wake', 'user', 'The user answered your open question q_1: …', 3, { subagentNotice: notice, turnId: 'run-2' }),
+    message('a2', 'assistant', 'Green it is.', 4)
+  ]
+
+  it('show once, as the answers row recorded when they were given; the delivering message shows nothing', () => {
+    render(delivered([answered]))
+    expect(host.querySelectorAll('.an-answered-questions')).toHaveLength(1)
+    expect(rowOf()?.textContent).toContain('Green')
+    expect(host.textContent).not.toContain('answered your open question')
+    expect(mousseToUIMessages(delivered([answered])).some((each) => each.id === 'wake')).toBe(false)
+  })
+
+  it('delivered with a subagent result: the result shows as usual, without the answers again', () => {
+    const wake = mousseToUIMessages(delivered([answered, result])).find((each) => each.id === 'wake')!
+    expect((wake.metadata as { subagentNotice?: unknown }).subagentNotice).toEqual([result])
+  })
+})

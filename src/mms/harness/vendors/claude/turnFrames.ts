@@ -10,6 +10,7 @@ import { recordSubagentCall, toolResultText } from '../../../../shared/subagentT
 import { claudeActivityComplete, claudeActivityStart, claudeCallContext, type ClaudeCallContext } from './claudeActivity'
 import type { ClaudeMetricsCollector } from './metrics'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
+import { retryCause, type ProviderRetries } from '../../../../shared/providerRetry'
 
 /**
  * Launch arguments every turn adds. Claude Code sends a headless session (as the SDK runs it) no
@@ -35,7 +36,7 @@ export interface TurnFrameSink {
    * Claude Code tries a failed request of this turn again (`api_retry`). `noResponse`: the API sent no headers in
    * time; that retry has its own small cap, so `maxAttempts` is left out.
    */
-  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean; cause?: string }) => void
   /**
    * Claude Code compacts the session inside the turn: `start` at its `compacting` status, `complete` at its compact
    * boundary (the conversation before it is now a summary).
@@ -48,6 +49,9 @@ export interface TurnFrameSink {
  * session id. Both ways of running a turn (a one-shot query and a live one) feed their frames here;
  * what a result means stays with the caller.
  */
+/** The model Claude Code names on a message it made up itself, with no request to the model. */
+const SYNTHETIC_MODEL = '<synthetic>'
+
 export class TurnFrames {
   text = ''
   thinking = ''
@@ -80,12 +84,23 @@ export class TurnFrames {
   private readonly inputComplete = new Set<string>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
+  /**
+   * What Claude Code wrote as the model's words without asking the model (`<synthetic>` assistant messages, such as the
+   * "No response requested." it writes on resuming an interrupted session). A result that only repeats one of them is
+   * not the model's answer (`resultText`).
+   */
+  private readonly syntheticTexts = new Set<string>()
   /** The turn was stopped (the caller's cancel): a call a Stop's aborted result drops reads as stopped. */
   stopped: () => boolean = () => false
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
   readonly rateLimits = new RejectedWindows()
   /** A frame of this turn arrived. */
   private heard = false
+  /**
+   * The retries Claude Code made of the turn's current request (`api_retry`), until the provider answers it: a result
+   * that fails after them failed after that many retries.
+   */
+  retries: ProviderRetries | undefined
 
   constructor(
     private readonly sink: TurnFrameSink,
@@ -124,11 +139,15 @@ export class TurnFrames {
   private observeRetry(frame: Record<string, unknown>): void {
     if (frame.parent_tool_use_id != null || this.subagentOpen()) return
     const noResponse = frame.no_response !== undefined && frame.no_response !== null
+    const attempt = typeof frame.attempt === 'number' && frame.attempt >= 1 ? Math.floor(frame.attempt) : 1
+    const maxAttempts = typeof frame.max_retries === 'number' && !noResponse ? frame.max_retries : undefined
+    this.retries = { attempt, ...(maxAttempts ? { max: maxAttempts } : {}) }
     this.sink.onRetry?.({
-      attempt: typeof frame.attempt === 'number' ? frame.attempt : 1,
-      ...(typeof frame.max_retries === 'number' && !noResponse ? { maxAttempts: frame.max_retries } : {}),
+      attempt,
+      ...(maxAttempts !== undefined ? { maxAttempts } : {}),
       ...(typeof frame.retry_delay_ms === 'number' ? { delayMs: frame.retry_delay_ms } : {}),
-      ...(noResponse ? { noResponse: true } : {})
+      ...(noResponse ? { noResponse: true } : {}),
+      cause: noResponse ? 'no answer yet' : retryCause(typeof frame.error_status === 'number' ? frame.error_status : null, typeof frame.error === 'string' ? frame.error : undefined)
     })
   }
 
@@ -162,12 +181,14 @@ export class TurnFrames {
   }
 
   /**
-   * The turn's own calls it waits for (Send now stops them): open root calls that are not subagents, or subagents that
-   * could not be moved, with the task each runs as when Claude Code named one.
+   * The turn's own calls a person's steer stops: open root calls that are not subagents, or subagents that could not be
+   * moved, with the task each runs as when Claude Code named one. A call whose input still streams is left out: the
+   * steer's push alone drops it before it runs (spike S1), and an interrupt would also stop background work.
    */
   foregroundCalls(): Array<{ callId: string; taskId?: string; toolName: string }> {
     return [...this.tools.keys()]
-      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)))
+      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)) &&
+        (this.inputComplete.has(callId) || this.taskIds.has(callId)))
       .map((callId) => {
         const taskId = this.taskIds.get(callId)
         const toolName = this.tools.get(callId)!
@@ -184,6 +205,14 @@ export class TurnFrames {
   breakParagraph(): void {
     if (this.text) this.text += '\n\n'
     this.segmentStart = this.text.length
+  }
+
+  /**
+   * A result's text when it may fill in a segment that streamed nothing: never one that only repeats a message Claude
+   * Code made up itself, which would reach the reader as the model's answer.
+   */
+  resultText(result: string): string {
+    return this.syntheticTexts.has(result.trim()) ? '' : result
   }
 
   /** The turn streamed no text of its own since the last break. */
@@ -204,6 +233,8 @@ export class TurnFrames {
       this.flushNextMessage()
     }
     this.waiting()
+    // The provider answered: the retries before were of a request that went through.
+    if (message.type === 'stream_event' && !message.parent_tool_use_id) this.retries = undefined
     if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
     if (message.type === 'system') {
       const subtype = (message as { subtype?: unknown }).subtype
@@ -249,6 +280,10 @@ export class TurnFrames {
           ...(parent ? { parentCallId: parent } : {})
         })
       }
+    }
+    if (message.type === 'assistant' && (message.message as { model?: unknown }).model === SYNTHETIC_MODEL && Array.isArray(message.message.content)) {
+      const said = message.message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('').trim()
+      if (said) this.syntheticTexts.add(said)
     }
     // A tool_use block's arguments are complete only in the assistant message that holds it.
     if (message.type === 'assistant' && Array.isArray(message.message.content))

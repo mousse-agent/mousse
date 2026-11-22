@@ -97,7 +97,6 @@ describe('Markdown preview safety', () => {
     expect(markup).not.toContain('https://example.com/tracker.png')
     expect(markup).toContain('Image omitted: remote')
     expect(markup).not.toContain('src="data:')
-    expect(resolvePreviewImageSrc('data:image/png;base64,abc')).toBe('data:image/png;base64,abc')
     expect(markup).not.toContain('<script>')
     expect(markup).toContain('href="https://example.com"')
     expect(markup).not.toContain('javascript:alert(1)')

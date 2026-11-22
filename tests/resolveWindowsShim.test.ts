@@ -1,11 +1,14 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { cliNames, instanceEnv, resolveBinary } from '../src/mms/harness/env'
+import { findCodexBinary } from '../src/mms/harness/vendors/codex/CodexProviderService'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveWindowsShim, shimTarget } from '../src/mms/harness/resolveWindowsShim'
 
 const dirs: string[] = []
 afterEach(() => {
+  vi.unstubAllEnvs()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -86,6 +89,32 @@ function codexInstall(root: string): { shim: string; exe: string } {
   file(join(root, 'codex'), npmSh('node_modules/@openai/codex/bin/codex.js'))
   return { shim, exe }
 }
+
+it('finds the Windows standalone Codex install with an older daemon PATH and still prefers a PATH install', () => {
+  const root = prefix()
+  const installed = program(join(root, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe'))
+  chmodSync(installed, 0o755)
+  vi.stubEnv('HOME', root)
+  vi.stubEnv('USERPROFILE', root)
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+  try {
+    const base = { Path: join(root, 'old-path'), LocalAppData: root }
+    const probe = (env: NodeJS.ProcessEnv) => resolveBinary({
+      names: cliNames('codex'),
+      env: instanceEnv({ driver: 'codex', instanceId: 'codex', configRevision: 0, searchPath: [], base: env })
+    }).launch?.command
+    expect(probe(base)).toBe(installed)
+    expect(findCodexBinary(base)).toBe(installed)
+
+    const preferred = program(join(root, 'old-path', 'codex.exe'))
+    chmodSync(preferred, 0o755)
+    expect(probe(base)).toBe(preferred)
+    expect(findCodexBinary(base)).toBe(preferred)
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+  }
+})
 
 describe('Windows shim resolution', () => {
   it('finds the shim target, skipping the node runtime it may name', () => {

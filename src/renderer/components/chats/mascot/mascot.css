@@ -1,0 +1,8 @@
+.mascot { position: relative; display: inline-grid; place-items: center; margin: 0 auto 18px; padding: 0; border: 0; background: none; cursor: pointer; border-radius: 50%; -webkit-tap-highlight-color: transparent; }
+.mascot::before { content: ''; position: absolute; inset: 62% 12% -4%; border-radius: 50%; background: radial-gradient(closest-side, rgba(var(--accent-rgb), 0.28), transparent); pointer-events: none; }
+.mascot:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
+/* Two layers: the body floats without ever restarting; the hop (Mascot.tsx) runs on the layer inside it. */
+.mascot-body { position: relative; display: block; animation: mascot-float 4.2s steps(32) infinite; will-change: transform; }
+.mascot-hopper { display: block; transform-origin: 50% 90%; will-change: transform; }
+@keyframes mascot-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+@media (prefers-reduced-motion: reduce) { .mascot-body { animation: none; } }

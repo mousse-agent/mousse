@@ -2,7 +2,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createProcessFailureHandlers } from '../src/cli/daemonDiagnostics'
+import { createProcessFailureHandlers, DAEMON_LOG_RELATIVE_PATH, installDaemonDiagnostics } from '../src/cli/daemonDiagnostics'
+import { normalizeAppError } from '../src/shared/errors'
 import { logError, logWarn, setDiagSink } from '../src/mms/log/diag'
 import { RotatingFileLog } from '../src/mms/log/rotatingFileLog'
 
@@ -99,6 +100,19 @@ describe('process failure handlers', () => {
     expect(deps.flushSync).toHaveBeenCalled()
   })
 
+  it('keeps running when a child program\'s pipe fails to start reading, and only then', async () => {
+    const pipeFailure = (stack: string) => Object.assign(new Error('read ENOTCONN'), { code: 'ENOTCONN', syscall: 'read', stack })
+    const spawnStack = 'Error: read ENOTCONN\n    at tryReadStart (node:net:776:20)\n    at new Socket (node:net:501:12)\n    at createSocket (node:internal/child_process:337:14)\n    at ChildProcess.spawn (node:internal/child_process:475:23)\n    at execFile (node:child_process:349:17)'
+    const { lines, deps, handlers } = setup()
+    handlers.onUncaughtException(pipeFailure(spawnStack))
+    expect(lines[0]).toContain('kept running')
+    expect(deps.shutdown).not.toHaveBeenCalled()
+    expect(deps.exit).not.toHaveBeenCalled()
+    // The same code from a socket the service owns is still fatal.
+    handlers.onUncaughtException(pipeFailure('Error: read ENOTCONN\n    at tryReadStart (node:net:776:20)\n    at Server.onconnection (node:net:2000:10)'))
+    await vi.waitFor(() => expect(deps.exit).toHaveBeenCalledWith(1))
+  })
+
   it('still exits when shutdown hangs', async () => {
     const { deps, handlers } = setup()
     deps.shutdown.mockImplementation(() => new Promise<void>(() => undefined))
@@ -112,5 +126,28 @@ describe('process failure handlers', () => {
     handlers.onUncaughtException(new Error('b'))
     await vi.waitFor(() => expect(deps.exit).toHaveBeenCalledTimes(1))
     expect(deps.shutdown).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('error references in daemon.log', () => {
+  it('a generic failure the service answers with "Reference: <id>" leaves that id, its method and its redacted cause there', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const homeDir = tmp()
+    const diagnostics = installDaemonDiagnostics({ homeDir, shutdown: async () => undefined })
+    const secret = 'ghp_0123456789abcdefghijABCDEFGHIJ'
+    let message: string
+    try {
+      message = normalizeAppError(new Error(`git push failed for https://bot:${secret}@example.com/repo.git`), 'handler_error', 'net.link.make').message
+    } finally {
+      diagnostics.dispose()
+    }
+    const reference = /Reference: (\S+)$/.exec(message)?.[1]
+    const line = readFileSync(join(homeDir, DAEMON_LOG_RELATIVE_PATH), 'utf8').split('\n').find((entry) => entry.includes(`${reference}`))
+    expect(line).toContain('"operation":"net.link.make"')
+    expect(line).toContain('git push failed')
+    expect(line).not.toContain(secret)
+    // Once the service's diagnostics are disposed, nothing more is written for it.
+    normalizeAppError(new Error('after dispose'))
+    expect(readFileSync(join(homeDir, DAEMON_LOG_RELATIVE_PATH), 'utf8')).not.toContain('after dispose')
   })
 })

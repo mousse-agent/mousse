@@ -12,7 +12,7 @@ import { GROK_PRESET, GROK_TESTED_VERSION } from '../../src/mms/harness/acp/pres
 import { COMPATIBILITY, CONTAINMENT_EVIDENCE, compatibilityFields, knownProblemOf, parseVersionRange, type CompatibilityKey } from '../../src/mms/harness/compatibility'
 import { compareVersions } from '../../src/mms/harness/driver'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
-import { ANTIGRAVITY_VERSION, antigravityDriver } from '../../src/mms/harness/drivers/antigravity'
+import { antigravityDriver } from '../../src/mms/harness/drivers/antigravity'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { grokDriver } from '../../src/mms/harness/drivers/grok'
@@ -96,7 +96,6 @@ describe('the compatibility table', () => {
 
   it('the versions Mousse installs and its containment evidence are inside the tested ranges', () => {
     expect(inside(GROK_TESTED_VERSION, COMPATIBILITY.grok.tested!)).toBe(true)
-    expect(inside(ANTIGRAVITY_VERSION, COMPATIBILITY.antigravity.tested!)).toBe(true)
     for (const record of CONTAINMENT_EVIDENCE) {
       const tested = COMPATIBILITY[record.driver as CompatibilityKey].tested
       expect(tested && inside(record.cliVersion, tested), `${record.driver} ${record.cliVersion} (${record.platform})`).toBe(true)

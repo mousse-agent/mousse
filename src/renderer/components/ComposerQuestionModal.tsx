@@ -94,6 +94,12 @@ function typedFor(customs: Record<string, string>, questionId: string): string {
 /** The card's button that skips the questions and sends the composer's message as usual. */
 export const SKIP_QUESTIONS_AND_SEND_LABEL = 'Skip questions and send'
 
+/** The same button under a question asked without waiting: the message goes as usual, and the question stays open. */
+export const SEND_AS_MESSAGE_LABEL = 'Send as a message'
+
+/** Under a question the agent asked without waiting: answering is not urgent, and the agent is not stuck. */
+export const KEEPS_WORKING_NOTE = 'The agent keeps working while you decide.'
+
 /**
  * The card's state after a message from the composer answers the question at `step`, as if typed into its "Other…"
  * field. Images sent with it are that question's own and replace the ones an earlier message gave it.
@@ -157,6 +163,14 @@ export function approvalNotes(approval: PendingApprovalInfo): string[] {
     notes.push('Sending a message denies the pending approvals with your message as the reason.')
   }
   return notes
+}
+
+/**
+ * Whether answering grants or refuses something (an approval request, or any option that means allow or reject): then
+ * the theme pauses while it shows, so it cannot relabel the choices. A plain question from the agent keeps the theme.
+ */
+export function grantsAccess(pending: PendingUserQuestions): boolean {
+  return Boolean(pending.approval) || pending.questions.some((question) => question.options.some((option) => option.decision !== undefined))
 }
 
 /** The dialog's label: "Question", or how many there are ("3 questions"). The dots show the position. */
@@ -513,6 +527,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndS
           aria-label={total > 1 ? `Question ${clampedStep + 1} of ${total}` : undefined}
         >
           <p className={`composer-question-prompt${pending.approval ? ' composer-question-prompt--approval' : ''}`}>{active.prompt}</p>
+          {pending.wait === false && <p className="composer-question-reason">{KEEPS_WORKING_NOTE}</p>}
           {pending.approval && approvalNotes(pending.approval).map((note) => (
             <p key={note} className="composer-question-reason">{note}</p>
           ))}
@@ -553,14 +568,14 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndS
           )}
         </div>
       </div>
-      <div className="composer-question-modal-footer" data-mousse-decision="">
+      <div className="composer-question-modal-footer" data-mousse-decision={grantsAccess(pending) ? '' : undefined}>
         <span className="composer-question-footer-start">
           <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onDismiss() }}>
             Skip
           </button>
           {onSkipAndSend && (
             <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onSkipAndSend() }}>
-              {SKIP_QUESTIONS_AND_SEND_LABEL}
+              {pending.wait === false ? SEND_AS_MESSAGE_LABEL : SKIP_QUESTIONS_AND_SEND_LABEL}
             </button>
           )}
         </span>

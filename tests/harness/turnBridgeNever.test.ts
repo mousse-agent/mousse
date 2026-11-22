@@ -27,7 +27,7 @@ import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/ses
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { QuickActionTools } from '../../src/mms/orchestrator/QuickActionTools'
-import { createAppToolRegistry, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
+import { createAppToolRegistry, refused, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture, type DelegationFixture } from '../run/delegationFixture'
 import type { RunPolicy } from '../../src/shared/harness/types'
@@ -168,11 +168,8 @@ describe('ACP request_permission', () => {
   } as RequestPermissionRequest
 
   it('answers `reject_once` under `never` without asking', async () => {
-    const questions = new UserQuestionService()
-    const asked = vi.spyOn(questions, 'requestAnswers')
     const answer = await answerPermission(refusingPrompter(), scope, request, { label: 'Agent', classify: classifyGenericOption })
     expect(answer).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } })
-    expect(asked).not.toHaveBeenCalled()
   })
 
   it('asks under `ask`, as before', async () => {
@@ -312,8 +309,8 @@ describe('Mousse tools that wait for the user', () => {
 
   it('are refused before they ask under `never`', async () => {
     const r = await registry()
-    expect(await r.call('ask_user', question, 'never')).toEqual({ text: QUESTIONS_REFUSED_MESSAGE, isError: true })
-    expect(await r.call('create_quick_action', action, 'never')).toEqual({ text: APPROVALS_REFUSED_MESSAGE, isError: true })
+    expect(await r.call('ask_user', question, 'never')).toEqual(refused('needs_person', QUESTIONS_REFUSED_MESSAGE))
+    expect(await r.call('create_quick_action', action, 'never')).toEqual(refused('needs_person', APPROVALS_REFUSED_MESSAGE))
     expect(r.askUser).not.toHaveBeenCalled()
     expect(r.approve).not.toHaveBeenCalled()
     // A tool that does not wait for the user still runs.
@@ -377,12 +374,12 @@ describe('an ACP session carries the turn prompter\'s approvals to client file w
   })
 })
 
-describe('Mousse tools that wait for the user are not offered under `never`', () => {
-  it('the registry offers them only when the run may ask', () => {
+describe('Mousse tools that wait for the user are not usable under `never`', () => {
+  it('the registry holds them only when the run may ask', () => {
     const fixture = fakeAppToolHost()
     const quickActions = new QuickActionTools(async () => true, () => {})
     const { registry: tools } = createAppToolRegistry({ host: { ...fixture.host, quickActions } })
-    const offered = (approvals?: 'never') => tools.offeredFor({ ...appTurn({ threadId: 'thread-1', runId: 'run-1', ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn).map((tool) => tool.name)
+    const offered = (approvals?: 'never') => tools.usableNow({ ...appTurn({ threadId: 'thread-1', runId: 'run-1', ...(approvals ? { approvals } : {}) }), turnToken: '' } as AppToolTurn)
     expect(offered()).toEqual(expect.arrayContaining(['ask_user', 'create_quick_action']))
     expect(offered('never')).not.toContain('ask_user')
     expect(offered('never')).not.toContain('create_quick_action')

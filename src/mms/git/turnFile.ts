@@ -3,7 +3,7 @@ import { basename, dirname, isAbsolute, join, posix, relative, sep, win32 } from
 import type { ReviewFileResult } from '../../shared/review'
 import type { TurnFileResult } from '../../shared/turnFiles'
 import { waitForFolderAccess } from '../files/folderAccess'
-import { checkRepoPrograms, guardedSimpleGit } from './repoPrograms'
+import { checkRepoPrograms, guardedGit } from './repoPrograms'
 import { readFileVersions } from './reviewDiff'
 
 /**
@@ -55,7 +55,7 @@ export async function locateTurnFile(path: string): Promise<TurnFileResult> {
 async function changedVersion(path: string): Promise<ReviewFileResult | null> {
   const folder = dirname(path)
   await checkRepoPrograms(folder)
-  const top = (await guardedSimpleGit(folder).raw(['rev-parse', '--show-toplevel'])).trim()
+  const top = (await guardedGit(folder).raw(['rev-parse', '--show-toplevel'])).trim()
   if (!top) return null
   // Both sides through their real paths: a link in either (macOS's /tmp, a Windows junction) must not move the file outside.
   const root = await realpath(top)
@@ -63,7 +63,7 @@ async function changedVersion(path: string): Promise<ReviewFileResult | null> {
   if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) return null
   const gitPath = relativePath.split(sep).join('/')
   if (root !== top) await checkRepoPrograms(root)
-  const git = guardedSimpleGit(root)
+  const git = guardedGit(root)
   // `!!` is an ignored file, nothing at all is a file that matches the last commit: neither has a change to show.
   const status = await git.raw(['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=all', '--', `:(literal)${gitPath}`])
   if (!status || status.startsWith('!!')) return null

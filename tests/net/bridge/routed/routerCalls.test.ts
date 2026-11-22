@@ -2,11 +2,17 @@
  * What the router does with a call on its way: refusals that reach the window unchanged, the words for
  * a computer that refused or is older, a lost reply, big replies and queue changes.
  */
-import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { NetError, type NodeId } from '../../../../src/shared/net'
 import { RoutedClient } from '../../../../src/mms/bridge/routed/RoutedClient'
 import { FIRST_SEND_BINDING_CAPABILITY } from '../../../../src/mms/protocol/types'
+import { atomicWriteJsonSync } from '../../../../src/mms/data/AtomicFs'
+import { ThreadWorkspaceManager } from '../../../../src/mms/workspace/ThreadWorkspaceManager'
+import * as worktreeCheckout from '../../../../src/mms/worktree/worktreeCheckout'
+import type { GitStatusSnapshot } from '../../../../src/shared/types'
 import { cleanupAll, linked } from './routerFixture'
 
 afterAll(cleanupAll)
@@ -57,8 +63,128 @@ const withClient = async <T>(client: RoutedClient, run: () => Promise<T>): Promi
   }
 }
 
+it('reports provisioning from the owner before the checkout exists', async () => {
+  const repo = join(t.owner.getProfileHomeDir(), 'routed-provisioning')
+  mkdirSync(repo)
+  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo })
+  execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-qm', 'base'], { cwd: repo })
+  const project = t.owner.projects.openProject(repo)
+  const thread = t.owner.threads.createThread('Provisioning Git', project.id, repo, { started: true, worktreeEnabled: true })
+  const manager = new ThreadWorkspaceManager(t.owner.threads.getThreadDir(thread.id))
+  const threadId = t.qualified(thread.id)
+  const beforeCheckout = Promise.withResolvers<string>()
+  const gate = Promise.withResolvers<void>()
+  // A new thread's worktree is registered first (`git worktree add --no-checkout`) and its files written after.
+  const registerWorktree = worktreeCheckout.registerWorktree
+  const hold = vi.spyOn(worktreeCheckout, 'registerWorktree').mockImplementationOnce(async (options) => {
+    beforeCheckout.resolve(options.add[0]!)
+    await gate.promise
+    return registerWorktree(options)
+  })
+  const provisioning = manager.provision(thread.id, 'main', repo)
+  try {
+    const path = await Promise.race([beforeCheckout.promise, provisioning.then(() => { throw new Error('Provisioning did not wait before checkout creation') })])
+    expect(existsSync(path)).toBe(false)
+    const status = await t.dispatch('workspace.getStatus', { threadId })
+    expect(status.metadata).toMatchObject({ lifecycle: 'provisioning' })
+    expect(status.execution).toMatchObject({ lifecycle: 'provisioning' })
+  } finally {
+    gate.resolve()
+    try { await provisioning } finally { hold.mockRestore() }
+  }
+  const ready = await t.dispatch('workspace.getStatus', { threadId })
+  expect(ready.execution).toMatchObject({ lifecycle: 'ready', projectPath: (await provisioning).worktreePath })
+}, 60_000)
+
+it('retries a held status on the owner and rejects an in-flight read from before a same-path rebuild', async () => {
+  const repo = join(t.owner.getProfileHomeDir(), 'routed-git-retry')
+  mkdirSync(repo)
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' })
+  git(repo, 'init', '-qb', 'main')
+  git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-qm', 'base')
+  const project = t.owner.projects.openProject(repo)
+  const projectFolder = t.owner.threads.createThread('Project-folder Git', project.id, repo, { started: true, worktreeEnabled: false })
+  const projectWorkspace = await t.dispatch('workspace.getStatus', { threadId: t.qualified(projectFolder.id) })
+  expect(projectWorkspace.metadata).toBeUndefined()
+  expect(projectWorkspace.execution).toMatchObject({ placement: 'project-folder', projectPath: repo })
+
+  const thread = t.owner.threads.createThread('Routed Git', project.id, repo, { started: true, worktreeEnabled: true })
+  const directory = t.owner.threads.getThreadDir(thread.id)
+  const workspace = await new ThreadWorkspaceManager(directory).provision(thread.id, 'main', repo)
+  const threadId = t.qualified(thread.id)
+  const lookedUp = await t.dispatch('workspace.getStatus', { threadId })
+  expect(lookedUp.execution).toMatchObject({ projectPath: workspace.worktreePath, generation: workspace.generation ?? 0 })
+  const scope = { threadId, workspaceGeneration: lookedUp.execution.generation as number }
+  const service = t.owner.gitService as unknown as { readStatus(path: string): Promise<GitStatusSnapshot> }
+  const before = await service.readStatus(workspace.worktreePath)
+
+  const held = () => {
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const read = vi.spyOn(service, 'readStatus').mockImplementationOnce(async () => {
+      entered()
+      await gate
+      return before
+    })
+    const pending = t.dispatch('git.status', scope)
+    return {
+      started: Promise.race([started, pending.then(() => { throw new Error('The owner did not hold the read') })]),
+      pending,
+      release,
+      async close() {
+        release()
+        await pending.catch(() => undefined)
+        read.mockRestore()
+      }
+    }
+  }
+
+  const first = held()
+  try {
+    await first.started
+    writeFileSync(join(workspace.worktreePath, 'new-file'), 'present on Retry')
+    const retried = await t.dispatch('git.status', { ...scope, attempt: 1 })
+    expect(retried.status.changes).toContainEqual(expect.objectContaining({ path: 'new-file' }))
+  } finally {
+    await first.close()
+  }
+
+  const second = held()
+  try {
+    await second.started
+    git(workspace.worktreePath, 'checkout', '-qb', 'rebuilt')
+    const generation = scope.workspaceGeneration + 1
+    atomicWriteJsonSync(join(directory, 'workspace.json'), { ...workspace, generation })
+    second.release()
+    expect(await t.refused(second.pending)).toMatchObject({ code: 'workspace_changed', details: { threadId } })
+    const refreshed = await t.dispatch('workspace.getStatus', { threadId })
+    expect(refreshed.execution).toMatchObject({ projectPath: workspace.worktreePath, generation })
+    expect((await t.dispatch('git.status', { threadId, workspaceGeneration: generation })).status.branch).toBe('rebuilt')
+  } finally {
+    await second.close()
+  }
+
+  const transmitted: unknown[] = []
+  const older = clientWith((real) => ({
+    rpc: async (method: string, params: unknown, options: unknown) => {
+      if (method === 'routed.git.status') transmitted.push(params)
+      const answer = await real.rpc(method, params, options)
+      if (method !== 'net.info') return answer
+      const info = answer as { routed: Record<string, number> }
+      return { ...info, routed: { ...info.routed, 'git.status': 1 } }
+    }
+  }))
+  await withClient(older, async () => {
+    expect((await t.dispatch('git.status', { ...scope, attempt: 2 })).status.branch).toBe('rebuilt')
+  })
+  expect(transmitted).toHaveLength(1)
+  expect(JSON.stringify(transmitted[0])).not.toMatch(/workspaceGeneration|attempt/)
+}, 60_000)
+
 describe('refusals', () => {
-  it('reach the window as the owner’s own error, with its code and details', async () => {
+  it('reach the window as the ownerâ€™s own error, with its code and details', async () => {
     const thread = t.thread()
     const id = t.qualified(thread.id)
     const first = await t.dispatch('queue.enqueue', { threadId: id, content: 'one', requestId: 'q1' })
@@ -177,10 +303,18 @@ describe('refusals', () => {
     expect(page.messages.map((row: { id: string }) => row.id)).toEqual(['big'])
     expect(page.messages[0].content).toHaveLength(200 * 1024)
   }, 60_000)
+
+  it('reads a durable answer over a replyâ€™s size, which the owner sends as an artifact', async () => {
+    const thread = t.thread()
+    // The answer holds the task twice (the task and the list), so it is larger than a reply.
+    const description = 'd'.repeat(40 * 1024)
+    const created = await t.dispatch('tasks.create', { threadId: t.qualified(thread.id), description })
+    expect(JSON.stringify(created)).toContain(description)
+  }, 60_000)
 })
 
 describe('steer and Stop', () => {
-  it('steer a turn the owner’s own window started, and stop it, from this computer', async () => {
+  it('steer a turn the ownerâ€™s own window started, and stop it, from this computer', async () => {
     const thread = t.thread()
     const id = t.qualified(thread.id)
     const steer = vi
@@ -237,7 +371,7 @@ describe('Git progress', () => {
 })
 
 describe('what a computer refused, in words', () => {
-  it('says why: the owner’s switch, a block, and the grant', async () => {
+  it('says why: the ownerâ€™s switch, a block, and the grant', async () => {
     const thread = t.thread()
     const id = t.qualified(thread.id)
     await t.owner.net.request('bridge.workOnThreads', { enabled: false })
@@ -251,6 +385,14 @@ describe('what a computer refused, in words', () => {
     expect(blocked).toMatchObject({ code: 'computer_forbidden', details: { reason: 'blocked' } })
     expect(blocked.message).toMatch(/refused this device\.$/)
     await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: false })
+    await expect(t.dispatch('threads.get', { threadId: id })).resolves.toBeDefined()
+
+    // Disconnected on the owner, the caller keeps its session with it (the keeper) and its calls are refused.
+    await t.owner.net.request('bridge.disconnect', { node: t.callerNode })
+    const disconnected = await t.refused(t.dispatch('threads.get', { threadId: id }))
+    expect(disconnected).toMatchObject({ code: 'computer_forbidden', details: { reason: 'not_connected' } })
+    expect(disconnected.message).toMatch(/hasn't connected this computer\.$/)
+    await t.owner.net.request('bridge.connect', { node: t.callerNode })
     await expect(t.dispatch('threads.get', { threadId: id })).resolves.toBeDefined()
   }, 60_000)
 

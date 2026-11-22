@@ -3,7 +3,8 @@
  * in the lifecycle store, and the model and workspace it was started on, which later turns use
  * instead of re-resolving them from today's settings or the parent's session.
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -16,6 +17,8 @@ class RecordingAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
   readonly capabilities = PI_TEST_CAPABILITIES
   readonly turns: Array<{ threadId: string; model: string; provider: string; cwd: string | null }> = []
+  /** What a turn does in its folder before it answers, as a subagent that edits would. */
+  onTurn?: (input: TurnInput) => void
 
   configured(): boolean {
     return true
@@ -23,6 +26,7 @@ class RecordingAdapter implements ProviderAdapter {
 
   async startTurn(input: TurnInput, sink: TurnSink, _ctl: TurnControl, _host: AdapterHost): Promise<TurnResult> {
     this.turns.push({ threadId: input.threadId, model: input.model, provider: input.llmProvider, cwd: input.cwd })
+    this.onTurn?.(input)
     sink.providerRef({ provider: input.llmProvider, model: input.model })
     const text = `answer to ${input.prompt}`
     sink.text({ phase: 'complete', content: text, contentIndex: 0 })
@@ -139,7 +143,7 @@ describe('delegated child creation', () => {
     mkdirSync(elsewhere)
     const { parent, parentRunId } = await parentWithRun(d, { projectDir, explicitModel: true })
     const accepted = await delegate(d, parent.id, parentRunId, { role: 'research', workspace: 'shared' })
-    expect(d.store.getThread(accepted.childThreadId)?.workspaceBinding).toEqual({ policy: 'shared', sharedPath: projectDir })
+    expect(d.store.getThread(accepted.childThreadId)?.workspaceBinding).toEqual({ policy: 'shared', sharedPath: projectDir, access: 'write' })
     await waitFor(() => d.engine.getRun(accepted.childRunId)?.status === 'completed', 'the child run')
     expect(adapter.turns.at(-1)?.cwd).toBe(projectDir)
 
@@ -150,6 +154,44 @@ describe('delegated child creation', () => {
     evictSession(d, accepted.childThreadId)
     await d.orch.send('Read it again', false, { threadId: accepted.childThreadId, clientRequestId: 'child-2' })
     expect(adapter.turns.at(-1)).toMatchObject({ threadId: accepted.childThreadId, cwd: projectDir })
+  })
+
+  it("a subagent that edits its parent's folder is reported with what it changed there, between snapshots of its own turns", async () => {
+    const { d, adapter, home: dir } = setup()
+    const projectDir = join(dir, 'project')
+    mkdirSync(projectDir)
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: projectDir, encoding: 'utf8' })
+    git('init', '-q')
+    writeFileSync(join(projectDir, 'README.md'), 'start\n')
+    git('add', '.')
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'start')
+    const { parent, parentRunId } = await parentWithRun(d, { projectDir, explicitModel: true })
+    adapter.onTurn = (input) => {
+      if (input.threadId !== parent.id && input.cwd) writeFileSync(join(input.cwd, 'notes.txt'), 'written by the subagent\n')
+    }
+    const accepted = await delegate(d, parent.id, parentRunId, { workspace: 'shared' })
+    await waitFor(() => d.engine.delegations.get(accepted.delegationId)?.status === 'result_available', 'the delegated task')
+    // It worked where its parent works (the parent's worktree of the project).
+    const parentCwd = adapter.turns.find((turn) => turn.threadId === parent.id)!.cwd!
+    expect(adapter.turns.at(-1)).toMatchObject({ threadId: accepted.childThreadId, cwd: parentCwd })
+    const report = (d.orch as unknown as { delegationResultReport: (delegation: unknown) => { baseSha: string; resultSha: string; changedFiles: string[] } | undefined })
+      .delegationResultReport(d.engine.delegations.get(accepted.delegationId))
+    expect(report).toBeDefined()
+    expect(report!.baseSha).not.toBe(report!.resultSha)
+    expect(report!.changedFiles).toEqual(['notes.txt'])
+    // The person's own index is untouched: the snapshots never stage anything.
+    expect(execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: parentCwd, encoding: 'utf8' })).toBe('')
+  })
+
+  it('a read-only subagent with no folder to be held in never runs with every tool', async () => {
+    const { d, adapter } = setup()
+    const { parent, parentRunId } = await parentWithRun(d, { explicitModel: true })
+    const accepted = await delegate(d, parent.id, parentRunId, { workspace: 'shared', readOnly: true })
+    expect(d.store.getThread(accepted.childThreadId)?.workspaceBinding).toEqual({ policy: 'shared', access: 'read-only' })
+    await waitFor(() => ['failed', 'completed', 'cancelled'].includes(d.engine.getRun(accepted.childRunId)?.status ?? ''), 'the child run')
+    expect(d.engine.getRun(accepted.childRunId)?.status).toBe('failed')
+    expect(JSON.stringify(d.engine.getRun(accepted.childRunId)?.outcome)).toContain('read_only_needs_folder')
+    expect(adapter.turns.map((turn) => turn.threadId)).not.toContain(accepted.childThreadId)
   })
 
   it('a failed delegation commit leaves no thread and no lifecycle registration; the retry creates and owns exactly one', async () => {

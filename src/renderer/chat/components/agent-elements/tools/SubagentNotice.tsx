@@ -1,8 +1,9 @@
+import { useState } from "react";
 import type { BackgroundTaskNoticeItem, SubagentNoticeItem } from "../../../../../shared/subagents";
 import type { SettleNoticeItem } from "../../../../../shared/settleNotice";
 import { settleNoticeName, settleNoticeOutcome } from "../../../adapters/settleNotice";
 import { backgroundNoticeName } from "../../../adapters/nativeSubagents";
-import { noticeItemName, noticeOutcome } from "../../../adapters/subagentNotice";
+import { monitorNoticeLine, noteNoticeName, noticeItemName, noticeOutcome, wakeNoticeLine } from "../../../adapters/subagentNotice";
 import { openThread } from "../../../../lib/openThread";
 import { ThreadChip } from "../../../../components/ThreadChip";
 import "./subagent-card.css";
@@ -16,21 +17,22 @@ export type SubagentNoticeViewProps = {
 };
 
 /**
- * Subagent results reaching this thread (a wake turn, a steer, a queued steer), drawn from the
- * structured payload on the message: one quiet row per task that opens its subagent's thread. The
- * message text, which the model reads, is not shown.
+ * What reaches this thread about its subagents (a wake turn, a steer, a queued steer): a result, a
+ * question one of them waits on, a stop. Drawn from the structured payload on the message: one quiet
+ * row each that opens the subagent's thread. The message text, which the model reads, is not shown.
  */
 export function SubagentNoticeView({ items, onOpen }: SubagentNoticeViewProps) {
   const shown = items.slice(0, SUBAGENT_NOTICE_ROWS);
   const hidden = items.length - shown.length;
   return (
-    <div className="subagent-notice">
-      {shown.map((item) => {
+    <div className="subagent-notice" role="note" aria-label="Notice from Mousse">
+      {shown.map((item, index) => {
+        if (item.event === "note" || item.event === "monitor" || item.event === "wake") return <OpenableNoticeRow key={`${item.event}:${item.delegationId}:${index}`} item={item} />;
         const name = noticeItemName(item);
         const { verb, tone } = noticeOutcome(item);
         return (
           <button
-            key={item.delegationId}
+            key={item.requestId ?? item.delegationId}
             type="button"
             className="subagent-notice-row"
             title={`Open ${name}`}
@@ -44,6 +46,48 @@ export function SubagentNoticeView({ items, onOpen }: SubagentNoticeViewProps) {
         );
       })}
       {hidden > 0 && <span className="subagent-notice-row">and {hidden} more</span>}
+    </div>
+  );
+}
+
+/**
+ * Another agent's note, or what this thread's monitor or background command reported: one quiet row that opens in place
+ * on the words (the note, the monitor's lines and a command's last output). Nothing on it moves; it opens only when
+ * clicked. The notice text the agent reads is not shown.
+ */
+export function OpenableNoticeRow({ item, initiallyOpen = false }: { item: SubagentNoticeItem; initiallyOpen?: boolean }) {
+  const [open, setOpen] = useState(initiallyOpen);
+  const line = item.event === "monitor"
+    ? monitorNoticeLine(item)
+    : item.event === "wake"
+      ? wakeNoticeLine(item)
+      : { name: noteNoticeName(item), detail: "sent a note", tone: "done" as const };
+  const words = item.event === "note"
+    ? item.note?.text ?? ""
+    : item.event === "wake"
+      ? item.wake?.brief ?? ""
+      : [
+        ...(item.monitor?.lines ?? []),
+        ...(item.monitor?.dropped ? [`\u2026 ${item.monitor.dropped} more not shown`] : []),
+        ...(item.monitor?.tail ? [item.monitor.tail.replace(/\s+$/, "")] : []),
+      ].join("\n");
+  return (
+    <div className="subagent-notice-openable">
+      <button
+        type="button"
+        className="subagent-notice-row"
+        aria-expanded={words ? open : undefined}
+        disabled={!words}
+        title={words ? (open ? "Hide" : "Show") : undefined}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="subagent-notice-dot" data-tone={line.tone} aria-hidden="true" />
+        <span className="subagent-notice-name">{line.name}</span>
+        <span className="subagent-notice-detail">{line.detail}</span>
+      </button>
+      {open && words && (item.event === "note" || item.event === "wake"
+        ? <div className="subagent-notice-words" data-kind="note">{words}</div>
+        : <pre className="subagent-notice-words" data-kind="monitor">{words}</pre>)}
     </div>
   );
 }

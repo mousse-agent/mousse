@@ -29,7 +29,16 @@ export interface DeleteIntent {
    * expiry's authority (`ResourcePurgeService.purge`), which holds only while that expiry has passed.
    */
   expiry?: true
+  /** Starts that tried to finish this delete and could not: after {@link CUT_SHORT_TRIES} it goes back to Archived. */
+  triedAtStart?: number
 }
+
+/**
+ * How many starts try to finish a delete left in the trash that keeps being refused (a blocker, a check that fails).
+ * After that the thread goes back to Archived, where the person sees it again and a new Delete says why it is refused,
+ * instead of it waiting in the trash and being tried at every start for good.
+ */
+export const CUT_SHORT_TRIES = 3
 
 export interface ThreadDeleteDeps {
   store: ResourceLifecycleStore
@@ -384,6 +393,26 @@ export class ThreadDeleter {
   }
 
   /**
+   * A start could not finish the delete of `taskId`, for `error`. It stays in the trash for the next start, until
+   * {@link CUT_SHORT_TRIES} starts have tried: then it goes back to Archived, and the reason is reported with it.
+   */
+  private async refusedAtStart(taskId: string, intent: DeleteIntent, error: unknown): Promise<{ taskId: string; outcome: 'archived' | 'kept'; reason: string }> {
+    const reason = error instanceof Error ? error.message : String(error)
+    const tried = (intent.triedAtStart ?? 0) + 1
+    if (tried < CUT_SHORT_TRIES) {
+      // The purge may have started meanwhile; the intent is still this delete's.
+      if (this.readIntents()[taskId]) this.setIntent(taskId, { ...this.readIntents()[taskId]!, triedAtStart: tried })
+      return { taskId, outcome: 'kept', reason: `${reason} (tried at ${tried} of ${CUT_SHORT_TRIES} starts; then it goes back to Archived)` }
+    }
+    // A purge that started can't be undone: it is finished at the next start, as before.
+    if (this.deps.store.get(taskId)?.state !== 'trashed') return { taskId, outcome: 'kept', reason }
+    await this.putBack([taskId])
+    if (this.deps.store.get(taskId)?.state !== 'active') return { taskId, outcome: 'kept', reason: `${reason} (and it could not be put back in Archived)` }
+    try { this.deps.archive(taskId) } catch { /* It is listed again either way. */ }
+    return { taskId, outcome: 'archived', reason: `back in Archived after ${CUT_SHORT_TRIES} starts could not delete it: ${reason}` }
+  }
+
+  /**
    * At start: a thread in the trash with a recorded delete is a delete that was cut short. It is finished as it was
    * asked; when that is not allowed (unpublished work without the person's consent) it goes back to Archived. A
    * thread in the trash with no recorded delete (an older build's trash, one the move to Archived could not bring
@@ -423,14 +452,14 @@ export class ThreadDeleter {
               try { this.deps.archive(record.taskId) } catch { /* It is listed again either way. */ }
               results.push({ taskId: record.taskId, outcome: 'archived' })
             } else results.push({ taskId: record.taskId, outcome: 'kept', reason: 'could not be put back' })
-          } else results.push({ taskId: record.taskId, outcome: 'kept', reason: error instanceof Error ? error.message : String(error) })
+          } else results.push(await this.refusedAtStart(record.taskId, intent, error))
           continue
         }
         try {
           await this.finish(record.taskId, intent)
           results.push({ taskId: record.taskId, outcome: 'purged' })
         } catch (error) {
-          results.push({ taskId: record.taskId, outcome: 'kept', reason: error instanceof Error ? error.message : String(error) })
+          results.push(await this.refusedAtStart(record.taskId, intent, error))
         }
       }
     }

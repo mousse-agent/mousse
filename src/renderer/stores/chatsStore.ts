@@ -22,14 +22,17 @@ interface ChatsState {
    * goes on showing what it showed, so the bot never opens on an empty "Loading messages…" chat.
    */
   openingBotId: string | null
+  /**
+   * A thread of `activeBotId`'s opened in its chat pane (lib/botThread.ts): the pane shows that thread under the bot's
+   * header while the sidebar stays on Chats. Opening any bot or chat ends it.
+   */
+  botThread: { botId: string; threadId: string } | null
   error: string | null
   /** What set `error`: a background refresh clears only its own, never an action's. */
   errorSource: 'refresh' | 'action' | null
   loading: boolean
   newChatOpen: boolean
   newChatKind: 'direct' | 'group'
-  searchOpen: boolean
-  search: string
   drafts: Record<string, string>
   activate(profileId: string): void
   refresh(): Promise<void>
@@ -66,8 +69,8 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 /** The error of something the person did, which a later background refresh leaves on screen. */
 export const actionError = (error: unknown, prefix = '') => ({ error: `${prefix}${errorText(error)}`, errorSource: 'action' as const })
 export const useChatsStore = create<ChatsState>((set, get) => ({
-  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, error: null, errorSource: null,
-  loading: false, newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {},
+  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, botThread: null, error: null, errorSource: null,
+  loading: false, newChatOpen: false, newChatKind: 'direct', drafts: {},
   activate(profileId) {
     if (get().profileId === profileId) return
     epoch += 1
@@ -75,8 +78,8 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     pendingPublications.clear()
     refreshOperation = undefined
     refreshAgain = false
-    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, error: null, errorSource: null, loading: false,
-      newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {} })
+    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, openingBotId: null, botThread: null, error: null, errorSource: null, loading: false,
+      newChatOpen: false, newChatKind: 'direct', drafts: {} })
     useBotsStore.getState().activate(profileId)
     // A bot's notification was clicked: open its chat.
     stopOpenBot?.()
@@ -121,7 +124,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     if (chatId !== get().activeChatId && !await confirmNavigation()) return
     const owner = epoch
     useAppStore.getState().setThreadsSidebarView('chats')
-    set({ activeChatId: chatId, activeBotId: null, openingBotId: null, conversation: null, error: null, errorSource: null, loading: true })
+    set({ activeChatId: chatId, activeBotId: null, openingBotId: null, botThread: null, conversation: null, error: null, errorSource: null, loading: true })
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
       if (owner === epoch && get().activeChatId === chatId) set({ conversation, loading: false })
@@ -132,7 +135,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     useAppStore.getState().setThreadsSidebarView('chats')
     const show = () => {
       if (botId !== get().activeBotId) useBotsStore.setState({ aboutOpen: false, error: null })
-      set({ activeBotId: botId, openingBotId: null, activeChatId: null, conversation: null, error: null, errorSource: null, loading: false })
+      set({ activeBotId: botId, openingBotId: null, botThread: null, activeChatId: null, conversation: null, error: null, errorSource: null, loading: false })
     }
     if (botId === get().activeBotId || useBotsStore.getState().chats[botId]) {
       show()
@@ -155,7 +158,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.create', input)
       if (owner !== epoch) return
-      set({ conversation, activeChatId: conversation.id, activeBotId: null, openingBotId: null, newChatOpen: false, loading: false })
+      set({ conversation, activeChatId: conversation.id, activeBotId: null, openingBotId: null, botThread: null, newChatOpen: false, loading: false })
       useAppStore.getState().setThreadsSidebarView('chats')
       await get().refresh()
     } catch (error) { if (owner === epoch && get().activeChatId === from) set({ loading: false, ...actionError(error) }) }

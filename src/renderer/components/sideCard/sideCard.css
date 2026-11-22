@@ -1,8 +1,11 @@
 /* Thread side card: a floating card on the right of the full-width thread view. */
 
 .sidebar {
-  --side-card-width: 272px;
+  --side-card-width: 296px;
+  /* The gap between the card and the conversation column. */
   --side-card-gutter: 12px;
+  /* The card sits flush with the pane's top and right edges. */
+  --side-card-edge: 0px;
 }
 
 /* The layer anchors the card to the thread pane. */
@@ -24,6 +27,12 @@
   margin-left: max(0px, calc((100% - var(--side-card-reserved, 0px) - var(--an-max-width, 680px)) / 2));
   margin-right: 0;
   transition: width calc(180ms * var(--ui-motion-scale)) ease, margin-left calc(180ms * var(--ui-motion-scale)) ease;
+}
+
+/* The room the card keeps at launch is in the first frame, not slid into (ThreadSideCard's launch frame). */
+.sidebar.sidebar-full[data-side-card-launch] .an-message-list > div,
+.sidebar.sidebar-full[data-side-card-launch] .chat-input-area {
+  transition: none;
 }
 
 /* Go to latest floats over the full-width scroller, so it would stay at the pane's middle while the
@@ -61,32 +70,61 @@
 
 .thread-side-card {
   position: absolute;
-  top: var(--side-card-gutter);
-  right: var(--side-card-gutter);
+  top: var(--side-card-edge);
+  right: var(--side-card-edge);
   display: flex;
   flex-direction: column;
   width: var(--side-card-width);
-  max-height: calc(100% - 2 * var(--side-card-gutter));
+  max-height: calc(100% - var(--side-card-edge) - var(--side-card-gutter));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   border: 1px solid var(--ui-line);
-  border-radius: var(--ui-card-radius);
+  /* Square top-left and bottom-right, rounded top-right and bottom-left. */
+  border-radius: 0 var(--ui-card-radius);
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
   color: var(--text-primary);
   opacity: 0;
   transform: translateX(10px);
-  transition: opacity calc(180ms * var(--ui-motion-scale)) ease, transform calc(180ms * var(--ui-motion-scale)) ease,
+  /* Closing fades out over 180ms, the exit wait in sideCardPresence.ts. */
+  transition:
+    opacity calc(180ms * var(--ui-motion-scale)) ease,
+    transform calc(180ms * var(--ui-motion-scale)) ease,
+    background-color calc(180ms * var(--ui-motion-scale)) ease,
+    border-color calc(180ms * var(--ui-motion-scale)) ease,
+    box-shadow calc(180ms * var(--ui-motion-scale)) ease,
     translate var(--ui-dur-slow) var(--ui-collapse-ease);
   pointer-events: none;
 }
 
+/* Opening and hovering in or out fade over 450ms; the slide keeps its 180ms. */
 .thread-side-card[data-shown='true'] {
   opacity: 1;
   transform: none;
   pointer-events: auto;
+  transition:
+    opacity calc(450ms * var(--ui-motion-scale)) ease,
+    transform calc(180ms * var(--ui-motion-scale)) ease,
+    background-color calc(450ms * var(--ui-motion-scale)) ease,
+    border-color calc(450ms * var(--ui-motion-scale)) ease,
+    box-shadow calc(450ms * var(--ui-motion-scale)) ease,
+    translate var(--ui-dur-slow) var(--ui-collapse-ease);
+}
+
+/* At rest the docked card recedes: 60% opacity, no fill, shadow or specular, and a
+   transparent border so nothing shifts when it comes back. Hover or keyboard focus
+   inside it restores the full card. The overlay card covers the transcript, so it
+   stays solid. The selector outweighs the acrylic theme's fill. */
+.thread-side-card-layer:not(.thread-side-card-layer--overlay) > .thread-side-card:not(:hover):not(:has(:focus-visible)) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.thread-side-card-layer:not(.thread-side-card-layer--overlay) > .thread-side-card[data-shown='true']:not(:hover):not(:has(:focus-visible)) {
+  opacity: 0.6;
 }
 
 /* Find in thread (agent-ui.css, find-bar-host.ts): an open find bar takes the top of the card's column at the
@@ -99,14 +137,14 @@
 
 .thread-side-card-layer:has(> .chat-find-bar) > .thread-side-card {
   translate: 0 calc(var(--chat-find-bar-height) + var(--chat-find-bar-gap));
-  max-height: calc(100% - 2 * var(--side-card-gutter) - var(--chat-find-bar-height) - var(--chat-find-bar-gap));
+  max-height: calc(100% - var(--side-card-edge) - var(--side-card-gutter) - var(--chat-find-bar-height) - var(--chat-find-bar-gap));
 }
 
 /* Narrow thread area: the same card is an overlay. It slides in from the right
    edge over the conversation (which keeps its layout, nothing is reserved) with a
    light scrim behind it that closes it (both on the card's 180ms, which the exit wait
    in sideCardPresence.ts matches). Panes under 400px keep the card inside
-   the pane: min() is 272px whenever the pane has room for it and its gutters. */
+   the pane: min() is the card's width whenever the pane has room for it and its gutters. */
 .thread-side-card-layer--overlay {
   overflow: hidden;
 }
@@ -141,19 +179,9 @@
   pointer-events: auto;
 }
 
-/* Reduced motion fades without the slide, over the same 180ms, and keeps the exit
-   wait. The app-wide reduced-motion rule in global.css forces every transition
-   duration to 0.01ms with !important and six :not() classes of specificity, so
-   this needs !important and more specificity than that (the repeated class is
-   deliberate). The column follows the fade, but a reflow is motion, so it is
-   instant. */
+/* Reduced motion: the app-wide rule in global.css makes the card's fades and slide
+   instant, and the column's reflow is instant too. */
 @media (prefers-reduced-motion: reduce) {
-  .app .sidebar .thread-side-card-layer .thread-side-card.thread-side-card.thread-side-card[data-shown] {
-    transform: none;
-    transition-property: opacity;
-    transition-duration: 180ms !important;
-  }
-
   .sidebar.sidebar-full .an-message-list > div,
   .sidebar.sidebar-full .chat-input-area {
     transition: none;
@@ -201,11 +229,13 @@
   min-width: 0;
 }
 
+/* Its -4px side margins widen its hit area past the heading's text; the cap adds them back, else a heading sized to
+   the button's content holds it 8px short and cuts a collapsed note ("0 of 2 d…") with room to spare. */
 .side-card-section-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 100%;
+  max-width: calc(100% + 8px);
   margin: -2px -4px;
   padding: 2px 4px;
   border: 0;

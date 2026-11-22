@@ -24,10 +24,13 @@ import { pressed } from './support/userRequest'
 
 let f: ReturnType<typeof gitFoundationFixture>
 let cwd: string
+/** The thread's own branch: a temporary `mousse/<random id>` name. */
+let own: string
 let actions: ThreadActionService
 beforeEach(async () => {
   f = gitFoundationFixture()
-  cwd = (await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)).worktreePath
+  const made = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+  cwd = made.worktreePath; own = made.branch
   actions = new ThreadActionService(f.thread)
 })
 afterEach(() => f.dispose())
@@ -51,7 +54,7 @@ describe('turns are recorded as private snapshots', () => {
 
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
     expect(action.commits).toEqual([])
-    expect(action.git).toMatchObject({ headBefore: head, headAfter: head, rewroteHistory: false, branchBefore: 'mousse/thread-task', branchAfter: 'mousse/thread-task' })
+    expect(action.git).toMatchObject({ headBefore: head, headAfter: head, rewroteHistory: false, branchBefore: own, branchAfter: own })
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(branches()).toBe(refs)
     expect(git(cwd, 'ls-files', '--stage')).toBe(index)
@@ -62,7 +65,7 @@ describe('turns are recorded as private snapshots', () => {
     expect(git(cwd, 'show', `${action.endSha}:agent.txt`)).toBe('agent')
     expect(git(cwd, 'rev-parse', `${action.endSha}^^`)).toBe(head)
     expect(git(cwd, 'branch', '--contains', action.endSha)).toBe('')
-    expect(git(cwd, 'log', '-1', '--format=%B', action.endSha)).toMatch(/^mousse snapshot: .*\n\nMousse-Thread: task\nMousse-Operation: .*\nMousse-Head: .*\nMousse-Branch: mousse\/thread-task\nMousse-Bytes: exact$/)
+    expect(git(cwd, 'log', '-1', '--format=%B', action.endSha)).toMatch(/^mousse snapshot: .*\n\nMousse-Thread: task\nMousse-Operation: .*\nMousse-Head: .*\nMousse-Branch: mousse\/[0-9a-f]{8}\nMousse-Bytes: exact$/)
   })
 
   it('pins the latest snapshot under the thread ref and keeps exactly the receipt’s before and after refs', async () => {
@@ -70,7 +73,7 @@ describe('turns are recorded as private snapshots', () => {
     const metadata = new ThreadWorkspaceManager(f.thread).load()!
     expect(git(cwd, 'rev-parse', metadata.retainedRef)).toBe(action.endSha)
     expect(metadata.snapshotSha).toBe(action.endSha)
-    expect(metadata.branch).toBe('mousse/thread-task')
+    expect(metadata.branch).toBe(own)
     const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)!
     expect(receipt.retainedRefs).toEqual([`refs/mousse/changes/${receipt.id}/before`, `refs/mousse/changes/${receipt.id}/after`])
     expect(git(cwd, 'rev-parse', receipt.retainedRefs[0])).toBe(action.startSha)
@@ -145,7 +148,7 @@ describe('an agent that does its own Git work', () => {
     })
     const committed = git(cwd, 'rev-parse', 'HEAD')
     expect(action.state).toBe('completed')
-    expect(action.git).toMatchObject({ branchBefore: 'mousse/thread-task', branchAfter: 'issue-1-task', headBefore: head, headAfter: committed, rewroteHistory: false })
+    expect(action.git).toMatchObject({ branchBefore: own, branchAfter: 'issue-1-task', headBefore: head, headAfter: committed, rewroteHistory: false })
     expect(action.commits).toEqual([committed])
     expect(action.changedPaths.map((item) => item.path).sort()).toEqual(['draft.txt', 'feature.txt'])
     expect((await new ThreadWorkspaceManager(f.thread).verify()).lifecycle).toBe('ready')
@@ -160,13 +163,13 @@ describe('an agent that does its own Git work', () => {
 
   it('the thread reports the branch HEAD is on now, not the one it was created with', async () => {
     const manager = new ThreadWorkspaceManager(f.thread)
-    expect((await manager.executionContext(f.repo)).branch).toBe('mousse/thread-task')
+    expect((await manager.executionContext(f.repo)).branch).toBe(own)
     git(cwd, 'switch', '-q', '-c', 'issue-2-task')
     expect((await manager.executionContext(f.repo)).branch).toBe('issue-2-task')
     git(cwd, 'switch', '-q', '--detach')
     expect((await manager.executionContext(f.repo)).branch).toBeUndefined()
     // The record keeps the branch the worktree was made on.
-    expect(manager.load()!.branch).toBe('mousse/thread-task')
+    expect(manager.load()!.branch).toBe(own)
   })
 
   it.each([['detaches HEAD', ['switch', '-q', '--detach']], ['switches to a branch of its own', ['switch', '-q', '-c', 'agent/own']]])('when the agent %s, a workflow write script and an isolated workflow agent still run', async (_name, command) => {
@@ -232,7 +235,7 @@ describe('an agent that does its own Git work', () => {
     // No commit of Mousse's anywhere: the branch history is the agent's own.
     expect(git(cwd, 'log', '--format=%s', '-5')).not.toMatch(/mousse/i)
     // It says what it left: the commit, the branch it is on, and the switch.
-    expect(undone.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on issue-2-task, so Git now shows its changes as undone. This turn switched from mousse/thread-task to issue-2-task; Undo leaves the checkout where it is.`)
+    expect(undone.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on issue-2-task, so Git now shows its changes as undone. This turn switched from ${own} to issue-2-task; Undo leaves the checkout where it is.`)
     const refs = branches()
 
     // Redo's target is the Undo's own record, with no commits; the notice still comes from the turn.
@@ -242,7 +245,7 @@ describe('an agent that does its own Git work', () => {
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(branches()).toBe(refs)
     expect(redone.commits).toEqual([])
-    expect(redone.notice).toBe(`Redo restored files only. Commit ${head.slice(0, 7)} from this turn stays on issue-2-task. This turn switched from mousse/thread-task to issue-2-task; Redo leaves the checkout where it is.`)
+    expect(redone.notice).toBe(`Redo restored files only. Commit ${head.slice(0, 7)} from this turn stays on issue-2-task. This turn switched from ${own} to issue-2-task; Redo leaves the checkout where it is.`)
     // Undo of the Redo goes back through both records to the same turn.
     expect((await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).notice).toBe(undone.notice)
   })
@@ -261,7 +264,7 @@ describe('an agent that does its own Git work', () => {
     expect(action.changedPaths.map((item) => item.path).sort()).toEqual(['after-reset.txt', 'earlier.txt'])
     noPending()
     const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
-    expect(undone.notice).toBe('Undo restored files only. This turn rewrote the history of mousse/thread-task (a reset or rebase); Undo leaves that history as it is.')
+    expect(undone.notice).toBe(`Undo restored files only. This turn rewrote the history of ${own} (a reset or rebase); Undo leaves that history as it is.`)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(f.baseSha)
     expect(existsSync(join(cwd, 'after-reset.txt'))).toBe(false)
     expect(existsSync(join(cwd, 'earlier.txt'))).toBe(true)
@@ -281,7 +284,7 @@ describe('an agent that does its own Git work', () => {
     const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(existsSync(join(cwd, 'pushed.txt'))).toBe(false)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
-    expect(undone.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on mousse/thread-task, so Git now shows its changes as undone. This commit was already pushed to origin/feature.`)
+    expect(undone.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on ${own}, so Git now shows its changes as undone. This commit was already pushed to origin/feature.`)
     // The notice stays on the recorded action, where the app reads it.
     expect(actions.get(undone.id)?.notice).toBe(undone.notice)
   })
@@ -292,7 +295,7 @@ describe('an agent that does its own Git work', () => {
     })
     const [first, second] = action.commits.map((sha) => sha.slice(0, 7))
     expect((await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).notice)
-      .toBe(`Undo restored files only. Commits ${first} and ${second} from this turn stay on mousse/thread-task, so Git now shows their changes as undone.`)
+      .toBe(`Undo restored files only. Commits ${first} and ${second} from this turn stay on ${own}, so Git now shows their changes as undone.`)
   })
 
   it('has no notice when the turn did no Git work', async () => {
@@ -645,7 +648,7 @@ describe('recovery', () => {
     await interruptedUndo(action, true)
     await new UndoService(f.thread).recoverPending(cwd, () => undefined)
     noPending()
-    expect(actions.get('compensation-1')?.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on mousse/thread-task, so Git now shows its changes as undone.`)
+    expect(actions.get('compensation-1')?.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on ${own}, so Git now shows its changes as undone.`)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
   })
 
@@ -732,7 +735,7 @@ describe('conversation forks', () => {
     expect(readFileSync(join(cwd, 'later.txt'), 'utf8')).toBe('later\n')
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(branches()).toBe(before)
-    expect(new ThreadWorkspaceManager(f.thread).load()).toMatchObject({ conversationBranchId: fork.id, branch: 'mousse/thread-task' })
+    expect(new ThreadWorkspaceManager(f.thread).load()).toMatchObject({ conversationBranchId: fork.id, branch: own })
     // The files the person had when leaving were recorded as theirs first.
     const outside = actions.list().find((item) => item.turnId.startsWith('user-changes:'))!
     expect(git(cwd, 'show', `${outside.endSha}:later.txt`)).toBe('later')
@@ -753,8 +756,9 @@ describe('seeding another worktree from a snapshot', () => {
     // The branch is at the real commit, the files are uncommitted, and the first turn will not call them outside changes.
     expect(git(seeded.worktreePath, 'rev-parse', 'HEAD')).toBe(head)
     expect(git(seeded.worktreePath, 'status', '--porcelain', '--untracked-files=all')).toBe('M value.txt\n?? new.txt')
-    expect(seeded.snapshotSha).toBe(action.endSha)
-    expect(git(seeded.worktreePath, 'rev-parse', seeded.retainedRef)).toBe(action.endSha)
+    // Its first baseline is the bytes after seeding (#1758): the snapshot's files, in a snapshot of the new worktree's own.
+    expect(git(seeded.worktreePath, 'rev-parse', `${seeded.snapshotSha}^{tree}`)).toBe(git(cwd, 'rev-parse', `${action.endSha}^{tree}`))
+    expect(git(seeded.worktreePath, 'rev-parse', seeded.retainedRef)).toBe(seeded.snapshotSha)
     const forkActions = new ThreadActionService(forkThread)
     expect((await forkActions.recordOutsideChanges({ threadId: 'fork', conversationBranchId: 'main', workspacePath: seeded.worktreePath })).action).toBeUndefined()
     // The source thread's files are untouched.
@@ -912,7 +916,7 @@ describe('publish', () => {
     expect(f.read(f.repo, 'uncommitted.txt')).toBe('uncommitted\n')
     expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe('')
     // The thread keeps its own branch, HEAD and files.
-    expect(git(cwd, 'branch', '--show-current')).toBe('mousse/thread-task')
+    expect(git(cwd, 'branch', '--show-current')).toBe(own)
     expect(f.read(cwd, 'uncommitted.txt')).toBe('uncommitted\n')
     // The turn's receipt is published, so Undo of it is refused; the snapshot is remembered as the next base.
     const receipts = new ChangeReceiptService(f.thread)

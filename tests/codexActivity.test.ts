@@ -19,7 +19,7 @@ import type { ThreadItem } from '../src/mms/harness/vendors/codex/protocol'
 import { CodexAdapter } from '../src/mms/harness/drivers/codex/adapter'
 import { createCodexProviderService, type CodexProviderService as AdapterService } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../src/mms/harness/adapter'
-import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../src/mms/run/testkit/codexAppServerReplay'
+import { CODEX_APP_SERVER_BOUNDARY, codexFixtureAccessToken, replayCodexAppServer, replayCodexEnv } from '../src/mms/run/testkit/codexAppServerReplay'
 import { ReplayTransport, parseTranscript } from '../src/mms/run/testkit/ReplayTransport'
 import { TranscriptAssembler, type TranscriptStreamState } from '../src/mms/run/transcript/TranscriptAssembler'
 import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
@@ -27,6 +27,7 @@ import { ACTIVITY_DIFF_CAP_BYTES, diffSides, ACTIVITY_OUTPUT_CAP_BYTES, type Age
 import type { ChatMessage } from '../src/shared/types'
 import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
 import { CODEX_CAPS } from '../src/mms/harness/drivers/codex'
+import { CODEX_BOT_CHECKED_VERSIONS } from '../src/mms/harness/vendors/codex/childPolicy'
 import { holdControl } from './support/steerHoldControl'
 
 const item = (value: Record<string, unknown>): ThreadItem => value as unknown as ThreadItem
@@ -284,7 +285,7 @@ describe('the activity fixture through the Codex adapter', () => {
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
-    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env: replayCodexEnv(home), launch: () => ({ binaryPath: binary }) })
     services.push(service)
     const tools: StreamingLlmToolEvent[] = []
     const sink = new Proxy({}, { get: (_target, name) => (name === 'tool' ? (event: StreamingLlmToolEvent) => tools.push(event) : () => undefined) }) as TurnSink
@@ -377,6 +378,7 @@ describe('Codex activity against a scripted app-server', () => {
   type Message = { id?: number | string; method?: string; params?: Record<string, unknown> }
   const PARENT = 'thr-1'
   const HELPER = 'helper-1'
+  const token = codexFixtureAccessToken('fixture-workspace')
   let home: string
   const services: CodexProviderService[] = []
   const questions = new UserQuestionService()
@@ -384,6 +386,7 @@ describe('Codex activity against a scripted app-server', () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-activity-s-'))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: token } }))
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -441,7 +444,9 @@ describe('Codex activity against a scripted app-server', () => {
           }
           const result =
             message.method === 'initialize' ? { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' }
-            : message.method === 'account/read' ? { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true }
+            : message.method === 'account/read' ? { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, workspaceRouting: { chatgptAccountId: 'fixture-workspace' }, requiresOpenaiAuth: true }
+            : message.method === 'getAuthStatus' ? { authMethod: 'chatgpt', authToken: token }
+            : message.method === 'config/read' ? { config: {} }
             : message.method === 'thread/list' ? { data: [], nextCursor: null }
             : message.method === 'thread/start' ? { thread: { id: PARENT }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home }
             : message.method === 'turn/start' ? { turn: { id: 'turn-1', status: 'inProgress', error: null } }
@@ -453,11 +458,11 @@ describe('Codex activity against a scripted app-server', () => {
       })
       return process as unknown as CodexProcess
     }
-    return { launch: launch as (spec: CodexLaunch) => CodexProcess, emit: (value: unknown) => latest?.write(JSON.stringify(value) + '\n') }
+    return { launch: launch as (spec: CodexLaunch) => CodexProcess, emit: (value: unknown) => latest?.write(JSON.stringify(value) + '\n'), messages }
   }
 
   function create(s: ReturnType<typeof server>, dependencies: Record<string, unknown> = {}): CodexProviderService {
-    const service = new CodexProviderService(home, questions, { launch: s.launch, ...dependencies }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const service = new CodexProviderService(home, questions, { launch: s.launch, ...dependencies }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(service)
     return service
   }
@@ -478,6 +483,25 @@ describe('Codex activity against a scripted app-server', () => {
   const interruptReply = (send: (value: unknown) => void, params: Record<string, unknown>) => send(turnDone(params.threadId as string, params.threadId === HELPER ? 'h-turn-1' : 'turn-1', 'interrupted'))
   const completeOf = (events: ProviderToolEvent[], callId: string) => events.find((event) => event.callId === callId && event.phase === 'complete')
   const phases = (events: ProviderToolEvent[], callId: string) => events.filter((event) => event.callId === callId).map((event) => event.phase)
+
+  it.each([
+    ["a person's turn waits for the tree to be quiet", false, true],
+    ["a bot's turn (subagents off) is not held for it", true, false]
+  ] as const)('the process lists helper trees: %s', async (_name, bot, reads) => {
+    const s = server({
+      // A process that lists helper trees, a Codex version a bot's turn runs on, and an owner config with nothing in it.
+      respond: (message) =>
+        message.method === 'thread/list' && (message.params as Record<string, unknown>).parentThreadId ? { error: { code: -32602, message: 'parentThreadId and ancestorThreadId are mutually exclusive' } }
+        : message.method === 'initialize' ? { result: { userAgent: `codex_cli_rs/${CODEX_BOT_CHECKED_VERSIONS[0]}`, codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
+        : message.method === 'config/read' ? { result: { config: { mcp_servers: {}, features: {} }, layers: [] } }
+        : undefined,
+      onTurnStart: (send) => setImmediate(() => send(turnDone(PARENT, 'turn-1')))
+    })
+    await chat(create(s), [], bot ? { bot: { check: () => ({ ok: true }) } as unknown as CodexChatInput['bot'] } : {})
+    // The tree's reads after the turn started are the quiet check's (the listing before it is the probe for tree mode).
+    const methods = s.messages.map((message) => message.method)
+    expect(methods.slice(methods.indexOf('turn/start')).some((method) => method === 'thread/read' || method === 'thread/list')).toBe(reads)
+  })
 
   it('output arrives in order, once: a late chunk and a chunk for a call that never started are dropped', async () => {
     const events: ProviderToolEvent[] = []
@@ -733,79 +757,6 @@ describe('Codex activity against a scripted app-server', () => {
     expect(interrupted.filter((thread) => thread === PARENT)).toEqual([])
     expect(accepted).toEqual(['use pnpm@drain-1'])
     expect(returned).toEqual([])
-  })
-
-  it('strict release: a turn Codex starts on its own during the helper wait is a provider turn; a steer held for its command goes in at its end, not when the helpers end', async () => {
-    const events: ProviderToolEvent[] = []
-    let turns = 0
-    const interrupted: string[] = []
-    let helperActive = true
-    const s = server({
-      // The process lists the thread's helper tree (tree mode), with the helper active until the steer's turn.
-      respond: (message) => {
-        const params = (message.params ?? {}) as Record<string, unknown>
-        if (message.method === 'thread/list' && params.parentThreadId && params.ancestorThreadId) return { error: { code: -32602, message: 'parentThreadId and ancestorThreadId are mutually exclusive' } }
-        if (message.method === 'thread/list' && params.ancestorThreadId === PARENT)
-          return { result: { data: [{ id: HELPER, parentThreadId: PARENT, createdAt: 0, status: { type: helperActive ? 'active' : 'idle' } }], nextCursor: null } }
-        if (message.method === 'thread/read') return { result: { thread: { id: params.threadId, status: { type: params.threadId === HELPER && helperActive ? 'active' : 'idle' } } } }
-        return undefined
-      },
-      onTurnStart: (send) =>
-        setImmediate(() => {
-          turns += 1
-          if (turns === 1) {
-            send(spawn())
-            send(helperTurn())
-            send(turnDone(PARENT, 'turn-1'))
-            return
-          }
-          // The steer's turn: the helper ends, and so does the turn.
-          helperActive = false
-          send(itemFrame('completed', PARENT, 'turn-1', { type: 'subAgentActivity', id: 'sub-1', kind: 'completed', agentThreadId: HELPER, agentPath: '/' }))
-          send(turnDone(HELPER, 'h-turn-1'))
-          send(turnDone(PARENT, 'turn-1'))
-        }),
-      onInterrupt: (send, params) => {
-        interrupted.push(params.threadId as string)
-        interruptReply(send, params)
-      }
-    })
-    const hold = holdControl(CODEX_CAPS, { strict: true })
-    const sink = hold.wrap({ text: () => {}, thinking: () => {}, tool: () => {}, progress: () => {}, providerRef: () => {}, usage: () => {}, steerAccepted: () => {} } as unknown as TurnSink)
-    const ctl = hold.ctl
-    const result = chat(create(s), events, {
-      peekSteer: () => ctl.peekSteer!(),
-      drainSteerEntry: (opts) => ctl.drainSteerEntry!(opts),
-      mayCut: (token) => ctl.mayCut!(token),
-      steerTaken: (token) => ctl.steerTaken?.(token),
-      returnSteer: (text, token) => ctl.returnSteer?.(text, token!),
-      onSteer: (text, token) => sink.steerAccepted(text, token),
-      onBoundary: () => sink.boundary?.(),
-      onProviderTurn: () => sink.providerTurn?.(),
-      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
-      onTool: (event) => {
-        events.push(event)
-        sink.tool(runtimeToolEvent(event))
-      }
-    })
-    await vi.waitFor(() => expect(events.some((event) => event.callId === `helper:${HELPER}`)).toBe(true))
-    await new Promise((resolve) => setTimeout(resolve, 600))
-    // A helper's message wakes the thread: Codex starts a turn of its own, and it runs a command.
-    s.emit(note('turn/started', { threadId: PARENT, turn: { id: 'turn-a', status: 'inProgress', error: null } }))
-    s.emit(itemFrame('started', PARENT, 'turn-a', cmd('adopted-1')))
-    await vi.waitFor(() => expect(hold.log.some(([event, detail]) => event === 'tool' && detail === 'start:adopted-1')).toBe(true))
-    hold.steer('use pnpm')
-    await vi.waitFor(() => expect(hold.held()).toBe(true))
-    s.emit(itemFrame('completed', PARENT, 'turn-a', cmd('adopted-1', { status: 'completed', aggregatedOutput: '', exitCode: 0 })))
-    s.emit(turnDone(PARENT, 'turn-a'))
-    // At the adopted turn's end the steer goes in, as the next turn, while the helper still runs.
-    await vi.waitFor(() => expect(turns, JSON.stringify(hold.log.map(([e, d]) => `${e}:${d}`))).toBe(2), { timeout: 3_000 })
-    await expect(result).resolves.toBeDefined()
-    const log = hold.log.map(([event, detail]) => `${event}:${detail}`)
-    expect(log.filter((entry) => entry === 'providerTurn:').length).toBeGreaterThanOrEqual(2)
-    expect(log.indexOf('tool:complete:adopted-1')).toBeLessThan(log.indexOf('drain:use pnpm'))
-    expect(log.filter((entry) => entry.startsWith('accepted:'))).toEqual(['accepted:use pnpm@drain-1'])
-    expect(interrupted.filter((thread) => thread === PARENT)).toEqual([])
   })
 
   it('a person\'s steer that cuts a turn Codex started on its own during the helper wait does not fail the run: the steer goes in as the next turn', async () => {

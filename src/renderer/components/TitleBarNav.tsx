@@ -7,6 +7,7 @@ import { showProjectInSidebar } from '../lib/sidebarReveal'
 import { selectThread } from '../lib/threadActions'
 import {
   canOpenFromHistory,
+  chatsPlaceTitle,
   goToHistoryIndex,
   HISTORY_PAGE_TITLES,
   historyList,
@@ -193,7 +194,7 @@ export function HistoryButtons() {
 
   const rows: NavMenuRow[] = menu === null ? [] : historyList(history, menu, canOpenFromHistory).map(({ index, threadId }) => ({
     key: `${index}`,
-    label: pageTitle(threadId) ?? (threads.find((thread) => thread.id === threadId)?.name.trim() || 'New thread'),
+    label: pageTitle(threadId) ?? chatsPlaceTitle(threadId) ?? (threads.find((thread) => thread.id === threadId)?.name.trim() || 'New thread'),
     meta: projectOf(threadId),
     onSelect: () => void goToHistoryIndex(index).catch(logFailure('Opening a thread from the history'))
   }))
@@ -314,7 +315,7 @@ export function ThreadPath() {
   )
   const slotRef = useRef<HTMLDivElement>(null)
   const measureRef = useRef<HTMLDivElement>(null)
-  const [fit, setFit] = useState({ hidden: 0, squeezed: false, offset: 0 })
+  const [fit, setFit] = useState({ hidden: 0, squeezed: false })
   const [menu, setMenu] = useState<OpenMenu>(null)
   const menuAnchor = useRef<HTMLElement | null>(null)
   const closeMenu = useCallback(() => setMenu(null), [])
@@ -340,22 +341,26 @@ export function ThreadPath() {
       const shownWidth = Math.min(available, (hidden > 0 ? moreWidth : 0) + widths.slice(hidden).reduce((sum, width) => sum + width, 0))
       const slotLeft = slot.getBoundingClientRect().left
       const centred = window.innerWidth / 2 - shownWidth / 2 - slotLeft
-      const offset = Math.round(Math.max(0, Math.min(available - shownWidth, centred)))
-      setFit((previous) => (previous.hidden === hidden && previous.squeezed === squeezed && previous.offset === offset ? previous : { hidden, squeezed, offset }))
+      // The offset changes on every frame of a window drag, so it is written here rather than re-rendering.
+      const offset = `${Math.round(Math.max(0, Math.min(available - shownWidth, centred)))}px`
+      if (slot.style.paddingLeft !== offset) slot.style.paddingLeft = offset
+      setFit((previous) => (previous.hidden === hidden && previous.squeezed === squeezed ? previous : { hidden, squeezed }))
     }
     update()
-    // The slot's own size can stay the same while it moves (the sidebar opening), so the window's
-    // size and the bar's are watched too.
-    window.addEventListener('resize', update)
-    if (typeof ResizeObserver === 'undefined') return () => window.removeEventListener('resize', update)
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', update)
+      return () => window.removeEventListener('resize', update)
+    }
+    // Measured only after layout, once a frame: a window resize event would read a layout it has
+    // just made stale. The slot's own size can stay the same while it moves (the sidebar opening),
+    // so the window's size and the bar's are watched too. The slot is watched by its border box,
+    // which the offset written above does not change.
     const observer = new ResizeObserver(update)
-    observer.observe(slot)
+    observer.observe(slot, { box: 'border-box' })
     observer.observe(row)
     if (slot.parentElement) observer.observe(slot.parentElement)
-    return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', update)
-    }
+    observer.observe(document.documentElement)
+    return () => observer.disconnect()
   }, [segmentsKey])
 
   const openSegment = (segment: PathSegment) => {
@@ -396,7 +401,7 @@ export function ThreadPath() {
   }
 
   return (
-    <div ref={slotRef} className="titlebar-path-slot" style={{ paddingLeft: fit.offset }}>
+    <div ref={slotRef} className="titlebar-path-slot">
       {segments.length > 0 && (
         <>
           <ThreadPathView

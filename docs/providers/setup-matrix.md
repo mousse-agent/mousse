@@ -34,8 +34,10 @@ works and [compatibility.md](compatibility.md) for the agent versions.
 
 | Source | Sign-in | OS | State |
 |---|---|---|---|
-| Installed by Mousse | Sign-in in Mousse | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Install and Google sign-in were tested with fakes and replays (#157); no live install or sign-in. |
-| Custom command or executable | Sign-in in Mousse | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: An executable set in Settings (with its helper beside it) was not run separately. |
+| On PATH | Account in the agent's home | Windows x64 | Untested: agy 1.5.13 answered `agy acp` and opened a session on this computer's existing sign-in in a direct check; not run through Mousse. |
+| On PATH | Account in the agent's home | Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: No run on these systems. |
+| Installed by Mousse | Sign-in in Mousse | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Install from Google's feed and the sign-in were tested with fakes and replays; no live install or Google sign-in. |
+| Custom command or executable | Sign-in in Mousse | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: An executable set in Settings (agy, or the 1.1.1 server beside its helper) was not run separately. |
 
 ## Grok
 

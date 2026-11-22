@@ -8,7 +8,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ThreadsContextMenu, type ThreadsContextMenuTarget } from '../../src/renderer/components/ThreadsContextMenu'
 import { ThreadsSidebar } from '../../src/renderer/components/ThreadsSidebar'
-import { clearAllRequest, deleteDialogCopy, deleteThreads } from '../../src/renderer/lib/archivedThreads'
+import { clearAllRequest, DELETE_TIME_LIMIT_MS, DELETE_TOO_LONG, deleteDialogCopy, deleteThreads } from '../../src/renderer/lib/archivedThreads'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { Thread } from '../../src/shared/types'
 
@@ -183,6 +183,23 @@ describe('the Archived section', () => {
     expect(alert?.getAttribute('role')).toBe('alert')
     expect(alert?.textContent).toBe('“Old one” was not deleted: A run is still stopping.')
     expect(dialog()?.textContent).toContain('Delete 1 archived thread?')
+  })
+
+  it('stops showing Deleting… and says so when a delete never answers', async () => {
+    const remove = (window as unknown as { mousse: { threads: { delete: ReturnType<typeof vi.fn> } } }).mousse.threads.delete
+    remove.mockImplementationOnce(() => new Promise(() => {}))
+    await open()
+    await click(row('old1')!.querySelector<HTMLButtonElement>('[data-action="delete"]'))
+    vi.useFakeTimers()
+    try {
+      const confirm = () => document.querySelector<HTMLButtonElement>('[data-testid="archived-delete-confirm"]')!
+      await click(confirm())
+      expect(confirm().textContent).toBe('Deleting…')
+      await act(async () => { await vi.advanceTimersByTimeAsync(DELETE_TIME_LIMIT_MS) })
+      expect(document.querySelector('[data-testid="archived-delete-error"]')?.textContent).toBe(DELETE_TOO_LONG)
+      expect(confirm().textContent).toBe('Delete')
+      expect(confirm().disabled).toBe(false)
+    } finally { vi.useRealTimers() }
   })
 })
 

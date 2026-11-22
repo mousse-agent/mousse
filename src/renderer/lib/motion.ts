@@ -86,11 +86,12 @@ export type ViewSwapPhase = 'in' | null
  * view to fade out first, and the new one never starts transparent, so a swap shows no empty frames. With motion
  * off (the setting, the OS, or no renderer) `phase` stays null.
  */
-export function useViewSwap<T>(target: T): { shown: T; phase: ViewSwapPhase } {
-  const instant = useMotionScale() === 0 || typeof globalThis.matchMedia !== 'function'
+export function useViewSwap<T>(target: T, animate = true): { shown: T; phase: ViewSwapPhase } {
+  const scale = useMotionScale()
+  const instant = !animate || scale === 0 || typeof globalThis.matchMedia !== 'function'
   const [swap, setSwap] = useState({ target, entering: 0 })
   // Set while rendering, so the change and its settle reach the screen in the same commit.
-  if (!Object.is(swap.target, target)) setSwap({ target, entering: instant ? 0 : Math.abs(swap.entering) + 1 })
+  if (!Object.is(swap.target, target) || (instant && swap.entering > 0)) setSwap({ target, entering: instant ? 0 : Math.abs(swap.entering) + 1 })
   const entering = Object.is(swap.target, target) ? swap.entering : 0
   useEffect(() => {
     if (entering <= 0) return

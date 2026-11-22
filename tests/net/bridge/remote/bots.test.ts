@@ -26,6 +26,10 @@ import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/r
 import type { BotChatMessage, BotSummary } from '../../../../src/shared/bots/personal/chat'
 import type { PermissionMode } from '../../../../src/shared/permissionMode'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from '../../../bots/botFixture'
+import { actionDigest } from '../../../../src/mms/bots/actions/BotActions'
+import { aloneKey, argumentContract } from '../../../../src/mms/bots/actions/BotAlone'
+import { botManifestDigest } from '../../../../src/mms/bots/grants/compile'
+import { getDefaultSettings } from '../../../../src/shared/settings'
 
 const at = '2026-11-07T09:00:00.000Z'
 const BOT = 'bot-0123456789ab'
@@ -262,6 +266,42 @@ describe('bot methods on a real bot', () => {
     expect(missing.code).toBe('stream_unknown')
   })
 
+  it('a phone can remove one automation exception without widening a grant', async () => {
+    f.host.settings = { get: getDefaultSettings } as never
+    const binding = { identity: 'mail', configDigest: 'same', schemaDigest: 'same' }
+    f.host.mcp = { binding: () => binding, servers: () => [], offered: () => [] } as never
+    const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send digest' }, 'owner')
+    const manifest = { ...f.store.activeGrant(botId)!.manifest, mcp: [{ serverId: 'mail', tool: 'send', level: 'asks_first' as const }] }
+    f.store.approve(botId, botManifestDigest(manifest), manifest)
+    const request = { scheduleId: schedule.scheduleId, serverId: 'mail', tool: 'send' }
+    const key = aloneKey(request)
+    const place = { to: 'inbox@example.test' }
+    const entry = { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest('Send digest'),
+      arguments: argumentContract({ ...place, body: 'A plain message' }, 'phone-test-key'), grantedAt: f.store.now(),
+      title: '‘Send digest’ sends to Inbox in Mail without asking', askTitle: 'let ‘Send digest’ send to Inbox in Mail without asking' }
+    f.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, JSON.stringify(entry))
+    expect(f.bots.service.get(botId).permissions.some(item => item.id === key)).toBe(true)
+    const before = f.store.activeGrant(botId)!.digest
+    await call(methods, 'bots.permissions.revoke', { botId, permissionId: key })
+    expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)).toBeUndefined()
+    expect(f.store.activeGrant(botId)!.digest).toBe(before)
+  })
+
+  it('refuses a let-alone answer on a phone without changing authority', async () => {
+    await f.bots.service.chatSend({ botId, text: 'Ask', clientRequestId: 'alone' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload, prepared } = await start(f, activation.id)
+    prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Ask' })
+    await finish(f, payload, 'completed', { text: 'Allow?' })
+    const ask = f.store.openAsks(botId)[0]!
+    f.store.run('UPDATE bot_escalations SET permission_json = ? WHERE id = ?', JSON.stringify({ ask: 'let_alone', scheduleId: 's', serverId: 'mail', tool: 'send' }), ask.id)
+    const before = f.store.all('SELECT * FROM bot_memory_state')
+    const error = await refused(() => call(methods, 'bots.asks.answer', { botId, askId: ask.id, answer: 'allow' }))
+    expect(error).toMatchObject({ code: 'forbidden', message: 'Answer this on the computer.' })
+    expect(f.store.escalation(ask.id)?.status).toBe('open')
+    expect(f.store.all('SELECT * FROM bot_memory_state')).toEqual(before)
+  })
+
   it('"use your threads" from a device: its message holds the turn to its own limit, and only a Full access device may Allow the card', async () => {
     let limit: PermissionMode = 'ask'
     methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: (node) => (node === 'n' ? limit : 'full') })
@@ -341,18 +381,6 @@ describe('bot methods on a real bot', () => {
     expect(() => validateRemoteBotParams('bots.questions.answer', { botId, questionId: 'nope', choice: 'Flat A', clientRequestId: 'r' })).toThrow(NetError)
   })
 
-  it('answers a permission ask', async () => {
-    await f.bots.service.chatSend({ botId, text: 'Read my invoices', clientRequestId: 'm2' })
-    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
-    const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To read them.' })
-    await finish(f, payload, 'completed', { text: 'May I?' })
-    const card = chatOf(f, botId).at(-1)!.ask!
-    expect(card.kind).toBe('permission')
-    const answered = (await call(methods, 'bots.asks.answer', { botId, askId: card.askId, answer: 'not_now' })) as { message: BotChatMessage }
-    expect(answered.message.ask).toMatchObject({ askId: card.askId, status: 'not_now' })
-  })
-
   it('the lists carry the bots, and push again when a bot changes', async () => {
     const services = {
       threads: Object.assign(new EventEmitter(), { listAllThreads: () => [] }),
@@ -412,11 +440,13 @@ describe('"Share bots with other devices"', () => {
       'bots.work.stop': { botId: BOT, workId: 'act_00000000-0000-0000-0000-000000000000' },
       'bots.chat.markRead': { botId: BOT, seq: 1 },
       'bots.asks.answer': { botId: BOT, askId: ASK, answer: 'allow' },
+      'bots.actions.answer': { botId: BOT, actionId: 'action_1', digest: 'digest', answer: 'send' },
       'bots.questions.answer': { botId: BOT, questionId: 'q_00000000-0000-0000-0000-000000000000', choice: 'Yes', clientRequestId: 'r-q' },
       'bots.personal.pause': { botId: BOT },
       'bots.personal.resume': { botId: BOT },
       'bots.create': { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1' },
       'bots.update': { botId: BOT, name: 'Pip' },
+      'bots.reminders.snooze': { botId: BOT, messageId: 'm1', choice: '10m' },
       'bots.reminders.cancel': { botId: BOT, reminderId: 'rem_00000000-0000-0000-0000-000000000000' },
       'bots.schedules.remove': { botId: BOT, scheduleId: 'daily' },
       'bots.permissions.set': { botId: BOT, permissionId: 'p1', enabled: false },
@@ -579,3 +609,20 @@ function listsServices(bots: unknown, botsSharing?: unknown): ListsServices {
     ...(botsSharing ? { botsSharing } : {})
   } as unknown as ListsServices
 }
+
+describe('device presets and bot answers', () => {
+  it('holds both held-action choices to the same Work gate as ordinary permission answers', async () => {
+    const { ACCESS_PRESETS } = await import('../../../../src/shared/net/accessPresets')
+    const { methodAccess, needsWork } = await import('../../../../src/shared/net/accessClasses')
+    for (const preset of ACCESS_PRESETS) {
+      // NetService's authorizeMethod reads this same decision on calls AND saved-result lookups.
+      const mayAnswer = (method: string) => preset.fields.work || !needsWork(methodAccess(method))
+      expect(mayAnswer('bots.chat.list'), preset.label).toBe(true)
+      expect(mayAnswer('bots.chat.send'), preset.label).toBe(true)
+      for (const choice of ['send', 'not_now']) {
+        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(mayAnswer('bots.asks.answer'))
+        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(preset.fields.work)
+      }
+    }
+  })
+})

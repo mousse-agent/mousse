@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OLD_MODEL_NAME_IGNORED } from '../../src/mms/bots/activation/BotEngine'
 import { createBotModelResolver } from '../../src/mms/bots/model/BotModelResolver'
 import type { BotRuntimeHold } from '../../src/mms/bots/seams'
-import type { BotActivationTrigger, BotDepth, BotModelPick, BotModelSlotKey, BotModelSlots, BotThreadSpec } from '../../src/shared/bots/personal/definition'
+import { MAX_BOT_CUSTOM_SLOTS, type BotActivationTrigger, type BotDepth, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotThreadSpec } from '../../src/shared/bots/personal/definition'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { customSlotsOf, imagePickOf, modelSlotsProblem, ownerNamesModel, pickProblemText, plainLabel, slotsAllOn, slotsOf, slotsWith, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, workRowsDiffer } from '../../src/shared/bots/personal/modelSlots'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
@@ -162,7 +162,7 @@ describe('custom slots', () => {
       ['not an object', 'docs']
     ]
     for (const [why, bad] of table) expect(customSlotsOf(stored([good, bad])), why).toEqual([good])
-    expect(customSlotsOf(stored(Array.from({ length: 14 }, (_, n) => ({ name: `s${n}`, pick: DOCS }))))).toHaveLength(12)
+    expect(customSlotsOf(stored(Array.from({ length: MAX_BOT_CUSTOM_SLOTS + 2 }, (_, n) => ({ name: `s${n}`, pick: DOCS }))))).toHaveLength(MAX_BOT_CUSTOM_SLOTS)
   })
 
   it('work routed to a slot runs on its pick while the slot is there; its own pick still wins, and the chat never takes one', () => {
@@ -409,7 +409,7 @@ describe('the engine on rows', () => {
     expect(f.bots.ownerSlots(botId)).toEqual({ talk: SUB_WORK, light: SUB_TALK, medium: SUB_TALK, hard: SUB_TALK })
   })
 
-  it('/model <name>: a custom slot is saved with its sign-in and shown without it; bad names, a 13th slot and a pick not offered are refused', async () => {
+  it('/model <name>: a custom slot is saved with its sign-in and shown without it; bad names and a pick not offered are refused, and a 13th slot is not', async () => {
     f.bots.setOwnerSlots(botId, ROWS)
     const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
     options.modelOptions = async () => [{ instanceId: 'claude:sub', entry: 'Claude', model: 'sonnet', label: 'Sonnet', efforts: ['high'], credential: 'subscription', account: 'acct-1' }]
@@ -432,14 +432,11 @@ describe('the engine on rows', () => {
       ['removing a slot it doesn\'t have', () => set('docs', null), { code: 'invalid_params', message: 'No slot named docs.' }]
     ]
     for (const [why, call, error] of refused) await expect(call(), why).rejects.toMatchObject(error)
-    for (let n = 2; n <= 12; n += 1) await set(`s${n}`, pick)
-    await expect(set('thirteen', pick)).rejects.toMatchObject({ code: 'invalid_params', message: expect.stringMatching(/at most 12/) })
-    // Changing one of the twelve is not a 13th.
+    // More than the twelve an older build allowed: the ceiling is one only a runaway reaches.
+    for (let n = 2; n <= 13; n += 1) await set(`s${n}`, pick)
     await set('s2', pick, 'Second')
     await set('iosdev', null)
-    expect(f.bots.customSlots(botId).map((slot) => slot.name)).toEqual(['s2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 's12'])
-    await set('thirteen', pick)
-    expect(f.bots.customSlots(botId)).toHaveLength(12)
+    expect(f.bots.customSlots(botId).map((slot) => slot.name)).toEqual(['s2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 's12', 's13'])
   })
 
   it('Talk can\'t run: every owner message gets the line with no model call, working rows keep their schedules, and it clears by itself', async () => {

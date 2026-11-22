@@ -3,9 +3,12 @@
  * the prompt, a native cancel that misses its deadline ends in a kill and a forgotten session, and
  * closing uses `session/close` only when the agent offers it.
  */
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, RequestError, type AgentApp } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/session'
+import { AcpSessions, readAcpPromptUsage, type AcpTurnUsage, type SavedAcpSession } from '../../src/mms/harness/acp/session'
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { interruptWithDeadline } from '../../src/mms/harness/supervise'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
@@ -19,8 +22,10 @@ import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
 import { holdControl } from '../support/steerHoldControl'
 
 const sessionsUnderTest: AcpSessions[] = []
+const tempDirs: string[] = []
 afterEach(() => {
   for (const sessions of sessionsUnderTest.splice(0)) sessions.stop()
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
 interface AgentScript {
@@ -29,8 +34,8 @@ interface AgentScript {
   session?: Record<string, unknown>
   /** Slash commands the agent advertises (`available_commands_update`) when it opens a session. */
   commands?: string[]
-  /** Runs one prompt; resolves with its stop reason. `blocks` is the text of every block of the prompt. */
-  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; update: (update: Record<string, unknown>) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string>
+  /** Runs one prompt; resolves with its stop reason or full prompt response. `blocks` is the text of every block of the prompt. */
+  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; update: (update: Record<string, unknown>) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string | { stopReason?: string; usage?: Record<string, unknown> }>
 }
 
 const DEFAULT_SESSION = { configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fast', options: [{ value: 'fast', name: 'Fast' }, { value: 'deep', name: 'Deep' }] }] }
@@ -64,7 +69,7 @@ function scriptedAgent(script: AgentScript) {
         const cancelled = new Promise<void>((resolve) => { cancel = resolve })
         const notify = (chunk: string) => c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } } })
         const blocks = c.params.prompt.map((block) => (block as { text?: string }).text ?? '')
-        const stopReason = await (script.prompt ?? (async (prompt, ctx) => { await ctx.notify(`echo: ${prompt}`); return 'end_turn' }))(text, {
+        const result = await (script.prompt ?? (async (prompt, ctx) => { await ctx.notify(`echo: ${prompt}`); return 'end_turn' }))(text, {
           notify,
           update: (update) => c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update } as never),
           cancelled,
@@ -75,8 +80,9 @@ function scriptedAgent(script: AgentScript) {
             options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }]
           })
         })
+        if (typeof result === 'object') return result as { stopReason: 'end_turn' }
         // An empty reason stands for an agent that sends no `stopReason` at all.
-        return (stopReason ? { stopReason: stopReason as 'end_turn' } : {}) as { stopReason: 'end_turn' }
+        return (result ? { stopReason: result as 'end_turn' } : {}) as { stopReason: 'end_turn' }
       })
       .onNotification(methods.agent.session.cancel, (c) => {
         cancels.push(c.params.sessionId)
@@ -86,7 +92,7 @@ function scriptedAgent(script: AgentScript) {
   return { ...agentApp, calls, cancels }
 }
 
-function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number } = {}) {
+function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
   const questions = new UserQuestionService()
@@ -95,7 +101,7 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     defaultInstanceId: 'acp:fake',
     questions,
     connect,
-    quirks: NO_QUIRKS,
+    quirks: { ...NO_QUIRKS, ...(options.clientFs ? { clientFs: true } : {}) },
     ...(options.closeSessions ? { closeSessions: true } : {}),
     ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {}),
     ...(options.promptSilenceMs !== undefined ? { promptSilenceMs: options.promptSilenceMs } : {}),
@@ -115,6 +121,64 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
 }
 
 describe('ACP sessions', () => {
+  it('passes the role and task from an agy 1.5.13 subagent launch to the transcript', async () => {
+    const rawInput = { Prompt: 'Compute the arithmetic 23 + 19 and report the result back to me.', Role: 'Arithmetic Solver', TypeName: 'self' }
+    const launch = { toolCallId: 'call_1071222551326134974', name: 'invoke_subagent', args: rawInput, kind: 'other', title: 'Run invoke_subagent', rawInput }
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update({ ...launch, sessionUpdate: 'tool_call', status: 'in_progress' })
+        await ctx.update({ ...launch, sessionUpdate: 'tool_call_update', status: 'completed' })
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    const onTool = vi.fn()
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'Delegate 23 + 19', onText: vi.fn(), onTool })
+    expect(onTool).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      phase: 'start', callId: launch.toolCallId, toolName: 'invoke_subagent',
+      activity: { kind: 'subagent', description: rawInput.Role, agentType: rawInput.TypeName, prompt: rawInput.Prompt }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({ phase: 'complete', callId: launch.toolCallId, status: 'completed' }))
+  })
+
+  it('records Antigravity mcp_mousse_delegate_task and mcp_mousse_thread_send tool calls with their subagent ids', async () => {
+    const delegateIn = { title: 'GitHub researcher', prompt: 'Research GitHub', workspace: 'shared' }
+    const delegateOut = { delegationId: 'd-gh', childThreadId: 't-gh', title: 'GitHub researcher' }
+    const sendOut = { delegationId: 'd-gh-2', threadId: 't-gh', title: 'GitHub researcher', subagent: true }
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-del', name: 'mcp_mousse_delegate_task', title: 'Run mcp_mousse_delegate_task', rawInput: delegateIn, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-del', status: 'completed', rawOutput: { content: [{ type: 'text', text: JSON.stringify(delegateOut) }] } })
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-send', name: 'mcp_mousse_thread_send', title: 'Run mcp_mousse_thread_send', rawInput: { threadId: 't-gh', message: 'follow up' }, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-send', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: JSON.stringify(sendOut) } }] })
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    const onTool = vi.fn()
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'Start researcher', onText: vi.fn(), onTool })
+    expect(onTool).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      phase: 'start',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      status: 'completed',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, response: JSON.stringify(delegateOut), failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-send',
+      toolName: 'mcp_mousse_thread_send',
+      status: 'completed',
+      activity: { output: JSON.stringify(sendOut) }
+    }))
+  })
+
   it('lists the session’s models, sets the chosen one, and runs the agent default without setting one', async () => {
     const agent = scriptedAgent({})
     const { sessions, models } = core(agent.connect)
@@ -149,6 +213,29 @@ describe('ACP sessions', () => {
     expect(await text).toBe('working\n\nthen focus on tests')
     expect(onSteer).toHaveBeenCalledExactlyOnceWith('focus on tests')
     expect(agent.cancels).toEqual(['native-1'])
+  })
+
+  it("restarts the prompt with the steer's images as well as its text", async () => {
+    const agent = scriptedAgent({
+      prompt: async (text, ctx) => {
+        if (text === 'long task') {
+          await ctx.notify('working')
+          await ctx.cancelled
+          return 'cancelled'
+        }
+        await ctx.notify(`then ${text}`)
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    let steer: { text: string; token: string; images: Array<{ name: string; mimeType: string; data: string }> } | undefined
+    const text = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'long task', onText: vi.fn(), onSteer: vi.fn(), drainSteerEntry: () => { const value = steer; steer = undefined; return value } })
+    await vi.waitFor(() => expect(agent.calls.filter((call) => call.method === 'session/prompt')).toHaveLength(1))
+    steer = { text: 'match this', token: 'drain-1', images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] }
+    expect(await text).toBe('working\n\nthen match this')
+    const prompts = agent.calls.filter((call) => call.method === 'session/prompt').map((call) => (call.params as { prompt: unknown[] }).prompt)
+    expect(prompts[0]).not.toContainEqual(expect.objectContaining({ type: 'image' }))
+    expect(prompts[1]).toEqual([{ type: 'text', text: 'match this' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }])
   })
 
   it('ends an agent that ignores the cancel a steer sends, and fails the turn without replaying it', async () => {
@@ -522,7 +609,7 @@ describe('ACP sessions', () => {
     })
   })
 
-  describe("the hold: a person's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
+  describe("the hold: a person's steer cuts in at once; an agent's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
     const STEER = 'Use pnpm, not npm'
     const gate = () => {
       let open!: () => void
@@ -566,7 +653,7 @@ describe('ACP sessions', () => {
       }
     }
 
-    it('strict boundary drain: a steer held during a tool goes in as the next prompt when the prompt ends, and nothing is cancelled', async () => {
+    it('strict boundary drain: an agent\'s steer held during a tool goes in as the next prompt when the prompt ends, and nothing is cancelled', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const endPrompt = gate()
@@ -587,7 +674,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       // The tool ended and the agent wrote: an agent whose gaps were never measured still holds (strict release).
@@ -626,7 +713,7 @@ describe('ACP sessions', () => {
       expect(turn.promptsWhenAccepted).toEqual([['work', STEER]])
     })
 
-    it('a tool that starts between the drain and the cancel keeps the steer: it is handed back, held, and goes in at the boundary', async () => {
+    it('a tool that starts between the drain and the cancel keeps an agent\'s steer: it is handed back, held, and goes in at the boundary', async () => {
       const endPrompt = gate()
       const agent = scriptedAgent({
         prompt: async (text, ctx) => {
@@ -643,7 +730,7 @@ describe('ACP sessions', () => {
       await vi.waitFor(() => expect(turn.events()).toContain('text:working'))
       // The tool's start arrives while the cut is on its way.
       turn.hold.beforeMayCut = () => turn.sink.tool({ kind: 'mcp_tool_call', phase: 'start', callId: 'late', title: 'npm test', summary: '', details: [] })
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.events()).toContain(`returned:${STEER}`))
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       turn.sink.tool({ kind: 'mcp_tool_result', phase: 'complete', callId: 'late', title: 'npm test', summary: '', details: [] })
@@ -654,7 +741,7 @@ describe('ACP sessions', () => {
       expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-2`])
     })
 
-    it('Send now during a tool cancels at once, and the steer goes in once', async () => {
+    it('a person\'s steer during a tool cancels at once, holds nothing, and the turn goes on with it as the next prompt, once', async () => {
       const toolStarted = gate()
       const agent = scriptedAgent({
         prompt: async (text, ctx) => {
@@ -662,6 +749,7 @@ describe('ACP sessions', () => {
             await ctx.notify(`then ${text}`)
             return 'end_turn'
           }
+          // The tool never ends by itself: only the cut ends the prompt.
           await ctx.update(toolCall('call-1', 'sleep 20'))
           toolStarted.open()
           await ctx.cancelled
@@ -671,11 +759,11 @@ describe('ACP sessions', () => {
       const turn = holdTurn(agent)
       await toolStarted.opened
       turn.hold.steer(STEER)
-      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
-      turn.hold.sendNow()
-      await turn.result
+      expect((await turn.result).text).toBe('then Use pnpm, not npm')
+      expect(turn.hold.held()).toBe(false)
       expect(agent.cancels).toEqual(['native-1'])
       expect(turn.prompts()).toEqual(['work', STEER])
+      order(turn.events(), 'tool:start:call-1', `drain:${STEER}`, 'mayCut:true', 'taken:drain-1', `accepted:${STEER}@drain-1`)
       expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
     })
 
@@ -720,7 +808,7 @@ describe('ACP sessions', () => {
       order(turn.events(), 'awaiting:tool-1:true', `drain:${STEER}`, 'awaiting:tool-1:false')
     })
 
-    it('strict release: a steer already held for a tool does not wait for a person\'s answer to the next call: it cuts and answers it', async () => {
+    it('strict release: an agent\'s steer already held for a tool does not wait for a person\'s answer to the next call: it cuts and answers it', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -740,7 +828,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       await turn.result
@@ -748,7 +836,7 @@ describe('ACP sessions', () => {
       order(turn.events(), 'tool:complete:call-1', 'awaiting:tool-1:true', `drain:${STEER}`, `accepted:${STEER}@drain-1`)
     })
 
-    it('Grok, with its measured window: the steer goes in about 100 ms after the tool\'s result when the agent shows nothing', async () => {
+    it('Grok, with its measured window: an agent\'s steer goes in about 100 ms after the tool\'s result when the agent shows nothing', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -767,7 +855,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent, GROK_CAPS)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       await turn.result
@@ -798,7 +886,7 @@ describe('ACP sessions', () => {
       expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
     })
 
-    it('Grok: a subagent reporting progress does not keep a steer held after the turn\'s own tool ends', async () => {
+    it('Grok: a subagent reporting progress does not keep an agent\'s steer held after the turn\'s own tool ends', async () => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -825,7 +913,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent, GROK_CAPS)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       finishTool.open()
       await turn.result
@@ -870,11 +958,11 @@ describe('ACP sessions', () => {
         return answer
       }
 
-      it('a steer held for a tool goes in once Mousse asks the person', async () => {
+      it('an agent\'s steer held for a tool goes in once Mousse asks the person', async () => {
         const script = asks(true)
         const turn = holdTurn(script.agent)
         await script.toolStarted.opened
-        turn.hold.steer(STEER)
+        turn.hold.steer(STEER, { person: false })
         await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
         script.finishTool.open()
         await script.asking.opened
@@ -900,7 +988,7 @@ describe('ACP sessions', () => {
       })
     })
 
-    it.each(['mousse/docs', 'Mousse.md'])('a call titled %s is no Mousse question: it holds a steer while a question is pending, like any call', async (title) => {
+    it.each(['mousse/docs', 'Mousse.md'])('a call titled %s is no Mousse question: it holds an agent\'s steer while a question is pending, like any call', async (title) => {
       const toolStarted = gate()
       const finishTool = gate()
       const agent = scriptedAgent({
@@ -921,7 +1009,7 @@ describe('ACP sessions', () => {
       await toolStarted.opened
       const answer = turn.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], 't')
       answer.catch(() => undefined)
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       await sleep(300)
       expect(turn.hold.drained()).toEqual([])
@@ -933,7 +1021,7 @@ describe('ACP sessions', () => {
       expect(turn.prompts()).toEqual(['work', STEER])
     })
 
-    it('strict release with a tool the agent never reports complete: the steer is never cut in, and stays for the follow-up', async () => {
+    it('strict release with a tool the agent never reports complete: an agent\'s steer is never cut in, and stays for the follow-up', async () => {
       const toolStarted = gate()
       const endPrompt = gate()
       const agent = scriptedAgent({
@@ -947,7 +1035,7 @@ describe('ACP sessions', () => {
       })
       const turn = holdTurn(agent)
       await toolStarted.opened
-      turn.hold.steer(STEER)
+      turn.hold.steer(STEER, { person: false })
       await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
       endPrompt.open()
       expect((await turn.result).text).toBe('done, I think')
@@ -970,5 +1058,184 @@ describe('ACP sessions', () => {
     sessions.closeIdle()
     await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
     expect(agent.calls.filter((call) => call.method === 'session/close').map((call) => call.method)).toEqual(expected)
+  })
+
+  describe('PromptResponse.usage reporting', () => {
+    it.each([
+      [
+        'agy 1.5.13 payload with cached read and thought tokens',
+        { stopReason: 'end_turn', usage: { inputTokens: 2145, outputTokens: 20, cachedReadTokens: 8752, cachedWriteTokens: 0, thoughtTokens: 18, totalTokens: 10917 } },
+        { input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917, hasOutput: true }
+      ],
+      [
+        'payload without totalTokens sums reported token fields',
+        { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 25, cachedReadTokens: 50 } },
+        { input: 100, output: 25, cacheRead: 50, cacheWrite: 0, totalTokens: 175, hasOutput: true }
+      ],
+      [
+        'payload with only totalTokens marks output unavailable so speed stays unset',
+        { stopReason: 'end_turn', usage: { totalTokens: 500 } },
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 500, hasOutput: false }
+      ],
+      ['response without usage', { stopReason: 'end_turn' }, undefined],
+      ['null usage', { stopReason: 'end_turn', usage: null }, undefined],
+      ['empty or negative usage fields', { stopReason: 'end_turn', usage: { inputTokens: -1, outputTokens: Number.NaN } }, undefined]
+    ])('readAcpPromptUsage handles %s', (_label, outcome, expected) => {
+      expect(readAcpPromptUsage(outcome)).toEqual(expected)
+    })
+
+    it('sums PromptResponse.usage across multiple prompts in one steered turn', async () => {
+      let promptCount = 0
+      const agent = scriptedAgent({
+        prompt: async (prompt, ctx) => {
+          promptCount += 1
+          await ctx.notify(`reply ${promptCount}: ${prompt}`)
+          if (promptCount === 1) {
+            return {
+              stopReason: 'end_turn',
+              usage: { inputTokens: 10801, outputTokens: 20, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 18, totalTokens: 10821 }
+            }
+          }
+          return {
+            stopReason: 'end_turn',
+            usage: { inputTokens: 2145, outputTokens: 30, cachedReadTokens: 8752, cachedWriteTokens: 0, thoughtTokens: 12, totalTokens: 10927 }
+          }
+        }
+      })
+      const { sessions } = core(agent.connect)
+      let drained = false
+      const reported: AcpTurnUsage[] = []
+      await sessions.chat({
+        threadId: 't',
+        cwd: process.cwd(),
+        model: 'default',
+        prompt: 'first',
+        onText: vi.fn(),
+        onBoundary: () => {
+          // Make the boundary steer available right after the first prompt finishes.
+        },
+        drainSteer: () => {
+          if (promptCount === 1 && !drained) {
+            drained = true
+            return 'follow-up'
+          }
+          return undefined
+        },
+        onUsage: (usage) => reported.push(usage)
+      })
+      expect(promptCount).toBe(2)
+      expect(reported).toEqual([
+        { input: 12946, output: 50, cacheRead: 8752, cacheWrite: 0, reasoning: 30, totalTokens: 21748, hasOutput: true }
+      ])
+    })
+  })
+
+  describe('requests from an idle agent outside a turn', () => {
+    it('cancels unsolicited permission requests without asking, closes the idle process, forgets the session, and runs the next turn cleanly in Full access', async () => {
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      let turn = 0
+      let inTurnAnswer: unknown
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: `native-${turn + 1}`, ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            turn += 1
+            if (turn === 1) {
+              idleClient = c.client as unknown as { request: (method: string, params: unknown) => Promise<unknown> }
+              return { stopReason: 'end_turn' as const }
+            }
+            inTurnAnswer = await c.client.request(methods.client.session.requestPermission, {
+              sessionId: c.params.sessionId,
+              toolCall: { toolCallId: 'tool-turn-2', title: 'Run tests', kind: 'execute' },
+              options: [
+                { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+                { optionId: 'reject', name: 'Reject', kind: 'reject_once' }
+              ]
+            })
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const { sessions, saved, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'start background work', onText: vi.fn() })
+      sessions.commitConversation('t', 'history-1')
+      expect(saved.get('t')?.sessionId).toBe('native-1')
+
+      // After Turn 1 completes, the idle process wakes up on its own and fires permission requests outside any turn.
+      const outOfTurnExecute = await idleClient!.request(methods.client.session.requestPermission, {
+        sessionId: 'native-1',
+        toolCall: { toolCallId: 'rogue-1', title: 'Run git status', kind: 'execute' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'reject', name: 'Reject', kind: 'reject_once' }
+        ]
+      })
+      expect(outOfTurnExecute).toEqual({ outcome: { outcome: 'cancelled' } })
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      expect(saved.get('t')).toBeUndefined()
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+
+      // The next turn opens a clean process with Full access and auto-allows without prompting.
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', history: 'history-1', prompt: 'continue', onText: vi.fn() })
+      expect(agent.connections).toHaveLength(2)
+      expect(inTurnAnswer).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+      expect(pending).not.toHaveBeenCalled()
+    })
+
+    it('rejects client file reads and writes outside a turn without prompting or touching disk', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mousse-acp-idle-fs-'))
+      tempDirs.push(dir)
+      writeFileSync(join(dir, 'existing.txt'), 'secret-data', 'utf8')
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: 'native-fs', ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            idleClient = c.client as unknown as { request: (method: string, params: unknown) => Promise<unknown> }
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const { sessions, questions } = core(agent.connect, { clientFs: true })
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: dir, model: 'default', permissionMode: 'full', prompt: 'turn 1', onText: vi.fn() })
+      await expect(idleClient!.request(methods.client.fs.readTextFile, { sessionId: 'native-fs', path: join(dir, 'existing.txt') })).rejects.toThrow(/outside a turn/i)
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+
+      await sessions.chat({ threadId: 't', cwd: dir, model: 'default', permissionMode: 'full', prompt: 'turn 2', onText: vi.fn() })
+      await expect(idleClient!.request(methods.client.fs.writeTextFile, { sessionId: 'native-fs', path: join(dir, 'rogue.txt'), content: 'bad' })).rejects.toThrow(/outside a turn/i)
+      expect(existsSync(join(dir, 'rogue.txt'))).toBe(false)
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      await vi.waitFor(() => expect(agent.connections[1].killed).toBe(true))
+    })
+
+    it('still reuses an idle session and auto-allows in-turn requests on a normal follow-up turn', async () => {
+      let inTurnAnswer: unknown
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text === 'second') inTurnAnswer = await ctx.askPermission()
+          return 'end_turn'
+        }
+      })
+      const { sessions, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'first', onText: vi.fn() })
+      sessions.commitConversation('t', 'h')
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', history: 'h', prompt: 'second', onText: vi.fn() })
+
+      expect(agent.connections).toHaveLength(1)
+      expect(agent.connections[0].killed).toBe(false)
+      expect(inTurnAnswer).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+      expect(pending).not.toHaveBeenCalled()
+    })
   })
 })

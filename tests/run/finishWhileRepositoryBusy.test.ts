@@ -227,4 +227,197 @@ describe('a finished turn while its repository is busy', () => {
     // The finished notice is not repeated for the failure.
     expect(watch.notices).toEqual([{ state: 'completed', replyShown: true }])
   })
+
+  it('tells the windows why a queued message waits: the next turn being set up, then the last turn finishing', async () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-finish-busy-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    const projectDir = gitProject(home)
+    const adapter = new WritingAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, new Set(['first', 'second']))
+    const d = phase6Daemon(home, [adapter])
+    daemon = d
+    const project = d.projects.openProject(projectDir)
+    const thread = d.store.createThread('Busy repository', project.id)
+    d.orch.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'vendor-model' })
+    // What the windows were last sent, and what a window that opens the thread now reads.
+    let sent: Array<{ content: string; waitsFor?: string }> = []
+    d.orch.on('queue-updated', (event: { threadId: string; items: Array<{ content: string; waitsFor?: string }> }) => {
+      if (event.threadId === thread.id) sent = event.items.map(({ content, waitsFor }) => ({ content, ...(waitsFor ? { waitsFor } : {}) }))
+    })
+    const listed = () => d.orch.queueSnapshot(thread.id).items.map(({ content, waitsFor }) => ({ content, ...(waitsFor ? { waitsFor } : {}) }))
+
+    // The first turn's setup waits for the repository: a message sent now waits for that setup.
+    held = await acquireRepositoryLease(resolveRepositoryIdentity(projectDir))
+    const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    const second = await d.orch.send('write second', false, { threadId: thread.id, clientRequestId: 'second', awaitMode: 'ack' })
+    expect(second.queued).toBe(true)
+    expect(adapter.turns).toHaveLength(0)
+    expect(listed()).toEqual([{ content: 'write second', waitsFor: 'setup' }])
+    expect(sent).toEqual([{ content: 'write second', waitsFor: 'setup' }])
+
+    // The turn runs: the message only waits its turn.
+    held.release()
+    held = undefined
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 20_000)
+    await waitFor(() => sent.length === 1 && !sent[0]!.waitsFor, 'the windows to be told the setup ended')
+    expect(listed()).toEqual([{ content: 'write second' }])
+
+    // The answer is complete but its checkpoint waits for the repository: the message, queued before, now waits for the
+    // turn to finish, and so does one sent now.
+    held = await acquireRepositoryLease(resolveRepositoryIdentity(projectDir))
+    adapter.answer()
+    await waitFor(() => d.engine.getRun(first.runId!)?.status === 'finalizing', 'the first run to finalize')
+    await waitFor(() => sent[0]?.waitsFor === 'finish', 'the windows to be told the last turn is finishing')
+    await d.orch.send('write third', false, { threadId: thread.id, clientRequestId: 'third', awaitMode: 'ack' })
+    expect(sent).toEqual([{ content: 'write second', waitsFor: 'finish' }, { content: 'write third', waitsFor: 'finish' }])
+    expect(listed()).toEqual(sent)
+
+    // The checkpoint is recorded: the next message runs, and the one after it only waits its turn.
+    held.release()
+    held = undefined
+    await waitFor(() => adapter.turns.length === 2, 'the second message to run', 20_000)
+    await waitFor(() => listed().length === 1 && !listed()[0]!.waitsFor, 'the third message to wait only its turn', 20_000)
+    expect(sent).toEqual([{ content: 'write third' }])
+    adapter.answer()
+  })
+})
+
+/**
+ * A steer that comes after the provider's turn is over, while the turn only saves its answer and waits for its
+ * checkpoint, can no longer reach the model. It is the next turn at once: first in the queue, shown there and not inside
+ * the finished turn, reported as queued, and it runs once the checkpoint is recorded. The same holds for a steer the
+ * turn was handed while it worked and never read. The repository's lease is held to keep the turn in that window.
+ */
+describe('a steer while a finished turn saves its answer', () => {
+  let home: string | undefined
+  let previousHome: string | undefined
+  let daemon: Phase6Daemon | undefined
+  let held: RepositoryLeaseHandle | undefined
+
+  afterEach(async () => {
+    held?.release()
+    held = undefined
+    await daemon?.stop().catch(() => undefined)
+    daemon = undefined
+    if (previousHome === undefined) delete process.env.MOUSSE_HOME
+    else process.env.MOUSSE_HOME = previousHome
+    if (home) rmSync(home, { recursive: true, force: true })
+    home = undefined
+  })
+
+  /** A Git project thread whose first turn is held at the provider until `answer`, with the repository taken first. */
+  const world = async () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-steer-finalizing-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    const projectDir = gitProject(home)
+    const adapter = new WritingAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, new Set(['first']))
+    const d = phase6Daemon(home, [adapter])
+    daemon = d
+    const project = d.projects.openProject(projectDir)
+    const thread = d.store.createThread('Steer while saving', project.id)
+    d.orch.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'vendor-model' })
+    const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider')
+    held = await acquireRepositoryLease(resolveRepositoryIdentity(projectDir))
+    const runId = first.runId!
+    /** The provider answers; the turn shows finished and its checkpoint waits for the repository. */
+    const answer = async () => {
+      adapter.answer()
+      await waitFor(() => d.orch.getTurnState(thread.id).phase === 'completed', 'the answer to be complete')
+      expect(d.engine.getRun(runId)?.status).toBe('finalizing')
+    }
+    const freeRepository = () => {
+      held?.release()
+      held = undefined
+    }
+    const queued = () => d.orch.listQueue(thread.id).map((item) => item.content)
+    /** The person's messages as the transcript shows them (hidden copies left out). */
+    const shown = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden).map((message) => message.content)
+    /** What each turn was asked to write, in the order the turns reached the provider. */
+    const prompts = () => adapter.turns.map((turn) => turn.prompt.match(/write (\w+)/)?.[1])
+    const settled = async (turns: number) => {
+      await waitFor(() => adapter.turns.length === turns && !d.orch.getOrCreateSession(thread.id).isTurnRunning() && d.orch.listQueue(thread.id).length === 0, `${turns} turns to run`, 20_000)
+    }
+    return { d, adapter, thread, runId, answer, freeRepository, queued, shown, prompts, settled }
+  }
+
+  it('a steer typed in the composer is queued first at once, shows only as its own turn, and runs next', async () => {
+    const w = await world()
+    await w.answer()
+    expect((await w.d.orch.send('write later', false, { threadId: w.thread.id, clientRequestId: 'later', awaitMode: 'ack' })).queued).toBe(true)
+
+    expect(w.d.orch.steerThreadOrEnqueueExternal(w.thread.id, 'write steered', { source: 'gui-steer' })).toMatchObject({ steered: false, queued: true })
+    expect(w.queued()).toEqual(['write steered', 'write later'])
+    expect(w.shown()).toEqual(['write first'])
+
+    w.freeRepository()
+    await w.settled(3)
+    expect(w.prompts()).toEqual(['first', 'steered', 'later'])
+    expect(w.shown()).toEqual(['write first', 'write steered', 'write later'])
+  })
+
+  it('a steer from another computer is queued first at once and keeps that computer\'s limit', async () => {
+    const w = await world()
+    await w.answer()
+    expect(w.d.orch.steerThreadOrEnqueueExternal(w.thread.id, 'write limited', { source: 'gui-steer', permissionMode: 'ask' })).toMatchObject({ steered: false, queued: true })
+    expect(w.d.orch.listQueue(w.thread.id)).toEqual([expect.objectContaining({ content: 'write limited', permissionMode: 'ask' })])
+    expect(w.shown()).toEqual(['write first'])
+
+    w.freeRepository()
+    await w.settled(2)
+    expect(w.prompts()).toEqual(['first', 'limited'])
+  })
+
+  it('a steer that names the run is answered as a follow-up, queued first, and never shown inside the finished turn', async () => {
+    const w = await world()
+    await w.answer()
+    expect((await w.d.orch.send('write later', false, { threadId: w.thread.id, clientRequestId: 'later', awaitMode: 'ack' })).queued).toBe(true)
+
+    expect(await w.d.orch.steerRun(w.runId, 'write bound', 'bound-1', w.thread.id)).toMatchObject({ status: 'accepted', runId: w.runId, followUp: true })
+    await waitFor(() => w.queued().includes('write bound'), 'the steer to be queued')
+    expect(w.queued()).toEqual(['write bound', 'write later'])
+    expect(w.shown()).toEqual(['write first'])
+
+    w.freeRepository()
+    await w.settled(3)
+    expect(w.prompts()).toEqual(['first', 'bound', 'later'])
+  })
+
+  it('an agent\'s steer the turn never read is its own turn as soon as the answer completes, runs once, and shows once', async () => {
+    const w = await world()
+    const actor = { kind: 'agent' as const, threadId: 'sender-thread', runId: 'sender-run', toolCallId: 'call-1' }
+    // While the provider still works the steer joins its turn: not a follow-up.
+    const steer = await w.d.orch.steerRun(w.runId, 'write guided', 'agent-1', w.thread.id, actor, 'full')
+    expect(steer).toMatchObject({ status: 'accepted' })
+    expect(steer).not.toHaveProperty('followUp')
+    const shownCopies = () => w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => message.role === 'user' && !message.hidden && message.content.includes('write guided'))
+    await waitFor(() => shownCopies().length === 1, 'the steer to show in the running turn')
+
+    // The provider answers without reading it: before the checkpoint is recorded, it already waits as a turn of its own.
+    await w.answer()
+    expect(w.d.engine.listRuns(w.thread.id).some((run) => run.source === 'steer-followup' && run.status === 'queued')).toBe(true)
+
+    w.freeRepository()
+    await w.settled(2)
+    expect(w.prompts()).toEqual(['first', 'guided'])
+    // Shown once: its follow-up turn's prompt is not shown, so the copy in the turn it missed is the record of it.
+    expect(shownCopies()).toHaveLength(1)
+  })
+
+  it('a person\'s steer the turn never read is back first in the queue as the answer completes, shown there only', async () => {
+    const w = await world()
+    expect((await w.d.orch.send('write later', false, { threadId: w.thread.id, clientRequestId: 'later', awaitMode: 'ack' })).queued).toBe(true)
+    expect(w.d.orch.steerThreadOrEnqueueExternal(w.thread.id, 'write unread', { source: 'gui-steer' })).toMatchObject({ steered: true })
+    expect(w.shown()).toEqual(['write first', 'write unread'])
+
+    await w.answer()
+    expect(w.queued()).toEqual(['write unread', 'write later'])
+    expect(w.shown()).toEqual(['write first'])
+
+    w.freeRepository()
+    await w.settled(3)
+    expect(w.prompts()).toEqual(['first', 'unread', 'later'])
+    expect(w.shown()).toEqual(['write first', 'write unread', 'write later'])
+  })
 })

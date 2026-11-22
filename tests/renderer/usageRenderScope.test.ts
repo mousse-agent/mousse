@@ -43,6 +43,7 @@ let host: HTMLElement | undefined
 
 beforeEach(() => {
   localStorage.clear()
+  localStorage.setItem('mousse.usage.tab', 'limits')
   localStorage.setItem('mousse.usage.section.other', 'open')
   renders.clear()
   answers.clear()

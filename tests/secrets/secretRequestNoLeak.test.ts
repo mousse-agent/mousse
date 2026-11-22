@@ -1,7 +1,8 @@
 // #595: an agent asks for a secret through a private card; the person's value goes to the secret store and nowhere
 // else. The thread's messages (as windows get them and as they are saved), the agent's tool results, the protocol's
-// replies and events, and anything written to the console or to a file under the profile hold only its name.
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+// replies and events, and anything written to the console or to a file under the profile hold only its name. The one
+// place besides the store that holds it is the thread's private copy, which the agent is told to read and use.
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,11 +19,11 @@ import { registerSecretMethods } from '../../src/mms/secrets/registerMethods'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
 import { SecretVault } from '../../src/mms/secrets/SecretVault'
 import { createSecretToolHost } from '../../src/mms/secrets/secretToolHost'
-import { createOrchestrator, phase6Daemon, piAdapter, waitFor, type Phase6Daemon, type ScriptedAdapter } from '../run/phase6Fixture'
+import { CLAUDE, PI, claudeAdapter, createOrchestrator, phase6Daemon, piAdapter, waitFor, type Phase6Daemon, type ScriptedAdapter } from '../run/phase6Fixture'
 
 const VALUE = 'hf_Secr3tValue-that-must-never-leak'
 
-/** Every file under `root` but the secret store's own value file, with its text. */
+/** Every file under `root` but the secret store's own value file and the threads' private copies, with its text. */
 function filesUnder(root: string): Array<{ path: string; text: string }> {
   const out: Array<{ path: string; text: string }> = []
   const walk = (dir: string): void => {
@@ -30,7 +31,7 @@ function filesUnder(root: string): Array<{ path: string; text: string }> {
       const path = join(dir, entry)
       const stat = statSync(path)
       if (stat.isDirectory()) walk(path)
-      else if (path !== join(root, 'secrets', 'refs.json')) out.push({ path, text: readFileSync(path).toString('latin1') })
+      else if (path !== join(root, 'secrets', 'refs.json') && !path.startsWith(join(root, 'secrets', 'threads'))) out.push({ path, text: readFileSync(path).toString('latin1') })
     }
   }
   walk(root)
@@ -55,6 +56,9 @@ describe('a secret given through the card', () => {
   const cli = { connection: { clientType: 'cli', binding: { profileId: 'p', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
   const dispatch = (context: HandlerContext, method: string, params: Record<string, unknown>) => domains.dispatch(context, method, params)
 
+  /** The vault's copy control, as the profile wires it. */
+  const copyControl = () => ({ allow: (id: string) => vault.allowCopies(id, true), hold: (ids: readonly string[]) => vault.holdCopies(ids) })
+
   let daemon: Phase6Daemon | undefined
   /** `withEngine`: a whole daemon (run engine, effect worker), whose runs record their final text. */
   function setUp(adapter: ProviderAdapter, withEngine = false): void {
@@ -70,7 +74,7 @@ describe('a secret given through the card', () => {
       store.saveThreadData(threadId, { messages: orch.liveMessagesForSave(threadId) as never, agents: existing.agents, tasks: existing.tasks, llmContext: orch.getNativeContext(threadId) })
     })
     const host = createSecretToolHost({ vault, requests, scratchRoot: join(home, 'secrets', 'run') })
-    orch.setSecrets({ tools: host, masker: (threadId) => vault.maskerFor(threadId) })
+    orch.setSecrets({ tools: host, masker: (threadId) => vault.maskerFor(threadId), copies: copyControl() })
     for (const name of ['thread-message', 'thread-message-updated', 'thread-messages'] as const) {
       orch.on(name, (payload: unknown) => events.push(JSON.stringify(payload)))
     }
@@ -89,7 +93,7 @@ describe('a secret given through the card', () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-secret-'))
     store = new ThreadDataStore(new ProjectManager(), home)
-    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => Boolean(store.getThread(id)) })
+    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => Boolean(store.getThread(id)), ancestorsOf: (id) => { const lineage = store.getThread(id)?.lineage; return lineage ? [lineage.parentThreadId, lineage.rootThreadId] : [] } })
     requests = new SecretRequests(vault)
     domains = new DomainHandlerRegistry()
     registerSecretMethods(domains, async () => ({
@@ -173,9 +177,13 @@ describe('a secret given through the card', () => {
     expect(vault.value('HF_TOKEN')).toBe(VALUE)
     const messages = JSON.stringify(orch.getMessages(threadId))
     expect(messages).toContain('[secret HF_TOKEN hidden]')
-    // The agent's tool result names it and never holds it.
-    expect(agentToolResult?.text).toContain('kept by Mousse as HF_TOKEN')
+    // The agent's tool result names it and never holds the value. This turn runs on Pi, which keeps its own tools' results
+    // as they are: it gets no file and is pointed to secret_run (a Claude Code turn's is in the test below).
+    expect(agentToolResult?.text).toContain('keeps it as HF_TOKEN')
+    expect(agentToolResult?.text).toContain('Use it with secret_run')
+    expect(agentToolResult?.text).not.toContain(join(home, 'secrets', 'threads'))
     expect(agentToolResult?.text).not.toContain(VALUE)
+    expect(existsSync(join(home, 'secrets', 'threads', threadId, 'HF_TOKEN'))).toBe(false)
     expect(messages).not.toContain(VALUE)
     expect(messages).not.toContain(Buffer.from(VALUE).toString('base64'))
     expect(JSON.stringify(orch.getNativeContext(threadId))).not.toContain(VALUE)
@@ -183,7 +191,7 @@ describe('a secret given through the card', () => {
     expect(events.length).toBeGreaterThan(0)
     for (const event of events) expect(event).not.toContain(VALUE)
     expect(JSON.stringify(await dispatch(cli, 'secrets.list', {}))).not.toContain(VALUE)
-    // Nothing logged it, and no file under the profile but the secret store holds it.
+    // Nothing logged it, and no file under the profile but the secret store and the thread's copy holds it.
     for (const line of console_) expect(line).not.toContain(VALUE)
     const files = filesUnder(home)
     expect(files.some((file) => file.path.includes('thread'))).toBe(true)
@@ -269,5 +277,145 @@ describe('a secret given through the card', () => {
 
     const refused = await runTool({ command: 'printf "%s" "$API_TOKEN"', secrets: [{ name: 'API_TOKEN' }] }, other, home)
     expect(refused).toMatchObject({ isError: true, text: expect.stringContaining('no secret named API_TOKEN') })
+  })
+
+  /** An agent that opens the secret's file with a file-reading tool (lines numbered, as such tools return them) and quotes it. */
+  function fileReadingAgent(file: () => string): ScriptedAdapter {
+    const adapter = piAdapter(() => 'unused')
+    adapter.startTurn = async (input: TurnInput, sink): Promise<TurnResult> => {
+      sink.providerRef({ provider: input.llmProvider, model: input.model })
+      sink.tool({ kind: 'build_tool_call', phase: 'start', callId: 'read', title: 'Read', summary: 'Read the token', details: [file()], response: JSON.stringify({ file_path: file() }) })
+      sink.tool({ kind: 'build_tool_result', phase: 'complete', callId: 'read', title: 'Read', summary: 'done', details: [], response: `     1\t${VALUE}\n     2\t` })
+      const text = `The file holds ${VALUE}.`
+      sink.text({ phase: 'complete', content: text, contentIndex: 0 })
+      return { text, aborted: false, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: input.llmProvider, model: input.model } }
+    }
+    return adapter
+  }
+
+  // Where the file's contents come back: [whose turn reads it]
+  const READERS: Array<[string, boolean]> = [
+    ['the thread that asked', false],
+    ["a subagent's thread of it", true]
+  ]
+  it.each(READERS)("masks the file's contents read back by %s, in its messages, events and saved data", async (_who, child) => {
+    let copy = ''
+    setUp(fileReadingAgent(() => copy))
+    const parent = store.createThread('Release').id
+    // The thread asked on Claude Code, whose turns get copies.
+    vault.allowCopies(parent, true)
+    const asked = tool({ label: 'GitHub token', reason: 'To publish.', name: 'GH_TOKEN' }, parent)
+    await waitFor(() => requests.list(parent).length === 1, 'the card')
+    await dispatch(gui, 'secrets.requests.answer', { threadId: parent, requestId: requests.list(parent)[0].requestId, value: VALUE, keep: 'day' })
+    expect((await asked).text).not.toContain(VALUE)
+    copy = vault.fileFor('GH_TOKEN', parent)!
+    expect(readFileSync(copy, 'utf8')).toBe(VALUE)
+
+    const threadId = child ? store.createThread('Worker', undefined, undefined, { lineage: { parentThreadId: parent, rootThreadId: parent, relationship: 'subagent' } }).id : parent
+    events.length = 0
+    await orch.send('Publish it', false, { threadId })
+    await waitFor(() => orch.getMessages(threadId).some((message) => message.role === 'assistant' && message.content.includes('The file holds')), 'the reply')
+    await waitFor(() => !orch.activeTurnThreadIds().includes(threadId), 'the turn to end')
+
+    // This turn ran on Pi, which keeps its tools' results: its thread lost its copy. A subagent's turn only held the
+    // parent's off while it ran: settled, the parent (still on Claude Code) has it back.
+    expect(existsSync(copy)).toBe(child)
+    const messages = JSON.stringify(orch.getMessages(threadId))
+    expect(messages).toContain('[secret GH_TOKEN hidden]')
+    expect(messages).not.toContain(VALUE)
+    expect(events.length).toBeGreaterThan(0)
+    for (const event of events) expect(event).not.toContain(VALUE)
+    for (const line of console_) expect(line).not.toContain(VALUE)
+    for (const file of filesUnder(home)) expect({ path: file.path, leaked: file.text.includes(VALUE) }).toEqual({ path: file.path, leaked: false })
+  })
+
+  // Which runtime a turn runs on decides, as each turn starts, whether its thread has a readable copy.
+  it("keeps a copy for a Claude Code turn, and removes it before a turn on another runtime runs", async () => {
+    const seen: boolean[] = []
+    let threadId = ''
+    const copy = () => join(home, 'secrets', 'threads', threadId, 'API_TOKEN')
+    const claude = claudeAdapter(() => { seen.push(existsSync(copy())); return 'Claude here.' })
+    const pi = piAdapter(() => { seen.push(existsSync(copy())); return 'Pi here.' })
+    process.env.MOUSSE_HOME = home
+    orch = createOrchestrator(home, store, [pi, claude])
+    const host = createSecretToolHost({ vault, requests, scratchRoot: join(home, 'secrets', 'run') })
+    orch.setSecrets({ tools: host, masker: (id) => vault.maskerFor(id), copies: copyControl() })
+    threadId = store.createThread('Deploy').id
+    orch.setThreadModelOverride(threadId, CLAUDE)
+    await orch.send('Start', false, { threadId })
+    // Given while the thread runs on Claude Code: it gets a copy.
+    const asked = requests.request(threadId, { label: 'API token', reason: 'x', name: 'API_TOKEN' })
+    requests.answer(threadId, requests.list(threadId)[0].requestId, VALUE, 'day')
+    expect((await asked)).toMatchObject({ kind: 'stored', file: copy() })
+    await orch.send('Use it', false, { threadId })
+    orch.setThreadModelOverride(threadId, PI)
+    await orch.send('Now on Pi', false, { threadId })
+    expect(seen).toEqual([false, true, false])
+    expect(existsSync(copy())).toBe(false)
+    expect(vault.value('API_TOKEN')).toBe(VALUE)
+  })
+
+  /** An orchestrator with a Claude Code and a Pi runtime, wired to the vault as the profile wires it. */
+  function twoRuntimes(claude: (input: TurnInput) => Promise<string> | string, pi: (input: TurnInput) => Promise<string> | string): void {
+    process.env.MOUSSE_HOME = home
+    orch = createOrchestrator(home, store, [piAdapter(pi), claudeAdapter(claude)])
+    const host = createSecretToolHost({ vault, requests, scratchRoot: join(home, 'secrets', 'run') })
+    orch.setSecrets({ tools: host, masker: (id) => vault.maskerFor(id), copies: copyControl() })
+  }
+  const giveOnClaude = async (threadId: string) => {
+    vault.allowCopies(threadId, true)
+    const asked = requests.request(threadId, { label: 'API token', reason: 'x', name: 'API_TOKEN' })
+    requests.answer(threadId, requests.list(threadId)[0].requestId, VALUE, 'day')
+    await asked
+  }
+
+  it("keeps the parent's copy off while a subagent on another runtime still runs, even across the parent's next Claude Code turn", async () => {
+    let parent = ''
+    const copy = () => join(home, 'secrets', 'threads', parent, 'API_TOKEN')
+    let childStarted = false
+    let finishChild: () => void = () => {}
+    const childDone = new Promise<void>((resolve) => { finishChild = resolve })
+    const seenByParent: boolean[] = []
+    twoRuntimes(() => { seenByParent.push(existsSync(copy())); return 'Claude here.' }, async () => { childStarted = true; await childDone; return 'Pi child done.' })
+    parent = store.createThread('Release').id
+    orch.setThreadModelOverride(parent, CLAUDE)
+    await giveOnClaude(parent)
+    expect(existsSync(copy())).toBe(true)
+    const child = store.createThread('Worker', undefined, undefined, { lineage: { parentThreadId: parent, rootThreadId: parent, relationship: 'subagent' } }).id
+    const childTurn = orch.send('Publish it', false, { threadId: child })
+    await waitFor(() => childStarted, 'the child turn')
+    expect(existsSync(copy())).toBe(false)
+    // The parent's own Claude Code turn starts and ends while the child still runs: the copy stays off.
+    await orch.send('Meanwhile', false, { threadId: parent })
+    expect(seenByParent).toEqual([false])
+    expect(existsSync(copy())).toBe(false)
+    finishChild()
+    await childTurn
+    await waitFor(() => !orch.activeTurnThreadIds().includes(child), 'the child turn to end')
+    // Settled: the parent, still on Claude Code, has its copy back.
+    expect(readFileSync(copy(), 'utf8')).toBe(VALUE)
+  })
+
+  it('refuses to start a turn on another runtime when a copy cannot be removed, and runs nothing', async () => {
+    let locked = false
+    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => Boolean(store.getThread(id)), removePath: (path) => { if (locked) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); rmSync(path, { recursive: true, force: true }) } })
+    requests = new SecretRequests(vault)
+    let piRan = false
+    twoRuntimes(() => 'Claude here.', () => { piRan = true; return 'Pi here.' })
+    const threadId = store.createThread('Deploy').id
+    await giveOnClaude(threadId)
+    const copy = join(home, 'secrets', 'threads', threadId, 'API_TOKEN')
+    expect(existsSync(copy)).toBe(true)
+    // A locked file: the copy cannot be removed, so the Pi turn must not run with it in place.
+    locked = true
+    await orch.send('Now on Pi', false, { threadId }).catch(() => undefined)
+    await waitFor(() => !orch.activeTurnThreadIds().includes(threadId), 'the turn to settle')
+    expect(piRan).toBe(false)
+    expect(JSON.stringify(orch.getMessages(threadId))).toMatch(/could not remove a readable copy/)
+    // Once the file can be removed, the next turn runs, without the copy.
+    locked = false
+    await orch.send('Again', false, { threadId })
+    expect(piRan).toBe(true)
+    expect(existsSync(copy)).toBe(false)
   })
 })

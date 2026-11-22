@@ -154,3 +154,175 @@ describe('McpManager for the MCP relay', () => {
     expect(listener).toHaveBeenCalledTimes(2)
   })
 })
+
+it('refuses a pinned schema that changed before dispatch', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    schemaDigest: 'a-different-schema'
+  })).rejects.toMatchObject({ code: 'stale_revision' })
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})
+
+it('checks the bot binding synchronously after the last asynchronous authorization read', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  let stillGranted = true
+  const original = mcp.isToolCallAllowed.bind(mcp)
+  let reads = 0
+  vi.spyOn(mcp, 'isToolCallAllowed').mockImplementation(async (...args) => {
+    const allowed = await original(...args)
+    if (++reads === 2) stillGranted = false
+    return allowed
+  })
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    assertDispatchActive: () => { if (!stillGranted) throw new Error('grant changed') }
+  })).rejects.toThrow('grant changed')
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})
+
+it.each([false, true])('tracks certainty at the actual transport boundary, dispatched=%s', async dispatched => {
+  const callTool = vi.fn(async () => { throw new Error('connection dropped') })
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  const error = await mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    assertDispatchActive: () => { if (!dispatched) throw new Error('binding changed') }
+  }, { trackDispatch: true }).catch(error => error as { mcpNotDispatched?: boolean })
+  expect(error.mcpNotDispatched).toBe(dispatched ? undefined : true)
+  expect(callTool).toHaveBeenCalledTimes(dispatched ? 1 : 0)
+  await mcp.shutdown()
+})
+
+it('re-lists hints on tools/list_changed before publishing discovery changes', async () => {
+  let changed: (() => Promise<void>) | undefined
+  let readOnlyHint: boolean | undefined = true
+  const mcp = manager({ connect: async () => ({
+    listTools: async () => ({ tools: [{ name: 'get_items', inputSchema: { type: 'object' }, annotations: { readOnlyHint } }] }),
+    callTool: async () => ({}), close: async () => {},
+    onToolsChanged: (listener: () => Promise<void>) => { changed = listener }
+  }) })
+  try {
+    const [tool] = await mcp.getEnabledTools()
+    expect(tool!.readOnlyHint).toBe(true)
+    readOnlyHint = undefined
+    await changed?.()
+    expect(mcp.lookupTool(tool!.providerName)?.readOnlyHint).toBeUndefined()
+  } finally { await mcp.shutdown() }
+})
+it('re-lists tools after restarting a server', async () => {
+  let tools: Tools = [{ name: 'before' }]
+  const { factory } = clientFactory({ tools: () => tools })
+  const mcp = manager(factory)
+  try {
+    const [before] = await mcp.getEnabledTools()
+    tools = [{ name: 'after' }]
+    await mcp.restartServer(before!.installationId!)
+    await mcp.refreshEnabledServer(before!.installationId!)
+    expect(mcp.lookupTool(before!.providerName)).toBeUndefined()
+    expect((await mcp.getEnabledTools()).map(t => t.toolName)).toEqual(['after'])
+  } finally { await mcp.shutdown() }
+})
+
+it('a targeted server listing leaves other servers alone', async () => {
+  const seen: string[] = []
+  const { factory } = clientFactory({ tools: server => { seen.push(server.installationId!); return [{ name: 'echo' }] } })
+  const mcp = manager(factory, [testServerConfig(), two])
+  try {
+    await mcp.getEnabledToolsByServer(undefined, undefined, { installationId: 'inst-two' })
+    expect(seen).toEqual(['inst-two'])
+  } finally { await mcp.shutdown() }
+})
+
+it('re-lists again when a hint changes during an in-flight notification listing', async () => {
+  let notify: (() => Promise<void>) | undefined, release!: () => void
+  let hint: boolean | undefined = true, reads = 0
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const mcp = manager({ connect: async () => ({
+    onToolsChanged: listener => { notify = listener },
+    listTools: async () => { const readOnlyHint = hint; if (++reads === 2) await gate; return { tools: [{ name: 'send', inputSchema: {}, annotations: { readOnlyHint } }] } },
+    callTool: async () => ({}), close: async () => {}
+  }) })
+  try {
+    const [tool] = await mcp.getEnabledTools()
+    const first = notify!()
+    await vi.waitFor(() => expect(reads).toBe(2))
+    hint = undefined
+    const second = notify!()
+    release(); await Promise.all([first, second])
+    expect(mcp.lookupTool(tool!.providerName)?.readOnlyHint).toBeUndefined()
+  } finally { release(); await mcp.shutdown() }
+})
+
+// Config changes close the old connection; only an explicit Restart may re-list.
+it.each(['disable', 'delete', 'edit', 'unauthorized', 'unreachable'])('restart stays close-only after %s', async change => {
+  const servers = [testServerConfig()]
+  let broken = false
+  const { factory, clients } = clientFactory({ tools: () => {
+    if (broken) throw new Error(change)
+    return [{ name: 'echo' }]
+  } })
+  const mcp = manager(factory, servers)
+  try {
+    await mcp.getEnabledTools()
+    if (change === 'disable') servers[0]!.enabled = false
+    if (change === 'delete') servers.splice(0)
+    if (change === 'edit') servers[0] = { ...servers[0]!, url: 'http://example.test/new', configRevision: 'rev2' }
+    broken = change === 'unauthorized' || change === 'unreachable'
+    await expect(mcp.restartServer('inst-echo')).resolves.toBeUndefined()
+    expect(clients).toHaveLength(1)
+    expect(mcp.getActiveCount()).toBe(0)
+  } finally { await mcp.shutdown() }
+})
+
+it.each(['enabled', 'disable', 'delete', 'edit', 'unauthorized', 'unreachable'])('explicit Restart re-lists current enabled config: %s', async change => {
+  const servers = [testServerConfig()]
+  const seen: string[] = []
+  let broken = false
+  const { factory, clients } = clientFactory({ tools: server => {
+    seen.push(server.configRevision!)
+    if (broken) throw new Error(change)
+    return [{ name: 'echo' }]
+  } })
+  const mcp = manager(factory, servers)
+  try {
+    await mcp.getEnabledTools()
+    if (change === 'disable') servers[0]!.enabled = false
+    if (change === 'delete') servers.splice(0)
+    if (change === 'edit') servers[0] = { ...servers[0]!, configRevision: 'rev2', url: 'http://example.test/current' }
+    broken = change === 'unauthorized' || change === 'unreachable'
+    await mcp.restartServer('inst-echo')
+    await expect(mcp.refreshEnabledServer('inst-echo')).resolves.toBeUndefined()
+    expect(clients).toHaveLength(['disable', 'delete'].includes(change) ? 1 : 2)
+    expect(seen).toEqual(['disable', 'delete'].includes(change) ? ['rev1'] : ['rev1', change === 'edit' ? 'rev2' : 'rev1'])
+  } finally { await mcp.shutdown() }
+})
+
+it('a delete stops a queued list_changed pass from reconnecting', async () => {
+  let notify!: () => Promise<void>, release!: () => void, reads = 0, connects = 0
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const servers = [testServerConfig()]
+  const mcp = manager({ connect: async () => {
+    connects++
+    return { onToolsChanged: listener => { notify = listener }, listTools: async () => {
+      if (++reads === 2) await gate
+      return { tools: [{ name: 'echo', inputSchema: {} }] }
+    }, callTool: async () => ({}), close: async () => {} }
+  } }, servers)
+  try {
+    await mcp.getEnabledTools()
+    const first = notify(); await vi.waitFor(() => expect(reads).toBe(2))
+    const second = notify(); servers.splice(0)
+    await mcp.restartServer('inst-echo'); release(); await Promise.all([first, second])
+    expect(connects).toBe(1); expect(mcp.getActiveCount()).toBe(0)
+  } finally { release(); await mcp.shutdown() }
+})

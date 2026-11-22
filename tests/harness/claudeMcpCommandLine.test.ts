@@ -378,6 +378,9 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
    * stops it before it starts.
    */
   async function rig(plans: Record<string, Json[]>, options: { locked?: boolean; oneShot?: boolean; debug?: boolean; channel?: ClaudeStartupChannel; viaInput?: boolean; stderrFlood?: boolean; oauth?: string } = {}) {
+    // npm adds nonexistent ancestor node_modules/.bin entries; the sandbox cannot mount those.
+    const pathSep = process.platform === 'win32' ? ';' : ':'
+    const fixturePath = (process.env.PATH ?? '').split(pathSep).filter(dir => dir && existsSync(dir)).join(pathSep)
     const base = mkdtempSync(join(tmpdir(), 'mousse-claude-mcp-argv-'))
     const started: Started[] = []
     // Runs after the service has stopped (cleanups run in reverse). A live Claude Code exits a moment after its input
@@ -422,12 +425,13 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     writeFileSync(join(state, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const service = new ClaudeSubscriptionProviderService(state, new UserQuestionService(), {
-      probe: () => ({ kind: 'signed_in', account: { label: 'API key', credential: 'api_key' } }),
+      // An account Mousse can identify: only then does a thread keep its Claude Code process between turns.
+      probe: () => ({ kind: 'signed_in', account: { label: 'API key', subject: 'test-account', credential: 'api_key' } }),
       launchConfig: () => ({ binaryPath: options.stderrFlood ? flood : BINARY, ...(options.viaInput ? { args: ['--mcp-config', ownConfig] } : {}) }),
       ...(options.channel ? { startupChannel: options.channel } : {}),
-      baseEnv: () => ({ PATH: process.env.PATH, HOME: dirs.userHome, CLAUDE_CONFIG_DIR: dirs.instanceHome }),
+      baseEnv: () => ({ PATH: fixturePath, HOME: dirs.userHome, CLAUDE_CONFIG_DIR: dirs.instanceHome }),
       ...(options.locked
-        ? { lockedEnv: (cwd: string) => lockedEnv({ platform: process.platform, base: { PATH: process.env.PATH, HOME: dirs.userHome }, driver: 'claude', credential: 'api_key', home: dirs.instanceHome, scratch: cwd }) }
+        ? { lockedEnv: (cwd: string) => lockedEnv({ platform: process.platform, base: { PATH: fixturePath, HOME: dirs.userHome }, driver: 'claude', credential: 'api_key', home: dirs.instanceHome, scratch: cwd }) }
         : {}),
       // Every live slot taken: each turn runs as one query, as a person's turn past the cap does.
       ...(options.oneShot ? { live: { maxSessions: 0 } } : {}),
@@ -900,10 +904,12 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(text).toContain('done')
     expect(run.started).toHaveLength(1)
     clean(run.started[0]!)
-    expect(run.rows).toEqual(expect.arrayContaining([{ name: 'Bash', status: 'committed' }]))
     const results = run.anthropic.results('shell').join('\n')
+    expect(run.rows, results).toEqual(expect.arrayContaining([{ name: 'Bash', status: 'committed' }]))
     expect(results).toContain('pong from /mcp')
-    expect(results).toContain('CLAUDE_CONFIG_DIR=')
+    // Claude Code's subprocess scrub removes its configuration/sign-in directory too (#1294).
+    expect(results).toContain('HOME=')
+    expect(results).not.toContain('CLAUDE_CONFIG_DIR=')
     expect(found(results)).toEqual([])
     expect(run.leftBehind()).toEqual([])
   }, 120_000)

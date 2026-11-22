@@ -65,7 +65,7 @@ describe('Settings > Agents > Access', () => {
 
   it('an older profile that stored a level and projects reads as the switches alone', () => {
     show({ level: 'read', projectIds: ['p2'], answerApprovals: true } as Partial<AccessSetting>)
-    expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computers: [] })
+    expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: [] })
   })
 
   describe('answering approvals on other threads', () => {
@@ -88,15 +88,15 @@ describe('Settings > Agents > Access', () => {
       const { updates } = show({ computers: ['node-a'] })
       click(answerSwitch()!)
       expect(updates).toHaveBeenCalledTimes(1)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: false, computers: ['node-a'] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'] } })
       expect(on()).toBe(true)
-      expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computers: ['node-a'] })
+      expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'] })
       click(answerSwitch()!)
       expect(savedByDaemon().answerApprovals).toBe(false)
     })
   })
 
-  describe('subagents on other devices', () => {
+  describe('let agents work on your other devices', () => {
     const remoteSwitch = () => host.querySelector<HTMLElement>('#agent-access-remote-subagents')
     const on = () => remoteSwitch()!.getAttribute('aria-checked') === 'true'
 
@@ -104,17 +104,17 @@ describe('Settings > Agents > Access', () => {
       show()
       expect(remoteSwitch()).not.toBeNull()
       expect(on()).toBe(false)
-      expect(remoteSwitch()!.getAttribute('aria-label')).toBe('Subagents on other devices')
-      expect(host.querySelector('label[for="agent-access-remote-subagents"]')?.textContent).toBe('Subagents on other devices')
+      expect(remoteSwitch()!.getAttribute('aria-label')).toBe('Let agents work on your other devices')
+      expect(host.querySelector('label[for="agent-access-remote-subagents"]')?.textContent).toBe('Let agents work on your other devices')
       expect(remoteSwitch()!.closest('section.settings-group')?.querySelector('h3')?.textContent?.trim()).toBe('Subagents')
       expect(host.querySelector('#agent-access-answer-approvals')!.closest('section.settings-group')?.querySelector('h3')?.textContent?.trim()).toBe('Access')
       expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).remoteSubagents).toBe(false)
     })
 
-    it('saves the whole setting when switched, and says to pair computers when none are connected', () => {
+    it('saves the whole setting when switched, under the key it always had, and says to pair computers when none are connected', () => {
       const { updates } = show({ answerApprovals: true })
       click(remoteSwitch()!)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: true, computers: [] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: true, computerUse: true, computers: [] } })
       expect(savedByDaemon().remoteSubagents).toBe(true)
       expect(text()).toContain('Pair them in Settings → Devices')
     })

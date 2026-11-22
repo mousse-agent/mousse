@@ -67,6 +67,8 @@ interface Sources {
   services: MmsProfileServices
   runtime: Pick<NetRuntime, 'audit' | 'identity'>
   now: number
+  /** A device's name, from the peer directory (v1 devices and engine pairings); the v1 roster when absent. */
+  name?: (node: NodeId) => string
 }
 
 /** A thread of this computer by id; anything else (a deleted thread, an id of another computer) is not found. */
@@ -90,6 +92,7 @@ function entryOf(
     outcome: string
     thread?: string
     project?: string
+    actor?: 'agent'
   }
 ): DeviceActivityEntry {
   const entry: DeviceActivityEntry = {
@@ -98,6 +101,7 @@ function entryOf(
     kind: row.kind,
     outcome: row.outcome
   }
+  if (row.actor === 'agent') entry.actor = 'agent'
   if (row.thread) entry.thread = { id: row.thread, name: threadHere(services, row.thread)?.name ?? null }
   if (row.project && !isHashedPath(row.project))
     entry.project = { name: services.projects.getProject(row.project)?.name ?? null }
@@ -180,7 +184,7 @@ export function messageSendersOf(sources: Sources, threadId: string): MessageSen
       continue
     }
     if (!isId('node', node)) continue
-    if (!names.has(node)) names.set(node, deviceNameOf(runtime.identity, node as NodeId))
+    if (!names.has(node)) names.set(node, sources.name?.(node as NodeId) ?? deviceNameOf(runtime.identity, node as NodeId))
     runs[runId] = { node: node as NodeId, name: names.get(node)! }
   }
   return { runs }

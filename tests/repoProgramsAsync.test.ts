@@ -10,7 +10,7 @@ import { delimiter, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { decideGitCommand, decideGitCommandAsync, GitPolicyError, registerOwnedGitRoot, userAction, withUserRequest } from '../src/mms/git/gitPolicy'
 import { grepWorkspace } from '../src/mms/files/WorkspaceGrep'
-import { checkRepoPrograms, clearRepoProgramCache, guardedSimpleGit, repoProgramProbes, repoProgramSettings, repoProgramSettingsAsync, RepoProgramError, withoutRepoPrograms, withoutRepoProgramsAsync } from '../src/mms/git/repoPrograms'
+import { checkRepoPrograms, clearRepoProgramCache, guardedGit, repoProgramProbes, repoProgramSettings, repoProgramSettingsAsync, RepoProgramError, withoutRepoPrograms, withoutRepoProgramsAsync } from '../src/mms/git/repoPrograms'
 import { clearRepositoryIdentityCache, resolveRepositoryIdentity, resolveRepositoryIdentityAsync, RepositoryIdentityError } from '../src/mms/git/RepositoryIdentity'
 import { folderAccess } from '../src/mms/files/folderAccess'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -139,7 +139,7 @@ describe('the async check before a Git command', () => {
     await expect(withoutRepoProgramsAsync(path, ['status'])).rejects.toThrow(RepoProgramError)
     await expect(checkRepoPrograms(path)).rejects.toThrow(/core\.gitproxy/)
     // simple-git's methods reject with it too.
-    await expect(guardedSimpleGit(path).raw(['status'])).rejects.toThrow(RepoProgramError)
+    await expect(guardedGit(path).raw(['status'])).rejects.toThrow(RepoProgramError)
 
     process.env.MOUSSE_GIT_POLICY = 'refuse'
     const other = repo('policy')
@@ -259,7 +259,7 @@ describe('the async check before a Git command', () => {
     folderAccess.reset({ keyOf: (folder) => folder.startsWith(path) ? 'external' : 'internal', probe: async (folder) => { if (folder.startsWith(path)) await prompt } })
     const probes = repoProgramProbes()
     const waiting = withoutRepoProgramsAsync(path, ['status'])
-    const simple = guardedSimpleGit(path).raw(['status', '--porcelain'])
+    const simple = guardedGit(path).raw(['status', '--porcelain'])
     const identity = resolveRepositoryIdentityAsync(path)
     expect(await pending(Promise.race([waiting, simple, identity]))).toBe(true)
     expect(repoProgramProbes()).toBe(probes)

@@ -29,6 +29,8 @@ export interface ResidencyHost {
   releaseIfIdle(threadId: string): boolean
   /** After each sweep: drops what is cached of threads no session holds and nothing used for `idleMs` before `now`. */
   releaseIdleData?(idleMs: number, now: number): void
+  /** After each sweep: drops the per-thread runtimes (`ThreadRuntimeManager`) nothing holds or used for `idleMs`. */
+  releaseIdleRuntimes?(idleMs: number, now: number): void
 }
 
 export interface ResidencyOptions {
@@ -226,6 +228,11 @@ export class ThreadResidency {
       this.host.releaseIdleData?.(this.idleReleaseMs, now)
     } catch (error) {
       console.warn('idle thread data could not be dropped', error instanceof Error ? error.message : String(error))
+    }
+    try {
+      this.host.releaseIdleRuntimes?.(this.idleReleaseMs, now)
+    } catch (error) {
+      console.warn('idle thread runtimes could not be dropped', error instanceof Error ? error.message : String(error))
     }
     return out
   }

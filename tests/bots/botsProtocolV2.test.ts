@@ -189,6 +189,10 @@ describe('validation', () => {
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', glow: true } }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', kind: 7 } }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', eyes: 'x'.repeat(41) } }],
+      ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', eyeColour: 'x'.repeat(41) } }],
+      ['bots.update', { botId, description: '   ' }],
+      ['bots.update', { botId, description: 'x'.repeat(501) }],
+      ['bots.update', { botId, description: 7 }],
       ['bots.chat.list', { botId, limit: 101 }],
       ['bots.chat.list', { botId, beforeSeq: 0 }],
       ['bots.chat.send', { botId, text: '  ', clientRequestId: 'm1' }],
@@ -261,8 +265,9 @@ describe('a bot through the v2 methods', () => {
     const botId = await created()
     expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots).toMatchObject([{ id: botId, name: 'Inbox Helper', state: 'idle', unread: 1 }])
     expect(await call<{ bot: BotSummary }>('bots.update', { botId, name: 'Invoice Sum', look: { colour: 'pink', accessory: 'crown' } })).toMatchObject({ bot: { name: 'Invoice Sum', look: { colour: 'pink', accessory: 'crown' } } })
-    // A Mousse with heart eyes is kept; back to the mouse with pill eyes stores no extra fields.
+    // A Mousse with heart eyes, and a picked eye colour, are kept; back to the mouse with pill eyes stores no extra fields.
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
+    expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', eyeColour: 'white' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown', eyeColour: 'white' })
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mouse', eyes: 'pill' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown' })
 
     // The owner asks; the chat turn asks to run commands with `escalate`, and the card lands on its reply.
@@ -293,12 +298,12 @@ describe('a bot through the v2 methods', () => {
 
     // About: what was allowed is listed and can be removed; so can a schedule.
     let detail = await call<BotDetail>('bots.get', { botId })
-    expect(detail.permissions).toMatchObject([{ title: 'run commands', note: expect.any(String) }])
+    expect(detail.permissions.filter((item) => !item.builtIn)).toMatchObject([{ title: 'run commands', note: expect.any(String) }])
     f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'Sum up new invoices.' }, 'bot')
     await f.tickSchedules(new Date(f.clock.now))
     detail = await call<BotDetail>('bots.get', { botId })
     expect(detail.runs).toMatchObject([{ label: 'every weekday · 09:00', kind: 'schedule' }])
-    expect((await call<BotDetail>('bots.permissions.revoke', { botId, permissionId: detail.permissions[0]!.id })).permissions).toEqual([])
+    expect((await call<BotDetail>('bots.permissions.revoke', { botId, permissionId: detail.permissions.find((item) => !item.builtIn)!.id })).permissions.filter((item) => !item.builtIn)).toEqual([])
     expect((await call<BotDetail>('bots.schedules.remove', { botId, scheduleId: detail.runs[0]!.id })).runs).toEqual([])
 
     expect(await call('bots.personal.pause', { botId })).toMatchObject({ bot: { state: 'paused', stateText: 'Paused' } })
@@ -361,4 +366,33 @@ describe('Bot UI wiring', () => {
     expect(calls).toEqual([['bots:changed', { botId: 'bot-1' }], ['bots:message', message], ['bots:activity', activity]])
     expect(bridgeProtocolEvent({ type: 'bots.escalation', data: {} } as never, broadcast as never, presentation)).toBe(false)
   })
+})
+
+
+it('snoozes through the optional reminder method without writing an owner message', async () => {
+  const botId = await created()
+  await f.bots.reconcileOnStartup()
+  const first = f.store.listActivations(botId)[0]!
+  const { reminderId } = f.bots.addReminder(botId, first.id, { dueAt: new Date(f.clock.now).toISOString(), text: 'Tea' })
+  await f.bots.deliverDueReminders()
+  const before = f.store.listActivations(botId).length
+  const messageId = `bm_${reminderId}`
+  const message = await call<BotChatMessage>('bots.reminders.snooze', { botId, messageId, choice: '10m' })
+  expect(message.reminder?.snoozedUntil).toBe(new Date(f.clock.now + 600_000).toISOString())
+  expect(f.store.listActivations(botId)).toHaveLength(before)
+  await expect(call('bots.reminders.snooze', { botId, messageId, choice: '10m' })).rejects.toMatchObject({ code: 'reminder_snoozed' })
+  await expect(call('bots.reminders.snooze', { botId, messageId, choice: 'bad' })).rejects.toMatchObject({ code: 'invalid_params' })
+})
+
+it('refuses a stale snooze after Clear chat without making a reminder', async () => {
+  const botId = await created()
+  await f.bots.reconcileOnStartup()
+  const turn = f.store.listActivations(botId)[0]!
+  const { reminderId } = f.bots.addReminder(botId, turn.id, { dueAt: new Date(f.clock.now).toISOString(), text: 'Tea' })
+  await f.bots.deliverDueReminders()
+  await call('bots.chat.clear', { botId })
+  await expect(call('bots.reminders.snooze', { botId, messageId: `bm_${reminderId}`, choice: '10m' })).rejects.toMatchObject({
+    code: 'reminder_not_found', message: 'This message has no reminder to snooze.'
+  })
+  expect(f.store.waitingReminders(botId)).toEqual([])
 })

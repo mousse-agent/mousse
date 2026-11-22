@@ -56,6 +56,22 @@ describe("a window's own service connection", () => {
   const windowSender = (id: number) => Object.assign(new EventEmitter(), { id, isDestroyed: () => false }) as unknown as WebContents
   const ringOf = (profileId: string): Ring => (server as unknown as { ringFor: (id: string) => Ring }).ringFor(profileId)
 
+  it('asks the running service to refresh stale models when the desktop reopens', async () => {
+    // Restart only the GUI connection. The service, and its provider state, survive.
+    const profile = await mms.getProfileServices(mms.profileId)
+    const refresh = vi.spyOn(profile.harness!.instances, 'refreshStaleModelsOnDesktopOpen')
+    // A normal provider snapshot read is not a desktop startup request.
+    await gui.request('providers.snapshots', { scope: { kind: 'device' } })
+    expect(refresh).not.toHaveBeenCalled()
+
+    await gui.stop()
+    gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
+    await gui.start()
+    await gui.prepareWindow(windowSender(910))
+
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce())
+  })
+
   it('is opened again by itself when the service drops it, and the window is told to catch up', async () => {
     const sender = windowSender(901)
     await gui.prepareWindow(sender)
@@ -80,7 +96,7 @@ describe("a window's own service connection", () => {
     const events: string[] = []
     gui.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => { if (senderId === 901) events.push(event.type) })
     await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'After' }))
-    await vi.waitFor(() => expect(events).toContain('threads.updated'))
+    await vi.waitFor(() => expect(events).toContain('threads.row'))
   })
 
   it("is not opened again after main closed it itself", async () => {
@@ -113,7 +129,7 @@ describe("a window's own service connection", () => {
     const events: string[] = []
     gui.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => { if (senderId === 904) events.push(event.type) })
     await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'First live update' }))
-    await vi.waitFor(() => expect(events).toContain('threads.updated'))
+    await vi.waitFor(() => expect(events).toContain('threads.row'))
     await vi.waitFor(() => expect((gui as unknown as Internals).windowSessions.get(904)!.client.lastKnownSequence).toBe(ringOf(mms.profileId).currentSequence))
   })
 
@@ -159,7 +175,7 @@ describe("a window's own service connection", () => {
     const events: ProtocolEvent[] = []
     gui.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => { if (senderId === 908) events.push(event) })
     await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'Alice thread' }))
-    await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.updated')).toBe(true))
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.row')).toBe(true))
     expect(events.filter((event) => event.profileId).every((event) => event.profileId === alice.id)).toBe(true)
   })
 

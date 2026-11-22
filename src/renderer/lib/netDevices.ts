@@ -1,10 +1,11 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { AgentReach, BridgeAccessMine, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
-import { parseVersion } from '../../shared/net/version'
+import { serviceFailureLine } from './errorText'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
+import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
 
 /** One route this computer knows for a device and how its last attempt went. */
 export interface DeviceRouteHealth {
@@ -47,6 +48,28 @@ export interface Device {
   sshOffer?: { endpoint: string }
   /** What this computer lets the device do here. Absent from a daemon that predates it. */
   policy?: BridgeNodePolicy
+  /** Whether the device is connected here. Absent from a daemon that predates it, where every device is. */
+  connection?: BridgeNodeConnection
+  /** This computer holds the device's routes, so Connect can reach it. */
+  routeHeld?: boolean
+  /** The device keeps the list: it signs every device's pass and its renewals. Absent from a daemon that predates it. */
+  keeper?: boolean
+  /** An engine pairing (the new networking), not one of the old networking's devices. */
+  source?: 'engine'
+}
+
+/** The device is connected here (a daemon from before the record connects every device). */
+export function connectedHere(device: Pick<Device, 'connection'>): boolean {
+  return device.connection === undefined || device.connection === 'connected'
+}
+/**
+ * How a device that is not connected here gets connected from its row: Connect when this computer holds its routes,
+ * otherwise a link from it. Undefined for a connected device.
+ */
+export function connectStep(device: Pick<Device, 'connection' | 'routeHeld' | 'name'>): { connect: true } | { hint: string } | undefined {
+  // A held device is connected with Allow, which also sets what it may do here.
+  if (connectedHere(device) || device.connection === 'held') return undefined
+  return device.routeHeld ? { connect: true } : { hint: `Paste a link from ${device.name}` }
 }
 
 /** The capability that lets a computer work on this one's threads is stored as `settings`. */
@@ -71,12 +94,42 @@ const NET_ERROR_WORDS: Record<string, string> = {
   route_unreachable: 'none of your other devices can be reached right now',
   peer_offline: 'a device is offline',
   keystore_locked: 'the network keys are locked',
-  deadline_exceeded: 'a device did not answer in time'
+  deadline_exceeded: 'a device did not answer in time',
+  // This computer's device pass lapsed; the computer that manages your devices renews it once they meet.
+  bad_delegation: 'waiting for your other computer to reconnect this one'
 }
 
 /** A Net error code in words a person can read; a code this build does not know has its underscores taken out. */
 export function netErrorWords(code: string): string {
   return NET_ERROR_WORDS[code] ?? code.replaceAll('_', ' ')
+}
+
+/**
+ * Why a join failed, with the one thing to do next. The daemon names the reason and the other
+ * computer in the error's details; a daemon from before them sends only the code.
+ */
+export function joinErrorWords(error: { code?: unknown; details?: unknown; message?: unknown }): string {
+  const details = (error.details ?? {}) as { reason?: unknown; label?: unknown }
+  const other = typeof details.label === 'string' ? details.label : 'the other computer'
+  switch (details.reason) {
+    case 'unreachable':
+      return `Couldn’t reach ${other}. Check that it’s on and that both computers are on the same network or tailnet, then try again.`
+    case 'clock':
+      return `The clocks on this computer and ${other} are too far apart. Set both to the correct time, then try again.`
+    case 'cancelled':
+      return `This connection was cancelled on ${other}. Start again with a new link from ${other}.`
+    case 'join_unfinished':
+      return `Couldn’t finish connecting to ${other}. Retry, or give up and start again.`
+  }
+  switch (error.code) {
+    case 'invite_invalid':
+      return 'This link isn’t valid or has expired. Make a new one on the other computer.'
+    case 'keystore_locked':
+      return 'The system keychain refused to protect this computer’s keys. Set a passphrase to continue.'
+    case 'conflict':
+      return 'This computer is already set up with its own devices, so it can’t join another set.'
+  }
+  return serviceFailureLine(error) ?? String(error.message ?? error.code ?? 'The connection failed.')
 }
 
 /** Words for a capability in the device line; `settings` is "work on threads". */
@@ -156,6 +209,141 @@ export function deviceLine(device: Device, now: number): string {
   return parts.join(' · ')
 }
 
+/**
+ * This computer's device pass lapsed (it was away too long): its own connections fail with
+ * `bad_delegation`, or another computer refuses it for that. It comes back by itself once the
+ * computer that manages your devices renews it, so the page says "Reconnecting", not an error.
+ */
+export function passLapsed(status?: Pick<NetStatus, 'error' | 'peers'>): boolean {
+  if (!status) return false
+  return status.error === 'bad_delegation' || (status.peers ?? []).some((peer) => peer.error === 'bad_delegation')
+}
+
+/**
+ * A device's state on this computer, for its row: connected here, held (it came in by a connect link and waits for
+ * Allow), or not connected. A daemon from before the record sends none.
+ */
+export type DeviceConnectionState = 'connected' | 'held' | 'not_connected'
+const CONNECTION_WORDS: Record<DeviceConnectionState, string> = {
+  connected: 'connected here',
+  held: 'waits for Allow',
+  not_connected: 'not connected here'
+}
+export function connectionState(device: Pick<Device, 'connection'>): DeviceConnectionState | undefined {
+  if (device.connection === undefined) return undefined
+  return device.connection === 'connected' || device.connection === 'held' ? device.connection : 'not_connected'
+}
+
+/** The held devices, each with which side this computer is on: it made the link (`maker`) or joined through it. */
+export function heldDevices(devices: Device[]): Array<{ device: Device; side: 'maker' | 'joiner' }> {
+  return devices
+    .filter((device) => !device.self && !device.revoked && device.connection === 'held')
+    // Only a computer that joined holds the one that keeps the list.
+    .map((device) => ({ device, side: device.keeper ? 'joiner' as const : 'maker' as const }))
+}
+
+/** What Allow does, for its tooltip; the maker's adds that Mousse ID connects the device elsewhere on its own. */
+export function allowDetail(name: string, side: 'maker' | 'joiner'): string {
+  const work = accessPreset('work')
+  const access = `Allow connects ${name} here with ${work.label}: ${work.detail}`
+  return side === 'maker' ? `${access} Your other computers signed in to Mousse ID connect it on their own.` : access
+}
+
+/**
+ * The preset name of what a connected computer may do here ("Work on threads", "Custom"), or undefined where the
+ * detail shows no preset: a phone, a device not connected here, blocked, without Works on threads, or a daemon that
+ * does not report every field.
+ */
+export function presetLabel(device: Device): string | undefined {
+  const policy = device.policy
+  if (!policy || policy.blocked || !connectedHere(device) || !isComputer(device) || !worksOnThreads(device)) return undefined
+  const preset = accessPresetOf(policy)
+  if (!preset) return undefined
+  return preset === 'custom' ? 'Custom' : accessPreset(preset).label
+}
+
+/**
+ * The short line under a device's name in the device list: online or last seen, the route in use, whether it is
+ * connected here and, for a connected computer, its preset, then only what needs attention. Signed out of Mousse ID,
+ * devices reach each other only nearby, so it says that.
+ */
+export function deviceListLine(device: Device, now: number, { signedOut = false }: { signedOut?: boolean } = {}): string {
+  const online = device.state === 'open'
+  const parts = [online ? (signedOut ? 'Nearby' : 'Online') : device.state === 'connecting' ? 'Connecting' : signedOut ? 'Not nearby' : 'Offline']
+  if (!online) {
+    const seen = lastSeenLabel(device.lastSeenAt, now)
+    if (seen) parts.push(seen)
+  }
+  if (online && device.route?.transport) parts.push(`via ${routeLabel(device.route.transport)}`)
+  const connection = connectionState(device)
+  if (connection) parts.push(CONNECTION_WORDS[connection])
+  const preset = presetLabel(device)
+  if (preset) parts.push(preset)
+  if (isIncompatible(device)) parts.push('incompatible version')
+  else if (device.olderThanThis) parts.push('older version')
+  if (device.policy?.blocked) parts.push('blocked on this computer')
+  if (device.sshOffer) parts.push('offers an SSH route')
+  return parts.join(' · ')
+}
+
+/** What one device may do on one computer, in either direction. */
+export type DeviceAccess = Pick<BridgeAccessMine, 'threads' | 'work' | 'terminal' | 'editor' | 'bots'> & {
+  maxPermissionMode?: PermissionMode
+  /** Which threads its agents may change; a person's own calls are not limited by it. */
+  agentReach?: AgentReach
+}
+/** Which threads a device's agents may change, as Limits names it. */
+const AGENT_REACH_WORDS: Record<AgentReach, string> = { none: 'none', launched: 'only threads they started', all: 'all threads' }
+
+/**
+ * What this computer lets `device` do here, from what it knows: connected here, the block, the grant, this computer's
+ * own switches ("Let my other devices work here", Share bots) and the device's switches. A phone keeps the phone API.
+ * A string says why it may do nothing; undefined for a daemon that sends no policy.
+ */
+export function accessHere(device: Device, switches: { workOnThreads: boolean; shareBots: boolean }): DeviceAccess | 'not_connected' | 'blocked' | undefined {
+  const policy = device.policy
+  if (!policy) return undefined
+  if (!connectedHere(device)) return 'not_connected'
+  if (policy.blocked) return 'blocked'
+  // Each item also needs the signed grant its calls check: reads need read, sends chat, terminals write.
+  const has = (cap: NodeCapability) => device.caps.includes(cap)
+  const bots = has('read') && policy.bots !== false && switches.shareBots
+  if (!isComputer(device)) {
+    const threads = device.caps.includes('read')
+    return { threads, work: threads && device.caps.includes('write') && policy.work !== false, terminal: false, editor: false, bots }
+  }
+  const threads = worksOnThreads(device) && has('read') && switches.workOnThreads
+  return {
+    threads,
+    work: threads && has('chat') && policy.work !== false,
+    terminal: threads && has('write') && policy.terminal,
+    editor: threads && policy.editor,
+    bots,
+    maxPermissionMode: policy.maxPermissionMode,
+    ...(policy.agentReach ? { agentReach: policy.agentReach } : {})
+  }
+}
+
+/**
+ * One short line for what a device may do, and every item on or off for its tooltip. A phone keeps the phone API, so
+ * its work on threads is not called Works on threads (the grant it never holds).
+ */
+export function accessWords(access: DeviceAccess, { phone = false }: { phone?: boolean } = {}): { line: string; detail: string } {
+  const work = phone ? 'Uses threads' : 'Works on threads'
+  const parts = [access.work ? work : access.threads ? 'Reads threads' : '', access.terminal ? 'terminals' : '', access.editor ? 'editor' : '', access.bots ? 'bots' : ''].filter(Boolean)
+  const mode = access.work && access.maxPermissionMode ? `, up to ${describePermissionMode(access.maxPermissionMode)}` : ''
+  const detail = [
+    `Threads: ${access.work ? `${phone ? 'starts and sends to them' : 'works on them'}${mode}` : access.threads ? 'reads them' : 'none'}`,
+    ...(access.work && access.agentReach ? [`Agents change: ${AGENT_REACH_WORDS[access.agentReach]}`] : []),
+    `Terminals: ${access.terminal ? 'on' : 'off'}`,
+    `Editor connections: ${access.editor ? 'on' : 'off'}`,
+    `Bots: ${access.bots ? 'on' : 'off'}`
+  ].join('\n')
+  // Agents that may change no thread is the one limit a person working there would not expect.
+  if (access.work && access.agentReach === 'none') parts.push('agents read only')
+  return { line: parts.length ? parts.join(' · ') : 'Nothing', detail }
+}
+
 /** Hover text: the connection in use and every known route with its last result. */
 export function routeDetails(device: Device): string {
   const lines: string[] = []
@@ -171,65 +359,6 @@ export function routeDetails(device: Device): string {
     lines.push(`${routeLabel(health.route.transport)}: ${result}`)
   }
   return lines.join('\n')
-}
-
-export interface UpdateInstructions {
-  summary: string
-  /** A shell command to run on the device, when one exists for its platform. */
-  command?: string
-}
-
-const RELEASES = 'https://github.com/mousse-agent/mousse/releases'
-
-/** The steps for a headless Linux x86_64 host: verify the download, install the service, restart it. */
-function headlessLinuxScript(version: string): string {
-  const file = `mousse-cli-${version}-linux-x86_64.AppImage`
-  return [
-    'set -e',
-    `mkdir -p ~/.local/share/mousse/cli/${version} && cd ~/.local/share/mousse/cli/${version}`,
-    `curl -fLO ${RELEASES}/download/v${version}/${file}`,
-    `curl -fLO ${RELEASES}/download/v${version}/SHA256SUMS-${version}.txt`,
-    `sha256sum -c --ignore-missing SHA256SUMS-${version}.txt`,
-    `chmod +x ${file}`,
-    `./${file} --appimage-extract > /dev/null`,
-    // The packaged CLI needs the Chromium sandbox off on a host without a SUID helper, both when
-    // it runs here and when systemd starts it.
-    'export ELECTRON_DISABLE_SANDBOX=1',
-    './squashfs-root/mousse-cli service install',
-    'mkdir -p ~/.config/systemd/user/mousse-mms.service.d',
-    "printf '[Service]\\nEnvironment=ELECTRON_DISABLE_SANDBOX=1\\n' > ~/.config/systemd/user/mousse-mms.service.d/sandbox.conf",
-    'systemctl --user daemon-reload',
-    'systemctl --user restart mousse-mms'
-  ].join('\n')
-}
-
-/**
- * What to do to bring `device` to `target` (this device's version). Only a headless Linux x86_64
- * host gets a command; every other platform gets words that match how it really updates.
- */
-export function updateInstructions(device: Device, target: string): UpdateInstructions {
-  const name = device.name
-  if (!parseVersion(target)) return { summary: `Update Mousse on ${name} to match this device. Releases are on ${RELEASES}.` }
-  const page = `${RELEASES}/tag/v${target}`
-  switch (device.platform) {
-    case 'linux':
-      if (device.arch === 'x64')
-        return {
-          summary: `For ${name} running the headless mousse-cli as a service, run this on it. It checks the download against the published checksums, installs it, and restarts the service, which interrupts threads running there. If ${name} runs the Mousse desktop app instead, open the app there: a copy started from its AppImage updates itself.`,
-          command: headlessLinuxScript(target)
-        }
-      return {
-        summary: `If ${name} runs the Mousse desktop app, open the app there: a copy started from its AppImage updates itself. There is no headless download for ${device.arch ? `${device.arch} ` : 'this kind of '}Linux hosts yet; releases are on ${page}.`
-      }
-    case 'darwin': {
-      const dmg = device.arch === 'arm64' ? `Mousse-${target}-arm64.dmg` : device.arch === 'x64' ? `Mousse-${target}-x64.dmg` : `Mousse-${target}-arm64.dmg (Apple silicon) or Mousse-${target}-x64.dmg (Intel)`
-      return { summary: `Mousse for macOS can't update itself yet. On ${name}, download ${dmg} from ${page} and replace the app.` }
-    }
-    case 'win32':
-      return { summary: `Mousse for Windows updates itself: open Mousse on ${name} and let it install ${target}. To do it by hand, run Mousse.Setup.${target}.exe from ${page}.` }
-    default:
-      return { summary: `Update Mousse on ${name} to ${target}. Installers and the headless CLI are on ${page}.` }
-  }
 }
 
 /** The remote machine record that set up or approved a device, if any. */

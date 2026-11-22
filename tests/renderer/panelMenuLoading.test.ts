@@ -7,7 +7,7 @@ import { OpenSurfacePicker } from '../../src/renderer/components/OpenSurfaceMenu
 import { WorkspaceLoading, WORKSPACE_SKELETON_DELAY_MS } from '../../src/renderer/components/WorkspaceLoading'
 import { ProfileSwitcher } from '../../src/renderer/components/profiles/ProfileSwitcher'
 import { surfaceTabItems } from '../../src/renderer/lib/surfaces'
-import { RESIZER_KEY_STEP, resizerKeyTarget } from '../../src/renderer/lib/resizerKeys'
+import { resizerKeyTarget } from '../../src/renderer/lib/resizerKeys'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { ProjectTerminalTab } from '../../src/shared/types'
 
@@ -60,7 +60,6 @@ describe('terminal tab labels', () => {
 
 describe('resizer keys', () => {
   it('moves 16px with Left and Right and stops at the bounds', () => {
-    expect(RESIZER_KEY_STEP).toBe(16)
     expect(resizerKeyTarget('ArrowLeft', 260, 180, 480)).toBe(244)
     expect(resizerKeyTarget('ArrowRight', 260, 180, 480)).toBe(276)
     expect(resizerKeyTarget('ArrowLeft', 190, 180, 480)).toBe(180)
@@ -105,35 +104,60 @@ describe('the "+" panel menu', () => {
     expect(addButton().getAttribute('aria-haspopup')).toBe('menu')
     expect(menu()!.getAttribute('role')).toBe('menu')
     expect(menu()!.getAttribute('aria-label')).toBe('Add panel')
-    expect(rows()).toHaveLength(5)
+    expect(rows()).toHaveLength(6)
     expect(document.activeElement).toBe(rows()[0])
     press('ArrowDown')
     expect(document.activeElement).toBe(rows()[1])
     press('End')
-    expect(document.activeElement).toBe(rows()[4])
+    expect(document.activeElement).toBe(rows()[5])
     press('Escape')
     expect(menu()).toBeNull()
     expect(document.activeElement).toBe(addButton())
   })
 
-  it('marks open panels "Open", reads "New terminal", and shows no shortcut hints', () => {
+  it('marks single-instance panels "Open" and labels actions that add tabs', () => {
     render()
-    expect(rows().map((item) => text(item.querySelector('.surface-menu-row-label')))).toEqual(['Browser', 'New terminal', 'Files', 'Changes', 'Pull request'])
-    expect(rows().map((item) => text(item.querySelector('.surface-menu-state')) ?? null)).toEqual(['Open', null, null, 'Open', null])
+    expect(rows().map((item) => text(item.querySelector('.surface-menu-row-label')))).toEqual(['New browser tab', 'New terminal', 'Files', 'Changes', 'Pull request', 'Side chats'])
+    expect(rows().map((item) => text(item.querySelector('.surface-menu-state')) ?? null)).toEqual([null, null, null, 'Open', null, null])
     expect(menu()!.querySelector('kbd')).toBeNull()
   })
 
-  it('focuses the tab of an open panel instead of adding one', async () => {
+  it('focuses the tab of an open single-instance panel', async () => {
     render()
     await act(async () => { row('Changes').click() })
     const state = useAppStore.getState()
     expect(state.mainView).toBe('git')
     expect(state.openedSurfaceKinds).toEqual(['browser', 'git', 'terminal'])
     expect(menu()).toBeNull()
-    act(() => addButton().click())
-    await act(async () => { row('Browser').click() })
-    expect(useAppStore.getState().mainView).toBe('browser')
+  })
+
+  it.each([null, 'thread-a'])('adds and selects another browser tab for %s', async (threadId) => {
+    render()
+    act(() => useAppStore.setState({ activeThreadId: threadId, mainView: 'git' }))
+    const existing = useAppStore.getState().browserTabs[0]
+    await act(async () => { row('New browser tab').click() })
+    const state = useAppStore.getState()
+    expect(state.browserTabs).toHaveLength(2)
+    expect(state.browserTabs[0]).toEqual(existing)
+    const added = state.browserTabs[1]
+    expect(added.ownerThreadId).toBe(threadId)
+    expect(added.url).toBe('about:blank')
+    expect(state.browserActiveTabByThread[threadId ?? '__standalone__']).toBe(added.id)
+    expect(state.mainView).toBe('browser')
+    expect(menu()).toBeNull()
+    const selected = host.querySelector<HTMLButtonElement>('[aria-current="page"]')!
+    expect(selected.textContent).toContain('Browser 2')
+    // The original tab remains selectable.
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('.main-view-tab-select')].find((item) => item.textContent === 'Browser 1')!.click() })
+    expect(useAppStore.getState().browserActiveTabByThread[threadId ?? '__standalone__']).toBe(existing.id)
+  })
+
+  it('opens the first browser tab from the menu', () => {
+    render()
+    act(() => useAppStore.setState({ browserTabs: [], openedSurfaceKinds: ['git'], mainView: 'git' }))
+    act(() => row('New browser tab').click())
     expect(useAppStore.getState().browserTabs).toHaveLength(1)
+    expect(host.querySelector('[aria-current="page"]')?.textContent).toBe('Browser')
   })
 
   it('adds another terminal from "New terminal"', () => {
@@ -157,7 +181,7 @@ describe('the empty app panel', () => {
     expect(text(host.querySelector('.surface-picker > .surface-picker-title'))).toBe('Add a panel')
     expect(host.querySelector('.surface-picker-title + .surface-menu-list')).not.toBeNull()
     expect(host.querySelector('[role="menuitem"]')).toBeNull()
-    expect(host.querySelectorAll('.surface-menu-row')).toHaveLength(5)
+    expect(host.querySelectorAll('.surface-menu-row')).toHaveLength(6)
     expect(text(host.querySelectorAll('.surface-menu-row')[1]?.querySelector('.surface-menu-row-label'))).toBe('Terminal')
     expect(host.querySelectorAll('kbd').length).toBeGreaterThan(0)
   })
@@ -175,7 +199,6 @@ describe('workspace loading', () => {
     act(() => { vi.advanceTimersByTime(WORKSPACE_SKELETON_DELAY_MS - 1) })
     expect(host.querySelector('.workspace-loading-composer')).toBeNull()
     act(() => { vi.advanceTimersByTime(1) })
-    expect(WORKSPACE_SKELETON_DELAY_MS).toBe(160)
     expect(host.querySelector('.workspace-loading-sidebar')).not.toBeNull()
     expect(host.querySelector('.workspace-loading-composer')).not.toBeNull()
     expect(loading.textContent).toBe('')

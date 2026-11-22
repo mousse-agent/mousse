@@ -102,14 +102,14 @@ describe('the Agents tab sidebar', () => {
     expect(host.querySelector('[data-testid="space-dialog"]')).not.toBeNull()
   })
 
-  it('shows Recent once there is a chat with an agent; a bot is listed once, in the Bots row, not in Recent', () => {
+  it('shows Recent once there is a chat with an agent; a bot is listed once, in the Bots list, not in Recent', () => {
     show(ChatsSidebar, [agent], [direct])
     expect(text('.chat-section-heading h2')).toEqual(['Bots', 'Groups', 'Recent'])
     show(ChatsSidebar, [])
     expect(text('.chat-section-heading h2')).toEqual(['Bots', 'Groups'])
     act(() => useBotsStore.setState({ bots: [summary('b1')] }))
     expect(text('.chat-section-heading h2')).toEqual(['Bots', 'Groups'])
-    expect(host.querySelectorAll('.bot-roster button')).toHaveLength(1)
+    expect(host.querySelectorAll('button[aria-label^="Message "]')).toHaveLength(1)
   })
 })
 
@@ -129,6 +129,18 @@ describe('the Agents pane', () => {
     act(() => useBotsStore.setState({ bots: [summary('b1')] }))
     show(ChatWorkspace, [])
     expect(text('.chat-workspace-empty h1')).toEqual(['Talk to your bots and agents'])
+    // The mascot stands above the title; a click makes it cheer for a moment.
+    const face = () => button('Mousse mascot')?.querySelector('.bot-face')?.getAttribute('data-state')
+    expect(face()).toBe('idle')
+    vi.useFakeTimers()
+    try {
+      click(button('Mousse mascot'))
+      expect(face()).toBe('happy')
+      act(() => { vi.advanceTimersByTime(2000) })
+      expect(face()).toBe('idle')
+    } finally {
+      vi.useRealTimers()
+    }
     expect(button('New bot')).toBeDefined()
     expect(button('New chat')).toBeUndefined()
     show(ChatWorkspace, [agent])
