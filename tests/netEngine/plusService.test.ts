@@ -5,6 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FakePlus } from './fakeHelper'
+import { ENGINE_PLUS_VARIABLE } from '../../src/mms/netEngine/plus'
 import { eventually, Fabric, type Computer } from './checks/harness'
 
 const identity = (name: string) => Buffer.from(`endpoint-${name}`).toString('hex')
@@ -38,13 +39,20 @@ describe('Plus through the engine (Phase 4)', () => {
     // A helper still starting: the first two reads of the Plus state fail.
     failures: { 'plus.status': 2 }
   }
+  // Plus over the engine is off by default (`ENGINE_PLUS_VARIABLE`); this file runs with it on.
+  const plusBefore = process.env[ENGINE_PLUS_VARIABLE]
   beforeAll(async () => {
+    process.env[ENGINE_PLUS_VARIABLE] = '1'
     fabric.network.plus.set(identity('a'), plus)
     a = await fabric.computer('a')
     b = await fabric.computer('b')
     ;({ callerOnOwner: bOnA } = await fabric.pair(a, b))
   }, 120_000)
-  afterAll(() => fabric.close(), 120_000)
+  afterAll(async () => {
+    await fabric.close()
+    if (plusBefore === undefined) delete process.env[ENGINE_PLUS_VARIABLE]
+    else process.env[ENGINE_PLUS_VARIABLE] = plusBefore
+  }, 120_000)
 
   const status = () => a.mms.netEngine.status()
   const asked = (op: string) => a.fake!.requests.filter((request) => request.op === op)

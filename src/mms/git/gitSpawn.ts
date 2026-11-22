@@ -124,7 +124,8 @@ export function gitChildSpawned(child: ChildProcess): Promise<void> {
   return child instanceof WorkerGitChild ? child.spawned : Promise.resolve()
 }
 
-const requireHere = createGitWorkerRequire(import.meta.url)
+// `import.meta.url` is empty when this module is bundled as CommonJS (a test's child process); `__filename` is set there.
+const requireHere = createGitWorkerRequire(typeof __filename === 'string' ? __filename : import.meta.url)
 let windows: ReturnType<typeof windowsGitRuntime> | undefined
 const windowsRuntime = () => windows ??= windowsGitRuntime(requireHere, requireHere.resolve('koffi'))
 const windowsJobs = new Set<WindowsGitJob>()

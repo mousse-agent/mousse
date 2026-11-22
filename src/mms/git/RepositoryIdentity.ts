@@ -9,7 +9,6 @@ import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '.
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { repositoryFacts } from './repositoryFacts'
-import { NOT_A_GIT_REPOSITORY } from './gitMarkers'
 import { gitEnvFor, gitFile } from './gitExecutable'
 import { execFileGitSync, execFileGit } from './gitSpawn'
 
@@ -244,6 +243,17 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
   return { commonDir, key, worktreePath, metadataDir, capability, movedFrom }
 }
 
+/** What Git prints (under `LC_ALL=C`) for a folder that is not in a repository, or whose `.git` file names no repository. */
+const NO_REPOSITORY = /^fatal: (not a git repository|gitfile does not point to a valid repository)/
+
+/** True only when the folder does not exist: Git cannot start there, and the folder is no repository. */
+async function folderGone(path: string): Promise<boolean> {
+  try { await stat(path); return false } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'ENOTDIR'
+  }
+}
+
 async function gitAsync(cwd: string, args: readonly string[], absent: (code: string | number | undefined, stderr: string) => boolean): Promise<string | null> {
   const argv = await withoutRepoProgramsAsync(cwd, args)
   return new Promise((settle, reject) => {
@@ -256,9 +266,6 @@ async function gitAsync(cwd: string, args: readonly string[], absent: (code: str
   })
 }
 
-/** Git's answer for a folder outside any repository it can open, as the first line it writes. */
-const NOT_A_REPOSITORY_ANSWER = new RegExp('^fatal: (?:' + NOT_A_GIT_REPOSITORY.source + ')', 'i')
-
 /**
  * {@link resolveRepositoryIdentity} without blocking the daemon. It first waits until the folder's volume
  * answers; then Git runs as a child process and the folder is read and written with async calls. It asks Git
@@ -270,7 +277,9 @@ export async function resolveRepositoryIdentityAsync(cwd: string, options: Resol
   const worktreePath = await canonicalAsync(cwd)
   // A turn's start or end asks once for all its callers (`repositoryFacts.ts`).
   const facts = await repositoryFacts(worktreePath)
-  const answer = facts ? null : await gitAsync(worktreePath, PROBE, (code, stderr) => code === 128 && NOT_A_REPOSITORY_ANSWER.test(stderr))
+  // A folder that is gone, or whose `.git` file points nowhere (an agent removed its worktree), is no repository, as
+  // for the synchronous call. Any other failure is Git's own error, never read as "not a repository".
+  const answer = facts || await folderGone(worktreePath) ? null : await gitAsync(worktreePath, PROBE, (code, stderr) => code === 128 && NO_REPOSITORY.test(stderr))
   const [commonRaw, bare, inside] = facts ? [facts.commonDirRaw, facts.bare, facts.inside] : probeAnswers(answer)
   if (answer !== null && (!commonRaw || !['true', 'false'].includes(bare ?? '') || !['true', 'false'].includes(inside ?? ''))) {
     throw new Error('Git returned an invalid repository identity')

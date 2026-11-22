@@ -156,6 +156,8 @@ describe('private threads', () => {
     const sharedChild = orchestrator.createChildThread({ parentThreadId: shared.id, parentRunId: 'run-2', clientRequestId: 'c2', prompt: 'Look', workspace: 'shared', wake: 'none' })
     expect(mms.threads.getThread(sharedChild.threadId)?.localOnly).toBeUndefined()
     const fork = orchestrator.createForkThread({ kind: 'fork', sourceThreadId: secret.id, sourceRunId: 'run-1' })
+    // A fork is shown once its fork transaction commits (#1764), as the Run Engine then publishes it.
+    mms.threads.publishPendingFork(fork.threadId)
     expect(mms.threads.getThread(fork.threadId)?.localOnly).toBe(true)
     const remote = await orchestrator.delegateRemoteTask(secret.id, 'run-1', { computer: 'Office', prompt: 'p', title: 't', workspace: 'shared' }, { toolCallId: 'call-1' }, { accessLevel: 'lineage' })
     expect(remote).toMatchObject({ started: false, code: 'private_thread' })

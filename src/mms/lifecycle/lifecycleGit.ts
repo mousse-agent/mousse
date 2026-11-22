@@ -20,8 +20,11 @@ export async function lifecycleGitAsync(cwd: string, args: string[], input?: str
   // A check that reads first returns a promise for its final synchronous check: the reads run now, and that check right
   // before Git starts (after any wait for its disk), with nothing awaited in between. A synchronous check runs now and then.
   const admission = beforeStart?.()
-  // No promise came back: `beforeStart` is the synchronous kind.
-  const final = admission ? await admission : beforeStart as (() => void) | undefined
+  const final: (() => void) | undefined = admission
+    ? await admission
+    : beforeStart
+      ? () => { void beforeStart() }
+      : undefined
   const ran = await runGitProcess(argv, { cwd, input, env: runEnv, timeout: 30_000, maxBuffer, beforeStart: final })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trimEnd()
