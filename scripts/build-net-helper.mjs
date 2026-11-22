@@ -13,7 +13,8 @@
 // or untracked files is left alone and the build stops: moving it to the pinned commit would lose that work. Its
 // remotes and ignored files are not touched. It is built with `--locked --target <triple>`; CARGO_TARGET_DIR is
 // honoured. On Windows the C runtime is linked in, so the helper runs on a computer without the Visual C++
-// redistributable.
+// redistributable, and the exe gets the Mousse icon and names (FileDescription and ProductName "Mousse", the app's
+// CompanyName), so Windows asks to let "Mousse" through its firewall rather than an unnamed program.
 //
 // The helper names its build in `--version`, from its source's commit. MOUSSE_BUILD_ID, which would override that,
 // is not passed to the build: a package says what it was built from. When the built helper runs here, its
@@ -159,6 +160,28 @@ mkdirSync(packageDir, { recursive: true })
 copyFileSync(output, join(packageDir, name))
 writeFileSync(join(packageDir, 'ENGINE_COMMIT'), `${commit}\n`)
 writeFileSync(join(packageDir, 'TARGET'), `${triple}\n`)
+// Windows names the helper by its version resources, so it says Mousse, with the Mousse icon. Loaded here only: the
+// steps before need no packages.
+if (triple.endsWith('-windows-msvc')) {
+  try {
+    const { appIdentity, stampWindowsExe } = await import('./windows-exe-resources.mjs')
+    const { CompanyName, LegalCopyright, version } = appIdentity(project)
+    stampWindowsExe(join(packageDir, name), {
+      icon: join(project, 'resources', 'icon.ico'),
+      strings: {
+        FileDescription: 'Mousse',
+        ProductName: 'Mousse',
+        CompanyName,
+        LegalCopyright,
+        InternalName: 'mousse-helper',
+        OriginalFilename: name
+      },
+      version
+    })
+  } catch (error) {
+    stop(`could not set the helper's Windows name and icon: ${error.message}`)
+  }
+}
 const size = Math.round(statSync(output).size / 1024 / 1024)
 const version = run(join(packageDir, name), ['--version'])
 if (version.error && ['ENOEXEC', 'EBADARCH', 'UNKNOWN', 'EACCES'].includes(version.error.code)) {
