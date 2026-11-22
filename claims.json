@@ -104,22 +104,6 @@
       "expiresAt": "2026-11-22T18:34:57.715Z"
     },
     {
-      "task": "fix/usage-history-antigravity",
-      "session": "agibook-39826e",
-      "machine": "agibook",
-      "branch": "fix/usage-history-antigravity",
-      "paths": [
-        "src/shared/usageHistory.ts",
-        "src/mms/usageHistory",
-        "src/renderer/lib/usageHistory.ts",
-        "src/renderer/lib/usageHistoryDevices.ts",
-        "src/mms/protocol/handlers.ts",
-        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts"
-      ],
-      "claimedAt": "2026-11-22T16:55:24.773Z",
-      "expiresAt": "2026-11-22T18:55:24.773Z"
-    },
-    {
       "task": "git-spawn-off-daemon-loop",
       "session": "Animatrix-2dabf9",
       "machine": "Animatrix",
@@ -148,22 +132,6 @@
       "expiresAt": "2026-11-21T19:07:55.290Z"
     },
     {
-      "task": "receipt-release-outside-lease",
-      "session": "Animatrix-92964c",
-      "machine": "Animatrix",
-      "branch": "receipt-release-outside-lease",
-      "paths": [
-        "src/mms/actions",
-        "src/mms/lifecycle",
-        "src/mms/data",
-        "src/mms/run",
-        "src/mms/orchestrator",
-        "src/mms/git/runGitProcess.ts"
-      ],
-      "claimedAt": "2026-11-21T05:51:10.179Z",
-      "expiresAt": "2026-11-21T17:20:22.673Z"
-    },
-    {
       "task": "sidebar-branch-without-git-reads",
       "session": "Animatrix-4b6bd9",
       "machine": "Animatrix",
@@ -182,32 +150,6 @@
       ],
       "claimedAt": "2026-11-21T04:52:44.669Z",
       "expiresAt": "2026-11-21T18:09:21.279Z"
-    },
-    {
-      "task": "starting-thread-queue-steer",
-      "session": "Animatrix-119e93",
-      "machine": "Animatrix",
-      "branch": "starting-thread-queue-steer",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/protocol/handlers.ts",
-        "tests/run/queueSteerExactlyOnce.test.ts"
-      ],
-      "claimedAt": "2026-11-21T10:50:38.459Z",
-      "expiresAt": "2026-11-21T17:40:28.363Z"
-    },
-    {
-      "task": "worktree-checks-without-git",
-      "session": "Animatrix-a7b4de",
-      "machine": "Animatrix",
-      "branch": "worktree-checks-without-git",
-      "paths": [
-        "src/mms/lifecycle",
-        "tests/resourcePurge.test.ts",
-        "tests/worktreeFacts.test.ts"
-      ],
-      "claimedAt": "2026-11-21T05:51:04.012Z",
-      "expiresAt": "2026-11-21T17:05:13.421Z"
     },
     {
       "task": "worktree-turns-skip-start-snapshot",
