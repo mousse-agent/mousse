@@ -2,22 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "devices-declutter",
-      "session": "Animatrix-69a682",
-      "machine": "Animatrix",
-      "branch": "devices-declutter",
-      "paths": [
-        "src/renderer/components/SettingsPage.tsx",
-        "src/renderer/components/NetDevicesSection.tsx",
-        "src/renderer/components/devices",
-        "src/renderer/components/netEngine",
-        "src/renderer/lib/settingsSearch.ts",
-        "src/renderer/lib/netDevices.ts"
-      ],
-      "claimedAt": "2026-11-21T04:04:09.685Z",
-      "expiresAt": "2026-11-21T06:04:09.685Z"
-    },
-    {
       "task": "devices-quick-tunnel",
       "session": "Animatrix-f25446",
       "machine": "Animatrix",
@@ -28,7 +12,7 @@
         "src/shared/netEngine"
       ],
       "claimedAt": "2026-11-21T10:24:52.800Z",
-      "expiresAt": "2026-11-21T19:23:11.003Z"
+      "expiresAt": "2026-11-22T10:41:17.871Z"
     },
     {
       "task": "early-checkout-preparation",
@@ -62,35 +46,6 @@
       ],
       "claimedAt": "2026-11-21T05:55:00.275Z",
       "expiresAt": "2026-11-21T18:19:01.797Z"
-    },
-    {
-      "task": "fix-acp-out-of-turn-requests",
-      "session": "agibook-9bfa6e",
-      "machine": "agibook",
-      "branch": "fix-acp-out-of-turn-requests",
-      "paths": [
-        "src/mms/harness/acp/session.ts",
-        "src/mms/harness/acp/permissions.ts",
-        "src/mms/harness/acp/xai.ts",
-        "src/mms/run/mcp/instructions.ts"
-      ],
-      "claimedAt": "2026-11-20T20:50:53.551Z",
-      "expiresAt": "2026-11-20T22:50:53.551Z"
-    },
-    {
-      "task": "git-restart-scaling",
-      "session": "Animatrix-57bbb8",
-      "machine": "Animatrix",
-      "branch": "git-restart-scaling",
-      "paths": [
-        "src/mms/lifecycle",
-        "src/mms/workspace",
-        "src/mms/runtime",
-        "src/mms/actions/UndoRetentionSweeper.ts",
-        "src/mms/git/gitPolicy.ts"
-      ],
-      "claimedAt": "2026-11-20T23:26:45.041Z",
-      "expiresAt": "2026-11-21T01:26:45.041Z"
     },
     {
       "task": "git-spawn-off-daemon-loop",
@@ -173,20 +128,6 @@
       "expiresAt": "2026-11-21T18:09:21.279Z"
     },
     {
-      "task": "starting-thread-is-own-thread",
-      "session": "Animatrix-96ddcc",
-      "machine": "Animatrix",
-      "branch": "starting-thread-is-own-thread",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/renderer/lib/threadActions.ts",
-        "src/renderer/lib/pendingThreadRows.ts",
-        "src/renderer/components/ThreadsSidebar.tsx"
-      ],
-      "claimedAt": "2026-11-21T04:26:46.988Z",
-      "expiresAt": "2026-11-21T06:36:56.876Z"
-    },
-    {
       "task": "starting-thread-queue-steer",
       "session": "Animatrix-119e93",
       "machine": "Animatrix",
@@ -198,48 +139,6 @@
       ],
       "claimedAt": "2026-11-21T10:50:38.459Z",
       "expiresAt": "2026-11-21T17:40:28.363Z"
-    },
-    {
-      "task": "thread-journal-scaling",
-      "session": "Animatrix-8aab10",
-      "machine": "Animatrix",
-      "branch": "thread-journal-scaling",
-      "paths": [
-        "src/mms/data/ThreadJournal.ts",
-        "src/mms/actions/ThreadActionService.ts",
-        "src/mms/actions/ChangeReceiptService.ts",
-        "src/mms/actions/UndoRetentionService.ts",
-        "src/mms/workspace"
-      ],
-      "claimedAt": "2026-11-20T23:03:35.429Z",
-      "expiresAt": "2026-11-21T01:03:35.429Z"
-    },
-    {
-      "task": "thread-list-scaling",
-      "session": "Animatrix-596759",
-      "machine": "Animatrix",
-      "branch": "thread-list-scaling",
-      "paths": [
-        "src/mms/data/ThreadDataStore.ts",
-        "src/mms/protocol/server.ts",
-        "src/mms/lifecycle/ThreadExpiryService.ts"
-      ],
-      "claimedAt": "2026-11-20T23:01:48.345Z",
-      "expiresAt": "2026-11-21T01:01:48.345Z"
-    },
-    {
-      "task": "window-warm-start",
-      "session": "Animatrix-b233b3",
-      "machine": "Animatrix",
-      "branch": "window-warm-start",
-      "paths": [
-        "src/main/warmStart",
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/renderer/App.tsx",
-        "src/main/mms/bootstrapPresentation.ts"
-      ],
-      "claimedAt": "2026-11-20T21:12:08.192Z",
-      "expiresAt": "2026-11-20T23:12:08.192Z"
     },
     {
       "task": "worktree-checks-without-git",
