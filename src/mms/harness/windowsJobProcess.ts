@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
 import type { SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 
-const requireNative = createRequire(import.meta.url)
+// `import.meta.url` is empty when this module is bundled as CommonJS (a test's child process); `__filename` is set there.
+const requireNative = createRequire(typeof __filename === 'string' ? __filename : import.meta.url)
 const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000

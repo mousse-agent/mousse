@@ -425,7 +425,8 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     writeFileSync(join(state, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const service = new ClaudeSubscriptionProviderService(state, new UserQuestionService(), {
-      probe: () => ({ kind: 'signed_in', account: { label: 'API key', credential: 'api_key' } }),
+      // An account Mousse can identify: only then does a thread keep its Claude Code process between turns.
+      probe: () => ({ kind: 'signed_in', account: { label: 'API key', subject: 'test-account', credential: 'api_key' } }),
       launchConfig: () => ({ binaryPath: options.stderrFlood ? flood : BINARY, ...(options.viaInput ? { args: ['--mcp-config', ownConfig] } : {}) }),
       ...(options.channel ? { startupChannel: options.channel } : {}),
       baseEnv: () => ({ PATH: fixturePath, HOME: dirs.userHome, CLAUDE_CONFIG_DIR: dirs.instanceHome }),

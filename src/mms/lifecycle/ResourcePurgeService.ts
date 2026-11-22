@@ -22,7 +22,7 @@ import { assertFrozenEntryUnchanged, lockedText, proveFrozenContentEntryAsync, w
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
-import { isMousseOwnedRef } from '../../shared/mousseBranches'
+import { isAgentBranchName, isMousseOwnedRef } from '../../shared/mousseBranches'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { BRANCH_RECORD_OPERATIONS, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { forkCheckpointRef, readForkCheckpointPin } from '../workspace/forkCheckpointPin'
@@ -687,7 +687,8 @@ export class ResourcePurgeService {
             preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, branchProvenance, status: 'pending' })
             continue
           }
-          if (resource.identity.startsWith('refs/heads/')) {
+          // An agent's or a workflow's branch has a reserved name its verified record gives; any other branch needs a thread's journal.
+          if (resource.identity.startsWith('refs/heads/') && !isAgentBranchName(resource.identity.slice('refs/heads/'.length))) {
             preview.retained.push({ identity: resource.identity, reason: 'Mousse has no proof it owns this branch; the branch stays' })
             continue
           }
@@ -890,8 +891,8 @@ export class ResourcePurgeService {
             progress.retainedReason = reason
           })
         }
-        // Older ledgers cannot establish which incarnation of a branch the preview reviewed.
-        if (item.kind === 'ref' && item.identity.startsWith('refs/heads/') && !item.branchProvenance) {
+        // Older ledgers cannot establish which incarnation of a thread's branch the preview reviewed.
+        if (item.kind === 'ref' && item.identity.startsWith('refs/heads/') && !item.branchProvenance && !isAgentBranchName(item.identity.slice('refs/heads/'.length))) {
           retain('The purge recorded no proof of branch ownership; the branch stays')
           continue
         }
@@ -1009,6 +1010,18 @@ export class ResourcePurgeService {
         if (item.identity.startsWith('refs/heads/')) {
           const name = item.identity.slice('refs/heads/'.length)
           const proof = item.branchProvenance
+          if (!proof && isAgentBranchName(name)) {
+            // An agent's or a workflow's branch, as retirement deletes one: at the tip the preview reviewed, never while checked out.
+            let checkedOut = false
+            const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, async () => {
+              const unclaimed = await readUnclaimed()
+              if (await branchCheckedOutAsync(commonDir, item.identity)) { checkedOut = true; return false }
+              unclaimed()
+              return true
+            }))
+            if (!deleted) return checkedOut ? 'This branch is checked out; the branch stays' : 'This branch was in use or its checkouts could not be verified; the branch stays'
+            return
+          }
           if (!proof) return 'The purge recorded no proof of branch ownership; the branch stays'
           let reason = 'The branch reflog changed since the purge preview; the branch stays'
           const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, async () => {
