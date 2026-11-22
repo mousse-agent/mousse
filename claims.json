@@ -59,18 +59,6 @@
       ],
       "claimedAt": "2026-11-22T16:34:57.715Z",
       "expiresAt": "2026-11-22T23:19:06.190Z"
-    },
-    {
-      "task": "profiler-memory-scope",
-      "session": "agibook-5c97dc",
-      "machine": "agibook",
-      "branch": "profiler-memory-scope",
-      "paths": [
-        "src/shared/diagnostics/memory.ts",
-        "src/renderer/components/settings/MemoryRows.tsx"
-      ],
-      "claimedAt": "2026-11-22T21:15:35.316Z",
-      "expiresAt": "2026-11-22T23:20:08.779Z"
     }
   ]
 }
