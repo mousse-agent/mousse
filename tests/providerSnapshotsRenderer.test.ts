@@ -61,6 +61,12 @@ describe('composer picker from snapshots', () => {
     expect(providers[0].caps?.planMode).toBe(true)
   })
 
+  it('leaves out a default agent that is signed out, but keeps a model API that needs attention', () => {
+    const agent = snapshot({ auth: { state: 'signed_out' }, models: { entries: claudeModels, source: 'live' } })
+    const api = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', auth: { state: 'signed_out' }, models: { entries: [model('gpt-5')], source: 'live' } })
+    expect(pickerProviders([agent, api], []).map((entry) => entry.instanceId)).toEqual(['pi:openai'])
+  })
+
   it('gives the same entries for the same snapshots, so switching threads does not group the models again', () => {
     const snapshots = [snapshot({ models: { entries: claudeModels, source: 'live' } })]
     const first = pickerProviders(snapshots, catalog)

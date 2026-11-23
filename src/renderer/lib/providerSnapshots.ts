@@ -7,6 +7,7 @@ import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import { useAppStore } from '../stores/appStore'
 import { ipcErrorLine } from './errorText'
+import { isApiInstance } from '../components/providers/providerView'
 
 /**
  * Provider instance snapshots as the daemon reports them (`providers.snapshots`), kept per scope
@@ -609,7 +610,7 @@ function makePickerProviders(snapshots: readonly InstanceSnapshot[] | undefined,
     const listed = catalog.find((provider) => provider.instanceId === snapshot.instanceId)
     // Default agent entries can report fallback models before the user connects them.
     // Added accounts and model APIs remain visible while they need attention.
-    if (snapshot.builtIn && snapshot.driver !== 'pi' &&
+    if (snapshot.builtIn && !isApiInstance(snapshot) &&
       (snapshot.auth.state === 'signed_out' || (snapshot.auth.state === 'unknown' && !listed?.models.length))) continue
     // The catalog's entry for each model, the first one listed under its id.
     const listedModels = new Map<string, LlmModelOption>()
