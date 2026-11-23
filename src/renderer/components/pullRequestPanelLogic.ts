@@ -430,6 +430,20 @@ export function pullRequestPanelState(input: {
   return { kind: 'loading' }
 }
 
+/** Panel state for a pull request opened explicitly from a chat link (by repository identity, independent of any branch). */
+export function viewedPullRequestPanelState(
+  number: number,
+  entry: { detail: PullRequestDetail | null; error: string | null; errorReason?: string | null } | null
+): PullRequestPanelState {
+  if (entry?.detail) return { kind: 'ready', detail: entry.detail, staleError: entry.error }
+  if (entry?.error) {
+    if (isGitHubSignedOut({ reason: entry.errorReason, message: entry.error })) return { kind: 'signed-out', message: entry.error }
+    if (entry.errorReason === 'gh-missing') return { kind: 'gh-missing' }
+    return { kind: 'error', message: entry.error, number }
+  }
+  return { kind: 'loading' }
+}
+
 /** First seven characters of a commit id. */
 export function shortSha(sha: string): string {
   return sha.slice(0, 7)

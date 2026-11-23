@@ -200,6 +200,7 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestIdentity,
   PullRequestListItem,
   PullRequestMergeMethod,
   PullRequestPushTarget,
@@ -3449,6 +3450,15 @@ export function registerGuiIpc(
       ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
       ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
       number,
+      ...(force === true ? { force } : {})
+    })
+    return response.detail
+  })
+  registerHandler('pullRequests:view', async (_e, identity: PullRequestIdentity | undefined, force?: boolean) => {
+    const response = await guiMms.request<{ detail: PullRequestDetail }>('pullRequests.view', {
+      host: identity?.host,
+      nameWithOwner: identity?.nameWithOwner,
+      number: identity?.number,
       ...(force === true ? { force } : {})
     })
     return response.detail

@@ -1,5 +1,7 @@
 import { parseChatReference, parseMousseFileLink, type ChatReference } from '../../shared/chatReferences'
+import { parsePullRequestReference, type PullRequestIdentity } from '../../shared/pullRequests'
 import { useAppStore } from '../stores/appStore'
+import { openViewedPullRequest } from '../stores/pullRequestStore'
 import { visibleThreads } from '../../shared/threadLineage'
 import { parseThreadLink } from '../../shared/threadLink'
 import { isQualifiedId } from '../../shared/threadRef'
@@ -62,6 +64,15 @@ function classifyPath(value: string): RoutedLink {
   }
 }
 
+/** Parses a GitHub pull request URL (`https://github.com/<owner>/<repo>/pull/<number>[/...]`); null for other URLs. */
+export function parseGitHubPullRequestUrl(href: string): PullRequestIdentity | null {
+  if (!/^https?:\/\//i.test(href.trim())) return null
+  const parsed = parsePullRequestReference(href)
+  if (!parsed || !parsed.host || !parsed.nameWithOwner) return null
+  if (parsed.host !== 'github.com') return null
+  return { host: parsed.host, nameWithOwner: parsed.nameWithOwner, number: parsed.number }
+}
+
 export function routeLink(href: string, context?: { threadId?: string; projectId?: string }): boolean {
   const route = classifyLink(href)
   if (route.kind === 'reject') return false
@@ -71,10 +82,16 @@ export function routeLink(href: string, context?: { threadId?: string; projectId
   }
   if (route.kind === 'web') {
     const store = useAppStore.getState()
-    // In Chats (a bot's or an agent chat) the Browser panel would swap the chat for the Projects workspace, so a
-    // web link opens in the person's own browser and the chat stays on screen.
+    // In Chats (a bot's or an agent chat) the Browser or Pull Request panel would swap the chat for the Projects
+    // workspace, so a web link opens in the person's own browser and the chat stays on screen.
     if (store.sidebarMode === 'chats') {
       window.open(route.url, '_blank', 'noopener,noreferrer')
+      return true
+    }
+    const pullRequest = parseGitHubPullRequestUrl(route.url)
+    if (pullRequest && typeof window !== 'undefined' && typeof window.mousse?.pullRequests?.view === 'function') {
+      openViewedPullRequest(pullRequest, context?.threadId ?? store.activeThreadId)
+      store.openSurfaceKind('pullRequest')
       return true
     }
     const tabId = store.addBrowserTab(store.activeThreadId)

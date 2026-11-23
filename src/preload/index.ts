@@ -108,6 +108,7 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestIdentity,
   PullRequestListItem,
   PullRequestMergeMethod,
   PullRequestPushTarget,
@@ -678,6 +679,9 @@ const api = {
       ipcRenderer.invoke('pullRequests:get', ref, branch, force),
     detail: (ref: PullRequestRef, number: number, force?: boolean): Promise<PullRequestDetail> =>
       ipcRenderer.invoke('pullRequests:detail', ref, number, force),
+    /** One pull request read by explicit repository identity (`host`, `owner/repo`, `number`), e.g. from a chat link. */
+    view: (identity: PullRequestIdentity, force?: boolean): Promise<PullRequestDetail> =>
+      ipcRenderer.invoke('pullRequests:view', identity, force),
     draft: (scope: PullRequestScope, base?: string): Promise<PullRequestDraft> =>
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>

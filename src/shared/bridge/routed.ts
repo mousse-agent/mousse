@@ -994,6 +994,10 @@ export interface RoutedLocalRule {
  */
 export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
+    methods: ['pullRequests.view'],
+    reason: 'Reads a GitHub pull request linked in a chat message through this computer’s GitHub CLI without binding to a remote project folder.'
+  },
+  {
     methods: ['git.heads'],
     reason: 'The sidebar batches IDs owned by its local profile. Remote workspaces are looked up individually on their owners.'
   },

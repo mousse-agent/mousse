@@ -29,6 +29,11 @@ export interface CodeHost {
    * the conversation only): a watch reads them itself, a page at a time, and keeps its own cache entry.
    */
   getPullRequestDetail(cwd: string, number: number, options?: { force?: boolean; lineComments?: boolean }): Promise<PullRequestDetail>
+  /**
+   * One pull request identified explicitly by host, `owner/repo` and number (no local folder required).
+   * Shares the same per-pull-request 30-second cache as `getPullRequestDetail`.
+   */
+  getPullRequestDetailByIdentity?(identity: PullRequestIdentity, options?: { force?: boolean; lineComments?: boolean }): Promise<PullRequestDetail>
   /** `userRequested` is the user's Create pull request action; the central Git check (`gitPolicy`) needs it for any change on the host. */
   createPullRequest(cwd: string, input: CreatePullRequestInput, userRequested: UserAction): Promise<GitPullRequestInfo>
   listBaseBranches(cwd: string): Promise<PullRequestBaseBranches>
