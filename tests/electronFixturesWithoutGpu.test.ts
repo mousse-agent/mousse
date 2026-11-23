@@ -103,9 +103,17 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
 
 const READY_EVENT_METHODS = new Set(['on', 'once', 'addListener', 'prependListener'])
 
+// The scans below read every test file several times; each file and string is parsed once.
+const parsed = new Map<string, ts.SourceFile>()
+
 function parse(source: string, fileName: string): ts.SourceFile {
+  const key = `${fileName}\0${source}`
+  const cached = parsed.get(key)
+  if (cached) return cached
   const kind = /\.[cm]?js$/.test(fileName) ? ts.ScriptKind.JS : fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  return ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind)
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind)
+  parsed.set(key, file)
+  return file
 }
 
 function walk(node: ts.Node, visit: (node: ts.Node) => void): void {
@@ -549,7 +557,8 @@ describe('what a launch of the Electron binary starts', () => {
   })
 })
 
-describe('Electron apps the tests start', () => {
+// These scans parse every test file in the repository, so they get more time than one unit test.
+describe('Electron apps the tests start', { timeout: 60_000 }, () => {
   const tests = join(process.cwd(), 'tests')
   const sources = readdirSync(tests, { recursive: true, encoding: 'utf8' })
     .filter((path) => /\.(?:[cm]?[jt]s|tsx)$/.test(path))
