@@ -96,20 +96,21 @@ describe('Change folder', () => {
     expect(saved()[0]).toMatchObject({ id, path: old })
   })
 
-  // Each refusal leaves the project where it was.
+  // Each refusal leaves the project where it was, and carries a code, so the window shows its reason and not a generic
+  // failure.
   it.each([
-    ['a path that is not there', () => join(root, 'gone'), /There is no folder at/],
-    ['a file', () => { const file = join(root, 'notes.txt'); writeFileSync(file, 'x'); return file }, /There is no folder at/],
-    ['the folder of another project', () => { const other = folder('other'); projects.openProject(other); return other }, /already the project other/],
+    ['a path that is not there', () => join(root, 'gone'), 'invalid_params', /There is no folder at/],
+    ['a file', () => { const file = join(root, 'notes.txt'); writeFileSync(file, 'x'); return file }, 'invalid_params', /There is no folder at/],
+    ['the folder of another project', () => { const other = folder('other'); projects.openProject(other); return other }, 'conflict', /already the project other/],
     // Windows folders are the same whatever the case of their names.
     ...(process.platform === 'win32'
-      ? [['the folder of another project, in other case', () => { projects.openProject(folder('other')); return join(root, 'OTHER') }, /already the project other/] as const]
+      ? [['the folder of another project, in other case', () => { projects.openProject(folder('other')); return join(root, 'OTHER') }, 'conflict', /already the project other/] as const]
       : [])
-  ])('refuses %s', async (_name, target, message) => {
+  ])('refuses %s', async (_name, target, code, message) => {
     const old = folder('app')
     const { id } = projects.openProject(old)
     picked.path = target()
-    await expect(changeFolder(id, old)).rejects.toThrow(message)
+    await expect(changeFolder(id, old)).rejects.toMatchObject({ code, message: expect.stringMatching(message) })
     expect(projects.getProject(id)).toMatchObject({ path: old, name: 'app' })
   })
 

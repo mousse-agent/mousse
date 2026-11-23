@@ -9,6 +9,7 @@ import { trustRepositoryPrograms } from '../git/repoPrograms'
 import { retireProjectSnapshots } from '../workspace/SnapshotWorkspace'
 import type { ProjectIconChoice } from '../../shared/projectIcon'
 import { PROJECT_ICON_DETECTOR_VERSION, toStoredIconPath } from './projectIcon'
+import { DomainRpcError } from '../protocol/domainRegistry'
 
 /** The same folder: Windows paths compare without case. */
 function samePath(a: string, b: string): boolean {
@@ -110,10 +111,10 @@ export class ProjectManager {
     if (!project) throw new Error(`Project not found: ${id}`)
     if (samePath(project.path, folderPath)) return project
     const other = this.projects.find((p) => p.id !== id && samePath(p.path, folderPath))
-    if (other) throw new Error(`That folder is already the project ${other.name}.`)
+    if (other) throw new DomainRpcError('conflict', `That folder is already the project ${other.name}.`, { projectId: other.id })
     let folder = false
     try { folder = statSync(folderPath).isDirectory() } catch { /* missing or unreadable: refused below */ }
-    if (!folder) throw new Error(`There is no folder at ${folderPath}.`)
+    if (!folder) throw new DomainRpcError('invalid_params', `There is no folder at ${folderPath}.`)
     if (project.name === basename(project.path)) project.name = basename(folderPath)
     project.path = folderPath
     delete project.detectedIconPath
