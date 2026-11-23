@@ -2,6 +2,22 @@
   "version": 1,
   "claims": [
     {
+      "task": "first-run-setup",
+      "session": "agibook-193469",
+      "machine": "agibook",
+      "branch": "first-run-setup",
+      "paths": [
+        "src/renderer/components/onboarding",
+        "src/renderer/main.tsx",
+        "src/renderer/lib/icons.tsx",
+        "src/renderer/lib/settingsNavigation.ts",
+        "src/renderer/components/providers/ProvidersSettings.tsx",
+        "tests/renderer/firstRunSetup.test.tsx"
+      ],
+      "claimedAt": "2026-11-23T16:02:58.216Z",
+      "expiresAt": "2026-11-23T18:02:58.216Z"
+    },
+    {
       "task": "fix/mcp-server-before-boot-wakes",
       "session": "agibook-e58f50",
       "machine": "agibook",
