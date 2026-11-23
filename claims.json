@@ -14,6 +14,20 @@
       "expiresAt": "2026-11-22T23:14:27.822Z"
     },
     {
+      "task": "fresh-install-model-picker",
+      "session": "agibook-595fdc",
+      "machine": "agibook",
+      "branch": "fresh-install-model-picker",
+      "paths": [
+        "src/renderer/lib/providerSnapshots.ts",
+        "src/renderer/components/ComposerFooter.tsx",
+        "src/renderer/components/OrchestratorChat.tsx",
+        "src/renderer/components/sideChats/SideChatsPanel.tsx"
+      ],
+      "claimedAt": "2026-11-23T15:17:31.583Z",
+      "expiresAt": "2026-11-23T17:17:31.583Z"
+    },
+    {
       "task": "refresh-provider-models-after-setup",
       "session": "agibook-6ece71",
       "machine": "agibook",
