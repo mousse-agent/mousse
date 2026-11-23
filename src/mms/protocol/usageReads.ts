@@ -11,7 +11,12 @@ import { limitReadings } from '../usageHistory/limitReadings'
 /** The longest one provider's read may take before the page shows it as not reachable. */
 export const USAGE_FOR_MS = 20_000
 
-interface Kept { usage: ProviderUsage; at: number }
+interface Kept {
+  usage: ProviderUsage
+  at: number
+  /** The preview may display older numbers for these sign-ins while their reads are still pending. */
+  pending?: ReadonlySet<string>
+}
 const readings = new WeakMap<object, Map<string, Kept>>()
 
 function kept(owner: object): Map<string, Kept> {
@@ -65,7 +70,8 @@ export function keepUsage(owner: object, usage: ProviderUsage, now = Date.now())
     const last = before?.accounts?.find((entry) => entry.id === account.id)
     return last && !last.pending ? last : account
   })
-  map.set(usage.id, { usage: { ...usage, ...(accounts ? { accounts } : {}) }, at: now })
+  const pending = usage.accounts?.filter((account) => account.pending).map((account) => account.id)
+  map.set(usage.id, { usage: { ...usage, ...(accounts ? { accounts } : {}) }, at: now, ...(pending?.length ? { pending: new Set(pending) } : {}) })
   usageKept(owner, usage.id)
 }
 
@@ -74,7 +80,9 @@ export function keepAccount(owner: object, providerId: string, account: UsageAcc
   const entry = kept(owner).get(providerId)
   if (!entry?.usage.accounts) return
   const accounts = entry.usage.accounts.map((existing) => (existing.id === account.id ? account : existing))
-  kept(owner).set(providerId, { usage: { ...entry.usage, accounts }, at: now })
+  const pending = entry.pending && new Set(entry.pending)
+  if (!account.pending) pending?.delete(account.id)
+  kept(owner).set(providerId, { usage: { ...entry.usage, accounts }, at: now, ...(pending?.size ? { pending } : {}) })
   usageKept(owner, providerId)
 }
 
@@ -96,10 +104,11 @@ export function steadyUsage(owner: object, usage: ProviderUsage): ProviderUsage 
 }
 
 /** The page's list of providers, each with its last reading when there is one. */
-export function usageSlots(owner: object, slots: ReadonlyArray<Omit<UsageSlot, 'cached'>>): UsageSlot[] {
+export function usageSlots(owner: object, slots: ReadonlyArray<Omit<UsageSlot, 'cached' | 'cachedAt'>>): UsageSlot[] {
   return slots.map((slot) => {
     const cached = cachedUsage(owner, slot.id)
-    return { ...slot, ...(cached ? { cached } : {}) }
+    const entry = kept(owner).get(slot.id)
+    return { ...slot, ...(cached ? { cached } : {}), ...(entry && !entry.pending?.size ? { cachedAt: new Date(entry.at).toISOString() } : {}) }
   })
 }
 
@@ -135,7 +144,7 @@ export function unreachableUsage(id: string, label: string): ProviderUsage {
 export const CLAUDE_USAGE_ID = 'claude-subscription'
 
 /** Every provider the usage page shows, before any is read. */
-export function usageSlotList(mms: MmsProfileServices): Array<Omit<UsageSlot, 'cached'>> {
+export function usageSlotList(mms: MmsProfileServices): Array<Omit<UsageSlot, 'cached' | 'cachedAt'>> {
   // Claude turned off in Settings is not shown either.
   const claudeOn = !mms.providerInstances?.isDisabled?.('claude')
   const claude = claudeOn && mms.claudeSubscription.configured() ? [{ id: CLAUDE_USAGE_ID, label: 'Claude subscription', instanceId: 'claude', previewAccounts: true as const }] : []

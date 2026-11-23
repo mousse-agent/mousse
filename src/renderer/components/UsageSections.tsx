@@ -1,5 +1,5 @@
 import { createContext, memo, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronDown } from '../lib/icons'
+import { ChevronDown, RefreshCw } from '../lib/icons'
 import { attentionReason, otherUsageFigure, usageInstanceId } from '../lib/usageSections'
 import { usageLevel } from '../lib/subscriptionUsage'
 import type { ProviderUsage } from '../../shared/providerAuth'
@@ -50,6 +50,18 @@ export function UsageCardSkeleton() {
   </div>
 }
 
+export function UsageRefreshButton({ provider, refreshing, onRefresh }: {
+  provider: ProviderUsage
+  refreshing: boolean
+  onRefresh: (providerId: string) => void
+}) {
+  return <button type="button" className="settings-icon-btn" data-testid="usage-provider-refresh"
+    onClick={() => onRefresh(provider.id)} disabled={refreshing} aria-busy={refreshing || undefined}
+    aria-label={`Refresh ${provider.label} usage`} title="Refresh">
+    <RefreshCw size={14} aria-hidden="true" className={refreshing ? 'icon-spin' : undefined} />
+  </button>
+}
+
 /** One provider in Other usage: its name, and its key figure on the right; a mini bar only against a limit. */
 export function OtherUsageRow({ provider, computerName, menu }: { provider: ProviderUsage; computerName?: string; menu?: ReactNode }) {
   const figure = otherUsageFigure(provider)
@@ -81,7 +93,7 @@ export function AttentionRow({ provider, computerName, onReconnect, menu }: { pr
  * (`actions`, not for another computer's rows). Memoized on plain props, so one provider's answer
  * during a refresh re-renders that row only.
  */
-export const UsageListRow = memo(function UsageListRow({ kind, provider, computerName, loading, hidden, actions, onReconnect }: {
+export const UsageListRow = memo(function UsageListRow({ kind, provider, computerName, loading, hidden, actions, onReconnect, onRefresh, refreshing = false }: {
   kind: 'other' | 'attention'
   provider: ProviderUsage
   computerName?: string
@@ -89,8 +101,13 @@ export const UsageListRow = memo(function UsageListRow({ kind, provider, compute
   hidden: boolean
   actions?: UsageRowActions
   onReconnect?: (instanceId: string) => void
+  onRefresh?: (providerId: string) => void
+  refreshing?: boolean
 }) {
-  const menu = actions && !computerName ? <UsageRowMenu provider={provider} hidden={hidden} actions={actions} /> : undefined
+  const menu = <>
+    {onRefresh && <UsageRefreshButton provider={provider} refreshing={refreshing} onRefresh={onRefresh} />}
+    {actions && !computerName && <UsageRowMenu provider={provider} hidden={hidden} actions={actions} />}
+  </>
   const place = computerName ? { computerName } : {}
   return <UsageRowSlot hidden={hidden} loading={loading}>
     {loading

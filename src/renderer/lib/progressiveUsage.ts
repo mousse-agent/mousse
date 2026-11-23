@@ -41,6 +41,23 @@ export function applyFailure(entries: UsageEntries, id: string): UsageEntry[] {
   return withEntry(entries, id, (entry) => ({ ...entry, usage: { ...entry.usage, status: 'error', windows: [], problem: 'unavailable', message: 'Not reachable', accounts: undefined, readAt: undefined }, state: 'fresh' }))
 }
 
+/** How recently a provider may have been read (by the page or in the background) for the page to show that reading when it opens instead of reading it again. */
+export const USAGE_RECENT_MS = 10 * 60_000
+
+/** Whether a provider's last reading is recent and complete enough to show as it is when the page opens. */
+export function recentlyRead(slot: UsageSlot, now: number, within = USAGE_RECENT_MS): boolean {
+  if (!slot.cached || !slot.cachedAt) return false
+  // A reading cut short (sign-ins still pending) is read again.
+  if (slot.cached.accounts?.some((account) => account.pending)) return false
+  const at = Date.parse(slot.cachedAt)
+  return Number.isFinite(at) && at <= now && now - at < within
+}
+
+/** Providers not read again: each shows its last reading as its current one. */
+export function keepCached(entries: UsageEntries, slots: readonly UsageSlot[]): UsageEntry[] {
+  return slots.reduce<UsageEntry[]>((next, slot) => (slot.cached ? applyProvider(next, slot.cached) : next), [...entries])
+}
+
 /**
  * The sign-ins of a proxy provider before their usage: each pending one shows what it had last time
  * when there was a last time (else a placeholder), and the provider is \`partial\` until all are read.

@@ -17,7 +17,7 @@ import { DelayedLoader } from './ui/DelayedLoader'
 import { Select } from './ui/Select'
 import { CLAUDE_USAGE_ID } from './bots/botUsageRing'
 import { needsProxyKey, ProxyKeyNote, UsageSettingsButton, type SaveProxyKey } from './UsageProxyControls'
-import type { ProvidersUsageResponse, ProviderUsage, ProviderUsageWindow, UseLimitResetResponse } from '../../shared/providerAuth'
+import type { ProvidersUsageResponse, ProviderUsage, ProviderUsageWindow, UsageSlot, UseLimitResetResponse } from '../../shared/providerAuth'
 import { UsageBar } from './UsageBar'
 import { providerLogo, usageProviderTitle } from '../lib/usageProviderName'
 import { activeAccountsLabel, UsageAccountsView } from './UsageAccountsView'
@@ -29,10 +29,10 @@ import { showToast } from './ui/Toast'
 import { readHiddenUsage, writeHiddenUsage } from '../lib/usageHidden'
 import { DEVICE_SCOPE, onProviderSignInChanged } from '../lib/providerSnapshots'
 import { usageInstanceId } from '../lib/usageSections'
-import { UsageCardSkeleton, UsageCollapsibleSection, UsageListRow } from './UsageSections'
+import { UsageCardSkeleton, UsageCollapsibleSection, UsageListRow, UsageRefreshButton } from './UsageSections'
 import { motionAllowed } from './ui/Collapse'
 import { orderAttention, rememberedSectionOpen, rememberSectionOpen, slotSection, usageSection } from '../lib/usageSections'
-import { applyAccount, applyFailure, applyPreview, applyProvider, entriesResponse, loadingIds as entriesLoading, refreshEntries, removeEntry, startEntries, type UsageEntry } from '../lib/progressiveUsage'
+import { applyAccount, applyFailure, applyPreview, applyProvider, entriesResponse, keepCached, loadingIds as entriesLoading, recentlyRead, refreshEntries, removeEntry, startEntries, type UsageEntry } from '../lib/progressiveUsage'
 import { openProvider } from '../lib/settingsNavigation'
 import '../styles/settings.css'
 import '../styles/usage.css'
@@ -97,7 +97,12 @@ interface UsageProviderCardProps {
   canReset: boolean
   /** The reset flow, when it is this card's. */
   flow: ResetFlow | null
-  onRefresh: () => void
+  /** Reads this provider again, alone. */
+  onRefresh: (providerId: string) => void
+  /** Shows its own Refresh button (this computer's reading). */
+  refreshable: boolean
+  /** Its own read is running. */
+  refreshing: boolean
   onManage: (url: string) => void
   onSaveProxyKey?: SaveProxyKey
   onClearProxyKey?: (providerId: string) => Promise<void>
@@ -110,9 +115,10 @@ interface UsageProviderCardProps {
  * One working plan's card: its limit windows, or its accounts' table. Memoized on its props, so one
  * provider's answer during a refresh re-renders that card only.
  */
-const UsageProviderCard = memo(function UsageProviderCard({ provider, computerName, waiting, local, now, canReset, flow, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, onStartReset, onConfirmReset, onCancelReset }: UsageProviderCardProps) {
+const UsageProviderCard = memo(function UsageProviderCard({ provider, computerName, waiting, local, now, canReset, flow, onRefresh, refreshable, refreshing, onManage, onSaveProxyKey, onClearProxyKey, onStartReset, onConfirmReset, onCancelReset }: UsageProviderCardProps) {
   // Several sign-ins (a proxy): a summary strip and a table instead of one bar per window.
   const multi = provider.accounts && provider.accounts.length > 1 ? provider.accounts : undefined
+  const refreshThis = () => onRefresh(provider.id)
   return <SettingsGroup
     // A proxy is named in the gear's tooltip, not in the title.
     title={provider.source && !provider.proxy ? `${usageProviderTitle(provider)} · ${provider.source}` : usageProviderTitle(provider)}
@@ -127,16 +133,17 @@ const UsageProviderCard = memo(function UsageProviderCard({ provider, computerNa
             hint={provider.windows.some((window) => usageRunningLow(remainingNow(window, now) ?? 100))}
             onStart={() => onStartReset(provider.id)}
           />}
-          {provider.proxy && onSaveProxyKey && onClearProxyKey && local && <UsageSettingsButton provider={provider} onSave={onSaveProxyKey} onClear={onClearProxyKey} onSaved={onRefresh} />}
+          {provider.proxy && onSaveProxyKey && onClearProxyKey && local && <UsageSettingsButton provider={provider} onSave={onSaveProxyKey} onClear={onClearProxyKey} onSaved={refreshThis} />}
         </>
       : undefined}
     className="usage-provider usage-enter"
-    action={computerName || provider.manageUrl || provider.readAt || multi
+    action={computerName || provider.manageUrl || provider.readAt || multi || refreshable
       ? <span className="usage-provider-actions">
           <UsageReadAt provider={provider} now={now} />
           {multi && totalResets(multi) > 0 && <span className="usage-provider-active settings-muted" data-testid="usage-resets-total">{totalResets(multi)} reset{totalResets(multi) === 1 ? '' : 's'} across accounts</span>}
           {multi && <span className="usage-provider-active settings-muted" data-testid="usage-accounts-active">{activeAccountsLabel(multi)}</span>}
           {computerName && <span className="usage-provider-computer settings-muted" data-testid="usage-provider-computer">{computerName}</span>}
+          {refreshable && <UsageRefreshButton provider={provider} refreshing={refreshing} onRefresh={onRefresh} />}
           {provider.manageUrl && <button type="button" className="settings-icon-btn" onClick={() => onManage(provider.manageUrl!)} aria-label={`Open ${provider.label} usage page`} title="Open the provider's usage page">
             <ExternalLink size={14} aria-hidden="true" />
           </button>}
@@ -150,7 +157,7 @@ const UsageProviderCard = memo(function UsageProviderCard({ provider, computerNa
           {orderUsageWindows(provider.windows).map((entry) => <UsageBarRow key={entry.id} entry={entry} now={now} />)}
         </div>}
     {needsProxyKey(provider) && onSaveProxyKey && local
-      ? <ProxyKeyNote provider={provider} onSave={onSaveProxyKey} onSaved={onRefresh} />
+      ? <ProxyKeyNote provider={provider} onSave={onSaveProxyKey} onSaved={refreshThis} />
       : !multi && !waiting && <UsageNote provider={provider} />}
     {!multi && canReset && <UsageResetConfirm
       resets={provider.resets}
@@ -184,7 +191,12 @@ export interface SubscriptionUsageViewProps {
   onSelect?: (value: string) => void
   /** Other computers' readings, by node id, when they share them. */
   remote?: readonly ComputerUsage[]
+  /** Reads every provider again (Refresh all, Retry). */
   onRefresh: () => void
+  /** Reads one of this computer's providers again from its Refresh button or after a reset. */
+  onRefreshProvider?: (providerId: string) => void
+  /** Providers whose own read is running. */
+  refreshingIds?: ReadonlySet<string>
   onManage: (url: string) => void
   /** Saves or removes the key of the CLI API proxy a provider's usage is read through. */
   onSaveProxyKey?: SaveProxyKey
@@ -209,7 +221,9 @@ export interface SubscriptionUsageViewProps {
   onTab?: (tab: UsageTab) => void
 }
 
-export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer, onUseReset, history, limitTrends, tab = 'history', onTab }: SubscriptionUsageViewProps) {
+export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onRefresh, onRefreshProvider, refreshingIds, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer, onUseReset, history, limitTrends, tab = 'history', onTab }: SubscriptionUsageViewProps) {
+  // One provider read again when the page can, else all of them.
+  const refreshOne = useCallback((providerId: string) => (onRefreshProvider ? onRefreshProvider(providerId) : onRefresh()), [onRefreshProvider, onRefresh])
   const [showHidden, setShowHidden] = useState(false)
   // Using a limit reset, for one card at a time: asked from its header button, answered in its own row.
   const [resetFlow, setResetFlow] = useState<ResetFlow | null>(null)
@@ -225,16 +239,16 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
       const failed = resetOutcomeText(outcome)
       if (failed) {
         setResetFlow({ providerId: provider.id, phase: 'failed', message: failed })
-        onRefresh()
+        refreshOne(provider.id)
         return
       }
       setResetFlow({ providerId: provider.id, phase: 'done', message: resetEffect(credit?.type ?? 'codexRateLimits').done })
-      onRefresh()
+      refreshOne(provider.id)
       setTimeout(() => setResetFlow((current) => (current?.providerId === provider.id && current.phase === 'done' ? null : current)), 2500)
     } catch {
       setResetFlow({ providerId: provider.id, phase: 'failed', message: "Couldn't use the reset" })
       // The reset may still have been used (a timeout): read the limits again before anyone tries again.
-      onRefresh()
+      refreshOne(provider.id)
     } finally {
       resetRunning.current = false
     }
@@ -253,6 +267,9 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
   // A provider still on its way keeps its placeholder: whether Claude has the proxy's numbers is known only once read.
   const rows = usage ? usageRows(readings, picked).filter((row) => !hiddenClaude(row.provider) || !!loadingIds?.has(row.provider.id)) : []
   const pickedOther = picked !== ALL_COMPUTERS && picked !== THIS_COMPUTER
+  const localRow = (row: { provider: ProviderUsage; computerName?: string }) =>
+    !pickedOther && (!row.computerName || row.computerName === computers?.selfName) &&
+    !!usage?.providers.some((provider) => provider.id === row.provider.id)
   // Three sections: working plans as cards; credit balances, API keys, no-data and no-subscription rows in
   // Other usage; signed out and failing rows in Needs attention. A provider still on its way waits
   // where its slot suggests.
@@ -275,6 +292,7 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
     hidden={isHidden(row)}
     {...(rowActions ? { actions: rowActions } : {})}
     {...(onReconnect ? { onReconnect } : {})}
+    {...(onRefreshProvider && localRow(row) ? { onRefresh: refreshOne, refreshing: !!refreshingIds?.has(row.provider.id) } : {})}
   />
   const otherShown = otherOpen ?? subscriptions.length === 0
   const toggleOther = () => { const next = !otherShown; setOtherOpen(next); rememberSectionOpen('other', next) }
@@ -311,9 +329,10 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
         {attention.length > 0 && <button type="button" className="usage-attention-chip" data-testid="usage-attention-chip" onClick={revealAttention} title="Needs attention" aria-label={`${attention.length} need attention`}>
           <AlertTriangle size={12} aria-hidden="true" />{attention.length}
         </button>}
-        <button type="button" className="settings-icon-btn" data-testid="usage-refresh" onClick={onRefresh} disabled={loading} aria-busy={loading || undefined} aria-label="Refresh usage" title="Refresh">
+        {showLimits && !pickedOther && <button type="button" className="settings-btn" data-testid="usage-refresh" onClick={onRefresh} disabled={loading} aria-busy={loading || undefined}>
           <RefreshCw size={14} aria-hidden="true" className={loading ? 'icon-spin' : undefined} />
-        </button>
+          Refresh all
+        </button>}
       </div>
     </header>
     <div className="subscription-usage-page-body">
@@ -331,9 +350,10 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
           </p>}
           {!usage && loading && <DelayedLoader label="Loading usage" className="usage-loader" data-testid="usage-loading" />}
           {usage && rows.length === 0 && !loading && <p className="settings-muted usage-empty" data-testid="usage-empty">{pickedOther ? 'No usage shared yet.' : 'No subscription providers are connected.'}</p>}
-          {subscriptions.map(({ key, provider, computerName, loading: waiting }) => {
+          {subscriptions.map((row) => {
+            const { key, provider, computerName, loading: waiting } = row
             // Proxy controls act on this computer's Claude only.
-            const local = !computerName || computerName === computers?.selfName
+            const local = localRow(row)
             return <UsageProviderCard
               key={key}
               provider={provider}
@@ -343,7 +363,9 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
               now={now}
               canReset={!!onUseReset && local && !!provider.resettable}
               flow={resetFlow?.providerId === provider.id ? resetFlow : null}
-              onRefresh={onRefresh}
+              onRefresh={refreshOne}
+              refreshable={!!onRefreshProvider && local}
+              refreshing={!!refreshingIds?.has(provider.id)}
               onManage={onManage}
               {...(onSaveProxyKey ? { onSaveProxyKey } : {})}
               {...(onClearProxyKey ? { onClearProxyKey } : {})}
@@ -404,6 +426,8 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   }, [effective, linked, picked])
   const [entries, setEntries] = useState<UsageEntry[] | null>(null)
   const [loading, setLoading] = useState(false)
+  // The providers whose own read is running, for their cards' spinning Refresh.
+  const [reading, setReading] = useState<ReadonlySet<string>>(() => new Set())
   const [failed, setFailed] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const mounted = useRef(true)
@@ -411,55 +435,96 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   const [trendRange, setTrendRange] = useState<LimitTrendRange>('7d')
   // Null until the first answer, so an empty chart is never shown before the readings are known.
   const [trends, setTrends] = useState<LimitTrend[] | null>(null)
+  // A read of the usage keeps new limit readings: the trends are read again once none is running.
+  const busy = loading || reading.size > 0
   useEffect(() => {
-    if (tab !== 'limits' || loading) return
+    if (tab !== 'limits' || busy) return
     let current = true
     void window.mousse.providers.limitTrends?.(trendRange)
       .then((reply) => { if (current) setTrends(Array.isArray(reply?.trends) ? reply.trends : []) })
       .catch(() => undefined)
     return () => { current = false }
-  }, [tab, trendRange, loading])
+  }, [tab, trendRange, busy])
+  // Each provider's read belongs to the latest run that asked for it: a newer read of the same provider
+  // (Refresh all, or its own Refresh) makes an older one's answer stale; other providers' reads carry on.
   const generation = useRef(0)
-  const loadUsage = useCallback(async () => {
-    setLoading(true)
-    const run = ++generation.current
+  const listRun = useRef(0)
+  const runs = useRef(new Map<string, number>())
+  const entriesRef = useRef(entries)
+  entriesRef.current = entries
+  const markReading = useCallback((ids: readonly string[], on: boolean) => setReading((current) => {
+    const next = new Set(current)
+    for (const id of ids) { if (on) next.add(id); else next.delete(id) }
+    return next
+  }), [])
+  /** One provider's progressive read, as run \`run\`; its answers land only while that run is its latest. */
+  const readSlot = useCallback(async (slot: UsageSlot, run: number) => {
+    const latest = () => mounted.current && runs.current.get(slot.id) === run
     const update = (change: (shown: UsageEntry[]) => UsageEntry[]) => {
-      if (mounted.current && generation.current === run) setEntries((shown) => (shown ? change(shown) : shown))
+      if (latest()) setEntries((shown) => (shown ? change(shown) : shown))
     }
     const providers = window.mousse.providers
     try {
-      // Every provider at once, each with its last reading; then each one as its own read answers.
-      const { slots } = await providers.usageSlots()
-      if (!mounted.current || generation.current !== run) return
-      setEntries((shown) => (shown ? refreshEntries(shown, slots) : startEntries(slots)))
-      setFailed(false)
-      await Promise.all(slots.map(async (slot) => {
-        try {
-          if (slot.previewAccounts) {
-            // Several proxy sign-ins: listed first, then filled in one by one.
-            const { provider: preview } = await providers.getUsageFor({ providerId: slot.id, preview: true })
-            if (preview?.accounts?.length) {
-              update((shown) => applyPreview(shown, preview))
-              await Promise.all(preview.accounts.filter((account) => account.pending).map(async (account) => {
-                const { account: read } = await providers.getUsageFor({ providerId: slot.id, accountId: account.id }).catch(() => ({ account: undefined }))
-                update((shown) => applyAccount(shown, slot.id, read ?? { id: account.id, label: account.label, windows: [], problem: 'Not reachable' }))
-              }))
-              return
-            }
-          }
-          const { provider } = await providers.getUsageFor({ providerId: slot.id })
-          update((shown) => (provider ? applyProvider(shown, provider) : removeEntry(shown, slot.id)))
-        } catch {
-          update((shown) => applyFailure(shown, slot.id))
+      if (slot.previewAccounts) {
+        // Several proxy sign-ins: listed first, then filled in one by one.
+        const { provider: preview } = await providers.getUsageFor({ providerId: slot.id, preview: true })
+        if (preview?.accounts?.length) {
+          update((shown) => applyPreview(shown, preview))
+          await Promise.all(preview.accounts.filter((account) => account.pending).map(async (account) => {
+            const { account: read } = await providers.getUsageFor({ providerId: slot.id, accountId: account.id }).catch(() => ({ account: undefined }))
+            update((shown) => applyAccount(shown, slot.id, read ?? { id: account.id, label: account.label, windows: [], problem: 'Not reachable' }))
+          }))
+          return
         }
-      }))
+      }
+      const { provider } = await providers.getUsageFor({ providerId: slot.id })
+      update((shown) => (provider ? applyProvider(shown, provider) : removeEntry(shown, slot.id)))
+    } catch {
+      update((shown) => applyFailure(shown, slot.id))
+    } finally {
+      if (runs.current.get(slot.id) === run) {
+        runs.current.delete(slot.id)
+        if (mounted.current) markReading([slot.id], false)
+      }
+    }
+  }, [markReading])
+  /**
+   * Every provider: the list at once, each with its last reading, then each one as its own read answers.
+   * Automatic refresh keeps readings from the last ten minutes, including background reads.
+   */
+  const loadUsage = useCallback(async ({ skipRecent = false }: { skipRecent?: boolean } = {}) => {
+    setLoading(true)
+    const run = ++generation.current
+    listRun.current = run
+    try {
+      const { slots } = await window.mousse.providers.usageSlots()
+      if (!mounted.current || listRun.current !== run) return
+      const at = Date.now()
+      const recent = skipRecent ? slots.filter((slot) => !runs.current.has(slot.id) && recentlyRead(slot, at)) : []
+      const kept = new Set(recent.map((slot) => slot.id))
+      const toRead = slots.filter((slot) => !kept.has(slot.id) && (!skipRecent || !runs.current.has(slot.id)))
+      for (const slot of toRead) runs.current.set(slot.id, run)
+      setEntries((shown) => keepCached(shown ? refreshEntries(shown, slots) : startEntries(slots), recent))
+      markReading(toRead.map((slot) => slot.id), true)
+      setFailed(false)
+      await Promise.all(toRead.map((slot) => readSlot(slot, run)))
     } catch {
       // The list itself failed: the page keeps what it shows and says so.
-      if (mounted.current && generation.current === run) setFailed(true)
+      if (mounted.current && listRun.current === run) setFailed(true)
     } finally {
-      if (mounted.current && generation.current === run) { setLoading(false); setNow(Date.now()) }
+      if (mounted.current && listRun.current === run) { setLoading(false); setNow(Date.now()) }
     }
-  }, [])
+  }, [markReading, readSlot])
+  /** One provider read again, alone. */
+  const refreshProvider = useCallback(async (providerId: string) => {
+    const slot = entriesRef.current?.find((entry) => entry.slot.id === providerId)?.slot
+    if (!slot) return
+    const run = ++generation.current
+    runs.current.set(providerId, run)
+    markReading([providerId], true)
+    await readSlot(slot, run)
+    if (mounted.current) setNow(Date.now())
+  }, [markReading, readSlot])
   // Kept between renders, with each provider's own object, so the cards and rows that did not change skip re-rendering.
   const usage: ProvidersUsageResponse | null = useMemo(() => (entries ? entriesResponse(entries, now) : null), [entries, now])
   const loadingIds = useMemo(() => (entries ? entriesLoading(entries) : undefined), [entries])
@@ -492,12 +557,13 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   const closeRef = useRef(onClose)
   closeRef.current = onClose
   const refresh = useCallback(() => void loadUsage(), [loadUsage])
+  const refreshOne = useCallback((providerId: string) => void refreshProvider(providerId), [refreshProvider])
   const reconnect = useCallback((instanceId: string) => { closeRef.current(); openProvider(instanceId) }, [])
   useEffect(() => {
     mounted.current = true
-    void loadUsage()
-    // Limits move while the page is open: read them again every few minutes.
-    const timer = setInterval(() => void loadUsage(), USAGE_REFRESH_MS)
+    const refreshStale = () => void loadUsage({ skipRecent: true })
+    refreshStale()
+    const timer = setInterval(refreshStale, USAGE_REFRESH_MS)
     // A provider signed in, out or to another account: read again. The event names no provider, so the
     // whole progressive read runs; every row keeps what it shows until its own fresh reading replaces it.
     const stopListening = onProviderSignInChanged(() => void loadUsage())
@@ -512,6 +578,8 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
     selected={effective}
     onSelect={pickComputer}
     onRefresh={refresh}
+    onRefreshProvider={refreshOne}
+    refreshingIds={reading}
     onManage={manageUsage}
     onSaveProxyKey={saveProxyKey}
     onClearProxyKey={clearProxyKey}

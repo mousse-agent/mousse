@@ -218,6 +218,11 @@ export interface UsageSlot {
   onRequestOnly?: true
   /** The last reading this computer made, dated (`readAt`), to show until the fresh one arrives. */
   cached?: ProviderUsage
+  /**
+   * When this computer last finished reading the provider, in ISO format. `cached.readAt` may be older
+   * because it dates the provider's numbers. Omitted while any sign-in is still being read.
+   */
+  cachedAt?: string
 }
 
 export interface UsageSlotsResponse {
