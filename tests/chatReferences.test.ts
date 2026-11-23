@@ -104,7 +104,10 @@ describe('chat references', () => {
     expect(classifyLink('https://example.com/docs').kind).toBe('web')
     expect(classifyLink('javascript:alert(1)').kind).toBe('reject')
     expect(classifyLink('data:text/html,bad').kind).toBe('reject')
-    expect(classifyLink('file:///etc/passwd').kind).toBe('reject')
+    // A file URL opens like its path, only on this computer: another host would be reached when opened.
+    expect(classifyLink('file:///repo/a.ts')).toEqual({ kind: 'relative-file', path: '/repo/a.ts' })
+    expect(classifyLink('file://server/share/a.ts').kind).toBe('reject')
+    expect(classifyLink('file:////server/share/a.ts').kind).toBe('reject')
     expect(safeMarkdownUrl('mousse-file://open?path=src%2Fa.ts&line=2')).toBe('mousse-file://open?path=src%2Fa.ts&line=2')
     expect(safeMarkdownUrl('javascript:alert(1)')).toBe('')
   })
