@@ -28,7 +28,8 @@ describe('the usage-limit pause decision', () => {
     for (const resetsAt of [undefined, new Date(NOW - HOUR).toISOString(), new Date(NOW + 30 * 24 * HOUR).toISOString()]) {
       // The error is built a moment ago; the decision re-checks the time against its own clock.
       const error = usageLimitError({ provider: 'codex', ...(resetsAt ? { resetsAt } : {}), estimated: resetsAt === undefined })
-      expect(decide(error, { nowMs: NOW })).toMatchObject({ action: 'pause', pause: { until: estimate, estimated: true } })
+      // A guessed time never continues the run by itself, whatever the setting says.
+      expect(decide(error, { nowMs: NOW })).toMatchObject({ action: 'pause', pause: { until: estimate, estimated: true, autoResume: false } })
     }
   })
 

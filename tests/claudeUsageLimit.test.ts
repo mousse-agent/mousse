@@ -48,7 +48,7 @@ describe('Claude usage limit classification', () => {
   })
 
   it('a rejected window Claude can cover with extra usage is not a limit', () => {
-    for (const covered of [{ overageStatus: 'allowed' }, { overageStatus: 'allowed_warning' }, { isUsingOverage: true }]) {
+    for (const covered of [{ overageStatus: 'allowed' }, { overageStatus: 'allowed_warning' }, { isUsingOverage: true }, { overageInUse: true }]) {
       const seen = seenFrom(rejected('five_hour', seconds(HOUR), covered))
       expect(seen.recorded).toBe(false)
       expect(usageLimitFromResult(errorResult(), seen, NOW)).toBeUndefined()

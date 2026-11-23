@@ -185,11 +185,12 @@ function usageLimitMessage(limit: UsageLimit, nowMs: number): string {
   const who = limit.provider ? PROVIDER_LABELS[limit.provider] ?? limit.provider : 'The provider'
   const window = limit.limitKind ? LIMIT_KIND_LABELS[limit.limitKind] ?? limit.limitKind.replace(/_/g, ' ') : undefined
   const head = `${who}'s ${window ? `${window} ` : ''}usage limit was reached.`
-  if (!limit.resetsAt) return head
+  // Mousse's guess is not shown as a reset time.
+  if (!limit.resetsAt || limit.estimated) return head
   const reset = new Date(limit.resetsAt)
   const sameDay = reset.toDateString() === new Date(nowMs).toDateString()
   const at = reset.toLocaleString([], { ...(sameDay ? {} : { weekday: 'short' }), hour: 'numeric', minute: '2-digit' })
-  return `${head} It resets at ${at}${limit.estimated ? ' (estimated)' : ''}.`
+  return `${head} It resets at ${at}.`
 }
 
 /**

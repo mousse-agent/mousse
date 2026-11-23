@@ -29,11 +29,23 @@ function limitName(pause: Pick<TurnPause, 'provider' | 'limitKind'>): string {
 
 /** The reset time alone: "Paused until 3:40 PM". The date is added when it is not today. */
 export function pausedUntilLabel(pause: Pick<TurnPause, 'until' | 'estimated'>, nowMs: number): string {
-  return `Paused until ${formatPauseUntil(pause.until, nowMs)}${pause.estimated ? ' (estimated)' : ''}`
+  return pause.estimated ? 'Paused' : `Paused until ${formatPauseUntil(pause.until, nowMs)}`
 }
 
-/** The words of the paused notice: the reset time (absolute and relative), the limit, and what happens next. */
+/**
+ * The words of the paused notice: the reset time (absolute and relative), the limit, and what happens next.
+ * A pause whose provider gave no reset time shows none: Mousse's guess is not shown as a time.
+ */
 export function describePausedRun(pause: TurnPause, nowMs: number): PausedRunText {
+  if (pause.estimated) {
+    return {
+      headline: pausedUntilLabel(pause, nowMs),
+      resetAt: '',
+      detail: `${limitName(pause)} was reached${pause.again ? ' again after resuming' : ''}. No reset time was given. Press Try now to continue.`,
+      due: false,
+      stale: false
+    }
+  }
   const until = Date.parse(pause.until)
   const due = Number.isFinite(until) && until <= nowMs
   // A timer more than a day past its reset is ruled stale the moment the daemon looks at it; say so already.
@@ -61,11 +73,11 @@ function isLongOverdue(pause: Pick<TurnPause, 'until'>, nowMs: number): boolean 
 }
 
 /**
- * The thread list's status text for a paused thread: its own reset time ("Paused until 3:40 PM", with a
- * "~" before a time that is Mousse's estimate), or just "Paused" for a row a subagent below it paused.
+ * The thread list's status text for a paused thread: its own reset time ("Paused until 3:40 PM"), or just
+ * "Paused" when the provider gave no reset time or a subagent below the row paused.
  */
 export function pausedStatusLabel(pause: Pick<TurnPause, 'until' | 'estimated'> | undefined, nowMs: number): string {
-  return pause ? `Paused until ${pause.estimated ? '~' : ''}${formatPauseUntil(pause.until, nowMs)}` : 'Paused'
+  return pause ? pausedUntilLabel(pause, nowMs) : 'Paused'
 }
 
 export type PausedAction = 'resume' | 'cancel' | 'stop'

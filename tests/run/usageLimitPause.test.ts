@@ -1121,7 +1121,7 @@ describe('a usage limit pauses the run', () => {
       expect(pauseProviderName('openai')).toBe('OpenAI')
       expect(pauseProviderName('anthropic')).toBe('Anthropic')
       expect(pauseProviderName(undefined)).toBeUndefined()
-      expect(pausedLine({ until: new Date(Date.now() + 3_600_000).toISOString(), estimated: true, provider: 'openai-codex', limitKind: 'five_hour', autoResume: false })).toMatch(/ChatGPT's 5-hour limit was reached \(estimated\)\. Press Try now to continue\. Messages you send wait in the queue until then\.$/)
+      expect(pausedLine({ until: new Date(Date.now() + 3_600_000).toISOString(), estimated: true, provider: 'openai-codex', limitKind: 'five_hour', autoResume: false })).toMatch(/^Paused: ChatGPT's 5-hour limit was reached, with no reset time given\. Press Try now to continue\. Messages you send wait in the queue until then\.$/)
     })
 
     it('the Bridge is not sent a turn.paused event: older peers reject event types they do not know', () => {
