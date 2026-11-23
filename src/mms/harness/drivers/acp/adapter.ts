@@ -104,6 +104,8 @@ export class AcpAdapter implements ProviderAdapter {
     const cwd = input.cwd ?? client?.standaloneWorkspace?.(input.threadId)
     if (!client || !cwd) throw new Error(`${input.llmProvider || this.options.label} requires a project workspace`)
     const startedAt = Date.now()
+    // The output speed uses the monotonic clock: a turn shorter than a millisecond still has one.
+    const startedTick = performance.now()
     // The ACP session id stays inside the runtime's saved sessions; the ref names the runtime.
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
@@ -206,9 +208,10 @@ export class AcpAdapter implements ProviderAdapter {
       ? { input: reportedUsage.input, output: reportedUsage.output, cacheRead: reportedUsage.cacheRead, cacheWrite: reportedUsage.cacheWrite }
       : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
     const totalTokensUsed = reportedUsage?.totalTokens
+    const elapsedMs = performance.now() - startedTick
     const tokensPerSecond =
-      reportedUsage?.hasOutput && totalResponseTimeMs > 0
-        ? Math.round((usage.output / totalResponseTimeMs) * 1000 * 10) / 10
+      reportedUsage?.hasOutput && elapsedMs > 0
+        ? Math.round((usage.output / elapsedMs) * 1000 * 10) / 10
         : undefined
     if (reportedUsage) {
       sink.providerMetrics({

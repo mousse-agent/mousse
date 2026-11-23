@@ -484,6 +484,8 @@ class PiTurn {
   readonly steerSends = new Set<Promise<void>>()
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   hasUsage = false
+  /** The monotonic clock at the start, for the output speed: a turn shorter than a millisecond still has one. */
+  readonly startedTick = performance.now()
   /** When the turn's last request was answered, and the longest cache lifetime its requests wrote (`cacheWrite1h`). */
   promptCache: { at?: number; ttlMs?: number } = {}
   /** The current assistant message's text blocks by `contentIndex`. */
@@ -1667,9 +1669,10 @@ export class PiRpcEngine implements ProviderAdapter {
     const totalTokensUsed = turn.hasUsage
       ? turn.usage.input + turn.usage.output + turn.usage.cacheRead + turn.usage.cacheWrite
       : undefined
+    const elapsedMs = performance.now() - turn.startedTick
     const tokensPerSecond =
-      turn.hasUsage && totalResponseTimeMs > 0
-        ? Math.round((turn.usage.output / totalResponseTimeMs) * 1000 * 10) / 10
+      turn.hasUsage && elapsedMs > 0
+        ? Math.round((turn.usage.output / elapsedMs) * 1000 * 10) / 10
         : undefined
     sink.providerMetrics({
       totalResponseTimeMs,
