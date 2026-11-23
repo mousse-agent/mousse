@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { Mic, RefreshCw, Reply, X } from '../lib/icons'
+import { MessageSquare, Mic, RefreshCw, Reply, X } from '../lib/icons'
 import type {
   BrowserElementAttachment,
   FileSearchResponse,
@@ -63,6 +63,20 @@ import {
   registerQuote,
   type ComposerQuoteDetail
 } from '../lib/composerQuotes'
+import {
+  chipThreadLinks,
+  expandComposerThreadChips,
+  findThreadChips,
+  rangeOverChips,
+  registerThreadChip,
+  threadChipAround,
+  threadChipAtEdge,
+  threadChipLabel,
+  threadChipParts,
+  threadChipRegistry
+} from '../lib/composerThreadChips'
+import { threadLinkStatus } from '../../shared/threadAttention'
+import { openLinkedThread } from '../utils/chatLinks'
 
 import { admitAttachments, type ChipStatus } from '../lib/attachmentPreparation'
 
@@ -372,6 +386,20 @@ export function ChatComposer({
     : findInlineSkillToken(input, enabledSkills)
   // Reply pills: text quoted from the conversation, at their place in the typed text (`lib/composerQuotes.ts`).
   const quoteSpans = useMemo(() => findQuoteTokens(input, quoteRegistry()), [input])
+  // Thread chips: a thread's link shown as its chip at its place in the text (`lib/composerThreadChips.ts`). A thread
+  // this window does not list, or one this chat may not point at, stays a link.
+  const threadChips = useMemo(() => findThreadChips(input, threadChipRegistry()), [input])
+  const chipLinks = (text: string, within?: { start: number; end: number }) =>
+    chipThreadLinks(text, (threadId) => (pastedThreadRefusal?.(threadId) ? null : threadChipLabel(threadId)), registerThreadChip, within)
+  // The text box's value as its own typing last left it; any other `input` was set from outside (a draft, Up, a
+  // queued message given back), and its links become chips.
+  const nativeValueRef = useRef<string | null>(null)
+  // A link the last typing may have finished (a space or new line after it), or a drop, to turn into a chip.
+  const pendingChipRef = useRef<{ start: number; end: number } | null>(null)
+  // True while the composer edits the text box itself, so that edit is not looked at again.
+  const selfEditRef = useRef(false)
+  const [chipHover, setChipHover] = useState<{ index: number; close: boolean } | null>(null)
+  const chipPressRef = useRef<{ index: number; close: boolean } | null>(null)
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || references.length > 0
   const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
@@ -589,7 +617,19 @@ export function ChatComposer({
         return
       }
       const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
-      if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) return
+      if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) {
+        // A paste replaces whole chips, never half of one; thread links in it go in as chips, in one undo step.
+        const node = event.currentTarget
+        const range = rangeOverChips(threadChips, node.selectionStart, node.selectionEnd)
+        const chipped = chipLinks(text)
+        if (chipped.value !== text) {
+          event.preventDefault()
+          editRange(node, range.start, range.end, chipped.value)
+        } else if (range.start !== node.selectionStart || range.end !== node.selectionEnd) {
+          node.setSelectionRange(range.start, range.end)
+        }
+        return
+      }
       event.preventDefault()
       const added = addFiles([{ file: longPasteFile(text), label: pastedTextName(text), pastedText: true }])
       if (added?.[0]) pasteUndo.current = { id: added[0].id, input }
@@ -640,6 +680,109 @@ export function ChatComposer({
       target.focus()
       target.setSelectionRange(edit.caret, edit.caret)
     })
+  }
+
+  // Put `text` over `start`..`end` as typing would, so undo takes it back; without the editing command, as `commitEdit`.
+  const editRange = (node: HTMLTextAreaElement, start: number, end: number, text: string) => {
+    node.setSelectionRange(start, end)
+    selfEditRef.current = true
+    let done = false
+    try {
+      done = Boolean(text ? document.execCommand?.('insertText', false, text) : document.execCommand?.('delete'))
+    } finally {
+      selfEditRef.current = false
+    }
+    if (!done) commitEdit({ value: node.value.slice(0, start) + text + node.value.slice(end), caret: start + text.length })
+  }
+
+  // Links put in from outside the text box become chips; so does a link typing just finished, or one a drop brought.
+  useLayoutEffect(() => {
+    const node = composerInputRef.current
+    const pending = pendingChipRef.current
+    pendingChipRef.current = null
+    if (!node || !input.toLowerCase().includes('mousse://thread/')) {
+      nativeValueRef.current = input
+      return
+    }
+    if (input !== nativeValueRef.current) {
+      nativeValueRef.current = input
+      const chipped = chipLinks(input)
+      if (chipped.value === input) return
+      const focused = document.activeElement === node
+      const start = chipped.map(node.selectionStart)
+      const end = chipped.map(node.selectionEnd)
+      nativeValueRef.current = chipped.value
+      onInputChange(chipped.value)
+      if (focused) requestAnimationFrame(() => composerInputRef.current?.setSelectionRange(start, end))
+      return
+    }
+    if (!pending || node.value !== input) return
+    const chipped = chipLinks(input, pending)
+    if (chipped.value === input) return
+    // Only the changed stretch is replaced, as one edit undo can take back.
+    let head = 0
+    while (head < input.length && input[head] === chipped.value[head]) head += 1
+    let tail = 0
+    while (tail < input.length - head && input[input.length - 1 - tail] === chipped.value[chipped.value.length - 1 - tail]) tail += 1
+    const caretAt = chipped.map(node.selectionStart)
+    editRange(node, head, input.length - tail, chipped.value.slice(head, chipped.value.length - tail))
+    node.setSelectionRange(caretAt, caretAt)
+    // Runs for a new `input` only: the helpers it calls are rebuilt every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input])
+
+  // The chip under the pointer, and whether the pointer is on its remove mark.
+  const threadChipAt = (x: number, y: number): { index: number; close: boolean } | null => {
+    const backdrop = backdropRef.current
+    if (!backdrop || threadChips.length === 0) return null
+    const holds = (rect: DOMRect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+    for (const element of backdrop.querySelectorAll<HTMLElement>('[data-thread-chip]')) {
+      if (![...element.getClientRects()].some(holds)) continue
+      const close = element.querySelector('[data-thread-chip-close]')?.getBoundingClientRect()
+      return { index: Number(element.dataset.threadChip), close: Boolean(close && holds(close)) }
+    }
+    return null
+  }
+  const onChipPointer = (event: React.MouseEvent<HTMLTextAreaElement>) => {
+    const hit = event.buttons === 0 && !disabled ? threadChipAt(event.clientX, event.clientY) : null
+    if (hit?.index !== chipHover?.index || hit?.close !== chipHover?.close) setChipHover(hit)
+  }
+  // A press on a chip opens its thread, or on its remove mark takes the chip out; it never moves the caret.
+  const onChipMouseDown = (event: React.MouseEvent<HTMLTextAreaElement>) => {
+    chipPressRef.current = null
+    if (event.button !== 0 || event.shiftKey || disabled) return
+    const hit = threadChipAt(event.clientX, event.clientY)
+    if (!hit) return
+    event.preventDefault()
+    chipPressRef.current = hit
+  }
+  const onChipClick = (event: React.MouseEvent<HTMLTextAreaElement>) => {
+    const pressed = chipPressRef.current
+    chipPressRef.current = null
+    if (!pressed) return
+    const hit = threadChipAt(event.clientX, event.clientY)
+    const chip = hit && hit.index === pressed.index ? threadChips[hit.index] : undefined
+    if (!chip) return
+    if (hit?.close) {
+      const node = event.currentTarget
+      node.focus()
+      editRange(node, chip.index, chip.index + chip.length, '')
+      setChipHover(null)
+    } else {
+      openLinkedThread(chip.threadId)
+    }
+  }
+  // A copied or cut selection holding chips carries their links.
+  const copyChips = (event: React.ClipboardEvent<HTMLTextAreaElement>, cut: boolean) => {
+    if (threadChips.length === 0) return
+    const node = event.currentTarget
+    const range = rangeOverChips(threadChips, node.selectionStart, node.selectionEnd)
+    const selected = node.value.slice(range.start, range.end)
+    const text = expandComposerThreadChips(selected)
+    if (text === selected) return
+    event.preventDefault()
+    event.clipboardData.setData('text/plain', text)
+    if (cut && !disabled) editRange(node, range.start, range.end, '')
   }
 
   const applySkill = (skillId: string, range?: { index: number; end: number }) => {
@@ -753,9 +896,15 @@ export function ChatComposer({
   const renderInputBackdrop = () => {
     const chip = skillToken ? { start: skillToken.index, end: skillToken.index + skillToken.length } : null
     const quotes = quoteSpans.map((span) => ({ start: span.index, end: span.index + span.length }))
+    const threads = threadChips.map((span, index) => ({
+      start: span.index,
+      end: span.index + span.length,
+      threadId: span.threadId,
+      hover: chipHover?.index === index ? (chipHover.close ? 'close' as const : 'chip' as const) : null
+    }))
     return (
       <>
-        {renderMarkdownBackdrop(input, chip, quotes)}
+        {renderMarkdownBackdrop(input, chip, quotes, threads)}
         {input.endsWith('\n') ? '\u200B' : null}
       </>
     )
@@ -845,6 +994,34 @@ export function ChatComposer({
           }
         }
         return
+      }
+    }
+    // A thread chip goes as one character would: Backspace after it or Delete before it removes all of it (undo brings
+    // it back), the arrows step over it, and typing over a selection that cuts into one replaces all of it.
+    if (threadChips.length > 0) {
+      const node = e.currentTarget
+      const { selectionStart: start, selectionEnd: end } = node
+      if (start === end && (e.key === 'Backspace' || e.key === 'Delete')) {
+        const chip = threadChipAtEdge(threadChips, start, e.key)
+        if (chip) {
+          e.preventDefault()
+          editRange(node, chip.index, chip.index + chip.length, '')
+          return
+        }
+      } else if (start === end && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        const chip = e.key === 'ArrowRight'
+          ? threadChips.find((span) => span.index === start)
+          : threadChips.find((span) => span.index + span.length === start)
+        if (chip) {
+          e.preventDefault()
+          const to = e.key === 'ArrowRight' ? chip.index + chip.length : chip.index
+          node.setSelectionRange(to, to)
+          setCaret(to)
+          return
+        }
+      } else if (start !== end && (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Enter' || (e.key.length === 1 && !e.ctrlKey && !e.metaKey))) {
+        const range = rangeOverChips(threadChips, start, end)
+        if (range.start !== start || range.end !== end) node.setSelectionRange(range.start, range.end)
       }
     }
     // A Reply pill goes as one character would: Backspace after it or Delete before it removes all of it.
@@ -1032,18 +1209,35 @@ export function ChatComposer({
         </div>
         <textarea
           ref={composerInputRef}
-          className="composer-input composer-input-mirrored"
+          className={`composer-input composer-input-mirrored${chipHover ? ' composer-input-on-chip' : ''}`}
           value={input}
           onChange={(e) => {
             setSuggestionsDismissed(false)
             setSelectedSuggestion(0)
             setCaret(readCaret(e.target))
+            nativeValueRef.current = e.target.value
+            // A space or new line typed after a thread link, or a drop, may make a chip (see the effect above).
+            const typed = e.nativeEvent as InputEvent
+            if (!selfEditRef.current) {
+              const at = e.target.selectionStart - (typed.data?.length ?? 1)
+              if (typed.inputType === 'insertFromDrop') pendingChipRef.current = { start: 0, end: e.target.value.length }
+              else if (typed.inputType === 'insertLineBreak' || (typed.inputType === 'insertText' && typed.data && /^\s+$/.test(typed.data)))
+                pendingChipRef.current = { start: at, end: at }
+            }
             onInputChange(e.target.value)
           }}
+          onMouseMove={onChipPointer}
+          onMouseLeave={() => setChipHover(null)}
+          onMouseDown={onChipMouseDown}
+          onClick={onChipClick}
+          onCopy={(e) => copyChips(e, false)}
+          onCut={(e) => copyChips(e, true)}
           onSelect={(e) => {
             // The caret never rests inside a Reply pill, so typing can't split one.
             const node = e.currentTarget
-            const inside = node.selectionStart === node.selectionEnd ? quoteTokenAround(quoteSpans, node.selectionStart) : undefined
+            const inside = node.selectionStart === node.selectionEnd
+              ? quoteTokenAround(quoteSpans, node.selectionStart) ?? threadChipAround(threadChips, node.selectionStart)
+              : undefined
             if (inside) {
               const end = inside.index + inside.length
               const next = node.selectionStart - inside.index < end - node.selectionStart ? inside.index : end
@@ -1231,7 +1425,7 @@ export function buildComposerMessageContent(
   pastedTexts: ReadonlyArray<{ name: string; text: string }> = []
 ): string {
   const parts: string[] = []
-  const typed = expandComposerQuotes(input).trim()
+  const typed = expandComposerThreadChips(expandComposerQuotes(input)).trim()
   if (typed) parts.push(typed)
   for (const pasted of pastedTexts) parts.push(pastedTextBlock(pasted.name, pasted.text))
 
@@ -1274,9 +1468,10 @@ const MARKDOWN_CLASS: Record<MarkdownKind, string> = {
 function renderMarkdownBackdrop(
   text: string,
   chip: { start: number; end: number } | null,
-  quotes: Array<{ start: number; end: number }> = []
+  quotes: Array<{ start: number; end: number }> = [],
+  threads: Array<{ start: number; end: number; threadId: string; hover: 'chip' | 'close' | null }> = []
 ): ReactNode[] {
-  const cuts = [...(chip ? [chip.start, chip.end] : []), ...quotes.flatMap((quote) => [quote.start, quote.end])]
+  const cuts = [...(chip ? [chip.start, chip.end] : []), ...[...quotes, ...threads].flatMap((token) => [token.start, token.end])]
   const nodes: ReactNode[] = []
   for (const span of composerMarkdownSpans(text)) {
     const bounds = [...new Set([span.start, ...cuts.filter((cut) => cut > span.start && cut < span.end), span.end])].sort((a, b) => a - b)
@@ -1284,6 +1479,15 @@ function renderMarkdownBackdrop(
       const start = bounds[i]
       const end = bounds[i + 1]
       // A Reply pill is drawn whole, without Markdown: its reply icon in the token's blank first slot, then the preview.
+      // A thread chip is drawn whole too: its icon and status dot in the token's blank slots.
+      const threadIndex = threads.findIndex((item) => start >= item.start && end <= item.end)
+      if (threadIndex >= 0) {
+        const thread = threads[threadIndex]
+        if (start === thread.start) {
+          nodes.push(<ComposerThreadChip key={start} index={threadIndex} token={text.slice(thread.start, thread.end)} threadId={thread.threadId} hover={thread.hover} />)
+        }
+        continue
+      }
       const quote = quotes.find((item) => start >= item.start && end <= item.end)
       if (quote) {
         if (start === quote.start) {
@@ -1304,4 +1508,36 @@ function renderMarkdownBackdrop(
     }
   }
   return nodes
+}
+
+/**
+ * A thread chip as the input backdrop draws it, over the token's own glyphs: the icon in the first blank slot, the
+ * title (and the computer for another computer's thread), and the thread's status dot in the last slot, which shows the
+ * remove mark while the pointer is on the chip.
+ */
+function ComposerThreadChip({ index, token, threadId, hover }: { index: number; token: string; threadId: string; hover: 'chip' | 'close' | null }) {
+  const thread = useAppStore((state) => state.threads.find((entry) => entry.id === threadId))
+  const activity = useAppStore((state) => state.threadActivity[threadId])
+  const lastPhase = useAppStore((state) => state.turnStates[threadId]?.phase)
+  const status = thread ? threadLinkStatus(activity, lastPhase, false, thread.setupFailure !== undefined, thread.lastRun) : 'missing'
+  const parts = threadChipParts(token)
+  return (
+    <span
+      className="composer-thread-chip"
+      data-thread-chip={index}
+      data-status={status}
+      {...(thread?.settledAt !== undefined ? { 'data-archived': '' } : {})}
+      {...(hover ? { 'data-hover': hover } : {})}
+    >
+      <span className="composer-chip-slot">{parts.head}<MessageSquare size={12} strokeWidth={2} className="composer-thread-chip-icon" aria-hidden /></span>
+      {parts.title}
+      {parts.computer && <span className="composer-thread-chip-computer">{parts.computer}</span>}
+      {parts.gap}
+      <span className="composer-chip-slot" data-thread-chip-close="">
+        {parts.dot}
+        {hover ? <X size={11} strokeWidth={2.4} className="composer-thread-chip-remove" aria-hidden /> : <span className="composer-thread-chip-dot" />}
+      </span>
+      {parts.tail}
+    </span>
+  )
 }

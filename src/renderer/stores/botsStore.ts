@@ -14,6 +14,7 @@ import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents
 import { keepEqualById } from '../lib/keepEqual'
 import { botRetryOf } from '../components/bots/botRetry'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
+import { expandComposerThreadChips } from '../lib/composerThreadChips'
 import { clearBotLiveReplies, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 import { adoptFilePreview } from '../components/bots/fileImageCache'
 import type { ChatReference } from '../../shared/chatReferences'
@@ -579,7 +580,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
     },
 
     async send(botId) {
-      const typed = expandComposerQuotes(get().drafts[botId] ?? '').trim()
+      const typed = expandComposerThreadChips(expandComposerQuotes(get().drafts[botId] ?? '')).trim()
       const attachments = get().attachments[botId] ?? []
       const references = get().references[botId] ?? []
       const replyTo = get().replyingTo[botId]
