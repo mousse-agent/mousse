@@ -238,12 +238,14 @@ export async function writeWorkspaceFile(
   questions: UserQuestionService,
   scope: AcpRequestScope,
   request: WriteTextFileRequest,
-  label: string
+  label: string,
+  /** A bot's turn whose authority already allowed the write (`checkBotFileRequest`): nobody is asked. */
+  botAllowed = false
 ): Promise<WriteTextFileResponse> {
   const path = workspacePath(scope, request.path)
   if (!scope.threadId) throw new Error('ACP file write has no thread')
   if (scope.approvals === 'never') throw new Error(APPROVALS_REFUSED_MESSAGE)
-  const mode = scope.permissionMode ?? 'ask'
+  const mode = botAllowed ? 'full' : scope.permissionMode ?? 'ask'
   // Full access writes anything in the workspace without asking, so there is nothing to tell apart.
   const write = permissionModeAllows(mode, 'command') ? { action: 'edit' as const } : await permissionActionForWrite(scope.cwd, path)
   scope.throwIfAborted()
