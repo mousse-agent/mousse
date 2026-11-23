@@ -12,6 +12,20 @@
       ],
       "claimedAt": "2026-11-22T18:11:45.608Z",
       "expiresAt": "2026-11-22T23:14:27.822Z"
+    },
+    {
+      "task": "refresh-provider-models-after-setup",
+      "session": "agibook-6ece71",
+      "machine": "agibook",
+      "branch": "master",
+      "paths": [
+        "src/mms/harness/gateway.ts",
+        "src/mms/harness/drivers/pi/instance.ts",
+        "tests/harness/modelRefreshSchedule.test.ts",
+        "tests/harness/providerAddSignIn.test.ts"
+      ],
+      "claimedAt": "2026-11-23T15:15:39.333Z",
+      "expiresAt": "2026-11-23T17:15:39.333Z"
     }
   ]
 }
