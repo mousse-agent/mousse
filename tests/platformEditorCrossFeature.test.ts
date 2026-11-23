@@ -11,6 +11,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { readOwnerRecord } from '../src/mms/ownership/MmsOwnerLease'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { MmsProtocolServer } from '../src/mms/protocol'
+import { fixtureBundleDir, removeFixtureBundleDir } from './fixtures/agent-platform/fixtureBundleDir'
 import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { installExactDefinitionRuntime, type ExactRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 
@@ -20,12 +21,13 @@ afterEach(async () => {
   for (const root of roots.splice(0)) {
     const rel = relative(realpathSync(tmpdir()), realpathSync(root))
     if (isAbsolute(rel) || !rel.startsWith('mousse-editor-cross-') || rel.includes('..')) throw new Error('Unexpected fixture root')
+    removeFixtureBundleDir(root)
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
 })
 
 async function launch(config: Record<string, unknown>, root: string): Promise<Record<string, unknown>> {
-  const bundle = join(root, 'electron-main.mjs')
+  const bundle = join(fixtureBundleDir(root), 'electron-main.mjs')
   await build({ entryPoints: [resolve('tests/fixtures/agent-platform/editor-cross-feature/electron-main.ts')],
     outfile: bundle, bundle: true, platform: 'node', format: 'esm', packages: 'external', logLevel: 'silent',
     banner: { js: "import {createRequire as __fixtureCreateRequire} from 'node:module'; const require = __fixtureCreateRequire(import.meta.url);" } })
