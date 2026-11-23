@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 /**
  * Bot Phase 1 §5.9 item 7: a bot's Sign in opens Settings → Providers on the entry it names (the
- * bot runner, "Claude for bots"), whether Providers was already showing or mounts afterwards.
+ * bot runner, "Claude for bots"), whether Providers was already showing or mounts afterwards. First-run
+ * setup's Add key opens Add provider the same way.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ProvidersSettings } from '../../src/renderer/components/providers/ProvidersSettings'
-import { openProvider } from '../../src/renderer/lib/settingsNavigation'
+import { openAddProvider, openProvider } from '../../src/renderer/lib/settingsNavigation'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { snapshot } from '../providerSnapshotFixture'
@@ -20,6 +21,8 @@ describe('Settings → Providers opened on one entry', () => {
   const settle = async () => {
     for (let round = 0; round < 6; round += 1) await act(async () => { await new Promise((done) => setTimeout(done, 0)) })
   }
+  const addProviderOpen = () =>
+    [...document.body.querySelectorAll('[role="dialog"] h3')].some((title) => title.textContent === 'Add provider')
   const selected = () => [...document.body.querySelectorAll('.prov-item-hit[aria-pressed="true"]')].map((item) => item.getAttribute('aria-label'))
   const mount = async () => {
     act(() => root.render(createElement(ProvidersSettings, {
@@ -72,5 +75,19 @@ describe('Settings → Providers opened on one entry', () => {
     await act(async () => { openProvider('claude:bots') })
     await settle()
     expect(selected()).toEqual(['Select Claude for bots'])
+  })
+
+  it('opens Add provider when asked before the page mounted', async () => {
+    openAddProvider()
+    await mount()
+    expect(addProviderOpen()).toBe(true)
+  })
+
+  it('opens Add provider when asked while the page shows', async () => {
+    await mount()
+    expect(addProviderOpen()).toBe(false)
+    await act(async () => { openAddProvider() })
+    await settle()
+    expect(addProviderOpen()).toBe(true)
   })
 })

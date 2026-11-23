@@ -21,7 +21,7 @@ import {
   watchPendingSignIn
 } from '../../lib/providerSnapshots'
 import { useLocalProjects } from '../../hooks/useLocalProjects'
-import { takePendingProvider } from '../../lib/settingsNavigation'
+import { takePendingAddProvider, takePendingProvider } from '../../lib/settingsNavigation'
 import { Select } from '../ui/Select'
 import { AddProviderDialog, type AddProviderHandlers } from './AddProviderDialog'
 import { ApiSetupRow } from './ApiSections'
@@ -108,8 +108,18 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     window.addEventListener('mousse:settings-provider', pick)
     return () => window.removeEventListener('mousse:settings-provider', pick)
   }, [])
-  const [addOpen, setAddOpen] = useState(false)
   const [addOptions, setAddOptions] = useState<ProviderAddOption[]>([])
+  // First-run setup's Add key opens Add provider here, before or after the page mounted.
+  const [addOpen, setAddOpen] = useState(takePendingAddProvider)
+  useEffect(() => {
+    const open = () => {
+      if (!takePendingAddProvider()) return
+      setAddOpen(true)
+      void window.mousse.providers.catalog.addOptions().then(setAddOptions).catch(() => {})
+    }
+    window.addEventListener('mousse:settings-add-provider', open)
+    return () => window.removeEventListener('mousse:settings-add-provider', open)
+  }, [])
   const [signIn, setSignIn] = useState<SignInSession | null>(null)
   /** Opens Models in the editor of this entry: after it signs in, to show what is connected now. */
   const [revealModels, setRevealModels] = useState<{ instanceId: string; count: number } | null>(null)
