@@ -2,38 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "devices-quick-tunnel",
-      "session": "Animatrix-f25446",
-      "machine": "Animatrix",
-      "branch": "devices-quick-tunnel",
-      "paths": [
-        "src/renderer/components/netEngine",
-        "src/mms/netEngine",
-        "src/shared/netEngine"
-      ],
-      "claimedAt": "2026-11-21T10:24:52.800Z",
-      "expiresAt": "2026-11-22T10:41:17.871Z"
-    },
-    {
-      "task": "download-windows-git",
-      "session": "agibook-b1b05b",
-      "machine": "agibook",
-      "branch": "download-windows-git",
-      "paths": [
-        "src/main/mms/GuiMmsController.ts",
-        "src/main/mms/gitPrerequisite.ts",
-        "src/main/mms/windowsGit.ts",
-        "src/main/mms/nativeGit.ts",
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/preload/index.ts",
-        "src/renderer/App.tsx",
-        "src/renderer/components/WorkspaceLoading.tsx",
-        "src/shared/gitSetup.ts"
-      ],
-      "claimedAt": "2026-11-22T21:56:47.600Z",
-      "expiresAt": "2026-11-22T23:56:47.600Z"
-    },
-    {
       "task": "fix/mcp-server-before-boot-wakes",
       "session": "agibook-e58f50",
       "machine": "agibook",
