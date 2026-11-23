@@ -96,7 +96,10 @@ describe('chat references', () => {
       kind: 'relative-file', path: 'C:\\repo\\src\\a.ts', line: 42, column: 7
     })
     expect(classifyLink('src/a.ts#L9C2')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: 2 })
+    expect(classifyLink('src/a.ts#L9-L20')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: undefined })
+    expect(classifyLink('src/a.ts#L9C2-L20C8')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: 2 })
     expect(classifyLink('src/a.ts:9:2')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: 2 })
+    expect(classifyLink('src/a.ts:9-20')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: undefined })
     expect(classifyLink('/repo/src/a.ts:9')).toEqual({ kind: 'relative-file', path: '/repo/src/a.ts', line: 9, column: undefined })
   })
 
