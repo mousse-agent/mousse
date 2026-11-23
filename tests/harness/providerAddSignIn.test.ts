@@ -55,6 +55,24 @@ describe('adding cloud credentials', () => {
     expect(credentials.keys.has('amazon-bedrock')).toBe(false)
   })
 
+  it('publishes the models discovered after connecting cloud credentials', async () => {
+    const credentials = new PiInstallationCredentials()
+    const listed = credentials.getConfiguredLlmProviders
+    let discovered = false
+    credentials.getConfiguredLlmProviders = () => listed().map((provider) => ({
+      ...provider,
+      models: discovered ? [{ id: 'cloud-model', label: 'Cloud model' }] : []
+    }))
+    credentials.refreshDynamicModels.mockImplementation(async () => { discovered = credentials.has('amazon-bedrock') })
+    const a = profile(credentials)
+
+    await a.harness.instances.addInstance({ driver: 'pi', config: { provider: 'amazon-bedrock' }, signIn: 'ambient' })
+
+    await vi.waitFor(() => expect(a.events.some((event) => event.type === 'snapshots' &&
+      event.data.snapshots.some((snapshot) => snapshot.instanceId === 'pi:amazon-bedrock' &&
+        snapshot.models.entries.some((model) => model.id === 'cloud-model')))).toBe(true))
+  })
+
   it('with credentials adds the entry signed in, and adding again keeps it', async () => {
     const credentials = new PiInstallationCredentials()
     const a = profile(credentials)

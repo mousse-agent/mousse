@@ -43,7 +43,7 @@ function lateUpdates(connection: AcpConnection): AcpConnection {
   })
 }
 
-function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; lateUpdates?: boolean; updates?: Update[] } = {}) {
+function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; lateUpdates?: boolean; updates?: Update[]; model?: string } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
@@ -66,7 +66,13 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
       .onRequest(methods.agent.session.new, (c) => {
         calls.push('session/new')
         sessionCwds.push(c.params.cwd)
-        return { sessionId: `s${calls.length}` }
+        return {
+          sessionId: `s${calls.length}`,
+          ...(options.model ? { configOptions: [{
+            id: 'model', name: 'Model', category: 'model', type: 'select',
+            currentValue: options.model, options: [{ value: options.model, name: 'Listed model' }]
+          }] } : {})
+        }
       })
       .onRequest(methods.agent.session.prompt, async (c) => {
         calls.push(`prompt ${c.params.sessionId}`)
@@ -97,16 +103,17 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
 }
 
 describe('the generic ACP driver', () => {
-  it('adds a Custom command and checks it with an initialize-only handshake that never opens a session', async () => {
-    const { harness, calls, agent } = fixture()
+  it('checks a new Custom command with an initialize-only handshake and then lists its models', async () => {
+    const { harness, calls, agent } = fixture([], { model: 'listed' })
     const added = await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath, args: ['agent.js'] } })
     expect(added.instanceId).toBe('acp:fake-agent')
     await vi.waitFor(async () => {
       const [snapshot] = await harness.instances.snapshots({ kind: 'device' })
       expect(snapshot).toMatchObject({ runs: { state: 'yes' }, binary: { version: '1.2.3', source: 'override' }, caps: { toolControl: 'uncontrolled', planMode: false }, auth: { state: 'not_required' } })
+      expect(snapshot?.models.entries.some((model) => model.id === 'listed')).toBe(true)
+      expect(agent.connections.map(({ request, killed }) => [request.purpose, killed])).toEqual([['handshake', true], ['models', true]])
     })
-    expect(calls).toEqual(['initialize'])
-    expect(agent.connections.every((connection) => connection.request.purpose === 'handshake' && connection.killed)).toBe(true)
+    expect(calls).toEqual(['initialize', 'initialize', 'session/new'])
   })
 
   it('offers Sign in from Settings before the account is checked, and Sign out after a Mousse sign-in', async () => {

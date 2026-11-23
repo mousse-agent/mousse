@@ -10,7 +10,7 @@ import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
 import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
-import { MODEL_REFRESH_INTERVAL_MS, MODEL_REFRESH_STARTUP_DELAY_MS, type Harness, type TurnSpec } from '../../src/mms/harness/gateway'
+import { MODEL_REFRESH_INTERVAL_MS, MODEL_REFRESH_STARTUP_DELAY_MS, type Harness, type HarnessGatewayEvent, type TurnSpec } from '../../src/mms/harness/gateway'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -71,7 +71,14 @@ function agentDriver(world: World): HarnessDriver {
       const runtime: DriverRuntime = {
         adapter: new Chat(world),
         configured: () => world.signedIn.has(id),
-        models: () => [{ id: 'm', label: 'Model' }],
+        models: () => [
+          { id: 'm', label: 'Model' },
+          ...(world.stamps.has(id) ? [{ id: 'discovered', label: 'Discovered model' }] : [])
+        ],
+        signIn: async (session) => {
+          world.signedIn.add(id)
+          return { success: true, sessionId: session.sessionId }
+        },
         auth: async () => (world.signedIn.has(id) ? { state: 'signed_in' } : { state: 'signed_out' }),
         refreshModels: async () => {
           world.started.push(id)
@@ -125,6 +132,63 @@ describe('model refresh schedule', () => {
     const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms)
     return { home, binary, harness, spec, advance }
   }
+
+  const device = { kind: 'device' } as const
+  const project = { kind: 'project', projectId: 'p' } as const
+
+  it.each(['add', 'enable on device', 'enable in project', 'sign in', 'sign in again', 'sign in outside Mousse'] as const)(
+    'publishes newly listed models after %s without a manual refresh',
+    async (action) => {
+      const id = action === 'add' ? 'claude' : 'claude:a'
+      const needsSignIn = action === 'sign in' || action === 'sign in outside Mousse'
+      const world = newWorld(needsSignIn ? [] : [id])
+      const { harness, binary, advance } = fixture(world, action === 'add' ? [] : [id], {
+        enabled: { [id]: action !== 'enable on device' }
+      })
+      if (action === 'enable in project') await harness.instances.setEnabled(id, project, false)
+      if (needsSignIn || action === 'sign in again') {
+        const [snapshot] = await harness.instances.snapshots(device)
+        expect(snapshot?.auth.state).toBe(needsSignIn ? 'signed_out' : 'signed_in')
+      }
+      const events: HarnessGatewayEvent[] = []
+      harness.instances.subscribe((event) => events.push(event))
+
+      switch (action) {
+        case 'add':
+          await harness.instances.add({ driver: 'claude', config: { binaryPath: binary } })
+          break
+        case 'enable on device':
+          await harness.instances.setEnabled(id, device, true)
+          break
+        case 'enable in project':
+          await harness.instances.setEnabled(id, project, null)
+          break
+        case 'sign in':
+        case 'sign in again':
+          await harness.instances.signIn(id)
+          break
+        case 'sign in outside Mousse':
+          world.signedIn.add(id)
+          await harness.instances.recheck(id)
+          break
+      }
+
+      await advance(0)
+      const published = events.flatMap((event) => event.type === 'snapshots' ? event.data.snapshots : [])
+      expect(published.find((snapshot) => snapshot.instanceId === id &&
+        snapshot.models.entries.some((model) => model.id === 'discovered'))?.auth.state).toBe('signed_in')
+      expect(world.started).toEqual([id])
+    }
+  )
+
+  it('leaves a newly added signed-out provider alone', async () => {
+    const world = newWorld([])
+    const { harness, binary, advance } = fixture(world, [])
+    await harness.instances.add({ driver: 'claude', config: { binaryPath: binary } })
+    await advance(0)
+    expect((await harness.instances.snapshots(device))[0]?.auth.state).toBe('signed_out')
+    expect(world.started).toEqual([])
+  })
 
   it('refreshes stale models on desktop open while leaving fresh and signed-out entries alone', async () => {
     const world = newWorld(['claude:stale', 'claude:fresh', 'claude:disabled', 'claude:failed'])
