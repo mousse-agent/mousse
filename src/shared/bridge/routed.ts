@@ -1035,6 +1035,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
   },
   {
+    methods: ['projects.setPath'],
+    reason: "A project's folder is chosen in the folder picker of the computer itself; another computer opens a folder there with projects.open."
+  },
+  {
     methods: ['appearance.wallpaperImport', 'appearance.wallpaperImportBytes', 'appearance.wallpaperRead', 'appearance.wallpaperSaveCopy'],
     reason: 'A theme wallpaper is an image kept in the profile of the computer itself; a window of another computer shows the theme without it.'
   },

@@ -1163,6 +1163,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     startRename({ type: target.type, id: target.id, name: target.name, inNeedsMe, returnFocus })
   }
 
+  // A project of this computer: the folder picker, then the same project in the folder chosen. A refusal (no folder
+  // there, or another project's folder) is the failure toast.
+  const handleChangeFolder = () => {
+    if (!contextMenu) return
+    const { target } = contextMenu
+    closeContextMenu()
+    void runWithToast('change the folder', () => window.mousse.projects.changeFolder(target.id, target.path))
+  }
+
   // Only an archived thread of this computer is deleted, after its confirmation; a project asks first too.
   const handleRemove = () => {
     if (!contextMenu) return
@@ -2153,6 +2162,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onRename={handleRename}
 
           onRemove={handleRemove}
+          onChangeFolder={contextMenu.target.type === 'project' && !contextMenu.target.node ? handleChangeFolder : undefined}
           onTrustGitSettings={handleTrustGitSettings}
           onNewThread={handleNewProjectThread}
           onNewThreadFromPullRequest={handleNewThreadFromPullRequest}

@@ -2177,6 +2177,20 @@ export function registerGuiIpc(
     broadcast('projects:updated', res.projects)
     return res.project
   })
+  // Asks for the project's new folder, starting at its current one; null when cancelled.
+  registerHandler('projects:changeFolder', async (_e, projectId: string, defaultPath?: unknown) => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose the project folder',
+      properties: ['openDirectory'],
+      ...(typeof defaultPath === 'string' && defaultPath.length <= 4096 ? { defaultPath } : {})
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const res = await guiMms.request<{ project: unknown; projects: unknown[] }>('projects.setPath', { projectId, path: result.filePaths[0] })
+    broadcast('projects:updated', res.projects)
+    return res.project
+  })
   registerHandler('projects:pin', async (_e, projectId: string, pinned: boolean) => {
     const res = await guiMms.request<{ project: unknown; projects: unknown[] }>(
       'projects.pin',

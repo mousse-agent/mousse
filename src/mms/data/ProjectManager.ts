@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'fs'
-import { basename, join } from 'path'
+import { existsSync, readFileSync, statSync } from 'fs'
+import { basename, join, resolve } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { NewThreadChoice, Project, Thread } from '../../shared/types'
 import type { ThreadDataStore } from './ThreadDataStore'
@@ -9,6 +9,13 @@ import { trustRepositoryPrograms } from '../git/repoPrograms'
 import { retireProjectSnapshots } from '../workspace/SnapshotWorkspace'
 import type { ProjectIconChoice } from '../../shared/projectIcon'
 import { PROJECT_ICON_DETECTOR_VERSION, toStoredIconPath } from './projectIcon'
+
+/** The same folder: Windows paths compare without case. */
+function samePath(a: string, b: string): boolean {
+  const left = resolve(a)
+  const right = resolve(b)
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
+}
 
 export class ProjectManager {
   private projects: Project[] = []
@@ -90,6 +97,31 @@ export class ProjectManager {
 
     project.name = trimmed
     this.persist()
+    return project
+  }
+
+  /**
+   * Points the project at another folder: the same project, with its id, threads and settings. A project still named
+   * after its old folder takes the new folder's name, and the icon is looked for again there. Refuses a folder that
+   * is missing or is already another project's.
+   */
+  setProjectPath(id: string, folderPath: string): Project {
+    const project = this.getProject(id)
+    if (!project) throw new Error(`Project not found: ${id}`)
+    if (samePath(project.path, folderPath)) return project
+    const other = this.projects.find((p) => p.id !== id && samePath(p.path, folderPath))
+    if (other) throw new Error(`That folder is already the project ${other.name}.`)
+    let folder = false
+    try { folder = statSync(folderPath).isDirectory() } catch { /* missing or unreadable: refused below */ }
+    if (!folder) throw new Error(`There is no folder at ${folderPath}.`)
+    if (project.name === basename(project.path)) project.name = basename(folderPath)
+    project.path = folderPath
+    delete project.detectedIconPath
+    delete project.iconDetectedAt
+    delete project.iconDetector
+    this.persist()
+    // As for a project just opened: the repository's own filters as the user has them now are theirs.
+    try { trustRepositoryPrograms(folderPath) } catch { /* not a repository: nothing to record */ }
     return project
   }
 

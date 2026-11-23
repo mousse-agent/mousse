@@ -295,6 +295,7 @@ export const PROTOCOL_METHODS = [
   'projects.trustGitSettings',
   'projects.icon',
   'projects.setIcon',
+  'projects.setPath',
   'appearance.wallpaperImport',
   'appearance.wallpaperImportBytes',
   'appearance.wallpaperRead',

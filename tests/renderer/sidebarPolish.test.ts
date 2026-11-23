@@ -250,7 +250,7 @@ describe('the project menu', () => {
     expect(menuEntries()).toEqual([
       'New thread', 'New thread from a pull request', '—',
       'Open in Cursor', 'Show in Finder', 'Copy path', '—',
-      'Pin', 'Rename', 'Change icon…', 'Git', '—',
+      'Pin', 'Rename', 'Change folder…', 'Change icon…', 'Git', '—',
       'Remove project…'
     ])
   })

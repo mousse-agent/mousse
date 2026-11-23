@@ -12,6 +12,7 @@ import {
   Eye,
   EyeOff,
   Folder,
+  FolderOpen,
   FolderSearch,
   GitBranch,
   GitPullRequest,
@@ -66,6 +67,8 @@ interface ThreadsContextMenuProps {
   onRegenerateTitle: () => void
   onRename: () => void
   onRemove: () => void
+  /** Projects of this computer only: point the project at another folder. */
+  onChangeFolder?: () => void
   /** Projects only: record the repository's own Git filters as the user's again. */
   onTrustGitSettings?: () => void
   /** Projects only: start a thread in the project. */
@@ -184,6 +187,7 @@ export function ThreadsContextMenu({
   onRegenerateTitle,
   onRename,
   onRemove,
+  onChangeFolder,
   onTrustGitSettings,
   onNewThread,
   onNewThreadFromPullRequest,
@@ -272,6 +276,12 @@ export function ThreadsContextMenu({
         <EditRegular />
         <span>Rename</span>
       </button>
+      {target.type === 'project' && onChangeFolder && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" title={target.path} onClick={onChangeFolder}>
+          <FolderOpen />
+          <span>Change folder…</span>
+        </button>
+      )}
       {target.type === 'thread' && onCopyReference && (
         <button type="button" className="threads-context-menu-item" role="menuitem" title="Paste it into a chat to point its agent at this thread" onClick={onCopyReference}>
           <Copy />
