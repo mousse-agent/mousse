@@ -845,6 +845,10 @@ export class AcpSessions {
       return
     }
     if (!process.mayWake || !event.sessionUpdate || !CONTINUATION_START_UPDATES.has(event.sessionUpdate)) return
+    this.startContinuation(process, threadId, { update, sessionId })
+  }
+
+  private startContinuation(process: AcpProcess, threadId: string, initial?: AcpContinuation['buffer'][number]): void {
     if (process.wakeGraceTimer) { clearTimeout(process.wakeGraceTimer); process.wakeGraceTimer = undefined }
     const ended = process.recentlyEnded?.splice(0) ?? []
     const pendingSubagents = [...(process.backgroundTasks?.values() ?? [])].filter((t) => t.kind === 'subagent')
@@ -865,7 +869,7 @@ export class AcpSessions {
     const cont: AcpContinuation = {
       id,
       info: { id, taskIds: tasks.map((t) => t.taskId), summaries, ...(tasks.length ? { tasks } : {}) },
-      buffer: [{ update, sessionId }],
+      buffer: initial ? [initial] : [],
       claimed: false,
       discarded: false,
       settled: false,
@@ -879,7 +883,7 @@ export class AcpSessions {
       modelMovedPastOpenTools: false
     }
     process.continuation = cont
-    this.trackContinuationUpdate(process, cont, update)
+    if (initial) this.trackContinuationUpdate(process, cont, initial.update)
     if (!this.liveHost?.continuationStarted) {
       this.discardContinuations(threadId, id)
       return
@@ -945,6 +949,13 @@ export class AcpSessions {
         if (active?.refuseTools) {
           active.refuseTools(request.toolCall?.title ?? 'a tool')
           return { outcome: { outcome: 'cancelled' } }
+        }
+        // A background wake can request permission before its first session update. Create the same
+        // continuation as a notification would, then let its bound turn answer the request.
+        if (!inTurn() && active?.threadId && active.sessionId === request.sessionId &&
+            this.sessions.get(active.threadId) === active && !active.connection.signal.aborted &&
+            !active.continuation && this.hasBackgroundWork(active)) {
+          this.startContinuation(active, active.threadId)
         }
         if (!(await waitForTurn())) {
           stopIdle()
