@@ -188,6 +188,7 @@ describe('a thread reference pasted in a thread\'s composer', () => {
     await type('see mousse://thread/thread-b')
     expect(chips()).toEqual([])
     await type('see mousse://thread/thread-b ', ' ')
+    await settle()
     expect(chips()).toEqual(['Design notes'])
     expect(await send()).toBe('see mousse://thread/thread-b')
   })

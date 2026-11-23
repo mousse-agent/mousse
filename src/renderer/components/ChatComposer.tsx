@@ -716,17 +716,23 @@ export function ChatComposer({
       if (focused) requestAnimationFrame(() => composerInputRef.current?.setSelectionRange(start, end))
       return
     }
-    if (!pending || node.value !== input) return
-    const chipped = chipLinks(input, pending)
-    if (chipped.value === input) return
-    // Only the changed stretch is replaced, as one edit undo can take back.
-    let head = 0
-    while (head < input.length && input[head] === chipped.value[head]) head += 1
-    let tail = 0
-    while (tail < input.length - head && input[input.length - 1 - tail] === chipped.value[chipped.value.length - 1 - tail]) tail += 1
-    const caretAt = chipped.map(node.selectionStart)
-    editRange(node, head, input.length - tail, chipped.value.slice(head, chipped.value.length - tail))
-    node.setSelectionRange(caretAt, caretAt)
+    if (!pending) return
+    // After this commit, as an edit of its own: an editing command run while React commits would be undone by it.
+    requestAnimationFrame(() => {
+      const target = composerInputRef.current
+      if (!target || target.selectionStart !== target.selectionEnd) return
+      const value = target.value
+      const chipped = chipLinks(value, pending)
+      if (chipped.value === value) return
+      // Only the changed stretch is replaced, as one edit undo can take back.
+      let head = 0
+      while (head < value.length && value[head] === chipped.value[head]) head += 1
+      let tail = 0
+      while (tail < value.length - head && value[value.length - 1 - tail] === chipped.value[chipped.value.length - 1 - tail]) tail += 1
+      const caretAt = chipped.map(target.selectionStart)
+      editRange(target, head, value.length - tail, chipped.value.slice(head, chipped.value.length - tail))
+      target.setSelectionRange(caretAt, caretAt)
+    })
     // Runs for a new `input` only: the helpers it calls are rebuilt every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input])

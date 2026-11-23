@@ -2645,8 +2645,8 @@ html[data-chat-width='full'] .chat {
 /* A thread chip: a thread's link in the draft (lib/composerThreadChips.ts). Its icon and status dot sit in the token's
  * blank slots; the hover tint and the remove mark follow the pointer over the text box (`data-hover`). */
 .composer-thread-chip {
-  padding: 2px 3px;
-  margin: 0 -3px;
+  padding: 2px 2px;
+  margin: 0 -2px;
   border-radius: 6px;
   color: var(--accent);
   background: rgba(var(--accent-rgb), 0.13);
