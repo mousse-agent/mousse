@@ -8,7 +8,7 @@ import { cn } from "./utils/cn";
 import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
 import { codeBlockPre } from "./code-block";
-import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
+import { classifyLink, inlineCodeFileHref, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 import { LinkLabel, threadLinkLabel } from "./link-label-view";
 import { ThreadChip } from "../../../components/ThreadChip";
 import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
@@ -558,11 +558,35 @@ function isLocalFileHref(href: string): boolean {
   return !href.startsWith("/__mousse_") && !href.startsWith("#") && classifyLink(href).kind === "relative-file";
 }
 
+function inlineCodeText(node: Element): string | null {
+  if (node.tagName !== "code" || node.properties.className !== undefined) return null;
+  if (node.children.length !== 1) return null;
+  const sole = node.children[0];
+  return sole && sole.type === "text" ? sole.value : null;
+}
+
 function markFileLinksIn(node: Root | Element): void {
-  for (const child of node.children) {
-    if (child.type !== "element") continue;
-    const href = child.tagName === "a" ? child.properties.href : undefined;
-    if (typeof href === "string" && isLocalFileHref(href)) child.properties.href = `${LOCAL_FILE_MARKER}${encodeURIComponent(href)}`;
+  for (let index = 0; index < node.children.length; index += 1) {
+    const child = node.children[index];
+    if (!child || child.type !== "element") continue;
+    // Fenced code blocks stay verbatim; inline code inside an existing link is never double-wrapped.
+    if (child.tagName === "pre") continue;
+    if (child.tagName === "a") {
+      const href = child.properties.href;
+      if (typeof href === "string" && isLocalFileHref(href)) child.properties.href = `${LOCAL_FILE_MARKER}${encodeURIComponent(href)}`;
+      continue;
+    }
+    const text = inlineCodeText(child);
+    const fileHref = text !== null ? inlineCodeFileHref(text) : null;
+    if (fileHref !== null) {
+      node.children[index] = {
+        type: "element",
+        tagName: "a",
+        properties: { href: `${LOCAL_FILE_MARKER}${encodeURIComponent(fileHref)}` },
+        children: [child],
+      };
+      continue;
+    }
     markFileLinksIn(child);
   }
 }

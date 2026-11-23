@@ -46,11 +46,11 @@ function fileUrlPath(value: string): string | null {
   return /^[/\\][a-zA-Z]:[/\\]/.test(match[2]) ? match[2].slice(1) : match[2]
 }
 
-/** A path with an optional line and column. Markdown hands a backslash over as `%5C`, which the caller turns back. */
+/** A path with an optional line, column, or line range (`:12`, `:12:3`, `:12-20`, `#L12`, `#L12C3`, `#L12-L20`). Markdown hands a backslash over as `%5C`, which the caller turns back. */
 function classifyPath(value: string): RoutedLink {
-  // Agent markdown commonly emits path/to/file.ts#L12 or C:\repo\file.ts:12:3.
-  const windows = value.match(/^([a-zA-Z]:[\\/].*?)(?::(\d+))?(?::(\d+))?(?:#L(\d+)(?:C(\d+))?)?$/)
-  const ordinary = value.match(/^(.+?)(?::(\d+))?(?::(\d+))?(?:#L(\d+)(?:C(\d+))?)?$/)
+  // Agent markdown commonly emits path/to/file.ts#L12-L20, path/to/file.ts:12-20, or C:\repo\file.ts:12:3.
+  const windows = value.match(/^([a-zA-Z]:[\\/].*?)(?::(\d+)(?::(\d+))?(?:-\d+(?::\d+)?)?|#L(\d+)(?:C(\d+))?(?:-L?\d+(?:C\d+)?)?)?$/i)
+  const ordinary = value.match(/^(.+?)(?::(\d+)(?::(\d+))?(?:-\d+(?::\d+)?)?|#L(\d+)(?:C(\d+))?(?:-L?\d+(?:C\d+)?)?)?$/i)
   const match = windows ?? ordinary
   if (!match) return { kind: 'reject' }
   const path = match[1]
@@ -62,6 +62,35 @@ function classifyPath(value: string): RoutedLink {
   } catch {
     return { kind: 'reject' }
   }
+}
+
+/** Top-level MIME types so two-segment dotted types (`application/vnd.ms-excel`) stay plain code. */
+const MIME_PREFIX = /^(?:application|audio|font|image|message|model|multipart|text|video)\//i
+/** Bare hostnames (`example.com/index.html`) that look like relative paths without a scheme. */
+const HOST_PREFIX = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|dev|app|ai|gov|edu|co|me|gg|xyz)$/i
+
+/**
+ * Returns the file target when an inline code span is a single file path (with optional line, column, or range),
+ * such as Claude or Codex emits (`src/app.ts:42`, `.github/workflows/ci.yml`, `C:\repo\a.ts:10-20`). Returns null for
+ * commands, URLs, globs, MIME types, bare filenames without a directory, and prose slashes (`and/or`).
+ */
+export function inlineCodeFileHref(raw: string): string | null {
+  const value = raw.trim()
+  if (!value || value.length > 320 || /[\s<>"|*?{}[\]()$`'`;]/.test(value)) return null
+  if (/^(?:https?|ftp|mailto|tel|file|data|javascript|vbscript|blob|mousse|mousse-file):/i.test(value)) return null
+  if (value.startsWith('//') || value.startsWith('~') || value.startsWith('@') || value.startsWith('-')) return null
+  const route = classifyLink(value)
+  if (route.kind !== 'relative-file') return null
+  const filePath = route.path
+  if (!/[\\/]/.test(filePath) || /[\\/]$/.test(filePath)) return null
+  if (!/^[a-zA-Z]:[\\/]/.test(filePath) && !filePath.startsWith('/') && !filePath.startsWith('./') && !filePath.startsWith('../')) {
+    const segments = filePath.split('/')
+    if (segments.length === 2 && MIME_PREFIX.test(filePath)) return null
+    if (HOST_PREFIX.test(segments[0]!)) return null
+  }
+  const base = filePath.split(/[\\/]/).pop() ?? ''
+  if (!/^(?:[^./\\][^/\\]*|\.[^./\\][^/\\]*)\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(base)) return null
+  return value
 }
 
 /** Parses a GitHub pull request URL (`https://github.com/<owner>/<repo>/pull/<number>[/...]`); null for other URLs. */
