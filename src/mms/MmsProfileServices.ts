@@ -900,6 +900,9 @@ export class MmsProfileServices {
       // shown in the app's model picker from its own listing.
       modelOptions: () => botModels.pickable(),
       modelListing: () => harness.llmProviders({ kind: 'device' }),
+      unavailableModelReason: (instanceId) => this.providerInstances.get(instanceId)?.driver === 'acp'
+        ? 'This agent can run tools without asking Mousse.'
+        : undefined,
       runsOnNote: (instanceId) => harness.botRunsOnNote(instanceId),
       images: { options: () => botImages.options(), usage: (botId) => botImages.usage(botId) },
       // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.

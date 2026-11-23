@@ -238,6 +238,7 @@ export class BotChatService {
     modelOptions?(): Promise<BotModelOption[]>
     /** The app's model listing, narrowed to `modelOptions` for the model picker Runs on shows. */
     modelListing?(): Promise<LlmProviderOption[]>
+    unavailableModelReason?(instanceId: string): string | undefined
     /** Runs on's line for a bot's row on an entry (`HarnessGateway.botRunsOnNote`): a Codex not checked for bots. */
     runsOnNote?(instanceId: string): { text: string; title: string } | undefined
     /** Runs on's Images row (#1088). Absent: no Images row. */
@@ -1025,9 +1026,17 @@ export class BotChatService {
       const imageProviders = imageProviderOptions(listing, await this.options.images.options().catch(() => []))
       imageChoices = { imageProviders, ...(imageProviders.length ? {} : { imagesMissing: IMAGES_MISSING_TEXT }) }
     }
+    const providers = botPickProviderOptions(listing, options)
+    const selectable = new Set(providers.map((provider) => provider.instanceId))
+    const unavailableProviders = listing.flatMap(({ instanceId, label }) => {
+      if (!instanceId || selectable.has(instanceId)) return []
+      const reason = this.options.unavailableModelReason?.(instanceId)
+      return reason ? [{ instanceId, label, reason }] : []
+    })
     return {
       models,
-      providers: botPickProviderOptions(listing, options),
+      providers,
+      ...(unavailableProviders.length ? { unavailableProviders } : {}),
       ...imageChoices,
       ...(Object.keys(notes).length ? { notes } : {}),
       ...(last ? { last: { talk: offeredNow(last.talk), light: offeredNow(last.light), medium: offeredNow(last.medium), hard: offeredNow(last.hard) } } : {}),

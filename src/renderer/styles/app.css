@@ -1876,7 +1876,7 @@ html[data-chat-width='full'] .chat {
   transition: background 0.12s;
 }
 
-.model-picker-row:hover,
+.model-picker-row:not([aria-disabled="true"]):hover,
 .model-picker-row.highlighted,
 .model-picker-row.active {
   background: var(--ui-hover);
@@ -1904,6 +1904,10 @@ html[data-chat-width='full'] .chat {
 
 .model-picker-row:is(:hover, .highlighted, .active, .selected) .model-picker-row-main {
   color: var(--text-primary);
+}
+
+.model-picker-row[aria-disabled="true"] .model-picker-row-main {
+  color: var(--text-secondary);
 }
 
 .model-picker-row-icon {

@@ -182,7 +182,8 @@ function NewBotRunsOn({ choices, model, onModel, rows, access, onAccess, image, 
         : <span className="bot-new-runs-on-computer" title="This computer. A bot runs on the computer it is made on.">{here?.name ?? 'This computer'}</span>}
     </div>
     {choices.providers
-      ? <BotModelRows name="New bot" providers={choices.providers} slots={rows ?? EMPTY_ROWS} {...(choices.notes ? { notes: choices.notes } : {})}
+      ? <BotModelRows name="New bot" providers={choices.providers} unavailableProviders={choices.unavailableProviders}
+        slots={rows ?? EMPTY_ROWS} {...(choices.notes ? { notes: choices.notes } : {})}
         {...(choices.imageProviders ? { image: { providers: choices.imageProviders, pick: image, ...(choices.imagesMissing ? { missing: choices.imagesMissing } : {}), onPick: onImage } } : {})}
         onPick={onPick} onOneWork={onOneWork} />
       : <div className="bot-new-row">

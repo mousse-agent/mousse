@@ -154,10 +154,11 @@ const ROWS_OF: Record<RowSpec['key'], readonly BotModelSlotKey[]> = { talk: ['ta
  * when the work rows differ; closing it puts Medium work's pick on all work (`onOneWork`), and is refused while Medium
  * work has no pick and the rows differ. Controlled: `onPick` gets the rows a pick goes on (Work is all three).
  */
-export function BotModelRows({ name, providers, slots, named, notes, image, borrows, onPick, onOneWork, disabled }: {
+export function BotModelRows({ name, providers, unavailableProviders, slots, named, notes, image, borrows, onPick, onOneWork, disabled }: {
   /** The bot's name for the controls' labels ("Pip's Talk model"); New bot passes "New bot". */
   name: string
   providers: readonly LlmProviderOption[]
+  unavailableProviders?: BotRunsOnChoices['unavailableProviders']
   slots: BotShownRows
   /** Rows of a bot from before picks that run a model by name. */
   named?: Partial<Record<BotModelSlotKey, string>>
@@ -205,6 +206,7 @@ export function BotModelRows({ name, providers, slots, named, notes, image, borr
         <SettingsModelPicker
           ariaLabel={`${name}'s ${row.label} model`}
           providers={providers as LlmProviderOption[]}
+          unavailableProviders={unavailableProviders}
           providerId={listing?.id ?? ''}
           instanceId={shown?.instanceId}
           modelId={shown?.model ?? ''}

@@ -55,6 +55,8 @@ export interface BotRunsOnChoices {
    * bot, and their reasoning levels. Absent from an older service, whose app shows one Model picker.
    */
   providers?: LlmProviderOption[]
+  /** Added entries shown in the picker that cannot run a bot. */
+  unavailableProviders?: Array<{ instanceId: string; label: string; reason: string }>
   /** The computer that holds (or will hold) the bot: always `this_computer` for now. */
   computer: string
   computers: BotComputerChoice[]

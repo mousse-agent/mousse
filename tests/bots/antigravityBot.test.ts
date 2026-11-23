@@ -1,5 +1,5 @@
-/** Create and message a bot through the profile service with an Antigravity provider. The agent is scripted. */
-import { mkdtempSync, rmSync } from 'node:fs'
+/** Create and message a bot through the profile service with an Antigravity provider and a custom ACP agent. Both are scripted. */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
@@ -8,7 +8,7 @@ import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService
 import { setSharedShellPath } from '../../src/mms/harness/shellPath'
 import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
 
-it('offers Antigravity in New bot and uses the selected model for its greeting and subsequent chat', async () => {
+it('offers Antigravity for the greeting and subsequent chat and refuses an uncontrolled custom ACP agent', async () => {
   const home = mkdtempSync(join(tmpdir(), 'mousse-bot-provider-'))
   const pick = { instanceId: 'antigravity', model: 'gemini-4-hydrogen' }
   const models = [{ id: pick.model, label: 'Gemini 4 Hydrogen' }]
@@ -24,11 +24,27 @@ it('offers Antigravity in New bot and uses the selected model for its greeting a
     vi.spyOn(agent, 'llmProvider').mockReturnValue({ id: 'antigravity', label: 'Antigravity', models })
     vi.spyOn(agent, 'models').mockReturnValue(models)
     // The external executable and sign-in have been checked and are ready.
-    const snapshots = vi.spyOn(main.harness.instances, 'snapshots')
-    const realSnapshots = await snapshots({ kind: 'device' })
-    snapshots.mockResolvedValue(realSnapshots.map((snapshot) => snapshot.instanceId === 'antigravity'
-      ? { ...snapshot, runs: { state: 'yes' }, auth: { state: 'signed_in' } }
-      : snapshot))
+    const readSnapshots = main.harness.instances.snapshots.bind(main.harness.instances)
+    vi.spyOn(main.harness.instances, 'snapshots').mockImplementation(async (scope) => (await readSnapshots(scope)).map((snapshot) =>
+      snapshot.instanceId === 'antigravity' ? { ...snapshot, runs: { state: 'yes' }, auth: { state: 'signed_in' } } : snapshot
+    ))
+    const script = join(home, 'custom-agent.cjs')
+    writeFileSync(script, `
+      require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+        const { id, method } = JSON.parse(line)
+        if (id === undefined) return
+        const result = method === 'initialize'
+          ? { protocolVersion: 1, authMethods: [] }
+          : { sessionId: 'custom-session', models: {
+            currentModelId: 'custom-model', availableModels: [{ modelId: 'custom-model', name: 'Custom model' }]
+          } }
+        console.log(JSON.stringify({ jsonrpc: '2.0', id, result }))
+      })
+    `)
+    const custom = await main.harness.instances.add({
+      driver: 'acp', config: { displayName: 'Custom agent', binaryPath: process.execPath, args: [script] }
+    })
+    const customPick = { instanceId: custom.instanceId, model: 'custom-model' }
     const chat = vi.spyOn(agent, 'chat').mockImplementation(async (input) => {
       expect(input).toMatchObject({ instanceId: pick.instanceId, model: pick.model, permissionMode: 'ask', bot: true })
       expect(input.botAuthority?.check).toBeTypeOf('function')
@@ -38,7 +54,14 @@ it('offers Antigravity in New bot and uses the selected model for its greeting a
     })
     await main.start()
     const bots = main.personalBots!.service
-    expect((await bots.modelChoices()).providers).toContainEqual(expect.objectContaining({ instanceId: pick.instanceId, models: expect.arrayContaining([expect.objectContaining({ id: pick.model })]) }))
+    const choices = await bots.modelChoices()
+    expect(choices.providers).toContainEqual(expect.objectContaining({ instanceId: pick.instanceId, models: expect.arrayContaining([expect.objectContaining({ id: pick.model })]) }))
+    expect(choices.unavailableProviders).toContainEqual(expect.objectContaining({ instanceId: custom.instanceId, label: 'Custom agent' }))
+    expect(choices.providers?.some((provider) => provider.instanceId === custom.instanceId)).toBe(false)
+    await expect(bots.create({
+      name: 'Custom Helper', description: 'Help me look after my garden.', look: { colour: 'teal', accessory: 'cap' },
+      clientRequestId: 'create-custom-bot', slots: slotsAllOn(customPick)
+    })).rejects.toMatchObject({ code: 'model_unavailable' })
     const { bot } = await bots.create({
       name: 'Garden Helper', description: 'Help me look after my garden.', look: { colour: 'teal', accessory: 'cap' },
       clientRequestId: 'create-garden-bot', slots: slotsAllOn(pick)
