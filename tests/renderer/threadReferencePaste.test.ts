@@ -188,6 +188,8 @@ describe('a thread reference pasted in a thread\'s composer', () => {
     await type('see mousse://thread/thread-b')
     expect(chips()).toEqual([])
     await type('see mousse://thread/thread-b ', ' ')
+    // The composer turns the link into its chip on the next frame, after React commits the edit.
+    await act(async () => { await new Promise((done) => requestAnimationFrame(() => done(undefined))) })
     await settle()
     expect(chips()).toEqual(['Design notes'])
     expect(await send()).toBe('see mousse://thread/thread-b')
