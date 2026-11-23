@@ -2,6 +2,17 @@
   "version": 1,
   "claims": [
     {
+      "task": "engine-pin-pairing-grants",
+      "session": "Animatrix-6036c7",
+      "machine": "Animatrix",
+      "branch": "master",
+      "paths": [
+        "native/net-helper/ENGINE_COMMIT"
+      ],
+      "claimedAt": "2026-11-23T13:57:35.245Z",
+      "expiresAt": "2026-11-23T15:57:35.245Z"
+    },
+    {
       "task": "fix/mcp-server-before-boot-wakes",
       "session": "agibook-e58f50",
       "machine": "agibook",
