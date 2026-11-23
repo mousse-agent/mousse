@@ -30,8 +30,22 @@ export function classifyLink(href: string): RoutedLink {
       return { kind: 'web', url: url.toString() }
     } catch { return { kind: 'reject' } }
   }
-  if (/^(?:mailto|tel|file):/i.test(value)) return { kind: 'reject' }
+  if (/^(?:mailto|tel):/i.test(value)) return { kind: 'reject' }
+  // A file URL names a path like any other, but only one on this computer: another host would be reached when opened.
+  const target = /^file:/i.test(value) ? fileUrlPath(value) : value
+  if (target === null) return { kind: 'reject' }
+  return classifyPath(target.replace(/%5c/gi, '\\'))
+}
 
+/** The path of a `file:` URL with no host or `localhost` (`file:///C:/a` is `C:/a`); null for any other host. */
+function fileUrlPath(value: string): string | null {
+  const match = value.match(/^file:\/\/([^/\\]*)([/\\].*)$/i)
+  if (!match || (match[1] && match[1].toLowerCase() !== 'localhost')) return null
+  return /^[/\\][a-zA-Z]:[/\\]/.test(match[2]) ? match[2].slice(1) : match[2]
+}
+
+/** A path with an optional line and column. Markdown hands a backslash over as `%5C`, which the caller turns back. */
+function classifyPath(value: string): RoutedLink {
   // Agent markdown commonly emits path/to/file.ts#L12 or C:\repo\file.ts:12:3.
   const windows = value.match(/^([a-zA-Z]:[\\/].*?)(?::(\d+))?(?::(\d+))?(?:#L(\d+)(?:C(\d+))?)?$/)
   const ordinary = value.match(/^(.+?)(?::(\d+))?(?::(\d+))?(?:#L(\d+)(?:C(\d+))?)?$/)
