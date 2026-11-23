@@ -2,6 +2,18 @@
   "version": 1,
   "claims": [
     {
+      "task": "fix-local-file-links-blocked",
+      "session": "Animatrix-a0fa6f",
+      "machine": "Animatrix",
+      "branch": "fix-local-file-links-blocked",
+      "paths": [
+        "src/renderer/chat/components/agent-elements/markdown.tsx",
+        "src/renderer/utils/chatLinks.ts"
+      ],
+      "claimedAt": "2026-11-23T16:57:13.944Z",
+      "expiresAt": "2026-11-23T18:57:13.944Z"
+    },
+    {
       "task": "fix/mcp-server-before-boot-wakes",
       "session": "agibook-e58f50",
       "machine": "agibook",
