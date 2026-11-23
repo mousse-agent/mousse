@@ -329,7 +329,8 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
         {attention.length > 0 && <button type="button" className="usage-attention-chip" data-testid="usage-attention-chip" onClick={revealAttention} title="Needs attention" aria-label={`${attention.length} need attention`}>
           <AlertTriangle size={12} aria-hidden="true" />{attention.length}
         </button>}
-        {showLimits && !pickedOther && <button type="button" className="settings-btn" data-testid="usage-refresh" onClick={onRefresh} disabled={loading} aria-busy={loading || undefined}>
+        {/* Before the first reading there is nothing to refresh: only the loader shows. */}
+        {showLimits && !pickedOther && (usage || !loading) && <button type="button" className="settings-btn" data-testid="usage-refresh" onClick={onRefresh} disabled={loading} aria-busy={loading || undefined}>
           <RefreshCw size={14} aria-hidden="true" className={loading ? 'icon-spin' : undefined} />
           Refresh all
         </button>}
