@@ -476,6 +476,11 @@ export class AntigravityProviderService {
     return directory
   }
 
+  /** The native agy CLI can run with only the bot's ACP tool servers and approvals. */
+  supportsBotTurns(): boolean {
+    return this.runtime()?.kind === 'native'
+  }
+
   /** A turn on the thread's agent session (see `AcpSessions.chat`). */
   async chat(input: AcpChatInput): Promise<string> {
     input.signal?.throwIfAborted()

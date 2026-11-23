@@ -160,13 +160,14 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     const runtime = options.runtime()
     if (!runtime) throw new Error('Install Google Antigravity or select its official ACP binary first')
     const { binary, kind } = runtime
+    if (request.bot && kind !== 'native') throw new Error('Bot turns require the agy CLI.')
     const env = scrubbedAntigravityEnv(process.env)
-    const geminiHome = join(options.profileDir, 'gemini-home')
+    const geminiHome = join(options.profileDir, request.bot ? 'bot-gemini-home' : 'gemini-home')
     mkdirSync(geminiHome, { recursive: true, mode: 0o700 })
     const acpDir = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
     mkdirSync(acpDir, { recursive: true, mode: 0o700 })
     writeFileSync(join(acpDir, 'settings.json'), JSON.stringify({ auth: { type: ANTIGRAVITY_AUTH_METHOD } }), { mode: 0o600 })
-    for (const part of [['config', 'skills'], ['antigravity-cli', 'skills']]) {
+    for (const part of request.bot ? [] : [['config', 'skills'], ['antigravity-cli', 'skills']]) {
       const link = join(geminiHome, ...part)
       if (existsSync(link)) continue
       try {
@@ -200,9 +201,10 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     mkdirSync(tempDir, { recursive: true, mode: 0o700 })
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
-    const args = [...antigravityRuntimeArgs(kind, geminiHome), ...options.args()]
+    // Bot turns must use ACP approvals and the MCP servers Mousse supplies for their grant.
+    const args = [...antigravityRuntimeArgs(kind, geminiHome), ...(request.bot ? ['--include-default-customizations=false'] : options.args())]
     // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
-    const child = spawn(binary, args, { env: options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
+    const child = spawn(binary, args, { env: request.bot ? env : options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
     const acceptAuthUrl = (url: string) => {
       if (callbackTarget(url)) request.onAuthUrl?.(url)
     }

@@ -53,9 +53,16 @@ const PICKER_MAX_HEIGHT = 400
 /** The commands behind Ctrl/Cmd+1-5, in list order. */
 const MODEL_PICK_COMMANDS: readonly CommandId[] = ['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5']
 
+export interface UnavailableModelProvider {
+  instanceId: string
+  label: string
+  reason: string
+}
+
 interface ModelFamilyMenuProps {
   /** `status` (from the instance snapshot) is shown on the rows of a provider that is not ready. */
   providers: Array<LlmProviderOption & { status?: StatusDescription }>
+  unavailableProviders?: readonly UnavailableModelProvider[]
   selectedProviderId: string
   /** The selected instance, when the selection names one; listings of one provider are told apart by it. */
   selectedInstanceId?: string
@@ -219,6 +226,7 @@ export function ModelFamilyMenu(props: ModelFamilyMenuProps) {
 
 function ProfileModelFamilyMenu({
   providers,
+  unavailableProviders,
   selectedProviderId,
   selectedInstanceId,
   selectedModelId,
@@ -645,9 +653,13 @@ function ProfileModelFamilyMenu({
     syncPanelPosition()
   }
 
-  if (providers.length === 0) {
+  if (providers.length === 0 && !unavailableProviders?.length) {
     return <>{emptyState}</>
   }
+  const unavailableQuery = searchQuery.trim().toLowerCase()
+  const matchingUnavailable = favoritesShown && !searching
+    ? []
+    : (unavailableProviders ?? []).filter(({ label }) => label.toLowerCase().includes(unavailableQuery))
 
   // Rows filtered to one single-maker provider drop the logo and provider line, which would only
   // repeat the selected rail item on every row. A multi-brand API keeps them: the logo is the maker.
@@ -837,7 +849,7 @@ function ProfileModelFamilyMenu({
               aria-label="Select model"
               onScroll={handleMenuScroll}
             >
-              {filteredEntries.length === 0 ? (
+              {filteredEntries.length === 0 && matchingUnavailable.length === 0 ? (
                 <div className="model-picker-empty">
                   {favoritesShown && !searching ? 'No favorites yet' : 'No matches'}
                 </div>
@@ -859,6 +871,16 @@ function ProfileModelFamilyMenu({
                   )
                 )
               )}
+              {matchingUnavailable.map(({ instanceId, label, reason }) => (
+                <div key={instanceId} className="model-picker-row" role="option" aria-disabled="true" title={reason}>
+                  <div className="model-picker-row-main">
+                    <div className="model-picker-row-text">
+                      <span className="model-picker-row-title">{label}</span>
+                      <span className="model-picker-row-subtitle">{reason}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 

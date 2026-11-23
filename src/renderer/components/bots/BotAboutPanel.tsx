@@ -278,6 +278,7 @@ function RunsOn({ name, state }: { name: string; state: RunsOnState }) {
         <BotModelRows
           name={name}
           providers={choices.providers}
+          unavailableProviders={choices.unavailableProviders}
           slots={slots}
           borrows
           {...(choices.named ? { named: choices.named } : {})}
