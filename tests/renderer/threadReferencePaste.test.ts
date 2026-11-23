@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 /**
- * A copied thread reference pasted into a thread's composer goes in as text, in the line being typed, and the message
- * sent carries the link where it was written, with no references block; the sent bubble draws it as the thread's chip
- * in place. A private thread can't be pointed at from a shared one. A sidebar thread dropped on the composer is still a
- * pill, sent as a pointer to the thread, never its transcript. The real chat, composer and bubble; the bridge is a stub.
+ * A copied thread reference pasted into a thread's composer shows as the thread's chip where the caret was, in the line
+ * being typed, and the message sent carries the link where it was written, with no references block; the sent bubble
+ * draws it as the thread's chip in place. A thread this computer can't find stays link text. A private thread can't be
+ * pointed at from a shared one. A sidebar thread dropped on the composer is still a pill, sent as a pointer to the
+ * thread, never its transcript. The real chat, composer and bubble; the bridge is a stub.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -54,12 +55,12 @@ async function settle(rounds = 10): Promise<void> {
   for (let i = 0; i < rounds; i++) await act(async () => { await new Promise((done) => setTimeout(done, 0)) })
 }
 
-async function mount(activeThreadId = 'thread-a'): Promise<void> {
+async function mount(activeThreadId = 'thread-a', drafts: Record<string, string> = {}): Promise<void> {
   const now = new Date().toISOString()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   useAppStore.setState({
     profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false,
-    activeThreadId, composerDrafts: {}, composerReferences: {},
+    activeThreadId, composerDrafts: drafts, composerReferences: {},
     threads: [
       { id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0 },
       { id: 'thread-b', name: 'Design notes', projectId: 'p1', createdAt: now, updatedAt: now, startedAt: now, order: 1 },
@@ -85,10 +86,18 @@ async function paste(text: string): Promise<boolean> {
   return event.defaultPrevented
 }
 
-async function type(text: string): Promise<void> {
+/** The chips the composer draws over its text, by what they read. */
+const chips = () => [...host.querySelectorAll('.composer-thread-chip')].map((chip) => chip.textContent?.replace(/[\s\p{Cf}]+/gu, ' ').trim())
+
+async function key(name: string): Promise<void> {
+  await act(async () => { box().dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true })) })
+}
+
+/** Sets the box to `text`; with `typed`, as typing those last characters would. */
+async function type(text: string, typed?: string): Promise<void> {
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(box(), text)
-    box().dispatchEvent(new Event('input', { bubbles: true }))
+    box().dispatchEvent(typed ? new InputEvent('input', { bubbles: true, inputType: 'insertText', data: typed }) : new Event('input', { bubbles: true }))
   })
 }
 
@@ -128,17 +137,60 @@ async function drop(threadId: string, title: string): Promise<void> {
 }
 
 describe('a thread reference pasted in a thread\'s composer', () => {
-  it('goes in as text where the caret is, and is sent in the line, with no references block', async () => {
+  it("shows as the thread's chip where the caret is, and is sent as the link in the line, with no references block", async () => {
     await mount()
     await type('Pick up where ')
-    // Not taken by the composer: the text box inserts it at the caret, as any paste.
-    expect(await paste('mousse://thread/thread-b')).toBe(false)
+    box().setSelectionRange(14, 14)
+    expect(await paste('mousse://thread/thread-b')).toBe(true)
+    expect(chips()).toEqual(['Design notes'])
     expect(pills()).toEqual([])
+    expect(box().value.startsWith('Pick up where ')).toBe(true)
+    expect(box().value).not.toContain('mousse://')
 
-    await type('Pick up where mousse://thread/thread-b left off')
+    await type(`${box().value} left off`)
     const content = await send()
     expect(content).toBe('Pick up where mousse://thread/thread-b left off')
     expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it("a link to a thread this computer can't find stays text, and goes as pasted", async () => {
+    await mount()
+    expect(await paste('see mousse://thread/thread-gone')).toBe(false)
+    await type('see mousse://thread/thread-gone')
+    expect(chips()).toEqual([])
+    expect(await send()).toBe('see mousse://thread/thread-gone')
+  })
+
+  it('a draft holding a link opens with the chip, and Backspace after the chip takes it out whole', async () => {
+    await mount('thread-a', { 'thread-a': 'ask mousse://thread/thread-b' })
+    expect(chips()).toEqual(['Design notes'])
+    const end = box().value.length
+    box().setSelectionRange(end, end)
+    await key('Backspace')
+    expect(box().value).toBe('ask ')
+    expect(chips()).toEqual([])
+  })
+
+  it('a copied selection holding a chip carries the link', async () => {
+    await mount('thread-a', { 'thread-a': 'ask mousse://thread/thread-b now' })
+    // The selection cuts into the chip: the copy takes all of it.
+    box().setSelectionRange(0, 7)
+    const copied: Record<string, string> = {}
+    const event = new Event('copy', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { setData: (type: string, value: string) => { copied[type] = value } } })
+    await act(async () => { box().dispatchEvent(event) })
+    expect(event.defaultPrevented).toBe(true)
+    expect(copied['text/plain']).toBe('ask mousse://thread/thread-b')
+  })
+
+  it('a link typed and followed by a space becomes the chip', async () => {
+    await mount()
+    await type('see mousse://thread/thread-b')
+    expect(chips()).toEqual([])
+    await type('see mousse://thread/thread-b ', ' ')
+    await settle()
+    expect(chips()).toEqual(['Design notes'])
+    expect(await send()).toBe('see mousse://thread/thread-b')
   })
 
   it('a private thread is refused from a shared thread, with the reason, alone or amid other words', async () => {
@@ -152,8 +204,9 @@ describe('a thread reference pasted in a thread\'s composer', () => {
 
   it('a private thread may point at another private thread', async () => {
     await mount('thread-p')
-    expect(await paste('mousse://thread/thread-p')).toBe(false)
+    expect(await paste('mousse://thread/thread-p')).toBe(true)
     expect(host.textContent).not.toContain('is private')
+    expect(chips()).toEqual(['Secret plans'])
   })
 
   it('a dropped sidebar thread is a pill, and the message sent points at the thread without its content', async () => {

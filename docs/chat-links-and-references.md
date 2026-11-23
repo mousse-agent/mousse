@@ -74,7 +74,7 @@ Project/thread references are resolved in the daemon for the active profile with
 
 ## Thread references
 
-Right-click a thread wherever it shows (a sidebar row, a Nest row, a subagent card, a thread chip, a thread a bot started) and choose **Copy reference**: it copies the thread's link, `mousse://thread/<id>` (with `<node>:` for a thread of another computer). Pasting it into a composer inserts the link as text at the caret, in the line being typed, like any other paste; the sent message draws it as the thread's chip in place (`promptSegments`), and the agent gets the link in the text and reads it with its thread tools. Dragging a sidebar thread onto the composer adds a thread pill instead.
+Right-click a thread wherever it shows (a sidebar row, a Nest row, a subagent card, a thread chip, a thread a bot started) and choose **Copy reference**: it copies the thread's link, `mousse://thread/<id>` (with `<node>:` for a thread of another computer). Pasting it into a composer shows the thread's chip at the caret, in the line being typed: its title, a status dot, and "· <computer>" for a thread of another computer. A click opens the thread; the × on hover, or Backspace after it, removes it. A link typed and followed by a space or new line, dropped, or in a draft that opens gets the chip too; a thread this computer does not list stays link text. The text box holds a stand-in token for the chip (`src/renderer/lib/composerThreadChips.ts`), the same glyphs the input backdrop draws as the chip, so the caret, selection, undo and input methods stay the text box's own; the sent text, a copied selection and the bot chat's send get the exact link back. The sent message draws it as the thread's chip in place (`promptSegments`), and the agent gets the link in the text and reads it with its thread tools. Dragging a sidebar thread onto the composer adds a thread pill instead.
 
 The agent gets the thread by reference, never its transcript. In a thread chat, a pill goes into the message's `[Mousse references]` block as the thread's title, `Link` and `Thread ID`, and a line telling the agent to read it with `thread_read`, as far as the request needs:
 
@@ -84,7 +84,7 @@ The agent gets the thread by reference, never its transcript. In a thread chat, 
 | `recent` | Its last turns (3 by default, `turns` up to 10): each prompt, one line per step before the final answer, and the final answer, trimmed; `fromIndex` says where to page the full messages from |
 | `messages` | The full transcript, paged |
 
-In a bot chat, a pasted link stays where it was pasted, and each pill is sent as the thread's link on a line of its own, which the chat draws as the thread's chip; the bot reads it the same way with "use your threads", and asks for that permission without it.
+In a bot chat, a pasted link shows as its chip where it was pasted and is sent as the link there, and each pill is sent as the thread's link on a line of its own, which the chat draws as the thread's chip; the bot reads it the same way with "use your threads", and asks for that permission without it.
 
 The usual reach applies to every view. A private thread can be referenced only from a private thread, and a bot is never given a private thread; the composer refuses one with one line, and a refused paste is not inserted (`pastedThreadRefusal`). A bot reads a subagent as far as it reaches the thread that started it. A thread of another computer is read there, as that computer allows.
 
