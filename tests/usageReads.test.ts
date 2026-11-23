@@ -39,14 +39,26 @@ describe('the last readings', () => {
     expect(cachedUsage({}, 'a')).toBeUndefined()
   })
 
+  it('a slot says when this computer last read it, even when the provider dated its numbers earlier', () => {
+    const owner = {}
+    keepUsage(owner, reading('a', { readAt: '2026-11-09T08:00:00.000Z' }), Date.parse('2026-11-09T10:00:00Z'))
+    const [slot] = usageSlots(owner, [{ id: 'a', label: 'A' }])
+    expect(slot!.cached?.readAt).toBe('2026-11-09T08:00:00.000Z')
+    expect(slot!.cachedAt).toBe('2026-11-09T10:00:00.000Z')
+  })
+
   it('a preview of sign-ins keeps what each had last time; one sign-in\'s reading updates only it', () => {
     const owner = {}
     const full = reading('claude-subscription', { accounts: [{ id: 'x', label: 'x', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 40 }] }, { id: 'y', label: 'y', windows: [] , problem: 'Disabled in proxy' }] })
     keepUsage(owner, full)
     keepUsage(owner, reading('claude-subscription', { windows: [], accounts: [{ id: 'x', label: 'x', windows: [], pending: true }, { id: 'z', label: 'z', windows: [], pending: true }] }))
     expect(cachedUsage(owner, 'claude-subscription')!.accounts!.map((account) => [account.id, account.pending ?? false, account.windows.length])).toEqual([['x', false, 1], ['z', true, 0]])
+    const slots = [{ id: 'claude-subscription', label: 'Claude subscription' }]
     keepAccount(owner, 'claude-subscription', { id: 'z', label: 'z', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 90 }] })
     expect(cachedUsage(owner, 'claude-subscription')!.accounts!.find((account) => account.id === 'z')).toMatchObject({ windows: [{ remainingPercent: 90 }] })
+    expect(usageSlots(owner, slots)[0]?.cachedAt).toBeUndefined()
+    keepAccount(owner, 'claude-subscription', full.accounts![0]!, Date.parse('2026-11-09T11:00:00Z'))
+    expect(usageSlots(owner, slots)[0]?.cachedAt).toBe('2026-11-09T11:00:00.000Z')
   })
 })
 

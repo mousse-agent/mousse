@@ -97,7 +97,7 @@ it('persists tokensUsed and tokensPerSecond in responseMetadata for Antigravity 
   }
 })
 
-it('shows thread Waiting while Antigravity background command/subagent runs, then runs reactive continuation to completion', async () => {
+it('keeps Antigravity background work visible and answers a wakeup command under Full access', async () => {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-agy-bg-orch-'))
   const previousHome = process.env.MOUSSE_HOME
   process.env.MOUSSE_HOME = home
@@ -110,7 +110,10 @@ it('shows thread Waiting while Antigravity background command/subagent runs, the
     JSON.stringify({ nativeSignedIn: true, models: [{ id: 'gemini-3-pro', label: 'Gemini 3 Pro' }] })
   )
 
-  let agentClient: { notify: (method: string, params: unknown) => Promise<void> } | undefined
+  let agentClient: {
+    notify: (method: string, params: unknown) => Promise<void>
+    request: (method: string, params: unknown) => Promise<unknown>
+  } | undefined
   const agent = inProcessAgent((app: AgentApp) => {
     app
       .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
@@ -171,6 +174,7 @@ it('shows thread Waiting while Antigravity background command/subagent runs, the
   try {
     const project = d.projects.openProject(workspace)
     const thread = d.store.createThread('Investigate Gemini metadata tokens', project.id, workspace)
+    d.store.updateThreadMeta(thread.id, { permissionMode: 'full' })
     await d.orch.send({ content: 'verify and research', mode: 'agent' }, false, { threadId: thread.id, clientRequestId: 'req-1' })
 
     // After Turn 1 settles with open run_command + launched invoke_subagent, sidebar state must be Waiting (not Done!).
@@ -206,7 +210,17 @@ it('shows thread Waiting while Antigravity background command/subagent runs, the
     )
     expect(manager.getActivitySnapshot()[thread.id]).toBe('waiting')
 
-    // Reactive wakeup arrives -> OrchestratorService runs a real provider-continuation turn.
+    // The wake can ask for permission before sending any text or tool notification.
+    const permission = await agentClient!.request(methods.client.session.requestPermission, {
+      sessionId: 'agy-live-1',
+      toolCall: { toolCallId: 'cmd-follow-up', title: 'Check verification result', kind: 'execute' },
+      options: [
+        { optionId: 'allow', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Reject' }
+      ]
+    })
+    expect(permission).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+
     await agentClient!.notify(methods.client.session.update, {
       sessionId: 'agy-live-1',
       update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Verification passed and research is complete.' } }
