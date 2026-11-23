@@ -22,12 +22,12 @@
         "src/mms/harness/acp/session.ts",
         "src/mms/protocol/usageReads.ts",
         "src/renderer/components/SubscriptionUsagePage.tsx",
-        "src/renderer/components/UsageRowMenu.tsx",
+        "src/renderer/components/UsageSections.tsx",
         "src/renderer/lib/progressiveUsage.ts",
         "src/shared/providerAuth.ts"
       ],
       "claimedAt": "2026-11-23T15:31:51.113Z",
-      "expiresAt": "2026-11-23T17:31:51.113Z"
+      "expiresAt": "2026-11-23T17:34:13.947Z"
     }
   ]
 }
