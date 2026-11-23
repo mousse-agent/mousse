@@ -86,6 +86,7 @@ interface RateLimitInfo {
   utilization?: unknown
   overageStatus?: unknown
   isUsingOverage?: unknown
+  overageInUse?: unknown
 }
 
 /** How much of a window an event says is used: `utilization` is a fraction (0-1), or a percentage above 1. */
@@ -103,9 +104,9 @@ function planWindowUse(info: unknown): PlanWindowUse | undefined {
 /** A rejected window that no overage can cover. */
 function rejectedWindow(info: unknown): RejectedWindow | undefined {
   if (!info || typeof info !== 'object') return undefined
-  const { status, resetsAt, rateLimitType, overageStatus, isUsingOverage } = info as RateLimitInfo
+  const { status, resetsAt, rateLimitType, overageStatus, isUsingOverage, overageInUse } = info as RateLimitInfo
   if (status !== 'rejected') return undefined
-  if (overageStatus === 'allowed' || overageStatus === 'allowed_warning' || isUsingOverage === true) return undefined
+  if (overageStatus === 'allowed' || overageStatus === 'allowed_warning' || isUsingOverage === true || overageInUse === true) return undefined
   return {
     ...(typeof rateLimitType === 'string' ? { limitKind: rateLimitType } : {}),
     ...(typeof resetsAt === 'number' && Number.isFinite(resetsAt) ? { resetsAt } : {})

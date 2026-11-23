@@ -62,9 +62,9 @@ describe('the paused run notice', () => {
     expect(host.querySelector('[aria-haspopup]')).toBeNull()
   })
 
-  it('says an estimated time is approximate', () => {
-    view({ pause: pause({ estimated: true }) })
-    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes around \S+(\s?[AaPp][Mm])?$/)
+  it('shows no time when the provider gave none', () => {
+    view({ pause: pause({ estimated: true, autoResume: false }) })
+    expect(line()!.textContent).toBe('Usage limit reached · reset time unknown')
   })
 
   it('with no timer it says when the limit resets, not that it resumes', () => {

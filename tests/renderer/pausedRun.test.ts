@@ -71,8 +71,8 @@ describe('describePausedRun', () => {
     })
   })
 
-  it('labels a time Mousse guessed as estimated', () => {
-    expect(describePausedRun(pause({ estimated: true }), now).headline).toBe(`Paused until ${clock(at(15, 40))} (estimated)`)
+  it('shows no time Mousse guessed', () => {
+    expect(describePausedRun(pause({ estimated: true }), now).headline).toBe('Paused')
     expect(pausedUntilLabel({ until: pause().until, estimated: false }, now)).toBe(`Paused until ${clock(at(15, 40))}`)
   })
 
@@ -116,7 +116,7 @@ describe('the thread list', () => {
   const now = at(13, 25)
   it('says when a paused thread resets, marks a guess, and says just Paused for a row a subagent paused', () => {
     expect(pausedStatusLabel(pause(), now)).toBe(`Paused until ${clock(at(15, 40))}`)
-    expect(pausedStatusLabel(pause({ estimated: true }), now)).toBe(`Paused until ~${clock(at(15, 40))}`)
+    expect(pausedStatusLabel(pause({ estimated: true }), now)).toBe('Paused')
     expect(pausedStatusLabel(undefined, now)).toBe('Paused')
   })
 

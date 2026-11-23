@@ -54,8 +54,9 @@ export function pausedRunLine(text: PausedRunText, pause: Pick<TurnPause, 'autoR
   const head = subagents > 0 ? subagentHead(subagents, pause.again === true) : pause.again ? 'Still limited' : 'Usage limit reached'
   if (resuming) return `${head} · resuming…`
   if (text.stale) return `${head} · resume time unknown`
+  if (pause.estimated) return `${head} · reset time unknown`
   if (text.due) return `${head} · ${pause.autoResume ? 'retrying now' : 'should have reset by now'}`
-  return `${head} · ${pause.autoResume ? 'resumes' : 'resets'} ${pause.estimated ? 'around ' : ''}${text.resetAt}`
+  return `${head} · ${pause.autoResume ? 'resumes' : 'resets'} ${text.resetAt}`
 }
 
 /** The tooltip: the time left ("Resets in 2h 15m."), then the limit and what happens next. */
