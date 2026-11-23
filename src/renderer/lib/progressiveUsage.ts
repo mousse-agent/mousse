@@ -49,6 +49,8 @@ export function recentlyRead(slot: UsageSlot, now: number, within = USAGE_RECENT
   if (!slot.cached || !slot.cachedAt) return false
   // A reading cut short (sign-ins still pending) is read again.
   if (slot.cached.accounts?.some((account) => account.pending)) return false
+  // So is a failed one (not reachable, timed out): opening the page tries again.
+  if (slot.cached.status === 'error') return false
   const at = Date.parse(slot.cachedAt)
   return Number.isFinite(at) && at <= now && now - at < within
 }

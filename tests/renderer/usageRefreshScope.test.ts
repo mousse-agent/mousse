@@ -83,6 +83,16 @@ describe('reading the usage', () => {
     expect(document.querySelector('[data-testid="usage-card-loading"]')).toBeNull()
   })
 
+  it('reads a provider again on opening when its recent reading failed', async () => {
+    const failed: ProviderUsage = { id: recent.id, label: recent.label, status: 'error', windows: [], problem: 'unavailable', message: 'Not reachable' }
+    ;(window as unknown as { mousse: { providers: { usageSlots: unknown } } }).mousse.providers.usageSlots = async () => ({
+      slots: [{ id: recent.id, label: recent.label, cached: failed, cachedAt: minutesAgo(2) }]
+    })
+    await open()
+    expect(readIds()).toEqual([recent.id])
+    expect(shownRemaining('ChatGPT subscription')).toBe('35')
+  })
+
   it("reads one provider alone from its card's Refresh", async () => {
     await open()
     getUsageFor.mockClear()
