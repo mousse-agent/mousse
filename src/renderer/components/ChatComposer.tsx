@@ -712,6 +712,8 @@ export function ChatComposer({
       const start = chipped.map(node.selectionStart)
       const end = chipped.map(node.selectionEnd)
       nativeValueRef.current = chipped.value
+      // A prompt Up brought back is still that prompt: Escape clears it.
+      if (recalledRef.current === input) recalledRef.current = chipped.value
       onInputChange(chipped.value)
       if (focused) requestAnimationFrame(() => composerInputRef.current?.setSelectionRange(start, end))
       return
