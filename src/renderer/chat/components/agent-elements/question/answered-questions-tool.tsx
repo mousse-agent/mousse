@@ -1,6 +1,7 @@
 import { memo } from "react";
 import type { AnsweredQuestion } from "../../../../../shared/types";
 import { IconMessageCircleQuestion } from "../../../../lib/icons";
+import { ReadAloudButton } from "../../../../readAloud/ReadAloudButton";
 import { MessageImage } from "../message-image";
 import { ToolRowBase } from "../tools/tool-row-base";
 
@@ -28,6 +29,12 @@ export function answerText(question: AnsweredQuestion): string {
   const images = question.images?.length ?? 0;
   if (images) parts.push(images === 1 ? "1 image" : `${images} images`);
   return parts.join(", ") || "No answer";
+}
+
+/** What Read aloud says: each question, then its answer. */
+export function answeredQuestionsSpeechText(questions: AnsweredQuestion[]): string {
+  // The answer as a list item, so it ends as a sentence of its own.
+  return questions.map((question) => `${question.prompt.trim()}\n\n- ${answerText(question)}`).join("\n\n");
 }
 
 /** The collapsed row: "Answered N questions", or for one the question and "· answer". */
@@ -93,6 +100,11 @@ export const AnsweredQuestionsTool = memo(function AnsweredQuestionsTool({
             </div>
           ))}
         </dl>
+        {part.toolCallId && (
+          <div className="pl-[14px] pt-1">
+            <ReadAloudButton speechKey={`answers:${part.toolCallId}`} markdown={answeredQuestionsSpeechText(questions)} />
+          </div>
+        )}
       </ToolRowBase>
     </div>
   );

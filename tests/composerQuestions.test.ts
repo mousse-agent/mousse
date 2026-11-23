@@ -15,6 +15,7 @@ import {
   resolveQuestionAnswers,
   type QuestionCardHandle
 } from '../src/renderer/components/ComposerQuestionModal'
+import { useReadAloudStore } from '../src/renderer/readAloud/readAloudStore'
 import type { ChatImageAttachment, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -398,6 +399,19 @@ describe('ComposerQuestionModal', () => {
     expect(skippedAndSent).toBe(1)
     expect(dismissed).toBe(0)
     expect(submitted).toEqual([])
+  })
+
+  it('reads the shown question aloud, then its choices; an approval request has no Read aloud', () => {
+    useReadAloudStore.setState({ activeKey: null, status: 'idle', pending: null, pickerOpen: false, selection: null, error: null })
+    open([single, multi])
+    click(host.querySelector<HTMLButtonElement>('.composer-question-modal-header button[aria-label="Read aloud"]')!)
+    expect(useReadAloudStore.getState().pending?.text).toBe('Which area?\n\nUI.\n\nAPI.')
+    act(() => root.render(createElement(ComposerQuestionModal, {
+      pending: { requestId: 'r2', questions: [single], approval: { answerPath: 'continue' } },
+      onSubmit: () => {},
+      onDismiss: () => {}
+    })))
+    expect(host.querySelector('button[aria-label="Read aloud"]')).toBeNull()
   })
 })
 

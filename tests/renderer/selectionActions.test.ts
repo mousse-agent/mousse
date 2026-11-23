@@ -7,6 +7,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ComposerQuestionModal } from '../../src/renderer/components/ComposerQuestionModal'
 import { QUOTE_SOURCE_ATTRIBUTE, SelectionReplyButton, selectionSpeechKey } from '../../src/renderer/components/SelectionReplyButton'
 import { COMPOSER_QUOTE_EVENT } from '../../src/renderer/lib/composerQuotes'
 import { useReadAloudStore } from '../../src/renderer/readAloud/readAloudStore'
@@ -103,6 +104,33 @@ describe('the selected text bar', () => {
     expect(window.getSelection()!.toString()).toBe(TEXT)
     act(() => useReadAloudStore.setState({ activeKey: selectionSpeechKey(TEXT), status: 'playing', pickerOpen: false }))
     expect(button('Stop reading')?.textContent).toBe('Stop')
+  })
+
+  it('offers Read aloud for text selected in a question the agent asks, above the composer', () => {
+    chat = document.createElement('div')
+    const input = document.createElement('textarea')
+    input.className = 'composer-input'
+    const slot = document.createElement('div')
+    chat.append(slot, input)
+    document.body.append(chat)
+    const cardRoot = createRoot(slot)
+    act(() => cardRoot.render(createElement(ComposerQuestionModal, {
+      pending: { requestId: 'r1', questions: [{ id: 'q', prompt: TEXT, options: [{ id: 'a', label: 'Retry it' }] }] },
+      onSubmit: () => {},
+      onDismiss: () => {}
+    })))
+    slot.querySelector<HTMLElement>('[role="dialog"]')!.getBoundingClientRect = () => ({ ...rect(0, 1024), top: 0, bottom: 768 })
+    const range = document.createRange()
+    range.selectNodeContents(slot.querySelector('.composer-question-prompt')!)
+    act(() => {
+      window.getSelection()!.removeAllRanges()
+      window.getSelection()!.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+    })
+    act(() => button('Read aloud')!.click())
+    expect(useReadAloudStore.getState().pending).toMatchObject({ key: selectionSpeechKey(TEXT), text: TEXT })
+    expect(button('Reply to the selected text')).not.toBeNull()
+    act(() => cardRoot.unmount())
   })
 
   it('stays inside the window by its measured width', () => {

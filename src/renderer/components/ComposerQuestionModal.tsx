@@ -1,6 +1,7 @@
 import { useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent, type Ref } from 'react'
 import { Check, IconMessageCircleQuestion } from '../lib/icons'
 import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
+import { ReadAloudButton } from '../readAloud/ReadAloudButton'
 import type {
   ChatImageAttachment,
   PendingApprovalInfo,
@@ -171,6 +172,11 @@ export function approvalNotes(approval: PendingApprovalInfo): string[] {
  */
 export function grantsAccess(pending: PendingUserQuestions): boolean {
   return Boolean(pending.approval) || pending.questions.some((question) => question.options.some((option) => option.decision !== undefined))
+}
+
+/** What Read aloud says for a question: the question, then each of its choices. */
+export function questionSpeechText(question: UserQuestion): string {
+  return [question.prompt.trim(), ...question.options.map((option) => `- ${option.label}`)].join('\n\n')
 }
 
 /** The dialog's label: "Question", or how many there are ("3 questions"). The dots show the position. */
@@ -481,7 +487,8 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndS
   }
 
   return (
-    <div ref={rootRef} className="composer-question-modal" role="dialog" aria-label={label} onKeyDown={onKeyDown}>
+    // A quote source (SelectionReplyButton): text selected in the question offers Read aloud and Reply.
+    <div ref={rootRef} className="composer-question-modal" role="dialog" aria-label={label} onKeyDown={onKeyDown} data-quote-source>
       <div className="composer-question-modal-header">
         <h3 className="composer-question-modal-title">
           <IconMessageCircleQuestion size={15} aria-hidden="true" />
@@ -517,6 +524,10 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndS
               )
             })}
           </div>
+        )}
+        {/* An approval's prompt is the tool call itself, not something to listen to. */}
+        {!grantsAccess(pending) && (
+          <ReadAloudButton speechKey={`question:${pending.requestId}:${active.id}`} markdown={questionSpeechText(active)} />
         )}
       </div>
       <div className="composer-question-modal-body">

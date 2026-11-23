@@ -5509,6 +5509,18 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   to { opacity: 1; transform: none; }
 }
 
+/* Read aloud sits at the header's end; after the dots when there are several questions. */
+.composer-question-modal-title + [data-read-aloud] {
+  margin-left: auto;
+}
+
+/* The question can be selected, to read part of it aloud or reply to it (the app root is not selectable). */
+.composer-question-prompt,
+.composer-question-reason {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .composer-question-prompt {
   margin: 0 0 12px;
   font-size: 14px;
