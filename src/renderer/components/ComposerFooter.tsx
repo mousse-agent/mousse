@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowTurnForward, ArrowUp, Check, Layers, Loader2, Mic, Paperclip, Square, X, Zap } from '../lib/icons'
 import type { AudioLevels } from '../speech/audioLevels'
 import { SpeechHistoryWave } from '../speech/SpeechHistoryWave'
@@ -202,12 +202,19 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
   // The picker's run settings: the highlighted model's level and speed, with the chosen level carried over.
   // The permission mode has its own chip beside the model button, so the picker's footer holds only the speed.
   const runSettings = modelPickerRunSettings({ providers, selection, onSelect: onModelSelect, onClose: closePicker })
+  const emptyModelMenuOpen = !modelReadOnly && modelMenuOpen && providers.length === 0
+  const addProviderRef = useRef<HTMLButtonElement>(null)
   const emptyModelMenuStyle = useFloatingPosition({
-    open: modelMenuOpen && providers.length === 0,
+    open: emptyModelMenuOpen,
     anchorRef: modelButtonRef,
     contentRef: modelMenuContentRef,
     placement: 'above-start'
   })
+  useLayoutEffect(() => {
+    if (emptyModelMenuOpen && emptyModelMenuStyle.visibility === 'visible') {
+      addProviderRef.current?.focus({ preventScroll: true })
+    }
+  }, [emptyModelMenuOpen, emptyModelMenuStyle.visibility])
 
   useEffect(() => {
     if (!modelMenuOpen) return
@@ -249,7 +256,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
                 <div
                   ref={modelMenuContentRef}
                   className="composer-model-picker-shell composer-model-picker-shell-empty composer-model-picker-shell-floating"
-                  role="listbox"
+                  role="dialog"
                   aria-label="Select model"
                   style={emptyModelMenuStyle}
                 >
@@ -257,6 +264,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
                     <div className="composer-model-menu-empty">
                       <p>No providers connected.</p>
                       <button
+                        ref={addProviderRef}
                         type="button"
                         className="composer-model-menu-settings"
                         onClick={() => {
@@ -264,7 +272,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
                           onOpenSettings()
                         }}
                       >
-                        Open Settings
+                        Add provider
                       </button>
                     </div>
                   </div>
@@ -291,7 +299,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
           type="button"
           className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
           aria-expanded={pickerDisabled ? undefined : modelMenuOpen}
-          aria-haspopup={pickerDisabled ? undefined : 'listbox'}
+          aria-haspopup={pickerDisabled ? undefined : providers.length === 0 ? 'dialog' : 'listbox'}
           aria-label={buttonLabel}
           title={modelButtonTitle}
           disabled={pickerDisabled}

@@ -3,6 +3,8 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LlmProviderOption, MousseSettings } from '../../src/shared/settings'
+import type { InstanceSnapshot } from '../../src/shared/harness/status'
+import { model, snapshot } from '../providerSnapshotFixture'
 import type { Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -42,7 +44,7 @@ let settingsReads: Array<Deferred<MousseSettings> | undefined>
 let setModel: ReturnType<typeof vi.fn>
 
 /** `window.mousse` for the composer: settings (each read can be held), the model catalogue, `threads.setModel`; any other call stays pending. */
-function stubBridge(): void {
+function stubBridge({ freshSnapshots }: { freshSnapshots?: InstanceSnapshot[] } = {}): void {
   const pending = () => new Promise(() => undefined)
   const section = (overrides: Record<string, unknown>): unknown =>
     new Proxy(overrides, {
@@ -56,14 +58,15 @@ function stubBridge(): void {
     settings: section({
       get: () => {
         const held = settingsReads.shift()
-        return held ? held.promise : Promise.resolve(settings())
+        return held ? held.promise : Promise.resolve(freshSnapshots ? { ...settings(), provider: { llmProvider: '', model: '' } } : settings())
       },
-      getOptions: () => Promise.resolve({ themes: [], accentColors: [], llmProviders: catalog(), agentTypes: [] }),
+      getOptions: () => Promise.resolve({ themes: [], accentColors: [], llmProviders: freshSnapshots ? [] : catalog(), agentTypes: [] }),
       onChanged: (listener: (value: MousseSettings) => void) => {
         settingsListeners.push(listener)
         return () => { settingsListeners = settingsListeners.filter((entry) => entry !== listener) }
       }
     }),
+    ...(freshSnapshots ? { providers: section({ snapshots: async () => freshSnapshots }) } : {}),
     skills: section({ list: () => Promise.resolve({ skills: [] }) }),
     threads: section({ setModel: (...args: unknown[]) => setModel(...args) })
   }
@@ -94,20 +97,22 @@ beforeEach(async () => {
   settingsListeners = []
   settingsReads = []
   setModel = vi.fn()
-  stubBridge()
-  const { useAppStore } = await import('../../src/renderer/stores/appStore')
-  useAppStore.setState({
-    profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false,
-    activeThreadId: 'thread-a', threads: [withModel('opus')] as never,
-    messages: [{ id: 'm-1', role: 'user', content: 'First message', timestamp: now }] as never
-  })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
+})
+
+async function renderComposer(threads: Thread[]): Promise<void> {
+  const { useAppStore } = await import('../../src/renderer/stores/appStore')
+  useAppStore.setState({
+    profileId: threads.length ? 'prf_test' : 'prf_fresh', profileReady: true, workspaceReady: true, loading: false,
+    settingsOpen: false, activeThreadId: threads[0]?.id ?? null, threads,
+    messages: threads.length ? [{ id: 'm-1', role: 'user', content: 'First message', timestamp: now }] : []
+  })
   const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
   await act(async () => root.render(createElement(OrchestratorChat)))
   await settle()
-})
+}
 
 afterEach(() => {
   act(() => root.unmount())
@@ -116,7 +121,34 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+it('offers only Add provider when the default providers are not set up', async () => {
+  stubBridge({ freshSnapshots: [
+    snapshot({ install: { state: 'not_installed' }, auth: { state: 'unknown' }, models: { entries: [model('opus', { label: 'Opus 5.5' })], source: 'cached' } }),
+    snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex', auth: { state: 'signed_out' }, models: { entries: [model('gpt-5', { label: 'GPT-5' })], source: 'cached' } })
+  ] })
+  await renderComposer([])
+
+  const { useAppStore } = await import('../../src/renderer/stores/appStore')
+  const { takePendingSettingsSection } = await import('../../src/renderer/lib/settingsNavigation')
+  const trigger = host.querySelector<HTMLButtonElement>('button[aria-label^="Model:"]')!
+  await act(async () => { trigger.click() })
+  expect(document.body.textContent).not.toMatch(/Opus 5\.5|GPT-5|Claude Code|Codex/)
+  expect(document.querySelector('[role="option"]')).toBeNull()
+
+  const addProvider = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Add provider')
+  expect(addProvider).toBeDefined()
+  expect(document.activeElement).toBe(addProvider)
+  await act(async () => { addProvider!.click() })
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  expect(useAppStore.getState().settingsOpen).toBe(true)
+  expect(takePendingSettingsSection()).toBe('providers')
+})
+
 describe('the model picker keeps the model that was picked', () => {
+  beforeEach(async () => {
+    stubBridge()
+    await renderComposer([withModel('opus')])
+  })
   it('starts on the thread\'s model', () => {
     expect(shownModel()).toBe('Model: Opus 5.5')
   })
