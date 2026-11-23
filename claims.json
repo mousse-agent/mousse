@@ -15,6 +15,20 @@
       "expiresAt": "2026-11-23T21:12:33.270Z"
     },
     {
+      "task": "chat-web-link-favicons",
+      "session": "agibook-c9934e",
+      "machine": "agibook",
+      "branch": "chat-web-link-favicons",
+      "paths": [
+        "src/renderer/chat/components/agent-elements/link-label.ts",
+        "src/renderer/chat/components/agent-elements/link-label-view.tsx",
+        "src/renderer/chat/components/agent-elements/site-icons.tsx",
+        "src/renderer/styles/global.css"
+      ],
+      "claimedAt": "2026-11-23T19:15:44.034Z",
+      "expiresAt": "2026-11-23T21:15:44.034Z"
+    },
+    {
       "task": "composer-thread-reference-chip",
       "session": "Animatrix-d87084",
       "machine": "Animatrix",
