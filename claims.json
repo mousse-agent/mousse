@@ -26,20 +26,6 @@
       ],
       "claimedAt": "2026-11-23T15:17:31.583Z",
       "expiresAt": "2026-11-23T17:17:31.583Z"
-    },
-    {
-      "task": "refresh-provider-models-after-setup",
-      "session": "agibook-6ece71",
-      "machine": "agibook",
-      "branch": "refresh-provider-models-after-setup",
-      "paths": [
-        "src/mms/harness/gateway.ts",
-        "tests/harness/modelRefreshSchedule.test.ts",
-        "tests/harness/providerAddSignIn.test.ts",
-        "tests/harness/acpDriver.test.ts"
-      ],
-      "claimedAt": "2026-11-23T15:15:39.333Z",
-      "expiresAt": "2026-11-23T17:21:40.947Z"
     }
   ]
 }
