@@ -741,6 +741,7 @@ interface ProbeState {
   lastGood?: ProbeResult
   checkedAtMs?: number
   probing?: Promise<void>
+  refreshModelsAfterProbe?: boolean
   /** What this run's refreshes found; the age of a list kept on disk comes from the runtime (`modelsRefreshedAt`). */
   models?: { refreshedAt?: string; error?: string; live?: boolean }
   /** The account read running for a turn admission (resolves undefined = unknown). */
@@ -2501,11 +2502,13 @@ export class Harness implements HarnessGateway {
    * Single-flight probe of one instance; a timeout keeps the last good values (stale). `handshake`
    * (Add, Recheck, after install) also runs the runtime's start-up check, which records its facts.
    */
-  private probe(instanceId: string, force: boolean, options: { handshake?: boolean } = {}): Promise<void> {
-    const state = this.probes.get(instanceId) ?? {}
-    this.probes.set(instanceId, state)
+  private probe(instanceId: string, force: boolean, options: { handshake?: boolean; refreshModels?: boolean } = {}): Promise<void> {
+    const state = this.probeState(instanceId)
+    if (options.refreshModels) state.refreshModelsAfterProbe = true
     if (state.probing) return state.probing
     let upgraded = false
+    let detectedSignIn = false
+    let listedModels = false
     const run = async () => {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
       if (this.stopped) return
@@ -2513,6 +2516,8 @@ export class Harness implements HarnessGateway {
       const override = record.config.binaryPath
       // Signed out in Mousse: reported as such without asking the runtime (no CLI status check).
       const signedOut = this.isSignedOut(record)
+      const modelsBefore = record.runtime.modelsRefreshedAt?.()
+      const listingInProgress = this.modelRefreshes.has(instanceId)
       let result = await probeInstance({
         driver: record.driver,
         runtime: record.runtime,
@@ -2531,7 +2536,7 @@ export class Harness implements HarnessGateway {
       else if (state.handshake && record.driver.versionArgs?.(record.config) === null && result.runs.state === 'yes' &&
           state.handshake.revision === revision && sameBinary(state.handshake.fingerprint, result.fingerprint))
         result = { ...result, runs: state.handshake.runs }
-      const before = state.lastGood?.fingerprint
+      const before = state.lastGood
       state.result = result
       state.checkedAtMs = this.now()
       if (!result.timedOut) state.lastGood = result
@@ -2539,7 +2544,13 @@ export class Harness implements HarnessGateway {
       this.noteAuth(record, result.auth)
       if (options.handshake) this.captureFacts(record)
       // A different program than the last check saw (a CLI upgrade): its models come right away.
-      upgraded = !result.timedOut && Boolean(before && result.fingerprint && !sameBinary(before, result.fingerprint))
+      upgraded = !result.timedOut && Boolean(before?.fingerprint && result.fingerprint && !sameBinary(before.fingerprint, result.fingerprint))
+      // A terminal sign-in is visible only once a check reads it. Checks after a Mousse sign-in
+      // pass their own decision. Pi handles its external credential changes on its catalog cycle.
+      detectedSignIn = options.refreshModels === undefined && record.driver.kind !== 'pi' &&
+        !result.timedOut && result.auth.state === 'signed_in' && (before?.auth.state === 'signed_out' || before?.auth.state === 'expired')
+      const modelsAfter = record.runtime.modelsRefreshedAt?.()
+      listedModels = !listingInProgress && modelsAfter !== undefined && modelsAfter !== modelsBefore
     }
     state.probing = run()
       .catch((error) => {
@@ -2560,9 +2571,12 @@ export class Harness implements HarnessGateway {
       })
       .finally(() => {
         state.probing = undefined
+        const refreshModels = state.refreshModelsAfterProbe || detectedSignIn
+        delete state.refreshModelsAfterProbe
         if (!this.stopped) this.changed(instanceId)
-        // After the check ends, so what the refresh publishes cannot be taken for part of it.
-        if (upgraded) this.refreshAfterUpgrade(instanceId)
+        // A handshake can already list the models. Otherwise queue discovery once the check ends.
+        if (refreshModels && !listedModels) this.refreshAfterSetup(instanceId)
+        else if (upgraded) this.refreshAfterUpgrade(instanceId)
       })
     return state.probing
   }
@@ -2878,8 +2892,8 @@ export class Harness implements HarnessGateway {
       const existed = Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId)
       const verified = await driver.verifyAmbient(patch)
       if (!verified.success) return harnessFail('signed_out', verified.error || 'Could not verify the credentials.', instanceId)
-      await this.addFixed(driver, patch)
-      await this.credentialsChanged(instanceId)
+      await this.addFixed(driver, patch, false)
+      await this.credentialsChanged(instanceId, { refreshModels: true })
       return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed }
     }
     if (driver.instanceIdFor) return this.addFixed(driver, patch)
@@ -2955,7 +2969,7 @@ export class Harness implements HarnessGateway {
     }
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
-    void this.probe(instanceId, true, { handshake: true })
+    void this.probe(instanceId, true, { handshake: true, refreshModels: true })
     return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: false }
   }
 
@@ -2965,7 +2979,7 @@ export class Harness implements HarnessGateway {
    * build left for a removed id, and the tombstone goes in the same write. The provider is not
    * stored: the id carries it.
    */
-  private async addFixed(driver: HarnessDriver, patch: InstanceConfigPatch): Promise<{ snapshot: InstanceSnapshot; existed: boolean }> {
+  private async addFixed(driver: HarnessDriver, patch: InstanceConfigPatch, refreshModels = true): Promise<{ snapshot: InstanceSnapshot; existed: boolean }> {
     const instanceId = driver.instanceIdFor!(patch)
     // A removal of this id still deleting its key ends first (`removing`).
     await this.removing.get(instanceId)
@@ -2984,7 +2998,7 @@ export class Harness implements HarnessGateway {
     }
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
-    void this.probe(instanceId, true, { handshake: true })
+    void this.probe(instanceId, true, { handshake: true, refreshModels })
     return { snapshot: this.snapshot(instanceId, { kind: 'device' }), existed: false }
   }
 
@@ -3007,7 +3021,7 @@ export class Harness implements HarnessGateway {
    * holds the old one lets it go, a key saved for an instance signed out in Mousse signs it in
    * again, and the instance is checked again after any check already running.
    */
-  private async credentialsChanged(instanceId: string): Promise<void> {
+  private async credentialsChanged(instanceId: string, options: { refreshModels?: boolean } = {}): Promise<void> {
     // Processes started with the old credential stop holding it (Pi's agent: its auth.json too).
     const record = this.records.get(instanceId)
     await record?.runtime.credentialsChanged?.().catch((error) => console.warn('[harness] could not retire old credentials', { instanceId, error: errorText(error) }))
@@ -3016,7 +3030,7 @@ export class Harness implements HarnessGateway {
     if (flagged && this.isSignedOut(flagged) && flagged.runtime.configured()) await this.reconnect(flagged).catch((error) => console.warn('[harness] could not clear a sign-out', { instanceId, error: errorText(error) }))
     // A check already running read the old credentials: wait for it, then check again.
     await this.probes.get(instanceId)?.probing
-    await this.probe(instanceId, true)
+    await this.probe(instanceId, true, options)
   }
 
   private async remove(instanceId: string): Promise<void> {
@@ -3672,17 +3686,20 @@ export class Harness implements HarnessGateway {
 
   private async setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
+    const wasEnabled = this.scopes.enabled(instanceId, record.entry.enabled, scope).effective
     if (scope.kind === 'device') {
       if (enabled === null) harnessFail('unsupported', 'The device setting takes on or off.', instanceId)
       this.instanceMap.setEntry(instanceId, { ...record.entry, enabled })
       if (enabled) {
         // Attempts a turn off cancelled stay cancelled; new ones wait for its stops to drain (`admitTurn`).
         delete record.stopped
-        void this.probe(instanceId, false)
       } else void this.stopTurns(instanceId, record, 'disabled').catch((error) => this.warnStop(record, error))
     } else this.scopes.setEnabled(scope.projectId, instanceId, enabled)
     this.changed(instanceId, { scope })
-    return this.snapshot(instanceId, scope)
+    const snapshot = this.snapshot(instanceId, scope)
+    const turnedOn = snapshot.enabled.effective && !wasEnabled
+    if (turnedOn || (scope.kind === 'device' && enabled)) void this.probe(instanceId, false, { refreshModels: turnedOn })
+    return snapshot
   }
 
   private async signOut(instanceId: string): Promise<InstanceSnapshot> {
@@ -3763,10 +3780,11 @@ export class Harness implements HarnessGateway {
     const retired = this.retiredSkip(instanceId)
     if (retired) return retired
     const auth = this.probes.get(instanceId)?.lastGood?.auth.state
-    if (auth !== 'signed_in' && auth !== 'not_required') return 'Not signed in'
+    if (this.isSignedOut(record) || (auth !== 'signed_in' && auth !== 'not_required')) return 'Not signed in'
     if (record.active > 0) return 'A chat is running'
-    const installing = record.runtime.installState?.().installing === true || [...this.operations.values()].some((operation) => operation.started.instanceId === instanceId && operation.started.kind !== 'sign_in')
-    if (installing) return 'Being installed'
+    const operation = [...this.operations.values()].find((operation) => operation.started.instanceId === instanceId)
+    if (operation?.started.kind === 'sign_in') return 'Signing in'
+    if (operation || record.runtime.installState?.().installing === true) return 'Being installed'
     return undefined
   }
 
@@ -3781,7 +3799,7 @@ export class Harness implements HarnessGateway {
    * at once). A refresh that fails is recorded on the instance, never thrown. When `when` is set,
    * the instance is checked again once its turn comes and is left alone if it no longer qualifies.
    */
-  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' | 'desktop' }): Promise<void> {
+  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' | 'desktop' | 'setup' }): Promise<void> {
     const running = this.modelRefreshes.get(instanceId)
     if (running) return running
     const job = this.withModelSlot(async () => {
@@ -3790,6 +3808,7 @@ export class Harness implements HarnessGateway {
       // A retired entry's models are never fetched: nothing reads its sign-in.
       if (!record || this.retiredSkip(instanceId)) return
       if (when) {
+        if (when.reason === 'setup' && !record.runtime.refreshModels) return
         if (!this.probes.get(instanceId)?.result) await this.probe(instanceId, false)
         if (this.stopped || this.modelRefreshSkip(instanceId) || this.modelsAgeMs(record) < when.minAgeMs) return
       }
@@ -3878,6 +3897,15 @@ export class Harness implements HarnessGateway {
       if (!entry.enabled || entry.driver === 'pi') continue
       void this.refreshModelsOf(instanceId, { minAgeMs, reason }).catch((error) => console.warn('[harness] background model refresh failed', { instanceId, reason, error: errorText(error) }))
     }
+  }
+
+  /** A refresh already underway may have read the credential from before setup. */
+  private refreshAfterSetup(instanceId: string): void {
+    if (this.stopped) return
+    void Promise.resolve(this.modelRefreshes.get(instanceId))
+      .catch(() => undefined)
+      .then(() => this.refreshModelsOf(instanceId, { minAgeMs: 0, reason: 'setup' }))
+      .catch((error) => console.warn('[harness] model refresh after provider setup failed', { instanceId, error: errorText(error) }))
   }
 
   /** A probe found another program than before: list its models now, when the instance qualifies. */
@@ -3999,10 +4027,13 @@ export class Harness implements HarnessGateway {
       // Reported after the caller has the operation id, like any sign-in.
       queueMicrotask(() => {
         this.emit({ type: 'operation', data: failure ? { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(failure), instanceId } } : { ...started, phase: 'completed' } })
-        void this.probe(instanceId, true)
+        void this.probe(instanceId, true, { refreshModels: !failure })
       })
       return started
     }
+    const modelsBefore = runtime.modelsRefreshedAt?.()
+    const listingInProgress = this.modelRefreshes.has(instanceId)
+    let refreshModels = false
     const session = new LoginSessionImpl(started.operationId)
     const operation: Operation = {
       started,
@@ -4033,6 +4064,10 @@ export class Harness implements HarnessGateway {
             this.counters.bumpAccount(instanceId)
             // Its verification (a `session/new`) may have listed the account's models and modes.
             this.captureFacts(record)
+            // Some sign-ins already listed their models, including Pi's guided OAuth and key flows.
+            const modelsAfter = current.runtime.modelsRefreshedAt?.()
+            refreshModels = (record.driver.kind !== 'pi' || method === 'ambient') &&
+              (listingInProgress || modelsAfter === undefined || modelsAfter === modelsBefore)
             this.emit({ type: 'operation', data: { ...started, phase: 'completed', ...(result.warning ? { warning: result.warning } : {}) } })
           }
           else this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'signed_out', message: result.error ?? 'Sign-in failed.', instanceId } } })
@@ -4045,7 +4080,7 @@ export class Harness implements HarnessGateway {
           // check again, so the entry does not read signed out until the check's lifetime ends.
           void (async () => {
             await this.probes.get(instanceId)?.probing
-            await this.probe(instanceId, true)
+            await this.probe(instanceId, true, { refreshModels })
           })().catch(() => undefined)
           this.emitSnapshots({ kind: 'device' })
         })
