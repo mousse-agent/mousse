@@ -15,7 +15,6 @@ export const NO_SPEECH_MESSAGE = 'No speech was recognized'
 
 export interface UseDictationOptions {
   disabled: boolean
-  loading: boolean
   /** Receives the text of a finished recording. */
   onTranscript: (text: string) => void
 }
@@ -24,7 +23,7 @@ export interface UseDictationOptions {
  * The composer's microphone button: records with the microphone and turns the recording into text
  * with the dictation model. The first use asks which model to use, then starts recording.
  */
-export function useDictation({ disabled, loading, onTranscript }: UseDictationOptions) {
+export function useDictation({ disabled, onTranscript }: UseDictationOptions) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   /** A local model's recording, transcribed while the user speaks; providers use the recorder. */
   const liveRef = useRef<LiveTranscription | null>(null)
@@ -117,7 +116,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
   }
 
   const begin = async () => {
-    if (loading || isRecording || transcribing || disabled || capturePending.current || !captureMounted.current) return
+    if (isRecording || transcribing || disabled || capturePending.current || !captureMounted.current) return
     const ticket = ++captureTicket.current
     capturePending.current = true
     setRecordingPending(true)
@@ -212,7 +211,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
 
   /** Starts recording; with no dictation model chosen yet, asks for one first and then records. */
   const start = () => {
-    if (loading || isRecording || transcribing || disabled || capturePending.current) return
+    if (isRecording || transcribing || disabled || capturePending.current) return
     const dictation = useDictationStore.getState()
     dictation.syncProfile(useAppStore.getState().profileId)
     if (!useDictationStore.getState().selection) {

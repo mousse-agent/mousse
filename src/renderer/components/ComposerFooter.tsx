@@ -137,8 +137,6 @@ export interface ComposerFooterProps {
    * button and the send button queues (a bot's chat, an idle thread, a card that takes the message).
    */
   sendMode?: ComposerSendModeProps
-  /** Dictation stays offered while a run can be stopped: a bot's chat, which takes messages while it works. */
-  dictateWhileStoppable?: boolean
   /** Buttons of the caller's own, left of Attach (a bot's chat: emoji). */
   extraActions?: ReactNode
 }
@@ -410,7 +408,6 @@ export function ComposerFooter({
   permission,
   sendLabel,
   sendBlocked = null,
-  dictateWhileStoppable = false,
   extraActions,
   sendMode
 }: ComposerFooterProps) {
@@ -511,7 +508,8 @@ export function ComposerFooter({
           <Paperclip size={16} strokeWidth={2} />
         </button>
 
-        {(!stoppable || dictateWhileStoppable) && onStartRecording ? (
+        {/* Offered while a run goes too, so a message to steer or queue can be dictated. */}
+        {onStartRecording ? (
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"

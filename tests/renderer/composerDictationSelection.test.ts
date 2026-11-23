@@ -193,14 +193,46 @@ describe('the dictation shortcut', () => {
     expect(dictation.cancel).not.toHaveBeenCalled()
   })
 
-  it('does nothing where the microphone is not offered: a running reply', () => {
+})
+
+describe('dictation while a run can be stopped', () => {
+  // Every state in which the composer shows Stop: the message dictated there is steered or queued.
+  const states: Array<[string, Pick<ChatComposerProps, 'loading' | 'stoppable'>, string]> = [
+    ['a reply runs', { loading: true }, 'Queue message'],
+    ['the run waits on an approval or an answer', { loading: false, stoppable: true }, 'Send message']
+  ]
+  function renderRunning(initial: string, state: Pick<ChatComposerProps, 'loading' | 'stoppable'>, onSend: () => void) {
     function Running() {
-      const props: ChatComposerProps = { input: '', onInputChange: () => {}, attachedFiles: [], onAttachedFilesChange: () => {}, voiceMessages: [], onVoiceMessagesChange: () => {}, enabledSkills: [], loading: true, onSend: () => {} }
+      const [input, setInput] = useState(initial)
+      value = input
+      const props: ChatComposerProps = { input, onInputChange: setInput, attachedFiles: [], onAttachedFilesChange: () => {}, voiceMessages: [], onVoiceMessagesChange: () => {}, enabledSkills: [], onSend, ...state }
       return createElement(ChatComposer, props)
     }
     act(() => root.render(createElement(Running)))
-    expect(dictate()).toBeNull()
-    expect(runCommand('composer.dictate', 'key')).toBe(false)
-    expect(dictation.start).not.toHaveBeenCalled()
+  }
+
+  it.each(states)('while %s, the microphone records and its text goes in the box to send', (_name, state, sendLabel) => {
+    const onSend = vi.fn()
+    renderRunning('also check', state, onSend)
+    expect(host.querySelector('button[aria-label="Stop run"]')).not.toBeNull()
+    box().focus()
+    box().setSelectionRange(10, 10)
+    expect(pressDictate()).toBe(true)
+    expect(dictation.start).toHaveBeenCalledTimes(1)
+    finish('the tests')
+    expect(value).toBe('also check the tests')
+    act(() => host.querySelector<HTMLButtonElement>(`button[aria-label="${sendLabel}"]`)!.click())
+    expect(onSend).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(states)('while %s, the dictation key starts recording', (_name, state) => {
+    renderRunning('', state, () => {})
+    box().focus()
+    let ran = false
+    act(() => {
+      ran = runCommand('composer.dictate', 'key')
+    })
+    expect(ran).toBe(true)
+    expect(dictation.start).toHaveBeenCalledTimes(1)
   })
 })

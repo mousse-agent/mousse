@@ -593,7 +593,7 @@ describe('composer send slot', () => {
   it('shows one Stop during a run with an empty box, with the shortcut in its tooltip', () => {
     useAppStore.setState({ appInfo: { platform: 'win32' } as never })
     const { onStop } = slot({ loading: true })
-    expect(actions()).toEqual(['Attach files', 'Stop run'])
+    expect(actions()).toEqual(['Attach files', 'Dictate', 'Stop run'])
     expect(button('Stop run').title).toBe('Stop · Ctrl+Shift+Backspace')
     act(() => button('Stop run').click())
     expect(onStop).toHaveBeenCalledTimes(1)
@@ -601,7 +601,7 @@ describe('composer send slot', () => {
 
   it('keeps Stop beside Queue once the box has text, and Stop does not send', () => {
     const { onStop, onSend } = slot({ loading: true, canSend: true })
-    expect(actions()).toEqual(['Attach files', 'Stop run', 'Queue message'])
+    expect(actions()).toEqual(['Attach files', 'Dictate', 'Stop run', 'Queue message'])
     expect(button('Queue message').title).toContain('Steer ·')
     act(() => button('Stop run').click())
     expect(onStop).toHaveBeenCalledTimes(1)
@@ -612,18 +612,11 @@ describe('composer send slot', () => {
 
   it('shows Stop while a run waits on an approval, beside Send when the box has text', () => {
     slot({ stoppable: true })
-    expect(actions()).toEqual(['Attach files', 'Stop run'])
+    expect(actions()).toEqual(['Attach files', 'Dictate', 'Stop run'])
     act(() => root.unmount())
     root = createRoot(host)
     slot({ stoppable: true, canSend: true })
-    expect(actions()).toEqual(['Attach files', 'Stop run', 'Send message'])
-  })
-
-  it('keeps dictation beside Stop when the caller asks (a bot, which takes messages while it works)', () => {
-    const { onStartRecording } = slot({ loading: true, dictateWhileStoppable: true })
-    expect(actions()).toEqual(['Attach files', 'Dictate', 'Stop run'])
-    act(() => button('Dictate').click())
-    expect(onStartRecording).toHaveBeenCalledTimes(1)
+    expect(actions()).toEqual(['Attach files', 'Dictate', 'Stop run', 'Send message'])
   })
 
   it('uses the macOS symbols in the Stop tooltip on a Mac', () => {
