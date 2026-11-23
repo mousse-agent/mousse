@@ -2,6 +2,26 @@
   "version": 1,
   "claims": [
     {
+      "task": "chat-github-pr-links-viewer",
+      "session": "agibook-1cdeae",
+      "machine": "agibook",
+      "branch": "chat-github-pr-links-viewer",
+      "paths": [
+        "src/mms/git/CodeHost.ts",
+        "src/mms/git/GitHubCodeHost.ts",
+        "src/mms/protocol/handlers.ts",
+        "src/main/ipc/registerGuiIpc.ts",
+        "src/preload/index.ts",
+        "src/shared/pullRequests.ts",
+        "src/renderer/stores/pullRequestStore.ts",
+        "src/renderer/components/PullRequestPanel.tsx",
+        "src/renderer/components/pullRequestPanelLogic.ts",
+        "src/renderer/utils/chatLinks.ts"
+      ],
+      "claimedAt": "2026-11-23T19:20:31.827Z",
+      "expiresAt": "2026-11-23T21:20:31.827Z"
+    },
+    {
       "task": "chat-inline-code-file-links",
       "session": "agibook-210f2b",
       "machine": "agibook",
