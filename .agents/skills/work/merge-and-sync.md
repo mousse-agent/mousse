@@ -6,7 +6,7 @@ Read this only when asked to merge, when a small documentation or communication-
 
 1. The PR head must be the commit the recorded checks ran on: `node scripts/task-notes.mjs get tested.sha` against `gh pr view <n> --json headRefOid`. If they differ, rerun only what the later commits affect (`node scripts/verify.mjs ...`).
 2. Check the checks, reviews and conversations GitHub actually requires. Do not wait for hosted CI that GitHub does not require; if GitHub blocks the merge on a required check, report it. Do not start the full-suite CI run unless asked.
-3. Merge: `gh pr merge <n> --match-head-commit <tested sha>` with an enabled method. No extra confirmation or arbitrary wait for changes the policy authorizes. Sensitive changes keep the teammate review in the policy's "Review and merge".
+3. Merge: `gh pr merge <n> --match-head-commit <tested sha>` with an enabled method. No extra confirmation or arbitrary wait for changes the policy authorizes. Sensitive changes in the policy's "Review and merge" need no teammate review, only the present human's authorization for that merge.
 4. Release the claim: `node scripts/work-claim.mjs release --task <branch>`.
 5. Issue completion: the issue-hygiene workflow closes issues named by `Closes #N` after the merge. Look at the issue once (`gh issue view <n> --json state`); for `Refs #N`, leave it open.
 

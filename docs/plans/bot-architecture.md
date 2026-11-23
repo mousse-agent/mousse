@@ -1434,7 +1434,7 @@ npx vitest run tests/bots tests/harness/piBotGate.test.ts tests/harness/piBotEph
 
 **App check.** Run the real GUI and daemon in an isolated profile, driven over CDP, with a fake Anthropic Messages API for the locked Claude entry. This is the existing headless trial recipe. Go through create → first message → ask → allow → schedule → run report → pause → delete, and attach screenshots of every Bot UI Phase 1 screen to the PR.
 
-Changes to credentials and authorization (the bot runner entry, grants, the authority outcome) need review by the other teammate before merge (`docs/team-workflow.md` "Review and merge").
+Changes to credentials and authorization (the bot runner entry, grants, the authority outcome) merge once the present human authorizes that merge (`docs/team-workflow.md` "Review and merge").
 
 ---
 
