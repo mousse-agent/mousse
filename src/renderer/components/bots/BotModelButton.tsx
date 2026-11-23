@@ -194,6 +194,7 @@ export function BotModelButton({ bot }: { bot: BotSummary }) {
             <SettingsModelPicker
               ariaLabel={`${bot.name}'s ${row.label} model`}
               providers={providers as LlmProviderOption[]}
+              unavailableProviders={info.unavailableProviders}
               providerId={rowListing?.id ?? ''}
               instanceId={picked?.instanceId}
               modelId={picked?.model ?? ''}

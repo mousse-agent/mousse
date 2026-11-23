@@ -5,7 +5,7 @@ import { ChevronDown } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { listingServes } from '../../../shared/providerInstances'
 import { modelPickerRunSettings, runFasterSpeed, runLevelText } from '../ComposerEffortPicker'
-import { getGroupedModelButtonParts, ModelFamilyMenu } from '../ModelFamilyMenu'
+import { getGroupedModelButtonParts, ModelFamilyMenu, type UnavailableModelProvider } from '../ModelFamilyMenu'
 import '../../styles/settingsModelPicker.css'
 
 /**
@@ -16,6 +16,7 @@ import '../../styles/settingsModelPicker.css'
  */
 export function SettingsModelPicker({
   providers,
+  unavailableProviders,
   providerId,
   instanceId,
   modelId,
@@ -30,6 +31,7 @@ export function SettingsModelPicker({
   clear
 }: {
   providers: LlmProviderOption[]
+  unavailableProviders?: readonly UnavailableModelProvider[]
   providerId: string
   /** The selection's instance; tells apart two accounts of one provider. */
   instanceId?: string
@@ -108,7 +110,7 @@ export function SettingsModelPicker({
         aria-expanded={open}
         aria-label={`${ariaLabel}: ${label}${where ? ` on ${where}` : ''}`}
         title={title ?? (where ? `${label} on ${where}` : label)}
-        disabled={disabled || providers.length === 0}
+        disabled={disabled || (providers.length === 0 && !unavailableProviders?.length)}
         onClick={() => setOpen((current) => !current)}
       >
         {selected && <ProviderIcon providerId={providerId} size={14} />}
@@ -121,6 +123,7 @@ export function SettingsModelPicker({
       {open && !disabled && (
         <ModelFamilyMenu
           providers={providers}
+          unavailableProviders={unavailableProviders}
           selectedProviderId={providerId}
           selectedInstanceId={instanceId}
           selectedModelId={pickerId}

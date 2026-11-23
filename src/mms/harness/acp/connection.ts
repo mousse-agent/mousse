@@ -58,6 +58,8 @@ export type AcpPurpose = 'turn' | 'sign_in' | 'sign_out' | 'models' | 'handshake
 
 export interface AcpLaunchRequest {
   purpose: AcpPurpose
+  /** A personal bot turn needs a launch without the owner’s tool settings. */
+  bot?: true
   handlers: AcpClientHandlers
   /** A sign-in link the agent announced outside the protocol (on stdout or through a helper). */
   onAuthUrl?: (url: string) => void
