@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { IconGitHub } from "./icons";
-import { isGitHubUrl, linkLabel } from "./link-label";
+import { SiteMarkIcon } from "./site-icons";
+import { linkLabel, siteMarkForUrl } from "./link-label";
 import { parseThreadLink } from "../../../../shared/threadLink";
 import { useAppStore } from "../../../stores/appStore";
 
@@ -31,7 +31,7 @@ export function threadLinkLabel(href: string, children: ReactNode): ReactNode | 
 }
 
 /**
- * What goes inside a chat link (see link-label): the GitHub mark before a link to GitHub, and the short
+ * What goes inside a chat link (see link-label): a monochrome site mark before a web link, and the short
  * label of a bare GitHub address. Each surface keeps its own anchor and routing.
  */
 export function LinkLabel({ href, children }: { href: string; children?: ReactNode }) {
@@ -39,11 +39,12 @@ export function LinkLabel({ href, children }: { href: string; children?: ReactNo
   const threadId = text === href ? parseThreadLink(href) : null;
   if (threadId && text !== null) return <ThreadTitle threadId={threadId} text={text} />;
   const label = text === null ? children : linkLabel(href, text);
-  if (!isGitHubUrl(href)) return <>{label}</>;
+  const mark = siteMarkForUrl(href);
+  if (!mark) return <>{label}</>;
   const unbroken = typeof label === "string" && label.length <= UNBROKEN_MAX;
   return (
     <span className={unbroken ? "chat-link-unbroken" : undefined}>
-      <IconGitHub className="chat-link-mark" />
+      <SiteMarkIcon mark={mark} className="chat-link-mark" />
       {label}
     </span>
   );
