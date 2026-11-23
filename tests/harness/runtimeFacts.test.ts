@@ -50,6 +50,8 @@ function factsDriver(handshakes: string[], refreshes: string[] = []): HarnessDri
     }),
     create(context) {
       let report: RuntimeFactsReport | undefined
+      // The account's own modes, as a model refresh reads them: none until a sign-in adds Plan.
+      let accountModes: RuntimeFactsReport['modes'] = []
       const runtime: DriverRuntime = {
         adapter: new Finishing(),
         configured: () => true,
@@ -70,12 +72,13 @@ function factsDriver(handshakes: string[], refreshes: string[] = []): HarnessDri
         },
         runtimeFacts: () => report,
         signIn: async (session) => {
-          report = { ...report!, modes: [{ id: 'plan', name: 'Plan' }], source: 'session' }
+          accountModes = [{ id: 'plan', name: 'Plan' }]
+          report = { ...report!, modes: accountModes, source: 'session' }
           return { success: true, sessionId: session.sessionId }
         },
         refreshModels: async () => {
           refreshes.push(context.instanceId)
-          report = { ...report!, modes: [], source: 'session' }
+          report = { ...report!, modes: accountModes, source: 'session' }
         },
         stop: () => {}
       }
@@ -161,11 +164,19 @@ describe('runtime facts', () => {
   })
 
   it('takes the facts a sign-in verification learned', async () => {
-    const { harness, caps } = fixture({ 'claude:one': [] })
+    const { harness, caps, refreshes } = fixture({ 'claude:one': [] })
     await harness.instances.recheck('claude:one')
     expect(caps('claude:one').planMode).toBe(false)
+    // Read when the sign-in reports done, before any model refresh after it could supply the mode.
+    let atCompletion: { planMode: boolean; refreshes: number } | undefined
+    harness.instances.subscribe((event) => {
+      if (event.type === 'operation' && event.data.phase === 'completed') atCompletion = { planMode: caps('claude:one').planMode, refreshes: refreshes.length }
+    })
     const started = await harness.instances.signIn('claude:one')
-    await vi.waitFor(() => expect(caps('claude:one').planMode).toBe(true))
+    await vi.waitFor(() => expect(atCompletion).toEqual({ planMode: true, refreshes: 0 }))
+    // The models listed after the sign-in come from the same account: its Plan mode stays.
+    await vi.waitFor(() => expect(refreshes).toEqual(['claude:one']))
+    expect(caps('claude:one').planMode).toBe(true)
     expect(started.kind).toBe('sign_in')
   })
 
