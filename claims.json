@@ -22,19 +22,6 @@
       "expiresAt": "2026-11-23T21:20:31.827Z"
     },
     {
-      "task": "chat-inline-code-file-links",
-      "session": "agibook-210f2b",
-      "machine": "agibook",
-      "branch": "chat-inline-code-file-links",
-      "paths": [
-        "src/renderer/utils/chatLinks.ts",
-        "src/renderer/chat/components/agent-elements/markdown.tsx",
-        "src/renderer/chat/components/agent-elements/agent-ui.css"
-      ],
-      "claimedAt": "2026-11-23T19:12:33.270Z",
-      "expiresAt": "2026-11-23T21:12:33.270Z"
-    },
-    {
       "task": "chat-web-link-favicons",
       "session": "agibook-c9934e",
       "machine": "agibook",
