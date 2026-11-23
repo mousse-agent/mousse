@@ -1225,7 +1225,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             commandSuggestions={commandSuggestions}
             placeholder={`Message ${bot.name}`}
             stoppable={working}
-            dictateWhileStoppable
             extraActions={<BotEmojiButton field={composerField} value={draft} onChange={pasted.change} />}
             onSend={() => { if (pasted.beforeSend()) void submitBotChat(bot.id) }}
             onStop={() => void store().stop(bot.id)}

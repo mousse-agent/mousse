@@ -46,7 +46,7 @@ type Dictation = ReturnType<typeof useDictation>
 let dictation: Dictation
 const transcripts: string[] = []
 function Probe(): null {
-  dictation = useDictation({ disabled: false, loading: false, onTranscript: (text) => transcripts.push(text) })
+  dictation = useDictation({ disabled: false, onTranscript: (text) => transcripts.push(text) })
   return null
 }
 

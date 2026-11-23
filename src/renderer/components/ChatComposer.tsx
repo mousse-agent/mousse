@@ -166,8 +166,6 @@ export interface ChatComposerProps {
   mentionScope?: { scopeKey: string; threadId?: string; projectId?: string }
   /** The thread's permission mode and how to change it (see `ComposerFooter`). */
   permission?: ComponentProps<typeof ComposerFooter>['permission']
-  /** Dictation stays offered while a run can be stopped (see `ComposerFooter`): a bot's chat. */
-  dictateWhileStoppable?: boolean
   /** Buttons of the caller's own in the footer, left of Attach (see `ComposerFooter`). */
   extraActions?: ReactNode
   /**
@@ -253,7 +251,6 @@ export function ChatComposer({
   mentionScope,
   permission,
   sendModeThreadId,
-  dictateWhileStoppable = false,
   extraActions,
   messageLimit = Infinity,
   attachmentStatus,
@@ -340,19 +337,18 @@ export function ChatComposer({
       target.setSelectionRange(inserted.caret, inserted.caret)
     })
   }
-  const dictation = useDictation({ disabled, loading, onTranscript: insertDictation })
+  const dictation = useDictation({ disabled, onTranscript: insertDictation })
   const { isRecording, recordingPending, transcribing, recordingDuration } = dictation
   const startDictation = () => {
     const node = composerInputRef.current
     dictationRangeRef.current = node ? { start: node.selectionStart, end: node.selectionEnd, value: node.value } : null
     dictation.start()
   }
-  // The dictation key starts recording where the microphone button is offered and finishes it (Done) while recording.
-  const dictationOffered = !stoppable || dictateWhileStoppable
+  // The dictation key starts recording, idle or while a run goes, and finishes it (Done) while recording.
   useCommand(
     'composer.dictate',
     () => (isRecording ? dictation.stop() : startDictation()),
-    () => !disabled && isShown(composerInputRef.current) && (isRecording || (dictationOffered && !recordingPending && !transcribing))
+    () => !disabled && isShown(composerInputRef.current) && (isRecording || (!recordingPending && !transcribing))
   )
   const [pendingReferences, setPendingReferences] = useState(0)
   // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
@@ -362,7 +358,7 @@ export function ChatComposer({
   useComposerNotice(dictation.error ? {
     tone: 'error',
     title: dictation.error.message,
-    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: loading || disabled || recordingPending || transcribing, onClick: startDictation }],
+    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: disabled || recordingPending || transcribing, onClick: startDictation }],
     onDismiss: dictation.dismissError
   } : null)
   // With the picker disabled, `/skills` stays literal text so it is sent to the agent as a prompt.
@@ -1209,7 +1205,6 @@ export function ChatComposer({
         recordingLevels={dictation.levels}
         allowAttachWhileLoading
         permission={permission}
-        dictateWhileStoppable={dictateWhileStoppable}
         extraActions={extraActions}
         {...(sendModeShown ? { sendMode: { mode: sendMode, onSwitch: switchSendMode } } : {})}
       />
