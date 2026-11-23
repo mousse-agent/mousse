@@ -49,6 +49,8 @@ function api(path: string[] = []): unknown {
       if (method === 'app.getInfo') return Promise.resolve({ platform: 'win32' })
       if (method === 'threads.getActivity' || method === 'turn.getSnapshot') return Promise.resolve({})
       if (method === 'threads.listAll') return Promise.resolve([])
+      // A fresh profile opens first-run setup, which lists the model APIs a key can add.
+      if (method === 'providers.catalog.addOptions') return Promise.resolve([])
       if (method === 'threads.initialize') return hydration
       if (method === 'platformRequest.request') {
         const [name, params] = args
