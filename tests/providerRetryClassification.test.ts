@@ -106,12 +106,13 @@ describe('provider error classification', () => {
       expect(estimatedReset(now)).toBe('2026-10-01T05:00:00.000Z')
     })
 
-    it('names the window and says whether the reset is estimated', () => withClock(() => {
+    it('names the window, and gives the reset time only when the provider reported it', () => withClock(() => {
       const reported = usageLimitError({ provider: 'claude', resetsAt: '2026-10-01T03:00:00Z', estimated: false, limitKind: 'seven_day_opus' })
       expect(reported.message).toMatch(/^Claude's weekly Opus usage limit was reached\. It resets at /)
       expect(reported.message).not.toMatch(/estimated/)
       const guessed = usageLimitError({ provider: 'codex', estimated: true, limitKind: 'five_hour' })
-      expect(guessed.message).toMatch(/^Codex's 5-hour usage limit was reached\. It resets at .+ \(estimated\)\.$/)
+      // Mousse's own guess is never shown as a reset time.
+      expect(guessed.message).toBe("Codex's 5-hour usage limit was reached.")
     }))
 
     it('keeps the reset details through serialization and ignores other errors', () => {
