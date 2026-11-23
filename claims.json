@@ -30,6 +30,20 @@
       "expiresAt": "2026-11-23T17:34:13.947Z"
     },
     {
+      "task": "read-aloud-question-cards",
+      "session": "Animatrix-9636dc",
+      "machine": "Animatrix",
+      "branch": "read-aloud-question-cards",
+      "paths": [
+        "src/renderer/components/ComposerQuestionModal.tsx",
+        "src/renderer/chat/components/agent-elements/question/answered-questions-tool.tsx",
+        "src/renderer/chat/components/agent-elements/tools/plan-tool.tsx",
+        "src/renderer/styles/app.css"
+      ],
+      "claimedAt": "2026-11-23T16:20:14.247Z",
+      "expiresAt": "2026-11-23T18:20:14.247Z"
+    },
+    {
       "task": "remove-project-and-change-folder",
       "session": "Animatrix-fea599",
       "machine": "Animatrix",
