@@ -2,6 +2,19 @@
   "version": 1,
   "claims": [
     {
+      "task": "composer-thread-reference-chip",
+      "session": "Animatrix-d87084",
+      "machine": "Animatrix",
+      "branch": "composer-thread-reference-chip",
+      "paths": [
+        "src/renderer/components/ChatComposer.tsx",
+        "src/renderer/lib/composerThreadChips.ts",
+        "src/renderer/styles/app.css"
+      ],
+      "claimedAt": "2026-11-23T17:19:19.434Z",
+      "expiresAt": "2026-11-23T19:19:19.434Z"
+    },
+    {
       "task": "fix-local-file-links-blocked",
       "session": "Animatrix-a0fa6f",
       "machine": "Animatrix",
