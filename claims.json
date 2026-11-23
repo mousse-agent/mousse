@@ -12,6 +12,22 @@
       ],
       "claimedAt": "2026-11-22T18:11:45.608Z",
       "expiresAt": "2026-11-22T23:14:27.822Z"
+    },
+    {
+      "task": "mousse/per-provider-limit-refresh-buttons",
+      "session": "agibook-9f3712",
+      "machine": "agibook",
+      "branch": "mousse/per-provider-limit-refresh-buttons",
+      "paths": [
+        "src/mms/harness/acp/session.ts",
+        "src/mms/protocol/usageReads.ts",
+        "src/renderer/components/SubscriptionUsagePage.tsx",
+        "src/renderer/components/UsageRowMenu.tsx",
+        "src/renderer/lib/progressiveUsage.ts",
+        "src/shared/providerAuth.ts"
+      ],
+      "claimedAt": "2026-11-23T15:31:51.113Z",
+      "expiresAt": "2026-11-23T17:31:51.113Z"
     }
   ]
 }
