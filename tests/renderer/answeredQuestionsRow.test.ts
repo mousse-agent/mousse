@@ -6,6 +6,7 @@ import type { ChatMessage } from '../../src/shared/types'
 import { mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { answeredQuestionsSummary } from '../../src/renderer/chat/components/agent-elements/question/answered-questions-tool'
+import { useReadAloudStore } from '../../src/renderer/readAloud/readAloudStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -89,6 +90,16 @@ describe('answers to the agent\'s questions', () => {
     const prompt = list.querySelector<HTMLElement>('dt')!
     expect(prompt.classList).toContain('text-[color:var(--text-secondary)]')
     expect(prompt.className).not.toMatch(/an-foreground-muted|an-foreground-subtle/)
+  })
+
+  it('read aloud from the opened row: each question, then its answer', () => {
+    useReadAloudStore.setState({ activeKey: null, status: 'idle', pending: null, pickerOpen: false, selection: null, error: null })
+    render(transcript(twoAnswers))
+    act(() => rowOf()!.querySelector<HTMLElement>('button, [role="button"]')!.click())
+    act(() => rowOf()!.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')!.click())
+    expect(useReadAloudStore.getState().pending?.text).toBe(
+      'Which part of the export job should I start with?\n\nRow reader.\n\nWhich output formats should it write?\n\nCSV, JSON later.'
+    )
   })
 
   it('show one question as the question and its answer', () => {
