@@ -274,6 +274,7 @@ export const GIT_ACCESS = {
   'github.cloneRepository': 'userRequested',
   'pullRequests.get': 'owned',
   'pullRequests.detail': 'owned',
+  'pullRequests.view': 'read',
   'pullRequests.draft': 'owned',
   'pullRequests.create': 'userRequested',
   'pullRequests.merge': 'userRequested',

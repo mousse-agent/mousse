@@ -1113,6 +1113,24 @@ async function readPullRequestDetail(ctx: HandlerContext, root: string, number: 
   }
 }
 
+async function readPullRequestDetailByIdentity(
+  ctx: HandlerContext,
+  identity: { host: string; nameWithOwner: string; number: number },
+  force: boolean
+): Promise<PullRequestDetail> {
+  const codeHost = ctx.mms.gitService.codeHost
+  if (!codeHost.getPullRequestDetailByIdentity) {
+    throw new DomainRpcError('pull_request_unavailable', 'Viewing pull requests by repository is not supported.', { number: identity.number, reason: 'error' })
+  }
+  try {
+    return await codeHost.getPullRequestDetailByIdentity(identity, { force })
+  } catch (error) {
+    const kind = error instanceof PullRequestReadError ? error.kind : 'error'
+    const code = kind === 'not-found' || kind === 'rate-limited' ? PULL_REQUEST_READ_CODES[kind] : 'pull_request_unavailable'
+    throw new DomainRpcError(code, error instanceof Error ? error.message : String(error), { number: identity.number, reason: kind })
+  }
+}
+
 /**
  * Writes a thread's link. The same pull request keeps its watch; a different one ends the old watch (with its line), since
  * a watch belongs to the pull request it began on and must not resume later with an old cutoff and a backlog.
@@ -5431,6 +5449,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       await materializeRequestedWorkspace(ctx, p)
       const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, p), number, asOptionalBoolean(p.force, 'force') === true)
+      notePullRequestStates(ctx, [detail])
+      return { detail }
+    }
+    case 'pullRequests.view': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['host', 'nameWithOwner', 'number', 'force'])
+      const host = asString(p.host, 'host', 256).trim().toLowerCase()
+      const nameWithOwner = asString(p.nameWithOwner, 'nameWithOwner', 256).trim()
+      const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      const segments = nameWithOwner.split('/')
+      if (
+        !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/i.test(host)
+        || segments.length !== 2
+        || segments.some((segment) => !segment || segment.startsWith('-') || !/^[A-Za-z0-9._-]+$/.test(segment))
+      ) {
+        throw new DomainRpcError('invalid_params', 'host and nameWithOwner must name a valid repository')
+      }
+      const detail = await readPullRequestDetailByIdentity(ctx, { host, nameWithOwner, number }, asOptionalBoolean(p.force, 'force') === true)
       notePullRequestStates(ctx, [detail])
       return { detail }
     }

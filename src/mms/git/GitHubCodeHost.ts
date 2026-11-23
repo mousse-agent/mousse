@@ -840,15 +840,45 @@ export class GitHubCodeHost implements CodeHost {
     )
   }
 
-  private async readDetail(cwd: string, pullRequest: PullRequestIdentity, withLines = true): Promise<PullRequestDetail> {
+  async getPullRequestDetailByIdentity(
+    identity: PullRequestIdentity,
+    options: { force?: boolean; lineComments?: boolean } = {}
+  ): Promise<PullRequestDetail> {
+    if (!Number.isSafeInteger(identity.number) || identity.number < 1) throw new PullRequestReadError('Unsupported pull request number.', 'error')
+    const host = identity.host.trim().toLowerCase()
+    const nameWithOwner = identity.nameWithOwner.trim()
+    const parts = nameWithOwner.split('/')
+    if (
+      !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/i.test(host)
+      || parts.length !== 2
+      || parts.some((part) => !part || part.startsWith('-') || !/^[A-Za-z0-9._-]+$/.test(part))
+    ) {
+      throw new PullRequestReadError('Unsupported pull request repository.', 'error')
+    }
+    const probe = await this.probeGh()
+    if (!probe.ok) throw new PullRequestReadError(probe.message, probe.reason)
+    const pullRequest: PullRequestIdentity = { host, nameWithOwner, number: identity.number }
+    const withLines = options.lineComments !== false
+    return this.details.read(
+      withLines ? pullRequestIdentityKey(pullRequest) : `${pullRequestIdentityKey(pullRequest)}\u0000view`,
+      () => this.readDetail(undefined, pullRequest, withLines, true).catch(async (error: unknown) => {
+        throw error instanceof PullRequestReadError ? error : await this.detailFailure(undefined, pullRequest, pullRequest.number, error)
+      }),
+      { force: options.force, cacheError: (error) => error instanceof PullRequestReadError && (error.kind === 'unauthenticated' || error.kind === 'not-github' || error.kind === 'rate-limited') }
+    )
+  }
+
+  private async readDetail(cwd: string | undefined, pullRequest: PullRequestIdentity, withLines = true, explicitRepo = false): Promise<PullRequestDetail> {
     const [owner, repository] = pullRequest.nameWithOwner.split('/')
     const pull = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}`
+    const execOptions = cwd ? { cwd } : {}
+    const viewArgs = [
+      'pr', 'view', String(pullRequest.number),
+      ...(explicitRepo ? ['--repo', `${pullRequest.host}/${pullRequest.nameWithOwner}`] : []),
+      '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ
+    ]
     const [{ stdout: view }, association] = await Promise.all([
-      this.runExecutable(
-        'gh',
-        ['pr', 'view', String(pullRequest.number), '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ],
-        { cwd }
-      ),
+      this.runExecutable('gh', viewArgs, execOptions),
       this.readAuthorAssociation(cwd, pullRequest.host, pull)
     ])
     const endpoint = `${pull}/comments`
@@ -862,7 +892,7 @@ export class GitHubCodeHost implements CodeHost {
           `${endpoint}?sort=created&direction=desc&per_page=${LINE_COMMENT_PAGE_SIZE}&page=${page}`,
           '--jq', LINE_COMMENT_JQ
         ],
-        { cwd }
+        execOptions
       )
       const parsed = parseLineCommentPage(stdout)
       if (!parsed) throw new PullRequestReadError('GitHub CLI returned an unexpected comments response.', 'error')
@@ -881,9 +911,9 @@ export class GitHubCodeHost implements CodeHost {
    * A failed or unreadable answer (often GitHub's rate limit) is `UNCHECKED`: never trusted, as `NONE` is, but not
    * reported as the person being a stranger. A pull request must still open when it cannot be read.
    */
-  private async readAuthorAssociation(cwd: string, host: string, pull: string): Promise<string> {
+  private async readAuthorAssociation(cwd: string | undefined, host: string, pull: string): Promise<string> {
     try {
-      const { stdout } = await this.runExecutable('gh', ['api', '--hostname', host, pull, '--jq', '.author_association'], { cwd })
+      const { stdout } = await this.runExecutable('gh', ['api', '--hostname', host, pull, '--jq', '.author_association'], cwd ? { cwd } : {})
       const association = stdout.trim().toUpperCase()
       return /^[A-Z_]{1,40}$/.test(association) ? association : UNCHECKED_ASSOCIATION
     } catch {
@@ -892,15 +922,15 @@ export class GitHubCodeHost implements CodeHost {
   }
 
   /** A failed detail read with the host's own message, plus where and as whom it failed when that explains it. */
-  private async detailFailure(cwd: string, identity: RepositoryIdentity | null, number: number, error: unknown): Promise<PullRequestReadError> {
+  private async detailFailure(cwd: string | undefined, identity: RepositoryIdentity | null, number: number, error: unknown): Promise<PullRequestReadError> {
     if (error instanceof PullRequestReadError) return error
     if (isMissingExecutable(error)) return new PullRequestReadError('GitHub CLI (gh) was not found. Install it to see pull requests.', 'gh-missing')
     const message = processMessage(error)
     const kind = classifyGhFailure(message)
     const first = message.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? message
     if (kind === 'not-found') {
-      const viewer = identity ? await this.viewerLogin(cwd) : null
-      const where = identity ? `${identity.nameWithOwner} on ${identity.host}` : cwd
+      const viewer = identity ? await this.viewerLoginForHost(identity.host, cwd) : null
+      const where = identity ? `${identity.nameWithOwner} on ${identity.host}` : (cwd ?? 'this repository')
       const account = identity
         ? viewer
           ? `signed in to ${identity.host} as ${viewer}, which cannot see it`
@@ -909,9 +939,11 @@ export class GitHubCodeHost implements CodeHost {
       return new PullRequestReadError(`${first} — pull request #${number} is not in ${where}, or ${account}.`, 'not-found')
     }
     if (kind === 'unauthenticated') {
-      return new PullRequestReadError(`${first} — not signed in${identity ? ` to ${identity.host}` : ''} for ${cwd}.`, 'unauthenticated')
+      const where = identity ? ` to ${identity.host}` : ''
+      const scope = cwd ? ` for ${cwd}` : ''
+      return new PullRequestReadError(`${first} — not signed in${where}${scope}.`, 'unauthenticated')
     }
-    if (kind === 'not-github') return new PullRequestReadError(`${first} — ${cwd} is not a GitHub repository.`, 'not-github')
+    if (kind === 'not-github') return new PullRequestReadError(`${first} — ${cwd ?? identity?.nameWithOwner ?? 'this repository'} is not a GitHub repository.`, 'not-github')
     return new PullRequestReadError(message, kind === 'none' ? 'error' : kind)
   }
 
@@ -1100,8 +1132,16 @@ export class GitHubCodeHost implements CodeHost {
   async viewerLogin(cwd: string): Promise<string | null> {
     try {
       const { host } = await this.repositoryIdentity(cwd)
+      return await this.viewerLoginForHost(host, cwd)
+    } catch {
+      return null
+    }
+  }
+
+  private async viewerLoginForHost(host: string, cwd?: string): Promise<string | null> {
+    try {
       return await this.viewers.read(hostWithoutPort(host), async () => {
-        const { stdout } = await this.runExecutable('gh', ['api', '--hostname', host, 'user', '--jq', '.login'], { cwd })
+        const { stdout } = await this.runExecutable('gh', ['api', '--hostname', host, 'user', '--jq', '.login'], cwd ? { cwd } : {})
         const login = stdout.trim()
         if (!login) throw new Error('GitHub CLI did not report the signed-in account.')
         return login

@@ -550,6 +550,7 @@ export const PROTOCOL_METHODS = [
   'github.cloneRepository',
   'pullRequests.get',
   'pullRequests.detail',
+  'pullRequests.view',
   'pullRequests.draft',
   'pullRequests.create',
   'pullRequests.merge',
