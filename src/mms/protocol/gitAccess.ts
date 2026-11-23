@@ -33,6 +33,7 @@ export const GIT_ACCESS = {
   'projects.trustGitSettings': 'read',
   'projects.icon': 'none',
   'projects.setIcon': 'none',
+  'projects.setPath': 'read',
   'appearance.wallpaperImport': 'none',
   'appearance.wallpaperImportBytes': 'none',
   'appearance.wallpaperRead': 'none',

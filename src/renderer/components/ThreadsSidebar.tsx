@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { flushSync } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 
 import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
@@ -1163,6 +1163,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     startRename({ type: target.type, id: target.id, name: target.name, inNeedsMe, returnFocus })
   }
 
+  // A project of this computer: the folder picker, then the same project in the folder chosen. A refusal (no folder
+  // there, or another project's folder) is the failure toast.
+  const handleChangeFolder = () => {
+    if (!contextMenu) return
+    const { target } = contextMenu
+    closeContextMenu()
+    void runWithToast('change the folder', () => window.mousse.projects.changeFolder(target.id, target.path))
+  }
+
   // Only an archived thread of this computer is deleted, after its confirmation; a project asks first too.
   const handleRemove = () => {
     if (!contextMenu) return
@@ -2153,6 +2162,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onRename={handleRename}
 
           onRemove={handleRemove}
+          onChangeFolder={contextMenu.target.type === 'project' && !contextMenu.target.node ? handleChangeFolder : undefined}
           onTrustGitSettings={handleTrustGitSettings}
           onNewThread={handleNewProjectThread}
           onNewThreadFromPullRequest={handleNewThreadFromPullRequest}
@@ -2172,8 +2182,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       {tabMenu && <ThreadsTabMenu x={tabMenu.x} y={tabMenu.y} onClose={closeTabMenu} onHideAllBotThreads={handleHideAllBotThreads} />}
 
-      <Modal
-        open={removingProject !== null}
+      {/* In the document's body: the sidebar is a size container, which pins a fixed overlay inside it, under the main view. */}
+      {removingProject && createPortal(<Modal
+        open
         title="Remove project"
         onClose={() => setRemovingProject(null)}
         footer={<>
@@ -2181,13 +2192,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           <button type="button" className="settings-btn" data-testid="remove-project-confirm" onClick={confirmRemoveProject}>Remove</button>
         </>}
       >
-        {removingProject && (
-          <p className="threads-sidebar-remove-project">
-            {removingProject.computerName ? `${removingProject.name} on ${removingProject.computerName}` : removingProject.name} leaves the sidebar. Its folder and threads stay.
-            {removingProject.alsoOn?.length ? ` ${removingProject.alsoOn.join(' and ')} keep${removingProject.alsoOn.length === 1 ? 's' : ''} theirs.` : ''}
-          </p>
-        )}
-      </Modal>
+        <p className="threads-sidebar-remove-project">
+          {removingProject.computerName ? `${removingProject.name} on ${removingProject.computerName}` : removingProject.name} leaves the sidebar. Its folder and threads stay.
+          {removingProject.alsoOn?.length ? ` ${removingProject.alsoOn.join(' and ')} keep${removingProject.alsoOn.length === 1 ? 's' : ''} theirs.` : ''}
+        </p>
+      </Modal>, document.body)}
 
       {pullRequestProject && (
         <StartFromPullRequestDialog

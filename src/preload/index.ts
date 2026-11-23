@@ -998,6 +998,9 @@ const api = {
       ipcRenderer.invoke('projects:rename', projectId, name),
     pin: (projectId: string, pinned: boolean): Promise<Project> =>
       ipcRenderer.invoke('projects:pin', projectId, pinned),
+    /** Asks for a new folder for the project, starting at `defaultPath`, and points the project there; null when cancelled. */
+    changeFolder: (projectId: string, defaultPath?: string): Promise<Project | null> =>
+      ipcRenderer.invoke('projects:changeFolder', projectId, defaultPath),
     reorder: (projectIds: string[]): Promise<Project[]> =>
       ipcRenderer.invoke('projects:reorder', projectIds),
     trustGitSettings: (projectId: string): Promise<{ filters: string[] }> =>

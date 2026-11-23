@@ -5,7 +5,7 @@ import type { ProjectIconImage } from '../../shared/projectIcon'
 /** How long a window keeps a project's icon before asking the daemon again (the daemon answers from its own cache). */
 export const PROJECT_ICON_REFRESH_MS = 15 * 60 * 1000
 
-type IconProject = Pick<Project, 'id' | 'node' | 'iconPath' | 'iconOff' | 'detectedIconPath' | 'iconDetectedAt'>
+type IconProject = Pick<Project, 'id' | 'node' | 'iconPath' | 'iconOff' | 'detectedIconPath' | 'iconDetectedAt'> & { path?: string }
 
 interface Entry {
   key: string
@@ -85,9 +85,12 @@ function refreshShown(): void {
 
 if (typeof window !== 'undefined') window.addEventListener('focus', refreshShown)
 
-/** What a cached icon depends on: a change to the project's icon choice, or its being opened again, reads it again. */
+/**
+ * What a cached icon depends on: a change to the project's icon choice or folder, or its being opened again, reads it
+ * again.
+ */
 export function projectIconKey(project: IconProject): string {
-  return [project.iconOff ? 'off' : '', project.iconPath ?? '', project.detectedIconPath ?? '', project.iconDetectedAt ? '' : 'stale'].join('|')
+  return [project.iconOff ? 'off' : '', project.iconPath ?? '', project.detectedIconPath ?? '', project.iconDetectedAt ? '' : 'stale', project.path ?? ''].join('|')
 }
 
 /** Whether a project can have an image icon at all: only a project of this computer with icons on. */

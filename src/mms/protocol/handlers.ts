@@ -2050,7 +2050,7 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
  */
 const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
 const FOLDER_METHODS = new Set([
-  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup',
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'projects.setPath', 'orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup',
   'thread.fork', 'thread.mergeBack', 'threads.delete', 'agents.spawn', 'tasks.create',
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
@@ -2264,6 +2264,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projectId = asString(p.projectId, 'projectId', 256)
       const name = asString(p.name, 'name', 512)
       const project = ctx.mms.projects.renameProject(projectId, name)
+      const projects = ctx.mms.projects.listProjects()
+      ctx.emitEvent?.('projects.updated', { projects })
+      return { project, projects: listedProjectsFor(ctx, projects) }
+    }
+    case 'projects.setPath': {
+      // A folder of this computer, chosen in its own folder picker; another computer opens a folder with projects.open.
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', "A project's folder is changed on its own computer")
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const path = asString(p.path, 'path', 4096)
+      if (!isAbsolute(path)) throw new DomainRpcError('invalid_params', 'path must be absolute')
+      if (!ctx.mms.projects.getProject(projectId)) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
+      const project = ctx.mms.projects.setProjectPath(projectId, path)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects: listedProjectsFor(ctx, projects) }

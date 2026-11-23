@@ -47,6 +47,7 @@ const projectsApi = {
   pin: vi.fn(async () => undefined),
   rename: vi.fn(async () => undefined),
   remove: vi.fn(async () => undefined),
+  changeFolder: vi.fn(async (): Promise<unknown> => null),
   trustGitSettings: vi.fn(async () => undefined),
   open: vi.fn(async () => null)
 }
@@ -233,7 +234,7 @@ describe('the row menu', () => {
   it('opens on a project row from its "…" button, with Remove project…', () => {
     show([thread('a', 'Fix tests')])
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
-    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Change icon…', 'Git', 'Remove project…'])
+    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Change folder…', 'Change icon…', 'Git', 'Remove project…'])
   })
 
   it('Copy reference puts the thread\'s link on the clipboard and closes the menu', async () => {
@@ -269,6 +270,8 @@ describe('archive and delete', () => {
     click(menuItem('Delete…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Delete “Old work”?')
+    // Outside the sidebar: a size container pins a fixed overlay inside itself, where the main view covers it.
+    expect(dialog.closest('.threads-sidebar')).toBeNull()
     expect(threadsApi.delete).not.toHaveBeenCalled()
     click(dialog.querySelector('[data-testid="archived-delete-confirm"]')!)
     await flush()
@@ -283,11 +286,26 @@ describe('archive and delete', () => {
     click(menuItem('Remove project…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Mousse leaves the sidebar. Its folder and threads stay.')
+    // Outside the sidebar: a size container pins a fixed overlay inside itself, where the main view covers it.
+    expect(dialog.closest('.threads-sidebar')).toBeNull()
     expect(projectsApi.remove).not.toHaveBeenCalled()
     click(dialog.querySelector('[data-testid="remove-project-confirm"]')!)
     await flush()
     expect(projectsApi.remove).toHaveBeenCalledWith('p1')
     expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+})
+
+describe('Change folder…', () => {
+  it("asks for the project's new folder from its current one, and shows a refusal as a toast", async () => {
+    projectsApi.changeFolder.mockRejectedValueOnce(new Error("Error invoking remote method 'projects:changeFolder': Error: That folder is already the project Docs."))
+    show([thread('a', 'Fix tests')])
+    click(host.querySelector('[aria-label="More actions for Mousse"]')!)
+    click(menuItem('Change folder…'))
+    await flush()
+    expect(projectsApi.changeFolder).toHaveBeenCalledWith('p1', '/p/Mousse')
+    expect(menu()).toBeNull()
+    expect(toast()?.textContent).toContain('Could not change the folder · That folder is already the project Docs.')
   })
 })
 
