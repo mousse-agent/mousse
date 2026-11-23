@@ -4,6 +4,7 @@ import type { Thread } from '../../../shared/types'
 import { isTurnActivePhase, type TurnPhase } from '../../../shared/types'
 import { sideChatsOf } from '../../../shared/threadLineage'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
+import { openSettingsSection } from '../../lib/settingsNavigation'
 import { pickedSelection, pickerModelId } from '../../../shared/modelSelection'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH } from '../../../mms/protocol/types'
@@ -336,7 +337,7 @@ function SideChatColumn({ thread }: { thread: Thread }) {
                   modelMenuOpen,
                   onModelMenuOpenChange: setModelMenuOpen,
                   onModelSelect: (providerId, modelId) => void selectModel(providerId, modelId),
-                  onOpenSettings: () => useAppStore.getState().setSettingsOpen(true),
+                  onOpenSettings: () => openSettingsSection('providers'),
                   contextUsage: NO_CONTEXT,
                   contextOpen,
                   onContextOpenChange: setContextOpen,

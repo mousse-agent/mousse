@@ -574,9 +574,8 @@ export function sortInstances<T extends Pick<InstanceSnapshot, 'driver' | 'built
 }
 
 /**
- * The composer picker's providers: every instance switched on in the scope, in display order, with
- * its models less the hidden ones in the saved order. Before the first snapshot arrives (or when the daemon cannot report one) the
- * daemon's catalog is shown as it is.
+ * The composer picker's providers in display order, with their visible models in saved order.
+ * Before snapshots arrive, use the daemon's configured provider catalog.
  */
 export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefined, catalog: readonly LlmProviderOption[]): PickerProvider[] {
   // The same lists give the same entries, so the model lists keep their identity across thread switches and
@@ -596,12 +595,22 @@ const pickerProvidersMade = new WeakMap<readonly InstanceSnapshot[], WeakMap<rea
 const catalogProvidersMade = new WeakMap<readonly LlmProviderOption[], PickerProvider[]>()
 
 function makePickerProviders(snapshots: readonly InstanceSnapshot[] | undefined, catalog: readonly LlmProviderOption[]): PickerProvider[] {
-  if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id, models: provider.models.flatMap((model) => withSpeedVariants(model, model.speeds)) }))
+  if (!snapshots) {
+    return catalog.filter((provider) => provider.models.length > 0).map((provider) => ({
+      ...provider,
+      llmProvider: provider.id,
+      models: provider.models.flatMap((model) => withSpeedVariants(model, model.speeds))
+    }))
+  }
   const providers: PickerProvider[] = []
   for (const snapshot of sortInstances(snapshots)) {
     // A locked entry runs bot turns only.
     if (!snapshot.enabled.effective || snapshot.config?.profile === 'locked') continue
     const listed = catalog.find((provider) => provider.instanceId === snapshot.instanceId)
+    // Default agent entries can report fallback models before the user connects them.
+    // Added accounts and model APIs remain visible while they need attention.
+    if (snapshot.builtIn && snapshot.driver !== 'pi' &&
+      (snapshot.auth.state === 'signed_out' || (snapshot.auth.state === 'unknown' && !listed?.models.length))) continue
     // The catalog's entry for each model, the first one listed under its id.
     const listedModels = new Map<string, LlmModelOption>()
     for (const entry of listed?.models ?? []) if (!listedModels.has(entry.id)) listedModels.set(entry.id, entry)
