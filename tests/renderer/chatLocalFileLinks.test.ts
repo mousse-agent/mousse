@@ -8,7 +8,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { Markdown } from '../../src/renderer/chat/components/agent-elements/markdown'
+import { Markdown, type MarkdownImages } from '../../src/renderer/chat/components/agent-elements/markdown'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -31,8 +31,11 @@ afterEach(() => {
   window.removeEventListener('mousse:open-file', record)
 })
 
-function show(content: string): void {
-  act(() => root.render(createElement(Markdown, { content })))
+// A bot's chat renders its Markdown with an image rule, which takes its own plugin list.
+const imageRule: MarkdownImages = { Image: () => null }
+
+function show(content: string, images?: MarkdownImages): void {
+  act(() => root.render(createElement(Markdown, { content, images })))
 }
 
 /** Clicks the reply's only link and returns what it asked the Files panel to open. */
@@ -62,8 +65,11 @@ describe('a local file link in an agent reply', () => {
     ['[app.ts](file://localhost/home/me/app.ts)', { path: '/home/me/app.ts' }],
   ]
 
-  it.each(cases)('%s opens the file', (written, opens) => {
-    show(`See ${written} for details.`)
+  it.each(cases.flatMap(([written, opens]) => [
+    [written, 'a thread', opens, undefined],
+    [written, "a bot's chat", opens, imageRule],
+  ] as const))('%s opens the file in %s', (written, _where, opens, images) => {
+    show(`See ${written} for details.`, images)
     expect(host.textContent).not.toContain('[blocked]')
     expect(host.querySelector('a')?.textContent).toContain('app.ts')
     const detail = clickLink() as Record<string, unknown>
