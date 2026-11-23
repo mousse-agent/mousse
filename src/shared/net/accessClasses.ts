@@ -163,7 +163,6 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'workflowRuns.trace': 'view',
     'pullRequests.get': 'view',
     'pullRequests.detail': 'view',
-    'pullRequests.view': 'view',
     'pullRequests.baseBranches': 'view',
     'pullRequests.mergeMethod': 'view',
     'pullRequests.watchStatus': 'view',
