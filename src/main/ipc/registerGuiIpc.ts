@@ -3138,6 +3138,20 @@ export function registerGuiIpc(
     return info
   })
 
+  registerHandler('app:gitSetup', () => guiMms.gitPrerequisite)
+  registerHandler('app:installGit', (event) => {
+    if (event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) {
+      throw new Error('Git setup is only available from the workspace window')
+    }
+    return guiMms.installGit()
+  })
+  guiMms.on('git-setup', (setup: import('../../shared/gitSetup').GitSetup) => {
+    // This runs before any window has a profile binding.
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('app:gitSetupChanged', setup)
+    }
+  })
+
   // Profile operations are installation metadata plus a trusted per-window
   // binding. The renderer supplies only an id/slug; daemon admission resolves
   // the owned profile root and changes the sender's session epoch.

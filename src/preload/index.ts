@@ -1,4 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
+import type { GitSetup } from '../shared/gitSetup'
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import type { WindowCacheSize } from '../shared/diagnostics/profiler'
@@ -1449,6 +1450,13 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
+    installGit: (): Promise<boolean> => ipcRenderer.invoke('app:installGit'),
+    gitSetup: (): Promise<GitSetup> => ipcRenderer.invoke('app:gitSetup'),
+    onGitSetupChanged: (cb: (setup: GitSetup) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, setup: GitSetup) => cb(setup)
+      ipcRenderer.on('app:gitSetupChanged', handler)
+      return () => ipcRenderer.removeListener('app:gitSetupChanged', handler)
+    },
     /**
      * What this window's profile showed last time, to show until the service answers (display only). Synchronous, so
      * the window's first frame shows it; answered once per page load, then null.

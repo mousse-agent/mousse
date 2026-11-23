@@ -26,6 +26,9 @@ import { fileURLToPath } from 'url'
 import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import { rotateStartupLogSync, STARTUP_LOG_CAP_ENV, STARTUP_LOG_FILE, STARTUP_LOG_MAX_BYTES } from '../../cli/startupLog'
 import { daemonCommand } from './daemonCommand'
+import { ensureWindowsGit, withWindowsGitPath } from './windowsGit'
+import { nativeGitEnvironment, nativeGitInstaller, installNativeGit, type NativeGitInstaller } from './nativeGit'
+import type { GitSetup } from '../../shared/gitSetup'
 import {
   canonicalizeHome,
   DAEMON_OWNER_TOKEN_ENV,
@@ -228,6 +231,10 @@ export class GuiMmsController extends EventEmitter {
   private readonly windowEventUnsubs = new Map<number, () => void>()
   private baseBinding: TrustedProfileBinding | null = null
   private state: GuiMmsConnectionState = 'idle'
+  private gitSetup: GitSetup = null
+  private gitSetupAbort?: AbortController
+  private nativeInstaller?: NativeGitInstaller
+  private nativeInstall?: Promise<boolean>
   private quitting = false
   /**
    * Set while an update installs (`stopForInstall`) or when Mousse quits and stops its service (`stopForQuit`). Unlike
@@ -313,6 +320,47 @@ export class GuiMmsController extends EventEmitter {
     return this.state
   }
 
+  get gitPrerequisite(): GitSetup {
+    return this.gitSetup
+  }
+
+  private setGitSetup(setup: GitSetup): void {
+    if (this.gitSetup === setup) return
+    this.gitSetup = setup
+    this.emit('git-setup', setup)
+  }
+
+  /** Start the native installer from the startup screen. Concurrent clicks share one request. */
+  installGit(): Promise<boolean> {
+    this.assertMayConnect()
+    if (this.nativeInstall) return this.nativeInstall
+    const installer = this.nativeInstaller
+    if (!installer || this.gitSetupAbort || this.gitSetup?.phase !== 'required') return Promise.resolve(false)
+
+    const setup = new AbortController()
+    this.gitSetupAbort = setup
+    this.setGitSetup({ phase: 'installing', native: true })
+    this.nativeInstall = installNativeGit(installer, setup.signal).then((finished) => {
+      if (!finished) {
+        this.setGitSetup({
+          phase: 'required',
+          canInstall: true,
+          message: 'Finish installing Command Line Tools in the macOS dialog, then click Retry.'
+        })
+      }
+      return finished
+    }).catch(() => {
+      if (!setup.signal.aborted) {
+        this.setGitSetup({ phase: 'required', canInstall: true, message: installer.failureMessage })
+      }
+      return false
+    }).finally(() => {
+      this.nativeInstall = undefined
+      this.gitSetupAbort = undefined
+    })
+    return this.nativeInstall
+  }
+
   get connected(): boolean {
     return this.state === 'ready' && Boolean(this.client?.connected)
   }
@@ -383,11 +431,15 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    this.gitSetupAbort?.abort()
     this.clearReconnectTimer()
     for (const reopen of this.windowReopens.values()) if (reopen.timer) clearTimeout(reopen.timer)
     this.windowReopens.clear()
+    await this.nativeInstall
     await this.startPromise?.catch(() => undefined)
     await this.reconnecting?.catch(() => undefined)
+    this.nativeInstaller = undefined
+    this.setGitSetup(null)
     await Promise.allSettled([...this.windowSessionOpenings.values()])
     await this.attachedBrowserHost?.shutdown()
     this.clearAllTimersAndListeners()
@@ -1161,7 +1213,10 @@ export class GuiMmsController extends EventEmitter {
       const runtime = resolveRuntimeStatus(this.homeDir)
       if (runtime.running && runtime.record) {
         // A service asked to stop keeps the home and its readiness until it exits: wait for it, then look again.
-        if (!readStopRequest(this.homeDir, runtime.record.token)) return runtime.record
+        if (!readStopRequest(this.homeDir, runtime.record.token)) {
+          this.setGitSetup(null)
+          return runtime.record
+        }
         await this.waitForServiceToLeave(runtime.record.token, leaveBy)
         continue
       }
@@ -1257,6 +1312,48 @@ export class GuiMmsController extends EventEmitter {
       env: process.env,
       host
     })
+    if (this.nativeInstall) await this.nativeInstall
+    this.assertMayConnect()
+    const setup = new AbortController()
+    this.gitSetupAbort = setup
+    let gitEnv = env
+    try {
+      const gitPath = await ensureWindowsGit({
+        homeDir: this.homeDir,
+        env,
+        signal: setup.signal,
+        onSetup: (state) => this.setGitSetup(state)
+      })
+      gitEnv = withWindowsGitPath(env, gitPath)
+      if (!gitPath && (process.platform === 'linux' || process.platform === 'darwin')) {
+        const nativeGitEnv = await nativeGitEnvironment(process.platform, gitEnv, setup.signal)
+        if (!nativeGitEnv) {
+          this.nativeInstaller = await nativeGitInstaller(process.platform)
+          setup.signal.throwIfAborted()
+          if (this.gitSetup?.phase !== 'required' || this.gitSetup.canInstall !== Boolean(this.nativeInstaller)) {
+            this.setGitSetup({
+              phase: 'required',
+              canInstall: Boolean(this.nativeInstaller),
+              message: this.nativeInstaller?.readyMessage ??
+                'Install Git with your distribution’s package manager, then click Retry.'
+            })
+          }
+          throw new Error('Git is required to start the workspace.')
+        }
+        gitEnv = nativeGitEnv
+      }
+      this.nativeInstaller = undefined
+      this.setGitSetup(null)
+    } catch (error) {
+      if (!setup.signal.aborted && this.gitSetup?.phase !== 'required') {
+        this.setGitSetup({ phase: 'failed', message: error instanceof Error ? error.message : String(error) })
+      }
+      throw error
+    } finally {
+      this.gitSetupAbort = undefined
+      if (setup.signal.aborted) this.setGitSetup(null)
+    }
+    this.assertMayConnect()
     mkdirSync(this.homeDir, { recursive: true })
     const ownerToken = createOwnerToken()
     const logPath = join(this.homeDir, STARTUP_LOG_FILE)
@@ -1270,7 +1367,7 @@ export class GuiMmsController extends EventEmitter {
         {
           detached: true,
           stdio: ['ignore', logFd, logFd],
-          env: { ...env, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken,
+          env: { ...gitEnv, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken,
             [STARTUP_LOG_CAP_ENV]: String(STARTUP_LOG_MAX_BYTES)
           },
           windowsHide: true

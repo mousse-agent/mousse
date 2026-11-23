@@ -14,7 +14,7 @@ const listeners = vi.hoisted(() => new Map<string, (event: unknown) => void>())
 
 vi.mock('electron', () => ({
   ipcMain: { handle: (channel: string, handler: Handler) => { handlers.set(channel, handler) }, removeHandler: () => undefined, on: (channel: string, listener: (event: unknown) => void) => { listeners.set(channel, listener) } },
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: { getAllWindows: () => [], fromWebContents: (sender: unknown) => sender === event.sender ? window : null },
   Notification: class {},
   app: { getPath: () => '', getVersion: () => '0.0.0', on: () => undefined },
   shell: {},
@@ -36,6 +36,7 @@ const T = '2026-11-20T10:00:00.000Z'
 const thread = (id: string) => ({ id, name: `Thread ${id}`, createdAt: T, updatedAt: T })
 const requests: string[] = []
 const guiMms = {
+  installGit: vi.fn(async () => true),
   request: vi.fn(async (method: string) => {
     requests.push(method)
     if (method === 'threads.list') return { threads: [thread('newest'), thread('last-shown')], version: { epoch: 'e', seq: 3 } }
@@ -61,10 +62,10 @@ let dir: string
 let file: string
 let cache: WarmStartCache
 const sent: Array<[string, unknown]> = []
-const event = { sender: { id: 1, isDestroyed: () => false, send: (channel: string, data: unknown) => { sent.push([channel, data]) } } }
+const event = { sender: { id: 1, mainFrame: { parent: null }, isDestroyed: () => false, send: (channel: string, data: unknown) => { sent.push([channel, data]) } } }
 const invoke = (channel: string, ...args: unknown[]): Promise<unknown> => Promise.resolve(handlers.get(channel)!(event, ...args))
 /** The window's own page; another sender (another window, a frame inside it) is answered nothing. */
-const mainFrame = { parent: null }
+const mainFrame = event.sender.mainFrame
 const window = { isDestroyed: () => false, webContents: event.sender }
 /** What the preload's synchronous read returns: the listener sets `returnValue`, once the file has been read. */
 async function readSync(sender: unknown = event.sender, senderFrame: unknown = mainFrame): Promise<unknown> {
@@ -84,6 +85,14 @@ beforeAll(async () => {
   registerGuiIpc({ guiMms: inert(guiMms), presentation: new PresentationState(), settings: inert({ get: () => ({ provider: { llmProvider: 'claude-subscription' } }) }), browserView: inert(), repoRoot: '', warmStart: cache } as unknown as GuiIpcServices, () => window as never)
 })
 afterAll(async () => { await rm(dir, { recursive: true, force: true }) })
+
+it('opens Git setup from the workspace page before it has a profile binding', async () => {
+  const install = handlers.get('app:installGit')!
+  await expect(install({ ...event, senderFrame: { parent: mainFrame } })).rejects.toThrow('workspace window')
+  expect(guiMms.installGit).not.toHaveBeenCalled()
+  await expect(install({ ...event, senderFrame: mainFrame })).resolves.toBe(true)
+  expect(guiMms.installGit).toHaveBeenCalledOnce()
+})
 
 describe('the warm start through the window handlers', () => {
   it('opens a new window on the thread shown last, and keeps what it was sent for the next launch', async () => {
