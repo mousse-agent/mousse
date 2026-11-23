@@ -269,6 +269,8 @@ describe('archive and delete', () => {
     click(menuItem('Delete…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Delete “Old work”?')
+    // Outside the sidebar: a size container pins a fixed overlay inside itself, where the main view covers it.
+    expect(dialog.closest('.threads-sidebar')).toBeNull()
     expect(threadsApi.delete).not.toHaveBeenCalled()
     click(dialog.querySelector('[data-testid="archived-delete-confirm"]')!)
     await flush()
@@ -283,6 +285,8 @@ describe('archive and delete', () => {
     click(menuItem('Remove project…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Mousse leaves the sidebar. Its folder and threads stay.')
+    // Outside the sidebar: a size container pins a fixed overlay inside itself, where the main view covers it.
+    expect(dialog.closest('.threads-sidebar')).toBeNull()
     expect(projectsApi.remove).not.toHaveBeenCalled()
     click(dialog.querySelector('[data-testid="remove-project-confirm"]')!)
     await flush()

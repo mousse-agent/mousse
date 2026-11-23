@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom'
 import { deleteDialogCopy, type DeleteRequest } from '../../lib/archivedThreads'
 import { Modal } from '../ui/Modal'
 
@@ -13,7 +14,8 @@ export function DeleteArchivedDialog({ request, busy, error, onConfirm, onCancel
   onCancel: () => void
 }) {
   const copy = deleteDialogCopy(request)
-  return (
+  // In the document's body: the sidebar it opens from is a size container, which pins a fixed overlay inside it.
+  return createPortal(
     <Modal
       open
       title={copy.title}
@@ -29,6 +31,7 @@ export function DeleteArchivedDialog({ request, busy, error, onConfirm, onCancel
     >
       <p className="archived-delete-body">{copy.body}</p>
       {error && <p className="archived-delete-error" role="alert" data-testid="archived-delete-error">{error}</p>}
-    </Modal>
+    </Modal>,
+    document.body
   )
 }

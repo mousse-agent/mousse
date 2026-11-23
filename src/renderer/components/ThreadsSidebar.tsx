@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { flushSync } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 
 import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
@@ -2172,8 +2172,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       {tabMenu && <ThreadsTabMenu x={tabMenu.x} y={tabMenu.y} onClose={closeTabMenu} onHideAllBotThreads={handleHideAllBotThreads} />}
 
-      <Modal
-        open={removingProject !== null}
+      {/* In the document's body: the sidebar is a size container, which pins a fixed overlay inside it, under the main view. */}
+      {removingProject && createPortal(<Modal
+        open
         title="Remove project"
         onClose={() => setRemovingProject(null)}
         footer={<>
@@ -2181,13 +2182,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           <button type="button" className="settings-btn" data-testid="remove-project-confirm" onClick={confirmRemoveProject}>Remove</button>
         </>}
       >
-        {removingProject && (
-          <p className="threads-sidebar-remove-project">
-            {removingProject.computerName ? `${removingProject.name} on ${removingProject.computerName}` : removingProject.name} leaves the sidebar. Its folder and threads stay.
-            {removingProject.alsoOn?.length ? ` ${removingProject.alsoOn.join(' and ')} keep${removingProject.alsoOn.length === 1 ? 's' : ''} theirs.` : ''}
-          </p>
-        )}
-      </Modal>
+        <p className="threads-sidebar-remove-project">
+          {removingProject.computerName ? `${removingProject.name} on ${removingProject.computerName}` : removingProject.name} leaves the sidebar. Its folder and threads stay.
+          {removingProject.alsoOn?.length ? ` ${removingProject.alsoOn.join(' and ')} keep${removingProject.alsoOn.length === 1 ? 's' : ''} theirs.` : ''}
+        </p>
+      </Modal>, document.body)}
 
       {pullRequestProject && (
         <StartFromPullRequestDialog
