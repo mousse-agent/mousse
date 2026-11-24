@@ -15,6 +15,11 @@ import { cleanupAll, linked, type ProtocolEvent } from './routerFixture'
 afterAll(cleanupAll)
 
 const STORED = 120
+/**
+ * How long the records a test sets up with may take to reach this computer's copy. Each crosses a real Net
+ * session between two daemons, and a busy test runner delivers them several times slower than an idle one.
+ */
+const DELIVERED_WITHIN = 60_000
 
 const message = (id: string, content: string) => ({
   id,
@@ -45,7 +50,7 @@ describe('opening a thread of another computer', () => {
       t.owner.orchestrator.emit('thread-message', { threadId: thread.id, message: message(`m${n}`, `line ${n}`) })
     await vi.waitFor(
       async () => expect(ids(await t.dispatch('thread.snapshot', { threadId: id }, t.connection('earlier')))).toHaveLength(STORED),
-      { timeout: 20_000 }
+      { timeout: DELIVERED_WITHIN }
     )
     const options = (t.router.attached as unknown as { options: { idleMs?: number } }).options
     options.idleMs = 10
@@ -170,7 +175,7 @@ describe('opening a thread of another computer', () => {
     for (let n = 0; n < 60; n++)
       t.owner.orchestrator.emit('thread-message', { threadId: thread.id, message: message(`r${n}`, `line ${n}`) })
     await vi.waitFor(async () => expect(ids(await t.dispatch('thread.snapshot', { threadId: id }))).toHaveLength(60), {
-      timeout: 20_000
+      timeout: DELIVERED_WITHIN
     })
     const from = t.events.length
     // The session comes back: the hub opens every stream of that computer again, from the copy on disk.
