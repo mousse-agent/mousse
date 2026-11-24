@@ -12,6 +12,7 @@ import { onSettingsSaved } from '../settings/SettingsStore'
 import { DEFAULT_MEMORY_THRESHOLDS, MEMORY_THRESHOLDS_ENV, isPackagedRuntime, resolveMemoryThresholds, toMb, type MemoryThresholds } from '../../shared/diagnostics/memory'
 import { writeHeapSnapshotFile } from './heapSnapshot'
 import { removeLeftoverSummaryFiles, takeHeapSummary } from './heapSummary'
+import { IdleMemoryTrim } from './idleMemoryTrim'
 import { MemoryMonitor, type ServiceCountsReading } from './MemoryMonitor'
 import { liveFileWatchers } from './liveCounts'
 import { MEMORY_NOTICE_EVENT, PROFILER_COLLECT_EVENT, PROFILER_STATE_EVENT, registerMemoryDiagnosticsMethods, type MemoryMonitorHolder } from './memoryDomain'
@@ -110,6 +111,8 @@ export function prepareMemoryMonitor(opts: {
   packaged?: boolean
   /** Tests: the monitor to run when the profiler turns on. */
   createMonitor?: (thresholds: MemoryThresholds) => MemoryMonitor
+  /** Tests: the idle heap trim, which runs whether or not the profiler is on. */
+  idleTrim?: Pick<IdleMemoryTrim, 'start' | 'stop'>
 }): { start: () => void; stop: () => void; refresh: () => void } | null {
   const env = opts.env ?? process.env
   // A heap summary file a crash left behind holds what the service had in memory: gone at every start.
@@ -119,6 +122,7 @@ export function prepareMemoryMonitor(opts: {
   const activeTurns = () => profiles().reduce((sum, services) => sum + services.orchestrator.activeTurnCount(), 0)
   const thresholds = resolveMemoryThresholds(env[MEMORY_THRESHOLDS_ENV], DEFAULT_MEMORY_THRESHOLDS, { packaged: opts.packaged ?? isPackagedRuntime() })
   const waiting = new Map<string, (answered: boolean) => void>()
+  const idleTrim = opts.idleTrim ?? new IdleMemoryTrim({ activeTurns })
   const holder: MemoryMonitorHolder = {
     monitor: null,
     activeTurns,
@@ -193,9 +197,11 @@ export function prepareMemoryMonitor(opts: {
     start: () => {
       started = true
       refresh(10_000)
+      idleTrim.start()
     },
     stop: () => {
       stopped = true
+      idleTrim.stop()
       offSettings()
       offDisposed()
       offClosed()

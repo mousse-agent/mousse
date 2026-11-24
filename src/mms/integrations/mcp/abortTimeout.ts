@@ -44,15 +44,11 @@ export function abortError(reason: unknown): Error {
   return error
 }
 
+/**
+ * A signal that aborts when any of `signals` does, with that signal's reason. The sources hold it weakly, so one made
+ * for a single call or HTTP request is freed with it even when a source (a connection's or the manager's lifetime)
+ * lives on; a listener added to such a source would keep it until the source ends.
+ */
 export function combineSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
-  const controller = new AbortController()
-  for (const signal of signals) {
-    if (!signal) continue
-    if (signal.aborted) {
-      controller.abort(signal.reason)
-      return controller.signal
-    }
-    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
-  }
-  return controller.signal
+  return AbortSignal.any(signals.filter((signal): signal is AbortSignal => signal !== undefined))
 }
