@@ -49,6 +49,8 @@ export type PairingStep =
   | 'grant-removed'
   /** Either: one direction's grant is journaled as revoking and no longer served, `grant.revoke_local` not sent. */
   | 'revoking'
+  /** Either: the other direction's level saved and `grant.add_connected` answered, its row not written. */
+  | 'let-in'
 
 export interface PairingPort {
   /** Under the routes checks' `route-leak` control: the address pairback offers first. */
@@ -1385,6 +1387,11 @@ export class EnginePairing {
         this.waiters.delete(check)
       }
     }
+  }
+
+  /** A crash point of a step run outside the ceremony (asking for the other direction); throws once stopped. */
+  checkpoint(step: PairingStep): void {
+    this.at(step)
   }
 
   /** A test's crash point: from here this run writes nothing more. */

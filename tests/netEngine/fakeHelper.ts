@@ -129,6 +129,11 @@ export class FakeNetwork {
   readonly receipts = new Map<string, string>()
   /** By helper identity: an op fails (`busy`, a helper still starting) this many more times before it answers. */
   readonly failing = new Map<string, Record<string, number>>()
+  /**
+   * By helper identity: this many more `grant.add_connected` saves fail after the grant was added in memory
+   * (`store_failed`, the grant in effect), as a full disk would.
+   */
+  readonly storeFailing = new Map<string, number>()
   /** For each identity, the identities it may dial (its peers). */
   private readonly peers = new Map<string, Set<string>>()
   /** Open invitations by ticket, with their host. */
@@ -262,6 +267,30 @@ export class FakeNetwork {
     const given = grant ?? this.nextGrant++
     held.set(caller, given)
     this.peer(caller, host)
+    return { grant: given, already: false }
+  }
+
+  /**
+   * `grant.add_connected` on `host`'s connection `conn` (§7): the connection's peer gets a grant at `host`, without a
+   * peer record; an inbound connection answers the grant it is served under. Undefined when the connection is down.
+   */
+  grantConnected(
+    host: FakeHelper,
+    conn: Conn
+  ): { grant: number | string; already: boolean } | undefined {
+    if (!conn.up || !this.conns.has(conn)) return undefined
+    const peer = conn.a === host ? conn.b.identity : conn.a.identity
+    let held = this.grants.get(host.identity)
+    if (conn.b === host) {
+      // Inbound: the peer is live only under a served grant of this computer.
+      const served = held?.get(peer)
+      return served === undefined ? undefined : { grant: served, already: true }
+    }
+    if (!held) this.grants.set(host.identity, (held = new Map()))
+    const had = held.get(peer)
+    if (had !== undefined) return { grant: had, already: true }
+    const given = this.nextGrant++
+    held.set(peer, given)
     return { grant: given, already: false }
   }
 
@@ -1455,6 +1484,33 @@ export class FakeHelper {
           if (!added.already && typeof message.receipt === 'string')
             this.network.receipts.set(String(added.grant), message.receipt)
           return reply(added)
+        }
+        case 'grant.add_connected': {
+          if (!this.lists('grant-add-connected'))
+            return reply({ error: 'unknown_op', reason: 'grant.add_connected' })
+          // As the helper: every field is required and no other is taken; the identity is the connection's peer.
+          const fields = Object.keys(message).filter((key) => key !== 'op' && key !== 'id')
+          const name = message.name
+          if (
+            fields.length !== 3 ||
+            !Number.isSafeInteger(message.conn) ||
+            typeof name !== 'string' ||
+            !name ||
+            Buffer.byteLength(name) > 128 ||
+            typeof message.role !== 'string' ||
+            !/^[a-z0-9-]{1,32}$/.test(message.role)
+          )
+            return reply({ error: 'bad_request', reason: 'fields' })
+          if (this.paused) return reply({ error: 'paused', reason: this.paused })
+          const conn = this.conns.get(Number(message.conn))
+          const added = conn && this.network.grantConnected(this, conn)
+          if (!added) return reply({ error: 'no_conn', reason: 'not live' })
+          const failing = this.network.storeFailing.get(this.identity) ?? 0
+          if (failing > 0) {
+            this.network.storeFailing.set(this.identity, failing - 1)
+            return reply({ error: 'store_failed', reason: 'disk' })
+          }
+          return reply({ ...added, role: 'owner' })
         }
         case 'grants.list':
           return reply({

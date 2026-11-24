@@ -153,6 +153,18 @@ export interface EngineLimits {
   plusReadRetryMs: number
   /** How many times the Plus state and the removals are asked for at hello before the app waits for an event. */
   plusReadTries: number
+  /**
+   * How long a request to use the other computer of a one-way pairing waits for its owner to press Allow or Not now
+   * ("Use <name> from here…"); past it the row says it expired and the other computer's prompt closes.
+   */
+  accessAskMs: number
+  /** The least time between two such requests from this computer to one other computer. */
+  accessAskGapMs: number
+  /**
+   * The least time between two Allow prompts one other computer can raise here by asking: a request sooner than this
+   * after the last one is dropped without a prompt.
+   */
+  accessPromptGapMs: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -219,7 +231,10 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   relayReadRetryMs: 1_000,
   relayReadTries: 5,
   plusReadRetryMs: 1_000,
-  plusReadTries: 5
+  plusReadTries: 5,
+  accessAskMs: 2 * 60_000,
+  accessAskGapMs: 30_000,
+  accessPromptGapMs: 20_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -283,7 +298,10 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   relayReadRetryMs: 'MOUSSE_NET_ENGINE_RELAY_READ_RETRY_MS',
   relayReadTries: 'MOUSSE_NET_ENGINE_RELAY_READ_TRIES',
   plusReadRetryMs: 'MOUSSE_NET_ENGINE_PLUS_READ_RETRY_MS',
-  plusReadTries: 'MOUSSE_NET_ENGINE_PLUS_READ_TRIES'
+  plusReadTries: 'MOUSSE_NET_ENGINE_PLUS_READ_TRIES',
+  accessAskMs: 'MOUSSE_NET_ENGINE_ACCESS_ASK_MS',
+  accessAskGapMs: 'MOUSSE_NET_ENGINE_ACCESS_ASK_GAP_MS',
+  accessPromptGapMs: 'MOUSSE_NET_ENGINE_ACCESS_PROMPT_GAP_MS'
 })
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */

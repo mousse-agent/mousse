@@ -43,7 +43,11 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.relay.rotate': ['relay'],
   'netEngine.relay.allow': ['node', 'destination'],
   'netEngine.relay.disallow': ['node', 'destination'],
-  'netEngine.relay.dismiss': ['node', 'destination']
+  'netEngine.relay.dismiss': ['node', 'destination'],
+  'netEngine.access.ask': ['node'],
+  'netEngine.access.cancel': ['node'],
+  'netEngine.access.answer': ['node', 'request'],
+  'netEngine.access.let': ['node']
 }
 
 const text = (value: unknown): string | undefined =>
@@ -122,6 +126,14 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
     throw new DomainRpcError('bad_request', `${method} takes access, as a preset's fields, with kind "link"`)
   if (method === 'netEngine.approve' && fields.access !== undefined && !accessFields(fields.access))
     throw new DomainRpcError('bad_request', `${method} takes access as a preset's fields`)
+  if (method === 'netEngine.access.answer' && typeof fields.yes !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} needs yes`)
+  // Letting a computer in always names its level: nothing is let in under a default the owner did not see.
+  if (
+    (method === 'netEngine.access.let' || (method === 'netEngine.access.answer' && fields.yes === true)) &&
+    !accessFields(fields.access)
+  )
+    throw new DomainRpcError('bad_request', `${method} needs access as a preset's fields`)
   if (method === 'netEngine.join' && fields.share !== undefined && !strings(fields.share))
     throw new DomainRpcError('bad_request', `${method} takes share as a list of addresses`)
   if (method === 'netEngine.join' && fields.back !== undefined && typeof fields.back !== 'boolean')
@@ -321,6 +333,18 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.relay.dismiss':
               engine.dismissRelay(p.node, p.destination)
+              return engine.status()
+            case 'netEngine.access.ask':
+              engine.access().ask(p.node)
+              return engine.status()
+            case 'netEngine.access.cancel':
+              engine.access().cancel(p.node)
+              return engine.status()
+            case 'netEngine.access.answer':
+              await engine.access().answer(p.node, p.request, p.yes, p.access)
+              return engine.status()
+            case 'netEngine.access.let':
+              await engine.access().let(p.node, p.access)
               return engine.status()
           }
         } catch (error) {

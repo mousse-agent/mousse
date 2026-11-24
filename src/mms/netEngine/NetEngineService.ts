@@ -72,6 +72,7 @@ import {
 import { EnginePlus } from './plus'
 import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
+import { EngineAccess } from './access'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
@@ -116,6 +117,8 @@ interface Started {
   /** Aborted at a pairing's revocation: its handlers stop, nothing else does. */
   revocations: Map<NodeId, AbortController>
   pairing: EnginePairing
+  /** The other direction of one-way pairings: requests, answers and what each side grants. */
+  access: EngineAccess
   /** The host's owed rows being written from `grants.list`, while they are. */
   reconciling?: Promise<void>
   /** The engine's own editor tunnels and SSH endpoint (Phase 1b §9.2). */
@@ -328,6 +331,7 @@ export class NetEngineService implements EngineDirectoryPort {
         : {}),
       devices: this.devices(),
       approvals: this.started?.pairing.pendingApprovals() ?? [],
+      ...(this.started?.access.pending().length ? { accessAsks: this.started.access.pending() } : {}),
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
       ...(this.settings()?.enabled && this.options.loginStart?.asking() ? { loginStart: 'ask' as const } : {}),
@@ -1233,6 +1237,11 @@ export class NetEngineService implements EngineDirectoryPort {
     return this.require().pairing
   }
 
+  /** Asking for, and answering, the other direction of a one-way pairing (§7). */
+  access(): EngineAccess {
+    return this.require().access
+  }
+
   /**
    * The routes checks' `route-leak` control (1b §14): a second loopback address of this helper, a forwarder to its
    * listener on a port the checks' class map leaves out, so a route other than the one under test answers. Pairback
@@ -1394,6 +1403,7 @@ export class NetEngineService implements EngineDirectoryPort {
         const relay = this.relayView
           ? deviceRelay(this.relayView, row.endpoint, now, this.dismissed(), engineLimits().relayOffersShown)
           : undefined
+        const other = started.access.other(row)
         return {
           node,
           name: row.name,
@@ -1429,7 +1439,8 @@ export class NetEngineService implements EngineDirectoryPort {
                   : {})
               }
             : {}),
-          ...(relay ? { relay } : {})
+          ...(relay ? { relay } : {}),
+          ...(other ? { other } : {})
         }
       })
     for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
@@ -1462,6 +1473,12 @@ export class NetEngineService implements EngineDirectoryPort {
 
   /** Tells the windows to read the status again. */
   private changed(): void {
+    try {
+      // Each open access exchange says what this computer grants the other one now, when that changed.
+      this.started?.access.refresh()
+    } catch {
+      // Said again on the next change.
+    }
     try {
       // The rows' conditions are timed from the change that began them.
       if (this.started) this.devices()
@@ -1556,18 +1573,25 @@ export class NetEngineService implements EngineDirectoryPort {
         calledBy: (caller, name, features) => {
           pairing.heard(caller.node, features)
           pairing.named(caller.node, name)
+        },
+        features: () => access.features(),
+        access: {
+          open: (caller, connection, channel) => access.opened(caller.node, connection, channel),
+          message: (caller, _channel, header) => access.receive(caller.node, header)
         }
       },
       client: {
         get store() {
           return bridge().threads.store
         },
-        verify: (stream, _record, _snapshot, client) => this.verifyIngest(stream, client)
+        verify: (stream, _record, _snapshot, client) => this.verifyIngest(stream, client),
+        features: () => access.features()
       },
       hooks: {
         onClientReady: (node) => {
           this.options.bridge()?.peerOnline(node)
           pairing.clientReady(node)
+          access.ensure(node)
           // A: its first live connection to B confirms an SSH add (1b §3.4 step 6).
           // Stopping: the store is closed, and nothing is written.
           const row = liveRow(node)
@@ -1595,6 +1619,8 @@ export class NetEngineService implements EngineDirectoryPort {
         },
         // The helper keeps a newer outbound path (renewed, or dialled while one was up) waiting until told.
         onPathInUse: (connection) => {
+          // The access exchange follows the client to the path it uses now.
+          access.ensure(connection.peer)
           const conn = Number(connection.id)
           if (!Number.isSafeInteger(conn) || !this.helper || connection.reversed) return
           void this.helper.request('path.reopened', { conn }).catch(() => {
@@ -1678,6 +1704,22 @@ export class NetEngineService implements EngineDirectoryPort {
         })
       }
     })
+    const access: EngineAccess = new EngineAccess({
+      peers,
+      sessions,
+      helper: () => this.helper,
+      callerSays: (node, feature) => pairing.callerSays(node, feature),
+      applyAccess: (node, fields) => {
+        rt.policy.set(node, fields)
+      },
+      // Over the other computer's own connection: this computer holds no address of it.
+      dial: async (node) => {
+        const row = peers.serving(node)
+        if (row && this.helper && !sessions.online(node)) await this.helper.dial(row.endpoint)
+      },
+      checkpoint: (step) => pairing.checkpoint(step),
+      changed: () => this.changed()
+    })
     const timer = setInterval(() => {
       try {
         this.renew()
@@ -1691,7 +1733,7 @@ export class NetEngineService implements EngineDirectoryPort {
       rt.policy.onChange(() => editor.reconcile()),
       net.onWorkOnThreadsOff(() => editor.reconcile())
     ]
-    this.started = { rt, peers, sessions, timer, revocations, pairing, editor, rights, release }
+    this.started = { rt, peers, sessions, timer, revocations, pairing, access, editor, rights, release }
     net.setEngineAuthorizer((method, caller, capability) =>
       this.authorizeEngine(method, caller, capability)
     )
@@ -1850,6 +1892,7 @@ export class NetEngineService implements EngineDirectoryPort {
     this.started = undefined
     this.own = undefined
     started.pairing.stop()
+    started.access.stop()
     for (const release of started.release.splice(0)) release()
     this.options.net.setEngineEditor(undefined)
     // An ordinary end (a quit, a restart): editor servers keep running, as when an SSH server restarts.
