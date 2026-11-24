@@ -9,6 +9,7 @@ import type {
 import { relayText, routeText } from '../../../shared/netEngine/routes'
 import type { PlatformRequestMethod } from '../../../shared/platform'
 import type { SshRecordView } from '../../../shared/net/local'
+import type { AccessPresetFields } from '../../../shared/net/accessPresets'
 import { refreshComputers, useComputers } from '../../lib/computers'
 import {
   canWorkOnThreads,
@@ -35,18 +36,23 @@ import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { MousseIdAccount } from '../MousseIdAccount'
 import { AddPhoneDialog, EnrollmentRequestRow, useEnrollmentRequests } from '../MousseIdSection'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { Modal } from '../ui/Modal'
 import { AccessPanel } from './AccessPanel'
+import { AllowPrompt } from './AllowPrompt'
 import { EnginePlusGroup } from './EnginePlusGroup'
 import { LetDeviceInDialog } from './LetDeviceInDialog'
 import { UseComputerDialog } from './UseComputerDialog'
 import { hasFeatures } from './ways'
 import { hostLabel, removalText, removalTitle } from './plusRows'
 import {
+  askedLine,
   engineAddresses,
   engineSideRow,
   engineSides,
+  engineWay,
   engineWhere,
+  otherWayItem,
   type EngineSide,
   relayLimitDetail,
   relayLimitLine,
@@ -179,6 +185,10 @@ export function EngineDevicesSection() {
     name: string
   }>()
   const [everywhere, setEverywhere] = useState<NetEngineDevice>()
+  // "Let <name> use this computer…": the Allow prompt for a computer this one uses.
+  const [letting, setLetting] = useState<NetEngineDevice>()
+  // Requests from other computers closed here without an answer (they expire there).
+  const [setAside, setSetAside] = useState<string[]>([])
   // A `mousse://pair` link that opened Mousse opens Scan or paste with it.
   const offered = useOfferedPairLink()
   const [linkToEnter, setLinkToEnter] = useState<string>()
@@ -350,6 +360,17 @@ export function EngineDevicesSection() {
               ]
     )
     if (!view.actions.includes('remove')) items.push(...relayItems)
+    // The missing direction of a pairing made one way comes first.
+    const other = otherWayItem(device, side)
+    if (other)
+      items.unshift({
+        ...other,
+        action: 'engine-other-way',
+        onSelect: () =>
+          side === 'in'
+            ? void action('netEngine.access.ask', { node: device.node })
+            : setLetting(device)
+      })
     // Its routes stay at hand on a row with a problem, where a fixed address is often the fix.
     if (side === 'out' && !view.actions.includes('address') && device.state !== 'removing')
       items.unshift({
@@ -597,8 +618,28 @@ export function EngineDevicesSection() {
     if (!engineSides(device).includes('in')) return []
     const view = engineView(device, 'in')
     const node = nodes.find((item) => item.node === device.node)
+    const asked = askedLine(device)
     return [
       row(view, `Id ${device.shortId}`),
+      asked && (
+        <SettingsRow
+          key={`${device.node}-asked`}
+          indent
+          leading={asked.waiting ? <DelayedLoader size="small" delayMs={0} label="Waiting" /> : undefined}
+          title={<span title={asked.detail}>{asked.line}</span>}
+          control={
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              title={asked.waiting ? 'Takes the request back.' : undefined}
+              onClick={() => void action('netEngine.access.cancel', { node: device.node })}
+            >
+              {asked.waiting ? 'Cancel' : 'Dismiss'}
+            </button>
+          }
+        />
+      ),
       device.olderApp && device.direction === 'in' && (
         <SettingsRow
           key={`${device.node}-older`}
@@ -1064,6 +1105,48 @@ export function EngineDevicesSection() {
           )
         })()}
 
+
+      {/* A paired computer asks to use this one too; or this owner lets one it uses in from its row. */}
+      {status?.on &&
+        !adding &&
+        (() => {
+          const ask = status.accessAsks?.find((item) => !setAside.includes(item.request))
+          const device = letting ?? (ask && status.devices.find((item) => item.node === ask.node))
+          if (!device) return null
+          const close = () => {
+            if (letting) setLetting(undefined)
+            else if (ask) setSetAside((list) => [...list, ask.request])
+          }
+          const answer = async (yes: boolean, access?: AccessPresetFields) => {
+            const done = letting
+              ? yes
+                ? await action('netEngine.access.let', { node: device.node, access })
+                : true
+              : await action('netEngine.access.answer', {
+                  node: device.node,
+                  request: ask!.request,
+                  yes,
+                  ...(yes ? { access } : {})
+                })
+            if (done) close()
+          }
+          return (
+            <Modal open hideTitle title={`Let ${device.name} use this computer?`} onClose={close}>
+              <AllowPrompt
+                key={letting ? `let-${device.node}` : ask!.request}
+                approval={device}
+                busy={busy}
+                line={`Connects over ${engineWay(device)}, already in use.`}
+                onAnswer={(yes, access) => void answer(yes, access)}
+              />
+              {error && (
+                <p role="alert" className="chat-error">
+                  {error}
+                </p>
+              )}
+            </Modal>
+          )
+        })()}
 
       {everywhere && (
         <RemoveEverywhereDialog

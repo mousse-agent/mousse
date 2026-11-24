@@ -258,6 +258,56 @@ export function engineWhere(device: NetEngineDevice): string {
   return device.route ? HOW[device.route] : HOW.lan
 }
 
+/** The way a device's live connection runs, for "Connects over <way>, already in use." */
+export function engineWay(device: NetEngineDevice): string {
+  if (device.route === 'relay') return device.via ? `relay ${device.via}` : 'a relay'
+  return ROUTE_WORDS[device.route ?? 'lan']
+}
+
+/**
+ * The menu item for the missing direction of a pairing made one way, on the row of the list that holds it: "Use
+ * <name> from here…" under Can use this computer (it asks), "Let <name> use this computer…" under Computers I use
+ * (this owner decides). Disabled, with why, while it can't be done; absent where the pairing can't.
+ */
+export function otherWayItem(
+  device: NetEngineDevice,
+  side: EngineSide
+): { label: string; disabled?: boolean; title?: string; detail?: string } | undefined {
+  const other = device.other
+  if (!other || device.state === 'removing') return undefined
+  // Unavailable: the reason is the item's second line.
+  const blocked = (why: string) => ({ disabled: true, detail: why })
+  if (other.offer === 'ask' && side === 'in')
+    return {
+      label: `Use ${device.name} from here…`,
+      ...(other.blocked
+        ? blocked(other.blocked)
+        : other.asked === 'waiting'
+          ? blocked('Waiting for an answer.')
+          : { title: `Asks ${device.name} to let this computer in.` })
+    }
+  if (other.offer === 'let' && side === 'out')
+    return {
+      label: `Let ${device.name} use this computer…`,
+      ...(other.blocked ? blocked(other.blocked) : { title: 'You pick what it may do here.' })
+    }
+  return undefined
+}
+
+/** What a row says under it after this computer asked for the other direction. */
+export function askedLine(device: NetEngineDevice): { line: string; detail?: string; waiting?: boolean } | undefined {
+  switch (device.other?.asked) {
+    case 'waiting':
+      return { line: `Waiting for ${device.name} to allow this…`, waiting: true }
+    case 'declined':
+      return { line: `${device.name} said Not now`, detail: 'Nothing changed. You can ask again from its menu.' }
+    case 'expired':
+      return { line: `No answer from ${device.name}`, detail: 'The request expired. You can ask again from its menu.' }
+    default:
+      return undefined
+  }
+}
+
 /** Every address kept for a device, for the tooltip on how it is connected. */
 export const engineAddresses = (device: NetEngineDevice): string | undefined =>
   device.addresses?.map(routeText).join(', ') || undefined
