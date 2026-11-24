@@ -246,6 +246,14 @@ describe('asking for the other direction of a one-way pairing', () => {
     expect(sent(owner, 'grant.add_connected')).toEqual([])
     expect(sent(caller, 'grant.add_connected')).toEqual([])
     expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(false)
+
+    // While the owner waits, an answer carrying another id is not the answer.
+    await owner.dispatch('netEngine.access.ask', { node: callerOnOwner }, true)
+    expect(device(owner, callerOnOwner)?.other?.asked).toBe('waiting')
+    exchange(caller, ownerOnCaller).send({ t: 'access.answer', id: 'not-this-one', decision: 'allow' })
+    await sleep(200)
+    expect(device(owner, callerOnOwner)?.other?.asked).toBe('waiting')
+    expect(rowFor(owner, caller)?.ways).toBe('in')
   }, 60_000)
 
   it('lets the other computer in from its own row, and both rows follow', async () => {
@@ -307,5 +315,15 @@ describe('asking for the other direction of a one-way pairing', () => {
       caller.dispatch('netEngine.access.let', { node: ownerOnCaller, access: accessPreset('work').fields }, true)
     ).rejects.toThrow()
     expect(sent(caller, 'grant.add_connected')).toEqual([])
+
+    // The other way round: the caller's app is older, so the owner's row offers no ask.
+    const owner2 = await computer(fabric, 'old-owner2'),
+      caller2 = await computer(fabric, 'old-caller2')
+    const callerAccess = caller2.mms.netEngine.access() as unknown as { features(): string[] }
+    callerAccess.features = () => ['one-way']
+    const pair = await oneWay(fabric, owner2, caller2)
+    await sleep(300)
+    expect(device(owner2, pair.callerOnOwner)?.other).toBeUndefined()
+    await expect(owner2.dispatch('netEngine.access.ask', { node: pair.callerOnOwner }, true)).rejects.toThrow()
   }, 60_000)
 })
