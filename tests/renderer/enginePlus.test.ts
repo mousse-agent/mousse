@@ -120,6 +120,9 @@ const click = async (target: HTMLElement | null | undefined) => {
   await act(async () => target!.click())
   await flush()
 }
+/** A device's row menu in Can use this computer, where Remove on all my hosts sits. */
+const canUseActions = (name: string) =>
+  document.querySelector<HTMLButtonElement>(`[data-device-side="in"] [aria-label="Actions for ${name}"]`)
 const menuItem = (label: string) =>
   [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent?.trim() === label)
 const text = () => (document.body.textContent ?? '').replace(/\s+/g, ' ')
@@ -268,7 +271,7 @@ describe('Remove on all my hosts', () => {
   it('lists each host with the grant it named, says which hosts do not know the device, and removes on the chosen ones', async () => {
     const d = daemon()
     await mount()
-    await click(button('Actions for Phone'))
+    await click(canUseActions('Phone'))
     await click(menuItem('Remove on all my hosts…'))
     expect(d.called('netEngine.removeEverywhere.plan')).toEqual([{ node: 'n1' }])
     const dialog = document.querySelector('[role="dialog"]')!
@@ -286,7 +289,7 @@ describe('Remove on all my hosts', () => {
   it('offers it only once the helper has said who this computer is', async () => {
     daemon({ identity: undefined })
     await mount()
-    await click(button('Actions for Phone'))
+    await click(canUseActions('Phone'))
     expect(menuItem('Remove on all my hosts…')).toBeUndefined()
     expect(menuItem('Remove…')).toBeTruthy()
   })
