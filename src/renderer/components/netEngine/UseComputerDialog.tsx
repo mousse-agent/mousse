@@ -10,7 +10,7 @@ import { Modal } from '../ui/Modal'
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
-import { defaultCamera, PasteField, Scanner } from './pairingParts'
+import { CheckIcon, defaultCamera, PasteField, Scanner } from './pairingParts'
 import { EnterLinkPanel, JoinRoutes } from './SendLinkParts'
 import { SshAddSteps } from './SshAddSteps'
 import { cannotUse, hasFeatures, linkWays, waysText } from './ways'
@@ -79,10 +79,10 @@ export function UseComputerDialog({
           <div className="engine-dialog-home">
             <p className="settings-muted">On the other computer, choose Let a device in.</p>
             <PasteField onText={read} />
-            <div className="engine-dialog-choices">
+            <div className="engine-dialog-alt">
               <button
                 type="button"
-                className="settings-btn devices-dialog-btn"
+                className="settings-btn"
                 title="With this computer’s camera"
                 onClick={() => setStep({ kind: 'scan' })}
               >
@@ -91,7 +91,7 @@ export function UseComputerDialog({
               {status?.on && status.reach && (
                 <button
                   type="button"
-                  className="settings-btn devices-dialog-btn"
+                  className="settings-btn"
                   title="No code needed. Uses your SSH keys or agent."
                   onClick={() => setStep({ kind: 'ssh' })}
                 >
@@ -226,7 +226,11 @@ export function CheckStep({
   return (
     <div className="engine-check">
       <p className="engine-check-title">Use {name} from here</p>
-      {ways.length > 0 && <p className="settings-muted">Connects over {waysText(ways)}</p>}
+      {ways.length > 0 && (
+        <p className="settings-muted" title={probe?.reachable === true ? probe.route : undefined}>
+          Connects over {waysText(ways)}
+        </p>
+      )}
       {preview?.expired && (
         <p role="alert" className="chat-error">
           This code has expired. Make a new one on {name}.
@@ -234,10 +238,11 @@ export function CheckStep({
       )}
       {blocked ? (
         <div className="engine-check-blocked" role="group" aria-label="Can’t connect">
-          <p role="alert" className="chat-error">
-            {blocked.why}
+          <p role="alert" className="engine-check-line">
+            <CheckIcon ok={false} />
+            <span className="chat-error">{blocked.why}</span>
           </p>
-          <p className="settings-muted">{blocked.todo}</p>
+          <p className="settings-muted engine-check-todo">{blocked.todo}</p>
           <button
             type="button"
             className="settings-btn"
@@ -250,7 +255,8 @@ export function CheckStep({
       ) : probing ? (
         <DelayedLoader label={`Checking ${name} from here`} />
       ) : probe?.reachable === true ? (
-        <p className="settings-muted" role="status" title={probe.route}>
+        <p className="engine-check-line" role="status">
+          <CheckIcon ok />
           {name} can be reached from this computer
         </p>
       ) : (
@@ -293,7 +299,7 @@ export function CheckStep({
       <div className="devices-dialog-actions">
         <button
           type="button"
-          className="settings-btn primary"
+          className="settings-btn ui-btn-primary"
           disabled={busy || !!blocked || !!preview?.expired}
           onClick={() => void connect()}
         >

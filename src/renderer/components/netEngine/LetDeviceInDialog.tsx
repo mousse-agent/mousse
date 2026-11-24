@@ -10,7 +10,7 @@ import { Modal } from '../ui/Modal'
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { AllowPrompt } from './AllowPrompt'
-import { clock, Preparing, QrCode, toMs, useNow } from './pairingParts'
+import { ChoiceRow, clock, Preparing, QrCode, toMs, useNow } from './pairingParts'
 import { JoinedLine, SendLinkPanel } from './SendLinkParts'
 import { hasFeatures, WAY_LABEL, WAY_ORDER, wayFix, wayReason } from './ways'
 
@@ -47,6 +47,8 @@ export function LetDeviceInDialog({
   const ready = engine?.helper.state === 'running'
   const picker = hasFeatures(status, 'route-readiness', 'invite-way')
   const [step, setStep] = useState<Step>(() => (picker ? { kind: 'pick' } : { kind: 'code' }))
+  // A device asked to come in (or was let in): the dialog shows only that.
+  const [answering, setAnswering] = useState(false)
   const { busy, error, setError, call } = useDaemonCall()
 
   // The code this dialog shows, and a Send link it made: closing ends whichever is still open.
@@ -86,6 +88,7 @@ export function LetDeviceInDialog({
             call={call}
             error={error}
             setError={setError}
+            onAnswering={setAnswering}
           />
         )}
         {step.kind === 'link' && (
@@ -96,7 +99,7 @@ export function LetDeviceInDialog({
             }}
           />
         )}
-        {step.kind !== 'link' && (
+        {step.kind !== 'link' && !(step.kind === 'code' && answering) && (
           <>
             <p className="engine-hint">{SSH_HINT}</p>
             <div className="engine-dialog-more">
@@ -170,61 +173,64 @@ function WayPicker({
   if (!ways)
     return status ? <Preparing helper={status.helper} ready={ready && !error} /> : null
   return (
-    <div className="engine-choices" role="radiogroup" aria-labelledby="engine-ways-title">
+    <div className="engine-choices">
       <p id="engine-ways-title" className="engine-choices-title">
         How will it connect?
       </p>
-      {ways.map((item) => {
-        const on = item.state === 'ready'
-        const fix = wayFix(item, status?.reach)
-        return (
-          <div
-            key={item.way}
-            role="radio"
-            aria-checked={picked === item.way}
-            aria-disabled={!on}
-            tabIndex={on ? 0 : -1}
-            className={`engine-choice-row${picked === item.way ? ' selected' : ''}${on ? '' : ' engine-way-off'}`}
-            title={on ? item.routes.join(', ') : undefined}
-            onClick={() => on && setPicked(item.way)}
-            onKeyDown={(event) => {
-              if (on && (event.key === ' ' || event.key === 'Enter')) {
-                event.preventDefault()
-                setPicked(item.way)
+      <div className="engine-choice-list" role="radiogroup" aria-labelledby="engine-ways-title">
+        {ways.map((item) => {
+          const on = item.state === 'ready'
+          const fix = wayFix(item, status?.reach)
+          return (
+            <ChoiceRow
+              key={item.way}
+              selected={picked === item.way}
+              disabled={!on}
+              dim={!on}
+              title={on ? item.routes.join(', ') : undefined}
+              label={WAY_LABEL[item.way]}
+              detail={
+                on ? (
+                  <>
+                    <span className="engine-ready-dot" aria-hidden="true" />
+                    Ready
+                  </>
+                ) : (
+                  wayReason(item.way, item.reason)
+                )
               }
-            }}
-          >
-            <span className="engine-choice-label">{WAY_LABEL[item.way]}</span>
-            <span className="engine-choice-hint">{on ? 'Ready' : wayReason(item.way, item.reason)}</span>
-            {fix === 'turn-on' && (
-              <button
-                type="button"
-                className="settings-btn engine-way-fix"
-                disabled={busy}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  void turnOn(item.way)
-                }}
-              >
-                Turn on
-              </button>
-            )}
-            {fix === 'set-up' && (
-              <button
-                type="button"
-                className="settings-btn engine-way-fix"
-                title="In Reach this computer"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onSetUp(item.way)
-                }}
-              >
-                Set up
-              </button>
-            )}
-          </div>
-        )
-      })}
+              onPick={() => setPicked(item.way)}
+            >
+              {fix === 'turn-on' && (
+                <button
+                  type="button"
+                  className="settings-btn engine-way-fix"
+                  disabled={busy}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void turnOn(item.way)
+                  }}
+                >
+                  Turn on
+                </button>
+              )}
+              {fix === 'set-up' && (
+                <button
+                  type="button"
+                  className="settings-btn engine-way-fix"
+                  title="In Reach this computer"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onSetUp(item.way)
+                  }}
+                >
+                  Set up
+                </button>
+              )}
+            </ChoiceRow>
+          )
+        })}
+      </div>
       {error && (
         <p role="alert" className="chat-error">
           {error}
@@ -233,7 +239,7 @@ function WayPicker({
       <div className="devices-dialog-actions">
         <button
           type="button"
-          className="settings-btn primary"
+          className="settings-btn ui-btn-primary"
           disabled={!picked || busy}
           onClick={() => picked && onMake(picked)}
         >
@@ -258,7 +264,8 @@ function CodeStep({
   busy,
   call,
   error,
-  setError
+  setError,
+  onAnswering
 }: {
   status: NetEngineStatus
   ready: boolean
@@ -270,6 +277,8 @@ function CodeStep({
   call: ReturnType<typeof useDaemonCall>['call']
   error: string
   setError: (text: string) => void
+  /** A device's request shows (or it was let in): nothing else goes with it. */
+  onAnswering: (answering: boolean) => void
 }) {
   const [invite, setInvite] = useState<Invite>()
   const [allowed, setAllowed] = useState<{ name: string }>()
@@ -286,6 +295,8 @@ function CodeStep({
   const expiresAt = invite?.expiresAt === undefined ? undefined : toMs(invite.expiresAt)
   const now = useNow(expiresAt)
   const approval = invite && status.approvals.find((item) => item.invitation === invite.invitation)
+  const answering = !!approval || !!allowed
+  useEffect(() => onAnswering(answering), [answering, onAnswering])
   useEffect(() => {
     if (expiresAt === undefined || now < expiresAt || approval || allowed) return
     inviteRef.current = undefined

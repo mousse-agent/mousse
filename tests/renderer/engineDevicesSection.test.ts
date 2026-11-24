@@ -186,6 +186,11 @@ const button = (name: string | RegExp) =>
       ? item.textContent?.trim() === name || item.getAttribute('aria-label') === name
       : name.test(item.textContent ?? '')
   )
+/** A row of a list to pick one from, by its name. */
+const radio = (label: string) =>
+  [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+    (row) => row.querySelector('.engine-choice-label')?.textContent === label
+  )
 const click = async (target: HTMLElement | undefined) => {
   expect(target).toBeTruthy()
   await act(async () => target!.click())
@@ -385,6 +390,15 @@ describe('Settings → Devices, new networking', () => {
     expect(host.textContent).toContain('Update it, or connect again with “Also let” ticked.')
   })
 
+  it('says under Can use this computer that an older Mousse let in is used from here only once added from here', async () => {
+    daemon({ devices: [device({ node: 'n1', direction: 'in', olderApp: true })] })
+    await mount()
+    const canUse = host.querySelector('[data-settings-anchor="devices-can-use"]')!.textContent ?? ''
+    expect(canUse).toContain('Studio runs an older Mousse')
+    expect(canUse).toContain('To use it from here, add it from this computer.')
+    expect(listNodes('devices-list')).toEqual([])
+  })
+
   it('opens a row to its routes, the one in use first, adds a Tailscale fallback that the add allows, and removes a route', async () => {
     const d = daemon({
       devices: [device({ node: 'n1', route: 'lan', online: true, addresses: ['tcp://192.168.1.20:47100', 'wss://studio.example.com/mousse-net/1'] })]
@@ -491,10 +505,15 @@ describe('Let a device in', () => {
     expect([...document.querySelectorAll<HTMLElement>('[role="radio"] .engine-choice-label')].map((item) => item.textContent)).toEqual([
       'Same Wi-Fi',
       'Tailscale',
-      'Cloudflare Tunnel / own tunnel'
+      'Cloudflare Tunnel'
     ])
     expect(choice('Same Wi-Fi')!.getAttribute('aria-checked')).toBe('true')
     expect(choice('Same Wi-Fi')!.classList.contains('selected')).toBe(true)
+    // Its name, and under it the success dot before its status.
+    const ready = choice('Same Wi-Fi')!.querySelector('.engine-choice-hint')!
+    expect(ready.textContent).toBe('Ready')
+    expect(ready.firstElementChild?.classList.contains('engine-ready-dot')).toBe(true)
+    expect(choice('Tailscale')!.querySelector('.engine-ready-dot')).toBeNull()
     expect(choice('Tailscale')!.textContent).toContain('Off')
     expect(choice('Tailscale')!.getAttribute('aria-disabled')).toBe('true')
     expect(choice('Cloudflare')!.textContent).toContain('Not set up')
@@ -504,6 +523,7 @@ describe('Let a device in', () => {
     await click(button('Turn on'))
     expect(d.called('netEngine.routes.config')).toEqual([{ tailnet: true }])
 
+    expect(button('Make code')!.classList.contains('ui-btn-primary')).toBe(true)
     await click(button('Make code'))
     expect(d.called('netEngine.invite')).toEqual([{ way: 'lan' }])
     expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
@@ -531,11 +551,19 @@ describe('Let a device in', () => {
     const d = daemon()
     await mount()
     await click(button(/Let a device in/))
+    expect(document.body.textContent).toContain('Can you SSH into this computer?')
     await d.change({ approvals: [{ request: 'r1', invitation: 'inv1', name: 'Laptop (Work)', device: 'ffee0011' }] })
     expect(document.body.textContent).toContain('Let Laptop (Work) use this computer?')
+    // Only the question: no SSH hint, no other way to send a code, and no id nothing else shows.
+    expect(document.body.textContent).not.toContain('Can you SSH into this computer?')
+    expect(button('Send a link with a code instead')).toBeUndefined()
+    expect(document.body.textContent).not.toContain('ffee0011')
     const picked = document.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Access"] [aria-checked="true"]')
-    expect(picked?.textContent).toContain('Work on threads')
-    await click(button(/^Full control/))
+    expect(picked?.querySelector('.engine-choice-label')?.textContent).toBe('Work on threads')
+    expect(picked?.querySelector('.engine-choice-hint')?.textContent).toBe('Works on threads · no shell')
+    expect(button('Allow')!.classList.contains('ui-btn-primary')).toBe(true)
+    expect(button('Not now')!.classList.contains('ui-btn-primary')).toBe(false)
+    await click(radio('Full control'))
     await click(button('Allow'))
     expect(d.called('netEngine.approve')).toEqual([{ request: 'r1', yes: true, access: accessPreset('full').fields }])
 
@@ -577,8 +605,11 @@ describe('Use another computer', () => {
     const onClose = vi.fn()
     await mount(createElement(UseComputerDialog, { status: d.state.status, onClose }))
     expect(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')?.placeholder).toBe('Paste its link')
-    expect(button('Scan its code')).toBeTruthy()
-    expect(button('Connect over SSH')).toBeTruthy()
+    expect(button('Continue')!.classList.contains('ui-btn-primary')).toBe(true)
+    // The other two ways side by side under the link field, as secondary buttons.
+    const others = [...document.querySelectorAll<HTMLButtonElement>('.engine-dialog-alt > button')]
+    expect(others.map((item) => item.textContent)).toEqual(['Scan its code', 'Connect over SSH'])
+    expect(others.some((item) => item.classList.contains('ui-btn-primary'))).toBe(false)
     const link = 'mousse://pair?n=Studio%20Mac#AAAAAAAAAAAAAAAAAAAAAAAA'
     await pasteLink(link)
     expect(document.body.textContent).toContain('Use Studio Mac from here')
@@ -597,7 +628,17 @@ describe('Use another computer', () => {
     expect(d.called('netEngine.join.probe')).toHaveLength(1)
     expect(document.body.textContent).toContain('Connects over Same Wi-Fi')
     expect(document.body.textContent).toContain('Studio can be reached from this computer')
+    // A tick before it; the address it answered on in the tooltip of "Connects over".
+    const reached = [...document.querySelectorAll<HTMLElement>('.engine-check-line')].find((line) =>
+      line.textContent?.includes('can be reached')
+    )!
+    expect(reached.firstElementChild?.classList.contains('engine-check-icon')).toBe(true)
+    expect(reached.firstElementChild?.classList.contains('ok')).toBe(true)
+    expect(reached.getAttribute('title')).toBeNull()
+    const over = [...document.querySelectorAll<HTMLElement>('p')].find((line) => line.textContent === 'Connects over Same Wi-Fi')
+    expect(over?.getAttribute('title')).toBe('tcp://192.168.1.20:47100')
     expect(button('Connect')!.disabled).toBe(false)
+    expect(button('Connect')!.classList.contains('ui-btn-primary')).toBe(true)
   })
 
   it('says a neutral line when the check couldn’t tell', async () => {
@@ -614,6 +655,8 @@ describe('Use another computer', () => {
     await scanDialog(d.state.status)
     await pasteLink()
     expect(document.querySelector('[role="alert"]')?.textContent).toBe('Studio didn’t answer over Same Wi-Fi.')
+    // A warning icon before the failure.
+    expect(document.querySelector('[role="alert"] > .engine-check-icon.warn')).toBeTruthy()
     expect(document.body.textContent).toContain('Check both are on the same Wi-Fi and Mousse is open on Studio.')
     expect(button('Connect')!.disabled).toBe(true)
     await click(button('Check again'))
@@ -965,10 +1008,12 @@ describe('Connect over SSH (1b §3.4)', () => {
     await click(button('Continue'))
     expect(document.body.textContent).toContain('ssh-ed25519 SHA256:abc')
     expect(d.called('netEngine.ssh.profiles')).toEqual([])
-    await click(button('Trust'))
+    await click(button('Trust and continue'))
     expect(d.called('netEngine.ssh.trust')).toEqual([{ routeId: 'r1', sha256: 'SHA256:abc', host: 'box.example' }])
     expect(document.body.textContent).toContain('Profile on Box')
-    const labels = [...document.querySelectorAll('label')].map((item) => item.textContent)
+    // The same row list as the levels, not native radio buttons.
+    expect(document.querySelector('input[type="radio"]')).toBeNull()
+    const labels = [...document.querySelectorAll('[role="radio"] .engine-choice-label')].map((item) => item.textContent)
     expect(labels).toEqual(['Main', 'Work', 'New profile…'])
     // What Connect does: Box lets this computer in, nothing the other way, no port, all over SSH.
     const effects = [...document.querySelectorAll('[aria-label="What Connect does"] li')].map((item) => item.textContent)
@@ -977,7 +1022,7 @@ describe('Connect over SSH (1b §3.4)', () => {
       'Box opens no port.',
       'Every connection goes through SSH.'
     ])
-    await click([...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')][1])
+    await click(radio('Work'))
     await click(button('Connect'))
     expect(d.called('netEngine.ssh.connect')).toEqual([
       { routeId: 'r1', target: 'me@box.example', host: 'box.example', user: 'me', selector: 'b'.repeat(26) }

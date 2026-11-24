@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import jsQR from 'jsqr'
 import type { NetEngineStatus } from '../../../shared/netEngine/local'
+import { CircleAlert, CircleCheck } from '../../lib/icons'
 import { qrSvgPath } from '../../lib/plusQr'
 import { DelayedLoader } from '../ui/DelayedLoader'
 
@@ -52,7 +53,7 @@ export function PasteField({
             setNotLink(false)
           }}
         />
-        <button type="submit" className="settings-btn" disabled={!pasted.trim()}>
+        <button type="submit" className="settings-btn ui-btn-primary" disabled={!pasted.trim()}>
           Continue
         </button>
       </form>
@@ -62,6 +63,64 @@ export function PasteField({
         </p>
       )}
     </>
+  )
+}
+
+/**
+ * One row of a list to pick one from (a way, an access level, a profile): its name, the detail under it in muted
+ * text, and an action at the end when one fixes it. The picked row has a background, nothing else.
+ */
+export function ChoiceRow({
+  selected,
+  disabled = false,
+  dim = false,
+  label,
+  detail,
+  title,
+  onPick,
+  children
+}: {
+  selected: boolean
+  disabled?: boolean
+  /** A choice that can't be picked now: its name muted too. */
+  dim?: boolean
+  label: ReactNode
+  detail?: ReactNode
+  title?: string
+  onPick: () => void
+  children?: ReactNode
+}) {
+  return (
+    <div
+      role="radio"
+      aria-checked={selected}
+      aria-disabled={disabled || undefined}
+      tabIndex={disabled ? -1 : 0}
+      className={`engine-choice-row${selected ? ' selected' : ''}${dim ? ' engine-way-off' : ''}`}
+      title={title}
+      onClick={() => !disabled && onPick()}
+      onKeyDown={(event) => {
+        if (!disabled && (event.key === ' ' || event.key === 'Enter')) {
+          event.preventDefault()
+          onPick()
+        }
+      }}
+    >
+      <span className="engine-choice-text">
+        <span className="engine-choice-label">{label}</span>
+        {detail !== undefined && <span className="engine-choice-hint">{detail}</span>}
+      </span>
+      {children}
+    </div>
+  )
+}
+
+/** The mark before a check's result: a tick when it passed, a warning when it found a problem. */
+export function CheckIcon({ ok }: { ok: boolean }) {
+  return ok ? (
+    <CircleCheck size={16} className="engine-check-icon ok" aria-hidden="true" />
+  ) : (
+    <CircleAlert size={16} className="engine-check-icon warn" aria-hidden="true" />
   )
 }
 

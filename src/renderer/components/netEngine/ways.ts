@@ -13,7 +13,7 @@ export const WAY_LABEL: Readonly<Record<NetEngineWay, string>> = Object.freeze({
   lan: 'Same Wi-Fi',
   tailnet: 'Tailscale',
   public: 'Port forward',
-  tunnel: 'Cloudflare Tunnel / own tunnel',
+  tunnel: 'Cloudflare Tunnel',
   relay: 'Your own relay'
 })
 

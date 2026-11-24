@@ -9,6 +9,7 @@
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { accessPreset } from '../../src/shared/net/accessPresets'
 import type { NetEngineDevice, NetEngineStatus } from '../../src/shared/netEngine/local'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -224,12 +225,25 @@ describe('Let a device in while networking starts', () => {
 })
 
 describe('Send link (§5.1)', () => {
-  it('shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
+  it('asks what the device may do first, then shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
     const d = daemon()
     const update = await dialog(d, 'in')
     await click(button('Send a link with a code instead'))
-    // The dialog's own code first, then the link.
-    expect(d.called('netEngine.invite')).toEqual([{}, { kind: 'link' }])
+    // No Allow follows a link: the level is picked before the link exists, Work on threads first.
+    expect(text()).toContain('What can it do here?')
+    const radio = (label: string) =>
+      [...document.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Access"] [role="radio"]')].find(
+        (row) => row.querySelector('.engine-choice-label')?.textContent === label
+      )
+    expect(radio('Work on threads')?.getAttribute('aria-checked')).toBe('true')
+    expect(button('Customize')).toBeTruthy()
+    expect(d.called('netEngine.invite')).toEqual([{}])
+    await click(radio('View and chat'))
+    expect(button('Make link')?.classList.contains('ui-btn-primary')).toBe(true)
+    await click(button('Make link'))
+    // The dialog's own code first, then the link with its level.
+    const view = { kind: 'link', access: accessPreset('view').fields }
+    expect(d.called('netEngine.invite')).toEqual([{}, view])
     expect(field('Link').value).toBe(LINK)
     expect(button('Copy link')).toBeTruthy()
     expect(text()).toContain('123 456')
@@ -246,7 +260,7 @@ describe('Send link (§5.1)', () => {
     })
     expect(text()).toContain('Three wrong codes. This link no longer works.')
     await click(button('New link'))
-    expect(d.called('netEngine.invite')).toHaveLength(3)
+    expect(d.called('netEngine.invite')).toEqual([{}, view, view])
   })
 
   it('is offered only when the helper speaks Send link', async () => {

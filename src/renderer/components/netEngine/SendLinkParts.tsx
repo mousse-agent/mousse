@@ -12,7 +12,9 @@ import type {
   NetEngineLinkJoin,
   NetEngineStatus
 } from '../../../shared/netEngine/local'
+import type { AccessPresetFields } from '../../../shared/net/accessPresets'
 import { ROUTE_WORDS, unreachableDetail } from './engineRows'
+import { defaultLevel, LevelPicker } from './AllowPrompt'
 import { CopyButton } from '../settings/IconButtons'
 import { errorText, useDaemonCall } from '../devices/useDaemonCall'
 
@@ -68,8 +70,9 @@ export const spacedCode = (code: string): string =>
 const triesLeft = (left: number): string => (left === 1 ? '1 try left' : `${left} tries left`)
 
 /**
- * Send link (§5.1): a kind-2 invitation's link to copy into a chat, and the code to read out another way, with
- * the tries left. Three wrong codes end it; New link makes another.
+ * Send link (§5.1): what the device may do here first (there is no Allow on a link: the level is saved with the link,
+ * before anyone has it), then a kind-2 invitation's link to copy into a chat, and the code to read out another way,
+ * with the tries left. Three wrong codes end it; New link makes another at the same level.
  */
 export function SendLinkPanel({
   status,
@@ -80,6 +83,9 @@ export function SendLinkPanel({
   onInvitation: (invitation: string | undefined) => void
 }) {
   const { error, call } = useDaemonCall()
+  const [fields, setFields] = useState<AccessPresetFields>(defaultLevel)
+  // The level the link is made with, once Make link was tapped.
+  const [level, setLevel] = useState<AccessPresetFields>()
   const [made, setMade] = useState<{
     invitation: string
     uri: string
@@ -91,11 +97,12 @@ export function SendLinkPanel({
   onInvitationRef.current = onInvitation
 
   useEffect(() => {
+    if (!level) return
     let live = true
     setMade(undefined)
     void call<{ invitation: string; uri: string; code?: string; attemptsLeft?: number }>(
       'netEngine.invite',
-      { kind: 'link' }
+      { kind: 'link', access: level }
     ).then((answer) => {
       if (!answer || !live) return
       setMade(answer.value)
@@ -104,7 +111,7 @@ export function SendLinkPanel({
     return () => {
       live = false
     }
-  }, [round, call])
+  }, [round, call, level])
 
   const shown = made && status?.links?.find((link) => link.invitation === made.invitation)
   const code = shown?.code ?? made?.code ?? ''
@@ -115,6 +122,18 @@ export function SendLinkPanel({
     if (shown?.ended) onInvitationRef.current(undefined)
   }, [shown?.ended])
 
+  if (!level)
+    return (
+      <div className="engine-allow" role="group" aria-label="Send a link">
+        <p className="engine-allow-title">What can it do here?</p>
+        <LevelPicker fields={fields} onChange={setFields} busy={false} />
+        <div className="devices-dialog-actions">
+          <button type="button" className="settings-btn ui-btn-primary" onClick={() => setLevel(fields)}>
+            Make link
+          </button>
+        </div>
+      </div>
+    )
   if (error)
     return (
       <p role="alert" className="chat-error">
@@ -266,7 +285,7 @@ export function EnterLinkPanel({
         <div className="devices-dialog-actions">
           <button
             type="button"
-            className="settings-btn primary"
+            className="settings-btn ui-btn-primary"
             disabled={busy}
             onClick={() => void connect()}
           >
@@ -300,7 +319,7 @@ export function EnterLinkPanel({
             setError('')
           }}
         />
-        <button type="submit" className="settings-btn" disabled={busy || !text.trim()}>
+        <button type="submit" className="settings-btn ui-btn-primary" disabled={busy || !text.trim()}>
           Continue
         </button>
       </form>
@@ -404,7 +423,7 @@ export function CodeEntry({ join }: { join: NetEngineLinkJoin }) {
         </p>
       )}
       <div className="devices-dialog-actions">
-        <button type="submit" className="settings-btn primary" disabled={busy || code.length !== 6}>
+        <button type="submit" className="settings-btn ui-btn-primary" disabled={busy || code.length !== 6}>
           Confirm
         </button>
       </div>
