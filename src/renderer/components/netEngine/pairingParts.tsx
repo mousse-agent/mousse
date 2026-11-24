@@ -1,0 +1,198 @@
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import jsQR from 'jsqr'
+import type { NetEngineStatus } from '../../../shared/netEngine/local'
+import { qrSvgPath } from '../../lib/plusQr'
+import { DelayedLoader } from '../ui/DelayedLoader'
+
+/** An expiry in seconds (the helper's) or milliseconds, as milliseconds. */
+export const toMs = (at: number): number => (at < 1e12 ? at * 1000 : at)
+
+/** Time left as `m:ss`, never below zero. */
+export const clock = (ms: number): string => {
+  const seconds = Math.max(0, Math.ceil(ms / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+/** Now, each second while `until` is set: a code's time left. */
+export function useNow(until: number | undefined): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (until === undefined) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [until])
+  return now
+}
+
+/** A pasted link: Continue reads it; text that is not a Mousse link says so. */
+export function PasteField({
+  onText,
+  placeholder = 'Paste its link'
+}: {
+  onText: (text: string) => boolean
+  placeholder?: string
+}) {
+  const [pasted, setPasted] = useState('')
+  const [notLink, setNotLink] = useState(false)
+  const paste = (event: FormEvent) => {
+    event.preventDefault()
+    setNotLink(!onText(pasted))
+  }
+  return (
+    <>
+      <form className="engine-paste" onSubmit={paste}>
+        <input
+          className="settings-input"
+          value={pasted}
+          placeholder={placeholder}
+          aria-label="Pairing link"
+          onChange={(event) => {
+            setPasted(event.target.value)
+            setNotLink(false)
+          }}
+        />
+        <button type="submit" className="settings-btn" disabled={!pasted.trim()}>
+          Continue
+        </button>
+      </form>
+      {notLink && (
+        <p role="alert" className="chat-error">
+          This isn’t a link from Mousse.
+        </p>
+      )}
+    </>
+  )
+}
+
+/** How far the code is, by the steps it really goes through: the helper starts, says hello, then makes the code. */
+function preparingPercent(helper: NetEngineStatus['helper'], ready: boolean): number | undefined {
+  if (ready) return 75
+  if (helper.state !== 'starting') return undefined
+  return helper.step === 'hello' ? 50 : 25
+}
+
+/** Where the code will show, while it is being made: a spinner, plain words and how far along it is. */
+export function Preparing({ helper, ready }: { helper: NetEngineStatus['helper']; ready: boolean }) {
+  const waiting = ready || helper.state === 'starting' || helper.state === 'restarting'
+  const percent = preparingPercent(helper, ready)
+  const words = ready
+    ? 'Making a code'
+    : helper.state === 'restarting'
+      ? 'Trying again'
+      : waiting
+        ? 'Getting ready to connect'
+        : helper.text || 'Networking is off'
+  return (
+    <div className="engine-qr engine-preparing">
+      {waiting && <DelayedLoader label={words} delayMs={0} />}
+      <p className="settings-muted" role="status">
+        {waiting ? `${words}…` : words}
+        {percent !== undefined && <span className="engine-preparing-percent"> {percent}%</span>}
+      </p>
+      {helper.state === 'restarting' && helper.text && (
+        <p className="settings-muted" title={helper.text}>
+          {helper.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
+export function QrCode({ text }: { text: string }) {
+  const { size, path } = useMemo(() => qrSvgPath(text), [text])
+  // Dark on white with a quiet zone, so a camera reads it in either theme.
+  return (
+    <svg
+      className="net-plus-qr engine-qr-code"
+      viewBox={`0 0 ${size} ${size}`}
+      width={208}
+      height={208}
+      role="img"
+      aria-label="Pairing QR code"
+      shapeRendering="crispEdges"
+    >
+      <rect width={size} height={size} fill="#fff" />
+      <path d={path} fill="#000" />
+    </svg>
+  )
+}
+
+export async function defaultCamera(): Promise<MediaStream | undefined> {
+  const media = navigator.mediaDevices
+  if (!media?.getUserMedia) return undefined
+  try {
+    const devices = await media.enumerateDevices?.()
+    if (devices && !devices.some((device) => device.kind === 'videoinput')) return undefined
+    return await media.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+  } catch {
+    return undefined
+  }
+}
+
+/** Scan: the camera's frames are read for a pairing code; without a camera, the other computer scans instead. */
+export function Scanner({
+  camera,
+  everyMs,
+  onText
+}: {
+  camera: () => Promise<MediaStream | undefined>
+  /** How often a camera frame is read for a code (the engine limit `scanIntervalMs`). */
+  everyMs: number
+  onText: (text: string) => boolean
+}) {
+  const video = useRef<HTMLVideoElement>(null)
+  const [state, setState] = useState<'opening' | 'live' | 'none'>('opening')
+  const onTextRef = useRef(onText)
+  onTextRef.current = onText
+
+  useEffect(() => {
+    let stream: MediaStream | undefined
+    let timer: ReturnType<typeof setInterval> | undefined
+    let stopped = false
+    void camera().then((opened) => {
+      if (stopped) {
+        opened?.getTracks().forEach((track) => track.stop())
+        return
+      }
+      if (!opened || !video.current) {
+        setState('none')
+        return
+      }
+      stream = opened
+      video.current.srcObject = opened
+      void video.current.play().catch(() => undefined)
+      setState('live')
+      const canvas = document.createElement('canvas')
+      const context = canvas.getContext('2d', { willReadFrequently: true })
+      timer = setInterval(() => {
+        const element = video.current
+        if (!context || !element || element.readyState < 2 || !element.videoWidth) return
+        canvas.width = element.videoWidth
+        canvas.height = element.videoHeight
+        context.drawImage(element, 0, 0)
+        const frame = context.getImageData(0, 0, canvas.width, canvas.height)
+        const code = jsQR(frame.data, frame.width, frame.height, {
+          inversionAttempts: 'dontInvert'
+        })
+        if (code?.data && onTextRef.current(code.data) && timer) clearInterval(timer)
+      }, everyMs)
+    })
+    return () => {
+      stopped = true
+      if (timer) clearInterval(timer)
+      stream?.getTracks().forEach((track) => track.stop())
+    }
+  }, [camera, everyMs])
+
+  return (
+    <div className="engine-scan">
+      {state === 'none' ? (
+        <p className="settings-muted">Scan from the other computer instead.</p>
+      ) : (
+        <video ref={video} className="engine-scan-video" muted playsInline aria-label="Camera" />
+      )}
+      <PasteField onText={onText} placeholder="Or paste the link" />
+    </div>
+  )
+}

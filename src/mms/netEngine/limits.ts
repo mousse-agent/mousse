@@ -80,7 +80,7 @@ export interface EngineLimits {
    * its exit, and the stop must not wait on that.
    */
   helperStderrDrainMs: number
-  /** How often Add device reads a camera frame for a pairing code. */
+  /** How often Scan its code reads a camera frame for a pairing code. */
   scanIntervalMs: number
   /** How long a start keeps trying while another helper still holds the endpoint. */
   helperLockWaitMs: number

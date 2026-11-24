@@ -88,20 +88,23 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
   return (
     <div className="engine-ssh" data-step={step.kind}>
       {step.kind === 'target' && (
-        <form className="engine-paste" onSubmit={(event) => void resolve(event)}>
-          <input
-            className="settings-input"
-            value={target}
-            autoFocus
-            placeholder="user@host"
-            aria-label="SSH address"
-            title="Uses your SSH keys or agent, never a password."
-            onChange={(event) => setTarget(event.target.value)}
-          />
-          <button type="submit" className="settings-btn" disabled={busy || !target.trim()}>
-            Continue
-          </button>
-        </form>
+        <>
+          <form className="engine-paste" onSubmit={(event) => void resolve(event)}>
+            <input
+              className="settings-input"
+              value={target}
+              autoFocus
+              placeholder="Host or SSH config alias"
+              aria-label="SSH address"
+              title="user@host, a host name, or a Host alias from your SSH config."
+              onChange={(event) => setTarget(event.target.value)}
+            />
+            <button type="submit" className="settings-btn" disabled={busy || !target.trim()}>
+              Continue
+            </button>
+          </form>
+          <p className="settings-muted">Uses your SSH keys or agent, never a password.</p>
+        </>
       )}
 
       {step.kind === 'key' && (
@@ -155,7 +158,7 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
                 checked={choice === NEW}
                 onChange={() => setChoice(NEW)}
               />
-              New profile
+              New profile…
             </label>
             {choice === NEW && (
               <input
@@ -167,6 +170,16 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
               />
             )}
           </fieldset>
+          <div className="engine-ssh-effects" role="group" aria-label="What Connect does">
+            <p className="engine-ssh-effects-title">What Connect does</p>
+            <ul>
+              <li>{step.list.computer} lets this computer in. Nothing the other way.</li>
+              <li title="Nothing on that computer listens for others.">
+                {step.list.computer} opens no port.
+              </li>
+              <li>Every connection goes through SSH.</li>
+            </ul>
+          </div>
           <div className="devices-dialog-actions">
             <button
               type="button"

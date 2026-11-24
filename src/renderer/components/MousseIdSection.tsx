@@ -102,7 +102,7 @@ export function EnrollmentRequestRow({ row, busy, onDecide }: {
   )
 }
 
-/** Add device → A phone: a one-time code to scan with the Mousse app, made when the dialog opens. */
+/** Let a device in → Add a phone: a one-time code to scan with the Mousse app, made when the dialog opens. */
 export function AddPhoneDialog({ onClose }: { onClose: () => void }) {
   const [offer, setOffer] = useState<PlusEnrollmentOffer>()
   const [error, setError] = useState('')

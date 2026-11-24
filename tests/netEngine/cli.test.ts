@@ -125,7 +125,7 @@ describe('net-engine through a profile\'s local methods', () => {
     const inviting = executeNetEngineCommand({ kind: 'invite', link: false }, cli(owner), term.io)
     await eventually(() => expect(term.emitted).toHaveLength(1))
     const { uri } = term.emitted[0]!.value
-    // The other computer scans it with Add device.
+    // The other computer scans it with Use another computer.
     const joined = await caller.dispatch('netEngine.join', { ticket: uri }, true)
     expect(await inviting).toBe(0)
     expect(term.asked).toEqual([expect.stringMatching(/^Is caller computer .* next to you\?/)])

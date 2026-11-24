@@ -425,7 +425,7 @@ export interface NetEngineStatus {
   routes?: string[]
   /** Another profile under this OS account has the new networking on too, so they can read each other's keys. */
   sharedAccount?: boolean
-  /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
+  /** How often Scan its code reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
   /** Mousse Plus, once the helper said. */
   plus?: NetEnginePlus

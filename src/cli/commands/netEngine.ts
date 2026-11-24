@@ -148,7 +148,7 @@ export function prepareNetEngineCommand(args: ParsedArgs): NetEngineCliRequest {
       }
       // An in-person code proves the two computers are side by side only when a camera reads it (§5).
       if (kind === 1)
-        invalid('This is an in-person pairing code: scan it with Add device in Mousse. Use invite --link to pair from a terminal.')
+        invalid('This is an in-person pairing code: scan it with Use another computer in Mousse. Use invite --link to pair from a terminal.')
       const yes = args.flags.get('yes')
       return { kind: 'join', ticket: first, yes: yes === true }
     }
@@ -510,7 +510,7 @@ async function invite(
       ? [created.uri, shown(created.code, created.attemptsLeft), 'Send the link in a chat. Read the code to them another way.']
           .filter(Boolean)
           .join('\n')
-      : [terminalQr(created.uri), 'Scan this with Add device on the other computer.'].join('\n')
+      : [terminalQr(created.uri), 'Scan this with Use another computer on the other computer.'].join('\n')
   )
   let code = created.code
   let left = created.attemptsLeft
@@ -568,7 +568,7 @@ async function join(
     ticket: request.ticket
   })
   if (preview.kind === 1)
-    invalid('This is an in-person pairing code: scan it with Add device in Mousse.')
+    invalid('This is an in-person pairing code: scan it with Use another computer in Mousse.')
   if (preview.expired) invalid('This link has expired. Ask for a new one.')
   const destination = (entry: NetEngineJoinPreview['destinations'][number]): string => `${entry.label} (${entry.cls})`
   io.say(

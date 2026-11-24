@@ -184,6 +184,71 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
   return { line: 'Connected', actions: ['access', 'address', 'remove'] }
 }
 
+/** One direction of a pairing: `out`, this computer uses it; `in`, it uses this computer. */
+export type EngineSide = 'out' | 'in'
+
+/**
+ * The lists a pairing shows in: one direction in its own list, both in both. A pairing still being made shows only
+ * under Computers I use, where it was started.
+ */
+export function engineSides(device: NetEngineDevice): EngineSide[] {
+  if (device.direction) return [device.direction]
+  if (device.state === 'finishing' || device.unfinished) return ['out']
+  return ['out', 'in']
+}
+
+/**
+ * One direction's row: the pairing's own problem where it belongs to this direction, else that direction's state.
+ * Access belongs to `in`, routes and Retry to `out`; Remove on either ends only that direction.
+ */
+export function engineSideRow(device: NetEngineDevice, side: EngineSide): EngineRowView {
+  const whole = engineRow(device)
+  const name = device.name
+  // A problem of the other direction leaves this one working.
+  if (device.unreachable && device.unreachable !== side) return sideActions({ line: 'Connected', actions: [] }, side)
+  if (device.unreachable || device.state === 'removing' || device.state === 'finishing') return whole
+  if (side === 'out' && (device.unfinished || device.notAccepted || device.sshParked || device.certificateWindow))
+    return whole
+  if (side === 'in' && device.certificateWindow) return whole
+  if (device.state === 'connecting')
+    return sideActions(
+      device.direction
+        ? { line: 'Connecting…', actions: [] }
+        : { line: 'Connecting…', detail: `One direction to ${name} is up; the other is still connecting.`, actions: [] },
+      side
+    )
+  if (device.state === 'offline')
+    return sideActions(
+      side === 'out'
+        ? {
+            line: `Can't reach it · open Mousse on ${name}`,
+            detail: `Mousse is closed on ${name}, or it is on another network.`,
+            actions: []
+          }
+        : { line: 'Not connected now', detail: `It connects when Mousse is open on ${name}.`, actions: [] },
+      side
+    )
+  return sideActions(
+    {
+      line: 'Connected',
+      ...(device.source === 'ssh'
+        ? { detail: side === 'out' ? 'Added over SSH' : `Added over SSH from ${name}` }
+        : {}),
+      actions: []
+    },
+    side
+  )
+}
+
+function sideActions(view: EngineRowView, side: EngineSide): EngineRowView {
+  const live = view.line === 'Connected'
+  return {
+    ...view,
+    actions:
+      side === 'in' ? ['access', 'remove'] : live ? ['address', 'remove'] : ['address', 'retry', 'remove']
+  }
+}
+
 /**
  * How a device is connected, in plain words: the class of the route it is connected on (1b §7 `conn.up.route`),
  * "through relay host:port" on a relay (Phase 3), else "same network". The addresses go in the tooltip.
