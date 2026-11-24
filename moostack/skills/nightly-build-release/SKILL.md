@@ -21,7 +21,7 @@ A request to publish a nightly authorizes merging the PRs that fix what blocks i
 The user wants an update each time a job passes or fails, not only at the end. Run the watcher in the background and act on each exit:
 
 ```
-node .agents/skills/nightly-build-release/watch-run.mjs <run id>
+node moostack/skills/nightly-build-release/watch-run.mjs <run id>
 ```
 
 It exits as soon as a job finishes that it has not reported before, or when the run ends, and prints the newly finished jobs, the run's state and the jobs still going. On each exit:
@@ -34,7 +34,7 @@ Never answer a watcher's exit with silence or "no response requested"; it is the
 
 ## When a job fails
 
-Filter the failed log with the small Node script, which works the same in PowerShell and POSIX shells: `node .agents/skills/nightly-build-release/filter-log.mjs --run <run id>`. It saves the full failed log to the system temp folder (it prints the path), then prints the test summary lines, every "Unhandled Errors" section in full (no line cap), and the other failure lines with context (at most 150; `--context <n>` and `--max <n>` change that). A run can fail with every test passing when a test file leaves an error behind, such as a timer that fires after its window is torn down, so always read the Unhandled Errors part. Read around a match in the saved log only when the filtered output does not show the cause. Say where the full log is when you report the failure.
+Filter the failed log with the small Node script, which works the same in PowerShell and POSIX shells: `node moostack/skills/nightly-build-release/filter-log.mjs --run <run id>`. It saves the full failed log to the system temp folder (it prints the path), then prints the test summary lines, every "Unhandled Errors" section in full (no line cap), and the other failure lines with context (at most 150; `--context <n>` and `--max <n>` change that). A run can fail with every test passing when a test file leaves an error behind, such as a timer that fires after its window is torn down, so always read the Unhandled Errors part. Read around a match in the saved log only when the filtered output does not show the cause. Say where the full log is when you report the failure.
 
 - **Infrastructure** (download or registry timeouts, a lost runner, a GitHub 5xx): `gh run rerun <run id> --failed` once the run has ended, and keep watching the same run.
 - **A real failure** (a test that failed all three tries, an unhandled error, a type or lint error, a packaging step): reproduce it locally with the named test file, find the cause and fix it in the code, or in the test when the test is wrong. Do not skip, weaken or delete a test to get the build through. A failure from someone else's recent change is still fixed here; say in the PR which change it came from. Open the PR, merge it, and sync the primary worktree as described in "Local availability after merge" in the shared policy.
