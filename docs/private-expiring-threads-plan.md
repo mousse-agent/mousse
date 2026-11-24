@@ -109,7 +109,7 @@ command tests.
   5. Busy refusals from the profile-wide idle check retry with backoff; failures are written to the lifecycle record
      and retried, and the thread stays hidden.
 - Expired records never show in Recently deleted (`threads.inventory` filters `reason: 'expired'`), and don't go
-  to Settled.
+  to Archived.
 - Committed or pushed code is kept: purge removes the worktree folder and Mousse's own refs, not the thread's branch
   or anything pushed. Uncommitted files in the worktree are deleted (that is what expiry means).
 - Also removed for an expired thread: Run Engine rows for its thread ids (new `RunStore.deleteThreadData(ids)`),

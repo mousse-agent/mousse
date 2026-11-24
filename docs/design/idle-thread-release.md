@@ -6,7 +6,7 @@ Status: implemented in #852 (phase 1) and #853 (phase 2, stacked on #852), both 
 
 Once a thread runs a turn, the daemon keeps it loaded until the daemon stops: its transcript, its model context and its turn state. This design releases a thread that has been idle for 10 minutes and reloads it from its thread database the next time something needs it. Nothing on disk changes, and windows see nothing.
 
-Reading the code turned up a second cause that is cheaper to fix and probably larger. At startup, `ThreadRuntimeManager.restoreOnStartup` reads the agents and tasks of every thread that is not settled. That read (`ThreadDbStore.readState`) loads each whole transcript and keeps the last 64 in the thread database cache, whether or not anyone uses them. The plan fixes that first (phase 1, storage only), then releases idle threads (phase 2, run engine).
+Reading the code turned up a second cause that is cheaper to fix and probably larger. At startup, `ThreadRuntimeManager.restoreOnStartup` reads the agents and tasks of every thread that is not archived. That read (`ThreadDbStore.readState`) loads each whole transcript and keeps the last 64 in the thread database cache, whether or not anyone uses them. The plan fixes that first (phase 1, storage only), then releases idle threads (phase 2, run engine).
 
 ## 1. What a loaded thread holds
 
@@ -34,7 +34,7 @@ Reading the code turned up a second cause that is cheaper to fix and probably la
 So a loaded thread holds about its stored size: transcript rows plus model context rows (`c:a`, `c:r`), images and large outputs included, plus about 0.3 KB per message. A typical 30-turn coding thread is 2–5 MB. One with screenshots is 10–30 MB. Two consequences:
 
 - **The text is shared by the session and the cache.** Dropping only the session frees about 0.16 KB per message. A release must also drop the cache entry (`ThreadDbStore.forget`).
-- **Startup.** `restoreOnStartup` calls `loadThreadWorkState` → `ThreadDbStore.readState` → `fresh()` for every thread that is not settled. That is a full `load` on the event loop, and the last 64 stay in `entries`. With a few hundred threads, the daemon holds 64 whole transcripts from the start: 64 × 2 MB ≈ 130 MB. That is about the gap between a fresh home (127 MB) and the user's 306 MB. It is a hypothesis to confirm on an isolated home with about 100 threads (§6).
+- **Startup.** `restoreOnStartup` calls `loadThreadWorkState` → `ThreadDbStore.readState` → `fresh()` for every thread that is not archived. That is a full `load` on the event loop, and the last 64 stay in `entries`. With a few hundred threads, the daemon holds 64 whole transcripts from the start: 64 × 2 MB ≈ 130 MB. That is about the gap between a fresh home (127 MB) and the user's 306 MB. It is a hypothesis to confirm on an isolated home with about 100 threads (§6).
 - **Measured (#852): the hypothesis does not hold.** The user's real home has 73 `thread.db` files, 20 MB in all (median 208 KB, p90 688 KB, largest 1.4 MB; a size-only listing). On an isolated home with 100 threads sampled from those sizes, startup held 64 threads and 44.5 MB of heap before phase 1, and 0 threads and 37.7 MB after. Private memory went from about 170 MB to 164 MB. Phase 1 saves about 6 MB here, not 130 MB.
 
 ## 2. When a thread is idle
