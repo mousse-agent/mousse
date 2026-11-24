@@ -256,6 +256,7 @@ export class LocalMmsClient implements MmsClient {
   private readonly commands = new ClientCommandReceiver()
   private _hello: ProtocolHelloOk | null = null
   private _connected = false
+  private _lastReceivedAt = 0
   private closing = false
   private lastSequence = 0
   private needsResnapshot = false
@@ -270,6 +271,14 @@ export class LocalMmsClient implements MmsClient {
   private subscribeEventBuffer: ProtocolEvent[] = []
 
   constructor(private readonly opts: LocalMmsClientOptions) {}
+
+  /**
+   * When anything last arrived from the service on this connection (the handshake answer, a response, an event, a part
+   * of one): proof its main thread ran then. `GuiMmsController` asks an idle service whether it still answers.
+   */
+  get lastReceivedAt(): number {
+    return this._lastReceivedAt
+  }
 
   get connected(): boolean {
     return this._connected
@@ -347,6 +356,7 @@ export class LocalMmsClient implements MmsClient {
         // before residual same-chunk frames are processed.
         this._connected = true
         this._hello = hello
+        this._lastReceivedAt = Date.now()
         this.commands.bindWriter((envelope) => {
           try {
             this.write(envelope, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES)
@@ -705,6 +715,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private onData(chunk: Buffer): void {
+    this._lastReceivedAt = Date.now()
     try {
       this.decoder.push(chunk)
       for (const frame of this.decoder.shiftAll()) {

@@ -1,12 +1,15 @@
 /**
- * A service that holds the home with its process alive but answers no handshake (its main thread is stuck: a
- * deadlock, a native hang, an endless loop) is replaced by the app: asked to stop, ended when it outlives the stop, and
- * a new one started, instead of the app retrying "Hello timeout" for as long as the stuck process lives. A service that
- * is only slow, briefly busy, just restarted, or run by the dev script or a test is never replaced.
+ * A service that holds the home with its process alive but answers nothing (its main thread is stuck: a deadlock, a
+ * native hang, an endless loop) is replaced by the app: asked to stop, ended when it outlives the stop, and a new one
+ * started. That holds both when the app is reconnecting (handshakes go unanswered: before, it retried "Hello timeout"
+ * for as long as the stuck process lived) and when the app is still connected (an idle connection is probed, and the
+ * probes go unanswered: before, the window just sat there). A service that is only slow, briefly busy, just
+ * restarted, or run by the dev script or a test is never replaced, and a connection with traffic is never probed.
  *
  * Real services run in this process. The lease names an endpoint in front of each real one that passes the connection
- * on, holds it without an answer (stuck), or answers late. How the app starts a service is replaced, so the "new" one
- * is another in-process service over the same home; ending the stuck process is scripted (it stops the service).
+ * on, holds new connections without an answer and drops everything the service sends on open ones (stuck), or passes
+ * it on late. How the app starts a service is replaced, so the "new" one is another in-process service over the same
+ * home; ending the stuck process is scripted (it stops the service).
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -17,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { GuiMmsController, type GuiMmsControllerOptions } from '../src/main/mms/GuiMmsController'
+import { LocalMmsClient } from '../src/mms/protocol/client'
 import { publishOwnRuntimeRecord, readStopRequest, removeOwnRuntimeRecord } from '../src/cli/mmsRuntime'
 import { readOwnerRecord } from '../src/mms/ownership/MmsOwnerLease'
 
@@ -27,6 +31,9 @@ const HELLO_MS = 300
 /** Three unanswered handshakes (about 900 ms from the first one's start) pass it; two do not. */
 const AFTER_MS = 700
 const GRACE_MS = 300
+/** A connected service idle this long is probed; the probe waits this long for a reply. */
+const PROBE_IDLE_MS = 200
+const PROBE_TIMEOUT_MS = 300
 
 type FrontMode = 'pass' | 'stuck' | { lateMs: number }
 
@@ -43,20 +50,20 @@ class Front {
       this.sockets.add(client)
       client.on('error', () => undefined)
       client.on('close', () => this.sockets.delete(client))
-      const mode = this.mode
-      if (mode === 'stuck') return
-      const pass = (): void => {
-        if (client.destroyed) return
-        const upstream = createConnection(this.target)
-        this.sockets.add(upstream)
-        upstream.on('error', () => client.destroy())
-        upstream.on('close', () => { this.sockets.delete(upstream); client.destroy() })
-        client.on('close', () => upstream.destroy())
-        client.pipe(upstream)
-        upstream.pipe(client)
-      }
-      if (mode === 'pass') pass()
-      else setTimeout(pass, mode.lateMs)
+      if (this.mode === 'stuck') return
+      const upstream = createConnection(this.target)
+      this.sockets.add(upstream)
+      upstream.on('error', () => client.destroy())
+      upstream.on('close', () => { this.sockets.delete(upstream); client.destroy() })
+      client.on('close', () => upstream.destroy())
+      client.pipe(upstream)
+      // What the service sends: passed on, passed on late (in order), or dropped while it is stuck.
+      upstream.on('data', (chunk: Buffer) => {
+        const mode = this.mode
+        if (mode === 'stuck') return
+        if (mode === 'pass') client.write(chunk)
+        else setTimeout(() => { if (!client.destroyed) client.write(chunk) }, mode.lateMs)
+      })
     })
     this.server = server
     return new Promise((resolve, reject) => {
@@ -82,6 +89,8 @@ interface Service {
   token: string
   front: Front
   stopped: boolean
+  /** Sends an event to every subscribed connection, as a service at work does. */
+  emit(type: string): void
   stop(): Promise<void>
 }
 
@@ -117,6 +126,9 @@ describe('a service that stops answering', () => {
       token,
       front,
       stopped: false,
+      emit(type) {
+        ;(server as unknown as { emitToSubscribers: (event: unknown) => void }).emitToSubscribers({ kind: 'event', type, data: {} })
+      },
       async stop() {
         if (service.stopped) return
         service.stopped = true
@@ -153,6 +165,9 @@ describe('a service that stops answering', () => {
       unresponsiveService: {
         afterMs: AFTER_MS,
         stopGraceMs: GRACE_MS,
+        // Probes stay off unless a test is about them: they would add to the handshake rows' traffic.
+        probeIdleMs: 60_000,
+        probeTimeoutMs: PROBE_TIMEOUT_MS,
         endProcess: async (pid) => {
           ended.push(pid)
           stopRequestedBeforeEnd.push(stuck !== null && readStopRequest(home, stuck.token) !== null)
@@ -169,10 +184,13 @@ describe('a service that stops answering', () => {
       started.push(service)
       return { exitCode: null, signalCode: null }
     })
+    const probes = vi.spyOn(LocalMmsClient.prototype, 'request')
     return {
       gui,
       log,
       ended,
+      /** Probes sent so far (`health` reads; the app sends no other `health`). */
+      probes: () => probes.mock.calls.filter(([method]) => method === 'health').length,
       started,
       spawn,
       stopRequestedBeforeEnd,
@@ -249,6 +267,97 @@ describe('a service that stops answering', () => {
     expect(readOwnerRecord(home)?.token).toBe(a.started[0]!.token)
     expect(a.log.find((line) => line.event === 'service.replaced')?.fields).toMatchObject({ ended: false })
     expect(a.events()).not.toContain('service.ending')
+  })
+
+  const probing = { unresponsiveService: { probeIdleMs: PROBE_IDLE_MS } }
+
+  it('connected while it gets stuck: the open connection is probed, and the service is replaced', async () => {
+    const home = newHome()
+    const stuck = await startService(home)
+    const stuckPid = readOwnerRecord(home)!.pid
+    const a = app(home, probing)
+    a.endsProcessOf(stuck)
+    await a.gui.start()
+
+    // Its main thread stops: the connection stays open, and nothing comes back on it any more.
+    stuck.front.mode = 'stuck'
+
+    await vi.waitFor(() => {
+      expect(a.events()).toContain('service.restored')
+      expect(a.gui.connectionState).toBe('ready')
+    }, { timeout: 20_000, interval: 50 })
+
+    expect(a.probes()).toBeGreaterThanOrEqual(3)
+    expect(a.ended).toEqual([stuckPid])
+    expect(a.stopRequestedBeforeEnd).toEqual([true])
+    expect(a.spawn).toHaveBeenCalledTimes(1)
+    expect(readOwnerRecord(home)?.token).toBe(a.started[0]!.token)
+    const events = a.events()
+    const unresponsive = events.indexOf('service.unresponsive')
+    expect(unresponsive).toBeGreaterThan(-1)
+    expect(events.indexOf('service.replaced')).toBeGreaterThan(unresponsive)
+    expect(events.lastIndexOf('service.connected')).toBeGreaterThan(events.indexOf('service.replaced'))
+    const noted = a.log.find((line) => line.event === 'service.unresponsive')!.fields
+    expect(noted).toMatchObject({ noticedBy: 'probe' })
+    expect(noted.attempts).toBeGreaterThanOrEqual(3)
+    expect(noted.unansweredMs).toBeGreaterThanOrEqual(AFTER_MS)
+    await expect(a.gui.request('profiles.status', {})).resolves.toBeDefined()
+  })
+
+  it('connected and answering probes late, but in time, is kept', async () => {
+    const home = newHome()
+    const service = await startService(home)
+    const a = app(home, probing)
+    await a.gui.start()
+
+    service.front.mode = { lateMs: PROBE_TIMEOUT_MS / 2 }
+    // Long enough for the rule to replace it, were the late answers counted as none.
+    await new Promise((resolve) => setTimeout(resolve, 3 * (PROBE_IDLE_MS + PROBE_TIMEOUT_MS) + AFTER_MS))
+
+    expect(a.probes()).toBeGreaterThanOrEqual(3)
+    expect(a.events()).not.toContain('service.unresponsive')
+    expect(readStopRequest(home, service.token)).toBeNull()
+    expect(a.ended).toEqual([])
+    expect(a.gui.connectionState).toBe('ready')
+    expect(readOwnerRecord(home)?.token).toBe(service.token)
+  })
+
+  it('connected with steady traffic from the service is never probed', async () => {
+    const home = newHome()
+    const service = await startService(home)
+    const a = app(home, probing)
+    await a.gui.start()
+    const sent = a.probes()
+
+    const events: string[] = []
+    a.gui.on('event', (event: { type: string }) => events.push(event.type))
+    const ticking = setInterval(() => service.emit('test.tick'), PROBE_IDLE_MS / 4)
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 6 * PROBE_IDLE_MS))
+    } finally {
+      clearInterval(ticking)
+    }
+    expect(events.filter((type) => type === 'test.tick').length).toBeGreaterThan(10)
+    expect(a.probes()).toBe(sent)
+
+    // Once the traffic stops, the idle connection is probed: the check above was not just the probe being off.
+    await vi.waitFor(() => expect(a.probes()).toBeGreaterThan(sent), { timeout: 5_000, interval: 20 })
+  })
+
+  it('connected while it gets stuck, run by the dev script, is never probed or replaced', async () => {
+    const home = newHome()
+    const service = await startService(home)
+    const a = app(home, { managedDaemon: true, ...probing })
+    a.endsProcessOf(service)
+    await a.gui.start()
+
+    service.front.mode = 'stuck'
+    await new Promise((resolve) => setTimeout(resolve, 3 * (PROBE_IDLE_MS + PROBE_TIMEOUT_MS) + AFTER_MS))
+
+    expect(a.probes()).toBe(0)
+    expect(a.events()).not.toContain('service.unresponsive')
+    expect(a.ended).toEqual([])
+    expect(readOwnerRecord(home)?.token).toBe(service.token)
   })
 
   /**
