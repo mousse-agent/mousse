@@ -324,6 +324,22 @@ describe('Settings → Devices, new networking', () => {
     expect(host.textContent).toContain('Access from this device')
   })
 
+  it('shows the level picked at Allow on a one-way Can use row, which the old networking calls disconnected', async () => {
+    // One way, this computer never dials the device, so the old networking's node says disconnected while the
+    // engine row is connected (as two real computers paired this way showed).
+    daemon({ devices: [device({ node: 'n1', route: 'lan', direction: 'in' })] }, {
+      'bridge.nodes': () => ({
+        nodes: [{
+          node: 'n1', name: 'Studio', self: false, revoked: false, caps: ['read', 'chat', 'write', 'terminal', 'settings'],
+          kind: 'computer', state: 'closed', source: 'engine', routes: [], connection: 'disconnected',
+          policy: { blocked: false, ...accessPreset('view').fields }
+        }]
+      })
+    })
+    await mount()
+    expect(rowText('n1', 'in')).toContain('View and chat · Connected · same network')
+  })
+
   it('removes only the direction of the row, saying the other stays', async () => {
     const d = daemon({ features: ['grant-revoke-local'], devices: [device({ node: 'n1' })] })
     await mount()
@@ -435,6 +451,30 @@ describe('Let a device in', () => {
       { way: 'lan', state: 'ready', routes: ['tcp://192.168.1.20:47100'] }
     ]
   }
+
+  it('offers Turn on for a way whose switch is off while the helper still listens on it, and only then', async () => {
+    // As a real helper answered with Tailscale's switch saved off: restart_required, cleared by turning it on.
+    const restart = { ways: [{ way: 'lan', state: 'ready', routes: ['tcp://192.168.1.20:47100'] }, { way: 'tailnet', state: 'unavailable', reason: 'restart_required', routes: [] }] }
+    for (const tailnet of [false, true]) {
+      const d = daemon(
+        { features: ['route-readiness', 'invite-way'], reach: { lan: true, tailnet, public: [], tunnels: [] } as unknown as NetEngineStatus['reach'] },
+        { 'netEngine.routes.available': () => restart, 'netEngine.routes.config': () => ({}) }
+      )
+      await mount()
+      await click(button(/Let a device in/))
+      expect(document.body.textContent).toContain('Needs networking restarted')
+      if (tailnet) expect(button('Turn on')).toBeFalsy()
+      else {
+        await click(button('Turn on'))
+        expect(d.called('netEngine.routes.config')).toEqual([{ tailnet: true }])
+      }
+      act(() => root.unmount())
+      document.body.innerHTML = ''
+      host = document.createElement('div')
+      document.body.append(host)
+      root = createRoot(host)
+    }
+  })
 
   it('lists the ways with readiness in plain words, turns one on, and makes a code for the way picked', async () => {
     const d = daemon(

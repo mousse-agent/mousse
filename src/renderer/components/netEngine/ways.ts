@@ -2,6 +2,7 @@ import type {
   EngineFeature,
   NetEngineJoinCheck,
   NetEngineJoinProbe,
+  NetEngineReach,
   NetEngineStatus,
   NetEngineWay,
   NetEngineWayReadiness
@@ -51,11 +52,18 @@ export function wayReason(way: NetEngineWay, reason: string | undefined): string
 
 /**
  * What the owner can do here about a way that isn't ready: turn a switch on, or set it up in Reach this computer.
- * Undefined where nothing on this computer fixes it.
+ * Undefined where nothing on this computer fixes it. A switch saved off while the helper still listens that way
+ * reads as "needs a restart"; turning it on matches the two again.
  */
-export function wayFix(readiness: NetEngineWayReadiness): 'turn-on' | 'set-up' | undefined {
+export function wayFix(
+  readiness: NetEngineWayReadiness,
+  reach?: Pick<NetEngineReach, 'lan' | 'tailnet'>
+): 'turn-on' | 'set-up' | undefined {
   if (readiness.state === 'ready') return undefined
-  if ((readiness.way === 'lan' || readiness.way === 'tailnet') && readiness.reason === 'disabled') return 'turn-on'
+  if (readiness.way === 'lan' || readiness.way === 'tailnet') {
+    if (readiness.reason === 'disabled') return 'turn-on'
+    if (readiness.reason === 'restart_required' && reach?.[readiness.way] === false) return 'turn-on'
+  }
   if (readiness.reason === 'not_configured' || readiness.reason === 'relay_not_registered' || readiness.reason === 'origin_unavailable')
     return 'set-up'
   return undefined

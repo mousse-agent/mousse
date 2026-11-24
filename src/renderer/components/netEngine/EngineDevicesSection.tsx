@@ -357,7 +357,12 @@ export function EngineDevicesSection() {
         action: 'device-routes',
         onSelect: () => toggle(key)
       })
-    const access = side === 'in' && !view.warn ? accessShort(node, { workOnThreads: true, shareBots: true }) : undefined
+    // The level holds whatever the old networking says of its connection: one way, this computer never dials it,
+    // and the row's own state already says whether it is connected.
+    const access =
+      side === 'in' && !view.warn && node
+        ? accessShort({ ...node, connection: undefined }, { workOnThreads: true, shareBots: true })
+        : undefined
     return {
       key,
       node: device.node,

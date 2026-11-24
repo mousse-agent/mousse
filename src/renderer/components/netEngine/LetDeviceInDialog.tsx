@@ -176,7 +176,7 @@ function WayPicker({
       </p>
       {ways.map((item) => {
         const on = item.state === 'ready'
-        const fix = wayFix(item)
+        const fix = wayFix(item, status?.reach)
         return (
           <div
             key={item.way}
