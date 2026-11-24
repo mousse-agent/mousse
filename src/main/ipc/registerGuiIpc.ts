@@ -2728,10 +2728,7 @@ export function registerGuiIpc(
     return res.thread
   })
   registerHandler('threads:archive', async (_e, threadId: string, archived: boolean) => {
-    // A service still running from before `threads.archive` takes it under its old name.
-    const res = (await guiMms.supports('threads.archive'))
-      ? await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.archive', { threadId, archived })
-      : await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.settle', { threadId, settled: archived })
+    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.archive', { threadId, archived })
     broadcastIfRouted([threadId], res)
     return res.thread
   })

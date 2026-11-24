@@ -3,6 +3,7 @@ import type { PermissionMode } from '../../../shared/permissionMode'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../../run/delegation/subagentEvents'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { mmsJson } from './jsonOutput'
+import { withLegacySettledAt } from '../../../shared/archivedAt'
 import { withHiddenBots } from './botReach'
 import { MmsRemoteBackend, remoteThreadEventData } from './MmsBackend'
 import type {
@@ -107,7 +108,8 @@ export class MmsThreadSource implements ThreadSourcePort {
     const metadata = (thread: { id: string }): void => {
       if (thread.id !== threadId) return
       // A shared stream (any device may read it) names a bot that started the thread only if every device reaches it.
-      const data = { thread: withHiddenBots(thread, this.services.botReach?.hiddenFor(this.options.private?.reader)) },
+      // An older computer or phone reads the archive time only as `settledAt`.
+      const data = { thread: withLegacySettledAt(withHiddenBots(thread, this.services.botReach?.hiddenFor(this.options.private?.reader))) },
         fingerprint = JSON.stringify(data)
       if (fingerprint === lastMetadata) return
       lastMetadata = fingerprint

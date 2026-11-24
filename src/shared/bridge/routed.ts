@@ -904,12 +904,6 @@ export const routedMethodOf = (name: string): string | undefined =>
   isRoutedNetMethod(name) ? name.slice('routed.'.length) : undefined
 
 /**
- * The params of a call as an owner at `version` of the row takes them, for a row whose newer version
- * accepts a value an older one rejects. An owner from before the Auto permission mode (`threads.setPermissionMode`
- * below version 2) is sent Auto-accept edits for Auto: the mode Auto runs as on an agent without an auto mode,
- * so the thread never gets more than its person chose. Other calls are unchanged.
- */
-/**
  * Rows that were renamed: by new name, the old row and the call as the old row takes it. A caller sends the old row to
  * an owner that advertises it but not the new one (an owner that runs an older Mousse); the owner keeps the old row
  * for callers that run an older Mousse.
@@ -924,6 +918,12 @@ export const ROUTED_RENAMED_METHODS: Readonly<
   }
 })
 
+/**
+ * The params of a call as an owner at `version` of the row takes them, for a row whose newer version
+ * accepts a value an older one rejects. An owner from before the Auto permission mode (`threads.setPermissionMode`
+ * below version 2) is sent Auto-accept edits for Auto: the mode Auto runs as on an agent without an auto mode,
+ * so the thread never gets more than its person chose. Other calls are unchanged.
+ */
 export function routedParamsForOwner(method: string, version: number, params: Record<string, unknown>): Record<string, unknown> {
   if (method === 'threads.setPermissionMode' && version < 2 && params.mode === 'auto') return { ...params, mode: 'accept_edits' }
   const row = ROUTED_METHODS[method]
