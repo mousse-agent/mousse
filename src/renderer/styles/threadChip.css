@@ -24,6 +24,14 @@
   background-image: var(--ui-focus-layer);
 }
 
+/* An attachment's chip in a sent prompt (#1823), drawn as a thread link is: a button that opens the file or image. */
+.sent-attachment-chip {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+}
+
 .thread-chip-icon {
   display: inline-block;
   margin-right: 3px;

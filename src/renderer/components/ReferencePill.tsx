@@ -7,7 +7,8 @@ import { useChangesStore } from '../stores/changesStore'
 import { openSurface } from '../lib/surfaces'
 import { scopeFromKey } from './review/reviewComments'
 
-const ICONS = {
+/** The icon each kind of reference shows with, on its pill and on its chip in the text. */
+export const REFERENCE_ICONS = {
   file: File,
   folder: FolderOpen,
   project: Folder,
@@ -82,13 +83,14 @@ export function openChatReference(reference: ChatReference): void {
   }
 }
 
-export function ChatReferencePill({ reference: candidate, onRemove }: { reference: ChatReference; onRemove?: () => void }) {
+/** `tile`: beside image thumbnails the pill is a tile of their size, the name at its foot and the × in its corner. */
+export function ChatReferencePill({ reference: candidate, onRemove, tile = false }: { reference: ChatReference; onRemove?: () => void; tile?: boolean }) {
   const reference = parseChatReference(candidate)
   if (!reference) return null
-  const Icon = ICONS[reference.kind]
+  const Icon = REFERENCE_ICONS[reference.kind]
   const open = () => openChatReference(reference)
   return (
-    <span className="composer-attachment-pill composer-reference-pill">
+    <span className={`composer-attachment-pill composer-reference-pill${tile ? ' composer-reference-tile' : ''}`}>
       <button type="button" className="composer-reference-link" onClick={open} title={referenceTitle(reference)}>
         <Icon size={12} strokeWidth={2} />
         <span>{reference.title}</span>

@@ -2406,6 +2406,7 @@ html[data-chat-width='full'] .chat {
 
 .composer-attachments-scroll {
   display: flex;
+  align-items: center;
   gap: 6px;
   overflow-x: auto;
   overflow-y: hidden;
@@ -2494,6 +2495,48 @@ html[data-chat-width='full'] .chat {
 }
 
 .composer-reference-link:hover { color: #93c5fd; text-decoration: underline; }
+
+/* Beside image thumbnails: a tile of their size, icon at the top, name at the foot, × in the corner. */
+.composer-attachment-pill.composer-reference-tile {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  max-width: none;
+  padding: 8px;
+  border-radius: 6px;
+  align-items: stretch;
+}
+
+.composer-reference-tile .composer-reference-link {
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.composer-reference-tile .composer-reference-link svg {
+  width: 16px;
+  height: 16px;
+  margin: 8px;
+}
+
+.composer-attachment-pill.composer-reference-tile .composer-reference-link span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.composer-reference-tile .composer-attachment-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
 
 /* Inline `@skill` token layer. The wrap stacks a click-through backdrop behind
  * the real textarea (same grid cell): the textarea keeps native text, caret,
