@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { RegistryAgentView, RemoveInstallResult } from '../../../shared/harness/types'
 import { Trash2 } from '../../lib/icons'
-import { ProviderIcon } from '../../lib/providerIcons'
+import { ProviderIcon, registerProviderIcons } from '../../lib/providerIcons'
 import { Modal } from '../ui/Modal'
 import { SettingsRow } from '../settings/SettingsRow'
 import type { InstanceActions } from './CliSections'
@@ -23,8 +23,9 @@ import {
 
 /**
  * ACP agents Mousse installs from the registry: the Add dialog's searchable list and its confirm
- * panel, and the editor's source, update, downloaded files and remove rows. Icons are the generic
- * ACP logo; nothing is loaded from the registry's own icon URLs.
+ * panel, and the editor's source, update, downloaded files and remove rows. Each agent shows its
+ * own logo: the one Mousse ships for known brands, else the registry's icon as the daemon cleaned
+ * and cached it (a `data:` URL). The renderer never loads an icon from the registry itself.
  */
 
 type UsedBy = Extract<RemoveInstallResult, { removed: false }>['usedBy']
@@ -42,6 +43,7 @@ function useRegistrySearch(query: string) {
       window.mousse.providers.registry.search(query.trim()).then(
         (found) => {
           if (cancelled) return
+          registerProviderIcons(found)
           setAgents(found)
           setError(null)
         },
@@ -66,14 +68,12 @@ function useRegistrySearch(query: string) {
 
 /** The Add dialog's last step: search the registry, then pick an agent. */
 export function RegistryAgentList({
-  iconId,
   query,
   onQuery,
   selectedId,
   disabled,
   onSelect
 }: {
-  iconId: string
   query: string
   onQuery: (query: string) => void
   selectedId: string | null
@@ -104,22 +104,20 @@ export function RegistryAgentList({
       ) : agents.length === 0 ? (
         <p className="settings-muted prov-empty">{query.trim() ? 'No matches' : 'The registry lists no agents for this computer'}</p>
       ) : (
-        <RegistryAgentRows agents={agents} iconId={iconId} selectedId={selectedId} disabled={disabled} onSelect={onSelect} />
+        <RegistryAgentRows agents={agents} selectedId={selectedId} disabled={disabled} onSelect={onSelect} />
       )}
     </>
   )
 }
 
-/** One row per agent: name and version, then licence, how it is fetched and the checksum label. */
+/** One row per agent: its logo, name and version, then licence, how it is fetched and the checksum label. */
 export function RegistryAgentRows({
   agents,
-  iconId,
   selectedId,
   disabled,
   onSelect
 }: {
   agents: readonly RegistryAgentView[]
-  iconId: string
   selectedId: string | null
   disabled: boolean
   onSelect: (agent: RegistryAgentView) => void
@@ -139,7 +137,7 @@ export function RegistryAgentRows({
             disabled={disabled || Boolean(agent.unsupported)}
             onClick={() => onSelect(agent)}
           >
-            <ProviderIcon providerId={iconId} size={16} />
+            <ProviderIcon providerId={agent.id} icon={agent} size={16} />
             <span className="prov-registry-text">
               <span className="prov-registry-title">
                 <span className="prov-choice-label">{agent.name}</span>

@@ -710,7 +710,8 @@ export class MmsProfileServices {
         grokDriver({ agents: agentInstalls }),
         opencodeDriver({ agents: agentInstalls, registry: agentRegistry })
       ],
-      registry: { search: (query) => agentRegistry.search(query) },
+      // Search, and the icons snapshots carry (cached under `<installationHome>/agents/icons`).
+      registry: agentRegistry,
       // A sign-in the profiles share (the pi-ai credentials) stays while another profile still uses it.
       // With no host to ask, it is treated as in use: the credential is kept.
       otherProfilesUse: (instanceId) =>

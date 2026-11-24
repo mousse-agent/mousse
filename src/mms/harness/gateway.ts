@@ -499,6 +499,10 @@ export interface HarnessInstances {
 export interface HarnessRegistry {
   /** Agents of the ACP registry that fit this computer, best match first. */
   search(query: string): Promise<RegistryAgentView[]>
+  /** A registry agent's cached icon, read from disk only. */
+  icon?(agentId: string): { iconDataUrl: string; iconMonochrome: boolean } | undefined
+  /** Fetches a registry agent's icon into the cache when missing or old; true when one was stored. */
+  cacheIcon?(agentId: string): Promise<boolean>
 }
 
 export type HarnessGatewayEvent =
@@ -913,6 +917,8 @@ export class Harness implements HarnessGateway {
   readonly instanceMap: ProviderInstanceService
   private readonly drivers = new Map<HarnessDriverKind, HarnessDriver>()
   private readonly records = new Map<string, InstanceRecord>()
+  /** Registry agents whose icon is being fetched for a snapshot. */
+  private readonly iconRequests = new Set<string>()
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
@@ -2691,6 +2697,7 @@ export class Harness implements HarnessGateway {
       ...(limits ? { permissionLimits: limits } : {}),
       ...(cacheHour ? { promptCacheHour: cacheHour } : {}),
       config: this.configView(record),
+      ...this.registryIconOf(record),
       models: {
         entries,
         ...(names ? { names } : {}),
@@ -2916,6 +2923,28 @@ export class Harness implements HarnessGateway {
         ? { source: { kind: 'registry' as const, agentId: record.config.source.agentId, version: record.config.source.version, distribution: record.config.source.distribution } }
         : {})
     }
+  }
+
+  /**
+   * A registry agent's cached icon. When there is none yet (just added, or added before Mousse
+   * cached icons), it is fetched in the background and the snapshots go out again once it is stored.
+   */
+  private registryIconOf(record: InstanceRecord): { iconDataUrl?: string; iconMonochrome?: boolean } {
+    const source = record.config.source
+    const registry = this.options.registry
+    if (source?.kind !== 'registry' || !registry?.icon) return {}
+    const icon = registry.icon(source.agentId)
+    if (icon) return icon
+    const agentId = source.agentId
+    if (registry.cacheIcon && !this.iconRequests.has(agentId)) {
+      this.iconRequests.add(agentId)
+      void registry.cacheIcon(agentId)
+        .then((stored) => {
+          if (stored) this.emitSnapshots({ kind: 'device' })
+        }, () => undefined)
+        .finally(() => this.iconRequests.delete(agentId))
+    }
+    return {}
   }
 
   private displayName(record: InstanceRecord): string {

@@ -4,17 +4,30 @@
  * value that later becomes a path, a download or a launch is validated here first.
  */
 import { mkdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { RESERVED_AGENT_IDS, reservedAgentMessage, type RegistryAgentView, type RegistryChecksum } from '../../../shared/harness/types'
 
 export { RESERVED_AGENT_IDS, reservedAgentMessage }
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { HOME_VARIABLES, isInheritedCredential } from '../env'
+import { ICON_MAX_BYTES, RegistryIconCache, registryIconUrl, sanitizeRegistrySvg, type IconView } from './registryIcons'
 
 export const REGISTRY_URL = 'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json'
 export const REGISTRY_MAX_BYTES = 1024 * 1024
 export const REGISTRY_TIMEOUT_MS = 30_000
 export const REGISTRY_MAX_AGENTS = 512
+/** The registry's host: the only place agent icons are fetched from. */
+export const REGISTRY_HOST = new URL(REGISTRY_URL).host
+/** One icon fetch; an icon that does not arrive in time is tried again on a later search. */
+export const ICON_TIMEOUT_MS = 8_000
+/** Icon fetches at once, so a first search does not open dozens of connections. */
+export const ICON_CONCURRENCY = 4
+/** How long a search waits for missing icons before it answers without them. */
+export const ICON_SEARCH_WAIT_MS = 2_500
+/** A cached icon is fetched again after a week (the registry may change it). */
+export const ICON_MAX_AGE_MS = 7 * 24 * 60 * 60_000
+/** A failed icon fetch is not retried for ten minutes. */
+export const ICON_RETRY_MS = 10 * 60_000
 
 const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
@@ -66,6 +79,8 @@ export interface RegistryAgent {
   license?: string
   website?: string
   repository?: string
+  /** The agent's SVG icon on the registry's own host (`registryIconUrl`). */
+  icon?: string
   distribution: {
     binary?: Partial<Record<RegistryPlatform, RegistryBinaryTarget>>
     npx?: RegistryPackage
@@ -189,8 +204,11 @@ function decodePackage(value: unknown, runner: 'npx' | 'uvx'): RegistryPackage |
 
 const PLATFORMS: readonly RegistryPlatform[] = ['darwin-aarch64', 'darwin-x86_64', 'linux-aarch64', 'linux-x86_64', 'windows-aarch64', 'windows-x86_64']
 
-/** One registry entry, or undefined when any field that matters is invalid. */
-export function decodeAgent(value: unknown): RegistryAgent | undefined {
+/**
+ * One registry entry, or undefined when any field that matters is invalid. An icon is kept only
+ * on `registryHost` (the registry's own); one anywhere else is dropped, not the entry.
+ */
+export function decodeAgent(value: unknown, registryHost: string = REGISTRY_HOST): RegistryAgent | undefined {
   if (!isRecord(value)) return undefined
   const id = boundedString(value.id, 64)
   const version = boundedString(value.version, 64)
@@ -210,6 +228,7 @@ export function decodeAgent(value: unknown): RegistryAgent | undefined {
   const license = boundedString(value.license, 128)
   const website = httpsUrl(value.website)
   const repository = httpsUrl(value.repository)
+  const icon = registryIconUrl(value.icon, registryHost)
   return {
     id,
     name,
@@ -219,6 +238,7 @@ export function decodeAgent(value: unknown): RegistryAgent | undefined {
     ...(license ? { license } : {}),
     ...(website ? { website } : {}),
     ...(repository ? { repository } : {}),
+    ...(icon ? { icon } : {}),
     distribution: {
       ...(Object.keys(binary).length ? { binary } : {}),
       ...(npx ? { npx } : {}),
@@ -228,12 +248,12 @@ export function decodeAgent(value: unknown): RegistryAgent | undefined {
 }
 
 /** The registry document: its valid entries (at most `REGISTRY_MAX_AGENTS`), the rest dropped. */
-export function decodeRegistry(value: unknown): RegistryAgent[] {
+export function decodeRegistry(value: unknown, registryHost: string = REGISTRY_HOST): RegistryAgent[] {
   if (!isRecord(value) || !Array.isArray(value.agents)) throw new Error('The ACP registry is not in the expected format.')
   const agents: RegistryAgent[] = []
   const seen = new Set<string>()
   for (const entry of value.agents.slice(0, REGISTRY_MAX_AGENTS)) {
-    const agent = decodeAgent(entry)
+    const agent = decodeAgent(entry, registryHost)
     if (!agent || seen.has(agent.id)) continue
     seen.add(agent.id)
     agents.push(agent)
@@ -354,9 +374,13 @@ export function searchAgents(agents: readonly RegistryAgent[], query: string, ke
 
 /** Reads a response body up to `max` bytes; longer bodies fail. */
 async function readCapped(response: Response, max: number): Promise<string> {
+  return Buffer.from(await readCappedBytes(response, max, 'The ACP registry is larger than Mousse accepts.')).toString('utf8')
+}
+
+async function readCappedBytes(response: Response, max: number, tooLarge: string): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length'))
-  if (Number.isFinite(declared) && declared > max) throw new Error('The ACP registry is larger than Mousse accepts.')
-  if (!response.body) return ''
+  if (Number.isFinite(declared) && declared > max) throw new Error(tooLarge)
+  if (!response.body) return new Uint8Array()
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
@@ -366,11 +390,11 @@ async function readCapped(response: Response, max: number): Promise<string> {
     size += value.byteLength
     if (size > max) {
       await reader.cancel().catch(() => undefined)
-      throw new Error('The ACP registry is larger than Mousse accepts.')
+      throw new Error(tooLarge)
     }
     chunks.push(value)
   }
-  return Buffer.concat(chunks).toString('utf8')
+  return Buffer.concat(chunks)
 }
 
 export interface RegistryOptions {
@@ -381,6 +405,11 @@ export interface RegistryOptions {
   now?: () => number
   /** How long a fetched copy is reused before the network is asked again. */
   maxAgeMs?: number
+  /** `<installationHome>/agents/icons`; by default next to `cachePath`. */
+  iconsDir?: string
+  /** Test seams: how long a search waits for icons, and one icon fetch's deadline. */
+  iconSearchWaitMs?: number
+  iconTimeoutMs?: number
 }
 
 /**
@@ -392,8 +421,17 @@ export class AcpRegistry {
   private loading?: Promise<RegistryAgent[]>
   /** The cached file as last decoded, by its modification time (snapshots ask often). */
   private disk?: { mtimeMs: number; agents: RegistryAgent[] }
+  private readonly host: string
+  private readonly icons: RegistryIconCache
+  /** Icon fetches under way, by agent id, so one agent's icon is fetched once at a time. */
+  private readonly iconFetches = new Map<string, Promise<boolean>>()
+  /** When an agent's icon last failed to fetch. */
+  private readonly iconFailures = new Map<string, number>()
 
-  constructor(private readonly options: RegistryOptions) {}
+  constructor(private readonly options: RegistryOptions) {
+    this.host = new URL(options.url ?? REGISTRY_URL).host
+    this.icons = new RegistryIconCache(options.iconsDir ?? join(dirname(options.cachePath), 'icons'))
+  }
 
   async agents(signal?: AbortSignal): Promise<RegistryAgent[]> {
     const now = this.options.now?.() ?? Date.now()
@@ -414,15 +452,99 @@ export class AcpRegistry {
     if (this.memory) return this.memory.agents
     try {
       const { mtimeMs } = statSync(this.options.cachePath)
-      if (this.disk?.mtimeMs !== mtimeMs) this.disk = { mtimeMs, agents: decodeRegistry(JSON.parse(readFileSync(this.options.cachePath, 'utf8'))) }
+      if (this.disk?.mtimeMs !== mtimeMs) this.disk = { mtimeMs, agents: decodeRegistry(JSON.parse(readFileSync(this.options.cachePath, 'utf8')), this.host) }
       return this.disk.agents
     } catch {
       return []
     }
   }
 
+  /**
+   * Matching agents with their icons. Icons not cached yet are fetched (a few at a time) for up to
+   * `ICON_SEARCH_WAIT_MS`; the rest keep loading and show on a later search.
+   */
   async search(query: string, signal?: AbortSignal): Promise<RegistryAgentView[]> {
-    return searchAgents(await this.agents(signal), query)
+    const agents = await this.agents(signal)
+    const views = searchAgents(agents, query)
+    const shown = new Set(views.map((view) => view.id))
+    const missing = agents.filter((agent) => shown.has(agent.id) && this.wantsIcon(agent))
+    if (missing.length) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const wait = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.options.iconSearchWaitMs ?? ICON_SEARCH_WAIT_MS)
+      })
+      await Promise.race([this.fetchIcons(missing), wait]).finally(() => clearTimeout(timer))
+    }
+    return views.map((view) => ({ ...view, ...this.icon(view.id) }))
+  }
+
+  /** An agent's cached icon, from disk only (snapshots ask on every build). */
+  icon(agentId: string): IconView | undefined {
+    return this.icons.read(agentId)
+  }
+
+  /**
+   * Fetches an agent's icon into the cache when it is missing or old. True when a new icon was
+   * stored; false when none was needed, the agent has none, or the fetch failed.
+   */
+  async cacheIcon(agentId: string): Promise<boolean> {
+    // Snapshots ask often: offline, the registry is not asked again on every one.
+    if (this.iconFailedRecently(agentId)) return false
+    const agent = this.cached().find((entry) => entry.id === agentId) ?? (await this.agent(agentId).catch(() => undefined))
+    if (!agent) {
+      this.iconFailures.set(agentId, this.options.now?.() ?? Date.now())
+      return false
+    }
+    return this.wantsIcon(agent) ? this.fetchIcon(agent) : false
+  }
+
+  private iconFailedRecently(agentId: string): boolean {
+    const failed = this.iconFailures.get(agentId)
+    return failed !== undefined && (this.options.now?.() ?? Date.now()) - failed < ICON_RETRY_MS
+  }
+
+  /** The agent lists an icon, the cache has none (or an old one), and no recent fetch failed. */
+  private wantsIcon(agent: RegistryAgent): boolean {
+    if (!agent.icon || !this.icons.pathOf(agent.id) || this.iconFailedRecently(agent.id)) return false
+    // The file's time is the real clock's.
+    const written = this.icons.writtenAt(agent.id)
+    return written === undefined || Date.now() - written > ICON_MAX_AGE_MS
+  }
+
+  /** Fetches `agents`' icons, `ICON_CONCURRENCY` at a time; one failure costs only its icon. */
+  private async fetchIcons(agents: readonly RegistryAgent[]): Promise<void> {
+    const queue = [...agents]
+    const worker = async () => {
+      for (let agent = queue.shift(); agent; agent = queue.shift()) await this.fetchIcon(agent)
+    }
+    await Promise.all(Array.from({ length: Math.min(ICON_CONCURRENCY, queue.length) }, worker))
+  }
+
+  /** One icon: from the registry host only, no redirects, at most `ICON_MAX_BYTES`, cleaned before it is stored. */
+  private fetchIcon(agent: RegistryAgent): Promise<boolean> {
+    const running = this.iconFetches.get(agent.id)
+    if (running) return running
+    const url = agent.icon
+    const fetched = (async () => {
+      try {
+        if (!url || new URL(url).host !== this.host) return false
+        const fetchFile = this.options.fetch ?? fetch
+        const response = await fetchFile(url, { signal: AbortSignal.timeout(this.options.iconTimeoutMs ?? ICON_TIMEOUT_MS), redirect: 'error' })
+        if (!response.ok) throw new Error(`The icon answered ${response.status}.`)
+        const icon = sanitizeRegistrySvg(await readCappedBytes(response, ICON_MAX_BYTES, 'The icon is larger than Mousse accepts.'))
+        if (!icon) throw new Error('The icon is not a plain SVG.')
+        const stored = this.icons.write(agent.id, icon)
+        if (stored) this.iconFailures.delete(agent.id)
+        return stored
+      } catch {
+        this.iconFailures.set(agent.id, this.options.now?.() ?? Date.now())
+        return false
+      } finally {
+        this.iconFetches.delete(agent.id)
+      }
+    })()
+    this.iconFetches.set(agent.id, fetched)
+    return fetched
   }
 
   private async load(signal?: AbortSignal): Promise<RegistryAgent[]> {
@@ -432,7 +554,7 @@ export class AcpRegistry {
       const response = await fetchFile(this.options.url ?? REGISTRY_URL, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout, redirect: 'error' })
       if (!response.ok) throw new Error(`The ACP registry answered ${response.status}.`)
       const raw: unknown = JSON.parse(await readCapped(response, REGISTRY_MAX_BYTES))
-      const agents = decodeRegistry(raw)
+      const agents = decodeRegistry(raw, this.host)
       mkdirSync(dirname(this.options.cachePath), { recursive: true })
       atomicWriteJsonSync(this.options.cachePath, raw)
       this.memory = { agents, atMs: this.options.now?.() ?? Date.now() }

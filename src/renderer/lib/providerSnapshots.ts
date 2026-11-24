@@ -7,6 +7,7 @@ import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import { useAppStore } from '../stores/appStore'
 import { ipcErrorLine } from './errorText'
+import { registerInstanceIcons } from './providerIcons'
 import { isApiInstance } from '../components/providers/providerView'
 
 /**
@@ -44,6 +45,13 @@ interface ProviderSnapshotsState {
 }
 
 export const useProviderSnapshotsStore = create<ProviderSnapshotsState>(() => ({ profileId: null, scopes: {}, operations: {}, prompts: {} }))
+
+// Every logo of an ACP entry (pickers, thread rows, settings) follows the registry agent and the
+// icon its snapshot carries.
+useProviderSnapshotsStore.subscribe((state, previous) => {
+  if (state.scopes === previous.scopes) return
+  for (const scope of Object.values(state.scopes)) if (scope.snapshots) registerInstanceIcons(scope.snapshots)
+})
 
 const scopesByKey = new Map<string, ProviderScope>()
 /** The newest load of each scope: an older reply never replaces a newer one. */

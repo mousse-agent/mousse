@@ -7,7 +7,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AcpRegistry,
   agentView,
@@ -145,5 +145,97 @@ describe('the ACP registry', () => {
     writeFileSync(cachePath, 'not json')
     const broken = new AcpRegistry({ cachePath, fetch: (async () => answer()) as typeof fetch, now: () => clock })
     await expect(broken.agents()).rejects.toThrow(/could not load the ACP registry/)
+  })
+})
+
+describe('ACP registry icons', () => {
+  const icons = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'acp-registry-icons-2026-11-24.json'), 'utf8')) as { icons: Record<string, string> }
+  const CDN = 'https://cdn.agentclientprotocol.com/registry/v1/latest'
+  const npxAgent = (id: string, icon: unknown = `${CDN}/${id}.svg`) => ({ id, name: id, version: '1.0.0', icon, distribution: { npx: { package: `${id}@1.0.0` } } })
+
+  /** A registry of `agents` and a CDN serving `served` icons; records every request with its options. */
+  function setup(agents: unknown[], served: Record<string, () => Response | Promise<Response>>, iconSearchWaitMs = 1_000) {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-registry-icons-'))
+    dirs.push(dir)
+    const requests: Array<{ url: string; redirect: RequestRedirect | undefined }> = []
+    const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, redirect: init?.redirect })
+      if (url.endsWith('registry.json')) return new Response(JSON.stringify({ version: '1.0.0', agents }))
+      const answer = served[url]
+      if (!answer) return new Response('missing', { status: 404 })
+      return answer()
+    }) as typeof fetch
+    const registry = new AcpRegistry({ cachePath: join(dir, 'agents', 'registry.json'), fetch: fetchMock, iconSearchWaitMs })
+    return { dir, registry, requests }
+  }
+
+  it('returns each agent with its cleaned icon as a data URL, fetched from the registry host without redirects', async () => {
+    const { dir, registry, requests } = setup([npxAgent('goose'), npxAgent('kilo')], {
+      [`${CDN}/goose.svg`]: () => new Response(icons.icons.goose),
+      [`${CDN}/kilo.svg`]: () => new Response(icons.icons.kilo)
+    })
+    const found = await registry.search('')
+    expect(found.map((agent) => [agent.id, agent.iconMonochrome])).toEqual([['goose', true], ['kilo', true]])
+    for (const agent of found) expect(agent.iconDataUrl, agent.id).toMatch(/^data:image\/svg\+xml;base64,/)
+    expect(Buffer.from(found[0]!.iconDataUrl!.split(',')[1]!, 'base64').toString('utf8')).toBe(icons.icons.goose!.trim())
+    // Every icon request goes to the registry host and refuses redirects.
+    const iconRequests = requests.filter((request) => request.url.endsWith('.svg'))
+    expect(iconRequests.map((request) => new URL(request.url).host)).toEqual(['cdn.agentclientprotocol.com', 'cdn.agentclientprotocol.com'])
+    expect(iconRequests.every((request) => request.redirect === 'error')).toBe(true)
+    expect(readFileSync(join(dir, 'agents', 'icons', 'goose.svg'), 'utf8')).toBe(icons.icons.goose!.trim())
+    // A later search uses the cache: no second icon request.
+    await registry.search('goose')
+    expect(requests.filter((request) => request.url.endsWith('.svg'))).toHaveLength(2)
+  })
+
+  it('drops a hostile, oversized, failed or redirected icon without losing the agent or the other icons', async () => {
+    const { registry, requests } = setup(
+      [npxAgent('goose'), npxAgent('evil'), npxAgent('huge'), npxAgent('gone'), npxAgent('moved'), npxAgent('elsewhere', 'https://example.com/elsewhere.svg')],
+      {
+        [`${CDN}/goose.svg`]: () => new Response(icons.icons.goose),
+        [`${CDN}/evil.svg`]: () => new Response('<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><path d="M0 0h1"/></svg>'),
+        [`${CDN}/huge.svg`]: () => new Response(`<svg xmlns="http://www.w3.org/2000/svg">${' '.repeat(40_000)}</svg>`),
+        [`${CDN}/gone.svg`]: () => new Response('nope', { status: 500 }),
+        // What fetch does with `redirect: 'error'` when the server redirects.
+        [`${CDN}/moved.svg`]: () => Promise.reject(new TypeError('fetch failed: unexpected redirect'))
+      }
+    )
+    const found = await registry.search('')
+    expect(found.map((agent) => agent.id).sort()).toEqual(['elsewhere', 'evil', 'gone', 'goose', 'huge', 'moved'])
+    expect(found.filter((agent) => agent.iconDataUrl).map((agent) => agent.id)).toEqual(['goose'])
+    // The icon off the registry host is never requested.
+    expect(requests.some((request) => request.url.includes('example.com'))).toBe(false)
+    // A failed icon is not asked for again on every keystroke.
+    const before = requests.length
+    await registry.search('e')
+    expect(requests.slice(before).filter((request) => request.url.endsWith('.svg'))).toEqual([])
+  })
+
+  it('answers a search without waiting for a slow icon, and serves cached icons offline', async () => {
+    let release: () => void = () => undefined
+    const slow = new Promise<void>((resolve) => { release = resolve })
+    const { dir, registry } = setup([npxAgent('goose'), npxAgent('kilo')], {
+      [`${CDN}/goose.svg`]: () => new Response(icons.icons.goose),
+      [`${CDN}/kilo.svg`]: async () => { await slow; return new Response(icons.icons.kilo) }
+    }, 50)
+    const first = await registry.search('')
+    expect(first.map((agent) => [agent.id, Boolean(agent.iconDataUrl)])).toEqual([['goose', true], ['kilo', false]])
+    release()
+    await vi.waitFor(() => expect(registry.icon('kilo')).toBeDefined())
+    // Offline, a new registry reads the list and both icons from disk.
+    const offline = new AcpRegistry({ cachePath: join(dir, 'agents', 'registry.json'), fetch: (async () => { throw new Error('offline') }) as typeof fetch })
+    expect((await offline.search('')).map((agent) => Boolean(agent.iconDataUrl))).toEqual([true, true])
+    expect(offline.icon('goose')?.iconDataUrl).toMatch(/^data:image\/svg\+xml;base64,/)
+  })
+
+  it('asks an unreachable registry once for an added agent, not on every snapshot', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-registry-icons-'))
+    dirs.push(dir)
+    let requests = 0
+    const registry = new AcpRegistry({ cachePath: join(dir, 'agents', 'registry.json'), fetch: (async () => { requests += 1; throw new Error('offline') }) as typeof fetch })
+    expect(await registry.cacheIcon('goose')).toBe(false)
+    expect(await registry.cacheIcon('goose')).toBe(false)
+    expect(requests).toBe(1)
   })
 })

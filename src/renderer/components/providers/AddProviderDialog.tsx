@@ -408,7 +408,6 @@ export function AddProviderDialog({
               </SettingsGroup>
             ) : (
               <RegistryAgentList
-                iconId={selected.iconId}
                 query={registryQuery}
                 onQuery={setRegistryQuery}
                 selectedId={null}

@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentInstalls, resetAgentInstallState } from '../../src/mms/harness/agents/install'
-import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
+import { AcpRegistry, type RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness, HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -36,7 +36,7 @@ afterEach(async () => {
 
 const archive = tarGzOf([{ name: 'bin/demo', data: '#!/bin/sh\necho demo\n', mode: 0o755 }, { name: 'lib/helper.txt', data: 'helper' }])
 
-async function fixture(options: { gate?: Promise<void> } = {}) {
+async function fixture(options: { gate?: Promise<void>; registry?: AcpRegistry } = {}) {
   const server = createServer((_request, response) => {
     void (options.gate ?? Promise.resolve()).then(() => {
       response.writeHead(200, { 'content-length': String(archive.length) })
@@ -67,7 +67,7 @@ async function fixture(options: { gate?: Promise<void> } = {}) {
   })
   let stored: unknown = {}
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
-  const harness = testHarness({ drivers: [acpDriver({ agents, connect: (_context, request) => acp.connect(request) })], instances, profileHome: home })
+  const harness = testHarness({ drivers: [acpDriver({ agents, connect: (_context, request) => acp.connect(request) })], instances, profileHome: home, ...(options.registry ? { registry: options.registry } : {}) })
   harnesses.push(harness)
   const events: ProviderOperationEvent[] = []
   harness.instances.subscribe((event: HarnessGatewayEvent) => {
@@ -167,5 +167,35 @@ describe('a registry agent through the gateway', () => {
     await harness.instances.configure(id, { source: { kind: 'registry', agentId: 'demo-agent', version: '1.0.0', distribution: 'binary' } })
     expect(entries()[id]!.config).not.toHaveProperty('binaryPath')
     expect(entries()[id]!.config).toMatchObject({ source: { kind: 'registry', agentId: 'demo-agent' } })
+  })
+
+  it("carries the agent's cleaned icon once added, whatever the entry is called", async () => {
+    const cdn = 'https://cdn.agentclientprotocol.com/registry/v1/latest'
+    const iconSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="currentColor" d="M1 1h14v14H1z"/></svg>'
+    const iconHome = mkdtempSync(join(tmpdir(), 'mousse-registry-icon-home-'))
+    dirs.push(iconHome)
+    const iconRequests: string[] = []
+    const registry = new AcpRegistry({
+      cachePath: join(iconHome, 'agents', 'registry.json'),
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith('registry.json'))
+          return new Response(JSON.stringify({ agents: [{ id: 'demo-agent', name: 'Demo', version: '1.0.0', icon: `${cdn}/demo-agent.svg`, distribution: { npx: { package: 'demo-agent@1.0.0' } } }] }))
+        iconRequests.push(url)
+        return url === `${cdn}/demo-agent.svg` ? new Response(iconSvg) : new Response('', { status: 404 })
+      }) as typeof fetch
+    })
+    const { harness, snapshot } = await fixture({ registry })
+    const pushed: Array<{ instanceId: string; iconDataUrl?: string }> = []
+    harness.instances.subscribe((event) => {
+      if (event.type === 'snapshots') pushed.push(...event.data.snapshots)
+    })
+    // Added before its icon is cached: the snapshot goes out again once the icon is stored.
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'My agent', source: { kind: 'registry', agentId: 'demo-agent', version: '1.0.0', distribution: 'binary' } } })
+    await vi.waitFor(() => expect(pushed.some((entry) => entry.iconDataUrl)).toBe(true))
+    const shown = await snapshot()
+    expect(shown).toMatchObject({ iconMonochrome: true, config: { source: { agentId: 'demo-agent' } } })
+    expect(Buffer.from(shown.iconDataUrl!.split(',')[1]!, 'base64').toString('utf8')).toBe(iconSvg)
+    expect(iconRequests).toEqual([`${cdn}/demo-agent.svg`])
   })
 })

@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react'
+import { useSyncExternalStore, type ReactNode } from 'react'
+import type { InstanceSnapshot } from '../../shared/harness/status'
 import xaiLogo from '../assets/xai_logo.webp'
 import antgroupAsset from '../assets/provider-icons/antgroup-color.svg'
 import anthropicAsset from '../assets/provider-icons/anthropic.svg'
@@ -38,6 +39,17 @@ interface ProviderIconProps {
   providerId: string
   size?: number
   className?: string
+  /**
+   * An icon that came with what is shown (a registry search row), used when `providerId` has no
+   * bundled logo. Same fields as on `RegistryAgentView` and `InstanceSnapshot`.
+   */
+  icon?: IconFields
+}
+
+/** The icon fields a registry search row or an instance snapshot carries. */
+export interface IconFields {
+  iconDataUrl?: string
+  iconMonochrome?: boolean
 }
 
 function GenericProviderIcon({ size = 14, className }: { size?: number; className?: string }) {
@@ -243,6 +255,138 @@ function ProviderAssetIcon({
   )
 }
 
+/**
+ * ACP registry icons, as the daemon cleaned and cached them. Agents by registry id, and ACP
+ * entries by instance id with the registry agent they run, so a renamed entry (`acp:work` running
+ * OpenCode) still finds its agent's logo. Filled from provider snapshots and registry searches.
+ */
+interface RegistryIcon {
+  dataUrl: string
+  monochrome: boolean
+}
+const agentIcons = new Map<string, RegistryIcon>()
+const instanceAgents = new Map<string, { agentId?: string; icon?: RegistryIcon }>()
+const iconListeners = new Set<() => void>()
+let iconVersion = 0
+
+function subscribeIcons(listener: () => void): () => void {
+  iconListeners.add(listener)
+  return () => iconListeners.delete(listener)
+}
+
+const iconVersionNow = () => iconVersion
+
+function iconsChanged(): void {
+  iconVersion += 1
+  for (const listener of iconListeners) listener()
+}
+
+/**
+ * An icon to show: only a base64 SVG `data:` URL of bounded size, so no icon is ever loaded from
+ * the network and the URL cannot close the CSS `url("…")` it is placed in.
+ */
+function registryIconOf(fields: IconFields | undefined): RegistryIcon | undefined {
+  const url = fields?.iconDataUrl
+  if (!url || url.length > 64 * 1024 || !/^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/.test(url)) return undefined
+  return { dataUrl: url, monochrome: fields?.iconMonochrome === true }
+}
+
+function sameIcon(a: RegistryIcon | undefined, b: RegistryIcon | undefined): boolean {
+  return a?.dataUrl === b?.dataUrl && a?.monochrome === b?.monochrome
+}
+
+/** Registry agents' icons (`agent.id` with its `iconDataUrl`), as a registry search returns them. */
+export function registerProviderIcons(agents: ReadonlyArray<{ id: string } & IconFields>): void {
+  let changed = false
+  for (const agent of agents) {
+    const icon = registryIconOf(agent)
+    if (!icon || sameIcon(agentIcons.get(agent.id), icon)) continue
+    agentIcons.set(agent.id, icon)
+    changed = true
+  }
+  if (changed) iconsChanged()
+}
+
+/** The registry agents entries run, and their icons, from provider snapshots. */
+export function registerInstanceIcons(
+  snapshots: ReadonlyArray<Pick<InstanceSnapshot, 'instanceId' | 'config' | 'iconDataUrl' | 'iconMonochrome'>>
+): void {
+  let changed = false
+  for (const snapshot of snapshots) {
+    const source = snapshot.config?.source
+    const agentId = source?.kind === 'registry' ? source.agentId : undefined
+    const icon = registryIconOf(snapshot)
+    const known = instanceAgents.get(snapshot.instanceId)
+    // Only entries that run a registry agent (or carry its icon) are kept.
+    if (!agentId && !icon) {
+      if (known) {
+        instanceAgents.delete(snapshot.instanceId)
+        changed = true
+      }
+      continue
+    }
+    if (!known || known.agentId !== agentId || !sameIcon(known.icon, icon)) {
+      instanceAgents.set(snapshot.instanceId, { ...(agentId ? { agentId } : {}), ...(icon ? { icon } : {}) })
+      changed = true
+    }
+    if (agentId && icon && !sameIcon(agentIcons.get(agentId), icon)) {
+      agentIcons.set(agentId, icon)
+      changed = true
+    }
+  }
+  if (changed) iconsChanged()
+}
+
+/** Test seam: forgets every registered icon. */
+export function resetRegisteredIcons(): void {
+  agentIcons.clear()
+  instanceAgents.clear()
+  iconsChanged()
+}
+
+type ResolvedIcon =
+  | { kind: 'bundled'; key: string }
+  | { kind: 'registry'; key: string; icon: RegistryIcon }
+  | { kind: 'generic'; key: 'generic' }
+
+const GENERIC: ResolvedIcon = { kind: 'generic', key: 'generic' }
+
+function bundledKey(providerId: string): string | undefined {
+  const normalized = normalizeProviderId(providerId)
+  return PROVIDER_ASSET_ICONS[normalized] || PROVIDER_ICONS[normalized] ? normalized : undefined
+}
+
+/**
+ * Which logo a provider id shows. An ACP entry that runs a registry agent shows that agent's logo
+ * whatever the entry is called: the bundled one when Mousse ships it, else the registry's icon.
+ * Anything else shows its bundled logo, else a registry icon registered under its id (or its
+ * `acp:` slug), else the generic mark.
+ */
+function resolveProviderIcon(providerId: string, fields?: IconFields): ResolvedIcon {
+  const instance = instanceAgents.get(providerId)
+  if (instance?.agentId) {
+    const brand = bundledKey(instance.agentId)
+    if (brand) return { kind: 'bundled', key: brand }
+    const icon = instance.icon ?? agentIcons.get(instance.agentId)
+    return icon ? { kind: 'registry', key: `agent:${instance.agentId}`, icon } : GENERIC
+  }
+  const brand = bundledKey(providerId)
+  if (brand) return { kind: 'bundled', key: brand }
+  const slug = providerId.startsWith('acp:') ? providerId.slice(4) : providerId
+  const given = registryIconOf(fields)
+  if (given) return { kind: 'registry', key: `agent:${slug}`, icon: given }
+  const icon = instance?.icon ?? agentIcons.get(providerId) ?? agentIcons.get(slug)
+  return icon ? { kind: 'registry', key: `agent:${slug}`, icon } : GENERIC
+}
+
+/**
+ * What tells two logos apart: entries with the same key show the same logo (two Claude Code
+ * accounts, two OpenCode entries, two unknown agents with the generic mark).
+ */
+export function providerIconKey(providerId: string): string {
+  return resolveProviderIcon(providerId).key
+}
+
 /** The maker of a provider's own models, as a model brand id: Claude Code's models are Anthropic's. */
 export function providerMakerId(providerId: string): string {
   const id = normalizeProviderId(providerId)
@@ -256,7 +400,8 @@ export function providerMakerId(providerId: string): string {
  */
 export function normalizeProviderId(providerId: string): string {
   let id = providerId.trim().toLowerCase()
-  if (id.startsWith('pi:') && id.length > 3) id = id.slice(3)
+  // A model API is named by its provider, an ACP agent by its slug (`acp:opencode` is OpenCode).
+  if ((id.startsWith('pi:') || id.startsWith('acp:')) && id.length > id.indexOf(':') + 1) id = id.slice(id.indexOf(':') + 1)
   // Added instances are `<driver>:<slug>` (a second Claude Code account is `claude:work`).
   else if (/^[a-z-]+:./.test(id)) id = id.slice(0, id.indexOf(':'))
   if (id === 'claude' || id === 'claude-subscription') return 'claude'
@@ -297,15 +442,20 @@ export function normalizeProviderId(providerId: string): string {
   return id
 }
 
-export function ProviderIcon({ providerId, size = 14, className }: ProviderIconProps) {
-  const normalized = normalizeProviderId(providerId)
-  const asset = PROVIDER_ASSET_ICONS[normalized]
-  if (asset) {
+export function ProviderIcon({ providerId, size = 14, className, icon }: ProviderIconProps) {
+  // Icons registered later (a snapshot or a search arriving) redraw every logo.
+  useSyncExternalStore(subscribeIcons, iconVersionNow, iconVersionNow)
+  const resolved = resolveProviderIcon(providerId, icon)
+  if (resolved.kind === 'registry') {
+    // A one-ink mark follows the text colour (a mask); a mark of several colours is an image.
+    const asset: ProviderAsset = { src: resolved.icon.dataUrl, monochrome: resolved.icon.monochrome }
     return <ProviderAssetIcon asset={asset} size={size} className={className} />
   }
-  const Icon = PROVIDER_ICONS[normalized]
-  if (Icon) {
-    return <Icon size={size} className={className} />
+  if (resolved.kind === 'bundled') {
+    const asset = PROVIDER_ASSET_ICONS[resolved.key]
+    if (asset) return <ProviderAssetIcon asset={asset} size={size} className={className} />
+    const Icon = PROVIDER_ICONS[resolved.key]
+    if (Icon) return <Icon size={size} className={className} />
   }
   return <GenericProviderIcon size={size} className={className} />
 }
