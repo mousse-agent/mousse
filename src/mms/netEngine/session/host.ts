@@ -11,7 +11,13 @@ import type { AppendOutcome, BlobStore, EngineCaller, StreamStore } from '../../
 import type { DurableRpcDispatcher } from '../../net/sync/rpcDispatcher'
 import { engineControl, engineLimits } from '../limits'
 import type { EngineMessage } from './frame'
-import { Channel, toWireError, type EngineConnection, type EngineStream } from './transport'
+import {
+  Channel,
+  SESSION_FEATURES,
+  toWireError,
+  type EngineConnection,
+  type EngineStream
+} from './transport'
 
 /** The bytes of records one message may carry: the rest of it is the header's. */
 const recordsBudget = (): number => engineLimits().maxMessageBytes - engineLimits().headerReserveBytes
@@ -159,7 +165,12 @@ export class EngineHost {
       case 'mousse.hello':
         if (h.t === 'hello') {
           if (typeof h.name === 'string') this.port.calledBy?.(caller, h.name)
-          channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+          channel.send({
+            t: 'hello',
+            proto: 1,
+            name: this.port.name(),
+            features: [...SESSION_FEATURES]
+          })
         }
         else if (h.t === 'pairback') {
           if (!this.port.pairback) throw new NetError('bad_request')

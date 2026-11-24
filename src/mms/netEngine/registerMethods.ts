@@ -1,7 +1,15 @@
 import { AppError } from '../../shared/errors'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import { NET_ERRORS, NetError } from '../../shared/net'
-import { NET_ENGINE_LOCAL_METHODS, type NetEngineLocalMethod } from '../../shared/netEngine/local'
+import type { AccessPresetFields } from '../../shared/net/accessPresets'
+import { isAgentReach } from '../../shared/net/local'
+import { isPermissionMode } from '../../shared/permissionMode'
+import {
+  isNetEngineWay,
+  NET_ENGINE_LOCAL_METHODS,
+  NET_ENGINE_WAYS,
+  type NetEngineLocalMethod
+} from '../../shared/netEngine/local'
 import { DomainRpcError, type DomainHandlerRegistry } from '../protocol/domainRegistry'
 import type { NetEngineService } from './NetEngineService'
 import type { SshRemote } from './ssh/remote'
@@ -21,6 +29,9 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.address.remove': ['node', 'address'],
   'netEngine.address.use': ['node'],
   'netEngine.join.preview': ['ticket'],
+  'netEngine.join.check': ['ticket'],
+  'netEngine.join.probe': ['ticket'],
+  'netEngine.join.probe.cancel': ['ticket'],
   'netEngine.routes.test': ['route'],
   'netEngine.ssh.resolve': ['target'],
   'netEngine.ssh.probe': ['routeId'],
@@ -40,6 +51,21 @@ const text = (value: unknown): string | undefined =>
 
 const strings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.length <= 64 && value.every((item) => typeof item === 'string')
+
+/** Allow's access level: every field a preset sets, each of its type, and nothing else. */
+function accessFields(value: unknown): value is AccessPresetFields {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const fields = value as Record<string, unknown>
+  const keys: Array<keyof AccessPresetFields> = ['work', 'terminal', 'editor', 'maxPermissionMode', 'agentReach']
+  return (
+    Object.keys(fields).every((key) => (keys as string[]).includes(key)) &&
+    typeof fields.work === 'boolean' &&
+    typeof fields.terminal === 'boolean' &&
+    typeof fields.editor === 'boolean' &&
+    isPermissionMode(fields.maxPermissionMode) &&
+    isAgentReach(fields.agentReach)
+  )
+}
 
 /** `netEngine.routes.config`: only Reach's fields, each of its type. */
 function reach(fields: Record<string, unknown>): void {
@@ -90,10 +116,25 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
     throw new DomainRpcError('bad_request', `${method} needs enabled`)
   if (method === 'netEngine.invite' && fields.kind !== undefined && fields.kind !== 'link')
     throw new DomainRpcError('bad_request', `${method} takes kind "link" or none`)
+  if (method === 'netEngine.invite' && fields.way !== undefined && !isNetEngineWay(fields.way))
+    throw new DomainRpcError('bad_request', `${method} takes way as one of ${NET_ENGINE_WAYS.join(', ')}`)
+  if (method === 'netEngine.approve' && fields.access !== undefined && !accessFields(fields.access))
+    throw new DomainRpcError('bad_request', `${method} takes access as a preset's fields`)
   if (method === 'netEngine.join' && fields.share !== undefined && !strings(fields.share))
     throw new DomainRpcError('bad_request', `${method} takes share as a list of addresses`)
+  if (method === 'netEngine.join' && fields.back !== undefined && typeof fields.back !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} takes back as true or false`)
   if (
-    method === 'netEngine.join' &&
+    method === 'netEngine.remove' &&
+    fields.direction !== undefined &&
+    fields.direction !== 'in' &&
+    fields.direction !== 'out'
+  )
+    throw new DomainRpcError('bad_request', `${method} takes direction "in" or "out"`)
+  if (
+    (method === 'netEngine.join' ||
+      method === 'netEngine.join.check' ||
+      method === 'netEngine.join.probe') &&
     fields.arrival !== undefined &&
     fields.arrival !== 'scan' &&
     fields.arrival !== 'link'
@@ -148,7 +189,7 @@ export function registerNetEngineMethods(
               await engine.leakBeforeInvite()
               const invite = await engine
                 .pairing()
-                .invite(engine.ownName(), p.kind === 'link' ? 'link' : undefined)
+                .invite(engine.ownName(), p.kind === 'link' ? 'link' : undefined, p.way)
               // The window that showed the code closed, or switched profile: its invitation ends (§8).
               context.connection?.lifetime?.addEventListener(
                 'abort',
@@ -162,16 +203,30 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.approve':
               await engine.tellName()
-              await engine.pairing().approve(p.request, p.yes)
+              await engine.pairing().approve(p.request, p.yes, p.access)
               return engine.status()
             case 'netEngine.join': {
               const row = await engine.join(
                 p.ticket,
                 p.share ?? [],
-                p.arrival === 'link' ? 'link' : undefined
+                p.arrival === 'link' ? 'link' : undefined,
+                p.back !== false
               )
               return { node: row.localId, status: engine.status() }
             }
+            case 'netEngine.routes.available':
+              return { ways: await engine.waysAvailable() }
+            case 'netEngine.join.check':
+              return await engine.joinCheck(p.ticket, p.arrival === 'link' ? 'link' : 'scan')
+            case 'netEngine.join.probe':
+              // A window that closes, or a newer check of the same link, cancels this one.
+              return await engine.joinProbe(
+                p.ticket,
+                p.arrival === 'link' ? 'link' : 'scan',
+                context.connection?.lifetime
+              )
+            case 'netEngine.join.probe.cancel':
+              return { cancelled: await engine.cancelProbe(p.ticket) }
             case 'netEngine.join.code':
               await engine.pairing().submitCode(p.invitation, p.code)
               return engine.status()
@@ -179,7 +234,9 @@ export function registerNetEngineMethods(
               await engine.retry(p.node)
               return engine.status()
             case 'netEngine.remove':
-              await engine.pairing().remove(p.node)
+              if (p.direction === 'in' || p.direction === 'out')
+                await engine.pairing().removeDirection(p.node, p.direction)
+              else await engine.pairing().remove(p.node)
               return engine.status()
             case 'netEngine.address.add':
               await engine.addAddress(p.node, p.address)

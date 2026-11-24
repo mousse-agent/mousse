@@ -33,6 +33,11 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.join.preview',
   'netEngine.routes.config',
   'netEngine.routes.test',
+  // The pairing flow (protocol 1.2): which ways can make a code, and a link read and tried before Connect
+  'netEngine.routes.available',
+  'netEngine.join.check',
+  'netEngine.join.probe',
+  'netEngine.join.probe.cancel',
   // Phase 1b: Add over SSH (§3.4)
   'netEngine.ssh.resolve',
   'netEngine.ssh.probe',
@@ -140,8 +145,16 @@ export interface NetEngineDevice {
   ssh?: string
   /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
   source?: 'ssh'
-  /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */
+  /**
+   * A pairing with one direction only (added over SSH, or paired one way): `out`, this computer uses it; `in`, it
+   * uses this computer. Unset: both ways.
+   */
   direction?: 'out' | 'in'
+  /**
+   * This computer uses it one way and its Mousse is older than one-way pairing: its own row keeps waiting for this
+   * computer to let it in, until it is updated.
+   */
+  olderApp?: boolean
   /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */
   unfinished?: boolean
   /** That link is still valid, so Retry may ask for the code again. */
@@ -230,7 +243,63 @@ export interface NetEngineApproval {
   name: string
   /** The start of its endpoint id. */
   device: string
+  /** Its endpoint id, when the helper names it. */
+  identity?: string
 }
+
+/**
+ * What a 1.2 helper may list in its `hello` (pairing flow §1). The app sends a new field or operation only when the
+ * helper lists the feature that covers it; without it, that part works as it did with protocol 1.1.
+ */
+export const ENGINE_FEATURES = [
+  'invite-way',
+  'route-readiness',
+  'join-probe',
+  'grant-revoke-local',
+  'grant-roles',
+  'grant-add-connected'
+] as const
+export type EngineFeature = (typeof ENGINE_FEATURES)[number]
+
+/** How another device connects to this computer, as an invitation picks it (`invite.create {way}`). */
+export const NET_ENGINE_WAYS = ['lan', 'tailnet', 'public', 'tunnel', 'relay'] as const
+export type NetEngineWay = (typeof NET_ENGINE_WAYS)[number]
+export const isNetEngineWay = (value: unknown): value is NetEngineWay =>
+  (NET_ENGINE_WAYS as readonly unknown[]).includes(value)
+
+/** Whether this computer can make a code for one way now (`routes.available`, pairing flow §3). */
+export interface NetEngineWayReadiness {
+  way: NetEngineWay
+  state: 'ready' | 'off' | 'unavailable'
+  /** Why it is not ready (`disabled`, `no_interface`, `not_configured`, `paused`, …); undefined when ready. */
+  reason?: string
+  /** What a code of this way alone would carry now. */
+  routes: string[]
+}
+
+/** One hint of a link, as this computer reads it before Connect (`join.check`, pairing flow §4). */
+export interface NetEngineJoinHint {
+  route: string
+  way: NetEngineWay | null
+  eligibility: 'automatic' | 'approval_required' | 'skip'
+  reason?: string
+  /** Advice only: whether this computer has an address of that kind. */
+  local: 'interface_present' | 'no_matching_interface' | 'unknown'
+}
+
+/** What `netEngine.join.check` answers: what the link names, with nothing dialled. */
+export interface NetEngineJoinCheck {
+  /** 1: shown in person (QR); 2: sent as a link with a code. */
+  kind: number
+  name?: string
+  hints: NetEngineJoinHint[]
+}
+
+/** What `netEngine.join.probe` answers: whether the computer in the link answered from here. */
+export type NetEngineJoinProbe =
+  | { reachable: true; route: string; ms?: number }
+  | { reachable: null; reason: string }
+  | { reachable: false; reason: string }
 
 /** One class of the paid relay (typing, or copies) as the helper's blocks stand. */
 export interface NetEngineRelayClass {
@@ -377,6 +446,8 @@ export interface NetEngineStatus {
   reach?: NetEngineReach
   /** The helper speaks protocol 1.1, so Send link and Enter link work. */
   sendLink?: boolean
+  /** What the helper implements beyond 1.1 (its 1.2 `hello`); absent from an older helper. */
+  features?: EngineFeature[]
   /** Send links this computer shows. */
   links?: NetEngineLinkInvite[]
   /** Send link joins running here. */

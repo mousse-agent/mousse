@@ -90,6 +90,8 @@ export interface EngineLimits {
   joinDeadlineMs: number
   /** How long the other direction of a pairing may take to come up once the joiner asked for it (`pairback`). */
   pairbackDeadlineMs: number
+  /** How long "Use another computer" waits for its check that the computer answers (`join.probe`). */
+  joinProbeDeadlineMs: number
   /** The wait before a pairing step that failed (a grant not saved, a pairback not answered) is tried again. */
   pairingRetryMs: number
   /** How long a renewed path may take to answer hello and give back each live subscription's head (§3.6). */
@@ -194,6 +196,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   helperInitDeadlineMs: 60_000,
   joinDeadlineMs: 15 * 60_000,
   pairbackDeadlineMs: 60_000,
+  joinProbeDeadlineMs: 15_000,
   pairingRetryMs: 5_000,
   pathSwitchDeadlineMs: 30_000,
   pathDrainMs: 25 * 60_000,
@@ -257,6 +260,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS',
   joinDeadlineMs: 'MOUSSE_NET_ENGINE_JOIN_DEADLINE_MS',
   pairbackDeadlineMs: 'MOUSSE_NET_ENGINE_PAIRBACK_DEADLINE_MS',
+  joinProbeDeadlineMs: 'MOUSSE_NET_ENGINE_JOIN_PROBE_DEADLINE_MS',
   pairingRetryMs: 'MOUSSE_NET_ENGINE_PAIRING_RETRY_MS',
   pathSwitchDeadlineMs: 'MOUSSE_NET_ENGINE_PATH_SWITCH_DEADLINE_MS',
   pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
