@@ -126,7 +126,7 @@ it('Forget cancels the work timer with the original request', async () => {
 })
 it('scheduled runs must leave their place for the next run', async () => {
   const { workId } = await work()
-  f.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ kind: 'schedule', scheduleId: 'schedule', input: 'Check', occurrenceAt: f.store.now() }), workId)
+  f.store.run('UPDATE bot_activations SET trigger_json = ?, provenance = NULL WHERE id = ?', JSON.stringify({ kind: 'schedule', scheduleId: 'schedule', input: 'Check', occurrenceAt: f.store.now() }), workId)
   await expect(wait(workId)).rejects.toThrow('next run carries on')
 })
 
@@ -205,7 +205,7 @@ it('offers work_wait only to work, including work from reminders', async () => {
   expect((await start(f, chatTurn.id)).prepared.policy.tools!.allow).not.toContain('work_wait')
   for (const kind of ['manual', 'schedule'] as const) {
     const other = await f.bots.tools.work.start(botId, chatTurn.id, { title: kind, brief: 'Check', key: kind })
-    f.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ kind, input: 'Check', ...(kind === 'schedule' ? { scheduleId: 's', occurrenceAt: f.store.now() } : {}) }), other.workId)
+    f.store.run('UPDATE bot_activations SET trigger_json = ?, provenance = NULL WHERE id = ?', JSON.stringify({ kind, input: 'Check', ...(kind === 'schedule' ? { scheduleId: 's', occurrenceAt: f.store.now() } : {}) }), other.workId)
     expect((await start(f, other.workId)).prepared.policy.tools!.allow).not.toContain('work_wait')
     await expect(wait(other.workId)).rejects.toThrow(kind === 'schedule' ? 'next run' : 'run started by hand')
   }

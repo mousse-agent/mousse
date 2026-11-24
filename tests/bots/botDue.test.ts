@@ -130,13 +130,13 @@ describe('next due time', () => {
 describe('idleness (no caller outside tests yet)', () => {
   it.each(['chat', 'run'] as const)('is busy for queued, running and walled turns in the %s lane', (lane) => {
     for (const status of ['queued', 'running', 'waiting_grant']) {
-      f.store.run('UPDATE bot_activations SET lane = ?, status = ? WHERE id = ?', lane, status, first)
+      f.store.run('UPDATE bot_activations SET lane = ?, status = ?, provenance = NULL WHERE id = ?', lane, status, first)
       expect(f.bots.isIdle(botId)).toBe(false)
     }
   })
 
   it.each(['budget_exhausted', 'room_allowed', 'usage_limit', 'question', 'question_answered'])('is busy for work waiting on %s', (reason) => {
-    f.store.run("UPDATE bot_activations SET lane = 'run', status = 'blocked', trigger_json = ?, end_reason = ? WHERE id = ?",
+    f.store.run("UPDATE bot_activations SET lane = 'run', status = 'blocked', trigger_json = ?, end_reason = ?, provenance = NULL WHERE id = ?",
       JSON.stringify({ kind: 'work', title: 'Check.', input: 'Check.' }), reason, first)
     expect(f.bots.isIdle(botId)).toBe(false)
   })
@@ -146,7 +146,7 @@ describe('idleness (no caller outside tests yet)', () => {
     ['blocked', 'budget_denied'], ['blocked', 'bot_grant_revoked'], ['blocked', 'asked_too_often'],
     ['blocked', 'escalation_expired'], ['blocked', 'no_progress'], ['done', null], ['failed', null], ['cancelled', null]
   ])('is idle after a stopped %s row (%s)', (status, reason) => {
-    f.store.run("UPDATE bot_activations SET lane = 'run', status = ?, trigger_json = ?, end_reason = ? WHERE id = ?",
+    f.store.run("UPDATE bot_activations SET lane = 'run', status = ?, trigger_json = ?, end_reason = ?, provenance = NULL WHERE id = ?",
       status, JSON.stringify({ kind: 'work', title: 'Check.', input: 'Check.' }), reason, first)
     expect(f.bots.isIdle(botId)).toBe(true)
   })

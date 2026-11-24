@@ -56,7 +56,7 @@ it.each(['chat', 'manual', 'work', 'context', 'subagent'])('refuses %s even when
   const s = await scheduled()
   const at = f.bots.tools.activationOf(s.payload.threadId)!
   if (actor === 'chat' || actor === 'manual' || actor === 'work') {
-    f.store.run('UPDATE bot_activations SET lane = ?, trigger_json = ? WHERE id = ?', actor === 'chat' ? 'chat' : 'run', JSON.stringify({ kind: actor === 'chat' ? 'manual' : actor, input: 'Do it' }), s.row.id)
+    f.store.run('UPDATE bot_activations SET lane = ?, trigger_json = ?, provenance = NULL WHERE id = ?', actor === 'chat' ? 'chat' : 'run', JSON.stringify({ kind: actor === 'chat' ? 'manual' : actor, input: 'Do it' }), s.row.id)
   } else {
     vi.spyOn(f.bots.tools, 'activationOf').mockReturnValue({ ...at, role: actor })
   }

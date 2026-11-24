@@ -126,7 +126,7 @@ import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import { BOT_CHAT_TURN_END_KEY, BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT } from '../../../shared/bots/personal/memory'
 import { rollUpChips, type BotChipCall } from '../../../shared/bots/personal/chips'
 import type { BotActivityCalls, BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
-import { MERGED_END_REASON, workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
+import { MERGED_END_REASON, deriveBotProvenance, workWaits, type BotActivationProvenance, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
@@ -10711,24 +10711,36 @@ export function askAgainLine(question: string): string {
  * for (trigger `work`: `work_start` and a reminder's work), which waits for the answer. Never a scheduled run or a run
  * started by hand, which nobody waits on, nor a consult or a subagent (they compile their own tools).
  */
-export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'>): boolean {
-  return row.lane === 'chat' || (row.lane === 'run' && row.trigger.kind === 'work')
+export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance'>>): boolean {
+  return row.lane === 'chat' || (row.lane === 'run' && provenanceOf(row) === 'work')
 }
+
+/**
+ * What started the activation: the provenance its row stores, or, for a row read without one, what its lane, key and
+ * trigger give (`deriveBotProvenance`), so a caller with only `{ lane, idempotencyKey }` reads the same.
+ */
+function provenanceOf(row: Pick<BotActivationRow, 'lane'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance' | 'trigger'>>): BotActivationProvenance {
+  return row.provenance ?? deriveBotProvenance({ lane: row.lane, idempotencyKey: row.idempotencyKey ?? '', ...(row.trigger ? { trigger: row.trigger } : {}) })
+}
+
+/** The activation as the turn-kind predicates read it: a row, or its lane and key (and its provenance when stored). */
+type ActivationStart = Pick<BotActivationRow, 'lane' | 'idempotencyKey'> & Partial<Pick<BotActivationRow, 'provenance' | 'trigger'>>
 
 /**
  * Whether the activation is a chat turn its owner's own message started (`bots.chat.send`, keyed `chat:`). The bot's
  * first message (`create:`) is not one; it never waits at a wall the owner's reply continues (it asks for nothing, and at a limit the reply starts a turn of its own).
  * Nor is a turn an answer the owner tapped started (`answer:`): the label is the bot's words, not theirs.
  */
-export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
-  return row.lane === 'chat' && row.idempotencyKey.startsWith('chat:')
+export function ownerChatTurn(row: ActivationStart): boolean {
+  return row.lane === 'chat' && provenanceOf(row) === 'owner_message'
 }
 
 /** Owner facts, standing notes and Forget need an owner's message or tapped answer.
  * Unknown starts keep a run's memory rights until explicitly allowed here.
  */
-export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): BotLane {
-  return ownerChatTurn(row) || (row.lane === 'chat' && row.idempotencyKey.startsWith('answer:')) ? 'chat' : 'run'
+export function memoryLaneOf(row: ActivationStart): BotLane {
+  const provenance = provenanceOf(row)
+  return row.lane === 'chat' && (provenance === 'owner_message' || provenance === 'owner_tap') ? 'chat' : 'run'
 }
 
 /**
@@ -10738,6 +10750,9 @@ export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKe
  * message a thread the bot started sent it while it works (`threadmsg:`).
  */
 const ACTING_CHAT_KEYS = ['create:', 'wake:', 'question:', 'job:', THREAD_MESSAGE_KEY_PREFIX] as const
+
+/** The provenances of `ACTING_CHAT_KEYS`, also when Resume retried the turn. */
+const ACTING_CHAT_PROVENANCES: ReadonlySet<BotActivationProvenance> = new Set(['first_message', 'wake', 'question', 'job', 'threadmsg'])
 
 /** The start of a chat turn Resume retried after a usage limit (`chatToRetry`). */
 const RESUME_KEY_PREFIX = 'resume:'
@@ -10760,12 +10775,12 @@ function actingChatStartOf(key: string): string | undefined {
  * default answer or a thread's notice (`ACTING_CHAT_KEYS`, also when Resume retried it), and every run (work, a
  * reminder's work, a schedule). Not another bot's message (`botmsg:`).
  */
-export function threadsActOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
-  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && actingChatStartOf(row.idempotencyKey) !== undefined)
+export function threadsActOf(row: ActivationStart): boolean {
+  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && ACTING_CHAT_PROVENANCES.has(provenanceOf(row)))
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */
-export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'not_owner' | undefined {
+export function threadsReadOnlyOf(row: ActivationStart): 'not_owner' | undefined {
   return threadsActOf(row) ? undefined : 'not_owner'
 }
 

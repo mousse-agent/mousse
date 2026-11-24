@@ -14,7 +14,7 @@ import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
 import { WAKE_LINE_PREFIX, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
-import { BOT_JOB_ENDED, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
+import { BOT_JOB_ENDED, THREAD_MESSAGE_KEY_PREFIX, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
@@ -488,6 +488,15 @@ CREATE TABLE bot_jobs(
 CREATE INDEX bot_jobs_by_bot ON bot_jobs(bot_id, updated_at);
 CREATE INDEX bot_jobs_open ON bot_jobs(thread_id) WHERE ended_at IS NULL;
 `
+  },
+  {
+    // What started each activation (`BotActivationProvenance`), written with the row. An older row keeps NULL and reads
+    // it from its idempotency key and trigger (`deriveBotProvenance`). An older build refuses this bots.db
+    // (downgrade_unsupported).
+    version: 14,
+    sql: `
+ALTER TABLE bot_activations ADD COLUMN provenance TEXT;
+`
   }
 ]
 
@@ -811,6 +820,57 @@ export interface BotGrantRow {
   approvedAt: string
 }
 
+/**
+ * What started an activation (`bot_activations.provenance`, v14). A chat turn: the owner's message (`owner_message`, keyed
+ * `chat:`), an answer the owner tapped (`owner_tap`, `answer:`), the bot's first message (`first_message`, `create:`), a
+ * wake (`wake`), a question's default answer (`question`), a thread's notice (`job`) or message (`threadmsg`), another
+ * bot's message (`botmsg`), or a held call's result (`action_result`, `action:`). A run: work (`work`), a schedule
+ * (`schedule`) or a run started by hand (`manual`). `unknown`: any other start.
+ */
+export type BotActivationProvenance =
+  | 'owner_message' | 'owner_tap' | 'first_message' | 'wake' | 'question' | 'job' | 'threadmsg' | 'botmsg' | 'action_result'
+  | 'work' | 'schedule' | 'manual'
+  | 'unknown'
+
+const PROVENANCES: ReadonlySet<string> = new Set<BotActivationProvenance>([
+  'owner_message', 'owner_tap', 'first_message', 'wake', 'question', 'job', 'threadmsg', 'botmsg', 'action_result', 'work', 'schedule', 'manual', 'unknown'
+])
+
+/** The start of a chat turn's idempotency key, and the provenance it names. */
+const CHAT_KEY_PROVENANCE: ReadonlyArray<readonly [string, BotActivationProvenance]> = [
+  ['chat:', 'owner_message'], ['answer:', 'owner_tap'], ['create:', 'first_message'], ['wake:', 'wake'], ['question:', 'question'],
+  ['job:', 'job'], [THREAD_MESSAGE_KEY_PREFIX, 'threadmsg'], ['botmsg:', 'botmsg'], ['action:', 'action_result']
+]
+
+/** The start of a chat turn Resume retried after a usage limit (`BotEngine.chatToRetry`). */
+const RESUME_KEY = 'resume:'
+
+/**
+ * The provenance of an activation from its lane, idempotency key and trigger: what a row written before v14 means, and
+ * what a new row stores. A run: its trigger's kind. A chat turn: its key's start, also behind the `resume:` of the turns
+ * Resume retried (`resume:wake:<id>`, `resume:resume:job:<id>`). A bare `resume:<id>` is the retry of another bot's
+ * message (`chatToRetry` keeps no other start that way), so `botmsg`. The bot's first message is still told by its raw
+ * `create:` key (`resume:create:<id>` is not one); this does not change that.
+ */
+export function deriveBotProvenance(input: { lane: BotLane; idempotencyKey: string; trigger?: { kind: string } }): BotActivationProvenance {
+  if (input.lane === 'run') {
+    const kind = input.trigger?.kind
+    return kind === 'work' || kind === 'schedule' || kind === 'manual' ? kind : 'unknown'
+  }
+  if (input.lane !== 'chat') return 'unknown'
+  let key = input.idempotencyKey
+  let hadResumePrefix = false
+  while (key.startsWith(RESUME_KEY)) { key = key.slice(RESUME_KEY.length); hadResumePrefix = true }
+  const named = CHAT_KEY_PROVENANCE.find(([start]) => key.startsWith(start))
+  if (named) return named[1]
+  return hadResumePrefix ? 'botmsg' : 'unknown'
+}
+
+/** The provenance a new activation row stores: the one its writer names, or the one its lane, key and trigger give. */
+function provenanceToWrite(row: { lane?: BotLane; idempotencyKey: string; trigger: { kind: string } }, provenance: BotActivationProvenance | undefined): BotActivationProvenance {
+  return provenance ?? deriveBotProvenance({ lane: row.lane ?? 'run', idempotencyKey: row.idempotencyKey, trigger: row.trigger })
+}
+
 export interface BotActivationRow {
   id: string
   botId: string
@@ -839,6 +899,8 @@ export interface BotActivationRow {
    * `end_reason` while it runs, so `bots.db` needs no new column and older builds still read it.
    */
   offline: boolean
+  /** What started it: stored since v14, derived from its key and trigger for an older row (`deriveBotProvenance`). */
+  provenance: BotActivationProvenance
 }
 
 export interface BotDispatchRow {
@@ -1091,12 +1153,15 @@ const num = (value: unknown): number | null => (typeof value === 'number' ? valu
 const json = <T>(value: unknown): T | null => (typeof value === 'string' ? (JSON.parse(value) as T) : null)
 
 function activationOf(row: Row): BotActivationRow {
+  const lane = (str(row.lane) ?? 'run') as BotLane
+  const trigger = JSON.parse(row.trigger_json as string) as BotActivationRow['trigger']
+  const stored = str(row.provenance)
   return {
     id: row.id as string,
     botId: row.bot_id as string,
     revision: row.revision as string,
     grantDigest: row.grant_digest as string,
-    trigger: JSON.parse(row.trigger_json as string) as BotActivationRow['trigger'],
+    trigger,
     idempotencyKey: row.idempotency_key as string,
     status: row.status as BotActivationStatus,
     threadId: str(row.thread_id),
@@ -1106,11 +1171,12 @@ function activationOf(row: Row): BotActivationRow {
     createdAt: row.created_at as string,
     endedAt: str(row.ended_at),
     endReason: str(row.end_reason),
-    lane: (str(row.lane) ?? 'run') as BotLane,
+    lane,
     modelOverride: json<BotModelOverride>(row.model_override_json),
     reloadPending: num(row.reload_pending) === 1,
     selection: json<ProviderSelection>(row.selection_json),
-    offline: row.status === 'running' && row.end_reason === BOT_OFFLINE_REASON
+    offline: row.status === 'running' && row.end_reason === BOT_OFFLINE_REASON,
+    provenance: stored && PROVENANCES.has(stored) ? stored as BotActivationProvenance : deriveBotProvenance({ lane, idempotencyKey: row.idempotency_key as string, trigger })
   }
 }
 
@@ -1477,10 +1543,15 @@ export class BotStore {
     this.run('UPDATE bot_activations SET reload_pending = 1 WHERE id = ?', id)
   }
 
-  insertActivation(row: Pick<BotActivationRow, 'id' | 'botId' | 'revision' | 'grantDigest' | 'trigger' | 'idempotencyKey' | 'status' | 'createdAt'> & { lane?: BotLane }, limits: ActivationLimits): void {
+  /**
+   * `start.provenance`: what started it, when its lane, key and trigger do not say (`deriveBotProvenance` otherwise).
+   * Apart from the row, so a row built by spreading another activation's (with a new key or lane) never carries that
+   * one's provenance.
+   */
+  insertActivation(row: Pick<BotActivationRow, 'id' | 'botId' | 'revision' | 'grantDigest' | 'trigger' | 'idempotencyKey' | 'status' | 'createdAt'> & { lane?: BotLane }, limits: ActivationLimits, start: { provenance?: BotActivationProvenance } = {}): void {
     this.run(
-      'INSERT INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at, lane) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt, row.lane ?? 'run'
+      'INSERT INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at, lane, provenance) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt, row.lane ?? 'run', provenanceToWrite(row, start.provenance)
     )
     this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))
     this.run('INSERT INTO bot_spend(activation_id) VALUES(?)', row.id)
@@ -2024,10 +2095,10 @@ export class BotStore {
    * Inserts an activation unless its idempotency key exists already; true when it was inserted.
    * A repeated schedule occurrence only finds the activation it made before.
    */
-  insertActivationOnce(row: Parameters<BotStore['insertActivation']>[0], limits: ActivationLimits): boolean {
+  insertActivationOnce(row: Parameters<BotStore['insertActivation']>[0], limits: ActivationLimits, start: { provenance?: BotActivationProvenance } = {}): boolean {
     const inserted = this.run(
-      'INSERT OR IGNORE INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at, lane) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt, row.lane ?? 'run'
+      'INSERT OR IGNORE INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at, lane, provenance) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt, row.lane ?? 'run', provenanceToWrite(row, start.provenance)
     )
     if (!inserted) return false
     this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))

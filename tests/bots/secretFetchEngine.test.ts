@@ -80,7 +80,7 @@ it('withholds the service ledger from a subagent of work', async () => {
 it('checks the run lane independently of the work trigger', async () => {
   const { workId } = await newWork()
   // Pin the lane guard even for an inconsistent persisted row; a work trigger alone grants nothing.
-  f.store.run("UPDATE bot_activations SET lane = 'chat' WHERE id = ?", workId)
+  f.store.run("UPDATE bot_activations SET lane = 'chat', provenance = NULL WHERE id = ?", workId)
   expect((await start(f, workId)).prepared.authority.secretFetch).toBeUndefined()
 })
 it('supplies the ledger and its instruction to a scheduled run', async () => {
