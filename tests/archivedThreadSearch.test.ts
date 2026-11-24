@@ -33,7 +33,7 @@ describe('searching archived threads', () => {
   it('finds an archived thread by its title from a window', async () => {
     const open = mms.threads.createThread('Budget open', undefined, undefined, { started: true })
     const archived = mms.threads.createThread('Budget archived', undefined, undefined, { started: true })
-    await gui('threads.settle', { threadId: archived.id, settled: true })
+    await gui('threads.archive', { threadId: archived.id, archived: true })
 
     const { results } = (await gui('threads.search', { query: 'budget' })) as { results: ThreadSearchResult[] }
     expect(results.map((hit) => hit.threadId).sort()).toEqual([open.id, archived.id].sort())

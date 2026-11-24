@@ -347,7 +347,7 @@ describe('the handover', () => {
       realThread('t-lead', 'Limits review lead', 'p-mousse', -6),
       subagent('t-sub-1', 'Limits e2e tester', 't-lead', -5),
       subagent('t-sub-2', 'Worktree pause fixer', 't-lead', -4),
-      realThread('t-old', 'Archived audit', 'p-mousse', -3, { settledAt: T, lastRun: 'done' }),
+      realThread('t-old', 'Archived audit', 'p-mousse', -3, { archivedAt: T, lastRun: 'done' }),
       realThread('t-site', 'Pricing page copy', 'p-site', 0)
     ]
     // Main keeps only Done and Input: here every Done the service had, the subagents' included.

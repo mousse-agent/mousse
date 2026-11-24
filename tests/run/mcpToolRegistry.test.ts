@@ -694,10 +694,10 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect(result.payload).toMatchObject({ runId: child.childRunId, text: `${'w'.repeat(THREAD_RESULT_MAX_CHARS)}…`, truncated: true, totalChars: long.length, hint: expect.stringContaining('view "messages"') })
   })
 
-  it('thread_list: every project, started and unsettled by default, filters and limits, with the pending questions', async () => {
+  it('thread_list: every project, started and unarchived by default, filters and limits, with the pending questions', async () => {
     const { call, fx, threads, activity, strangerRun } = await world()
     threads.set('draft', thread('draft', { startedAt: undefined }))
-    threads.set('old', thread('old', { settledAt: NOW }))
+    threads.set('old', thread('old', { archivedAt: NOW }))
     threads.set('quiet', thread('quiet', { updatedAt: '2026-10-11T00:00:00.000Z' }))
     const sub = await fx.delegate(strangerRun.runId, 'call-sub')
     threads.set(sub.childThreadId, thread(sub.childThreadId, { lineage: { parentThreadId: 'stranger', rootThreadId: 'stranger', relationship: 'subagent' } }))
@@ -717,14 +717,17 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     })
 
     expect(ids(await list({ includeUnstarted: true }))).toContain('draft')
+    expect(ids(await list({ includeArchived: true }))).toContain('old')
+    // The name an agent learned before archived threads were called archived still works.
     expect(ids(await list({ includeSettled: true }))).toContain('old')
+    expect((await call('parent', 'thread_list', { includeSettled: 'yes' })).isError).toBe(true)
     // Archived and hidden rows say so; open, shown rows carry neither.
     threads.set('tucked', thread('tucked', { hidden: true }))
-    const settled = (await list({ includeSettled: true })).threads
-    expect(settled.find((row) => row.id === 'old')).toMatchObject({ archived: true, archivedAt: NOW })
-    expect(settled.find((row) => row.id === 'tucked')).toMatchObject({ hidden: true })
-    expect(settled.find((row) => row.id === 'quiet')).not.toHaveProperty('archived')
-    expect(settled.find((row) => row.id === 'quiet')).not.toHaveProperty('hidden')
+    const archived = (await list({ includeArchived: true })).threads
+    expect(archived.find((row) => row.id === 'old')).toMatchObject({ archived: true, archivedAt: NOW })
+    expect(archived.find((row) => row.id === 'tucked')).toMatchObject({ hidden: true })
+    expect(archived.find((row) => row.id === 'quiet')).not.toHaveProperty('archived')
+    expect(archived.find((row) => row.id === 'quiet')).not.toHaveProperty('hidden')
     threads.delete('tucked')
     expect(ids(await list({ includeSubagents: true }))).toContain(sub.childThreadId)
     expect(ids(await list({ projectId: 'p2' }))).toEqual(['elsewhere'])
@@ -740,10 +743,10 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect(ids(await list())).toContain('mine')
     expect(ids(await list())).not.toContain('secret')
     expect(ids(await list({ projectId: 'p1' }))).not.toContain('mine')
-    // Once archived it leaves the default list like any other, and comes back marked with includeSettled.
-    threads.set('mine', { ...threads.get('mine')!, settledAt: NOW })
+    // Once archived it leaves the default list like any other, and comes back marked with includeArchived.
+    threads.set('mine', { ...threads.get('mine')!, archivedAt: NOW })
     expect(ids(await list())).not.toContain('mine')
-    expect((await list({ includeSettled: true })).threads.find((row) => row.id === 'mine')).toMatchObject({ archived: true, archivedAt: NOW })
+    expect((await list({ includeArchived: true })).threads.find((row) => row.id === 'mine')).toMatchObject({ archived: true, archivedAt: NOW })
   })
 
   it('thread_search: titles, projects and message matches with snippets in every project, private threads left out before the limit', async () => {

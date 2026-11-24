@@ -156,7 +156,7 @@ describe('the walker', () => {
     await read('threads.inventory', { node: t.node })
     await read('projects.list', {})
     await read('threads.rename', { threadId: t.qualified(parent.id), name: 'Parent renamed' })
-    await read('threads.settle', { threadId: t.qualified(child.id), settled: false })
+    await read('threads.archive', { threadId: t.qualified(child.id), archived: false })
     await read('threads.create', { node: t.node, name: 'Made here', projectId: t.qualified(project.id) })
 
     // Events the owner raises for the parent and its subagent.
@@ -223,7 +223,7 @@ describe('the walker', () => {
     const value = (key: string): unknown =>
       key === 'path' || key === 'oldPath' ? 'a.txt'
         : key === 'scope' ? 'worktree'
-        : key === 'pinned' || key === 'settled' || key === 'enabled' || key === 'approved' ? true
+        : key === 'pinned' || key === 'archived' || key === 'settled' || key === 'enabled' || key === 'approved' ? true
         : key === 'paths' || key === 'orderedIds' || key === 'roots' ? ['x']
         : key === 'number' || key === 'index' ? 1
         : key === 'answers' || key === 'state' || key === 'data' || key === 'policy' ? {}

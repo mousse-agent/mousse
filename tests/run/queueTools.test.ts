@@ -150,7 +150,7 @@ describe('the queue tools (SPEC §15.1)', () => {
 
     it('an archived thread takes no new message, edit or steer, but its queue can be tidied (remove, reorder)', async () => {
       const { call, denied, threads, host } = await world()
-      threads.set('target', thread('target', { settledAt: NOW }))
+      threads.set('target', thread('target', { archivedAt: NOW }))
       for (const { tool, args } of TOOLS.filter((entry) => ['queue_enqueue', 'queue_edit', 'queue_promote_to_steer'].includes(entry.tool))) {
         const error = await denied(call(tool, { ...args, threadId: 'target' }))
         expect(error, tool).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'thread_archived' } })

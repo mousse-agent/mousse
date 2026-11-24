@@ -571,7 +571,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // A new chat is composer state, not a conversation, until its first message is sent: before that it is listed
   // only by its draft (`unsentChats`).
   const availableThreads = useMemo(
-    () => sortSidebarThreads(unarchivedListThreads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    () => sortSidebarThreads(unarchivedListThreads.filter((thread) => !thread.archivedAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
     [unarchivedListThreads, agentThreadIds]
   )
   // Threads whose composer holds unsent text. A new chat not sent yet is listed in its project once it has some
@@ -579,7 +579,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const draftedKey = useAppStore((s) => draftedThreadsKey(s.composerDrafts))
   const draftedIds = useMemo(() => draftedThreadIds(draftedKey), [draftedKey])
   const unsentChats = useMemo(
-    () => sortSidebarThreads(unarchivedListThreads.filter((thread) => !thread.settledAt && !isThreadStarted(thread) && !agentThreadIds.has(thread.id) && draftedIds.has(thread.id))),
+    () => sortSidebarThreads(unarchivedListThreads.filter((thread) => !thread.archivedAt && !isThreadStarted(thread) && !agentThreadIds.has(thread.id) && draftedIds.has(thread.id))),
     [unarchivedListThreads, agentThreadIds, draftedIds]
   )
   const projectListThreads = useMemo(() => withUnsentChats(availableThreads, unsentChats), [availableThreads, unsentChats])
@@ -587,7 +587,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // computer's: a thread is hidden by the computer that runs it.
   const shownBotThreads = useMemo(() => availableThreads.filter((thread) => thread.startedByBot && !thread.node && !thread.hidden), [availableThreads])
   const archivedThreads = useMemo(
-    () => sortArchivedThreads(archivedListThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    () => sortArchivedThreads(archivedListThreads.filter((thread) => Boolean(thread.archivedAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
     [archivedListThreads, agentThreadIds]
   )
   // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
@@ -675,7 +675,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // A hidden bot thread has no row to reveal.
     if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || !inFilter(shown)) return
     revealedRow.current = shownId
-    if (shown.settledAt) {
+    if (shown.archivedAt) {
       setArchivedExpanded(true)
       return
     }
@@ -1082,7 +1082,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (!contextMenu || contextMenu.target.type !== 'thread') return
     const { target } = contextMenu
     closeContextMenu()
-    void setArchived(target.id, !target.settled)
+    void setArchived(target.id, !target.archived)
   }
 
   const handleRegenerateTitle = async () => {
@@ -1173,7 +1173,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const { target } = contextMenu
     closeContextMenu()
     if (target.type === 'thread') {
-      if (target.settled && !target.node) askDelete({ kind: 'one', thread: { id: target.id, name: target.name } })
+      if (target.archived && !target.node) askDelete({ kind: 'one', thread: { id: target.id, name: target.name } })
     } else setRemovingProject(target)
   }
 
@@ -1305,7 +1305,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     clipped?: boolean
   } = {}) => {
     countRender(`SidebarRow:${thread.id}`)
-    const isArchived = Boolean(thread.settledAt)
+    const isArchived = Boolean(thread.archivedAt)
     // While the thread moves between its list and Archived: the row leaving (not clickable) or the one arriving.
     const archiveMotion = inNeedsMe ? undefined : archiveMotionOfRow(thread)
     // A pending row whose thread the service has not made or started yet: it has nothing to act on but opening it.
@@ -1326,7 +1326,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // project has none.
     const hue = layout === 'card' && threadProjectColors !== 'off' && group ? hueByGroup.get(group.id) : undefined
     const menuTarget: ThreadsContextMenuTarget = {
-      type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived,
+      type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), archived: isArchived,
       ...(thread.node ? { node: thread.node, computerName: nameOfComputer(thread.node) } : {}),
       ...(thread.expiresAt ? { expiresAt: thread.expiresAt, ...(thread.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}),
       canExpire: !thread.node && !thread.lineage
@@ -1379,7 +1379,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           isActive ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${unsentChat ? ' unsent-chat' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' archived' : ''}${unsentChat ? ' unsent-chat' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
 
         style={hue ? ({ '--project-tint': projectHueColor(hue) } as CSSProperties) : undefined}
 
@@ -2064,7 +2064,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       {/* The same footer under Projects and Threads: one "Archived" disclosure; the whole heading opens and closes it. */}
       <div ref={footerRef} className="threads-sidebar-footer" hidden={footerHidden}>
 
-        <section className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? ' expanded' : ' collapsed'}`} aria-label="Archived">
+        <section className={`threads-sidebar-section threads-sidebar-section-archived${archivedExpanded ? ' expanded' : ' collapsed'}`} aria-label="Archived">
 
           <div className="threads-sidebar-heading">
             <button
@@ -2075,24 +2075,24 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                 // How far below the footer's top the list starts: its motion is capped to the room under it (threads-sidebar.css).
                 const footer = footerRef.current
                 const heading = archivedHeadingRef.current?.parentElement
-                if (footer && heading) footer.style.setProperty('--threads-sidebar-settled-head', `${heading.getBoundingClientRect().bottom - footer.getBoundingClientRect().top}px`)
+                if (footer && heading) footer.style.setProperty('--threads-sidebar-archived-head', `${heading.getBoundingClientRect().bottom - footer.getBoundingClientRect().top}px`)
                 setArchivedExpanded((expanded) => !expanded)
               }}
               aria-expanded={archivedExpanded}
             >
-              <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
+              <Archive size={14} strokeWidth={2} className="threads-sidebar-archived-icon" aria-hidden="true" />
               <span>Archived</span>
-              {archivedThreads.length > 0 && <span className="threads-sidebar-settled-count">{archivedThreads.length}</span>}
-              <ChevronRight size={12} strokeWidth={2} className="threads-sidebar-settled-chevron" aria-hidden="true" />
+              {archivedThreads.length > 0 && <span className="threads-sidebar-archived-count">{archivedThreads.length}</span>}
+              <ChevronRight size={12} strokeWidth={2} className="threads-sidebar-archived-chevron" aria-hidden="true" />
             </button>
           </div>
 
           {/* Built only while open, and only the cards in view (ArchivedList). A long list opens at once: its height
               motion would lay out the footer on every frame. */}
-          <div ref={archivedScrollRef} className="threads-sidebar-settled-scroll">
+          <div ref={archivedScrollRef} className="threads-sidebar-archived-scroll">
           <Collapse open={archivedExpanded} itemCount={archivedThreads.length} animate={sidebarAnimations && archivedThreads.length <= COLLAPSE_LONG_LIST}>
             {archivedThreads.length === 0 ? (
-              <div className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-settled-list">
+              <div className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-archived-list">
                 <div className="threads-sidebar-empty">No archived threads</div>
               </div>
             ) : (

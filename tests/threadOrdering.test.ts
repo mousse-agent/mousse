@@ -37,7 +37,7 @@ describe('persisted sidebar ordering', () => {
     })
   })
 
-  it('persists settled state and removes a pin while settled', () => {
+  it('persists archived state and removes a pin while archived', () => {
     withTemporaryMousseHome(() => {
       const projects = new ProjectManager()
       const threads = new ThreadDataStore(projects)
@@ -45,15 +45,62 @@ describe('persisted sidebar ordering', () => {
       const thread = threads.createThread('Done')
 
       threads.setThreadPinned(thread.id, true)
-      const settled = threads.setThreadSettled(thread.id, true)
+      const archived = threads.setThreadArchived(thread.id, true)
 
-      expect(settled.settledAt).toBeTruthy()
-      expect(settled.pinnedAt).toBeUndefined()
-      expect(threads.getThread(thread.id)?.settledAt).toBe(settled.settledAt)
+      expect(archived.archivedAt).toBeTruthy()
+      expect(archived.pinnedAt).toBeUndefined()
+      expect(threads.getThread(thread.id)?.archivedAt).toBe(archived.archivedAt)
 
-      const unsettled = threads.setThreadSettled(thread.id, false)
-      expect(unsettled.settledAt).toBeUndefined()
-      expect(threads.getThread(thread.id)?.settledAt).toBeUndefined()
+      const unarchived = threads.setThreadArchived(thread.id, false)
+      expect(unarchived.archivedAt).toBeUndefined()
+      expect(threads.getThread(thread.id)?.archivedAt).toBeUndefined()
+    })
+  })
+
+  it('keeps a thread archived whose saved metadata names its archive time settledAt, as an older Mousse wrote it', () => {
+    withTemporaryMousseHome((root) => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const project = projects.openProject(join(root, 'proj'))
+      const standalone = threads.setThreadArchived(threads.createThread('Standalone').id, true)
+      const inProject = threads.setThreadArchived(threads.createThread('In a project', project.id).id, true)
+      const open = threads.createThread('Still open', project.id)
+      threads.flushStandaloneIndex()
+      // Every file that holds a thread's metadata, as an older Mousse left it: the time under `settledAt`.
+      const files: string[] = []
+      const walk = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const path = join(dir, entry.name)
+          if (entry.isDirectory()) walk(path)
+          else if (entry.name === 'meta.json' || entry.name === 'threads-index.json') files.push(path)
+        }
+      }
+      walk(process.env.MOUSSE_HOME!)
+      let rewritten = 0
+      for (const path of files) {
+        const text = readFileSync(path, 'utf8')
+        if (!text.includes('"archivedAt"')) continue
+        writeFileSync(path, text.replaceAll('"archivedAt"', '"settledAt"'))
+        rewritten += 1
+      }
+      // The standalone thread's folder and index entry, and the project thread's folder.
+      expect(rewritten).toBeGreaterThanOrEqual(3)
+
+      const upgraded = new ThreadDataStore(projects)
+      projects.setThreadStore(upgraded)
+      for (const [id, at] of [[standalone.id, standalone.archivedAt], [inProject.id, inProject.archivedAt]] as const) {
+        expect(upgraded.getThread(id)).toMatchObject({ archivedAt: at })
+        expect(upgraded.getThread(id)).not.toHaveProperty('settledAt')
+        expect(upgraded.listAllThreads().find((thread) => thread.id === id)?.archivedAt).toBe(at)
+      }
+      expect(upgraded.getThread(open.id)?.archivedAt).toBeUndefined()
+      // The next write of the thread stores the time under its new name only.
+      upgraded.updateThreadMeta(inProject.id, { name: 'Renamed after the upgrade' })
+      upgraded.flushStandaloneIndex()
+      const meta = files.map((path) => readFileSync(path, 'utf8')).find((text) => text.includes('Renamed after the upgrade'))!
+      expect(JSON.parse(meta)).toMatchObject({ archivedAt: inProject.archivedAt })
+      expect(JSON.parse(meta)).not.toHaveProperty('settledAt')
     })
   })
 
@@ -264,18 +311,18 @@ describe('persisted sidebar ordering', () => {
       })
     })
 
-    it('shows a thread the other store settled or discarded, at the next create', () => {
+    it('shows a thread the other store archived or discarded, at the next create', () => {
       withTemporaryMousseHome((root) => {
         const { a, b, project } = twoStores(root)
         const done = a.createThread('Done', project.id)
         const unused = a.createThread('Unused', project.id)
         a.listAllThreads()
-        b.setThreadSettled(done.id, true)
+        b.setThreadArchived(done.id, true)
         b.discardUnusedThread(unused.id)
 
         a.createThread('Next', project.id)
         const listed = a.listThreads(project.id)
-        expect(listed.find((thread) => thread.id === done.id)?.settledAt).toBeTruthy()
+        expect(listed.find((thread) => thread.id === done.id)?.archivedAt).toBeTruthy()
         expect(listed.some((thread) => thread.id === unused.id)).toBe(false)
       })
     })

@@ -100,7 +100,7 @@ export class MmsWorkflowBrowser {
     this.assertActive()
     if (context.profileId !== this.services.profileId || policy.profileId !== this.services.profileId || !context.runId || (expectedRunId && context.runId !== expectedRunId)) throw new DomainRpcError('profile_mismatch', 'Workflow browser belongs to another run or profile')
     const thread = this.services.threads.getThread(context.threadId)
-    if (!thread || thread.settledAt || thread.projectId !== context.projectId) throw new DomainRpcError('thread_unavailable', 'Workflow browser thread is unavailable')
+    if (!thread || thread.archivedAt || thread.projectId !== context.projectId) throw new DomainRpcError('thread_unavailable', 'Workflow browser thread is unavailable')
     if (context.projectId && !this.services.projects.getProject(context.projectId)) throw new DomainRpcError('project_unavailable', 'Workflow browser project was removed')
     const snapshot = await this.run(context)
     const manifest = snapshot.manifest

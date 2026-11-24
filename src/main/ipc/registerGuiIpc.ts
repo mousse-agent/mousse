@@ -2542,7 +2542,7 @@ export function registerGuiIpc(
   // files only the thread had go with it. A window showing the thread leaves it when the list without it arrives
   // (`watchDeletedShownThread`), as for a delete from anywhere else. Another computer's thread is never deleted from here.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
+    const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'archivedAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId, discard: true }
     ).catch((error: unknown) => {
@@ -2727,11 +2727,11 @@ export function registerGuiIpc(
     broadcastIfRouted([threadId], res)
     return res.thread
   })
-  registerHandler('threads:settle', async (_e, threadId: string, settled: boolean) => {
-    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
-      'threads.settle',
-      { threadId, settled }
-    )
+  registerHandler('threads:archive', async (_e, threadId: string, archived: boolean) => {
+    // A service still running from before `threads.archive` takes it under its old name.
+    const res = (await guiMms.supports('threads.archive'))
+      ? await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.archive', { threadId, archived })
+      : await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.settle', { threadId, settled: archived })
     broadcastIfRouted([threadId], res)
     return res.thread
   })

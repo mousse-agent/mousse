@@ -48,7 +48,7 @@ export function needsMeThreads(
   const byId = new Map(threads.map((thread) => [thread.id, thread]))
   return visibleThreads(threads)
     .filter((thread) =>
-      !thread.settledAt &&
+      !thread.archivedAt &&
       isThreadStarted(thread) &&
       !hidden.has(thread.id) &&
       (notifyBotThreads || !hiddenFromOwner(thread.id, (id) => byId.get(id))) &&

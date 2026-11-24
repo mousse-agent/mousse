@@ -408,12 +408,12 @@ describe('scheduled jobs run as turns', () => {
       await runNow(w, job)
       const record = await finished(w, job.id)
 
-      expect(record).toMatchObject({ status: 'error', error: expect.stringMatching(/10 open per-run worktree threads; settle or delete some, or bind the job to a thread/) })
+      expect(record).toMatchObject({ status: 'error', error: expect.stringMatching(/10 open per-run worktree threads; archive or delete some, or bind the job to a thread/) })
       expect(perRunThreads(w, job.id)).toHaveLength(10)
       expect(pi.turns).toHaveLength(0)
     })
 
-    it('keeps running a job on the project\'s checkout past ten runs, settling each finished run\'s thread', async () => {
+    it('keeps running a job on the project\'s checkout past ten runs, archiving each finished run\'s thread', async () => {
       const pi = piAdapter((input) => `pi: ${input.prompt}`)
       const w = boot([pi])
       const project = projectOf(w)
@@ -428,8 +428,8 @@ describe('scheduled jobs run as turns', () => {
       expect(records.map((record) => record.status)).toEqual(Array(12).fill('ok'))
       expect(pi.turns).toHaveLength(12)
       expect(perRunThreads(w, job.id)).toHaveLength(12)
-      expect(perRunThreads(w, job.id).every((thread) => thread.settledAt)).toBe(true)
-      // A settled thread is still reachable from the run record.
+      expect(perRunThreads(w, job.id).every((thread) => thread.archivedAt)).toBe(true)
+      // An archived thread is still reachable from the run record.
       expect(w.store.getThread(records[0].threadId!)).toBeDefined()
     })
 
@@ -443,10 +443,10 @@ describe('scheduled jobs run as turns', () => {
       const record = await finished(w, job.id)
 
       expect(record.status).toBe('ok')
-      expect(w.store.getThread(record.threadId!)?.settledAt).toBeFalsy()
+      expect(w.store.getThread(record.threadId!)?.archivedAt).toBeFalsy()
     })
 
-    it('settles a [SILENT] per-run thread, so it leaves the sidebar and stops counting toward the cap', async () => {
+    it('archives a [SILENT] per-run thread, so it leaves the sidebar and stops counting toward the cap', async () => {
       const pi = piAdapter(() => '[SILENT]')
       const w = boot([pi])
       const project = projectOf(w)
@@ -456,7 +456,7 @@ describe('scheduled jobs run as turns', () => {
       const record = await finished(w, job.id)
 
       expect(record).toMatchObject({ status: 'ok', silent: true })
-      expect(w.store.getThread(record.threadId!)?.settledAt).toBeTruthy()
+      expect(w.store.getThread(record.threadId!)?.archivedAt).toBeTruthy()
     })
 
     it('records a run the engine ended failed as an error, even though the turn returned', async () => {

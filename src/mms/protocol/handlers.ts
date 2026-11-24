@@ -255,7 +255,7 @@ function setDraftCheckout(directory: string, choice: DraftCheckoutChoice, apply:
 /** Prepares the selected checkout while a window shows an empty local project thread. */
 function prepareShownNewThread(ctx: HandlerContext, threadId: string): void {
   const thread = ctx.mms.threads.getThread(threadId)
-  if (!thread?.projectId || isThreadStarted(thread) || thread.settledAt || thread.lineage || thread.runsOn || thread.native || thread.hidden || thread.scheduledJobId) return
+  if (!thread?.projectId || isThreadStarted(thread) || thread.archivedAt || thread.lineage || thread.runsOn || thread.native || thread.hidden || thread.scheduledJobId) return
   const project = ctx.mms.projects.getProject(thread.projectId)
   const worktree = thread.worktreeEnabled ?? project?.newThread?.worktreeEnabled ?? ctx.mms.settings.get().runs.newThreadWorktree
   if (!project?.path || !worktree || ctx.mms.orchestrator.isActiveTurnRunning(threadId)) return
@@ -1918,7 +1918,7 @@ function lifecycleExpectedGeneration(params: Record<string, unknown>): number | 
 function refuseDelete(ctx: HandlerContext, threadId: string): void {
   const listed = ctx.mms.threads.getThread(threadId)
   const root = listed?.lineage?.rootThreadId
-  if (listed && !listed.settledAt && !(root && root !== threadId && ctx.mms.threads.getThread(root)?.settledAt))
+  if (listed && !listed.archivedAt && !(root && root !== threadId && ctx.mms.threads.getThread(root)?.archivedAt))
     throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
   if (ctx.connection?.clientType === 'bridge') throw new DomainRpcError('not_available_remotely', 'Delete the thread on the computer that runs it.', { threadId })
 }
@@ -2543,13 +2543,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
+    // `threads.settle` is the legacy name, still called by a phone or a computer that runs an older Mousse.
+    case 'threads.archive':
     case 'threads.settle': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const settled = asOptionalBoolean(p.settled, 'settled') === true
-      // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it (`settleThread`, which a
+      const archived = method === 'threads.archive'
+        ? asOptionalBoolean(p.archived, 'archived') === true
+        : asOptionalBoolean(p.settled, 'settled') === true
+      // Archiving a thread (the sidebar's Archive) is a Stop: what it still runs ends with it (`archiveThread`, which a
       // bot's `thread_archive` uses too).
-      const thread = await ctx.mms.orchestrator.settleThread(threadId, settled)
+      const thread = await ctx.mms.orchestrator.archiveThread(threadId, archived)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
@@ -2591,7 +2595,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A personal bot's threads are its chat, never a thread result (`Thread.botOwned`). Archived threads are found too.
       const results = await ctx.mms.threads.searchThreadsAsync(query, limit, {
         hideSubagents: true,
-        includeSettled: true,
+        includeArchived: true,
         allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
         ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {}),
         ...(perThread ? { perThread } : {})

@@ -29,7 +29,7 @@ function harness(threads: Thread[], options: { running?: Set<string>; failArchiv
       const failure = options.failArchive?.(id)
       if (failure) throw failure
       archived.push(id)
-      list = list.map((entry) => (entry.id === id ? { ...entry, settledAt: at(0), expiresAt: undefined } : entry))
+      list = list.map((entry) => (entry.id === id ? { ...entry, archivedAt: at(0), expiresAt: undefined } : entry))
     }),
     deleteForGood: vi.fn(async (id: string) => {
       deleted.push(id)

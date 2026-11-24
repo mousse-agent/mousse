@@ -219,10 +219,10 @@ export function ArchivedList({ threads, renderRow, scrollRef, keepIds, revealId 
   }
 
   return (
-    <div ref={listRef} className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-settled-list" onFocus={onFocus} onBlur={onBlur}>
+    <div ref={listRef} className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-archived-list" onFocus={onFocus} onBlur={onBlur}>
       {parts.map((part) => part.kind === 'row'
         ? renderRow(threads[part.index])
-        : <div key={`gap:${part.from}`} className="threads-sidebar-settled-spacer" aria-hidden="true" style={{ height: Math.max(0, tops[part.to] - tops[part.from] - gap) }} />)}
+        : <div key={`gap:${part.from}`} className="threads-sidebar-archived-spacer" aria-hidden="true" style={{ height: Math.max(0, tops[part.to] - tops[part.from] - gap) }} />)}
     </div>
   )
 }

@@ -4,6 +4,7 @@ import {
   ROUTED_RUN_WAIT_DEADLINE_MS,
   ROUTED_LARGE_READS_PER_CALLER,
   ROUTED_METHODS,
+  ROUTED_RENAMED_METHODS,
   ROUTED_DROPPABLE_KEYS,
   ROUTED_STAGED_KEY,
   isRoutedPagedReply,
@@ -208,6 +209,13 @@ export class RoutedClient {
     if (!row) throw new DomainRpcError('not_available_remotely', `${method} is not available from another computer.`)
     const computer = this.deps.computer(node)
     const session = this.sessionOrOffline(node, computer)
+    // An owner that runs an older Mousse knows a renamed row only by its old name.
+    const renamed = ROUTED_RENAMED_METHODS[method]
+    if (renamed) {
+      const versions = await this.guard(node, session, computer, () => this.versions(node, session))
+      if (versions?.[method] === undefined && versions?.[renamed.legacy] !== undefined)
+        return this.call(node, renamed.legacy, renamed.params(given), options)
+    }
     const known = Object.fromEntries(Object.entries(given).filter(([, value]) => value !== undefined))
     const verdict = await this.guard(node, session, computer, () => this.unsupportedKey(node, method, row, known))
     if (verdict.outdated) throw computerOutdated(computer, method, verdict.key)

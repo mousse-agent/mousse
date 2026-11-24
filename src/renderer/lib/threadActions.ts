@@ -271,7 +271,7 @@ export function hideThreads(threadIds: readonly string[]): Promise<boolean> {
 /** Archives the open thread, and opens the next one in its project (see `archiveThread`). */
 export async function archiveOpenThread(): Promise<void> {
   const thread = openStartedThread()
-  if (!thread || thread.settledAt) return
+  if (!thread || thread.archivedAt) return
   await archiveThread(thread.id)
 }
 
@@ -285,13 +285,13 @@ const ARCHIVE_UPDATE_WAIT_MS = 3000
 export async function setThreadArchived(threadId: string, archived: boolean): Promise<void> {
   const release = markPendingArchive(threadId, archived)
   try {
-    await window.mousse.threads.settle(threadId, archived)
+    await window.mousse.threads.archive(threadId, archived)
   } catch (error) {
     release()
     throw error
   }
   // Shown from here until the thread's update arrives, so the row does not move back and forth meanwhile.
-  const arrived = () => Boolean(useAppStore.getState().threads.find((thread) => thread.id === threadId)?.settledAt) === archived
+  const arrived = () => Boolean(useAppStore.getState().threads.find((thread) => thread.id === threadId)?.archivedAt) === archived
   if (arrived()) return release()
   const finish = () => {
     clearTimeout(timer)

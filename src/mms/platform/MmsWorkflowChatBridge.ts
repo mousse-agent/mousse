@@ -168,7 +168,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
   }
   private thread(id: string): void {
     const thread = this.options.threads.getThread(id)
-    if (!thread || thread.settledAt) throw new DomainRpcError('thread_unavailable', 'Workflow thread is unavailable in this profile')
+    if (!thread || thread.archivedAt) throw new DomainRpcError('thread_unavailable', 'Workflow thread is unavailable in this profile')
   }
   private read(id: string, threadId: string): Receipt {
     this.thread(threadId)

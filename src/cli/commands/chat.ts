@@ -104,10 +104,10 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     }
     let tid = threadId
     if (!tid) {
-      const threads = await client.request<{ threads: { id: string; settledAt?: string }[] }>(
+      const threads = await client.request<{ threads: { id: string; archivedAt?: string }[] }>(
         'threads.list'
       )
-      tid = threads.threads.find((t) => !t.settledAt)?.id ?? null
+      tid = threads.threads.find((t) => !t.archivedAt)?.id ?? null
     }
     if (!tid) {
       exitWithError('No thread to steer.', globals.mode)

@@ -107,12 +107,12 @@ describe('scheduled job workspace', () => {
     expect(() => validateScheduledJobOptions({ workspace: { kind: 'worktree', path: WORKTREE } }, deps())).toThrow(/needs a project/)
   })
 
-  it('only finds an owner among the threads it is given, skipping settled and unreadable ones', () => {
+  it('only finds an owner among the threads it is given, skipping archived and unreadable ones', () => {
     const load = (id: string): ThreadWorkspaceMetadata | undefined => {
       if (id === 'broken') throw new Error('unreadable workspace.json')
       return workspace(id, WORKTREE)
     }
-    expect(findWorktreeOwner([thread('broken'), thread('settled', { settledAt: '2026-01-02T00:00:00.000Z' }), thread('live')], WORKTREE, load)?.id).toBe('live')
+    expect(findWorktreeOwner([thread('broken'), thread('archived', { archivedAt: '2026-01-02T00:00:00.000Z' }), thread('live')], WORKTREE, load)?.id).toBe('live')
     expect(findWorktreeOwner([], WORKTREE, load)).toBeUndefined()
   })
 })

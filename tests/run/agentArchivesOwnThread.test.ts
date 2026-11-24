@@ -1,5 +1,5 @@
 /**
- * A thread's agent archives its own thread when the user asks it to ("settle yourself when done"): a real
+ * A thread's agent archives its own thread when the user asks it to ("archive yourself when done"): a real
  * `OrchestratorService`, Run Engine and effect worker, with a scripted provider whose turn calls `thread_archive`
  * through the Mousse MCP registry, as a provider does. The thread is archived only after the turn ends well, through the
  * app's own Archive; a turn that fails or is stopped, a message waiting in the queue, or a turn no person started leave it
@@ -23,7 +23,7 @@ const MODEL = { llmProvider: 'claude-subscription', model: 'vendor-model' }
 /** What the scripted turn does after it called `thread_archive`. */
 type After = 'reply' | 'fail' | 'hold'
 
-/** A provider whose turn for a prompt starting with "settle" calls `thread_archive`, then does `after`. */
+/** A provider whose turn for a prompt starting with "archive" calls `thread_archive`, then does `after`. */
 class ArchivingAdapter implements ProviderAdapter {
   readonly driver = 'claude' as const
   readonly capabilities = CLAUDE_SUBSCRIPTION_CAPABILITIES
@@ -45,7 +45,7 @@ class ArchivingAdapter implements ProviderAdapter {
     this.prompts.push(input.prompt)
     const providerRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
-    if (input.prompt.startsWith('settle')) {
+    if (input.prompt.startsWith('archive')) {
       const orch = this.daemon().orch
       if (!orch.appToolTurns.get(input.runId)) orch.appToolTurns.register(appTurn({ threadId: input.threadId, runId: input.runId }))
       const answer = await orch.mcpToolRegistry().call('thread_archive', {}, {
@@ -111,7 +111,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     let sends = 0
     // As the app's composer sends (`source: 'gui'`): a person's message. `internal`: what no person sent.
     const send = (text: string, source = 'gui') => d.orch.send(text, false, { threadId: thread.id, clientRequestId: `send-${++sends}`, source })
-    const archived = () => Boolean(d.store.getThread(thread.id)?.settledAt)
+    const archived = () => Boolean(d.store.getThread(thread.id)?.archivedAt)
     const actions = () => d.engine.store.listEvents(thread.id).filter((event) => event.type === 'agent.action').map((event) => (event.payload as { action: string }).action)
     const lines = () => d.orch.getOrCreateSession(thread.id).messages.filter((message: ChatMessage) => message.role === 'system').map((message) => message.content)
     const idle = () => waitFor(() => !d.orch.isActiveTurnRunning(thread.id) && d.engine.getActiveRun(thread.id) === null, 'turn ended')
@@ -123,20 +123,19 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
 
   it('a person\'s turn that asks is archived once it ends well, through the app\'s Archive, not while it still runs', async () => {
     const w = world()
-    const settled: string[] = []
-    w.d.orch.on('thread-settled', (event: { threadId: string }) => settled.push(event.threadId))
+    const archivedEvents: string[] = []\n    w.d.orch.on('thread-archived', (event: { threadId: string }) => archivedEvents.push(event.threadId))
     let archivedDuringTurn: boolean | undefined
     w.adapter.onArchived = () => { archivedDuringTurn = w.archived() }
-    await w.send('settle yourself when done')
+    await w.send('archive yourself when done')
     await waitFor(() => w.archived(), 'archived after the turn')
 
     expect(w.adapter.answers).toEqual([expect.objectContaining({ text: expect.stringContaining('after_this_turn') })])
     expect(w.adapter.answers[0]!.isError).toBeFalsy()
     // Not while the turn still ran: its reply was written first.
     expect(archivedDuringTurn).toBe(false)
-    expect(w.d.orch.getOrCreateSession(w.thread.id).messages.some((message) => message.role === 'assistant' && message.content.includes('reply to settle'))).toBe(true)
+    expect(w.d.orch.getOrCreateSession(w.thread.id).messages.some((message) => message.role === 'assistant' && message.content.includes('reply to archive'))).toBe(true)
     // The app's own Archive: the pull request watch hears it, and the change is recorded as the agent's.
-    expect(settled).toEqual([w.thread.id])
+    expect(archivedEvents).toEqual([w.thread.id])
     expect(w.actions()).toEqual(['archived_thread'])
   })
 
@@ -146,7 +145,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
       const queued = await w.send('one more thing')
       expect(queued.queued).toBe(true)
     }
-    await w.send('settle yourself when done')
+    await w.send('archive yourself when done')
     await waitFor(() => w.adapter.prompts.includes('one more thing'), 'queued message ran')
     await w.idle()
     await afterTurnEnd()
@@ -161,7 +160,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     w.d.orch.setThreadModelOverride(child.id, MODEL)
     // Queued on the subagent while the parent's turn runs, not started yet.
     w.adapter.onArchived = () => { w.d.orch.enqueueForThread(child.id, { content: 'child work' }, { source: 'internal', internal: true }) }
-    await w.send('settle yourself when done')
+    await w.send('archive yourself when done')
     await w.idle()
     await afterTurnEnd()
     expect(w.archived()).toBe(false)
@@ -176,7 +175,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     const run = w.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
     w.d.engine.markStarting(run.runId)
     w.d.engine.markRunning(run.runId)
-    await w.send('settle yourself when done')
+    await w.send('archive yourself when done')
     await w.idle()
     await afterTurnEnd()
     expect(w.archived()).toBe(false)
@@ -188,7 +187,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
   it('a background command the provider still runs keeps the thread open', async () => {
     const w = world()
     w.adapter.onArchived = () => { w.d.orch.setProviderBackgroundWork(w.thread.id, true) }
-    await w.send('settle yourself when done')
+    await w.send('archive yourself when done')
     await w.idle()
     await afterTurnEnd()
     expect(w.archived()).toBe(false)
@@ -205,7 +204,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
         return new Promise<number>((done) => { answer = done })
       })
     })
-    await w.send('settle yourself when done')
+    await w.send('archive yourself when done')
     await asked
     const sent = w.send('wait for this')
     await waitFor(() => w.adapter.release !== undefined, 'the new turn running')
@@ -222,7 +221,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
   it('a turn that fails after asking leaves the thread open', async () => {
     const w = world()
     w.adapter.after = 'fail'
-    await w.send('settle yourself when done').catch(() => undefined)
+    await w.send('archive yourself when done').catch(() => undefined)
     await w.idle()
     await afterTurnEnd()
     expect(w.adapter.answers[0]!.isError).toBeFalsy()
@@ -232,7 +231,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
   it('a turn stopped after asking leaves the thread open', async () => {
     const w = world()
     w.adapter.after = 'hold'
-    const sent = w.send('settle yourself when done')
+    const sent = w.send('archive yourself when done')
     await waitFor(() => w.adapter.answers.length === 1, 'tool answered')
     await w.d.orch.stopThread(w.thread.id)
     await sent.catch(() => undefined)
@@ -243,7 +242,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
 
   it('a turn no person started is refused, and the thread stays open', async () => {
     const w = world()
-    await w.send('settle yourself when done', 'internal')
+    await w.send('archive yourself when done', 'internal')
     await w.idle()
     await afterTurnEnd()
     expect(w.adapter.answers).toEqual([expect.objectContaining({ isError: true, text: expect.stringContaining('"lacks":"person"') })])
@@ -257,7 +256,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     const orch = w.d.orch
     // A call that names another thread, from inside a person's running turn.
     w.adapter.after = 'hold'
-    const sent = w.send('settle yourself when done')
+    const sent = w.send('archive yourself when done')
     await waitFor(() => w.adapter.answers.length === 1, 'turn running')
     const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
     const archived = await orch.mcpToolRegistry().call('thread_archive', { threadId: other.id }, {
@@ -267,7 +266,7 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     })
     expect(archived.isError).toBeFalsy()
     expect(JSON.parse(archived.text)).toMatchObject({ threadId: other.id, archived: true, changed: true })
-    expect(w.d.store.getThread(other.id)?.settledAt).toBeDefined()
+    expect(w.d.store.getThread(other.id)?.archivedAt).toBeDefined()
     expect(w.d.engine.getActiveRun(w.thread.id)?.runId).toBe(runId)
     await orch.stopThread(w.thread.id)
     await sent.catch(() => undefined)

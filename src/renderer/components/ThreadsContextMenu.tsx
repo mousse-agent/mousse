@@ -32,7 +32,7 @@ export interface ThreadsContextMenuTarget {
   id: string
   name: string
   pinned: boolean
-  settled?: boolean
+  archived?: boolean
   /** The computer a project or thread is on, when it is not this one. */
   node?: string
   /** That computer's name: the menu acts on the project there, and says so. An archived thread there is deleted there. */
@@ -248,7 +248,7 @@ export function ThreadsContextMenu({
           <Separator />
         </>
       )}
-      {!target.settled && (
+      {!target.archived && (
         <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
           {target.pinned ? <PinOffRegular /> : <PinRegular />}
           <span>{target.pinned ? 'Unpin' : 'Pin'}</span>
@@ -256,8 +256,8 @@ export function ThreadsContextMenu({
       )}
       {target.type === 'thread' && (
         <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onArchive}>
-          {target.settled ? <ArchiveArrowBackRegular /> : <ArchiveRegular />}
-          <span>{target.settled ? 'Unarchive' : 'Archive'}</span>
+          {target.archived ? <ArchiveArrowBackRegular /> : <ArchiveRegular />}
+          <span>{target.archived ? 'Unarchive' : 'Archive'}</span>
         </button>
       )}
       {target.type === 'thread' && onHideThread && (
@@ -312,7 +312,7 @@ export function ThreadsContextMenu({
           <span>Hide bot threads</span>
         </button>
       )}
-      {target.type === 'thread' && !target.settled && target.canExpire && onSetExpiry && (
+      {target.type === 'thread' && !target.archived && target.canExpire && onSetExpiry && (
         <Submenu icon={<Clock />} label="Archive after">
           {EXPIRY_PRESETS.map((preset) => (
             <button key={preset.id} type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(preset.ms)}>
@@ -359,7 +359,7 @@ export function ThreadsContextMenu({
         </button>
       )}
       {/* A thread is archived before it can be deleted; deleting is permanent and stays on the thread's computer. */}
-      {target.type === 'thread' && target.settled && (
+      {target.type === 'thread' && target.archived && (
         <button
           type="button"
           className="threads-context-menu-item threads-context-menu-item-danger"
@@ -372,7 +372,7 @@ export function ThreadsContextMenu({
           <span>Delete…</span>
         </button>
       )}
-      {target.type === 'thread' && target.settled && onDeleteAllArchived && (
+      {target.type === 'thread' && target.archived && onDeleteAllArchived && (
         <button type="button" className="threads-context-menu-item threads-context-menu-item-danger" role="menuitem" onClick={onDeleteAllArchived}>
           <DeleteRegular />
           <span>Delete all archived…</span>

@@ -1115,8 +1115,9 @@ const api = {
       ipcRenderer.invoke('threads:applySettings', threadId, settings, ifRevision),
     setPermissionMode: (threadId: string, mode: PermissionMode): Promise<Thread> =>
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
-    settle: (threadId: string, settled: boolean): Promise<Thread> =>
-      ipcRenderer.invoke('threads:settle', threadId, settled),
+    /** Archives (`archived`) or unarchives the thread. */
+    archive: (threadId: string, archived: boolean): Promise<Thread> =>
+      ipcRenderer.invoke('threads:archive', threadId, archived),
     /** When the thread archives itself (`Thread.expiresAt`); null: never. */
     setExpiry: (threadId: string, expiresAt: string | null, stopsRun?: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),

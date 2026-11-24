@@ -233,6 +233,8 @@ const PHRASES: Record<string, Phrase> = {
   'pullRequests.startThread': PR_THREAD,
   'threads.rename': RENAME,
   'threads.pin': ORGANIZE,
+  'threads.archive': ORGANIZE,
+  // Legacy name of `threads.archive`, from an older Mousse.
   'threads.settle': ORGANIZE,
   'threads.delete': DELETE,
   'threads.regenerateTitle': RENAME,

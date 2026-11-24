@@ -61,7 +61,7 @@ export function findWorktreeOwner(
   loadWorkspace: (threadId: string) => ThreadWorkspaceMetadata | undefined
 ): Thread | undefined {
   for (const thread of threads) {
-    if (thread.settledAt) continue
+    if (thread.archivedAt) continue
     let workspace: ThreadWorkspaceMetadata | undefined
     try {
       workspace = loadWorkspace(thread.id)

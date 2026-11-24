@@ -875,7 +875,7 @@ export class MmsProfileServices {
         const driver = this.providerInstances.get(instanceId)?.driver
         return driver === 'claude' || driver === 'codex'
       },
-      archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
+      archiveThread: (threadId) => { this.threads.setThreadArchived(threadId, true) },
       // Naming a new bot: one short call on the model its activations would use.
       oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
         selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },
@@ -1336,7 +1336,7 @@ export class MmsProfileServices {
       // "Check this daily" in an ordinary chat: a person's thread, not a run's, a bot's or the manager's.
       ordinaryThread: (threadId) => {
         const thread = this.threads.getThread(threadId)
-        if (!thread || thread.automationManager || thread.botOwned || thread.scheduledJobId || thread.settledAt) return false
+        if (!thread || thread.automationManager || thread.botOwned || thread.scheduledJobId || thread.archivedAt) return false
         if (this.personalBots?.tools.activationOf(threadId)) return false
         return !runs?.liveRunFor({ threadId })
       },
@@ -1677,14 +1677,14 @@ export class MmsProfileServices {
       this.personalBots?.threadRunEnded(event.threadId)
       this.threadWakes.threadRunEnded(event.threadId)
     })
-    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => {
+    this.orchestrator.on('thread-archived', (payload: { threadId: string }) => {
       this.personalBots?.threadRunEnded(payload.threadId)
       this.threadWakes.threadRunEnded(payload.threadId)
     })
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
-    // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.settleThread`).
-    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.pullRequestWatch.onEnded(payload.threadId, 'settled'))
+    // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.archiveThread`).
+    this.orchestrator.on('thread-archived', (payload: { threadId: string }) => this.pullRequestWatch.onEnded(payload.threadId, 'archived'))
     // Thread-event automations wake on their pull request's activity, never on what their own run caused.
     const threadEvents = new ThreadEventTriggers({
       jobs: () => this.scheduled.listJobs(),
@@ -1974,7 +1974,7 @@ export class MmsProfileServices {
    * it again on the next pass. Its subagents on other computers are told the expiry is gone, so they are kept there.
    */
   private async archiveExpiredThread(threadId: string): Promise<void> {
-    if (!this.threads.getThread(threadId)?.settledAt) await this.orchestrator.settleThread(threadId, true)
+    if (!this.threads.getThread(threadId)?.archivedAt) await this.orchestrator.archiveThread(threadId, true)
     this.threads.updateThreadMeta(threadId, { expiresAt: undefined, expiryStopsRun: undefined }, { touch: false })
     this.orchestrator.threadExpiryChanged(threadId)
     this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
@@ -2593,8 +2593,8 @@ export class MmsProfileServices {
   private archiveIfStartedByPerson(taskId: string): void {
     const thread = this.threads.getThread(taskId)
     const root = thread?.lineage?.rootThreadId
-    if (!thread || thread.settledAt || (root && root !== taskId && this.threads.getThread(root)) || this.threads.lifecycleStore.get(taskId)?.parentTaskId) return
-    this.threads.setThreadSettled(taskId, true)
+    if (!thread || thread.archivedAt || (root && root !== taskId && this.threads.getThread(root)) || this.threads.lifecycleStore.get(taskId)?.parentTaskId) return
+    this.threads.setThreadArchived(taskId, true)
   }
 
   async initialize(): Promise<void> {

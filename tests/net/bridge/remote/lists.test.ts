@@ -94,7 +94,7 @@ describe('phone sidebar lists', () => {
       thread('t2'),
       thread('t3'),
       thread('t4'),
-      thread('t5', { settledAt: at })
+      thread('t5', { archivedAt: at })
     ]
     f.runtimes.activity = { t1: 'processing', t2: 'awaiting_input', t3: 'completed', t5: 'idle' }
     f.orchestrator.turns = {

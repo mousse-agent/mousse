@@ -39,11 +39,11 @@ beforeEach(() => {
   } as typeof Element.prototype.animate
   Element.prototype.getAnimations = () => []
   ;(window as unknown as { mousse: object }).mousse = {
-    threads: { settle: vi.fn(async () => undefined), select: vi.fn(async () => undefined), pin: vi.fn(async () => undefined) },
+    threads: { archive: vi.fn(async () => undefined), select: vi.fn(async () => undefined), pin: vi.fn(async () => undefined) },
     editors: { list: vi.fn(async () => []) },
   }
   ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} }
-  useAppStore.setState({ projects: [project], threads: [thread('a1', 1), thread('a2', 2), thread('old', 0, { settledAt: at(3) })], activeThreadId: 'a1', threadsSidebarView: 'projects' })
+  useAppStore.setState({ projects: [project], threads: [thread('a1', 1), thread('a2', 2), thread('old', 0, { archivedAt: at(3) })], activeThreadId: 'a1', threadsSidebarView: 'projects' })
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -66,9 +66,9 @@ const rowsOf = (threadId: string) => {
   return { archived: rows.filter((row) => archivedSection().contains(row)), listed: rows.filter((row) => !archivedSection().contains(row)) }
 }
 const wasAnimated = (row: HTMLElement | undefined) => animated.some((entry) => entry.element === row)
-const setSettled = async (threadId: string, settled: boolean) => {
+const setArchivedHere = async (threadId: string, archived: boolean) => {
   await act(async () => {
-    useAppStore.setState({ threads: useAppStore.getState().threads.map((t) => (t.id === threadId ? { ...t, settledAt: settled ? at(30) : undefined } : t)) })
+    useAppStore.setState({ threads: useAppStore.getState().threads.map((t) => (t.id === threadId ? { ...t, archivedAt: archived ? at(30) : undefined } : t)) })
   })
 }
 const mount = async ({ archivedOpen }: { archivedOpen: boolean }) => {
@@ -83,7 +83,7 @@ const afterTheMove = () => act(async () => { await new Promise((resolve) => setT
 describe('archiving moves the row with motion', () => {
   it('keeps the old row closing in the project while the row opens under an open Archived, then drops the old one', async () => {
     await mount({ archivedOpen: true })
-    await setSettled('a2', true)
+    await setArchivedHere('a2', true)
 
     const during = rowsOf('a2')
     expect(during.listed).toHaveLength(1)
@@ -101,9 +101,9 @@ describe('archiving moves the row with motion', () => {
 
   it('with Archived closed, only the old row moves and the count changes at once', async () => {
     await mount({ archivedOpen: false })
-    await setSettled('a2', true)
+    await setArchivedHere('a2', true)
 
-    expect(archivedSection().querySelector('.threads-sidebar-settled-count')?.textContent).toBe('2')
+    expect(archivedSection().querySelector('.threads-sidebar-archived-count')?.textContent).toBe('2')
     expect(rowsOf('a2').archived).toHaveLength(0)
     expect(wasAnimated(rowsOf('a2').listed[0])).toBe(true)
     await afterTheMove()
@@ -112,7 +112,7 @@ describe('archiving moves the row with motion', () => {
 
   it('unarchiving moves the row out of Archived and back into its project', async () => {
     await mount({ archivedOpen: true })
-    await setSettled('old', false)
+    await setArchivedHere('old', false)
 
     const during = rowsOf('old')
     expect(during.archived).toHaveLength(1)
@@ -128,9 +128,9 @@ describe('archiving moves the row with motion', () => {
 
   it('undone at once, the row that was closing comes back and opens again', async () => {
     await mount({ archivedOpen: true })
-    await setSettled('a2', true)
+    await setArchivedHere('a2', true)
     const closing = rowsOf('a2').listed[0]
-    await setSettled('a2', false)
+    await setArchivedHere('a2', false)
 
     const reopened = rowsOf('a2').listed
     expect(reopened).toHaveLength(1)
@@ -143,13 +143,13 @@ describe('archiving moves the row with motion', () => {
 
   it('starts to move when Archive is clicked, before the service answers, and moves back when it fails', async () => {
     let answer!: { resolve: () => void; reject: (error: Error) => void }
-    const settle = vi.fn(() => new Promise<void>((resolve, reject) => { answer = { resolve, reject } }))
-    ;(window as unknown as { mousse: { threads: { settle: unknown } } }).mousse.threads.settle = settle
+    const archive = vi.fn(() => new Promise<void>((resolve, reject) => { answer = { resolve, reject } }))
+    ;(window as unknown as { mousse: { threads: { archive: unknown } } }).mousse.threads.archive = archive
     await mount({ archivedOpen: true })
     const archiveButton = () => host.querySelector<HTMLButtonElement>('[aria-label="Archive Thread a2"]')!
 
     await act(async () => { archiveButton().click() })
-    expect(settle).toHaveBeenCalledWith('a2', true)
+    expect(archive).toHaveBeenCalledWith('a2', true)
     // Still unanswered: the old row is already closing and the new one opening under Archived.
     expect(rowsOf('a2').listed[0]!.hasAttribute('inert')).toBe(true)
     expect(wasAnimated(rowsOf('a2').listed[0])).toBe(true)
@@ -164,7 +164,7 @@ describe('archiving moves the row with motion', () => {
     // Answered, the row stays archived while the thread's update arrives.
     await act(async () => { archiveButton().click() })
     await act(async () => { answer.resolve() })
-    await setSettled('a2', true)
+    await setArchivedHere('a2', true)
     await afterTheMove()
     expect(rowsOf('a2').listed).toHaveLength(0)
     expect(rowsOf('a2').archived).toHaveLength(1)
@@ -173,9 +173,9 @@ describe('archiving moves the row with motion', () => {
   it('lists the most recently archived first, and a thread a bot keeps out of the sidebar once it is archived', async () => {
     useAppStore.setState({
       threads: [
-        thread('started-late', 50, { settledAt: at(51) }),
-        thread('started-early', 5, { settledAt: at(55) }),
-        thread('bot-archived', 20, { hidden: true, settledAt: at(53) }),
+        thread('started-late', 50, { archivedAt: at(51) }),
+        thread('started-early', 5, { archivedAt: at(55) }),
+        thread('bot-archived', 20, { hidden: true, archivedAt: at(53) }),
         thread('bot-open', 21, { hidden: true }),
         thread('a1', 1),
       ],
@@ -190,7 +190,7 @@ describe('archiving moves the row with motion', () => {
     reduced = true
     await mount({ archivedOpen: true })
     animated = []
-    await setSettled('a2', true)
+    await setArchivedHere('a2', true)
 
     expect(rowsOf('a2').listed).toHaveLength(0)
     expect(rowsOf('a2').archived).toHaveLength(1)

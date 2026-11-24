@@ -71,7 +71,7 @@ describe('windows hear of list changes once, as pushes', () => {
     expect((others.at(-1)?.data as { threads: Thread[] }).threads).toEqual(lists[0])
   })
 
-  it('sends one thread list for a rename, a pin and a settle, each with the change made', async () => {
+  it('sends one thread list for a rename, a pin and an archive, each with the change made', async () => {
     const thread = (await window.request<{ thread: Thread }>('threads.create', { name: 'Before', started: true })).thread
     await new Promise((resolve) => setTimeout(resolve, 100))
     const renamed = await listsAfter(seen, () => window.request('threads.rename', { threadId: thread.id, name: 'After' }))
@@ -80,9 +80,9 @@ describe('windows hear of list changes once, as pushes', () => {
     const pinned = await listsAfter(seen, () => window.request('threads.pin', { threadId: thread.id, pinned: true }))
     expect(pinned).toHaveLength(1)
     expect(pinned[0].find((entry) => entry.id === thread.id)?.pinnedAt).toBeTruthy()
-    const settled = await listsAfter(seen, () => window.request('threads.settle', { threadId: thread.id, settled: true }))
-    expect(settled).toHaveLength(1)
-    expect(settled[0].find((entry) => entry.id === thread.id)?.settledAt).toBeTruthy()
+    const archived = await listsAfter(seen, () => window.request('threads.archive', { threadId: thread.id, archived: true }))
+    expect(archived).toHaveLength(1)
+    expect(archived[0].find((entry) => entry.id === thread.id)?.archivedAt).toBeTruthy()
   })
 
   it('still tells windows about a thread made without a request (an agent, the CLI, a schedule)', async () => {
@@ -108,7 +108,7 @@ describe('windows hear of list changes once, as pushes', () => {
     mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
     const lists = await listsAfter(seen, () => mms.threadExpiry.pass())
     expect(lists.length).toBeGreaterThanOrEqual(1)
-    expect(lists.at(-1)!.find((entry) => entry.id === thread.id)?.settledAt).toBeTruthy()
+    expect(lists.at(-1)!.find((entry) => entry.id === thread.id)?.archivedAt).toBeTruthy()
   })
 
   it('tells windows of a pin and a delete a phone made through its backend', async () => {
@@ -118,8 +118,8 @@ describe('windows hear of list changes once, as pushes', () => {
     const pinned = await listsAfter(seen, () => backend.execute('threads.pin' as never, { threadId: thread.id, pinned: true }))
     expect(pinned).toHaveLength(1)
     expect(pinned[0].find((entry) => entry.id === thread.id)?.pinnedAt).toBeTruthy()
-    const settled = await listsAfter(seen, () => backend.execute('threads.settle' as never, { threadId: thread.id, settled: true }))
-    expect(settled).toHaveLength(1)
+    const archived = await listsAfter(seen, () => backend.execute('threads.archive' as never, { threadId: thread.id, archived: true }))
+    expect(archived).toHaveLength(1)
     // The delete's reply carries the trash's file identity, which an NTFS file id can push past what the phone's JSON
     // allows; what is checked here is the push, made before the reply is encoded.
     const deleted = await listsAfter(seen, () => backend.execute('threads.delete' as never, { threadId: thread.id }).catch(() => undefined))

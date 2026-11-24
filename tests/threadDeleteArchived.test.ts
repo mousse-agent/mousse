@@ -83,7 +83,7 @@ describe('threads.delete', () => {
       for (const client of [f.rpc, cli]) {
         await expect(client.request('threads.delete', { threadId: thread.id })).rejects.toMatchObject({ code: 'thread_not_archived', message: 'Archive the thread before deleting it.' })
       }
-      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeUndefined()
+      expect(f.services.threads.getThread(thread.id)?.archivedAt).toBeUndefined()
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
       expect(existsSync(join(folder, 'meta.json'))).toBe(true)
     } finally { await f.close() }
@@ -97,7 +97,7 @@ describe('threads.delete', () => {
       const child = f.services.threads.createThread('Its subagent', undefined, undefined, { lineage: subagentOf(parent.id) })
       const grandchild = f.services.threads.createThread('Its nested subagent', undefined, undefined, { lineage: subagentOf(child.id, parent.id) })
       const folders = [parent, child, grandchild].map((thread) => f.services.threads.getThreadDir(thread.id))
-      await f.rpc.request('threads.settle', { threadId: parent.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: parent.id, archived: true })
       const reply = await f.rpc.request<{ threads: Thread[]; lifecycle: { state: string } }>('threads.delete', { threadId: parent.id })
       expect(reply.lifecycle.state).toBe('purged')
       const ids = new Set(reply.threads.map((thread) => thread.id))
@@ -119,7 +119,7 @@ describe('threads.delete', () => {
     try {
       const thread = f.services.threads.createThread('Archived with scratch files')
       soleCopy(f.services, thread.id)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       const reply = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.delete', { threadId: thread.id, discard: true })
       expect(reply.lifecycle.state).toBe('purged')
       const items = reply.lifecycle.purge!.items
@@ -138,7 +138,7 @@ describe('threads.delete', () => {
       const child = f.services.threads.createThread('Its subagent, with its own worktree', undefined, undefined, { lineage: subagentOf(parent.id) })
       const work = [parent, child].map((thread) => worktreeWithChanges(f.services, f.home, f.root, thread.id))
       const folders = [parent, child].map((thread) => f.services.threads.getThreadDir(thread.id))
-      await f.rpc.request('threads.settle', { threadId: parent.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: parent.id, archived: true })
       // As the app's Delete sends it, after its confirmation.
       const reply = await f.rpc.request<{ lifecycle: { state: string; purge?: { keptWork?: boolean } } }>('threads.delete', { threadId: parent.id, discard: true })
       expect(reply.lifecycle.state).toBe('purged')
@@ -170,7 +170,7 @@ describe('threads.delete', () => {
       const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
       const thread = f.services.threads.createThread('Archived, deleted from a script')
       const { worktree, refs, before } = worktreeWithChanges(f.services, f.home, f.root, thread.id)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       await cli.request('threads.delete', { threadId: thread.id })
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
       expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
@@ -186,7 +186,7 @@ describe('threads.delete', () => {
       // Its link to the repository is broken: Mousse can't check it, so it could never remove it, but that no longer matters.
       rmSync(join(worktree, '.git'), { force: true })
       writeFileSync(join(worktree, '.git'), 'gitdir: nowhere\n')
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       await f.rpc.request('threads.delete', { threadId: thread.id, discard: true })
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
       expect(readFileSync(join(worktree, '.git'), 'utf8')).toBe('gitdir: nowhere\n')
@@ -208,7 +208,7 @@ describe('threads.delete', () => {
       const refs = () => git(store, ['for-each-ref', '--format=%(refname) %(objectname)'])
       const before = refs()
       expect(before).toContain(`refs/mousse/threads/${thread.id}/`)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       await f.services.trashThread(thread.id, undefined, undefined, true)
       const keeping = await f.services.lifecycle.cleanup.preview(thread.id, { keepWork: true })
       expect(keeping.keepWork).toBe(true)
@@ -230,7 +230,7 @@ describe('threads.delete', () => {
     try {
       const thread = f.services.threads.createThread('Cut short by an older version')
       const { worktree, branch, refs } = worktreeWithChanges(f.services, f.home, f.root, thread.id)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       await f.services.trashThread(thread.id)
       // What an older version wrote at its purge boundary: the worktree and its refs in the ledger, to be removed.
       const preview = await f.services.lifecycle.cleanup.preview(thread.id)
@@ -261,7 +261,7 @@ describe('threads.delete', () => {
     try {
       const thread = f.services.threads.createThread('Cut short, its ledger not writable at first')
       const { worktree, branch, refs } = worktreeWithChanges(f.services, f.home, f.root, thread.id)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       await f.services.trashThread(thread.id)
       const preview = await f.services.lifecycle.cleanup.preview(thread.id)
       expect(preview.items.some((item) => item.kind === 'worktree')).toBe(true)
@@ -318,12 +318,12 @@ describe('threads.delete', () => {
       mkdirSync(join(path, 'terminal-workspace'), { recursive: true })
       writeFileSync(join(path, 'terminal-workspace', 'sole-copy.txt'), 'retained output')
       writeFileSync(join(path, 'terminal-workspace.json'), JSON.stringify({ schemaVersion: 1, kind: 'task-terminal-scratch', threadId: thread.id, workspaceRelativePath: 'terminal-workspace' }))
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
 
       // The CLI asks to discard too, but only a person in the app may: refused, and nothing is lost.
       await expect(cli.request('threads.delete', { threadId: thread.id, discard: true })).rejects.toMatchObject({ code: 'thread_has_unpublished_work' })
       const kept = f.services.threads.getThread(thread.id)
-      expect(kept?.settledAt).toBeTruthy()
+      expect(kept?.archivedAt).toBeTruthy()
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
       expect(readFileSync(join(f.services.threads.getThreadDir(thread.id), 'terminal-workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
 
@@ -343,13 +343,13 @@ describe('threads.delete', () => {
         const parent = f.services.threads.createThread(`Parent, ${unpublished} has unpublished work`)
         const child = f.services.threads.createThread('Its subagent', undefined, undefined, { lineage: subagentOf(parent.id) })
         soleCopy(f.services, unpublished === 'parent' ? parent.id : child.id)
-        await f.rpc.request('threads.settle', { threadId: parent.id, settled: true })
+        await f.rpc.request('threads.archive', { threadId: parent.id, archived: true })
         await expect(cli.request('threads.delete', { threadId: parent.id })).rejects.toMatchObject({ code: 'thread_has_unpublished_work' })
         for (const thread of [parent, child]) {
           expect(f.services.threads.getThread(thread.id), `${unpublished}: ${thread.name}`).toBeTruthy()
           expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
         }
-        expect(f.services.threads.getThread(parent.id)?.settledAt).toBeTruthy()
+        expect(f.services.threads.getThread(parent.id)?.archivedAt).toBeTruthy()
       }
     } finally { await f.close() }
   })
@@ -359,7 +359,7 @@ describe('threads.delete', () => {
     try {
       const thread = f.services.threads.createThread('Held by an editor')
       const folder = f.services.threads.getThreadDir(thread.id)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       const purge = vi.spyOn(f.services.lifecycle.cleanup, 'purge').mockRejectedValueOnce(Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }))
       await expect(f.rpc.request('threads.delete', { threadId: thread.id })).rejects.toThrow()
       // Not listed while the delete waits, and not "not found": the same Delete finishes it.
@@ -378,7 +378,7 @@ describe('threads.delete', () => {
     try {
       const thread = f.services.threads.createThread('Cut short')
       const folder = soleCopy(f.services, thread.id)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       // The process ends after the trash: the purge never runs.
       vi.spyOn(f.services.lifecycle.cleanup, 'purge').mockRejectedValueOnce(new Error('the process ended'))
       await expect(f.rpc.request('threads.delete', { threadId: thread.id, discard: true })).rejects.toThrow()
@@ -397,10 +397,10 @@ describe('threads.delete', () => {
     try {
       const thread = f.services.threads.createThread('Trashed by a script')
       soleCopy(f.services, thread.id)
-      f.services.threads.setThreadSettled(thread.id, true)
+      f.services.threads.setThreadArchived(thread.id, true)
       await f.services.trashThread(thread.id)
       expect(await f.services.finishCutShortDeletes()).toEqual([{ taskId: thread.id, outcome: 'archived' }])
-      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+      expect(f.services.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
       expect(readFileSync(join(f.services.threads.getThreadDir(thread.id), 'terminal-workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
     } finally { await f.close() }
   })
@@ -413,7 +413,7 @@ describe('threads.delete', () => {
       await f.services.trashThread(thread.id)
       expect(await f.services.finishCutShortDeletes()).toEqual([{ taskId: thread.id, outcome: 'archived' }])
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
-      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+      expect(f.services.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
     } finally { await f.close() }
   })
 
@@ -422,7 +422,7 @@ describe('threads.delete', () => {
     try {
       const thread = f.services.threads.createThread('Restored after a cut-short delete')
       soleCopy(f.services, thread.id)
-      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.archive', { threadId: thread.id, archived: true })
       vi.spyOn(f.services.lifecycle.cleanup, 'purge').mockRejectedValueOnce(new Error('the process ended'))
       await expect(f.rpc.request('threads.delete', { threadId: thread.id, discard: true })).rejects.toThrow()
       const intents = join(f.services.threads.lifecycleStore.root, 'delete-intents.json')
@@ -442,7 +442,7 @@ describe('threads.delete', () => {
       const thread = f.services.threads.createThread('A failed start')
       soleCopy(f.services, thread.id)
       await f.services.deleteThreadForGood(thread.id, { human: false, discard: false, internal: true })
-      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+      expect(f.services.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
       const plain = f.services.threads.createThread('Nothing unpublished')
       await f.services.deleteThreadForGood(plain.id, { human: false, discard: false, internal: true })
       expect(f.services.threads.lifecycleStore.require(plain.id).state).toBe('purged')
@@ -483,7 +483,7 @@ describe('old copies a move left behind', () => {
     writeFileSync(join(before, 'meta.json'), JSON.stringify({ id: thread.id, name: thread.name, projectId }))
     writeFileSync(join(f.home, 'threads-index.json'), JSON.stringify([{ id: other.id, name: other.name }]))
     writeFileSync(join(f.home, 'projects.json'), JSON.stringify([{ id: projectId, name: 'smiletrack', path: repo }]))
-    f.services.threads.setThreadSettled(thread.id, true)
+    f.services.threads.setThreadArchived(thread.id, true)
     return { repo, projectId, thread, left, folder: f.services.threads.getThreadDir(thread.id) }
   }
 
@@ -515,7 +515,7 @@ describe('old copies a move left behind', () => {
       const refused = await f.rpc.request('threads.delete', { threadId: thread.id, discard: true }).then(() => undefined, (error: { code?: string; message?: string }) => error)
       expect(refused?.code).toBe('thread_delete_blocked')
       expect(refused?.message).toContain(stray)
-      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+      expect(f.services.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
     } finally { await f.close() }
   })
@@ -541,7 +541,7 @@ describe('old copies a move left behind', () => {
       expect(archived).toMatchObject({ taskId: thread.id, outcome: 'archived' })
       expect(archived!.reason).toContain(stray)
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
-      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+      expect(f.services.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
       // Nothing is left to try at the next start.
       expect(await f.services.finishCutShortDeletes()).toEqual([])
     } finally { await f.close() }
@@ -554,7 +554,7 @@ describe('the steps of a delete', () => {
     try {
       const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'in use' })
-      f.services.threads.setThreadSettled(thread.id, true)
+      f.services.threads.setThreadArchived(thread.id, true)
       for (const client of [f.rpc, cli]) {
         for (const method of ['threads.trash', 'threads.restore', 'threads.purge']) await expect(client.request(method, { threadId: thread.id })).rejects.toThrow()
         await expect(client.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })).rejects.toThrow()
@@ -578,9 +578,9 @@ describe('the move of the old trash to Archived', () => {
       expect(await f.services.returnTrashToArchive()).toMatchObject({ done: true, restored: [home.id, execution.id], failed: [] })
       expect(f.services.threads.lifecycleStore.require(home.id).state).toBe('active')
       expect(f.services.threads.lifecycleStore.require(execution.id).state).toBe('active')
-      expect(f.services.threads.getThread(home.id)?.settledAt).toBeTruthy()
+      expect(f.services.threads.getThread(home.id)?.archivedAt).toBeTruthy()
       // A thread another owns is not archived on its own.
-      expect(f.services.threads.getThread(execution.id)?.settledAt).toBeUndefined()
+      expect(f.services.threads.getThread(execution.id)?.archivedAt).toBeUndefined()
     } finally { await f.close() }
   })
 })

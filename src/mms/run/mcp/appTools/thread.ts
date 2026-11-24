@@ -19,6 +19,7 @@ import { PARENT_MESSAGE_MAX_CHARS } from '../../../../shared/bots/personal/jobs'
 import { MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER } from '../../../../shared/bots/personal/botMessages'
 import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
 import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
+import { archivedAtOf } from '../../../../shared/archivedAt'
 import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
 import { lastCompletedAt, modelOf, pullRequestOf, recentTurns, RECENT_ANSWER_CHARS, RECENT_PROMPT_CHARS, RECENT_REMOTE_LOOKBACK, RECENT_REMOTE_MESSAGES, RECENT_STEP_CHARS, RECENT_TURNS_DEFAULT, RECENT_TURNS_MAX, SUMMARY_NEXT, type ViewRow } from './threadViews'
@@ -291,9 +292,17 @@ export function botMayNameThread(host: AppToolHost, engine: RunEngine | undefine
   return engine !== undefined && botMayList(host, engine, callerThreadId, thread, inventory)
 }
 
-/** `thread_list`'s flags for a thread out of the open list: archived (since `settledAt`) and hidden from the sidebar. */
-function listedFlags(thread: { settledAt?: string | null; hidden?: boolean }): { archived?: true; archivedAt?: string; hidden?: true } {
-  return { ...(thread.settledAt ? { archived: true, archivedAt: thread.settledAt } : {}), ...(thread.hidden ? { hidden: true } : {}) }
+/**
+ * `thread_list`'s `includeArchived`. `includeSettled` is its old name, still taken from a prompt written for an older
+ * Mousse (it is no longer in the schema); `includeArchived` wins when both are given.
+ */
+function includeArchivedOf(args: Record<string, unknown>): boolean {
+  return (args.includeArchived ?? args.includeSettled) === true
+}
+
+/** `thread_list`'s flags for a thread out of the open list: archived (since `archivedAt`) and hidden from the sidebar. */
+function listedFlags(thread: { archivedAt?: string | null; hidden?: boolean }): { archived?: true; archivedAt?: string; hidden?: true } {
+  return { ...(thread.archivedAt ? { archived: true, archivedAt: thread.archivedAt } : {}), ...(thread.hidden ? { hidden: true } : {}) }
 }
 
 /**
@@ -630,7 +639,7 @@ function sendConflict(error: unknown): McpToolError | undefined {
  * restored. A trashed thread never gets here (the central check refuses it as unknown).
  */
 function assertTakesWork(host: AppToolHost, threadId: string): void {
-  if (host.threadMeta?.(threadId)?.settledAt)
+  if (host.threadMeta?.(threadId)?.archivedAt)
     throw new McpToolError('mousse_conflict', `Thread ${threadId} is archived; it takes no new work until it is unarchived. When the user wants it back, unarchive it with thread_archive (threadId, archived: false) first.`, { conflict: 'thread_archived', threadId })
 }
 
@@ -1293,7 +1302,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         pullRequest: pullRequestOf(isRecordValue(thread.pullRequest) ? (thread.pullRequest as unknown as ThreadPullRequestLink) : null),
         messages: count.total,
         updatedAt: typeof thread.updatedAt === 'string' ? thread.updatedAt : null,
-        ...listedFlags({ settledAt: typeof thread.settledAt === 'string' ? thread.settledAt : null, hidden: thread.hidden === true }),
+        ...listedFlags({ archivedAt: archivedAtOf(thread) ?? null, hidden: thread.hidden === true }),
         hint: SUMMARY_NEXT
       })
     }
@@ -1587,7 +1596,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (args.projectId !== undefined && (typeof args.projectId !== 'string' || !args.projectId)) throw new Error('projectId must be a non-empty string')
     if (args.status !== undefined && args.status !== 'active' && args.status !== 'idle' && args.status !== 'awaiting_input')
       throw new Error('status must be active, idle or awaiting_input')
-    for (const key of ['includeUnstarted', 'includeSettled', 'includeSubagents'] as const)
+    for (const key of ['includeUnstarted', 'includeArchived', 'includeSettled', 'includeSubagents'] as const)
       if (args[key] !== undefined && typeof args[key] !== 'boolean') throw new Error(`${key} must be a boolean`)
     const limit = boundedInt(args.limit, 'limit', 1, THREAD_LIST_MAX_LIMIT, THREAD_LIST_DEFAULT_LIMIT)
     const computer = listedComputer(args, ctx, 'thread_list')
@@ -1605,7 +1614,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (args.includeSubagents !== true && thread.subagent && thread.parentThreadId && known.has(thread.parentThreadId)) return false
         if (!thread.launchedByYou && args.includeUnstarted !== true && !thread.startedAt) return false
         // Archived only when asked for, even one this thread launched.
-        if (args.includeSettled !== true && thread.settledAt) return false
+        if (!includeArchivedOf(args) && thread.archivedAt) return false
         return args.status === undefined || statusOf(thread.id) === args.status
       })
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -1619,7 +1628,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         projectName: (thread.projectId && projectNames.get(thread.projectId)) || null,
         startedAt: thread.startedAt ?? null,
         updatedAt: thread.updatedAt,
-        settledAt: thread.settledAt ?? null,
+        archivedAt: thread.archivedAt ?? null,
         ...listedFlags(thread),
         status: statusOf(thread.id),
         ...(thread.subagent && thread.parentThreadId ? { lineage: { parentThreadId: thread.parentThreadId } } : {}),
@@ -1807,7 +1816,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_list',
-      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are listed even before they start; archived threads, launched by you or not, only with includeSettled. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
+      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are listed even before they start; archived threads, launched by you or not, only with includeArchived. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1815,7 +1824,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           projectId: { type: 'string', description: 'Only this project (with computer: a project id from that computer\'s list).' },
           status: { type: 'string', enum: ['active', 'idle', 'awaiting_input'], description: 'active: a run of it or of a subagent below it is going; awaiting_input: a question in it or below it waits for an answer; idle: neither. A row whose own turn ended while its subagents still work or ask says waitingOnSubagents.' },
           includeUnstarted: { type: 'boolean', description: 'Include empty drafts (default false).' },
-          includeSettled: { type: 'boolean', description: 'Include archived threads (default false).' },
+          includeArchived: { type: 'boolean', description: 'Include archived threads (default false).' },
           includeSubagents: { type: 'boolean', description: 'Include subagent threads (default false).' },
           limit: { type: 'integer', minimum: 1, maximum: THREAD_LIST_MAX_LIMIT, description: `Most recently updated first; default ${THREAD_LIST_DEFAULT_LIMIT}.` }
         }
@@ -1831,7 +1840,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (args.projectId !== undefined && (typeof args.projectId !== 'string' || !args.projectId)) throw new Error('projectId must be a non-empty string')
         if (args.status !== undefined && args.status !== 'active' && args.status !== 'idle' && args.status !== 'awaiting_input')
           throw new Error('status must be active, idle or awaiting_input')
-        for (const key of ['includeUnstarted', 'includeSettled', 'includeSubagents'] as const)
+        for (const key of ['includeUnstarted', 'includeArchived', 'includeSettled', 'includeSubagents'] as const)
           if (args[key] !== undefined && typeof args[key] !== 'boolean') throw new Error(`${key} must be a boolean`)
         const bot = ctx.turn.bot
         const limit = boundedInt(args.limit, 'limit', 1, THREAD_LIST_MAX_LIMIT, THREAD_LIST_DEFAULT_LIMIT)
@@ -1849,7 +1858,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (args.projectId !== undefined && thread.projectId !== args.projectId) return false
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
           // Archived only when asked for, even one the caller launched.
-          return args.includeSettled === true || !thread.settledAt
+          return includeArchivedOf(args) || !thread.archivedAt
         }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         const projectNames = new Map(host.listProjects().map((project) => [project.id, project.name]))
         const below = subagentDescendantsIn(all)
@@ -1893,7 +1902,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             projectName: (thread.projectId && projectNames.get(thread.projectId)) || null,
             startedAt: thread.startedAt ?? null,
             updatedAt: thread.updatedAt,
-            settledAt: thread.settledAt ?? null,
+            archivedAt: thread.archivedAt ?? null,
             ...listedFlags(thread),
             modelOverride: thread.modelOverride ?? null,
             status,
@@ -2323,7 +2332,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_archive',
-      description: 'Archive a thread, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to settle or archive a thread once its work is done (merged, or dropped), never on your own. Without threadId it archives this thread when your turn ends: call it last, in the turn that finishes the work, and only when nothing is outstanding (no subagent, launched thread, background command, pending check or question to the user); a failed or stopped turn leaves the thread open. With threadId it archives that thread now, or unarchives it with archived: false; a thread that is still working is refused. Needs a turn the user started, in a thread that is not a subagent.',
+      description: 'Archive a thread, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. Only when the user asks you to archive a thread once its work is done (merged, or dropped), never on your own. Without threadId it archives this thread when your turn ends: call it last, in the turn that finishes the work, and only when nothing is outstanding (no subagent, launched thread, background command, pending check or question to the user); a failed or stopped turn leaves the thread open. With threadId it archives that thread now, or unarchives it with archived: false; a thread that is still working is refused. Needs a turn the user started, in a thread that is not a subagent.',
       botDescription: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
       inputSchema: {
         type: 'object',

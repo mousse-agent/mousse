@@ -181,7 +181,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it('refuses an archived thread as a conflict, and a trashed or unknown one like any thread the caller may not reach', async () => {
       const { call, denied, threads, host } = await world()
-      threads.set('target', thread('target', { settledAt: NOW }))
+      threads.set('target', thread('target', { archivedAt: NOW }))
       const archived = await denied(call('thread_send', { threadId: 'target', content: 'x' }))
       expect(archived).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'thread_archived', threadId: 'target' } })
       // The agent is told how to bring it back when the user wants that.

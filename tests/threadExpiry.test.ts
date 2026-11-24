@@ -68,7 +68,7 @@ describe('thread expiry', () => {
     await mms.threadExpiry.pass()
 
     const archived = mms.threads.getThread(thread.id)
-    expect(archived?.settledAt).toBeTruthy()
+    expect(archived?.archivedAt).toBeTruthy()
     expect(archived?.expiresAt).toBeUndefined()
     expect(mms.orchestrator.isExpired(thread.id)).toBe(false)
     expect(mms.threads.lifecycleStore.get(thread.id)?.state ?? 'active').toBe('active')
@@ -76,18 +76,18 @@ describe('thread expiry', () => {
     expect(existsSync(join(workspace.worktreePath, 'scratch.txt'))).toBe(true)
     expect(execFileSync('git', ['rev-parse', `refs/heads/${workspace.branch}`], { cwd: repo, encoding: 'utf8' }).trim()).toBe(committed)
     // Unarchived, it takes messages again.
-    await gui('threads.settle', { threadId: thread.id, settled: false })
-    expect(mms.threads.getThread(thread.id)?.settledAt).toBeUndefined()
+    await gui('threads.archive', { threadId: thread.id, archived: false })
+    expect(mms.threads.getThread(thread.id)?.archivedAt).toBeUndefined()
     await expect(gui('threads.setExpiry', { threadId: thread.id, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })).resolves.toBeTruthy()
   }, 120_000)
 
   it('archives an expired thread that is already archived without moving its archive time', async () => {
     const thread = mms.threads.createThread('Archived early', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
-    await gui('threads.settle', { threadId: thread.id, settled: true })
-    const settledAt = mms.threads.getThread(thread.id)?.settledAt
+    await gui('threads.archive', { threadId: thread.id, archived: true })
+    const archivedAt = mms.threads.getThread(thread.id)?.archivedAt
     mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
     await mms.threadExpiry.pass()
-    expect(mms.threads.getThread(thread.id)).toMatchObject({ settledAt })
+    expect(mms.threads.getThread(thread.id)).toMatchObject({ archivedAt })
     expect(mms.threads.getThread(thread.id)?.expiresAt).toBeUndefined()
   }, 60_000)
 
@@ -98,7 +98,7 @@ describe('thread expiry', () => {
     expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('trashed')
     mms.threads.updateThreadMeta(root.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
     await mms.threadExpiry.pass()
-    expect(mms.threads.getThread(root.id)?.settledAt).toBeTruthy()
+    expect(mms.threads.getThread(root.id)?.archivedAt).toBeTruthy()
     expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('trashed')
   }, 60_000)
 

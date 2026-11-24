@@ -155,7 +155,7 @@ describe('buildPaletteGroups', () => {
     thread('t1', 'New thread ideas', { projectId: 'p1', updatedAt: '2026-03-01T00:00:00.000Z' }),
     thread('t2', 'Fix login', { projectId: 'p2', updatedAt: '2026-04-01T00:00:00.000Z' }),
     thread('t3', 'Résumé layout', { updatedAt: '2026-02-01T00:00:00.000Z' }),
-    thread('t4', 'Settled work', { settledAt: '2026-04-02T00:00:00.000Z', updatedAt: '2026-04-02T00:00:00.000Z' }),
+    thread('t4', 'Shelved work', { archivedAt: '2026-04-02T00:00:00.000Z', updatedAt: '2026-04-02T00:00:00.000Z' }),
     thread('t5', 'Thread 5', { startedAt: undefined, name: 'New Thread', updatedAt: '2026-05-01T00:00:00.000Z' })
   ]
   const build = (query: string, commands = allCommands) => buildPaletteGroups({ query, commands, threads, projects })
@@ -163,7 +163,7 @@ describe('buildPaletteGroups', () => {
   it('shows the newest threads, then every eligible command, for an empty query', () => {
     const groups = build('')
     expect(groups.map((group) => group.label)).toEqual(['Recent', 'Commands'])
-    // Newest first; the settled thread and the empty draft are not listed.
+    // Newest first; the archived thread and the empty draft are not listed.
     expect(groups[0]!.items.map((item) => item.kind === 'thread' && item.id)).toEqual(['t2', 't1', 't3'])
     expect(groups[1]!.items).toHaveLength(allCommands.length)
   })
@@ -213,17 +213,17 @@ describe('buildPaletteGroups', () => {
   })
 
   it('finds archived threads by title in their own group after the open ones, and leaves empty drafts out', () => {
-    const settled = build('settled')
-    expect(settled.find((group) => group.label === 'Archived')!.items).toMatchObject([{ id: 't4' }])
-    expect(settled.some((group) => group.label === 'Threads')).toBe(false)
+    const shelved = build('shelved')
+    expect(shelved.find((group) => group.label === 'Archived')!.items).toMatchObject([{ id: 't4' }])
+    expect(shelved.some((group) => group.label === 'Threads')).toBe(false)
     const withOpen = buildPaletteGroups({ query: 'work', commands: [], threads: [threads[3]!, thread('t6', 'Open work', { projectId: 'p1' })], projects })
-    expect(labels(withOpen)).toEqual(['Threads: Open work', 'Archived: Settled work'])
+    expect(labels(withOpen)).toEqual(['Threads: Open work', 'Archived: Shelved work'])
     expect(withOpen[0]!.items).toMatchObject([{ id: 't6', detail: 'Mousse' }])
     expect(flattenGroups(build('new')).some((item) => item.kind === 'thread' && item.id === 't5')).toBe(false)
   })
 
   it('names an archived thread whose messages alone match', () => {
-    const hit: ThreadSearchResult = { threadId: 't4', threadName: 'Settled work', matchType: 'message', messageId: 'm1', snippet: 'the quarterly numbers', score: 2 } as ThreadSearchResult
+    const hit: ThreadSearchResult = { threadId: 't4', threadName: 'Shelved work', matchType: 'message', messageId: 'm1', snippet: 'the quarterly numbers', score: 2 } as ThreadSearchResult
     const messages = buildPaletteGroups({ query: 'quarterly', commands: [], threads, projects, messages: [hit] }).find((group) => group.label === 'Messages')!
     expect(messages.items[0]).toMatchObject({ kind: 'thread', id: 't4', detail: 'Archived' })
   })
@@ -344,7 +344,7 @@ describe('Search everything', () => {
   const threads = [
     thread('t1', 'Nightly installer drops the tray icon', { projectId: 'p1' }),
     thread('t2', 'Nightly build triage', { projectId: 'p1', startedByBot: alpha }),
-    thread('t3', 'Mac nightly signing check', { projectId: 'p1', startedByBot: alpha, settledAt: '2026-02-01T00:00:00.000Z' }),
+    thread('t3', 'Mac nightly signing check', { projectId: 'p1', startedByBot: alpha, archivedAt: '2026-02-01T00:00:00.000Z' }),
     // alpha's own chat runs in this thread; it is found as the bot, never as a thread.
     thread('home', 'Nightly chat with alpha'),
     thread('chat-thread', 'Release crew nightly')

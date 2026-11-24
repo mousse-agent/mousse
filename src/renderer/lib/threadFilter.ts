@@ -45,7 +45,7 @@ export function threadInFilter(thread: Thread, filter: ThreadFilter, context: Th
     if (bot?.botId !== filter.botId) return false
   } else if (filter.show === 'mine') {
     // Today's list: a thread a bot keeps out of the sidebar is not listed, unless it is archived.
-    if (thread.hidden && !thread.settledAt) return false
+    if (thread.hidden && !thread.archivedAt) return false
   } else if (filter.show === 'bots' && !bot) {
     return false
   }

@@ -299,7 +299,7 @@ export class PullRequestWatchService extends EventEmitter {
     }
   }
 
-  /** The link was removed or the thread settled or trashed: the watch ends with its line. */
+  /** The link was removed or the thread archived or trashed: the watch ends with its line. */
   onEnded(threadId: string, reason: PullRequestWatchEnd): void {
     // An unlink has already cleared the link by now, so only the sidecar can say that the thread was watched.
     const entry = this.load(threadId)
@@ -567,7 +567,7 @@ export class PullRequestWatchService extends EventEmitter {
   private ineligible(threadId: string, entry: Sidecar): PullRequestWatchEnd | 'off' | null {
     const thread = this.deps.threads.getThread(threadId)
     if (!thread || !this.deps.isAvailable(threadId)) return 'trashed'
-    if (thread.settledAt) return 'settled'
+    if (thread.archivedAt) return 'archived'
     const link = thread.pullRequest
     if (!link || !sameLinkedPullRequest(link, entry.pr)) return 'unlinked'
     if (!link.watch || link.watch === 'off' || entry.mode === 'off') return 'off'
@@ -645,6 +645,8 @@ export class PullRequestWatchService extends EventEmitter {
     try {
       const value = JSON.parse(readFileSync(file, 'utf8')) as Sidecar
       if (value?.version !== 1 || !value.state || !value.pr) return undefined
+      // A watch an older Mousse ended because its thread was archived says so as `settled`.
+      if ((value.ended?.reason as string | undefined) === 'settled') value.ended = { ...value.ended!, reason: 'archived' }
       const current = notifyOnly(value)
       this.entries.set(threadId, current)
       return current

@@ -27,7 +27,7 @@ export function compareThreadFeed(a: Thread, b: Thread): number {
 
 /** Archived threads, the most recently archived first, so a thread just archived is at the top of Archived. */
 export function sortArchivedThreads<T extends Thread>(threads: readonly T[]): T[] {
-  return [...threads].sort((a, b) => (b.settledAt ?? '').localeCompare(a.settledAt ?? '') || compareThreadFeed(a, b))
+  return [...threads].sort((a, b) => (b.archivedAt ?? '').localeCompare(a.archivedAt ?? '') || compareThreadFeed(a, b))
 }
 
 /**

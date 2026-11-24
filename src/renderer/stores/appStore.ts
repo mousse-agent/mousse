@@ -287,7 +287,7 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.updatedAt !== right.updatedAt ||
       left.order !== right.order ||
       left.pinnedAt !== right.pinnedAt ||
-      left.settledAt !== right.settledAt ||
+      left.archivedAt !== right.archivedAt ||
       left.startedAt !== right.startedAt ||
       left.worktreeEnabled !== right.worktreeEnabled ||
       // Saved without touching `updatedAt`, so it is compared on its own (a new thread gets its project's mode so).
@@ -1668,11 +1668,11 @@ useAppStore.subscribe((state, previous) => {
   if (gone.length) state.forgetQueueEdits(gone)
 })
 
-/** Threads archived since the last list: they were listed without `settledAt` and now have it. */
+/** Threads archived since the last list: they were listed without `archivedAt` and now have it. */
 export function newlyArchivedThreadIds(previous: AppState, state: AppState): string[] {
   if (state.threads === previous.threads || state.profileId !== previous.profileId) return []
-  const wasOpen = new Set(previous.threads.filter((thread) => !thread.settledAt).map((thread) => thread.id))
-  return state.threads.filter((thread) => thread.settledAt && wasOpen.has(thread.id)).map((thread) => thread.id)
+  const wasOpen = new Set(previous.threads.filter((thread) => !thread.archivedAt).map((thread) => thread.id))
+  return state.threads.filter((thread) => thread.archivedAt && wasOpen.has(thread.id)).map((thread) => thread.id)
 }
 
 // An archived or deleted thread's browser tabs close, so their pages stop using memory.

@@ -23,7 +23,7 @@ export function shownThreadLeftList(previous: readonly Pick<Thread, 'id'>[], nex
 
 /** The thread a window goes to after its thread was deleted: the first listed one that is not archived or a subagent. */
 export function threadAfterDeletion(threads: readonly Thread[], deletedId: string): string | undefined {
-  return visibleThreads(threads).find((thread) => thread.id !== deletedId && !thread.settledAt)?.id
+  return visibleThreads(threads).find((thread) => thread.id !== deletedId && !thread.archivedAt)?.id
 }
 
 export interface LeaveDeletedThreadDeps {
@@ -47,7 +47,7 @@ const defaultDeps: LeaveDeletedThreadDeps = {
   createNew: async () => {
     const store = useAppStore.getState()
     // The newest empty chat is reused, as the new-chat command does; a private one is not.
-    const draft = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly && !entry.settledAt))
+    const draft = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly && !entry.archivedAt))
     const thread = draft ?? await window.mousse.threads.newChatAfterDelete()
     store.upsertThread(thread)
     store.switchToThread(thread.id)

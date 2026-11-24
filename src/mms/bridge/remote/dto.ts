@@ -178,6 +178,12 @@ export function validateRemoteParams(
       text('threadId')
       boolean('pinned')
       break
+    case 'threads.archive':
+      keys(['threadId', 'archived'])
+      text('threadId')
+      boolean('archived')
+      break
+    // Legacy name of `threads.archive`, from a phone that runs an older Mousse.
     case 'threads.settle':
       keys(['threadId', 'settled'])
       text('threadId')

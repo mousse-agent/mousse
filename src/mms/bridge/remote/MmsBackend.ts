@@ -26,6 +26,7 @@ import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
 import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
 import { withHiddenBots } from './botReach'
+import { withLegacySettledAt, withLegacySettledAtIn } from '../../../shared/archivedAt'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
 import type { ChatMessage, OrchestratorSendRequest, QueuedMessage, Thread, ThreadStartedFrom } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
@@ -150,7 +151,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     const result = await this.executeFor(method, params, caller)
     // A thread a bot started names that bot only to a device that reaches it ("Started by a bot" otherwise).
-    const shown = withHiddenBots(result, this.services.botReach?.hiddenFor(caller?.node))
+    // A device that runs an older Mousse reads a thread's archive time only as `settledAt`.
+    const shown = withLegacySettledAtIn(withHiddenBots(result, this.services.botReach?.hiddenFor(caller?.node)))
     return method === 'storage.usage' ? this.withoutBotThreadNames(shown) : shown
   }
   /**
@@ -606,7 +608,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       found = this.remoteThread(threadId)
     // A thread a bot started names that bot to a reader that reaches it; with no reader (a stream any device may read),
     // only when every device does.
-    const thread = found && withHiddenBots(found, s.botReach?.hiddenFor(options.reader))
+    const thread = found && withLegacySettledAt(withHiddenBots(found, s.botReach?.hiddenFor(options.reader)))
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
     const budget = snapshotBudget(options)

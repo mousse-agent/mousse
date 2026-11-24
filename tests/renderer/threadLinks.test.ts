@@ -157,7 +157,7 @@ describe('a thread link in a thread\'s reply', () => {
     act(() => useAppStore.setState({ threadActivity: { 't-docs': 'paused' } }))
     expect(link!.getAttribute('aria-label')).toBe('Open thread Write the docs, Paused')
     // An archived thread says so, and still opens; one whose latest run ended still says how.
-    act(() => useAppStore.setState({ threads: [{ ...thread('t-docs', 'Write the docs'), settledAt: NOW, lastRun: 'done' }, { ...thread('t-fix', 'Fix the login page'), settledAt: NOW }], threadActivity: {} }))
+    act(() => useAppStore.setState({ threads: [{ ...thread('t-docs', 'Write the docs'), archivedAt: NOW, lastRun: 'done' }, { ...thread('t-fix', 'Fix the login page'), archivedAt: NOW }], threadActivity: {} }))
     render('Archived: mousse://thread/t-fix and mousse://thread/t-docs')
     expect(links().map((entry) => entry.getAttribute('aria-label'))).toEqual(['Open thread Fix the login page, Archived', 'Open thread Write the docs, Done, archived'])
     tabTo(links()[0]!)

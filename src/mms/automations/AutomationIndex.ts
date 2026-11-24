@@ -393,7 +393,7 @@ export function buildAutomationIndex(sources: AutomationIndexSources): Automatio
   if (sources.watchStatus) {
     try {
       for (const thread of sources.threads()) {
-        if (thread.pullRequest?.watch !== 'notify' || thread.settledAt || thread.botOwned) continue
+        if (thread.pullRequest?.watch !== 'notify' || thread.archivedAt || thread.botOwned) continue
         let status: ReturnType<NonNullable<AutomationIndexSources['watchStatus']>> | undefined
         try {
           status = sources.watchStatus(thread.id)

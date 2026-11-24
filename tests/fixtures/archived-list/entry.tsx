@@ -26,7 +26,7 @@ const thread = (id: string, name: string, over: Partial<Thread> = {}): Thread =>
 const archived = Array.from({ length: ARCHIVED }, (_, index) => {
   const started = new Date(Date.parse(at) - index * 60_000).toISOString()
   const name = index % 7 === 3 ? `Archived thread ${index} with a title long enough to wrap onto a second line of the card` : `Archived ${index}`
-  return thread(`old-${index}`, name, { createdAt: started, startedAt: started, settledAt: at })
+  return thread(`old-${index}`, name, { createdAt: started, startedAt: started, archivedAt: at })
 })
 useAppStore.setState({
   projects: [{ id: 'p1', name: 'Mousse', path: '/p/mousse', createdAt: at, order: 0 }],
@@ -45,19 +45,19 @@ const frames = (count: number) => new Promise<void>((done) => {
   step(count)
 })
 // Archived's list scrolls under its heading; the heading itself stays put in the footer.
-const footer = () => document.querySelector<HTMLElement>('.threads-sidebar-settled-scroll')!
+const footer = () => document.querySelector<HTMLElement>('.threads-sidebar-archived-scroll')!
 const pinnedFooter = () => document.querySelector<HTMLElement>('.threads-sidebar-footer')!
-const drawn = () => [...document.querySelectorAll<HTMLElement>('.threads-sidebar-settled-list button[data-thread-id]')]
+const drawn = () => [...document.querySelectorAll<HTMLElement>('.threads-sidebar-archived-list button[data-thread-id]')]
 const idOf = (row: HTMLElement) => row.dataset.threadId!
 
 /** What the list shows: every point down its middle lands on a card or a gap between two, and the heading is in view. */
 function view() {
   const box = footer().getBoundingClientRect()
-  const heading = document.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading')!.getBoundingClientRect()
+  const heading = document.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading')!.getBoundingClientRect()
   const blank: number[] = []
   for (let y = Math.max(box.top, heading.bottom) + 1; y < box.bottom - 1; y += 6) {
     const hit = document.elementFromPoint(box.left + box.width / 2, y)
-    if (!hit || hit.closest('.threads-sidebar-settled-spacer') || !hit.closest('.threads-sidebar-settled-list')) blank.push(Math.round(y - box.top))
+    if (!hit || hit.closest('.threads-sidebar-archived-spacer') || !hit.closest('.threads-sidebar-archived-list')) blank.push(Math.round(y - box.top))
   }
   const shown = drawn().filter((row) => {
     const rect = row.getBoundingClientRect()
@@ -75,11 +75,11 @@ function view() {
 }
 
 Object.assign(window, { qa: {
-  ready: () => Boolean(document.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')),
+  ready: () => Boolean(document.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')),
   async open() {
-    document.querySelector<HTMLElement>('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!.click()
+    document.querySelector<HTMLElement>('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!.click()
     await frames(4)
-    return { count: document.querySelector('.threads-sidebar-settled-count')?.textContent, ...view() }
+    return { count: document.querySelector('.threads-sidebar-archived-count')?.textContent, ...view() }
   },
   // Scrolled to the end; again once the cards drawn there are measured, as a person keeps scrolling.
   async end() {

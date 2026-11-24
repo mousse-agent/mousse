@@ -75,6 +75,7 @@ describe('the thread menu from a phone', () => {
       expect.arrayContaining([
         'threads.rename',
         'threads.pin',
+        'threads.archive',
         'threads.settle',
         'threads.regenerateTitle',
         'threads.setExpiry'

@@ -122,7 +122,7 @@ describe('bot threads in the sidebar', () => {
   })
 
   it('the Threads tab\'s menu hides every listed bot thread, and opens only while there are some', async () => {
-    show([thread('t1', 'Plain'), byBot('b1', 'Job one'), byBot('s1', 'Other job', { projectId: 'p2' }), byBot('x1', 'Archived job', { settledAt: at })], 'threads')
+    show([thread('t1', 'Plain'), byBot('b1', 'Job one'), byBot('s1', 'Other job', { projectId: 'p2' }), byBot('x1', 'Archived job', { archivedAt: at })], 'threads')
     rightClick(threadsTab())
     await act(async () => menuItem('Hide all bot threads')!.click())
     expect(hiddenIds()).toEqual(['b1', 's1'])

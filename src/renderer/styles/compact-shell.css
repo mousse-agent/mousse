@@ -84,7 +84,7 @@ html:not(.platform-darwin) .app {
 .app .threads-sidebar-thread { gap: 7px; padding: 4px 7px; border-radius: 5px; font-size: 13px; }
 .app .threads-sidebar-thread-root { padding-left: 9px; }
 .app .threads-sidebar-thread.active { background: rgba(var(--accent-rgb), 0.09); }
-.app .threads-sidebar-section-settled { margin-top: 8px; }
+.app .threads-sidebar-section-archived { margin-top: 8px; }
 .app .threads-sidebar-empty { padding: 5px 7px; font-size: 12px; }
 .app .threads-sidebar-show-more { min-height: 26px; padding: 4px 7px; font-size: 12px; }
 .app .threads-sidebar-recent { margin-top: 10px; padding-top: 4px; }
@@ -153,7 +153,7 @@ html:not(.platform-darwin) .app {
   flex: 1 0 auto;
 }
 /* The footer is the one scroll container for Archived; a height cap of its own would clip its rows. */
-.app .threads-sidebar-section-settled {
+.app .threads-sidebar-section-archived {
   flex: 0 0 auto;
   margin-top: 0;
   padding-top: 8px;

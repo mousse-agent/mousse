@@ -95,7 +95,7 @@ export class MmsWorkflowTools {
     this.assertActive()
     if (context.profileId !== this.services.profileId || policy.profileId !== this.services.profileId) throw new DomainRpcError('profile_mismatch', 'Workflow tool belongs to another profile')
     const thread = this.services.threads.getThread(context.threadId)
-    if (!thread || thread.settledAt || thread.projectId !== context.projectId || !context.projectId || !context.runId) throw new DomainRpcError('thread_unavailable', 'Workflow project-tool thread is unavailable')
+    if (!thread || thread.archivedAt || thread.projectId !== context.projectId || !context.projectId || !context.runId) throw new DomainRpcError('thread_unavailable', 'Workflow project-tool thread is unavailable')
     const project = this.services.projects.getProject(context.projectId)
     if (!project) throw new DomainRpcError('project_unavailable', 'Workflow project was removed')
     const manifest = await this.run(context)

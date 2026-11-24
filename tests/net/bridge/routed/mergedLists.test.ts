@@ -239,6 +239,21 @@ describe('rows of another computer', () => {
     for (const plain of ['"p1"', '"c1"', '"proj1"']) expect(json).not.toContain(plain)
   })
 
+  it('read as archived when a computer that runs an older Mousse names the archive time settledAt', async () => {
+    const h = harness()
+    await h.feed(
+      snapshot([
+        { id: 'old', updatedAt: iso(20), settledAt: iso(5) },
+        { id: 'open', updatedAt: iso(10) }
+      ])
+    )
+    const rows = h.lists.threads()
+    const old = rows.find((row) => row.id === h.q('old'))!
+    expect(old.archivedAt).toBe(iso(5))
+    expect(old).not.toHaveProperty('settledAt')
+    expect(rows.find((row) => row.id === h.q('open'))).not.toHaveProperty('archivedAt')
+  })
+
   it('stay out of every list while routing is off, and nothing is attached', async () => {
     const h = harness({ enabled: false })
     await h.lists.reconcile()
@@ -668,7 +683,7 @@ describe('a computer that is out of reach', () => {
       name: `${long}${n}`,
       // Older threads are archived; the others are updated a second apart.
       updatedAt: iso(n),
-      ...(n >= 1_000 ? { settledAt: iso(n - 2_000) } : {})
+      ...(n >= 1_000 ? { archivedAt: iso(n - 2_000) } : {})
     }))
     await h.feed(snapshot(many))
     expect(h.lists.threads()).toHaveLength(1_300)
@@ -691,7 +706,8 @@ describe('a computer that is out of reach', () => {
     const snapshot = {
       kind: 'mousse.lists',
       threads: [
-        row(1, { settledAt: iso(-50) }),
+        row(1, { archivedAt: iso(-50) }),
+        // As a computer that runs an older Mousse names the archive time.
         row(2, { settledAt: iso(-10) }),
         row(3),
         row(4),

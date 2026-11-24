@@ -92,6 +92,11 @@ export interface BridgeRemoteParams {
     threadId: string
     pinned: boolean
   }
+  'threads.archive': {
+    threadId: string
+    archived: boolean
+  }
+  /** Legacy: `threads.archive` under its old name, still accepted from a phone or computer that runs an older Mousse. */
   'threads.settle': {
     threadId: string
     settled: boolean

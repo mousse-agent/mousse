@@ -19,8 +19,8 @@ export interface LaunchedThreadMeta {
   createdByThreadId?: string
   /** `Thread.hidden`: out of the owner's sidebar, so this list is where the owner finds it. */
   hidden?: true
-  /** `Thread.settledAt`: set while the thread is archived. An archived thread never goes, whatever runs it left. */
-  settledAt?: string
+  /** `Thread.archivedAt`: set while the thread is archived. An archived thread never goes, whatever runs it left. */
+  archivedAt?: string
   /** `Thread.lineage`: set on a subagent's thread, naming the thread that started it. */
   lineage?: ThreadLineage
 }
@@ -98,25 +98,25 @@ export function launchedThreadsOf(input: {
   // A run waiting in the queue goes once what is ahead of it does: behind a run only a person moves on, it waits for them too.
   for (const [threadId, run] of waiting) if (!active.has(threadId) && !held.has(threadId)) active.set(threadId, run)
   // An archived subagent counts for nothing either: its leftovers never keep the thread above it going.
-  const archived = new Set(input.threads.filter((thread) => thread.settledAt).map((thread) => thread.id))
+  const archived = new Set(input.threads.filter((thread) => thread.archivedAt).map((thread) => thread.id))
   const subagentsAsk = (threadId: string) => below(threadId).some((id) => !archived.has(id) && input.asks(id))
   const subagentsWork = (threadId: string) => below(threadId).some((id) => !archived.has(id) && active.has(id))
   const subagentsHeld = (threadId: string) => below(threadId).some((id) => !archived.has(id) && held.has(id))
   const asks = (thread: LaunchedThreadMeta) => input.asks(thread.id) || subagentsAsk(thread.id)
   const works = (thread: LaunchedThreadMeta) => active.has(thread.id) || subagentsWork(thread.id)
   const onHold = (thread: LaunchedThreadMeta) => held.has(thread.id) || subagentsHeld(thread.id)
-  const goes = (thread: LaunchedThreadMeta) => !thread.settledAt && (works(thread) || asks(thread) || onHold(thread))
+  const goes = (thread: LaunchedThreadMeta) => !thread.archivedAt && (works(thread) || asks(thread) || onHold(thread))
   const going = mine.filter(goes)
   // Of the rest only the most recently updated are shown: their runs are read, never every thread the bot ever started.
   const goingIds = new Set(going.map((thread) => thread.id))
   const since = input.doneSince
-  const done = (thread: LaunchedThreadMeta) => since === undefined || (!thread.settledAt && (thread.updatedAt ?? thread.createdAt ?? '') >= since)
+  const done = (thread: LaunchedThreadMeta) => since === undefined || (!thread.archivedAt && (thread.updatedAt ?? thread.createdAt ?? '') >= since)
   const rest = mine.filter((thread) => !goingIds.has(thread.id) && done(thread))
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? '').localeCompare(a.updatedAt ?? a.createdAt ?? ''))
     .slice(0, BOT_LAUNCHED_ENDED_SHOWN)
   const launched = [...going, ...rest].map((thread): BotLaunchedThread => {
-    const working = thread.settledAt ? undefined : active.get(thread.id)
-    const run = working ?? (thread.settledAt ? undefined : held.get(thread.id))
+    const working = thread.archivedAt ? undefined : active.get(thread.id)
+    const run = working ?? (thread.archivedAt ? undefined : held.get(thread.id))
     const last = run ?? input.lastRun(thread.id)
     const status: BotLaunchedThread['status'] = !goes(thread) ? endedAs(last)
       : asks(thread) ? 'needs_input'

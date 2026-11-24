@@ -39,7 +39,7 @@ export function mainBrowserBinding(services: MmsProfileServices, turn: MainBrows
   const settings = services.settings.get().integrations.tools
   if (!settings.enabled) return undefined
   const thread = services.threads.getThread(turn.threadId)
-  if (!thread || thread.settledAt) return undefined
+  if (!thread || thread.archivedAt) return undefined
   const project = thread.projectId ? services.projects.getProject(thread.projectId) : undefined
   const descriptor = typeof turn.mode === 'string' ? services.modeRegistry.getModeSync(turn.mode, { projectPath: project?.path }) : undefined
   const workspace = (thread as { workspaceBinding?: { policy?: string; access?: string } }).workspaceBinding

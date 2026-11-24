@@ -19,10 +19,10 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
   try {
     switch (subcommand) {
       case 'list': {
-        const threads = await client.request<{ threads: { id: string; settledAt?: string }[] }>(
+        const threads = await client.request<{ threads: { id: string; archivedAt?: string }[] }>(
           'threads.list'
         )
-        const openThreads = threads.threads.filter((thread) => !thread.settledAt)
+        const openThreads = threads.threads.filter((thread) => !thread.archivedAt)
         const threadId = globals.sessionId ?? (openThreads.length === 1 ? openThreads[0].id : undefined)
         if (!threadId) {
           if (openThreads.length > 1) exitWithError('agents list requires --session when multiple threads are open.', globals.mode)
@@ -70,8 +70,8 @@ async function resolveThreadId(
   requestedThreadId?: string
 ): Promise<string> {
   if (requestedThreadId) return requestedThreadId
-  const res = await client.request<{ threads: { id: string; settledAt?: string }[] }>('threads.list')
-  const open = res.threads.filter((thread) => !thread.settledAt)
+  const res = await client.request<{ threads: { id: string; archivedAt?: string }[] }>('threads.list')
+  const open = res.threads.filter((thread) => !thread.archivedAt)
   if (open.length !== 1) throw new Error(`--session is required when ${open.length} open threads are available.`)
   return open[0].id
 }

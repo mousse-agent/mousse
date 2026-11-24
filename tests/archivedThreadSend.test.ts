@@ -47,8 +47,8 @@ const cli = from('cli')
 /** A started thread the person archived with the app's own Archive. */
 async function archivedThread(options: { expiresAt?: string } = {}): Promise<string> {
   const thread = mms.threads.createThread('Old work', undefined, undefined, { started: true, ...options })
-  await window('threads.settle', { threadId: thread.id, settled: true })
-  expect(mms.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+  await window('threads.archive', { threadId: thread.id, archived: true })
+  expect(mms.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
   return thread.id
 }
 
@@ -57,7 +57,7 @@ const replies = (threadId: string) => mms.orchestrator.getMessages(threadId).fil
 it('unarchives a thread when the person sends a message from a window, and the message runs', async () => {
   const threadId = await archivedThread()
   await window('orchestrator.send', { threadId, content: 'one more thing', mode: 'agent' })
-  expect(mms.threads.getThread(threadId)?.settledAt).toBeUndefined()
+  expect(mms.threads.getThread(threadId)?.archivedAt).toBeUndefined()
   expect(replies(threadId)).toContain('reply')
 }, 60_000)
 
@@ -65,21 +65,21 @@ it('unarchives a thread when the person sends a message from their phone, and th
   const threadId = await archivedThread()
   const result = await mms.orchestrator.runRemoteTurn(threadId, 'one more thing', mms.threads)
   expect(result.error).toBeUndefined()
-  expect(mms.threads.getThread(threadId)?.settledAt).toBeUndefined()
+  expect(mms.threads.getThread(threadId)?.archivedAt).toBeUndefined()
   expect(replies(threadId)).toContain('reply')
 }, 60_000)
 
 it('unarchives a thread when the person sends a message from the CLI, and the message runs', async () => {
   const threadId = await archivedThread()
   await cli('orchestrator.send', { threadId, content: 'one more thing', mode: 'agent' })
-  expect(mms.threads.getThread(threadId)?.settledAt).toBeUndefined()
+  expect(mms.threads.getThread(threadId)?.archivedAt).toBeUndefined()
   expect(replies(threadId)).toContain('reply')
 }, 60_000)
 
 it.each([['a window', window], ['the CLI', cli]] as const)('unarchives a thread when the person steers it from %s', async (_label, caller) => {
   const threadId = await archivedThread()
   await caller('orchestrator.steer', { threadId, text: 'also this' })
-  expect(mms.threads.getThread(threadId)?.settledAt).toBeUndefined()
+  expect(mms.threads.getThread(threadId)?.archivedAt).toBeUndefined()
 }, 60_000)
 
 it('keeps an expired thread archived and refuses the message', async () => {
@@ -87,6 +87,6 @@ it('keeps an expired thread archived and refuses the message', async () => {
   await expect(window('orchestrator.send', { threadId, content: 'one more thing', mode: 'agent' })).rejects.toMatchObject({ code: 'thread_expired' })
   expect((await mms.orchestrator.runRemoteTurn(threadId, 'one more thing', mms.threads)).error).toMatch(/expired/)
   await window('orchestrator.steer', { threadId, text: 'also this' }).catch(() => undefined)
-  expect(mms.threads.getThread(threadId)?.settledAt).toBeTruthy()
+  expect(mms.threads.getThread(threadId)?.archivedAt).toBeTruthy()
   expect(replies(threadId)).toEqual([])
 }, 60_000)
