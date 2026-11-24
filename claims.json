@@ -17,6 +17,19 @@
       "expiresAt": "2026-11-24T16:16:32.764Z"
     },
     {
+      "task": "bots-typed-provenance-and-contract",
+      "session": "LAPTOP-HIEROJK7-016dce",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "applet-source-out-of-context",
+      "paths": [
+        "src/mms/bots/store/BotStore.ts",
+        "src/mms/bots/activation/BotEngine.ts",
+        "tests/run/toolApiContract.test.ts"
+      ],
+      "claimedAt": "2026-11-24T14:33:58.137Z",
+      "expiresAt": "2026-11-24T16:33:58.137Z"
+    },
+    {
       "task": "composer-thread-reference-chip",
       "session": "Animatrix-d87084",
       "machine": "Animatrix",
