@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { MessageSquare, Mic, RefreshCw, Reply, X } from '../lib/icons'
+import { File as FileIcon, IconPhoto, MessageSquare, Mic, RefreshCw, Reply, X } from '../lib/icons'
 import type {
   BrowserElementAttachment,
   FileSearchResponse,
@@ -40,7 +40,7 @@ import { formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseChatReference, parseReferenceDragData } from '../../shared/chatReferences'
 import { ownFileDrop, startDragOut } from '../lib/fileDragOut'
-import { ChatReferencePill } from './ReferencePill'
+import { ChatReferencePill, REFERENCE_ICONS, openChatReference, referenceTitle } from './ReferencePill'
 import { threadIdsInText } from '../lib/threadReference'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
@@ -76,7 +76,25 @@ import {
   threadChipRegistry
 } from '../lib/composerThreadChips'
 import { threadLinkStatus } from '../../shared/threadAttention'
-import { openLinkedThread } from '../utils/chatLinks'
+import { openFileInPanel, openLinkedThread } from '../utils/chatLinks'
+import {
+  attachmentChipKey,
+  attachmentChipParts,
+  attachmentChipRegistry,
+  chipInsertion,
+  expandComposerAttachmentChips,
+  findAttachmentChips,
+  hasTextAround,
+  referenceChipKey,
+  registerAttachmentChip,
+  unregisterAttachmentChips,
+  wordEdge,
+  plainOrphanChips,
+  ATTACHMENT_CHIP_HEAD,
+  type AttachmentChipEntry,
+  type AttachmentChipSpan
+} from '../lib/composerAttachmentChips'
+import { formatSentChip } from '../../shared/inlineAttachments'
 
 import { admitAttachments, type ChipStatus } from '../lib/attachmentPreparation'
 
@@ -201,6 +219,16 @@ export interface ChatComposerProps {
   attachRules?: { remote: boolean; onRefused: (line: string) => void }
 }
 
+/** A chip under the pointer: a thread chip (and whether on its remove mark) or an attachment chip, by its place in its list. */
+interface ChipHit {
+  kind: 'thread' | 'attachment'
+  index: number
+  close: boolean
+}
+
+/** What a copied selection with chips carries for this composer, so pasting it back keeps the chips. */
+const COMPOSER_TEXT_MIME = 'application/x-mousse-composer-text'
+
 const MENTION_SEARCH_DEBOUNCE_MS = 120
 const MENTION_INDEXING_RETRY_MS = 500
 const MENTION_ROW_LIMIT = 20
@@ -272,6 +300,7 @@ export function ChatComposer({
   attachRules
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const attachmentsRowRef = useRef<HTMLDivElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
   // The send mode is a choice only while a reply runs: idle, Enter just sends. A card that takes the message (an open
@@ -389,6 +418,13 @@ export function ChatComposer({
   // Thread chips: a thread's link shown as its chip at its place in the text (`lib/composerThreadChips.ts`). A thread
   // this window does not list, or one this chat may not point at, stays a link.
   const threadChips = useMemo(() => findThreadChips(input, threadChipRegistry()), [input])
+  // Attachment chips: an attachment or reference placed among the text, at its place (`lib/composerAttachmentChips.ts`).
+  const attachmentChips = useMemo(() => findAttachmentChips(input, attachmentChipRegistry()), [input])
+  // Every chip that edits as one character: thread chips and attachment chips.
+  const atomicChips = useMemo(
+    () => (attachmentChips.length ? [...threadChips, ...attachmentChips].sort((a, b) => a.index - b.index) : threadChips),
+    [threadChips, attachmentChips]
+  )
   const chipLinks = (text: string, within?: { start: number; end: number }) =>
     chipThreadLinks(text, (threadId) => (pastedThreadRefusal?.(threadId) ? null : threadChipLabel(threadId)), registerThreadChip, within)
   // The text box's value as its own typing last left it; any other `input` was set from outside (a draft, Up, a
@@ -398,10 +434,11 @@ export function ChatComposer({
   const pendingChipRef = useRef<{ start: number; end: number } | null>(null)
   // True while the composer edits the text box itself, so that edit is not looked at again.
   const selfEditRef = useRef(false)
-  const [chipHover, setChipHover] = useState<{ index: number; close: boolean } | null>(null)
-  const chipPressRef = useRef<{ index: number; close: boolean } | null>(null)
+  const [chipHover, setChipHover] = useState<ChipHit | null>(null)
+  const chipPressRef = useRef<ChipHit | null>(null)
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || references.length > 0
+  const rowHasImages = attachedFiles.some((attached) => attached.previewUrl !== undefined && !attachmentStatus?.get(attached.id)?.noPreview)
   const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
   const skillsPickerQuery = skillsPickerDisabled ? null : parseSkillsPickerQuery(input)
   const skillSuggestions =
@@ -543,25 +580,179 @@ export function ChatComposer({
     [attachedFiles, onAttachedFilesChange, attachRules]
   )
 
-  const removeFile = (id: string) => {
-    const target = attachedFiles.find((f) => f.id === id)
-    if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl)
+  // An attachment removed while it had chips, kept so an undo that brings a chip back brings the attachment back too.
+  const removedRef = useRef(new Map<string, { file: AttachedFile; at: number } | { reference: ChatReference }>())
+  useEffect(() => () => {
+    for (const removed of removedRef.current.values()) if ('file' in removed && removed.file.previewUrl) URL.revokeObjectURL(removed.file.previewUrl)
+  }, [])
+
+  // Removing an attachment takes its chips out of the text; `keepText` leaves the text to an undo that takes them out.
+  const removeFile = (id: string, keepText = false) => {
+    const at = attachedFiles.findIndex((f) => f.id === id)
+    const target = attachedFiles[at]
+    const key = attachmentChipKey(id)
+    // With `keepText` an undo of the edit that goes with this removal may bring a chip back.
+    if (target && (keepText || hasChips(key))) removedRef.current.set(key, { file: target, at })
+    else if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl)
+    if (!keepText) dropChips(key)
     onAttachedFilesChange(attachedFiles.filter((f) => f.id !== id))
   }
 
+  const removeReference = (id: string) => {
+    const key = referenceChipKey(id)
+    const target = references.find((reference) => reference.id === id)
+    if (target && hasChips(key)) removedRef.current.set(key, { reference: target })
+    dropChips(key)
+    onRemoveReference(id)
+  }
+
+  const hasChips = (key: string) =>
+    findAttachmentChips(composerInputRef.current?.value ?? inputValueRef.current, attachmentChipRegistry()).some((span) => span.key === key)
+
+  // A chip back in the text (an undo) whose attachment was removed: the attachment goes back to the row.
+  useEffect(() => {
+    const removed = removedRef.current
+    if (!removed.size) return
+    const back = new Set(findAttachmentChips(input, attachmentChipRegistry()).map((span) => span.key).filter((key) => removed.has(key)))
+    if (!back.size) return
+    let files = attachedFiles
+    for (const key of back) {
+      const entry = removed.get(key)!
+      removed.delete(key)
+      if ('file' in entry) {
+        if (files.some((f) => f.id === entry.file.id)) continue
+        files = [...files.slice(0, entry.at), entry.file, ...files.slice(entry.at)]
+      } else if (!references.some((reference) => reference.id === entry.reference.id)) {
+        takeReference(entry.reference)
+      }
+    }
+    if (files !== attachedFiles) onAttachedFilesChange(files)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when the text changes
+  }, [input])
+
+  // Puts the text box at `next` as one edit undo can take back, replacing only the stretch that changed. Without focus
+  // in the box (a chip removed from elsewhere) the text is set as it is, and focus stays where it was.
+  const replaceText = (next: string) => {
+    const node = composerInputRef.current
+    const value = node?.value ?? inputValueRef.current
+    if (next === value) return
+    if (!node || document.activeElement !== node) {
+      onInputChange(next)
+      return
+    }
+    let head = 0
+    while (head < value.length && value[head] === next[head]) head += 1
+    let tail = 0
+    while (tail < value.length - head && tail < next.length - head && value[value.length - 1 - tail] === next[next.length - 1 - tail]) tail += 1
+    editRange(node, head, value.length - tail, next.slice(head, next.length - tail))
+  }
+
+  // Takes every chip of `key` out of the text, each with the space put in beside it; `forget` also forgets them, so one
+  // an undo brings back reads as its plain name.
+  const dropChips = (key: string, forget = false) => {
+    const value = composerInputRef.current?.value ?? inputValueRef.current
+    const spans = findAttachmentChips(value, attachmentChipRegistry()).filter((span) => span.key === key)
+    if (forget) unregisterAttachmentChips(key)
+    if (!spans.length) return
+    let next = ''
+    let from = 0
+    for (const span of spans) {
+      let start = span.index
+      let end = span.index + span.length
+      const spaceBefore = start - 1 >= from && value[start - 1] === ' '
+      if (value[end] === ' ' && (start === 0 || /\s/.test(value[start - 1]!))) end += 1
+      else if (spaceBefore && (end === value.length || /\s/.test(value[end]!))) start -= 1
+      next += value.slice(from, start)
+      from = end
+    }
+    replaceText(next + value.slice(from))
+  }
+
+  const attachmentEntry = (attached: AttachedFile): AttachmentChipEntry => ({
+    key: attachmentChipKey(attached.id),
+    name: attachedFileName(attached),
+    kind: attached.file.type.startsWith('image/') && !attached.pastedText ? 'image' : 'file'
+  })
+  const referenceEntry = (reference: ChatReference): AttachmentChipEntry => ({
+    key: referenceChipKey(reference.id),
+    name: reference.title,
+    kind: reference.kind === 'review-comment' ? 'file' : reference.kind
+  })
+
+  // Puts chips for `entries` over `start`..`end`, as typing would, when the text has words of its own besides: in an
+  // empty composer an attachment shows in the attachments row only. Returns whether they went in.
+  // Returns the text with the chips in, or null where none went in.
+  const placeChips = (start: number, end: number, entries: AttachmentChipEntry[]): string | null => {
+    const node = composerInputRef.current
+    if (!node || !entries.length || disabled) return null
+    const value = node.value
+    if (!hasTextAround(value, start, end)) return null
+    const range = rangeOverChips(atomicChips, Math.min(start, value.length), Math.min(end, value.length))
+    const insertion = chipInsertion(value, range.start, range.end, entries.map(registerAttachmentChip))
+    if (document.activeElement !== node) node.focus()
+    editRange(node, range.start, range.end, insertion.text)
+    const caretAt = range.start + insertion.caret
+    node.setSelectionRange(caretAt, caretAt)
+    setCaret(caretAt)
+    return value.slice(0, range.start) + insertion.text + value.slice(range.end)
+  }
+
+  // The reference already in the row for the same file, folder, thread or other target, which a chip can point at again.
+  const sameReference = (reference: ChatReference): ChatReference | undefined => {
+    const target = (item: ChatReference) => item.path ?? item.threadId ?? item.projectId ?? item.url ?? item.tabId
+    return references.find((item) => item.kind === reference.kind && target(item) !== undefined && target(item) === target(reference))
+  }
+
+  const openAttachmentChip = (span: AttachmentChipSpan) => {
+    if (span.key.startsWith('ref:')) {
+      const reference = references.find((item) => referenceChipKey(item.id) === span.key)
+      if (reference) openChatReference(reference)
+      return
+    }
+    const attached = attachedFiles.find((item) => attachmentChipKey(item.id) === span.key)
+    if (!attached) return
+    if (attached.pastedText) {
+      void previewPastedText(attached.id)
+      return
+    }
+    // An image opens the preview its tile in the row opens.
+    const tile = attachmentsRowRef.current?.querySelector<HTMLElement>(`[data-attachment-id="${CSS.escape(attached.id)}"]`)
+    const open = tile?.querySelector<HTMLButtonElement>('button[aria-label^="Open"]')
+    if (open) open.click()
+    else if (attached.path) openFileInPanel({ path: attached.path })
+  }
+
+  const attachmentChipTitle = (span: AttachmentChipSpan): string => {
+    if (span.key.startsWith('ref:')) {
+      const reference = references.find((item) => referenceChipKey(item.id) === span.key)
+      return reference ? referenceTitle(reference) : span.name
+    }
+    const attached = attachedFiles.find((item) => attachmentChipKey(item.id) === span.key)
+    return attached?.path ?? (attached ? attachedFileName(attached) : span.name)
+  }
+
   // The long paste Undo takes back while the box is as the paste left it.
-  const pasteUndo = useRef<{ id: string; input: string } | null>(null)
+  // `chip`: the paste also put its chip in the text, which the box's own undo takes out.
+  const pasteUndo = useRef<{ id: string; input: string; chip: boolean } | null>(null)
   const [previewing, setPreviewing] = useState<{ id: string; name: string; text: string } | null>(null)
 
-  /** Puts a long paste back into the box as text, where the caret is, and drops its chip. */
+  /** Puts a long paste back into the box as text, where its chip is or else where the caret is, and drops its chip. */
   const insertPastedText = async (id: string) => {
     const attached = attachedFiles.find((f) => f.id === id)
     if (!attached) return
     const text = await attached.file.text()
     setPreviewing(null)
     pasteUndo.current = null
-    removeFile(id)
     const target = composerInputRef.current
+    const chip = target && findAttachmentChips(target.value, attachmentChipRegistry()).find((span) => span.key === attachmentChipKey(id))
+    if (target && chip) {
+      // One edit: Undo puts the chip back, and with it the attachment.
+      target.focus()
+      editRange(target, chip.index, chip.index + chip.length, text)
+      removeFile(id, true)
+      return
+    }
+    removeFile(id)
     if (!target) return
     target.focus()
     // Typed in, so Undo takes it out again.
@@ -607,7 +798,16 @@ export function ChatComposer({
   // long (`LONG_PASTE_BYTES`): then it goes on the message as a text file, which the chip can put back as text.
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = collectFilesFromDataTransfer(event.clipboardData)
+    const node = event.currentTarget
     if (files.length === 0) {
+      // Text copied from this composer with chips in it goes back with its chips, while their attachments are here.
+      const copied = event.clipboardData?.getData(COMPOSER_TEXT_MIME) ?? ''
+      if (copied && findAttachmentChips(copied, attachmentChipRegistry()).length > 0) {
+        event.preventDefault()
+        const range = rangeOverChips(atomicChips, node.selectionStart, node.selectionEnd)
+        editRange(node, range.start, range.end, copied)
+        return
+      }
       const text = event.clipboardData?.getData('text/plain') ?? ''
       // A thread link (Copy reference) is pasted as text, unless this chat may not point at that thread.
       const refused = pastedThreadRefusal ? threadIdsInText(text).map(pastedThreadRefusal).find(Boolean) : null
@@ -619,8 +819,7 @@ export function ChatComposer({
       const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
       if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) {
         // A paste replaces whole chips, never half of one; thread links in it go in as chips, in one undo step.
-        const node = event.currentTarget
-        const range = rangeOverChips(threadChips, node.selectionStart, node.selectionEnd)
+        const range = rangeOverChips(atomicChips, node.selectionStart, node.selectionEnd)
         const chipped = chipLinks(text)
         if (chipped.value !== text) {
           event.preventDefault()
@@ -632,7 +831,11 @@ export function ChatComposer({
       }
       event.preventDefault()
       const added = addFiles([{ file: longPasteFile(text), label: pastedTextName(text), pastedText: true }])
-      if (added?.[0]) pasteUndo.current = { id: added[0].id, input }
+      if (added?.[0]) {
+        const at = node.selectionEnd
+        const chipped = placeChips(at, at, [attachmentEntry(added[0])])
+        pasteUndo.current = { id: added[0].id, input: chipped ?? input, chip: chipped !== null }
+      }
       return
     }
     event.preventDefault()
@@ -640,7 +843,9 @@ export function ChatComposer({
       if (filePasteKey.current.consumed) return
       filePasteKey.current.consumed = true
     }
-    addFiles(files)
+    // Among text, each pasted file also gets its chip at the caret (a selection stays: a file never replaces words).
+    const added = addFiles(files)
+    if (added?.length) placeChips(node.selectionEnd, node.selectionEnd, added.map(attachmentEntry))
   }
 
   const applySuggestion = (command: ComposerCommandDef) => {
@@ -695,6 +900,15 @@ export function ChatComposer({
     if (!done) commitEdit({ value: node.value.slice(0, start) + text + node.value.slice(end), caret: start + text.length })
   }
 
+  // Text put in from outside (a draft kept across a restart) may hold chips whose attachments are gone: they read as
+  // their plain names.
+  useLayoutEffect(() => {
+    if (input === nativeValueRef.current || !input.includes(ATTACHMENT_CHIP_HEAD)) return
+    const plain = plainOrphanChips(input, attachmentChipRegistry())
+    if (plain !== input) onInputChange(plain)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when the text changes
+  }, [input])
+
   // Links put in from outside the text box become chips; so does a link typing just finished, or one a drop brought.
   useLayoutEffect(() => {
     const node = composerInputRef.current
@@ -739,27 +953,28 @@ export function ChatComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input])
 
-  // The chip under the pointer, and whether the pointer is on its remove mark.
-  const threadChipAt = (x: number, y: number): { index: number; close: boolean } | null => {
+  // The chip under the pointer: a thread chip (and whether the pointer is on its remove mark) or an attachment chip.
+  const chipAt = (x: number, y: number): ChipHit | null => {
     const backdrop = backdropRef.current
-    if (!backdrop || threadChips.length === 0) return null
+    if (!backdrop || atomicChips.length === 0) return null
     const holds = (rect: DOMRect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
-    for (const element of backdrop.querySelectorAll<HTMLElement>('[data-thread-chip]')) {
+    for (const element of backdrop.querySelectorAll<HTMLElement>('[data-thread-chip], [data-attachment-chip]')) {
       if (![...element.getClientRects()].some(holds)) continue
+      if (element.dataset.attachmentChip !== undefined) return { kind: 'attachment', index: Number(element.dataset.attachmentChip), close: false }
       const close = element.querySelector('[data-thread-chip-close]')?.getBoundingClientRect()
-      return { index: Number(element.dataset.threadChip), close: Boolean(close && holds(close)) }
+      return { kind: 'thread', index: Number(element.dataset.threadChip), close: Boolean(close && holds(close)) }
     }
     return null
   }
   const onChipPointer = (event: React.MouseEvent<HTMLTextAreaElement>) => {
-    const hit = event.buttons === 0 && !disabled ? threadChipAt(event.clientX, event.clientY) : null
-    if (hit?.index !== chipHover?.index || hit?.close !== chipHover?.close) setChipHover(hit)
+    const hit = event.buttons === 0 && !disabled ? chipAt(event.clientX, event.clientY) : null
+    if (hit?.kind !== chipHover?.kind || hit?.index !== chipHover?.index || hit?.close !== chipHover?.close) setChipHover(hit)
   }
   // A press on a chip opens its thread, or on its remove mark takes the chip out; it never moves the caret.
   const onChipMouseDown = (event: React.MouseEvent<HTMLTextAreaElement>) => {
     chipPressRef.current = null
     if (event.button !== 0 || event.shiftKey || disabled) return
-    const hit = threadChipAt(event.clientX, event.clientY)
+    const hit = chipAt(event.clientX, event.clientY)
     if (!hit) return
     event.preventDefault()
     chipPressRef.current = hit
@@ -768,8 +983,15 @@ export function ChatComposer({
     const pressed = chipPressRef.current
     chipPressRef.current = null
     if (!pressed) return
-    const hit = threadChipAt(event.clientX, event.clientY)
-    const chip = hit && hit.index === pressed.index ? threadChips[hit.index] : undefined
+    const hit = chipAt(event.clientX, event.clientY)
+    if (!hit || hit.kind !== pressed.kind || hit.index !== pressed.index) return
+    // An attachment chip opens what it stands for: an image or pasted text in its preview, a reference where it points.
+    if (hit.kind === 'attachment') {
+      const span = attachmentChips[hit.index]
+      if (span) openAttachmentChip(span)
+      return
+    }
+    const chip = threadChips[hit.index]
     if (!chip) return
     if (hit?.close) {
       const node = event.currentTarget
@@ -780,16 +1002,17 @@ export function ChatComposer({
       openLinkedThread(chip.threadId)
     }
   }
-  // A copied or cut selection holding chips carries their links.
+  // A copied or cut selection holding chips carries their links and names; pasted back here, its attachment chips stay.
   const copyChips = (event: React.ClipboardEvent<HTMLTextAreaElement>, cut: boolean) => {
-    if (threadChips.length === 0) return
+    if (atomicChips.length === 0) return
     const node = event.currentTarget
-    const range = rangeOverChips(threadChips, node.selectionStart, node.selectionEnd)
+    const range = rangeOverChips(atomicChips, node.selectionStart, node.selectionEnd)
     const selected = node.value.slice(range.start, range.end)
-    const text = expandComposerThreadChips(selected)
+    const text = expandComposerAttachmentChips(expandComposerThreadChips(selected), (entry) => entry.name)
     if (text === selected) return
     event.preventDefault()
     event.clipboardData.setData('text/plain', text)
+    if (findAttachmentChips(selected, attachmentChipRegistry()).length > 0) event.clipboardData.setData(COMPOSER_TEXT_MIME, selected)
     if (cut && !disabled) editRange(node, range.start, range.end, '')
   }
 
@@ -842,19 +1065,23 @@ export function ChatComposer({
       mentionResult.failed ||
       !isMentionResultCurrent(mentionResult, { scopeKey: mentionScope.scopeKey, query: mentionQuery.query })
     ) return
-    const reference = mentionItemReference(
+    const picked = mentionItemReference(
       item,
       mentionResult.root,
       { threadId: mentionScope.threadId, projectId: mentionScope.projectId },
       `${item.kind}:${crypto.randomUUID()}`
     )
-    commitEdit(applyMentionPick(input, range, ''))
+    // A file already in the row is pointed at again, not added twice. Among text the pick leaves its chip in place of
+    // the `@query`; alone in the box it goes to the row only.
+    const existing = sameReference(picked)
+    const reference = existing ?? picked
+    // A space after the chip, unless the text goes on with one or with punctuation.
+    const gap = /^[\s.,;:!?)\]}]/.test(input.slice(range.end)) ? '' : ' '
+    const chip = hasTextAround(input, range.index, range.end) ? `${registerAttachmentChip(referenceEntry(reference))}${gap}` : ''
+    commitEdit(applyMentionPick(input, range, chip))
     setSuggestionsDismissed(true)
     setSelectedSuggestion(0)
-    setPendingReferences((count) => count + 1)
-    void Promise.resolve().then(() => onAddReference?.(reference)).catch((error) => {
-      onReferenceError(error instanceof Error ? error.message : String(error))
-    }).finally(() => setPendingReferences((count) => count - 1))
+    if (!existing) takeReference(reference)
   }
 
   const submit = (options?: { steer?: boolean }) => {
@@ -908,11 +1135,17 @@ export function ChatComposer({
       start: span.index,
       end: span.index + span.length,
       threadId: span.threadId,
-      hover: chipHover?.index === index ? (chipHover.close ? 'close' as const : 'chip' as const) : null
+      hover: chipHover?.kind === 'thread' && chipHover.index === index ? (chipHover.close ? 'close' as const : 'chip' as const) : null
+    }))
+    const attachments = attachmentChips.map((span, index) => ({
+      start: span.index,
+      end: span.index + span.length,
+      kind: span.kind,
+      hover: chipHover?.kind === 'attachment' && chipHover.index === index
     }))
     return (
       <>
-        {renderMarkdownBackdrop(input, chip, quotes, threads)}
+        {renderMarkdownBackdrop(input, chip, quotes, threads, attachments)}
         {input.endsWith('\n') ? '\u200B' : null}
       </>
     )
@@ -942,6 +1175,11 @@ export function ChatComposer({
     if (undone && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
       pasteUndo.current = null
       if (e.currentTarget.value === undone.input && attachedFiles.some((f) => f.id === undone.id)) {
+        // With a chip, the box's own undo takes the chip out of the text in the same step.
+        if (undone.chip) {
+          removeFile(undone.id, true)
+          return
+        }
         e.preventDefault()
         removeFile(undone.id)
         return
@@ -1004,22 +1242,27 @@ export function ChatComposer({
         return
       }
     }
-    // A thread chip goes as one character would: Backspace after it or Delete before it removes all of it (undo brings
-    // it back), the arrows step over it, and typing over a selection that cuts into one replaces all of it.
-    if (threadChips.length > 0) {
+    // A thread or attachment chip goes as one character would: Backspace after it or Delete before it removes all of it
+    // (undo brings it back; an attachment stays in the row), the arrows step over it, and typing over a selection that
+    // cuts into one replaces all of it.
+    if (atomicChips.length > 0) {
       const node = e.currentTarget
       const { selectionStart: start, selectionEnd: end } = node
       if (start === end && (e.key === 'Backspace' || e.key === 'Delete')) {
-        const chip = threadChipAtEdge(threadChips, start, e.key)
+        const chip = threadChipAtEdge(atomicChips, start, e.key)
         if (chip) {
           e.preventDefault()
-          editRange(node, chip.index, chip.index + chip.length, '')
+          // An attachment chip goes with one of the spaces put in beside it.
+          const value = node.value
+          const end = chip.index + chip.length
+          const spaced = 'key' in chip && value[end] === ' ' && (chip.index === 0 || /\s/.test(value[chip.index - 1]!))
+          editRange(node, chip.index, spaced ? end + 1 : end, '')
           return
         }
       } else if (start === end && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
         const chip = e.key === 'ArrowRight'
-          ? threadChips.find((span) => span.index === start)
-          : threadChips.find((span) => span.index + span.length === start)
+          ? atomicChips.find((span) => span.index === start)
+          : atomicChips.find((span) => span.index + span.length === start)
         if (chip) {
           e.preventDefault()
           const to = e.key === 'ArrowRight' ? chip.index + chip.length : chip.index
@@ -1028,7 +1271,7 @@ export function ChatComposer({
           return
         }
       } else if (start !== end && (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Enter' || (e.key.length === 1 && !e.ctrlKey && !e.metaKey))) {
-        const range = rangeOverChips(threadChips, start, end)
+        const range = rangeOverChips(atomicChips, start, end)
         if (range.start !== start || range.end !== end) node.setSelectionRange(range.start, range.end)
       }
     }
@@ -1046,7 +1289,7 @@ export function ChatComposer({
     }
     if (e.key === 'Backspace' && input.length === 0 && references.length > 0) {
       e.preventDefault()
-      onRemoveReference(references[references.length - 1].id)
+      removeReference(references[references.length - 1].id)
       return
     }
     if (e.key === 'Backspace' && input.length === 0 && browserElements.length > 0) {
@@ -1106,21 +1349,68 @@ export function ChatComposer({
     }
   }
 
+  // Adds a reference to the row; a chip placed for it before it was added goes again if it can't be added.
   const takeReference = (reference: ChatReference) => {
     if (!onAddReference) return
     setPendingReferences((count) => count + 1)
     void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
+      dropChips(referenceChipKey(reference.id), true)
       onReferenceError(error instanceof Error ? error.message : String(error))
     }).finally(() => setPendingReferences((count) => count - 1))
   }
 
+  // A reference dropped on the text gets its chip at the drop point (one already in the row is pointed at again).
+  const dropReference = (reference: ChatReference, at: number | null) => {
+    const existing = sameReference(reference)
+    const target = existing ?? reference
+    if (at !== null) placeChips(at, at, [referenceEntry(target)])
+    if (!existing) takeReference(target)
+  }
+
+  // Where in the text a drop at the pointer lands, or null for a drop outside the text box.
+  const dropOffset = (event: React.DragEvent): number | null => {
+    const node = composerInputRef.current
+    if (!node || event.target !== node) return null
+    const position = document.caretPositionFromPoint?.(event.clientX, event.clientY)
+    const at = position && position.offsetNode === node
+      ? Math.min(position.offset, node.value.length)
+      : backdropOffsetAt(event.clientX, event.clientY) ?? node.selectionEnd
+    return wordEdge(node.value, at)
+  }
+
+  // The text offset under a point, read from the backdrop, which draws the box's text glyph for glyph.
+  const backdropOffsetAt = (x: number, y: number): number | null => {
+    const backdrop = backdropRef.current
+    if (!backdrop || typeof document.caretRangeFromPoint !== 'function') return null
+    const node = composerInputRef.current
+    const previous = { backdrop: backdrop.style.pointerEvents, input: node?.style.pointerEvents ?? '' }
+    backdrop.style.pointerEvents = 'auto'
+    if (node) node.style.pointerEvents = 'none'
+    let range: Range | null = null
+    try {
+      range = document.caretRangeFromPoint(x, y)
+    } finally {
+      backdrop.style.pointerEvents = previous.backdrop
+      if (node) node.style.pointerEvents = previous.input
+    }
+    if (!range || !backdrop.contains(range.startContainer)) return null
+    let offset = 0
+    const walker = document.createTreeWalker(backdrop, NodeFilter.SHOW_TEXT)
+    for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+      if (text === range.startContainer) return Math.min(offset + range.startOffset, inputValueRef.current.length)
+      offset += text.textContent?.length ?? 0
+    }
+    return null
+  }
+
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     if (disabled) return
+    const at = dropOffset(event)
     const reference = onAddReference ? parseReferenceDragData(event.dataTransfer) : null
     if (reference && onAddReference) {
       event.preventDefault()
       event.stopPropagation()
-      takeReference(reference)
+      dropReference(reference, at)
       return
     }
     const files = Array.from(event.dataTransfer.files)
@@ -1131,10 +1421,12 @@ export function ChatComposer({
     if (own?.kind === 'ignore') return
     if (own?.kind === 'reference') {
       const parsed = parseChatReference({ ...own.reference, id: own.reference.id ?? `${own.reference.kind}:${crypto.randomUUID()}` })
-      if (parsed) takeReference(parsed)
+      if (parsed) dropReference(parsed, at)
       return
     }
-    addFiles(files)
+    // Dropped on the text among words, each file also gets its chip at the drop point.
+    const added = addFiles(files)
+    if (added?.length && at !== null) placeChips(at, at, added.map(attachmentEntry))
   }
 
   return (
@@ -1150,7 +1442,7 @@ export function ChatComposer({
       )}
       {hasAttachments && (
         <div className="composer-attachments">
-          <div className="composer-attachments-scroll">
+          <div ref={attachmentsRowRef} className="composer-attachments-scroll">
             {/* An attached image opens a preview that steps through the other attached images. */}
             <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl && !attachmentStatus?.get(id)?.noPreview ? [{ id, url: previewUrl, filename: file.name }] : []))}>
               {attachedFiles.map((attached) => {
@@ -1161,6 +1453,8 @@ export function ChatComposer({
                   <FileAttachment
                     key={id}
                     id={id}
+                    // Beside image thumbnails a file is a tile of the same size, so the row reads as one.
+                    display={previewUrl === undefined && rowHasImages ? 'tile' : 'chip'}
                     filename={attachedFileName(attached)}
                     size={path ? undefined : file.size}
                     title={pastedText ? 'Sent to the agent as a text file. Click to view.' : path}
@@ -1184,7 +1478,7 @@ export function ChatComposer({
               })}
             </ImageGalleryProvider>
             {references.map((reference) => (
-              <ChatReferencePill key={reference.id} reference={reference} onRemove={() => onRemoveReference(reference.id)} />
+              <ChatReferencePill key={reference.id} reference={reference} tile={rowHasImages} onRemove={() => removeReference(reference.id)} />
             ))}
             {browserElements.map((element) => (
               <BrowserElementPill
@@ -1219,6 +1513,8 @@ export function ChatComposer({
           ref={composerInputRef}
           className={`composer-input composer-input-mirrored${chipHover ? ' composer-input-on-chip' : ''}`}
           value={input}
+          // On an attachment chip the pointer shows where its file is.
+          title={chipHover?.kind === 'attachment' && attachmentChips[chipHover.index] ? attachmentChipTitle(attachmentChips[chipHover.index]!) : undefined}
           onChange={(e) => {
             setSuggestionsDismissed(false)
             setSelectedSuggestion(0)
@@ -1244,7 +1540,7 @@ export function ChatComposer({
             // The caret never rests inside a Reply pill, so typing can't split one.
             const node = e.currentTarget
             const inside = node.selectionStart === node.selectionEnd
-              ? quoteTokenAround(quoteSpans, node.selectionStart) ?? threadChipAround(threadChips, node.selectionStart)
+              ? quoteTokenAround(quoteSpans, node.selectionStart) ?? threadChipAround(atomicChips, node.selectionStart)
               : undefined
             if (inside) {
               const end = inside.index + inside.length
@@ -1433,7 +1729,10 @@ export function buildComposerMessageContent(
   pastedTexts: ReadonlyArray<{ name: string; text: string }> = []
 ): string {
   const parts: string[] = []
-  const typed = expandComposerThreadChips(expandComposerQuotes(input)).trim()
+  const typed = expandComposerAttachmentChips(
+    expandComposerThreadChips(expandComposerQuotes(input)),
+    (entry) => sentChipText(entry, attachedFiles, references)
+  ).trim()
   if (typed) parts.push(typed)
   for (const pasted of pastedTexts) parts.push(pastedTextBlock(pasted.name, pasted.text))
 
@@ -1454,6 +1753,26 @@ export function buildComposerMessageContent(
   if (references.length) parts.push(formatChatReferences(references))
 
   return parts.join('\n\n')
+}
+
+/**
+ * What an attachment chip says in the sent text (`shared/inlineAttachments.ts`): an image the agent gets inline with its
+ * place among the message's images, a file sent as a path by its name in the files marker, a reference by its kind and
+ * title. A chip whose attachment is not among these says what it was.
+ */
+function sentChipText(entry: AttachmentChipEntry, attachedFiles: readonly AttachedFile[], references: readonly ChatReference[]): string {
+  if (entry.key.startsWith('ref:')) {
+    const reference = references.find((item) => referenceChipKey(item.id) === entry.key)
+    if (reference?.kind === 'review-comment') return reference.title
+    if (reference) return formatSentChip({ kind: reference.kind, name: reference.title })
+    return formatSentChip({ kind: entry.kind, name: entry.name })
+  }
+  const attached = attachedFiles.find((item) => attachmentChipKey(item.id) === entry.key)
+  if (!attached) return formatSentChip({ kind: entry.kind, name: entry.name })
+  const asPath = new Set(fileAttachments(attachedFiles))
+  if (asPath.has(attached)) return formatSentChip({ kind: 'file', name: attachedFileName(attached) })
+  const images = attachedFiles.filter((item) => !asPath.has(item))
+  return formatSentChip({ kind: 'image', name: attachedFileName(attached), image: images.indexOf(attached) + 1 })
 }
 
 const MARKDOWN_CLASS: Record<MarkdownKind, string> = {
@@ -1477,9 +1796,10 @@ function renderMarkdownBackdrop(
   text: string,
   chip: { start: number; end: number } | null,
   quotes: Array<{ start: number; end: number }> = [],
-  threads: Array<{ start: number; end: number; threadId: string; hover: 'chip' | 'close' | null }> = []
+  threads: Array<{ start: number; end: number; threadId: string; hover: 'chip' | 'close' | null }> = [],
+  attachments: Array<{ start: number; end: number; kind: AttachmentChipEntry['kind']; hover: boolean }> = []
 ): ReactNode[] {
-  const cuts = [...(chip ? [chip.start, chip.end] : []), ...[...quotes, ...threads].flatMap((token) => [token.start, token.end])]
+  const cuts = [...(chip ? [chip.start, chip.end] : []), ...[...quotes, ...threads, ...attachments].flatMap((token) => [token.start, token.end])]
   const nodes: ReactNode[] = []
   for (const span of composerMarkdownSpans(text)) {
     const bounds = [...new Set([span.start, ...cuts.filter((cut) => cut > span.start && cut < span.end), span.end])].sort((a, b) => a - b)
@@ -1493,6 +1813,15 @@ function renderMarkdownBackdrop(
         const thread = threads[threadIndex]
         if (start === thread.start) {
           nodes.push(<ComposerThreadChip key={start} index={threadIndex} token={text.slice(thread.start, thread.end)} threadId={thread.threadId} hover={thread.hover} />)
+        }
+        continue
+      }
+      // An attachment chip is drawn whole: its icon in the token's blank slot, then its name.
+      const attachmentIndex = attachments.findIndex((item) => start >= item.start && end <= item.end)
+      if (attachmentIndex >= 0) {
+        const attachment = attachments[attachmentIndex]
+        if (start === attachment.start) {
+          nodes.push(<ComposerAttachmentChip key={start} index={attachmentIndex} token={text.slice(attachment.start, attachment.end)} kind={attachment.kind} hover={attachment.hover} />)
         }
         continue
       }
@@ -1516,6 +1845,18 @@ function renderMarkdownBackdrop(
     }
   }
   return nodes
+}
+
+/** An attachment chip as the input backdrop draws it, over the token's own glyphs: the icon in its blank slot, then the name. */
+function ComposerAttachmentChip({ index, token, kind, hover }: { index: number; token: string; kind: AttachmentChipEntry['kind']; hover: boolean }) {
+  const parts = attachmentChipParts(token)
+  const Icon = kind === 'image' ? IconPhoto : kind === 'file' ? FileIcon : REFERENCE_ICONS[kind]
+  return (
+    <span className="composer-thread-chip composer-attachment-chip" data-attachment-chip={index} {...(hover ? { 'data-hover': 'chip' } : {})}>
+      <span className="composer-chip-slot">{parts.head}<Icon size={12} strokeWidth={2} className="composer-thread-chip-icon" aria-hidden /></span>
+      {parts.rest}
+    </span>
+  )
 }
 
 /**

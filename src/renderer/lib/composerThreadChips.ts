@@ -41,6 +41,12 @@ export interface ThreadChipLabel {
   computer?: string
 }
 
+/** Where a chip's token sits in the text: thread chips and attachment chips (`composerAttachmentChips.ts`) alike. */
+export interface ChipSpan {
+  index: number
+  length: number
+}
+
 export interface ThreadChipSpan {
   index: number
   length: number
@@ -176,17 +182,17 @@ export function chipThreadLinks(
 }
 
 /** The chip a collapsed caret sits strictly inside, so the caret can be moved off it. */
-export function threadChipAround(spans: readonly ThreadChipSpan[], caret: number): ThreadChipSpan | undefined {
+export function threadChipAround<T extends ChipSpan>(spans: readonly T[], caret: number): T | undefined {
   return spans.find((span) => caret > span.index && caret < span.index + span.length)
 }
 
 /** The chip Backspace right after, or Delete right before, removes whole. */
-export function threadChipAtEdge(spans: readonly ThreadChipSpan[], caret: number, key: 'Backspace' | 'Delete'): ThreadChipSpan | undefined {
+export function threadChipAtEdge<T extends ChipSpan>(spans: readonly T[], caret: number, key: 'Backspace' | 'Delete'): T | undefined {
   return spans.find((span) => (key === 'Backspace' ? span.index + span.length === caret : span.index === caret))
 }
 
 /** `start`..`end` grown to hold whole every chip it cuts into, so an edit never leaves half a chip. */
-export function rangeOverChips(spans: readonly ThreadChipSpan[], start: number, end: number): { start: number; end: number } {
+export function rangeOverChips(spans: readonly ChipSpan[], start: number, end: number): { start: number; end: number } {
   let from = start
   let to = end
   for (const span of spans) {

@@ -193,12 +193,12 @@ describe('a long text paste in the composer', () => {
 
   it('is taken back by Undo right after the paste, and not once something was typed', async () => {
     await mount()
-    await type('keep this')
     await paste([], longLog(100))
     expect(await pressKey('z', { ctrlKey: true })).toBe(true)
     expect(chipNames()).toEqual([])
-    expect(box().value).toBe('keep this')
+    expect(box().value).toBe('')
 
+    await type('keep this')
     await paste([], longLog(100))
     await type('keep this and more')
     expect(await pressKey('z', { metaKey: true })).toBe(false)

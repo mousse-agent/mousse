@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { flushSync } from "react-dom";
 import type { UIMessage } from "ai";
 import { FIND_REVEAL_EVENT } from "./find/reveal";
@@ -8,7 +8,8 @@ import { ImageLightbox } from "./image-lightbox";
 import { useImageGallery } from "./image-gallery";
 import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { imageDragItem, startDragOut } from "../../../lib/fileDragOut";
-import { ChatReferencePill } from "../../../components/ReferencePill";
+import { ChatReferencePill, REFERENCE_ICONS, openChatReference, referenceTitle } from "../../../components/ReferencePill";
+import { findSentChips, sentChipName, type SentChipSpan } from "../../../../shared/inlineAttachments";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 import { openFileInPanel, openLinkedThread, routeLink } from "../../../utils/chatLinks";
 import { parseThreadLink, threadLink } from "../../../../shared/threadLink";
@@ -16,7 +17,7 @@ import { LinkLabel, threadLinkLabel } from "./link-label-view";
 import { ThreadChip } from "../../../components/ThreadChip";
 import { promptSegments } from "./prompt-links";
 import { WithSentQuotes } from "../../../components/QuotePill";
-import { Bot } from "../../../lib/icons";
+import { Bot, File as FileIcon, IconPhoto } from "../../../lib/icons";
 import { useAppStore } from "../../../stores/appStore";
 import { useBotsStore } from "../../../stores/botsStore";
 import { useChatsStore } from "../../../stores/chatsStore";
@@ -208,17 +209,84 @@ function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string, f
   return tall;
 }
 
+/** What a chip in the sent text points at: its icon, the tooltip (where it is), and what a click opens. */
+type SentChipTarget = { icon: "image" | "file" | ChatReference["kind"]; title: string; open?: () => void };
+type SentChipResolver = (chip: SentChipSpan) => SentChipTarget | null;
+
+/**
+ * The message's own attachments for the chips in its text (`shared/inlineAttachments.ts`): an image by its place among
+ * the images (or its name), a file by its name in the files marker, a reference by its kind and title. A bracket that
+ * names none of them stays text.
+ */
+function sentChipResolver(
+  images: Array<{ name?: string }>,
+  files: Array<{ filename: string; path?: string }>,
+  references: ChatReference[],
+  openImage: (index: number) => void,
+): SentChipResolver {
+  const same = (a: string | undefined, b: string) => a !== undefined && sentChipName(a) === b;
+  return (chip) => {
+    if (chip.kind === "image" || chip.kind === "file") {
+      const atPlace = chip.kind === "image" && chip.image ? chip.image - 1 : -1;
+      const imageIndex = atPlace >= 0 && atPlace < images.length && (!images[atPlace]!.name || same(images[atPlace]!.name, chip.name))
+        ? atPlace
+        : images.findIndex((image) => same(image.name, chip.name));
+      if (chip.kind === "image" && imageIndex >= 0) return { icon: "image", title: images[imageIndex]!.name ?? chip.name, open: () => openImage(imageIndex) };
+      const file = files.find((entry) => same(entry.filename, chip.name));
+      if (file) return { icon: "file", title: file.path ?? file.filename, open: file.path ? () => openFileInPanel({ path: file.path! }) : undefined };
+      if (imageIndex >= 0) return { icon: "image", title: images[imageIndex]!.name ?? chip.name, open: () => openImage(imageIndex) };
+    }
+    const kind = chip.kind === "image" ? null : chip.kind;
+    const reference = kind ? references.find((entry) => entry.kind === kind && same(entry.title, chip.name)) : undefined;
+    return reference ? { icon: reference.kind, title: referenceTitle(reference), open: () => openChatReference(reference) } : null;
+  };
+}
+
+/** An attachment's chip in the sent text, where the composer showed it: its icon and name; a click opens it. */
+function SentAttachmentChip({ name, target }: { name: string; target: SentChipTarget }) {
+  const Icon = target.icon === "image" ? IconPhoto : target.icon === "file" ? FileIcon : REFERENCE_ICONS[target.icon];
+  const content = (
+    <>
+      <Icon size={12} strokeWidth={2} className="thread-chip-icon" aria-hidden />
+      {name}
+    </>
+  );
+  return target.open ? (
+    <button type="button" className="thread-chip sent-attachment-chip" title={target.title} onClick={target.open}>{content}</button>
+  ) : (
+    <span className="thread-chip sent-attachment-chip" title={target.title}>{content}</span>
+  );
+}
+
+/** `text` with each bracket that names one of the message's attachments drawn as its chip. */
+function withSentChips(text: string, resolve: SentChipResolver | undefined, key: string): React.ReactNode {
+  const chips = resolve ? findSentChips(text) : [];
+  if (!chips.length) return text;
+  const nodes: React.ReactNode[] = [];
+  let from = 0;
+  for (const chip of chips) {
+    const target = resolve!(chip);
+    if (!target) continue;
+    nodes.push(text.slice(from, chip.index));
+    nodes.push(<SentAttachmentChip key={`${key}-${chip.index}`} name={chip.name} target={target} />);
+    from = chip.index + chip.length;
+  }
+  if (from === 0) return text;
+  nodes.push(text.slice(from));
+  return <>{nodes}</>;
+}
+
 /**
  * The prompt's text with its links drawn as links, the way a reply draws them (see prompt-links, link-label): a thread's
- * link as the thread's chip, in place.
+ * link as the thread's chip, in place; an attachment's bracket as its chip.
  */
-function PromptText({ text }: { text: string }) {
+function PromptText({ text, chips }: { text: string; chips?: SentChipResolver }) {
   const segments = promptSegments(text);
-  if (segments.length === 1 && segments[0]!.kind === "text") return <>{text}</>;
+  if (segments.length === 1 && segments[0]!.kind === "text") return <>{withSentChips(text, chips, "t")}</>;
   return (
     <>
       {segments.map((segment, i) => {
-        if (segment.kind === "text") return segment.text;
+        if (segment.kind === "text") return <Fragment key={i}>{withSentChips(segment.text, chips, String(i))}</Fragment>;
         const threadId = parseThreadLink(segment.href);
         if (threadId) return <ThreadChip key={i} threadId={threadId} label={threadLinkLabel(segment.href, segment.text)} />;
         return (
@@ -287,6 +355,7 @@ export const UserMessage = memo(function UserMessage({
   const lightboxImages = userMessageImages(message);
   // In a conversation its one preview steps through all of the conversation's images; alone, through this prompt's.
   const openImage = (i: number) => (gallery ? gallery.open(lightboxImages[i]!) : setLightboxIndex(i));
+  const chipResolver = sentChipResolver(images, files, references, openImage);
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
@@ -381,7 +450,7 @@ export const UserMessage = memo(function UserMessage({
           data-message-id={message.id}
           data-part-index="0"
         >
-          <WithSentQuotes text={text} render={(part) => <PromptText text={part} />} />
+          <WithSentQuotes text={text} render={(part) => <PromptText text={part} chips={chipResolver} />} />
         </p>
       )}
       {text && foldable && (
