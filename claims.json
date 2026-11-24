@@ -2,6 +2,22 @@
   "version": 1,
   "claims": [
     {
+      "task": "acp-agent-logos",
+      "session": "LAPTOP-HIEROJK7-a1f832",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "t3/acp-provider-icons",
+      "paths": [
+        "src/mms/harness/agents/registry.ts",
+        "src/mms/harness/agents/registryIcons.ts",
+        "src/renderer/lib/providerIcons.tsx",
+        "src/shared/privacy/outbound.ts",
+        "src/mms/harness/gateway.ts",
+        "src/renderer/components/providers/RegistryAgents.tsx"
+      ],
+      "claimedAt": "2026-11-24T15:06:33.185Z",
+      "expiresAt": "2026-11-24T17:06:33.185Z"
+    },
+    {
       "task": "applet-source-out-of-context",
       "session": "LAPTOP-HIEROJK7-016dce",
       "machine": "LAPTOP-HIEROJK7",
