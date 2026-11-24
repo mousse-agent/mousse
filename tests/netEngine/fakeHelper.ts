@@ -122,8 +122,13 @@ export class FakeNetwork {
   readonly routes = new Map<string, string[]>()
   /** For each host identity, the grant each caller identity holds there (the helper's numbers; tests may name one). */
   private readonly grants = new Map<string, Map<string, number | string>>()
-  /** The receipt `grant.add` saved with a grant, by grant number (kept while the grant lives, as the helper does). */
+  /**
+   * The receipt saved with a grant, by grant number: `grant.add`'s, or the invitation an enrollment used (kept while
+   * the grant lives, as the helper does).
+   */
   readonly receipts = new Map<string, string>()
+  /** By helper identity: an op fails (`busy`, a helper still starting) this many more times before it answers. */
+  readonly failing = new Map<string, Record<string, number>>()
   /** For each identity, the identities it may dial (its peers). */
   private readonly peers = new Map<string, Set<string>>()
   /** Open invitations by ticket, with their host. */
@@ -151,6 +156,15 @@ export class FakeNetwork {
    * (1b: routes with approvals, `routes.config`, `routes.test`, `conn.up.route`).
    */
   minor = 0
+  /**
+   * What its helpers list in a 1.2 `hello` (`minor` 2): only then do they answer `routes.available`, `join.check`,
+   * `join.probe`, `grant.revoke_local` and `invite.create {way}`, each under its feature.
+   */
+  features: string[] = []
+  /** Each identity's `routes.available` answer; unset: LAN ready with its routes, the other ways off. */
+  readonly ways = new Map<string, Array<Record<string, unknown>>>()
+  /** How long a `join.probe` takes before it answers (a cancel answers it at once). */
+  probeDelayMs = 0
   /**
    * Whether connections carry calls both ways (wire minor 3): `conn.up {both}`; the dialled side may open streams
    * on the dialler's connection, which its helper passes on as `stream.incoming` with the dialler's own live grant
@@ -293,6 +307,23 @@ export class FakeNetwork {
   }
 
   /** `from` forgets `to` as a peer; answers whether it knew it. */
+  /**
+   * `grant.revoke_local`: `host` stops letting the caller of `grant` in, and the connections that caller dialled
+   * close; its own peer record of that caller stays, and so do the connections it dialled.
+   */
+  revokeOnly(host: string, grant: unknown): string | undefined {
+    const held = this.grants.get(host)
+    for (const [caller, given] of held ?? [])
+      if (String(given) === String(grant)) {
+        held!.delete(caller)
+        this.receipts.delete(String(given))
+        for (const conn of [...this.conns])
+          if (conn.a.identity === caller && conn.b.identity === host) this.down(conn, 'grant_revoked')
+        return caller
+      }
+    return undefined
+  }
+
   forget(from: string, to: string): boolean {
     return !!this.peers.get(from)?.delete(to)
   }
@@ -568,6 +599,12 @@ export class FakeHelper {
   private readonly conns = new Map<number, Conn>()
   private nextHandle = 1
   private helloed = false
+  /** `join.probe`s not answered yet, by request id: each answers `cancelled` when cancelled. */
+  private readonly probes = new Map<string, () => void>()
+  /** It speaks 1.2 and lists `feature` in its hello. */
+  private lists(feature: string): boolean {
+    return this.network.minor >= 2 && this.network.features.includes(feature)
+  }
   /** What the app said in `hello`. */
   hello?: { name?: string; profile?: string }
   /** Why networking is paused, while it is. */
@@ -1009,7 +1046,9 @@ export class FakeHelper {
     reply: (fields: Record<string, unknown>) => void,
     candidates?: string[]
   ): void {
-    const { grant } = this.network.grant(host.identity, this.identity)
+    const { grant, already } = this.network.grant(host.identity, this.identity)
+    // The enrollment receipt names the invitation, as the helper's `grants.list` says.
+    if (!already) this.network.receipts.set(String(grant), invite.invitation)
     invite.ended = 'used'
     this.network.links.delete(invite.invitation)
     host.event({
@@ -1068,6 +1107,11 @@ export class FakeHelper {
       }
       if (!this.helloed && message.op !== 'hello')
         return reply({ error: 'no_hello', reason: 'hello first' })
+      const failing = this.network.failing.get(this.identity)
+      if ((failing?.[op] ?? 0) > 0) {
+        failing![op]!--
+        return reply({ error: 'busy', reason: 'starting' })
+      }
       switch (message.op) {
         case 'hello': {
           const proto = message.proto
@@ -1098,8 +1142,78 @@ export class FakeHelper {
                   routes_config: reach,
                   ...(reach.tunnels.length ? { ws_port: (port ?? 47000) + 1 } : {})
                 }
-              : {})
+              : {}),
+            ...(minor >= 2 ? { features: [...this.network.features] } : {})
           })
+        }
+        case 'routes.available': {
+          if (!this.lists('route-readiness')) return reply({ error: 'unknown_op', reason: 'routes.available' })
+          const routes = this.network.routes.get(this.identity) ?? []
+          return reply({
+            ways: this.network.ways.get(this.identity) ?? [
+              { way: 'lan', state: 'ready', routes },
+              { way: 'tailnet', state: 'off', reason: 'disabled', routes: [] },
+              { way: 'public', state: 'off', reason: 'not_configured', routes: [] },
+              { way: 'tunnel', state: 'off', reason: 'not_configured', routes: [] },
+              { way: 'relay', state: 'unavailable', reason: 'relay_not_registered', routes: [] }
+            ]
+          })
+        }
+        case 'join.check': {
+          if (!this.lists('route-readiness')) return reply({ error: 'unknown_op', reason: 'join.check' })
+          const open = this.network.invitations.get(String(message.ticket))
+          if (!open) return reply({ error: 'bad_ticket', reason: 'no such invitation' })
+          return reply({
+            kind: 1,
+            invitation: open.invitation,
+            hints: open.routes.map((route) => ({
+              route,
+              way: 'lan',
+              eligibility: this.network.automatic(route) ? 'automatic' : 'approval_required',
+              local: 'unknown'
+            }))
+          })
+        }
+        case 'join.probe': {
+          if (!this.lists('join-probe')) return reply({ error: 'unknown_op', reason: 'join.probe' })
+          const open = this.network.invitations.get(String(message.ticket))
+          if (!open) return reply({ error: 'bad_ticket', reason: 'no such invitation' })
+          const answer = (): void => {
+            if (!this.probes.delete(String(re))) return
+            const automatic = open.routes.filter((route) => this.network.automatic(route))
+            try {
+              if (!automatic.length) throw new Error('nothing to dial unapproved')
+              this.network.route(this.identity, open.host, automatic)
+              const listens = this.network.listensOn(open.host)
+              const route = automatic.find((candidate) => listens.includes(candidate)) ?? automatic[0]
+              reply({ reachable: true, route, ms: 1 })
+            } catch {
+              reply(
+                automatic.length
+                  ? { reachable: false, reason: 'unreachable' }
+                  : { reachable: null, reason: 'approval_required' }
+              )
+            }
+          }
+          this.probes.set(String(re), () => reply({ reachable: null, reason: 'cancelled' }))
+          if (this.network.probeDelayMs) setTimeout(answer, this.network.probeDelayMs)
+          else answer()
+          return
+        }
+        case 'join.probe.cancel': {
+          const running = this.probes.get(String(message.probe))
+          this.probes.delete(String(message.probe))
+          running?.()
+          return reply({ cancelled: !!running })
+        }
+        case 'grant.revoke_local': {
+          if (!this.lists('grant-revoke-local'))
+            return reply({ error: 'unknown_op', reason: 'grant.revoke_local' })
+          // As the helper: only the grant goes; its peer record, approvals and completion stay.
+          const caller = this.network.revokeOnly(this.identity, message.grant)
+          return caller === undefined
+            ? reply({ error: 'not_found', reason: 'no such grant' })
+            : reply({ removed: true })
         }
         case 'config.set':
           // As the helper: the name joins and approvals send from now on.
@@ -1214,6 +1328,8 @@ export class FakeHelper {
           return reply({ approvals: entries })
         }
         case 'invite.create': {
+          if (message.way !== undefined && !this.lists('invite-way'))
+            return reply({ error: 'bad_request', reason: 'unknown field way' })
           if (message.kind === 'link') return this.linkInvite(reply)
           const invitation = randomBytes(16).toString('hex')
           const routes = this.network.routes.get(this.identity) ?? []
@@ -1223,7 +1339,8 @@ export class FakeHelper {
             invitation,
             uri,
             routes: [],
-            expires_at: Math.floor(Date.now() / 1000) + 600
+            expires_at: Math.floor(Date.now() / 1000) + 600,
+            ...(typeof message.way === 'string' ? { ways: [message.way] } : {})
           })
         }
         case 'invite.cancel':
@@ -1321,7 +1438,8 @@ export class FakeHelper {
           }
           for (const [uri, open] of this.network.invitations)
             if (open.invitation === waiting.invitation) this.network.invitations.delete(uri)
-          const { grant } = this.network.grant(this.identity, waiting.joiner.identity)
+          const { grant, already } = this.network.grant(this.identity, waiting.joiner.identity)
+          if (!already) this.network.receipts.set(String(grant), waiting.invitation)
           reply()
           this.event({
             ev: 'enrolled',

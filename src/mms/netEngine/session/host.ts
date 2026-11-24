@@ -11,7 +11,13 @@ import type { AppendOutcome, BlobStore, EngineCaller, StreamStore } from '../../
 import type { DurableRpcDispatcher } from '../../net/sync/rpcDispatcher'
 import { engineControl, engineLimits } from '../limits'
 import type { EngineMessage } from './frame'
-import { Channel, toWireError, type EngineConnection, type EngineStream } from './transport'
+import {
+  Channel,
+  SESSION_FEATURES,
+  toWireError,
+  type EngineConnection,
+  type EngineStream
+} from './transport'
 
 /** The bytes of records one message may carry: the rest of it is the header's. */
 const recordsBudget = (): number => engineLimits().maxMessageBytes - engineLimits().headerReserveBytes
@@ -43,8 +49,8 @@ export interface EngineHostPort {
   pairback?(caller: EngineCaller, request: { routes: string[]; receipt?: string }): Promise<void>
   /** A `mousse.tunnel` stream from a caller this connection serves: one editor tunnel (Phase 1b §9.2). */
   tunnel?(connection: EngineConnection, stream: EngineStream): void
-  /** The caller said its name in `hello` (`<computer> (<profile>)`). */
-  calledBy?(caller: EngineCaller, name: string): void
+  /** The caller said its name in `hello` (`<computer> (<profile>)`, or empty) and its app's session features. */
+  calledBy?(caller: EngineCaller, name: string, features: string[]): void
 }
 
 /**
@@ -158,8 +164,16 @@ export class EngineHost {
     switch (label) {
       case 'mousse.hello':
         if (h.t === 'hello') {
-          if (typeof h.name === 'string') this.port.calledBy?.(caller, h.name)
-          channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+          const features = Array.isArray(h.features)
+            ? h.features.filter((feature): feature is string => typeof feature === 'string')
+            : []
+          this.port.calledBy?.(caller, typeof h.name === 'string' ? h.name : '', features)
+          channel.send({
+            t: 'hello',
+            proto: 1,
+            name: this.port.name(),
+            features: [...SESSION_FEATURES]
+          })
         }
         else if (h.t === 'pairback') {
           if (!this.port.pairback) throw new NetError('bad_request')

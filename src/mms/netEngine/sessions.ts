@@ -28,6 +28,8 @@ export class EngineSessions {
   private readonly ready = new Map<NodeId, EngineClient>()
   private readonly clients = new Map<NodeId, Set<EngineClient>>()
   private readonly hosts = new Set<EngineHost>()
+  /** What each pairing's app said it understands, in the last hello a client of it heard. */
+  private readonly said = new Map<NodeId, string[]>()
   /** Each client's generation: the order its connection came up in, so the newest wins the slot. */
   private readonly generations = new WeakMap<EngineClient, number>()
   private generation = 0
@@ -72,8 +74,9 @@ export class EngineSessions {
         this.options.hooks.onClientClosed(node)
       }
     })
-    await client.hello(this.options.name())
+    const said = await client.hello(this.options.name())
     if (client.state() !== 'open') throw new NetError('peer_offline')
+    this.said.set(node, said.features)
     this.handoffReady.add(client)
     const current = this.ready.get(node)
     if (current && current !== client && current.state() === 'open') {
@@ -131,6 +134,14 @@ export class EngineSessions {
   }
 
   /**
+   * Whether the other computer's app said `feature` in the last `hello` this computer's client heard; undefined
+   * before any hello answered in this run.
+   */
+  says(node: NodeId, feature: string): boolean | undefined {
+    return this.said.get(node)?.includes(feature)
+  }
+
+  /**
    * The route a pairing's connection came up on (`conn.up.route`): this computer's open client first, else the
    * other computer's open connection here. Undefined from a 1.0 helper or with nothing open.
    */
@@ -185,6 +196,20 @@ export class EngineSessions {
         host.endSubscriptions()
         host.connection.close(reason)
       }
+    for (const client of [...(this.clients.get(node) ?? [])]) client.close(reason)
+  }
+
+  /** Closes only what this computer serves to a pairing (one direction removed): its own clients stay. */
+  closeHosts(node: NodeId, reason: string): void {
+    for (const host of [...this.hosts])
+      if (host.connection.peer === node) {
+        host.endSubscriptions()
+        host.connection.close(reason)
+      }
+  }
+
+  /** Closes only this computer's clients of a pairing (it no longer uses that computer). */
+  closeClients(node: NodeId, reason: string): void {
     for (const client of [...(this.clients.get(node) ?? [])]) client.close(reason)
   }
 

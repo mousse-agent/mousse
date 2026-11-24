@@ -11,6 +11,7 @@ import {
   type EngineStream
 } from '../session/transport'
 import type { AppChannel, HandleSink, StreamClass } from './appChannel'
+import { ENGINE_FEATURES, type EngineFeature } from '../../../shared/netEngine/local'
 
 /** The class a stream travels in (§3.2): bulk for blobs, staged writes and the large reads, else interactive. */
 export function classOf(label: EngineLabel, method?: string): StreamClass {
@@ -271,7 +272,10 @@ export class HelperConnection implements EngineConnection {
 
 /** The pairing a helper identity belongs to, and the grant it holds on this computer. */
 export interface HelperPeers {
-  byIdentity(identity: string): { node: NodeId; grant: string; endpoint: string } | undefined
+  /** `uses`: this computer uses that one (false for a pairing that only lets it in here); unset reads as true. */
+  byIdentity(
+    identity: string
+  ): { node: NodeId; grant: string; endpoint: string; uses?: boolean } | undefined
 }
 
 /**
@@ -322,12 +326,13 @@ export class EngineHelper {
 
   /**
    * The helper's `hello` with this computer's name and profile; answers what it said of itself. The app offers
-   * protocol 1.1 (Phase 1b §7); a 1.0 helper answers `[1, 0]` and serves 1a's messages only.
+   * protocol 1.2 (pairing flow §1): a 1.2 helper lists what it implements in `features`; a 1.1 helper answers
+   * `[1, 1]` with no list, and a 1.0 helper `[1, 0]`, serving 1a's messages only.
    */
   async hello(): Promise<Record<string, unknown>> {
     const profile = this.options.profile?.()
     const answer = await this.channel.request('hello', {
-      proto: [1, 1],
+      proto: [1, 2],
       name: this.options.name(),
       ...(profile ? { profile } : {})
     })
@@ -373,6 +378,7 @@ export class EngineHelper {
    * connection's number, or undefined without one.
    */
   callBack(identity: string): number | undefined {
+    if (this.options.peers.byIdentity(identity)?.uses === false) return undefined
     for (const [conn, event] of this.ups) {
       if (event.identity !== identity || event.dir !== 'in' || event.both !== true) continue
       const inbound = this.connections.get(conn)
@@ -413,6 +419,49 @@ export class EngineHelper {
   speaks(minor: number): boolean {
     const proto = this.info.proto
     return Array.isArray(proto) && proto[0] === 1 && typeof proto[1] === 'number' && proto[1] >= minor
+  }
+
+  /**
+   * Whether the helper implements `feature` (its 1.2 `hello` lists it). A new field or operation is sent only then:
+   * an older helper ignores a field it does not know and would answer as if it had not been sent.
+   */
+  has(feature: EngineFeature): boolean {
+    const features = this.info.features
+    return this.speaks(2) && Array.isArray(features) && features.includes(feature)
+  }
+
+  /** What the helper implements beyond 1.1, as its `hello` listed it. */
+  features(): EngineFeature[] {
+    const features = this.info.features
+    if (!this.speaks(2) || !Array.isArray(features)) return []
+    return features.filter((item): item is EngineFeature =>
+      (ENGINE_FEATURES as readonly unknown[]).includes(item)
+    )
+  }
+
+  /**
+   * Sends one request and says its id at once (`join.probe.cancel` names a probe by the id of its request); the
+   * reply comes as `request`'s does.
+   */
+  requestWithId(
+    op: string,
+    fields: Record<string, unknown>,
+    deadlineMs: number | undefined,
+    onId: (id: number) => void
+  ): Promise<Record<string, unknown>> {
+    return this.channel.request(op, fields, deadlineMs, undefined, onId)
+  }
+
+  /**
+   * This computer stopped using `identity` while it may still use this one: the calls this computer could make back
+   * on that computer's own connections end, and none is attached again (`peers.byIdentity(...).uses` is false).
+   */
+  dropCallBack(identity: string): void {
+    for (const [conn, connection] of [...this.reverse]) {
+      if (connection.direction !== 'outbound' || this.ups.get(conn)?.identity !== identity) continue
+      this.reverse.delete(conn)
+      connection.close('cancelled')
+    }
   }
 
   /** The route of the connection the helper holds up as `conn`, when its `conn.up` named one. */
@@ -567,8 +616,12 @@ export class EngineHelper {
         return
       }
       connection.incoming(handle, label as EngineLabel, cls)
-      // The dialler opened a stream: this computer may call it back on the same connection.
-      if (up?.both === true && !this.reverse.get(event.conn as number)?.isOpen())
+      // The dialler opened a stream: this computer may call it back on the same connection, when it uses that one.
+      if (
+        up?.both === true &&
+        !this.reverse.get(event.conn as number)?.isOpen() &&
+        this.options.peers.byIdentity(String(up.identity))?.uses !== false
+      )
         this.attachReverse(event.conn as number, up, 'outbound')
     }
   }

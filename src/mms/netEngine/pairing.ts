@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
 import { NetError } from '../../shared/net/errors'
 import type { NodeId } from '../../shared/net'
+import type { AccessPresetFields } from '../../shared/net/accessPresets'
 import {
+  isNetEngineWay,
   isSshParked,
+  type NetEngineWay,
   type NetEngineApproval,
   type NetEngineLinkInvite,
   type NetEngineLinkJoin,
@@ -18,7 +21,8 @@ import {
   isServingState,
   type EngineLink,
   type EnginePeerRow,
-  type EnginePeerStore
+  type EnginePeerStore,
+  type EngineWays
 } from './store'
 import { LINK_KIND, pairingLink, readTicket, sendLink, type TicketFacts } from './ticket'
 
@@ -43,6 +47,8 @@ export type PairingStep =
   | 'removing'
   /** Either: `grant.remove` answered, `peer.forget` not sent. */
   | 'grant-removed'
+  /** Either: one direction's grant is journaled as revoking and no longer served, `grant.revoke_local` not sent. */
+  | 'revoking'
 
 export interface PairingPort {
   /** Under the routes checks' `route-leak` control: the address pairback offers first. */
@@ -52,6 +58,12 @@ export interface PairingPort {
   helper(): EngineHelper | undefined
   /** Ends a pairing's Bridge work (§3.7); idempotent. */
   teardown(node: NodeId): void
+  /** Ends only what this computer serves to `node` (its sessions here, their work); its own clients stay. */
+  endServing?(node: NodeId): void
+  /** Saves the access the owner picked in Allow for `node`, before the helper saves its grant. */
+  applyAccess?(node: NodeId, access: AccessPresetFields): void
+  /** Gives `to` the access saved under the reserved id `from`, when one was saved; nothing otherwise. */
+  copyAccess?(from: NodeId, to: NodeId): void
   changed(): void
   /** A test stops this computer at `step` when this answers true. */
   crashAt?(step: PairingStep): boolean
@@ -71,6 +83,11 @@ export interface JoinOptions {
   arrival?: 'scan' | 'link'
   /** This computer's tailnet and public routes the owner ticked under "Also share". */
   share?: string[]
+  /**
+   * "Also let <name> use this computer": false pairs one way (no grant here, no pairback). Unset is true, the
+   * pairing both ways every caller made before one-way pairing.
+   */
+  back?: boolean
 }
 
 /** The helper's join errors after which a Send link cannot finish: its pending link goes (§3.6, §5.3). */
@@ -133,6 +150,8 @@ export class EnginePairing {
   private readonly parked = new Map<NodeId, NetEngineSshParked>()
   /** The step a pairing is running, so one runs at a time per pairing. */
   private readonly running = new Map<NodeId, Promise<void>>()
+  /** The session features each caller's app said in its last `hello` here, this run. */
+  private readonly callerFeatures = new Map<NodeId, string[]>()
   /** Removals under way, so one runs at a time per pairing and a second Remove joins it. */
   private readonly removals = new Map<NodeId, Promise<void>>()
   private readonly waiters = new Set<() => void>()
@@ -210,16 +229,29 @@ export class EnginePairing {
    */
   async invite(
     name?: string,
-    kind?: 'link'
+    kind?: 'link',
+    way?: NetEngineWay,
+    access?: AccessPresetFields
   ): Promise<{
     invitation: string
     uri: string
     expiresAt?: number
     code?: string
     attemptsLeft?: number
+    ways?: NetEngineWay[]
   }> {
+    // A way is sent only to a helper that lists `invite-way`: the caller checked, and a code is never made without it.
+    if (way && !this.helper().has('invite-way'))
+      throw new NetError('bad_request', 'Update networking to pick a way.', {
+        details: { reason: 'not_supported' }
+      })
+    const wayFields = way ? { way } : {}
+    const ways = (answer: Record<string, unknown>): { ways?: NetEngineWay[] } => {
+      const listed = Array.isArray(answer.ways) ? answer.ways.filter(isNetEngineWay) : []
+      return listed.length ? { ways: listed } : way ? { ways: [way] } : {}
+    }
     if (kind === 'link') {
-      const answer = await this.helper().request('invite.create', { kind: 'link' })
+      const answer = await this.helper().request('invite.create', { kind: 'link', ...wayFields })
       const ticket = String(answer.uri)
       const shown: NetEngineLinkInvite = {
         invitation: String(answer.invitation),
@@ -227,16 +259,30 @@ export class EnginePairing {
         attemptsLeft: typeof answer.attempts_left === 'number' ? answer.attempts_left : 3,
         ...(typeof answer.expires_at === 'number' ? { expiresAt: answer.expires_at } : {})
       }
+      // A Send link has no Allow: the level picked with it is saved now, under the id its row will take, before
+      // anyone has the link, so the device is served under it from its first call.
+      if (access && this.port.applyAccess)
+        try {
+          this.port.applyAccess(this.port.peers.pendingAccess(shown.invitation), access)
+        } catch (error) {
+          await this.helper()
+            .request('invite.cancel', { invitation: shown.invitation })
+            .catch(() => undefined)
+          throw error
+        }
       this.linkInvites.set(shown.invitation, shown)
       this.port.changed()
-      return { ...shown, uri: sendLink(ticket.slice(ticket.lastIndexOf('#') + 1)) }
+      return { ...shown, uri: sendLink(ticket.slice(ticket.lastIndexOf('#') + 1)), ...ways(answer) }
     }
-    const answer = await this.helper().request('invite.create')
+    const answer = way
+      ? await this.helper().request('invite.create', wayFields)
+      : await this.helper().request('invite.create')
     const ticket = String(answer.uri)
     return {
       invitation: String(answer.invitation),
       uri: name ? pairingLink(ticket.slice(ticket.lastIndexOf('#') + 1), name) : ticket,
-      ...(typeof answer.expires_at === 'number' ? { expiresAt: answer.expires_at } : {})
+      ...(typeof answer.expires_at === 'number' ? { expiresAt: answer.expires_at } : {}),
+      ...ways(answer)
     }
   }
 
@@ -249,10 +295,28 @@ export class EnginePairing {
     this.port.changed()
   }
 
-  /** The host's window answers "Is <computer> next to you?". Yes saves the grant (the helper does). */
-  async approve(request: string, yes: boolean): Promise<void> {
+  /**
+   * The host's window answers "Let <name> use this computer?". Yes saves the grant (the helper does). The access the
+   * owner picked is saved first, under the id its row will take, so nothing is ever served to it under a wider one.
+   */
+  async approve(request: string, yes: boolean, access?: AccessPresetFields): Promise<void> {
     const approval = this.approvals.get(request)
     if (approval && yes) this.approvedNames.set(approval.invitation, approval.name)
+    if (approval && yes && access && this.port.applyAccess) {
+      const { peers } = this.port
+      const known = approval.identity ? peers.byEndpoint(approval.identity) : undefined
+      const node = known?.localId ?? peers.pendingAccess(approval.invitation)
+      try {
+        this.port.applyAccess(node, access)
+      } catch (error) {
+        this.approvals.delete(request)
+        await this.helper()
+          .request('approval.answer', { request, yes: false })
+          .catch(() => undefined)
+        this.port.changed()
+        throw error
+      }
+    }
     try {
       await this.helper().request('approval.answer', { request, yes })
     } finally {
@@ -279,7 +343,8 @@ export class EnginePairing {
     const { peers } = this.port
     // Connect approves the ticket's destinations (§1.3); the ticked routes of this computer go in pairback.
     const approved = approvedHints(facts.routes)
-    const share = options.share ?? []
+    const back = options.back !== false
+    const share = back ? (options.share ?? []) : []
     let row = peers.byEndpoint(facts.host)
     if (!row && !engineControl('no-consent-journal'))
       row = peers.add({
@@ -293,10 +358,11 @@ export class EnginePairing {
         ticket,
         ...(approved.length ? { approved } : {}),
         ...(share.length ? { share } : {}),
+        ...(back ? {} : { ways: 'out' as const, oneWay: true }),
         pairedAt: Date.now()
       })
     else if (row && isServingState(row.state))
-      row = peers.update(row.localId, { approved, share })
+      row = peers.update(row.localId, { approved, share, ...joinWays(row, back) })
     this.port.changed()
     this.at('consented')
     const joined = await helper
@@ -304,7 +370,7 @@ export class EnginePairing {
       .catch((error) => {
         throw isForgotten(error) ? removedWhileJoining() : error
       })
-    return this.joined(row, facts, joined, share)
+    return this.joined(row, facts, joined, share, back)
   }
 
   /** `join` answered: `joined` is written (the ticket goes), the join's connection attaches, the ceremony goes on. */
@@ -312,7 +378,8 @@ export class EnginePairing {
     row: EnginePeerRow | undefined,
     facts: { host: string; invitation: string },
     joined: Record<string, unknown>,
-    share: string[] = []
+    share: string[] = [],
+    back = true
   ): EnginePeerRow {
     this.at('join-replied')
     const identity = typeof joined.identity === 'string' ? joined.identity : facts.host
@@ -342,6 +409,7 @@ export class EnginePairing {
             receipt: facts.invitation,
             invitation: facts.invitation,
             ...(share.length ? { share } : {}),
+            ...(back ? {} : { ways: 'out' as const, oneWay: true }),
             pairedAt: Date.now()
           })
     this.helper().claim(identity)
@@ -390,6 +458,17 @@ export class EnginePairing {
         if (peers.get(node)?.state === 'consented') return
         continue
       }
+      if (row.state === 'joined' && row.oneWay) {
+        // One way: Connect let nothing back in, so no grant is made and no pairback is sent. A grant this computer
+        // gave the host before stays: then it is both ways, as it was.
+        this.at('joined')
+        if (!peers.advance(node, ['joined'], { state: 'connected', oneWay: null, ways: row.grant === '' ? 'out' : null }))
+          return
+        this.notAccepted.delete(node)
+        this.port.changed()
+        await this.dial(row).catch(() => undefined)
+        return
+      }
       if (row.state === 'joined') {
         this.at('joined')
         const grant = await this.grantBack(row)
@@ -410,7 +489,8 @@ export class EnginePairing {
           ...(row.receipt ? { receipt: row.receipt } : {})
         })
         this.alive()
-        peers.advance(node, ['granted'], { state: 'connected' })
+        // Both ways now, whatever single direction the row had before.
+        peers.advance(node, ['granted'], { state: 'connected', ways: null })
         this.notAccepted.delete(node)
         this.port.changed()
         return
@@ -486,9 +566,10 @@ export class EnginePairing {
       ticketHash: facts.hash,
       invitation: facts.invitation,
       approved: approvedHints(facts.routes),
-      share: [...new Set(options.share ?? [])],
+      share: options.back === false ? [] : [...new Set(options.share ?? [])],
       ...(facts.expiresAt !== undefined ? { expiresAt: facts.expiresAt } : {}),
-      pending: true
+      pending: true,
+      ...(options.back === false ? { oneWay: true } : {})
     }
     if (this.linkJoins.has(facts.invitation))
       throw new NetError('bad_request', 'This link is being joined already.', {
@@ -586,7 +667,10 @@ export class EnginePairing {
       ticket: null,
       approved: link.approved,
       share: link.share,
-      link: null
+      link: null,
+      // One way only while nothing lets that computer in here already (a row added over SSH, say).
+      ways: link.oneWay && now.grant === '' ? 'out' : now.ways === 'out' ? null : (now.ways ?? null),
+      oneWay: link.oneWay ? true : null
     })!
     this.unfinished.delete(node)
     void this.helper()
@@ -721,9 +805,12 @@ export class EnginePairing {
           row.state !== 'removed'
       )
     if (added && !peers.holdsGrant(grant)) {
+      // It uses this computer now. This computer added it over SSH (it keeps the route), so it uses that one too:
+      // both ways. Added the other way round, only this one; a pairback, if it sends one, adds the other direction.
       peers.update(added.localId, {
         grant,
-        state: 'awaiting_pairback',
+        state: 'connected',
+        ways: added.ssh?.routeId ? null : 'in',
         source: null,
         ...(invitation ? { receipt: invitation, invitation } : {})
       })
@@ -740,26 +827,48 @@ export class EnginePairing {
     }
   }
 
-  /** A row in `awaiting_pairback` for a grant no row has (idempotent); its connections attach now. */
+  /**
+   * A row for a grant no row has (idempotent); its connections attach now. The other computer uses this one from
+   * here on (`connected`, one way in); a pairback, if it sends one, adds the other direction.
+   */
   private owe(identity: string, grant: string, name: string, receipt?: string): void {
     const { peers } = this.port
     if (peers.holdsGrant(grant)) return
     const existing = peers.byEndpoint(identity)
     // This computer joined that one (its row runs its own ceremony), or holds an older pairing with it.
     if (existing) {
-      if (existing.state === 'awaiting_pairback' || existing.state === 'connected')
-        peers.update(existing.localId, { grant })
+      const letIn = existing.state === 'awaiting_pairback' || existing.state === 'connected'
+      // The level the owner picked for this invitation, before the grant serves it (again on a repeat).
+      const reserved = peers.reserved(receipt)
+      if (letIn && reserved) this.port.copyAccess?.(reserved, existing.localId)
+      peers.updateReleasing(
+        existing.localId,
+        letIn
+          ? {
+              grant,
+              // A computer this one only used now uses this one too.
+              ...(existing.ways === 'out' ? { ways: null } : {})
+            }
+          : {},
+        reserved ? receipt : undefined
+      )
       return
     }
-    peers.add({
-      endpoint: identity,
-      fingerprint: fingerprintOf(identity),
-      grant,
-      name,
-      state: 'awaiting_pairback',
-      ...(receipt ? { receipt, invitation: receipt } : {}),
-      pairedAt: Date.now()
-    })
+    // The row takes the id reserved with the owner's level in the same write: a stop before it leaves the
+    // reservation for the next start's reconciliation.
+    peers.add(
+      {
+        endpoint: identity,
+        fingerprint: fingerprintOf(identity),
+        grant,
+        name,
+        state: 'connected',
+        ways: 'in',
+        ...(receipt ? { receipt, invitation: receipt } : {}),
+        pairedAt: Date.now()
+      },
+      receipt
+    )
     this.helper().claim(identity)
     this.port.changed()
   }
@@ -807,7 +916,11 @@ export class EnginePairing {
     const { peers } = this.port
     const row = peers.serving(caller.node)
     if (!row) throw new NetError('forbidden')
-    if (row.state === 'connected' && this.port.sessions.online(row.localId)) return
+    // A row only let in has no client of its own: the pairback is the other computer letting this one in too.
+    if (row.state === 'connected' && row.ways !== 'in' && this.port.sessions.online(row.localId)) return
+    // An app without one-way pairing sends pairback whatever its owner chose: it is answered (nothing waits on it),
+    // and this computer uses it only once its own owner adds it from here.
+    if (row.ways === 'in' && this.callerSays(row.localId, 'one-way') !== true) return
     this.at('pairback')
     // LAN routes are dialled at once; the others wait on the row until the owner taps Use (§1.3).
     const split = splitPairback(request.routes)
@@ -836,6 +949,11 @@ export class EnginePairing {
       throw error
     }
     await this.offer(row, split.offered)
+    // Both ways from here: the helper holds its peer record now, so this computer may dial it.
+    if (row.ways === 'in') {
+      peers.advance(row.localId, ['connected'], { ways: null })
+      this.port.changed()
+    }
     await this.waitOnline(row.localId, engineLimits().pairbackDeadlineMs, () => this.dial(row))
     this.alive()
     peers.advance(row.localId, ['awaiting_pairback'], { state: 'connected' })
@@ -874,6 +992,17 @@ export class EnginePairing {
     this.port.changed()
   }
 
+  /** The session features the other computer's app said in its last `hello` here (as a caller). */
+  heard(node: NodeId, features: readonly string[]): void {
+    this.callerFeatures.set(node, [...features])
+    this.port.changed()
+  }
+
+  /** Whether the app that calls this computer as `node` said `feature`; undefined before its hello this run. */
+  callerSays(node: NodeId, feature: string): boolean | undefined {
+    return this.callerFeatures.get(node)?.includes(feature)
+  }
+
   // ---------------------------------------------------------------- connections and recovery
 
   /** A client of a pairing is ready: waiters wake, and a pairing that owes its pairback sends it now. */
@@ -901,7 +1030,21 @@ export class EnginePairing {
     const { peers } = this.port
     for (const row of peers.inState('removing'))
       await this.finishRemovalLocked(row).catch(() => undefined)
-    await this.reconcileGrants().catch(() => undefined)
+    // A direction the owner removed stays removed: its grant goes before any owed row could take it back.
+    for (const row of peers.all())
+      if (row.revoking) await this.finishRevoke(row).catch(() => undefined)
+    const reconciled = await this.reconcileGrants().then(
+      () => true,
+      () => false
+    )
+    // Invitations end with the helper run that made them: once every owed row is written, no reserved id is waiting
+    // for one. While a row may still be owed, its reserved id and level stay for the next try.
+    if (reconciled)
+      try {
+        peers.clearPendingAccess()
+      } catch {
+        // Cleared at the next start.
+      }
     for (const row of peers.all()) {
       if (this.crashed || this.stopped) return
       if (
@@ -916,6 +1059,7 @@ export class EnginePairing {
           row.state === 'granted' ||
           row.state === 'connected' ||
           row.state === 'ssh_granted') &&
+        row.ways !== 'in' &&
         !this.parked.has(row.localId)
       )
         void this.dial(row).catch(() => undefined)
@@ -945,7 +1089,8 @@ export class EnginePairing {
             request,
             invitation: String(event.invitation ?? ''),
             name: typeof event.name === 'string' ? event.name : '',
-            device: typeof event.device === 'string' ? event.device : ''
+            device: typeof event.device === 'string' ? event.device : '',
+            ...(typeof event.identity === 'string' ? { identity: event.identity } : {})
           })
           this.port.changed()
           return
@@ -1040,6 +1185,98 @@ export class EnginePairing {
     return run
   }
 
+  /**
+   * Remove on one of a pairing's two rows: only that direction ends. `in` (it uses this computer) revokes the grant
+   * here and keeps the peer record; `out` (this computer uses it) forgets the peer record and keeps the grant. A
+   * pairing with only that direction, or one added over SSH, is removed whole.
+   */
+  async removeDirection(node: NodeId, direction: EngineWays): Promise<void> {
+    const { peers } = this.port
+    const row = peers.get(node)
+    if (!row) throw new NetError('bad_request', 'Unknown device.')
+    if (row.state === 'removed' || row.state === 'removing') return this.remove(node)
+    const both = row.state === 'connected' && !row.ways && row.grant !== '' && !row.source
+    if (!both) return this.remove(node)
+    const under = this.removals.get(node) ?? this.running.get(node)
+    if (under) await under.catch(() => undefined)
+    const run = (direction === 'in' ? this.endIn(row) : this.endOut(row)).finally(() =>
+      this.removals.delete(node)
+    )
+    this.removals.set(node, run)
+    return run
+  }
+
+  /** It no longer uses this computer: serving stops first, then the helper drops the grant (`grant.revoke_local`). */
+  private async endIn(row: EnginePeerRow): Promise<void> {
+    const helper = this.helper()
+    if (!helper.has('grant-revoke-local'))
+      throw new NetError('bad_request', 'Update networking to remove one direction.', {
+        details: { reason: 'not_supported' }
+      })
+    const { peers } = this.port
+    const node = row.localId
+    const grant = row.grant
+    // From here nothing is served to it: no row holds the grant, and the row keeps it as revoking until the helper
+    // has dropped it, so a stop in between finishes the removal at the next start.
+    if (!peers.advance(node, ['connected'], { grant: '', ways: 'out', revoking: grant })) return
+    this.port.endServing?.(node)
+    this.port.changed()
+    this.at('revoking')
+    try {
+      await helper.request('grant.revoke_local', { grant: Number(grant) })
+    } catch (error) {
+      // Still let in: the row says so again.
+      if (helperCode(error) !== 'not_found') {
+        peers.advance(node, ['connected'], { grant, ways: null, revoking: null })
+        this.port.changed()
+        throw new NetError('peer_offline', "Couldn't remove; try again.", {
+          details: { reason: helperCode(error) ?? 'helper' }
+        })
+      }
+    }
+    peers.update(node, { revoking: null })
+    this.port.changed()
+  }
+
+  /** A removed direction whose grant the helper may still hold (the app stopped in between): it goes now. */
+  private async finishRevoke(row: EnginePeerRow): Promise<void> {
+    const grant = row.revoking!
+    try {
+      await this.helper().request('grant.revoke_local', { grant: Number(grant) })
+    } catch (error) {
+      if (helperCode(error) !== 'not_found') throw error
+    }
+    this.alive()
+    this.port.peers.update(row.localId, { revoking: null })
+    this.port.changed()
+  }
+
+  /** This computer no longer uses it: the helper forgets its peer record; it may still use this computer. */
+  private async endOut(row: EnginePeerRow): Promise<void> {
+    const helper = this.helper()
+    const { peers } = this.port
+    const node = row.localId
+    await helper.request('peer.forget', { identity: row.endpoint }).catch((error) => {
+      throw new NetError('peer_offline', "Couldn't remove; try again.", {
+        details: { reason: helperCode(error) ?? 'helper' }
+      })
+    })
+    peers.advance(node, ['connected'], {
+      ways: 'in',
+      offered: null,
+      approved: null,
+      share: null,
+      link: null
+    })
+    peers.setAddresses(node, [])
+    helper.dropCallBack(row.endpoint)
+    this.port.sessions.closeClients(node, 'peer_forgotten')
+    this.notAccepted.delete(node)
+    this.outsideWindow.delete(node)
+    this.parked.delete(node)
+    this.port.changed()
+  }
+
   private async removing(node: NodeId): Promise<void> {
     const { peers } = this.port
     peers.advance(node, SERVING, { state: 'removing' })
@@ -1082,7 +1319,8 @@ export class EnginePairing {
       // The row's grant, and any other this computer made for that endpoint (a `grant.add` whose answer the
       // removal overtook): none may outlive the removal and bring the pairing back.
       const grants = new Set<number>()
-      if (row.grant !== '' && Number.isSafeInteger(Number(row.grant))) grants.add(Number(row.grant))
+      for (const held of [row.grant, row.revoking ?? ''])
+        if (held !== '' && Number.isSafeInteger(Number(held))) grants.add(Number(held))
       // The control removes only a grant the row holds: one an SSH add saved before its id was stored stays.
       const unsavedStays =
         row.source === 'ssh' && row.grant === '' && engineControl('removal-skips-unsaved-grant')
@@ -1187,6 +1425,18 @@ function linkError(reason: string): NetError {
 const isForgotten = (error: unknown): boolean => helperCode(error) === 'forgotten'
 
 const removedWhileJoining = (): NetError => new NetError('cancelled', 'Removed while joining.')
+
+/**
+ * A row this computer had with the host before Connect: one it only used turns both ways when "Also let" is ticked;
+ * one that lets the host in already stays so (Connect never takes access away).
+ */
+function joinWays(
+  row: EnginePeerRow,
+  back: boolean
+): { ways?: EnginePeerRow['ways'] | null; oneWay: true | null } {
+  if (back) return { oneWay: null, ...(row.ways === 'out' ? { ways: null } : {}) }
+  return { oneWay: true, ...(!row.ways && row.grant === '' ? { ways: 'out' as const } : {}) }
+}
 
 /** The other computer refuses this one (it removed it, or never let it in). */
 function isRefusal(error: unknown): boolean {

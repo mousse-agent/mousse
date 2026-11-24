@@ -13,12 +13,19 @@ import { NetError } from '../../shared/net/errors'
 import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../shared/netEngine/allowlist'
-import type {
-  NetEngineDevice,
-  NetEngineJoinPreview,
-  NetEngineReach,
-  NetEngineStatus
+import {
+  isNetEngineWay,
+  type EngineFeature,
+  type NetEngineDevice,
+  type NetEngineJoinCheck,
+  type NetEngineJoinHint,
+  type NetEngineJoinPreview,
+  type NetEngineJoinProbe,
+  type NetEngineReach,
+  type NetEngineStatus,
+  type NetEngineWayReadiness
 } from '../../shared/netEngine/local'
+import type { AccessPresetFields } from '../../shared/net/accessPresets'
 import {
   ownerRoute,
   parseRelayDestination,
@@ -326,6 +333,7 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(this.settings()?.enabled && this.options.loginStart?.asking() ? { loginStart: 'ask' as const } : {}),
       scanIntervalMs: engineLimits().scanIntervalMs,
       ...(this.helper?.speaks(1) ? { sendLink: true } : {}),
+      ...(this.helper?.features().length ? { features: this.helper.features() } : {}),
       ...(this.started?.pairing.links().length ? { links: this.started.pairing.links() } : {}),
       ...(this.started?.pairing.joins().length ? { joins: this.started.pairing.joins() } : {}),
       ...(this.reach() ? { reach: this.reach() } : {}),
@@ -684,12 +692,13 @@ export class NetEngineService implements EngineDirectoryPort {
   /**
    * Connect on a ticket (§1.3): its destinations are approved, and `share` (some of `shareable()`, ticked under
    * "Also share") goes in pairback beside this computer's LAN routes. `arrival: 'link'`: it came as a Send link
-   * (§5.3), whatever its kind says.
+   * (§5.3), whatever its kind says. `back: false` pairs one way: this computer uses the other and lets nothing in.
    */
   async join(
     ticket: string,
     share: readonly string[] = [],
-    arrival?: 'link'
+    arrival?: 'link',
+    back = true
   ): Promise<EnginePeerRow> {
     const started = this.require()
     const allowed = this.shareable()
@@ -700,7 +709,141 @@ export class NetEngineService implements EngineDirectoryPort {
       })
     await this.tellName()
     routeSetupProbes()
-    return started.pairing.join(ticket, { share: [...share], ...(arrival ? { arrival } : {}) })
+    return started.pairing.join(ticket, {
+      share: [...share],
+      ...(arrival ? { arrival } : {}),
+      ...(back ? {} : { back: false })
+    })
+  }
+
+  /** "How will it connect?": each way and whether a code made for it now would work (`routes.available`). */
+  async waysAvailable(): Promise<NetEngineWayReadiness[]> {
+    const helper = this.featured('route-readiness')
+    const answer = await helper.request('routes.available')
+    return (Array.isArray(answer.ways) ? answer.ways : []).flatMap((entry: unknown) => {
+      if (!entry || typeof entry !== 'object') return []
+      const way = (entry as Record<string, unknown>).way
+      const state = (entry as Record<string, unknown>).state
+      const reason = (entry as Record<string, unknown>).reason
+      const routes = (entry as Record<string, unknown>).routes
+      if (!isNetEngineWay(way) || (state !== 'ready' && state !== 'off' && state !== 'unavailable')) return []
+      return [
+        {
+          way,
+          state,
+          ...(typeof reason === 'string' && reason ? { reason } : {}),
+          routes: strings(Array.isArray(routes) ? routes : [])
+        }
+      ]
+    })
+  }
+
+  /**
+   * A pasted or scanned link, read without a byte on the network (`join.check`): which computer, and which of its
+   * routes this computer could use.
+   */
+  async joinCheck(ticket: string, arrival: 'scan' | 'link'): Promise<NetEngineJoinCheck> {
+    const facts = readTicket(ticket)
+    const helper = this.featured('route-readiness')
+    const answer = await helper.request('join.check', { ticket: facts.fragment, arrival })
+    const hints = (Array.isArray(answer.hints) ? answer.hints : []).flatMap(
+      (entry: unknown): NetEngineJoinHint[] => {
+        if (!entry || typeof entry !== 'object') return []
+        const hint = entry as Record<string, unknown>
+        if (typeof hint.route !== 'string') return []
+        const eligibility =
+          hint.eligibility === 'automatic' || hint.eligibility === 'approval_required'
+            ? hint.eligibility
+            : 'skip'
+        const local =
+          hint.local === 'interface_present' || hint.local === 'no_matching_interface'
+            ? hint.local
+            : 'unknown'
+        return [
+          {
+            route: hint.route,
+            way: isNetEngineWay(hint.way) ? hint.way : null,
+            eligibility,
+            ...(typeof hint.reason === 'string' && hint.reason ? { reason: hint.reason } : {}),
+            local
+          }
+        ]
+      }
+    )
+    return {
+      kind: typeof answer.kind === 'number' ? answer.kind : (facts.kind ?? 1),
+      ...(facts.name ? { name: facts.name } : {}),
+      hints
+    }
+  }
+
+  /** The probes running, by the window call that asked: Check again or a closed dialog cancels its own. */
+  private readonly probes = new Map<string, number>()
+
+  /**
+   * Whether that computer answers from here (`join.probe`): only private addresses and the hints the person approved
+   * are dialled, at most the helper's bound. `reachable: true` is the only answer that claims it can be reached.
+   */
+  async joinProbe(
+    ticket: string,
+    arrival: 'scan' | 'link',
+    signal?: AbortSignal
+  ): Promise<NetEngineJoinProbe> {
+    const facts = readTicket(ticket)
+    const helper = this.featured('join-probe')
+    const key = facts.hash
+    const earlier = this.probes.get(key)
+    if (earlier) void helper.request('join.probe.cancel', { probe: earlier }).catch(() => undefined)
+    let id: number | undefined
+    const cancel = (): void => {
+      if (id !== undefined) void helper.request('join.probe.cancel', { probe: id }).catch(() => undefined)
+    }
+    signal?.addEventListener('abort', cancel, { once: true })
+    try {
+      const answer = await helper.requestWithId(
+        'join.probe',
+        // Nothing approved yet: Connect approves the ticket's destinations, so a check dials private ones only.
+        { ticket: facts.fragment, arrival },
+        engineLimits().joinProbeDeadlineMs,
+        (sent) => {
+          id = sent
+          this.probes.set(key, sent)
+        }
+      )
+      if (answer.reachable === true && typeof answer.route === 'string')
+        return {
+          reachable: true,
+          route: answer.route,
+          ...(typeof answer.ms === 'number' ? { ms: answer.ms } : {})
+        }
+      const reason = typeof answer.reason === 'string' ? answer.reason : 'unknown'
+      return answer.reachable === false ? { reachable: false, reason } : { reachable: null, reason }
+    } finally {
+      signal?.removeEventListener('abort', cancel)
+      if (id !== undefined && this.probes.get(key) === id) this.probes.delete(key)
+    }
+  }
+
+  /** Check again, or a dialog closed: the probe running for that link stops. Answers whether one was running. */
+  async cancelProbe(ticket: string): Promise<boolean> {
+    const key = readTicket(ticket).hash
+    const id = this.probes.get(key)
+    if (id === undefined || !this.helper) return false
+    this.probes.delete(key)
+    const answer = await this.helper.request('join.probe.cancel', { probe: id }).catch(() => ({}))
+    return (answer as Record<string, unknown>).cancelled === true
+  }
+
+  /** The helper, when it lists `feature`; otherwise the window falls back to what it showed before. */
+  private featured(feature: EngineFeature): EngineHelper {
+    this.require()
+    const helper = this.helper
+    if (!helper) throw new NetError('peer_offline', 'Networking is starting.')
+    if (!helper.has(feature))
+      throw new NetError('bad_request', 'Update networking for this.', {
+        details: { reason: 'not_supported' }
+      })
+    return helper
   }
 
   // ---------------------------------------------------------------- Add over SSH (Phase 1b §3.4)
@@ -1188,6 +1331,8 @@ export class NetEngineService implements EngineDirectoryPort {
     }
     if (row.state !== 'connected' && row.state !== 'awaiting_pairback')
       await started.pairing.advance(node)
+    // A computer only let in is dialled by nothing here: it connects when it uses this one.
+    if (row.ways === 'in') return
     if (!started.sessions.online(node) && this.helper && row.state !== 'consented')
       await this.helper.dial(row.endpoint).catch(() => undefined)
   }
@@ -1215,13 +1360,15 @@ export class NetEngineService implements EngineDirectoryPort {
         const serving = started.sessions.serving(node)
         // A row added over SSH runs one way only (1b §3.6): A uses B, so A's direction is its client and B's is
         // A's client here.
-        const direction = row.source === 'ssh' ? (row.ssh?.routeId ? 'out' : 'in') : undefined
+        // A pairing made one way has the direction its row keeps.
+        const ssh = row.source === 'ssh'
+        const direction = ssh ? (row.ssh?.routeId ? 'out' : 'in') : row.ways
         const up = direction === 'out' ? online : direction === 'in' ? serving : online && serving
         // Connected only with both directions up: this computer's client to it, and its client here.
         const state =
           row.state === 'removing'
             ? 'removing'
-            : direction && row.state !== 'connected' && row.state !== 'removed'
+            : ssh && row.state !== 'connected' && row.state !== 'removed'
               ? 'connecting'
               : row.state !== 'connected'
                 ? 'finishing'
@@ -1253,6 +1400,13 @@ export class NetEngineService implements EngineDirectoryPort {
           shortId: row.endpoint.slice(0, 8),
           ...(started.pairing.accepted(node) && !row.ssh?.removed ? {} : { notAccepted: true }),
           ...(direction ? { direction } : {}),
+          // Its app does not know one-way pairing. Used one way: its own row waits to be let in here. Only let in:
+          // its pairback adds nothing, so this computer uses it once it is added from here.
+          ...(!ssh &&
+          ((row.ways === 'out' && started.sessions.says(node, 'one-way') === false) ||
+            (row.ways === 'in' && started.pairing.callerSays(node, 'one-way') === false))
+            ? { olderApp: true }
+            : {}),
           state,
           online,
           ...(stuck ? { stuck: true } : {}),
@@ -1399,7 +1553,10 @@ export class NetEngineService implements EngineDirectoryPort {
         name: () => this.selfName(),
         pairback: (caller, request) => pairing.pairback(caller, request),
         tunnel: (connection, stream) => editor.accept(connection, stream),
-        calledBy: (caller, name) => pairing.named(caller.node, name)
+        calledBy: (caller, name, features) => {
+          pairing.heard(caller.node, features)
+          pairing.named(caller.node, name)
+        }
       },
       client: {
         get store() {
@@ -1477,6 +1634,22 @@ export class NetEngineService implements EngineDirectoryPort {
       sessions,
       helper: () => this.helper,
       teardown: (node) => this.teardown(node),
+      endServing: (node) => this.endInbound(node),
+      // The access the owner picked in Allow, saved under the id its row takes before its grant exists.
+      applyAccess: (node, access: AccessPresetFields) => {
+        rt.policy.set(node, access)
+      },
+      copyAccess: (from, to) => {
+        const saved = rt.policy.list().find((policy) => policy.node === from)
+        if (saved)
+          rt.policy.set(to, {
+            work: saved.work,
+            terminal: saved.terminal,
+            editor: saved.editor,
+            maxPermissionMode: saved.maxPermissionMode,
+            agentReach: saved.agentReach
+          })
+      },
       changed: () => this.changed(),
       crashAt: (step) => !!this.pairingCrash?.(step),
       sshRequest: (receipt) => this.sshHost?.requests.get(receipt)?.state,
@@ -1753,7 +1926,13 @@ export class NetEngineService implements EngineDirectoryPort {
           const row = started.peers.byEndpoint(identity)
           // A joiner's connection waits until `join` answered and `joined` is written (§5.1 step 4).
           if (!row || row.state === 'consented') return undefined
-          return { node: row.localId, grant: row.grant, endpoint: row.endpoint }
+          // A computer only let in is not used from here: no client of it rides its connections.
+          return {
+            node: row.localId,
+            grant: row.grant,
+            endpoint: row.endpoint,
+            ...(row.ways === 'in' ? { uses: false } : {})
+          }
         }
       },
       attach: (connection) => this.attach(connection),
@@ -1827,6 +2006,21 @@ export class NetEngineService implements EngineDirectoryPort {
     started.rt.rpc.abortCaller(node)
     started.sessions.teardown(node, 'grant_revoked')
     // Its editor tunnels end and what the endpoint started for it stops (its row is removing, or its grant gone).
+    started.editor.reconcile()
+    this.options.bridge()?.releaseNode(node)
+  }
+
+  /**
+   * One direction removed (it no longer uses this computer): what it runs here ends as a revocation's does, and its
+   * connections here close; this computer's own clients of it stay. Idempotent.
+   */
+  endInbound(node: NodeId): void {
+    const started = this.started
+    if (!started) return
+    started.revocations.get(node)?.abort()
+    started.revocations.delete(node)
+    started.rt.rpc.abortCaller(node)
+    started.sessions.closeHosts(node, 'grant_revoked')
     started.editor.reconcile()
     this.options.bridge()?.releaseNode(node)
   }

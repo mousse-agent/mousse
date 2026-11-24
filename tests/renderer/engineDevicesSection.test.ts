@@ -1,19 +1,23 @@
 // @vitest-environment jsdom
 /**
- * Settings → Devices for the new networking (design §5.2, §7): the switch, each paired computer's row and its
- * actions, the same-account notice, and the Add device dialog (Show QR with the approval inside it, Scan with
- * its confirmation). The daemon is stubbed at `platformRequest`.
+ * Settings → Devices for the new networking (design §5.2, §7): the switch, the two lists (Computers I use from
+ * here, Can use this computer) with a row per direction and its actions, the same-account notice, and the two add
+ * dialogs: Let a device in (how it connects, the code, Allow with a level) and Use another computer (the check
+ * before Connect, one way unless "Also let" is ticked, SSH). The daemon is stubbed at `platformRequest`.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NetEngineDevice, NetEngineRelay, NetEngineStatus } from '../../src/shared/netEngine/local'
+import { accessPreset } from '../../src/shared/net/accessPresets'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
-const { AddEngineDeviceDialog } = await import('../../src/renderer/components/netEngine/AddEngineDeviceDialog')
-const { engineRow, clockMessage, SHARED_ACCOUNT_LINE } = await import('../../src/renderer/components/netEngine/engineRows')
+const { UseComputerDialog } = await import('../../src/renderer/components/netEngine/UseComputerDialog')
+const { engineRow, engineSideRow, engineSides, clockMessage, SHARED_ACCOUNT_LINE } = await import(
+  '../../src/renderer/components/netEngine/engineRows'
+)
 
 const device = (fields: Partial<NetEngineDevice> & { node: string }): NetEngineDevice => ({
   name: 'Studio',
@@ -50,6 +54,30 @@ describe('a device row (§5.2)', () => {
   it('gives every failing state its fix as a tooltip', () => {
     for (const [, fields] of rows.filter(([, , , actions]) => actions.includes('retry')))
       expect(engineRow(device({ node: 'n1', ...fields })).detail ?? '').not.toBe('')
+  })
+})
+
+describe('a direction of a pairing', () => {
+  it.each([
+    ['both ways', {}, ['out', 'in']],
+    ['this computer uses it', { direction: 'out' as const }, ['out']],
+    ['it uses this computer', { direction: 'in' as const }, ['in']],
+    ['still being made', { state: 'finishing' as const }, ['out']]
+  ])('lists %s under its direction', (_name, fields, sides) => {
+    expect(engineSides(device({ node: 'n1', ...fields }))).toEqual(sides)
+  })
+
+  it('puts Access on Can use, routes on Computers I use, and a down direction only on its own row', () => {
+    const both = device({ node: 'n1' })
+    expect(engineSideRow(both, 'in')).toMatchObject({ line: 'Connected', actions: ['access', 'remove'] })
+    expect(engineSideRow(both, 'out')).toMatchObject({ line: 'Connected', actions: ['address', 'remove'] })
+    const inDown = device({ node: 'n1', unreachable: 'in' })
+    expect(engineSideRow(inDown, 'in')).toMatchObject({ line: "Studio can't reach this computer", warn: true })
+    expect(engineSideRow(inDown, 'out')).toMatchObject({ line: 'Connected' })
+    // Not connected now is normal for a device that uses this computer.
+    const away = device({ node: 'n1', direction: 'in', state: 'offline', online: false })
+    expect(engineSideRow(away, 'in')).toMatchObject({ line: 'Not connected now' })
+    expect(engineSideRow(away, 'in').warn).toBeUndefined()
   })
 })
 
@@ -95,6 +123,8 @@ function daemon(
             }
           ]
         }
+      case 'netEngine.join.preview':
+        return { kind: 1, destinations: [], shareable: [] }
       case 'net.status':
         return { enabled: false }
       case 'bridge.activity':
@@ -156,13 +186,28 @@ const button = (name: string | RegExp) =>
       ? item.textContent?.trim() === name || item.getAttribute('aria-label') === name
       : name.test(item.textContent ?? '')
   )
+/** A row of a list to pick one from, by its name. */
+const radio = (label: string) =>
+  [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+    (row) => row.querySelector('.engine-choice-label')?.textContent === label
+  )
 const click = async (target: HTMLElement | undefined) => {
   expect(target).toBeTruthy()
   await act(async () => target!.click())
   await flush()
 }
-const menuItems = async (name: string) => {
-  await click(button(`Actions for ${name}`))
+/** The menu of a device's first row (Computers I use comes first), or of its row on one side. */
+const menuItems = async (name: string, side?: 'in' | 'out') => {
+  const scope = side
+    ? [...host.querySelectorAll<HTMLElement>(`[data-device-side="${side}"]`)].find((row) =>
+        row.querySelector(`button[aria-label="Actions for ${name}"]`)
+      )
+    : undefined
+  await click(
+    scope
+      ? (scope.querySelector<HTMLButtonElement>(`button[aria-label="Actions for ${name}"]`) ?? undefined)
+      : button(`Actions for ${name}`)
+  )
   return [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map((item) => item.textContent?.trim())
 }
 const type = async (input: HTMLInputElement, value: string) => {
@@ -172,9 +217,16 @@ const type = async (input: HTMLInputElement, value: string) => {
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
 }
-const rowOf = (node: string) => host.querySelector<HTMLElement>(`[data-device-node="${node}"]`)
+/** A device's row on one side; its first row without one. */
+const rowOf = (node: string, side?: 'in' | 'out') =>
+  host.querySelector<HTMLElement>(`[data-device-node="${node}"]${side ? `[data-device-side="${side}"]` : ''}`)
 /** A row's text as read, spaces collapsed (an icon sits where the double space is). */
-const rowText = (node: string) => (rowOf(node)?.textContent ?? '').replace(/\s+/g, ' ')
+const rowText = (node: string, side?: 'in' | 'out') => (rowOf(node, side)?.textContent ?? '').replace(/\s+/g, ' ')
+/** The rows in one list, by device node. */
+const listNodes = (anchor: 'devices-list' | 'devices-can-use') =>
+  [...host.querySelectorAll<HTMLElement>(`[data-settings-anchor="${anchor}"] [data-device-node]`)].map(
+    (row) => row.dataset.deviceNode
+  )
 
 describe('Settings → Devices, new networking', () => {
   it('turns the switch on and off through the daemon', async () => {
@@ -244,16 +296,107 @@ describe('Settings → Devices, new networking', () => {
     // Two lines: the name, then the state; no id and no separator left hanging.
     expect(rowText('n3')).not.toMatch(/04a223d6|· ·|·\s*$/)
     expect(rowOf('n3')!.querySelector('[title*="Keep Tailscale on and online on both computers, then Retry."]')).toBeTruthy()
-    expect(await menuItems('Laptop')).toEqual(['Routes', 'Retry', 'Remove…'])
+    expect(await menuItems('Laptop', 'out')).toEqual(['Routes', 'Retry', 'Remove…'])
   })
 
-  it('opens Access under the row, marking the row, from the row menu', async () => {
-    daemon({ devices: [device({ node: 'n1' })] })
+  it('lists each direction in its own list: one way in one, both ways in both', async () => {
+    daemon({
+      devices: [
+        device({ node: 'both' }),
+        device({ node: 'uses', name: 'Server', direction: 'out' }),
+        device({ node: 'usedBy', name: 'Phone-ish', direction: 'in' })
+      ]
+    })
     await mount()
-    expect(await menuItems('Studio')).toEqual(['Access', 'Remove…'])
+    expect(host.textContent).toContain('Computers I use from here')
+    expect(host.textContent).toContain('Can use this computer')
+    expect(listNodes('devices-list')).toEqual(['both', 'uses'])
+    expect(listNodes('devices-can-use')).toEqual(['both', 'usedBy'])
+    expect(button(/Use another computer/)).toBeTruthy()
+    expect(button(/Let a device in/)).toBeTruthy()
+  })
+
+  it('shows a Can use row as level · state · how, and opens Access under it, marking only that row', async () => {
+    daemon({ devices: [device({ node: 'n1', route: 'lan' })] })
+    await mount()
+    // The stubbed policy matches no preset.
+    expect(rowText('n1', 'in')).toContain('Custom · Connected · same network')
+    expect(rowText('n1', 'out')).not.toContain('Custom')
+    expect(await menuItems('Studio', 'in')).toEqual(['Access', 'Remove…'])
     await click(button('Access'))
-    expect(rowOf('n1')!.classList.contains('engine-row-selected')).toBe(true)
+    expect(rowOf('n1', 'in')!.classList.contains('engine-row-selected')).toBe(true)
+    expect(rowOf('n1', 'out')!.classList.contains('engine-row-selected')).toBe(false)
     expect(host.textContent).toContain('Access from this device')
+  })
+
+  it('shows the level picked at Allow on a one-way Can use row, which the old networking calls disconnected', async () => {
+    // One way, this computer never dials the device, so the old networking's node says disconnected while the
+    // engine row is connected (as two real computers paired this way showed).
+    daemon({ devices: [device({ node: 'n1', route: 'lan', direction: 'in' })] }, {
+      'bridge.nodes': () => ({
+        nodes: [{
+          node: 'n1', name: 'Studio', self: false, revoked: false, caps: ['read', 'chat', 'write', 'terminal', 'settings'],
+          kind: 'computer', state: 'closed', source: 'engine', routes: [], connection: 'disconnected',
+          policy: { blocked: false, ...accessPreset('view').fields }
+        }]
+      })
+    })
+    await mount()
+    expect(rowText('n1', 'in')).toContain('View and chat · Connected · same network')
+  })
+
+  it('removes only the direction of the row, saying the other stays', async () => {
+    const d = daemon({ features: ['grant-revoke-local'], devices: [device({ node: 'n1' })] })
+    await mount()
+    await menuItems('Studio', 'in')
+    await click(button('Remove…'))
+    expect(document.body.textContent).toContain('Stop Studio using this computer?')
+    expect(document.body.textContent).toContain('This computer still uses it.')
+    await click(button('Remove'))
+    expect(d.called('netEngine.remove')).toEqual([{ node: 'n1', direction: 'in' }])
+
+    await menuItems('Studio', 'out')
+    await click(button('Remove…'))
+    expect(document.body.textContent).toContain('It can still use this computer.')
+    await click(button('Remove'))
+    expect(d.called('netEngine.remove').at(-1)).toEqual({ node: 'n1', direction: 'out' })
+  })
+
+  it('says Remove ends both directions where networking can’t end one, and removes the pairing', async () => {
+    const d = daemon({ devices: [device({ node: 'n1' })] })
+    await mount()
+    await menuItems('Studio', 'in')
+    await click(button('Remove…'))
+    expect(document.body.textContent).toContain('this removes both')
+    await click(button('Remove'))
+    expect(d.called('netEngine.remove')).toEqual([{ node: 'n1' }])
+  })
+
+  it('removes a one-way pairing whole, and keeps the tip to remove it on the other computer too', async () => {
+    const d = daemon({ features: ['grant-revoke-local'], devices: [device({ node: 'n1', direction: 'in' })] })
+    await mount()
+    await menuItems('Studio', 'in')
+    await click(button('Remove…'))
+    expect(document.body.textContent).toContain('Remove Studio?')
+    expect(document.querySelector('[title="Remove it on the other computer too, or it keeps trying to connect."]')).toBeTruthy()
+    await click(button('Remove'))
+    expect(d.called('netEngine.remove')).toEqual([{ node: 'n1' }])
+  })
+
+  it('says when a computer used one way runs an older Mousse', async () => {
+    daemon({ devices: [device({ node: 'n1', direction: 'out', olderApp: true })] })
+    await mount()
+    expect(host.textContent).toContain('Studio runs an older Mousse')
+    expect(host.textContent).toContain('Update it, or connect again with “Also let” ticked.')
+  })
+
+  it('says under Can use this computer that an older Mousse let in is used from here only once added from here', async () => {
+    daemon({ devices: [device({ node: 'n1', direction: 'in', olderApp: true })] })
+    await mount()
+    const canUse = host.querySelector('[data-settings-anchor="devices-can-use"]')!.textContent ?? ''
+    expect(canUse).toContain('Studio runs an older Mousse')
+    expect(canUse).toContain('To use it from here, add it from this computer.')
+    expect(listNodes('devices-list')).toEqual([])
   })
 
   it('opens a row to its routes, the one in use first, adds a Tailscale fallback that the add allows, and removes a route', async () => {
@@ -261,8 +404,8 @@ describe('Settings → Devices, new networking', () => {
       devices: [device({ node: 'n1', route: 'lan', online: true, addresses: ['tcp://192.168.1.20:47100', 'wss://studio.example.com/mousse-net/1'] })]
     })
     await mount()
-    await menuItems('Studio')
-    await click(button('Access'))
+    await menuItems('Studio', 'out')
+    await click(button('Routes'))
     const routes = () =>
       [...host.querySelectorAll<HTMLElement>('[aria-label="Routes to Studio"] [data-route-state]')].map((row) =>
         (row.textContent ?? '').replace(/\s+/g, ' ').trim()
@@ -282,10 +425,10 @@ describe('Settings → Devices, new networking', () => {
     await click(button('Remove route'))
     expect(d.called('netEngine.address.remove')).toEqual([{ node: 'n1', address: 'wss://studio.example.com/mousse-net/1' }])
 
-    await menuItems('Studio')
+    await menuItems('Studio', 'out')
     await click(button('Remove…'))
     await click(button('Remove'))
-    expect(d.called('netEngine.remove')).toEqual([{ node: 'n1' }])
+    expect(d.called('netEngine.remove')).toEqual([{ node: 'n1', direction: 'out' }])
   })
 
   it('says once that profiles in this account can read each other, with the reason as its tooltip', async () => {
@@ -298,47 +441,237 @@ describe('Settings → Devices, new networking', () => {
   })
 })
 
-describe('Add device', () => {
-  it('shows a code, asks inside the dialog, and says the other direction is finishing', async () => {
+/** A Use another computer dialog, on its Scan step. */
+const scanDialog = async (status: NetEngineStatus, camera: () => Promise<MediaStream | undefined> = async () => undefined) => {
+  const onClose = vi.fn()
+  await mount(createElement(UseComputerDialog, { status, onClose, camera }))
+  await click(button('Scan its code'))
+  return onClose
+}
+const pasteLink = async (link = 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA') => {
+  await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, link)
+  await click(button('Continue'))
+}
+const ALSO_LET = (name: string) =>
+  [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((box) =>
+    box.closest('label')?.textContent?.includes(`Also let ${name} use this computer`)
+  )
+
+describe('Let a device in', () => {
+  const ways = {
+    ways: [
+      { way: 'tunnel', state: 'unavailable', reason: 'not_configured', routes: [] },
+      { way: 'tailnet', state: 'off', reason: 'disabled', routes: [] },
+      { way: 'lan', state: 'ready', routes: ['tcp://192.168.1.20:47100'] }
+    ]
+  }
+
+  it('offers Turn on for a way whose switch is off while the helper still listens on it, and only then', async () => {
+    // As a real helper answered with Tailscale's switch saved off: restart_required, cleared by turning it on.
+    const restart = { ways: [{ way: 'lan', state: 'ready', routes: ['tcp://192.168.1.20:47100'] }, { way: 'tailnet', state: 'unavailable', reason: 'restart_required', routes: [] }] }
+    for (const tailnet of [false, true]) {
+      const d = daemon(
+        { features: ['route-readiness', 'invite-way'], reach: { lan: true, tailnet, public: [], tunnels: [] } as unknown as NetEngineStatus['reach'] },
+        { 'netEngine.routes.available': () => restart, 'netEngine.routes.config': () => ({}) }
+      )
+      await mount()
+      await click(button(/Let a device in/))
+      expect(document.body.textContent).toContain('Needs networking restarted')
+      if (tailnet) expect(button('Turn on')).toBeFalsy()
+      else {
+        await click(button('Turn on'))
+        expect(d.called('netEngine.routes.config')).toEqual([{ tailnet: true }])
+      }
+      act(() => root.unmount())
+      document.body.innerHTML = ''
+      host = document.createElement('div')
+      document.body.append(host)
+      root = createRoot(host)
+    }
+  })
+
+  it('lists the ways with readiness in plain words, turns one on, and makes a code for the way picked', async () => {
+    const d = daemon(
+      { features: ['route-readiness', 'invite-way'] },
+      { 'netEngine.routes.available': () => ways, 'netEngine.routes.config': () => ({}) }
+    )
+    await mount()
+    await click(button(/Let a device in/))
+    expect(document.body.textContent).toContain('Use this computer from your phone or another computer')
+    expect(document.body.textContent).toContain('How will it connect?')
+    const choice = (label: string) =>
+      [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((row) => row.textContent?.startsWith(label))
+    // Nearest first; the ready one is picked, with a background, and the others say why.
+    expect([...document.querySelectorAll<HTMLElement>('[role="radio"] .engine-choice-label')].map((item) => item.textContent)).toEqual([
+      'Same Wi-Fi',
+      'Tailscale',
+      'Cloudflare Tunnel'
+    ])
+    expect(choice('Same Wi-Fi')!.getAttribute('aria-checked')).toBe('true')
+    expect(choice('Same Wi-Fi')!.classList.contains('selected')).toBe(true)
+    // Its name, and under it the success dot before its status.
+    const ready = choice('Same Wi-Fi')!.querySelector('.engine-choice-hint')!
+    expect(ready.textContent).toBe('Ready')
+    expect(ready.firstElementChild?.classList.contains('engine-ready-dot')).toBe(true)
+    expect(choice('Tailscale')!.querySelector('.engine-ready-dot')).toBeNull()
+    expect(choice('Tailscale')!.textContent).toContain('Off')
+    expect(choice('Tailscale')!.getAttribute('aria-disabled')).toBe('true')
+    expect(choice('Cloudflare')!.textContent).toContain('Not set up')
+    expect(button('Set up')).toBeTruthy()
+    // Nothing is made before Make code.
+    expect(d.called('netEngine.invite')).toEqual([])
+    await click(button('Turn on'))
+    expect(d.called('netEngine.routes.config')).toEqual([{ tailnet: true }])
+
+    expect(button('Make code')!.classList.contains('ui-btn-primary')).toBe(true)
+    await click(button('Make code'))
+    expect(d.called('netEngine.invite')).toEqual([{ way: 'lan' }])
+    expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Link to share"]')?.value).toContain('mousse://pair')
+    expect(button('Copy link')).toBeTruthy()
+    expect(document.querySelector('[role="timer"]')?.textContent).toMatch(
+      /^Works over Same Wi-Fi · used once · expires in [45]:\d\d$/
+    )
+    expect(document.body.textContent).toContain(
+      'Can you SSH into this computer? Add it from the other computer instead. No code needed.'
+    )
+  })
+
+  it('makes a code at once, and says so, where networking can’t pick the way', async () => {
     const d = daemon()
     await mount()
-    await click(button('Add device'))
-    // The code shows at once, with its time left and the link to share under it.
-    expect(d.called('netEngine.invite')).toHaveLength(1)
-    expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
-    expect(document.querySelector('[role="timer"]')?.textContent).toMatch(/^Expires in [45]:\d\d$/)
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="Link to share"]')?.value).toContain('mousse://pair')
+    await click(button(/Let a device in/))
+    expect(d.called('netEngine.routes.available')).toEqual([])
+    expect(d.called('netEngine.invite')).toEqual([{}])
+    expect(document.querySelector('[role="timer"]')?.textContent).toMatch(/^used once · expires in [45]:\d\d$/)
+    expect(document.body.textContent).toContain('Update networking to pick how it connects.')
+  })
 
+  it('asks Allow with Work on threads picked, sends the level with Allow, and says it can use this computer', async () => {
+    const d = daemon()
+    await mount()
+    await click(button(/Let a device in/))
+    expect(document.body.textContent).toContain('Can you SSH into this computer?')
     await d.change({ approvals: [{ request: 'r1', invitation: 'inv1', name: 'Laptop (Work)', device: 'ffee0011' }] })
-    expect(document.body.textContent).toContain('Is Laptop (Work) yours?')
-    await click(button('Yes'))
-    expect(d.called('netEngine.approve')).toEqual([{ request: 'r1', yes: true }])
+    expect(document.body.textContent).toContain('Let Laptop (Work) use this computer?')
+    // Only the question: no SSH hint, no other way to send a code, and no id nothing else shows.
+    expect(document.body.textContent).not.toContain('Can you SSH into this computer?')
+    expect(button('Send a link with a code instead')).toBeUndefined()
+    expect(document.body.textContent).not.toContain('ffee0011')
+    const picked = document.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Access"] [aria-checked="true"]')
+    expect(picked?.querySelector('.engine-choice-label')?.textContent).toBe('Work on threads')
+    expect(picked?.querySelector('.engine-choice-hint')?.textContent).toBe('Works on threads · no shell')
+    expect(button('Allow')!.classList.contains('ui-btn-primary')).toBe(true)
+    expect(button('Not now')!.classList.contains('ui-btn-primary')).toBe(false)
+    await click(radio('Full control'))
+    await click(button('Allow'))
+    expect(d.called('netEngine.approve')).toEqual([{ request: 'r1', yes: true, access: accessPreset('full').fields }])
 
-    await d.change({ approvals: [], devices: [device({ node: 'n3', name: 'Laptop (Work)', state: 'finishing' })] })
-    expect(document.body.textContent).toContain('Laptop (Work) can use this computer; finishing the other direction…')
+    await d.change({ approvals: [], devices: [device({ node: 'n3', name: 'Laptop (Work)', direction: 'in', state: 'offline', online: false })] })
+    expect(document.body.textContent).toContain('Laptop (Work) can use this computer.')
+  })
+
+  it('opens the single switches under Customize, and Not now refuses with no level', async () => {
+    const d = daemon()
+    await mount()
+    await click(button(/Let a device in/))
+    await d.change({ approvals: [{ request: 'r1', invitation: 'inv1', name: 'Laptop', device: 'ffee0011' }] })
+    await click(button('Customize'))
+    await click(document.querySelector<HTMLElement>('[role="switch"][aria-label="Terminals"]') ?? undefined)
+    expect(document.querySelector('[role="radiogroup"][aria-label="Access"] [aria-checked="true"]')).toBeNull()
+    await click(button('Not now'))
+    expect(d.called('netEngine.approve')).toEqual([{ request: 'r1', yes: false }])
   })
 
   it('ends the invitation when the dialog closes before anyone joined', async () => {
     const d = daemon()
     await mount()
-    await click(button('Add device'))
+    await click(button(/Let a device in/))
     await click(button('Close'))
     expect(d.called('netEngine.invite.cancel')).toEqual([{ invitation: 'inv1' }])
   })
+})
 
-  it('without a camera, says to scan from the other computer, and confirms a pasted link before joining', async () => {
-    const d = daemon()
+describe('Use another computer', () => {
+  const lanHint = { route: 'tcp://192.168.1.20:47100', way: 'lan', eligibility: 'automatic', local: 'interface_present' }
+  const checked = (probe: unknown, hints: unknown[] = [lanHint]) => ({
+    'netEngine.join.preview': () => ({ kind: 1, name: 'Studio', destinations: [], shareable: [] }),
+    'netEngine.join.check': () => ({ kind: 1, name: 'Studio', hints }),
+    'netEngine.join.probe': () => probe
+  })
+
+  it('offers its link, its code and SSH, and joins one way unless "Also let" is ticked', async () => {
+    const d = daemon({ reach: { lan: true, tailnet: false, public: [], tunnels: [] } })
     const onClose = vi.fn()
-    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose, initial: 'scan', camera: async () => undefined }))
-    expect(document.body.textContent).toContain('Scan from the other computer instead.')
+    await mount(createElement(UseComputerDialog, { status: d.state.status, onClose }))
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')?.placeholder).toBe('Paste its link')
+    expect(button('Continue')!.classList.contains('ui-btn-primary')).toBe(true)
+    // The other two ways side by side under the link field, as secondary buttons.
+    const others = [...document.querySelectorAll<HTMLButtonElement>('.engine-dialog-alt > button')]
+    expect(others.map((item) => item.textContent)).toEqual(['Scan its code', 'Connect over SSH'])
+    expect(others.some((item) => item.classList.contains('ui-btn-primary'))).toBe(false)
     const link = 'mousse://pair?n=Studio%20Mac#AAAAAAAAAAAAAAAAAAAAAAAA'
-    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, link)
-    await click(button('Continue'))
-    expect(document.body.textContent).toContain('Connect to Studio Mac? Studio Mac will also be able to use this computer.')
+    await pasteLink(link)
+    expect(document.body.textContent).toContain('Use Studio Mac from here')
+    expect(ALSO_LET('Studio Mac')!.checked).toBe(false)
     expect(d.called('netEngine.join')).toEqual([])
     await click(button('Connect'))
-    expect(d.called('netEngine.join')).toEqual([{ ticket: link }])
+    expect(d.called('netEngine.join')).toEqual([{ ticket: link, back: false }])
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('says it can be reached only when the check from here answered, and which way it connects', async () => {
+    const d = daemon({ features: ['route-readiness', 'join-probe'] }, checked({ reachable: true, route: 'tcp://192.168.1.20:47100' }))
+    await scanDialog(d.state.status)
+    await pasteLink()
+    expect(d.called('netEngine.join.check')).toHaveLength(1)
+    expect(d.called('netEngine.join.probe')).toHaveLength(1)
+    expect(document.body.textContent).toContain('Connects over Same Wi-Fi')
+    expect(document.body.textContent).toContain('Studio can be reached from this computer')
+    // A tick before it; the address it answered on in the tooltip of "Connects over".
+    const reached = [...document.querySelectorAll<HTMLElement>('.engine-check-line')].find((line) =>
+      line.textContent?.includes('can be reached')
+    )!
+    expect(reached.firstElementChild?.classList.contains('engine-check-icon')).toBe(true)
+    expect(reached.firstElementChild?.classList.contains('ok')).toBe(true)
+    expect(reached.getAttribute('title')).toBeNull()
+    const over = [...document.querySelectorAll<HTMLElement>('p')].find((line) => line.textContent === 'Connects over Same Wi-Fi')
+    expect(over?.getAttribute('title')).toBe('tcp://192.168.1.20:47100')
+    expect(button('Connect')!.disabled).toBe(false)
+    expect(button('Connect')!.classList.contains('ui-btn-primary')).toBe(true)
+  })
+
+  it('says a neutral line when the check couldn’t tell', async () => {
+    const d = daemon({ features: ['route-readiness', 'join-probe'] }, checked({ reachable: null, reason: 'timeout' }))
+    await scanDialog(d.state.status)
+    await pasteLink()
+    expect(document.body.textContent).not.toContain('can be reached')
+    expect(document.body.textContent).toContain('Couldn’t check from here. Connect still tries.')
+    expect(button('Connect')!.disabled).toBe(false)
+  })
+
+  it('says why it can’t work and what to do, with Check again, before anything is sent', async () => {
+    const d = daemon({ features: ['route-readiness', 'join-probe'] }, checked({ reachable: false, reason: 'refused' }))
+    await scanDialog(d.state.status)
+    await pasteLink()
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe('Studio didn’t answer over Same Wi-Fi.')
+    // A warning icon before the failure.
+    expect(document.querySelector('[role="alert"] > .engine-check-icon.warn')).toBeTruthy()
+    expect(document.body.textContent).toContain('Check both are on the same Wi-Fi and Mousse is open on Studio.')
+    expect(button('Connect')!.disabled).toBe(true)
+    await click(button('Check again'))
+    expect(d.called('netEngine.join.check')).toHaveLength(2)
+    expect(d.called('netEngine.join')).toEqual([])
+  })
+
+  it('doesn’t try a link this computer has no way to use', async () => {
+    const tailnetOnly = { route: 'tcp://100.101.7.2:47100', way: 'tailnet', eligibility: 'skip', local: 'no_matching_interface' }
+    const d = daemon({ features: ['route-readiness', 'join-probe'] }, checked({ reachable: true, route: 'x' }, [tailnetOnly]))
+    await scanDialog(d.state.status)
+    await pasteLink()
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe('This computer isn’t on Tailscale.')
+    expect(d.called('netEngine.join.probe')).toEqual([])
+    expect(button('Connect')!.disabled).toBe(true)
   })
 
   it('reads camera frames as often as the daemon says (the engine limit scanIntervalMs)', async () => {
@@ -348,19 +681,25 @@ describe('Add device', () => {
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
     const stream = { getTracks: () => [] } as unknown as MediaStream
     try {
-      await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => stream }))
+      await scanDialog(d.state.status, async () => stream)
       await act(async () => undefined)
       expect(every.mock.calls.map(([, ms]) => ms)).toContain(75)
     } finally {
       vi.restoreAllMocks()
     }
   })
+
+  it('without a camera, says to scan from the other computer instead', async () => {
+    const d = daemon()
+    await scanDialog(d.state.status)
+    expect(document.body.textContent).toContain('Scan from the other computer instead.')
+  })
 })
 
 describe('routes (1b §1.3, §1.5)', () => {
   const tailnet = (host: string) => ({ route: `tcp://${host}:47100`, label: `${host}:47100`, cls: 'tailnet' as const })
 
-  it('lists the ticket destinations with their class, and shares only the routes ticked', async () => {
+  it('lists the ticket destinations with their class, and offers routes to share only once "Also let" is ticked', async () => {
     const d = daemon({}, {
       'netEngine.join.preview': () => ({
         kind: 1,
@@ -368,17 +707,20 @@ describe('routes (1b §1.3, §1.5)', () => {
         shareable: [tailnet('100.101.7.9')]
       })
     })
-    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
+    await scanDialog(d.state.status)
     const link = 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA'
-    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, link)
-    await click(button('Continue'))
+    await pasteLink(link)
     expect(document.body.textContent).toContain('100.101.7.2:47100 (Tailscale)')
-    const box = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    // One way: nothing of this computer's is shared.
+    expect(document.body.textContent).not.toContain('Also share')
+    await click(ALSO_LET('Studio'))
+    const box = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(
+      (item) => item.closest('label')?.textContent === 'Tailscale 100.101.7.9:47100'
+    )!
     expect(box.checked).toBe(false)
-    expect(box.closest('label')?.textContent).toBe('Tailscale 100.101.7.9:47100')
 
     await click(button('Connect'))
-    expect(d.called('netEngine.join').at(-1)).toEqual({ ticket: link })
+    expect(d.called('netEngine.join').at(-1)).toEqual({ ticket: link, back: true })
   })
 
   it('sends a ticked route in the join', async () => {
@@ -388,12 +730,16 @@ describe('routes (1b §1.3, §1.5)', () => {
         throw new Error('stop here')
       }
     })
-    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
-    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA')
-    await click(button('Continue'))
-    await click(document.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    await scanDialog(d.state.status)
+    await pasteLink()
+    await click(ALSO_LET('Studio'))
+    await click(
+      [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(
+        (item) => item.closest('label')?.textContent === 'Tailscale 100.101.7.9:47100'
+      )
+    )
     await click(button('Connect'))
-    expect(d.called('netEngine.join').at(-1)).toMatchObject({ share: ['tcp://100.101.7.9:47100'] })
+    expect(d.called('netEngine.join').at(-1)).toMatchObject({ back: true, share: ['tcp://100.101.7.9:47100'] })
   })
 
   it('names the class a device is connected on, and offers its offered addresses with Use', async () => {
@@ -626,14 +972,13 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
         shareable: []
       })
     })
-    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
-    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA')
-    await click(button('Continue'))
+    await scanDialog(d.state.status)
+    await pasteLink()
     expect(document.body.textContent).toContain('Through relay relay.example.net:443')
   })
 })
 
-describe('Add over SSH (1b §3.4)', () => {
+describe('Connect over SSH (1b §3.4)', () => {
   const resolved = { routeId: 'r1', user: 'me', hostname: 'box.example', port: 22, pinned: false }
 
   it('trusts the host key shown, lists every profile with New profile, and connects the one picked', async () => {
@@ -655,17 +1000,29 @@ describe('Add over SSH (1b §3.4)', () => {
       }
     )
     const onClose = vi.fn()
-    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose }))
-    await click(button('Over SSH'))
+    await mount(createElement(UseComputerDialog, { status: d.state.status, onClose }))
+    await click(button('Connect over SSH'))
+    expect(document.body.textContent).toContain('Uses your SSH keys or agent, never a password.')
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="SSH address"]')?.placeholder).toBe('Host or SSH config alias')
     await type(document.querySelector<HTMLInputElement>('input[aria-label="SSH address"]')!, 'me@box.example')
     await click(button('Continue'))
     expect(document.body.textContent).toContain('ssh-ed25519 SHA256:abc')
     expect(d.called('netEngine.ssh.profiles')).toEqual([])
-    await click(button('Trust'))
+    await click(button('Trust and continue'))
     expect(d.called('netEngine.ssh.trust')).toEqual([{ routeId: 'r1', sha256: 'SHA256:abc', host: 'box.example' }])
-    const labels = [...document.querySelectorAll('label')].map((item) => item.textContent)
-    expect(labels).toEqual(['Main', 'Work', 'New profile'])
-    await click([...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')][1])
+    expect(document.body.textContent).toContain('Profile on Box')
+    // The same row list as the levels, not native radio buttons.
+    expect(document.querySelector('input[type="radio"]')).toBeNull()
+    const labels = [...document.querySelectorAll('[role="radio"] .engine-choice-label')].map((item) => item.textContent)
+    expect(labels).toEqual(['Main', 'Work', 'New profile…'])
+    // What Connect does: Box lets this computer in, nothing the other way, no port, all over SSH.
+    const effects = [...document.querySelectorAll('[aria-label="What Connect does"] li')].map((item) => item.textContent)
+    expect(effects).toEqual([
+      'Box lets this computer in. Nothing the other way.',
+      'Box opens no port.',
+      'Every connection goes through SSH.'
+    ])
+    await click(radio('Work'))
     await click(button('Connect'))
     expect(d.called('netEngine.ssh.connect')).toEqual([
       { routeId: 'r1', target: 'me@box.example', host: 'box.example', user: 'me', selector: 'b'.repeat(26) }
@@ -688,8 +1045,8 @@ describe('Add over SSH (1b §3.4)', () => {
         }
       }
     )
-    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined }))
-    await click(button('Over SSH'))
+    await mount(createElement(UseComputerDialog, { status: d.state.status, onClose: () => undefined }))
+    await click(button('Connect over SSH'))
     await type(document.querySelector<HTMLInputElement>('input[aria-label="SSH address"]')!, 'me@box.example')
     await click(button('Continue'))
     await click(button('Connect'))
@@ -698,9 +1055,9 @@ describe('Add over SSH (1b §3.4)', () => {
     expect(d.called('netEngine.ssh.profiles')).toHaveLength(1)
   })
 
-  it('offers Over SSH only when the helper speaks protocol 1.1', async () => {
+  it('offers Connect over SSH only when the helper speaks protocol 1.1', async () => {
     const d = daemon()
-    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined }))
-    expect(button('Over SSH')).toBeUndefined()
+    await mount(createElement(UseComputerDialog, { status: d.state.status, onClose: () => undefined }))
+    expect(button('Connect over SSH')).toBeUndefined()
   })
 })
