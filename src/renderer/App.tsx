@@ -30,7 +30,6 @@ import { NewProjectDialog } from './components/NewProjectDialog'
 import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
 import { PairLinkHost } from './components/netEngine/PairLinkHost'
-import { AccessAskHost } from './components/netEngine/AccessAskHost'
 import { BugReportDialogHost } from './components/bugReports/BugReportDialog'
 import { useBugReportStore } from './stores/bugReportStore'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
@@ -766,8 +765,6 @@ export default function App() {
 
       {/* A `mousse://pair` link that opened Mousse: the profile that joins, then Enter link. */}
       {profileReady && <PairLinkHost />}
-      {/* A computer this one uses asks to use this one too: the Allow prompt, wherever the window is. */}
-      {profileReady && <AccessAskHost />}
       <ToastHost />
       <BugReportDialogHost />
 

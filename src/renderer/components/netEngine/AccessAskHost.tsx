@@ -44,7 +44,7 @@ export function AccessAskHost() {
     }
   }
   return (
-    <Modal open hideTitle title={`Let ${device.name} use this computer?`} onClose={close}>
+    <Modal open hideTitle className="access-ask-prompt" title={`Let ${device.name} use this computer?`} onClose={close}>
       {/* Outside Settings: its spacing and controls, as in Devices. */}
       <div className="settings-scope">
         <AllowPrompt
