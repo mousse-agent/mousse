@@ -105,8 +105,14 @@
   margin: 0;
 }
 
+.engine-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
 .engine-confirm p {
-  margin: 0 0 var(--space-8);
+  margin: 0;
 }
 
 .engine-scan {
