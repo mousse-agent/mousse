@@ -43,6 +43,17 @@
       "expiresAt": "2026-11-23T19:19:19.434Z"
     },
     {
+      "task": "fast-automatic-title-naming",
+      "session": "LAPTOP-HIEROJK7-e7b696",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "fast-automatic-title-naming",
+      "paths": [
+        "src/mms/models"
+      ],
+      "claimedAt": "2026-11-24T14:48:06.647Z",
+      "expiresAt": "2026-11-24T16:48:06.647Z"
+    },
+    {
       "task": "fix-local-file-links-blocked",
       "session": "Animatrix-a0fa6f",
       "machine": "Animatrix",
