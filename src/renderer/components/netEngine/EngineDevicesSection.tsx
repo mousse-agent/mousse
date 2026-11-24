@@ -599,6 +599,20 @@ export function EngineDevicesSection() {
     const node = nodes.find((item) => item.node === device.node)
     return [
       row(view, `Id ${device.shortId}`),
+      device.olderApp && device.direction === 'in' && (
+        <SettingsRow
+          key={`${device.node}-older`}
+          indent
+          title={
+            <span className="settings-status-warn">{device.name} runs an older Mousse</span>
+          }
+          description={
+            <span title={`It asks to be used from here as well, but only this computer decides that. To use ${device.name} from here, add it with Use another computer.`}>
+              To use it from here, add it from this computer.
+            </span>
+          }
+        />
+      ),
       selected === view.key && engineSideRow(device, 'in').actions.includes('access') && (
         <AccessPanel
           key={`${device.node}-access`}

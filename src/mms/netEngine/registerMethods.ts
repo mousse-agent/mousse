@@ -118,6 +118,8 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
     throw new DomainRpcError('bad_request', `${method} takes kind "link" or none`)
   if (method === 'netEngine.invite' && fields.way !== undefined && !isNetEngineWay(fields.way))
     throw new DomainRpcError('bad_request', `${method} takes way as one of ${NET_ENGINE_WAYS.join(', ')}`)
+  if (method === 'netEngine.invite' && fields.access !== undefined && (fields.kind !== 'link' || !accessFields(fields.access)))
+    throw new DomainRpcError('bad_request', `${method} takes access, as a preset's fields, with kind "link"`)
   if (method === 'netEngine.approve' && fields.access !== undefined && !accessFields(fields.access))
     throw new DomainRpcError('bad_request', `${method} takes access as a preset's fields`)
   if (method === 'netEngine.join' && fields.share !== undefined && !strings(fields.share))
@@ -189,7 +191,7 @@ export function registerNetEngineMethods(
               await engine.leakBeforeInvite()
               const invite = await engine
                 .pairing()
-                .invite(engine.ownName(), p.kind === 'link' ? 'link' : undefined, p.way)
+                .invite(engine.ownName(), p.kind === 'link' ? 'link' : undefined, p.way, p.access)
               // The window that showed the code closed, or switched profile: its invitation ends (§8).
               context.connection?.lifetime?.addEventListener(
                 'abort',

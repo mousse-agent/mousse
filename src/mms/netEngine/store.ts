@@ -83,6 +83,16 @@ export interface EnginePeerRow {
    * <name> use this computer" unticked: no grant is made and no pairback is sent.
    */
   ways?: EngineWays
+  /**
+   * Joiner, while its ceremony runs: Connect left "Also let <name> use this computer" unticked, so no grant is made
+   * and no pairback is sent, whatever the row held before. Cleared once the row is `connected`.
+   */
+  oneWay?: boolean
+  /**
+   * The grant this computer stopped serving when the owner removed only that the other computer uses it, until the
+   * helper confirms it is gone (`grant.revoke_local`): recovery finishes it, and nothing gives that grant a row again.
+   */
+  revoking?: string
 }
 
 export type EngineWays = 'in' | 'out'
@@ -123,6 +133,8 @@ export type EnginePeerChange = Partial<
   ssh?: EngineSshJournal | null
   link?: EngineLink | null
   ways?: EngineWays | null
+  oneWay?: true | null
+  revoking?: string | null
 }
 
 const COLUMNS: Record<keyof EnginePeerChange, string> = {
@@ -140,7 +152,9 @@ const COLUMNS: Record<keyof EnginePeerChange, string> = {
   offered: 'offered',
   ssh: 'ssh',
   link: 'link',
-  ways: 'ways'
+  ways: 'ways',
+  oneWay: 'one_way',
+  revoking: 'revoking'
 }
 
 /** Columns kept as JSON text; an empty list is stored as NULL. */
@@ -164,7 +178,9 @@ const ADDED_COLUMNS = [
   'offered',
   'ssh',
   'link',
-  'ways'
+  'ways',
+  'one_way',
+  'revoking'
 ]
 
 export const isServingState = (state: EnginePeerState): boolean =>
@@ -185,7 +201,7 @@ export class EnginePeerStore {
   constructor(private readonly db: NetDatabase) {
     db.transaction(() => {
       db.database.exec(
-        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT,source TEXT,approved TEXT,share TEXT,offered TEXT,ssh TEXT,link TEXT,ways TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_pending_access(invitation TEXT PRIMARY KEY,local_id TEXT NOT NULL) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
+        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT,source TEXT,approved TEXT,share TEXT,offered TEXT,ssh TEXT,link TEXT,ways TEXT,one_way TEXT,revoking TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_pending_access(invitation TEXT PRIMARY KEY,local_id TEXT NOT NULL) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
       )
       // A table from before the journal or address columns gets them.
       const columns = new Set(
@@ -200,14 +216,23 @@ export class EnginePeerStore {
     })
   }
 
-  /** Saves a pairing; a new one gets a fresh local id. */
-  add(row: Omit<EnginePeerRow, 'localId'> & { localId?: NodeId }): EnginePeerRow {
-    const saved: EnginePeerRow = { ...row, localId: row.localId ?? newId('node') }
+  /**
+   * Saves a pairing; a new one gets a fresh local id. `reservedFor`: the row of the device that invitation let in
+   * takes the id `pendingAccess` reserved for it (and the access saved under it), released in the same transaction,
+   * so a stop at any point leaves either the reservation or the row.
+   */
+  add(row: Omit<EnginePeerRow, 'localId'> & { localId?: NodeId }, reservedFor?: string): EnginePeerRow {
+    let saved: EnginePeerRow = { ...row, localId: row.localId ?? newId('node') }
     this.db.transaction(() => {
       this.db.charge(1)
+      const reserved = reservedFor ? this.reserved(reservedFor) : undefined
+      if (reserved) {
+        saved = { ...saved, localId: reserved }
+        this.db.database.prepare('DELETE FROM net_engine_pending_access WHERE invitation=?').run(reservedFor!)
+      }
       this.db.database
         .prepare(
-          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,addresses,source,approved,share,offered,ssh,link,ways) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,addresses,source,approved,share,offered,ssh,link,ways,one_way,revoking) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
         )
         .run(
           saved.localId,
@@ -227,7 +252,9 @@ export class EnginePeerStore {
           columnValue('offered', saved.offered),
           columnValue('ssh', saved.ssh),
           columnValue('link', saved.link),
-          saved.ways ?? null
+          saved.ways ?? null,
+          columnValue('oneWay', saved.oneWay || null),
+          saved.revoking ?? null
         )
     })
     return saved
@@ -330,10 +357,8 @@ export class EnginePeerStore {
    * Kept until the row exists, so a row written at the next start (an owed grant) takes the same id.
    */
   pendingAccess(invitation: string): NodeId {
-    const held = this.db.database
-      .prepare('SELECT local_id FROM net_engine_pending_access WHERE invitation=?')
-      .get(invitation)?.local_id
-    if (typeof held === 'string') return held as NodeId
+    const held = this.reserved(invitation)
+    if (held) return held
     const localId = newId('node')
     this.db.transaction(() => {
       this.db.charge(1)
@@ -344,18 +369,28 @@ export class EnginePeerStore {
     return localId
   }
 
-  /** The id `pendingAccess` reserved for `invitation`, if any; it is released once the row exists. */
-  takePendingAccess(invitation: string | undefined): NodeId | undefined {
+  /** The id `pendingAccess` reserved for `invitation`, if any (it stays reserved). */
+  reserved(invitation: string | undefined): NodeId | undefined {
     if (!invitation) return undefined
     const held = this.db.database
       .prepare('SELECT local_id FROM net_engine_pending_access WHERE invitation=?')
       .get(invitation)?.local_id
-    if (typeof held !== 'string') return undefined
+    return typeof held === 'string' ? (held as NodeId) : undefined
+  }
+
+  /**
+   * Changes a pairing's row and releases the id reserved for `invitation` in one transaction (a row that existed
+   * before the invitation took its access already). Answers the row.
+   */
+  updateReleasing(localId: NodeId, change: EnginePeerChange, invitation: string | undefined): EnginePeerRow | undefined {
     this.db.transaction(() => {
-      this.db.charge(1)
-      this.db.database.prepare('DELETE FROM net_engine_pending_access WHERE invitation=?').run(invitation)
+      this.update(localId, change)
+      if (invitation) {
+        this.db.charge(1)
+        this.db.database.prepare('DELETE FROM net_engine_pending_access WHERE invitation=?').run(invitation)
+      }
     })
-    return held as NodeId
+    return this.get(localId)
   }
 
   /**
@@ -385,11 +420,11 @@ export class EnginePeerStore {
     return this.all().filter((row) => row.state === state)
   }
 
-  /** Whether any row, whatever its state, is for the grant `grant` this computer issued. */
+  /** Whether any row, whatever its state, is for the grant `grant` this computer issued, or is revoking it. */
   holdsGrant(grant: string): boolean {
     return !!this.db.database
-      .prepare('SELECT 1 FROM net_engine_peers WHERE grant=? LIMIT 1')
-      .get(grant)
+      .prepare('SELECT 1 FROM net_engine_peers WHERE grant=? OR revoking=? LIMIT 1')
+      .get(grant, grant)
   }
 
   /**
@@ -530,7 +565,9 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     ...(offered.length ? { offered } : {}),
     ...(ssh ? { ssh } : {}),
     ...(link ? { link } : {}),
-    ...(row.ways === 'in' || row.ways === 'out' ? { ways: row.ways } : {})
+    ...(row.ways === 'in' || row.ways === 'out' ? { ways: row.ways } : {}),
+    ...(row.one_way === 'true' ? { oneWay: true } : {}),
+    ...(typeof row.revoking === 'string' ? { revoking: row.revoking } : {})
   }
 }
 
@@ -548,7 +585,8 @@ function readLink(value: unknown): EngineLink | undefined {
       approved: strings(link.approved),
       share: strings(link.share),
       ...(typeof link.expiresAt === 'number' ? { expiresAt: link.expiresAt } : {}),
-      pending: link.pending === true
+      pending: link.pending === true,
+      ...(link.oneWay === true ? { oneWay: true } : {})
     }
   } catch {
     return undefined

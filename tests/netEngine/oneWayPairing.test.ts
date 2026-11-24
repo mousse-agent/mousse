@@ -3,7 +3,9 @@
  * saved before the device is let in, each new operation is sent only when the helper lists its feature, and Remove
  * on one of a pairing's two rows ends only that direction.
  */
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
+import { fingerprintOf } from '../../src/mms/netEngine/pairing'
+import { EngineClient } from '../../src/mms/netEngine/session/client'
 import { newId, type NodeId } from '../../src/shared/net'
 import { accessPreset } from '../../src/shared/net/accessPresets'
 import { Fabric, approveAll, connectedBothWays, eventually, rowFor, type Computer } from './checks/harness'
@@ -55,6 +57,40 @@ async function joinOneWay(owner: Computer, caller: Computer, approve?: (request:
   } finally {
     stop()
   }
+}
+
+/** The access `on` saved for `node`, if it saved one. */
+function policyOf(on: Computer, node: NodeId): Record<string, unknown> | undefined {
+  return (
+    on.mms.netEngine as unknown as { started: { rt: { policy: { list(): Array<Record<string, unknown>> } } } }
+  ).started.rt.policy
+    .list()
+    .find((policy) => policy.node === node)
+}
+
+/** `caller` opens `owner`'s Send link and types the code `owner` shows; `back` is Connect's "Also let". */
+async function joinLink(
+  owner: Computer,
+  caller: Computer,
+  link: { invitation: string; uri: string },
+  back: boolean
+): Promise<{ node: NodeId }> {
+  const joined = caller.dispatch('netEngine.join', { ticket: link.uri, arrival: 'link', back }, true)
+  await eventually(() =>
+    expect(caller.mms.netEngine.status().joins?.find((join) => join.invitation === link.invitation)?.needsCode).toBe(
+      true
+    )
+  )
+  const code = owner.mms.netEngine.status().links?.find((one) => one.invitation === link.invitation)?.code
+  await caller.dispatch('netEngine.join.code', { invitation: link.invitation, code }, true)
+  return joined
+}
+
+/** Stops `on` once at `step`, as a crash would; answers whether it stopped there. */
+function crashOnce(on: Computer, step: string): () => boolean {
+  let hit = false
+  on.mms.netEngine.pairingCrash = (at) => at === step && !hit && (hit = true)
+  return () => hit
 }
 
 describe('pairing one way', () => {
@@ -164,6 +200,217 @@ describe('pairing one way', () => {
     await eventually(() => expect(device(caller, ownerOnCaller)?.state).toBe('connected'))
     await caller.dispatch('netEngine.remove', { node: ownerOnCaller, direction: 'out' }, true)
     expect(rowFor(caller, owner)).toBeUndefined()
+  }, 60_000)
+
+  it('keeps a Send link joined one way one way when the joiner restarts mid-join', async () => {
+    const owner = await computer(fabric, 'link-stop-owner'),
+      caller = await computer(fabric, 'link-stop-caller')
+    const link = await owner.dispatch('netEngine.invite', { kind: 'link' }, true)
+    // The join answered PAIRED and the app stopped before writing it: the restart reads the saved link back.
+    const stopped = crashOnce(caller, 'join-replied')
+    await joinLink(owner, caller, link, false).catch(() => undefined)
+    expect(stopped()).toBe(true)
+    caller.mms.netEngine.pairingCrash = undefined
+    await fabric.restartEngine(caller)
+    await eventually(() => expect(rowFor(caller, owner)).toMatchObject({ state: 'connected', grant: '', ways: 'out' }))
+    expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(false)
+    expect(sent(caller, 'grant.add')).toEqual([])
+  }, 60_000)
+
+  it('sends no grant and no pairback when joining one way a computer this one lets in already', async () => {
+    const owner = await computer(fabric, 'let-in-owner'),
+      caller = await computer(fabric, 'let-in-caller')
+    // The owner joined the caller first, one way: the caller lets the owner in.
+    await joinOneWay(caller, owner)
+    await eventually(() => expect(rowFor(caller, owner)).toMatchObject({ state: 'connected', ways: 'in' }))
+    const pairbacks = vi.spyOn(EngineClient.prototype, 'pairback')
+    try {
+      await joinOneWay(owner, caller)
+      // Both ways now: the access it had stays, and Connect added only this computer using it.
+      await eventually(() => {
+        const row = rowFor(caller, owner)
+        expect(row).toMatchObject({ state: 'connected' })
+        expect(row?.ways).toBeUndefined()
+        expect(row?.oneWay).toBeUndefined()
+      })
+      expect(sent(caller, 'grant.add')).toEqual([])
+      expect(pairbacks).not.toHaveBeenCalled()
+    } finally {
+      pairbacks.mockRestore()
+    }
+  }, 60_000)
+
+  it('keeps the level picked at Allow when writing the row fails, for the next start to use', async () => {
+    const owner = await computer(fabric, 'insert-owner'),
+      caller = await computer(fabric, 'insert-caller')
+    const view = accessPreset('view').fields
+    const peers = (owner.mms.netEngine as unknown as { started: { peers: { add: (...args: any[]) => unknown } } })
+      .started.peers
+    const add = peers.add.bind(peers)
+    let failed = false
+    peers.add = (row: { ways?: string }, ...rest: unknown[]) => {
+      if (!failed && row.ways === 'in') {
+        failed = true
+        throw new Error('disk full')
+      }
+      return add(row, ...rest)
+    }
+    const { node: ownerOnCaller } = await joinOneWay(owner, caller, (request) =>
+      owner.dispatch('netEngine.approve', { request, yes: true, access: view }, true)
+    )
+    await eventually(() => expect(failed).toBe(true))
+    expect(rowFor(owner, caller)).toBeUndefined()
+    await fabric.restartEngine(owner)
+    const onOwner = await eventually(() => {
+      const row = rowFor(owner, caller)
+      expect(row?.state).toBe('connected')
+      return row!
+    })
+    expect(policyOf(owner, onOwner.localId)).toMatchObject(view)
+    await fabric.connect(caller, ownerOnCaller)
+    expect(await accessThere(caller, ownerOnCaller)).toMatchObject({ work: false })
+  }, 60_000)
+
+  it('keeps the level picked at Allow while the owed row cannot be written yet', async () => {
+    const owner = await computer(fabric, 'owed-owner'),
+      caller = await computer(fabric, 'owed-caller')
+    const view = accessPreset('view').fields
+    // The app stops after the helper let the caller in, before its row is written.
+    const stopped = crashOnce(owner, 'enrolled')
+    const { node: ownerOnCaller } = await joinOneWay(owner, caller, (request) =>
+      owner.dispatch('netEngine.approve', { request, yes: true, access: view }, true)
+    )
+    await eventually(() => expect(stopped()).toBe(true))
+    owner.mms.netEngine.pairingCrash = undefined
+    // At the next start the helper can't list its grants: the owed row waits.
+    const failing = { 'grants.list': 1_000 }
+    fabric.network.failing.set(owner.endpoint, failing)
+    await fabric.restartEngine(owner)
+    await eventually(() => expect(sent(owner, 'grants.list').length).toBeGreaterThanOrEqual(1))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(rowFor(owner, caller)).toBeUndefined()
+    // The helper starts again and lists them: the row is written under the level picked.
+    failing['grants.list'] = 0
+    await fabric.restartHelper(owner)
+    const onOwner = await eventually(() => {
+      const row = rowFor(owner, caller)
+      expect(row?.state).toBe('connected')
+      return row!
+    })
+    expect(policyOf(owner, onOwner.localId)).toMatchObject(view)
+    await fabric.connect(caller, ownerOnCaller)
+    expect(await accessThere(caller, ownerOnCaller)).toMatchObject({ work: false })
+  }, 60_000)
+
+  it('finishes removing one direction after the app stops between the row and the helper', async () => {
+    const owner = await computer(fabric, 'revoke-owner'),
+      caller = await computer(fabric, 'revoke-caller')
+    const { callerOnOwner } = await fabric.pair(owner, caller)
+    const stopped = crashOnce(owner, 'revoking')
+    await expect(owner.dispatch('netEngine.remove', { node: callerOnOwner, direction: 'in' }, true)).rejects.toBeDefined()
+    expect(stopped()).toBe(true)
+    // The helper still holds the grant.
+    expect(fabric.network.holds(owner.endpoint, caller.endpoint)).toBe(true)
+    owner.mms.netEngine.pairingCrash = undefined
+    await fabric.restartEngine(owner)
+    await eventually(() => expect(fabric.network.holds(owner.endpoint, caller.endpoint)).toBe(false))
+    const row = rowFor(owner, caller)
+    expect(row).toMatchObject({ state: 'connected', grant: '', ways: 'out' })
+    expect(row?.revoking).toBeUndefined()
+  }, 60_000)
+
+  it('keeps using a computer it added over SSH when that computer joins its Send link one way', async () => {
+    const owner = await computer(fabric, 'ssh-used-owner'),
+      caller = await computer(fabric, 'ssh-used-caller')
+    // The owner added the caller over SSH: it uses the caller through that route.
+    owner.mms.netEngine.pair({
+      endpoint: caller.endpoint,
+      fingerprint: fingerprintOf(caller.endpoint),
+      grant: '',
+      name: caller.name,
+      state: 'connected',
+      source: 'ssh',
+      ssh: { requestId: 'ab'.repeat(16), routeId: 'route-ssh-used' }
+    })
+    const link = await owner.dispatch('netEngine.invite', { kind: 'link' }, true)
+    await joinLink(owner, caller, link, false)
+    const onOwner = await eventually(() => {
+      const row = rowFor(owner, caller)
+      expect(row?.grant).not.toBe('')
+      return row!
+    })
+    // Both ways: it uses this computer now, and this computer still uses it.
+    expect(onOwner.ways).toBeUndefined()
+    expect(device(owner, onOwner.localId)?.direction).toBeUndefined()
+    await fabric.restartEngine(owner)
+    await eventually(() =>
+      expect(sent(owner, 'dial').some((message) => message.identity === caller.endpoint)).toBe(true)
+    )
+  }, 60_000)
+
+  it('answers an older Mousse’s pairback without using it from here', async () => {
+    const owner = await computer(fabric, 'older-owner'),
+      caller = await computer(fabric, 'older-caller')
+    // An app from before one-way pairing: its hello says no features, and it always pairs back.
+    const hello = vi.spyOn(EngineClient.prototype, 'hello').mockImplementation(async function (
+      this: EngineClient,
+      name: string
+    ) {
+      const reply = await (this as unknown as { exchange: (...args: unknown[]) => Promise<{ header: { name?: unknown } }> }).exchange(
+        'mousse.hello',
+        { t: 'hello', proto: 1, name },
+        [],
+        { deadlineMs: 10_000, until: 'hello', keepOpen: true }
+      )
+      return { name: String(reply.header.name ?? ''), features: [] }
+    })
+    try {
+      const invite = await owner.dispatch('netEngine.invite', {}, true)
+      const stop = approveAll(owner)
+      try {
+        await caller.dispatch('netEngine.join', { ticket: invite.uri, back: true }, true)
+      } finally {
+        stop()
+      }
+      // Its pairback was answered: its ceremony ends.
+      await eventually(() => expect(rowFor(caller, owner)?.state).toBe('connected'))
+      const onOwner = rowFor(owner, caller)!
+      expect(onOwner).toMatchObject({ state: 'connected', ways: 'in' })
+      expect(sent(owner, 'peer.add')).toEqual([])
+      expect(sent(owner, 'dial').filter((message) => message.identity === caller.endpoint)).toEqual([])
+      expect(device(owner, onOwner.localId)).toMatchObject({ direction: 'in', olderApp: true })
+    } finally {
+      hello.mockRestore()
+    }
+  }, 60_000)
+
+  it('serves a device that joined a Send link under the level picked with the link, also after a stop', async () => {
+    const view = accessPreset('view').fields
+    // As it is: served under the level from its first call.
+    const owner = await computer(fabric, 'link-level-owner'),
+      caller = await computer(fabric, 'link-level-caller')
+    let link = await owner.dispatch('netEngine.invite', { kind: 'link', access: view }, true)
+    let joined = await joinLink(owner, caller, link, false)
+    await fabric.connect(caller, joined.node)
+    expect(await accessThere(caller, joined.node)).toMatchObject({ work: false })
+
+    // The app stops after the helper let the device in, before its row is written.
+    const owner2 = await computer(fabric, 'link-level-owner2'),
+      caller2 = await computer(fabric, 'link-level-caller2')
+    link = await owner2.dispatch('netEngine.invite', { kind: 'link', access: view }, true)
+    const stopped = crashOnce(owner2, 'enrolled')
+    joined = await joinLink(owner2, caller2, link, false)
+    await eventually(() => expect(stopped()).toBe(true))
+    owner2.mms.netEngine.pairingCrash = undefined
+    await fabric.restartEngine(owner2)
+    const onOwner = await eventually(() => {
+      const row = rowFor(owner2, caller2)
+      expect(row?.state).toBe('connected')
+      return row!
+    })
+    expect(policyOf(owner2, onOwner.localId)).toMatchObject(view)
+    await fabric.connect(caller2, joined.node)
+    expect(await accessThere(caller2, joined.node)).toMatchObject({ work: false })
   }, 60_000)
 })
 

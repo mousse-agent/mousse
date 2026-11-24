@@ -122,8 +122,13 @@ export class FakeNetwork {
   readonly routes = new Map<string, string[]>()
   /** For each host identity, the grant each caller identity holds there (the helper's numbers; tests may name one). */
   private readonly grants = new Map<string, Map<string, number | string>>()
-  /** The receipt `grant.add` saved with a grant, by grant number (kept while the grant lives, as the helper does). */
+  /**
+   * The receipt saved with a grant, by grant number: `grant.add`'s, or the invitation an enrollment used (kept while
+   * the grant lives, as the helper does).
+   */
   readonly receipts = new Map<string, string>()
+  /** By helper identity: an op fails (`busy`, a helper still starting) this many more times before it answers. */
+  readonly failing = new Map<string, Record<string, number>>()
   /** For each identity, the identities it may dial (its peers). */
   private readonly peers = new Map<string, Set<string>>()
   /** Open invitations by ticket, with their host. */
@@ -1041,7 +1046,9 @@ export class FakeHelper {
     reply: (fields: Record<string, unknown>) => void,
     candidates?: string[]
   ): void {
-    const { grant } = this.network.grant(host.identity, this.identity)
+    const { grant, already } = this.network.grant(host.identity, this.identity)
+    // The enrollment receipt names the invitation, as the helper's `grants.list` says.
+    if (!already) this.network.receipts.set(String(grant), invite.invitation)
     invite.ended = 'used'
     this.network.links.delete(invite.invitation)
     host.event({
@@ -1100,6 +1107,11 @@ export class FakeHelper {
       }
       if (!this.helloed && message.op !== 'hello')
         return reply({ error: 'no_hello', reason: 'hello first' })
+      const failing = this.network.failing.get(this.identity)
+      if ((failing?.[op] ?? 0) > 0) {
+        failing![op]!--
+        return reply({ error: 'busy', reason: 'starting' })
+      }
       switch (message.op) {
         case 'hello': {
           const proto = message.proto
@@ -1426,7 +1438,8 @@ export class FakeHelper {
           }
           for (const [uri, open] of this.network.invitations)
             if (open.invitation === waiting.invitation) this.network.invitations.delete(uri)
-          const { grant } = this.network.grant(this.identity, waiting.joiner.identity)
+          const { grant, already } = this.network.grant(this.identity, waiting.joiner.identity)
+          if (!already) this.network.receipts.set(String(grant), waiting.invitation)
           reply()
           this.event({
             ev: 'enrolled',

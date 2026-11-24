@@ -151,8 +151,9 @@ export interface NetEngineDevice {
    */
   direction?: 'out' | 'in'
   /**
-   * This computer uses it one way and its Mousse is older than one-way pairing: its own row keeps waiting for this
-   * computer to let it in, until it is updated.
+   * Its Mousse is older than one-way pairing. Used one way from here: its own row keeps waiting for this computer to
+   * let it in, until it is updated. Only let in here: its pairback adds nothing, so this computer uses it only once
+   * it is added from here.
    */
   olderApp?: boolean
   /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */

@@ -1400,8 +1400,11 @@ export class NetEngineService implements EngineDirectoryPort {
           shortId: row.endpoint.slice(0, 8),
           ...(started.pairing.accepted(node) && !row.ssh?.removed ? {} : { notAccepted: true }),
           ...(direction ? { direction } : {}),
-          // Used one way, and its app does not know one-way pairing: its own row waits to be let in here.
-          ...(!ssh && row.ways === 'out' && started.sessions.says(node, 'one-way') === false
+          // Its app does not know one-way pairing. Used one way: its own row waits to be let in here. Only let in:
+          // its pairback adds nothing, so this computer uses it once it is added from here.
+          ...(!ssh &&
+          ((row.ways === 'out' && started.sessions.says(node, 'one-way') === false) ||
+            (row.ways === 'in' && started.pairing.callerSays(node, 'one-way') === false))
             ? { olderApp: true }
             : {}),
           state,
@@ -1550,7 +1553,10 @@ export class NetEngineService implements EngineDirectoryPort {
         name: () => this.selfName(),
         pairback: (caller, request) => pairing.pairback(caller, request),
         tunnel: (connection, stream) => editor.accept(connection, stream),
-        calledBy: (caller, name) => pairing.named(caller.node, name)
+        calledBy: (caller, name, features) => {
+          pairing.heard(caller.node, features)
+          pairing.named(caller.node, name)
+        }
       },
       client: {
         get store() {
@@ -1632,6 +1638,17 @@ export class NetEngineService implements EngineDirectoryPort {
       // The access the owner picked in Allow, saved under the id its row takes before its grant exists.
       applyAccess: (node, access: AccessPresetFields) => {
         rt.policy.set(node, access)
+      },
+      copyAccess: (from, to) => {
+        const saved = rt.policy.list().find((policy) => policy.node === from)
+        if (saved)
+          rt.policy.set(to, {
+            work: saved.work,
+            terminal: saved.terminal,
+            editor: saved.editor,
+            maxPermissionMode: saved.maxPermissionMode,
+            agentReach: saved.agentReach
+          })
       },
       changed: () => this.changed(),
       crashAt: (step) => !!this.pairingCrash?.(step),
