@@ -10,10 +10,24 @@
   opacity: 0.85;
 }
 
-.computer-badge[data-state='offline'],
-.computer-badge[data-state='not-shared'] {
-  color: var(--warning, var(--text-secondary));
-  opacity: 1;
+.computer-badge-icon {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* A computer that cannot be reached: a stroke across its icon, cut out of what is behind it so it reads on any row. */
+.computer-badge:not([data-state='online']) .computer-badge-icon::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -2px;
+  right: -2px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: currentColor;
+  box-shadow: 0 0 0 1px var(--sidebar-bg, var(--bg-primary, #000));
+  transform: translateY(-50%) rotate(-45deg);
 }
 
 .computer-badge-name {
@@ -22,12 +36,6 @@
   white-space: nowrap;
 }
 
-.computer-badge-state {
-  flex-shrink: 0;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
 
 /* Top of the thread view. */
 .thread-computer-bar {

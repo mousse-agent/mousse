@@ -189,12 +189,12 @@ describe('pushes other than text while a reply streams', () => {
     expectTranscriptAndRowsStill(swapped)
     expect(swapped.counts['SidebarStatus:live-thread']).toBeGreaterThan(0)
     expect(swapped.counts['SidebarStatus:other-a'] ?? 0).toBe(0)
-    expect(card('live-thread')?.textContent).toContain('Waiting')
-    expect(card('live-thread')?.textContent).not.toContain('Working')
+    expect(card('live-thread')?.querySelector('.threads-sidebar-card-status-waiting')).not.toBeNull()
+    expect(card('live-thread')?.querySelector('.threads-sidebar-card-status-working')).toBeNull()
 
     const back = await counted(() => useAppStore.getState().setThreadActivity(activity('processing')))
     expectTranscriptAndRowsStill(back)
-    expect(card('live-thread')?.textContent).toContain('Working')
+    expect(card('live-thread')?.querySelector('.threads-sidebar-card-status-working')).not.toBeNull()
   })
 
   it('a turn-state push renders the line under Working only', async () => {
@@ -237,7 +237,7 @@ describe('pushes other than text while a reply streams', () => {
     const useAppStore = await store()
     // Another thread finished: its row says so.
     await counted(() => useAppStore.getState().setThreadActivity({ ...activity(), 'other-b': 'completed' }))
-    expect(card('other-b')?.textContent).toContain('Done')
+    expect(card('other-b')?.querySelector('.threads-sidebar-card-status-done')).not.toBeNull()
     // A snapshot with a new message: the transcript shows it (whole, with reply pacing off).
     setReplyPacing(false)
     const longer = [...transcript(), assistant('more', 22, 'A message the snapshot brought')]

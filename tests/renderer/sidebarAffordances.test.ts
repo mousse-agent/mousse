@@ -398,7 +398,8 @@ describe('row marks', () => {
 
     show([thread('plain', 'Notes', { projectId: 'plain' })], { view: 'threads', active: 'plain', projects: [project('plain', 'Plain')] })
     await settle()
-    expect(card('plain')?.textContent).toBe('')
+    // Nothing to name: the card has no lower line.
+    expect(card('plain')).toBeNull()
   })
 
   it('gives a title a tooltip only when it does not fit', () => {

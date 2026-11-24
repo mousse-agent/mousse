@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -25,13 +26,16 @@ describe('the computer badge', () => {
     expect(card).not.toContain('computer-badge-state')
   })
 
-  it('marks a computer that cannot be reached, in the tooltip and beside the name', () => {
+  it('marks a computer that cannot be reached by its state, struck through, and says which in the tooltip', () => {
     expect(computerBadgeTitle('Studio', 'offline', 'Offline · last seen 5m ago')).toBe('Runs on Studio · Offline · last seen 5m ago')
     expect(computerBadgeTitle('Studio', 'not-shared')).toBe('Runs on Studio · Studio is not sharing its threads with this computer')
-    const card = html(createElement(ComputerBadgeView, { name: 'Studio', state: 'offline', withName: true }))
+    const card = html(createElement(ComputerBadgeView, { name: 'Studio', state: 'offline', withName: true, offline: 'Offline · last seen 5m ago' }))
     expect(card).toContain('data-state="offline"')
-    expect(card).toContain('computer-badge-state">offline<')
-    expect(html(createElement(ComputerBadgeView, { name: 'Studio', state: 'not-shared', withName: true }))).toContain('not shared')
+    expect(card).toContain('title="Runs on Studio · Offline · last seen 5m ago"')
+    // The name alone beside the icon: no word after it.
+    expect(card.replace(/<[^>]*>/g, '')).toBe('Studio')
+    const css = readFileSync('src/renderer/styles/computers.css', 'utf8')
+    expect(css).toMatch(/\.computer-badge:not\(\[data-state='online'\]\) \.computer-badge-icon::after \{/)
   })
 
   it('says "Also on" for a project of this computer that another computer holds too', () => {

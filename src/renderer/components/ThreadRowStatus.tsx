@@ -1,5 +1,6 @@
 import { memo, useSyncExternalStore } from 'react'
-import { CircleAlert, CircleCheck, CircleDotDashed, Clock, Loader2, MessageQuestion, Pause, Shield } from '../lib/icons'
+import { CircleAlert, CircleCheck, CircleDotDashed, Clock, Loader2, MessageQuestion, Pause, Pencil, Shield } from '../lib/icons'
+import { formatPauseUntil } from '../../shared/pauseDisplay'
 import { expiresInLabel } from '../../shared/threadExpiry'
 import { isThreadActivityActive, type Thread, type ThreadActivitySnapshot, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { threadStatus, type ThreadLinkStatus } from '../../shared/threadAttention'
@@ -42,8 +43,11 @@ interface RowStatusProps {
 /** What a row says of a thread whose message did not start, as its tooltip. */
 const setupFailedTitle = (reason: string): string => `Didn't start. ${reason}`
 
-/** The icon at the end of a Projects tree row. Nothing for a quiet thread. */
-export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId, activity, live, awaitsApproval, setupFailed }: RowStatusProps) {
+/**
+ * The mark in the gap before a Projects tree row's title: what the thread is doing, else its unsent draft (which
+ * outranks Done: the draft is what the person left to come back to). Nothing for a quiet thread with no draft.
+ */
+export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId, activity, live, awaitsApproval, setupFailed, draft = false }: RowStatusProps & { draft?: boolean }) {
   countRender(`SidebarStatus:${threadId}`)
   const status = threadStatus(useRowActivity(threadId, activity, live), awaitsApproval)
   const animateWorking = useAppStore((s) => status === 'working' && s.sidebarAnimations)
@@ -53,6 +57,13 @@ export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId,
   if (setupFailed && (status === 'quiet' || status === 'done')) {
     const title = setupFailedTitle(setupFailed)
     return <span className="threads-sidebar-status-icon threads-sidebar-status-icon--failed" title={title}><CircleAlert size={14} strokeWidth={2} aria-label={title} /></span>
+  }
+  if (draft && (status === 'quiet' || status === 'done')) {
+    return (
+      <span className="threads-sidebar-status-icon threads-sidebar-draft-icon" role="img" aria-label="Unsent draft" title="Unsent draft">
+        <Pencil size={13} strokeWidth={2} aria-hidden="true" />
+      </span>
+    )
   }
   switch (status) {
     case 'working':
@@ -64,15 +75,18 @@ export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId,
         </span>
       )
     case 'done':
-      return <CircleCheck size={14} strokeWidth={2} className="threads-sidebar-status-icon threads-sidebar-status-icon--completed" aria-label="Agent finished" />
+      return <span className="threads-sidebar-status-icon threads-sidebar-status-icon--completed" title="Done"><CircleCheck size={14} strokeWidth={2} aria-label="Agent finished" /></span>
     case 'approval':
-      return <Shield size={14} strokeWidth={2} className="threads-sidebar-status-icon threads-sidebar-status-icon--question" aria-label="Agent needs approval" />
+      return <span className="threads-sidebar-status-icon threads-sidebar-status-icon--question" title="Needs your approval"><Shield size={14} strokeWidth={2} aria-label="Agent needs approval" /></span>
     case 'question':
-      return <MessageQuestion size={14} strokeWidth={2} className="threads-sidebar-status-icon threads-sidebar-status-icon--question" aria-label="Agent needs input" />
+      return <span className="threads-sidebar-status-icon threads-sidebar-status-icon--question" title="Asks you something"><MessageQuestion size={14} strokeWidth={2} aria-label="Agent needs input" /></span>
     case 'waiting':
-      return <CircleDotDashed size={14} strokeWidth={2} className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting" aria-label="Agent is waiting" />
+      return <span className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting" title="Waiting"><CircleDotDashed size={14} strokeWidth={2} aria-label="Agent is waiting" /></span>
     case 'paused':
-      return <Pause size={14} strokeWidth={2} className="threads-sidebar-status-icon threads-sidebar-status-icon--paused" aria-label={pausedStatusLabel(pause, Date.now())} />
+    {
+      const label = pausedStatusLabel(pause, Date.now())
+      return <span className="threads-sidebar-status-icon threads-sidebar-status-icon--paused" title={label}><Pause size={14} strokeWidth={2} aria-label={label} /></span>
+    }
     case 'quiet':
       return null
   }
@@ -135,12 +149,20 @@ export const ThreadExpiryIcon = memo(function ThreadExpiryIcon({ expiresAt, size
   )
 })
 
+/** What a paused thread's status says when its icon already says Paused: when its limit resets, else Paused. */
+function pausedTerseLabel(pause: Pick<TurnPause, 'until' | 'estimated'> | undefined, nowMs: number): string {
+  return pause && !pause.estimated ? `until ${formatPauseUntil(pause.until, nowMs)}` : 'Paused'
+}
+
 /**
- * The status and age in a Threads tab card's top line: Working 5m, Waiting, Approval, Input, Paused, Done, or its age.
+ * A thread's status and age, as an icon and words: Working 5m, Waiting, Approval, Input, Paused, Done, or its age.
  * `withAge` adds the age to Approval, Input, Done and Failed too (a thread link's card, which has no other time).
  * `linkStatus`: the status a thread link shows (`threadLinkStatus`), which keeps Done and Failed once the thread is quiet.
+ * `terse`: the icon says Working, Waiting, Paused and Done, so the words are only the time (5m, until 3:40 PM); the
+ * states that need the person or went wrong keep their word. `icon: false` leaves the icon out: a Projects tree row
+ * shows it in the gap before its title.
  */
-export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activity, live, awaitsApproval, updatedAt, withAge = false, setupFailed, linkStatus }: RowStatusProps & { updatedAt?: string; withAge?: boolean; linkStatus?: ThreadLinkStatus }) {
+export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activity, live, awaitsApproval, updatedAt, withAge = false, setupFailed, linkStatus, terse = false, icon = true }: RowStatusProps & { updatedAt?: string; withAge?: boolean; linkStatus?: ThreadLinkStatus; terse?: boolean; icon?: boolean }) {
   countRender(`SidebarStatus:${threadId}`)
   useAgeClock(true)
   const shown = useRowActivity(threadId, activity, live)
@@ -151,26 +173,29 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
   // Chat thread links share this card layout but have their own motion.
   const animateWorking = useAppStore((s) => status === 'working' && (linkStatus !== undefined || s.sidebarAnimations))
   const settledAge = withAge && age && age !== 'now' ? ` ${age}` : ''
+  const runningAge = age && age !== 'now' ? age : ''
   if (status === 'working') {
     return (
-      <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
-        {animateWorking && <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />}
-        Working{age && age !== 'now' ? ` ${age}` : ''}
+      <span className="threads-sidebar-card-status threads-sidebar-card-status-working" title={terse ? 'Working' : undefined}>
+        {icon && (animateWorking
+          ? <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
+          : terse && <span className="threads-sidebar-status-dot" aria-hidden="true" />)}
+        {terse ? runningAge : `Working${runningAge ? ` ${runningAge}` : ''}`}
       </span>
     )
   }
   if (status === 'waiting') {
     return (
-      <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
-        <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />
-        Waiting{age && age !== 'now' ? ` ${age}` : ''}
+      <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting" title={terse ? 'Waiting' : undefined}>
+        {icon && <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />}
+        {terse ? runningAge : `Waiting${runningAge ? ` ${runningAge}` : ''}`}
       </span>
     )
   }
   if (status === 'approval') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
-        <Shield size={12} strokeWidth={2} aria-hidden="true" />
+        {icon && <Shield size={12} strokeWidth={2} aria-hidden="true" />}
         Approval{settledAge}
       </span>
     )
@@ -178,23 +203,24 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
   if (status === 'question') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
-        <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
+        {icon && <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />}
         Input{settledAge}
       </span>
     )
   }
   if (status === 'paused') {
+    const now = Date.now()
     return (
-      <span className="threads-sidebar-card-status threads-sidebar-card-status-paused">
-        <Pause size={12} strokeWidth={2} aria-hidden="true" />
-        {pausedStatusLabel(pause, Date.now())}
+      <span className="threads-sidebar-card-status threads-sidebar-card-status-paused" title={terse ? pausedStatusLabel(pause, now) : undefined}>
+        {icon && <Pause size={12} strokeWidth={2} aria-hidden="true" />}
+        {terse ? pausedTerseLabel(pause, now) : pausedStatusLabel(pause, now)}
       </span>
     )
   }
   if (setupFailed && (status === 'quiet' || status === 'done' || status === 'failed')) {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-failed" title={setupFailedTitle(setupFailed)}>
-        <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
+        {icon && <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />}
         Didn't start
       </span>
     )
@@ -202,16 +228,16 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
   if (status === 'failed') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-failed">
-        <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
+        {icon && <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />}
         Failed{settledAge}
       </span>
     )
   }
   if (status === 'done') {
     return (
-      <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
-        <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
-        Done{settledAge}
+      <span className="threads-sidebar-card-status threads-sidebar-card-status-done" title={terse ? 'Done' : undefined}>
+        {icon && <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />}
+        {terse ? age : `Done${settledAge}`}
       </span>
     )
   }
