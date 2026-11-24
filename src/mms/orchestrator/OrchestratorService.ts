@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, appletReferenceLine, modelFacingReplyText, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appletFencesAsLines, modelFacingReplyText, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -12612,15 +12612,19 @@ export class OrchestratorService extends EventEmitter {
    * What a `publish_applet` call stages. A revision is checked against the applet's current revision now, so a stale one
    * is refused to the model instead of failing when the response completes; one with `edits` becomes the full source
    * of that revision with the edits applied. One revision of an applet per response: a second would be stale by then.
+   * Only a revision the thread shows is revised: one an Undo hid is neither named nor built on, so its source stays hidden.
    */
-  private stageableApplet(threadId: string, value: unknown, staged: readonly AppletSubmission[]): AppletSubmission {
+  private stageableApplet(threadId: string, messages: readonly ChatMessage[], value: unknown, staged: readonly AppletSubmission[]): AppletSubmission {
     const store = this.appletStore
     const args = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
     if (store && args && typeof args.appletId === 'string') {
       const appletId = args.appletId
       if (staged.some(source => source.appletId === appletId)) throw new AppletValidationError('This response already revises that applet. Put every change to it in one publish_applet call.')
       const head = store.head(threadId, appletId)
-      if (!head) throw new AppletValidationError(`There is no applet ${appletId} in this conversation.`)
+      const shown = this.shownAppletReferences(messages).filter(reference => reference.appletId === appletId)
+      if (!head || !shown.length) throw new AppletValidationError(`No applet ${appletId} is shown in this conversation.`)
+      if (!shown.some(reference => reference.revisionId === head.revisionId))
+        throw new AppletValidationError(`Applet ${appletId}'s newest revision is not shown in this conversation, so it cannot be revised. Publish a new applet instead.`)
       if (args.expectedRevision !== head.revisionId) throw new AppletValidationError(`Applet ${appletId} is at revision ${head.revisionId}, not ${String(args.expectedRevision)}. Revise that revision.`)
       if (args.edits !== undefined)
         return validateAppletSubmission(appletRevisionFromEdits(args, store.load(threadId, appletId, head.revisionId).source), { publishing: true })
@@ -15965,7 +15969,7 @@ export class OrchestratorService extends EventEmitter {
       }, { dropLate: true })
       const onPublishApplet = this.appletStore ? (value: unknown) => {
         if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
-        stagedApplets.push(this.stageableApplet(session.threadId, value, stagedApplets))
+        stagedApplets.push(this.stageableApplet(session.threadId, session.messages, value, stagedApplets))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
       // A bot's applets are in its activations' threads, which its turns have no list of: reading is for threads.
@@ -16313,8 +16317,9 @@ export class OrchestratorService extends EventEmitter {
     const actions = filterActionsForChatMode(parsedActions, mode)
     const replyOnlyText = stripActionBlocks(assistantText)
     const displayText = replyOnlyText + appletFences
-    // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source.
-    const resultText = replyOnlyText + stagedApplets.map(source => '\n\n' + appletReferenceLine(source)).join('')
+    // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source:
+    // by title until the reply publishes them, then as the reply shows them (below).
+    let resultText = appletFencesAsLines(displayText)
     // A tool call ends a reply row, so a turn's notes before its calls already have rows of their
     // own: the row that ends the turn (the open one, else the last closed one) holds the rest.
     const shownReplies = this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content))
@@ -16363,6 +16368,9 @@ export class OrchestratorService extends EventEmitter {
         finalMessage.presentationParts = publishAppletPresentation(this.appletStore, { threadId: session.threadId, messageId: finalMessage.id, turnId, content: finalMessage.content })
         this.persist(true)
         this.emitMessageUpdated(finalMessage)
+        // The last row's applets as published (or not): the turn's earlier rows, then that row with its references.
+        if (finalMessage.presentationParts && displayText.endsWith(finalMessage.content))
+          resultText = appletFencesAsLines(displayText.slice(0, displayText.length - finalMessage.content.length) + modelFacingReplyText(finalMessage))
       }
     }
 

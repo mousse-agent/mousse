@@ -77,6 +77,14 @@ describe('readAppletSource', () => {
     expect(readAppletSource(many, { part: 'js', search: 'hit' })).toMatchObject({ totalMatches: 30, truncated: true, matches: expect.toSatisfy((matches: unknown[]) => matches.length === 20) })
   })
 
+  it('shows a match deep in a long minified line, and keeps every match together within a page', () => {
+    const minified = { ...base, js: Array.from({ length: 25 }, (_, i) => 'x'.repeat(20_000) + `needle${i}` + 'y'.repeat(20_000)).join('\n') }
+    const found = readAppletSource(minified, { part: 'js', search: 'needle' }) as { matches: Array<{ line: number; column?: number; text: string }> }
+    expect(found.matches[0]).toMatchObject({ line: 1, column: 20_001, text: expect.stringContaining('needle0') })
+    expect(found.matches.every((match, i) => match.text.includes(`needle${i}`))).toBe(true)
+    expect(found.matches.reduce((chars, match) => chars + match.text.length, 0)).toBeLessThanOrEqual(APPLET_READ_MAX_CHARS)
+  })
+
   it('never returns more than the most a page may hold', () => {
     const big = { ...base, js: 'x'.repeat(APPLET_READ_MAX_CHARS * 2) }
     expect((readAppletSource(big, { part: 'js', limit: APPLET_READ_MAX_CHARS }).text as string).length).toBe(APPLET_READ_MAX_CHARS)

@@ -1706,14 +1706,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const all = host.threadMessages(threadId)
     if (view === 'summary') {
       const { status, activeRunId, waitingOnSubagents, ...about } = localSummary(meta, all.length)
-      const lastReply = [...all].reverse().find((message) => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim())
+      const lastReply = [...all].reverse().map((message) => message.role === 'assistant' ? modelFacingReplyText(message) : '').find((text) => text.trim())
       return botData(`Thread «${title}»`, {
         threadId,
         link: threadLink(threadId),
         ...about,
         status: waitingOnSubagents ? 'waiting on subagents' : status === 'awaiting_input' ? 'waiting for your owner' : status === 'active' ? 'working' : 'idle',
         ...(activeRunId ? { activeRunId } : {}),
-        ...(lastReply ? { lastReply: oneLine(lastReply.content as string) } : {}),
+        ...(lastReply ? { lastReply: oneLine(lastReply) } : {}),
         ...(meta.createdByThreadId === undefined ? {} : { startedByYou: meta.createdByThreadId === callerThreadId }),
         ...(meta.lineage ? { lineage: { parentThreadId: meta.lineage.parentThreadId } } : {}),
         hint: `${SUMMARY_NEXT} Its run events (runs, tool calls, why a run failed) are view "events".`

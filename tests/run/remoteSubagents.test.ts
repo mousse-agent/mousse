@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { DomainRpcError } from '../../src/mms/protocol/domainRegistry'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { RemoteComputer, RemoteComputersPort } from '../../src/mms/protocol/remoteComputersPort'
-import type { RemoteSubagents } from '../../src/mms/orchestrator/RemoteSubagents'
+import { finalAssistantText, type RemoteSubagents } from '../../src/mms/orchestrator/RemoteSubagents'
 import { useSubagentWorld, type Json } from './subagentWorld'
 import { waitFor } from './phase6Fixture'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
@@ -560,5 +560,16 @@ describe('remote subagents (issue #469)', () => {
     w.steps['go'] = async (tools) => { w.out.started = await w.start(tools, 'Mac tester', { computer: MAC, workspace: 'isolated', role: 'implement' }) }
     await w.say('go')
     expect(w.out.started).toMatchObject({ started: false, code: 'remote_unavailable' })
+  })
+})
+
+describe('a remote subagent\'s result', () => {
+  it('names an applet its reply published by one line, not the source its stored reply keeps', () => {
+    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Costs', description: '' }
+    const messages = [
+      { id: 'u1', role: 'user', content: 'Chart it' },
+      { id: 'a1', role: 'assistant', content: 'Here.\n\n```mousse-applet\n{"html":"<h1>big</h1>"}\n```', presentationParts: [{ type: 'text', text: 'Here.\n\n' }, { type: 'applet', reference }] }
+    ]
+    expect(finalAssistantText(messages, 'u1')).toBe('Here.\n\n[Applet: Costs (appletId applet_a, revision rev_a)]')
   })
 })

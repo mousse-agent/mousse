@@ -217,6 +217,19 @@ export function appletReferenceLine(applet: { title: string; appletId?: string; 
 export function modelFacingReplyText(message: { content?: unknown; presentationParts?: unknown }): string {
   const parts = Array.isArray(message.presentationParts) ? (message.presentationParts as AppletPresentationPart[]) : undefined
   if (parts?.some((part) => part?.type === 'applet'))
-    return parts.map((part) => (part.type === 'applet' ? appletReferenceLine(part.reference) : part.text)).join('')
+    return parts.map((part, at) => (part.type === 'applet' ? appletReferenceLine(part.reference) + lineEnd(parts, at) : part.text)).join('')
   return typeof message.content === 'string' ? message.content : ''
+}
+/** A fence ends its line, so the line standing for it does too, unless it ends the text. */
+const lineEnd = (parts: readonly unknown[], at: number): string => (at < parts.length - 1 ? '\n' : '')
+/**
+ * `text` with each valid applet fence as one line naming it (`[Applet: title]`), for a reader that gets the applet's
+ * name but not its source (a run's result before or without publication). A fence that is not a valid applet stays.
+ */
+export function appletFencesAsLines(text: string): string {
+  const parts = extractAppletParts(text, true)
+  if (!parts.some((part) => part.type === 'submission')) return text
+  return parts
+    .map((part, at) => (part.type === 'submission' ? appletReferenceLine(part.submission) + lineEnd(parts, at) : part.type === 'error' ? part.source : part.text))
+    .join('')
 }

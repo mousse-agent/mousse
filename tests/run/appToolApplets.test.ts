@@ -86,6 +86,11 @@ describe('publish_applet from a vendor turn', () => {
         return 'Here is the chart.'
       }
       const { appletId, revisionId } = shown!
+      if (input.prompt === 'Revise it again') {
+        // The newest revision's reply was undone: neither it nor the one before it can be built on, and its id stays unnamed.
+        results.hiddenHead = await callTool(mcp!, 'publish_applet', { schemaVersion: 1, appletId, expectedRevision: revisionId, edits: [{ part: 'js', old_str: 'void 0', new_str: '' }] })
+        return 'Could not.'
+      }
       results.sizes = await callTool(mcp!, 'read_applet', { appletId })
       results.page = await callTool(mcp!, 'read_applet', { appletId, part: 'html', offset: 1, limit: 3 })
       results.search = await callTool(mcp!, 'read_applet', { appletId, part: 'css', search: 'teal' })
@@ -126,6 +131,14 @@ describe('publish_applet from a vendor turn', () => {
     const revised = store.load(d.thread.id, shown.appletId, head.revisionId)
     expect(revised.previousRevisionId).toBe(shown.revisionId)
     expect(revised.source).toMatchObject({ title: 'Costs', description: 'Costs chart', html: '<h1>Costs</h1><p>2026</p>', css: 'h1 { color: crimson; }', js: 'void 0', data: { rows: 3 }, stateVersion: 2 })
+
+    // Undo hides the reply that shows the new revision.
+    const undone = d.orch.getMessages(d.thread.id).find((message) => message.presentationParts?.some((part) => part.type === 'applet' && part.reference.revisionId === head.revisionId))!
+    undone.hidden = true
+    await d.send('Revise it again')
+    expect(refusalOf(results.hiddenHead)?.message).toMatch(/newest revision is not shown in this conversation/)
+    expect(refusalOf(results.hiddenHead)?.message).not.toContain(head.revisionId)
+    expect(store.head(d.thread.id, shown.appletId)!.revisionId).toBe(head.revisionId)
   }, 30_000)
 
   it('without an applet store the call returns "Applets are off for this turn." and nothing is staged', async () => {

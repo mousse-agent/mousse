@@ -238,13 +238,28 @@ it('hands a published applet to other models as one line, while the stored reply
   // Stored for recovery and bots' chats: the fence with its source.
   expect(reply.content).toContain(JSON.stringify(source.js))
   // A parent's result, a handoff to another model, and an agent's thread_read: the line, not the source.
-  expect(results.at(-1)).toBe(`Here is the chart.\n\n[Applet: Calculator]`)
+  expect(results.at(-1)).toBe(`Here is the chart.\n\n${line}`)
   const handedOver = transcriptOf!(thread.id).find((item) => item.role === 'assistant')
   expect(handedOver?.text).toBe(`Here is the chart.\n\n${line}`)
   const page = await request(main, 'thread.messages', { threadId: thread.id, index: 0 }) as { messages: Array<{ role: string; content: string }> }
   const read = page.messages.find((message) => message.role === 'assistant')
   expect(read?.content).toContain(line)
   expect(read?.content).not.toContain('mousse-applet')
+})
+
+it('gives a parent the line, not the source, of an applet the model wrote as a fence', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  main.orchestrator.setHarness(testHarness({ adapters: [piAdapter(() => 'Before\n' + fence(source) + '\nAfter')], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+  const ref = reference(main, thread.id)
+  expect(results.at(-1)).toBe(`Before\n[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]\nAfter`)
 })
 
 it('keeps one reply row when a tool-published applet follows a reply that already closed', async () => {

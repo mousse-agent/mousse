@@ -13,6 +13,8 @@ export const APPLET_READ_DEFAULT_CHARS = 16 * 1024
 export const APPLET_READ_MAX_CHARS = 64 * 1024
 const SEARCH_MAX_MATCHES = 20
 const SEARCH_CONTEXT_LINES = 2
+/** At most this much text per match, so all the matches together stay within a page (`APPLET_READ_MAX_CHARS`). */
+const SEARCH_EXCERPT_CHARS = 3 * 1024
 
 const isPart = (value: unknown): value is AppletPart => (APPLET_PARTS as readonly unknown[]).includes(value)
 
@@ -94,16 +96,20 @@ export function readAppletSource(
   if (args.search !== undefined) {
     if (typeof args.search !== 'string' || !args.search) throw new AppletValidationError('search must be non-empty text.')
     const lines = text.split('\n')
-    const matches: Array<{ line: number; text: string }> = []
+    const matches: Array<{ line: number; column?: number; text: string }> = []
     let total = 0
     for (let index = 0; index < lines.length; index += 1) {
-      if (!lines[index]!.includes(args.search)) continue
+      const column = lines[index]!.indexOf(args.search)
+      if (column < 0) continue
       total += 1
       if (matches.length >= SEARCH_MAX_MATCHES) continue
       const from = Math.max(0, index - SEARCH_CONTEXT_LINES)
       const to = Math.min(lines.length, index + SEARCH_CONTEXT_LINES + 1)
-      // A minified part can be one long line: each match shows at most a page of it.
-      matches.push({ line: index + 1, text: lines.slice(from, to).join('\n').slice(0, APPLET_READ_DEFAULT_CHARS) })
+      const context = lines.slice(from, to).join('\n')
+      // A minified part can be one long line: a long excerpt is cut around the match, so the match is always in it.
+      const hit = lines.slice(from, index).reduce((at, line) => at + line.length + 1, 0) + column
+      const start = context.length <= SEARCH_EXCERPT_CHARS ? 0 : Math.max(0, Math.min(hit - SEARCH_EXCERPT_CHARS / 2, context.length - SEARCH_EXCERPT_CHARS))
+      matches.push({ line: index + 1, ...(start ? { column: column + 1 } : {}), text: context.slice(start, start + SEARCH_EXCERPT_CHARS) })
     }
     return { part: args.part, search: args.search, matches, totalMatches: total, ...(total > matches.length ? { truncated: true } : {}) }
   }
