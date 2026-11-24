@@ -27,6 +27,19 @@
       "expiresAt": "2026-11-23T18:57:13.944Z"
     },
     {
+      "task": "issue-1823-inline-attachment-chips",
+      "session": "Avarnics-Mac-mini.local-20cb73",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "issue-1823-inline-attachment-chips",
+      "paths": [
+        "src/renderer/components/ChatComposer.tsx",
+        "src/renderer/chat/components/agent-elements/user-message.tsx",
+        "src/renderer/lib"
+      ],
+      "claimedAt": "2026-11-24T05:33:06.669Z",
+      "expiresAt": "2026-11-24T07:33:06.669Z"
+    },
+    {
       "task": "mousse/per-provider-limit-refresh-buttons",
       "session": "agibook-9f3712",
       "machine": "agibook",
