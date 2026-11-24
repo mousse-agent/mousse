@@ -56,6 +56,22 @@
       "expiresAt": "2026-11-24T17:13:10.735Z"
     },
     {
+      "task": "composer-shows-connecting",
+      "session": "agibook-b229e4",
+      "machine": "agibook",
+      "branch": "composer-shows-connecting",
+      "paths": [
+        "src/renderer/components/ChatComposer.tsx",
+        "src/renderer/components/ComposerFooter.tsx",
+        "src/renderer/components/WarmChat.tsx",
+        "src/preload/index.ts",
+        "src/main/ipc/registerGuiIpc.ts",
+        "src/renderer/lib/serviceConnection.ts"
+      ],
+      "claimedAt": "2026-11-24T20:54:42.403Z",
+      "expiresAt": "2026-11-24T22:54:42.403Z"
+    },
+    {
       "task": "computer-use-awareness-setup-card",
       "session": "LAPTOP-HIEROJK7-7cd74d",
       "machine": "LAPTOP-HIEROJK7",
