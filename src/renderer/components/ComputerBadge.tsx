@@ -26,14 +26,18 @@ interface ComputerBadgeViewProps {
   className?: string
 }
 
-/** Which computer runs a thread, and that it cannot be reached when it cannot. */
+/**
+ * Which computer runs a thread. One that cannot be reached (offline, or not sharing its threads) has its icon struck
+ * through; the tooltip says which and since when.
+ */
 export function ComputerBadgeView({ name, state, withName = false, offline, of, className }: ComputerBadgeViewProps) {
   const title = computerBadgeTitle(name, state, offline, of)
   return (
     <span className={`computer-badge${className ? ` ${className}` : ''}`} data-state={state} title={title}>
-      <Server size={withName ? 11 : 12} strokeWidth={2} aria-label={title} />
+      <span className="computer-badge-icon">
+        <Server size={withName ? 11 : 12} strokeWidth={2} aria-label={title} />
+      </span>
       {withName && <span className="computer-badge-name">{name}</span>}
-      {withName && state !== 'online' && <span className="computer-badge-state">{state === 'offline' ? 'offline' : 'not shared'}</span>}
     </span>
   )
 }

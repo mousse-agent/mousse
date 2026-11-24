@@ -3,6 +3,7 @@ import { Folder, GitBranch, Monitor, Server } from '../lib/icons'
 import { ProviderIcon } from '../lib/providerIcons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { UNKNOWN_COMPUTER_NAME, useComputer } from '../lib/computers'
+import { ThreadComputerBadge } from './ComputerBadge'
 import { useThreadBranch } from '../hooks/useThreadBranch'
 import { useAppStore } from '../stores/appStore'
 import { ProjectIcon } from './ProjectIcon'
@@ -40,31 +41,46 @@ export function ThreadModelIcon({ thread }: { thread: ModelThread }) {
   )
 }
 
-type LineThread = Pick<Thread, 'projectId' | 'node' | 'worktreeEnabled' | 'modelOverride'>
+type LineThread = Pick<Thread, 'projectId' | 'node' | 'offline' | 'notShared' | 'worktreeEnabled' | 'modelOverride'>
 
 /**
- * A thread's lower line, on a Projects tree row and a Threads tab card alike: its branch (with the branch icon when the
- * thread has a worktree of its own) or what goes in its place, then its pull requests and its model's logo.
+ * A thread's lower line, on a Projects tree row and a Threads tab card alike: the computer it runs on (when another),
+ * its branch (with the branch icon when the thread has a worktree of its own), its pull requests, then `end` (a tree
+ * row's time) and its model's logo.
+ *
+ * A thread with none of the first three (no Git, no other computer, no pull request) has nothing of its own for the
+ * line: it is marked `data-single`, so a tree row puts what is left on its title's line, and with `hideEmpty` (a card,
+ * whose logo sits on its top line) it shows nothing.
  */
-export function ThreadBranchLine({ thread, threadId, pullRequests, lead, className }: {
+export function ThreadBranchLine({ thread, threadId, pullRequests, end, wordy = false, model = true, hideEmpty = false, className }: {
   thread: LineThread
   threadId: string
   pullRequests: readonly ThreadPullRequestSummary[]
-  /** Shown before the branch (a card's computer), or alone when there is no branch. */
-  lead?: ReactNode
+  /** After the pull requests, before the logo. */
+  end?: ReactNode
+  /** `end` has words (Approval, until 3:40 PM): the line stays, so they don't take the title's room. */
+  wordy?: boolean
+  /** The model's logo at the end. */
+  model?: boolean
+  hideEmpty?: boolean
   className: string
 }) {
   // None in a project without Git (or another computer's).
   const branch = useThreadBranch(thread, threadId)
+  const single = !wordy && !thread.node && !branch?.branch && pullRequests.length === 0
+  if (single && hideEmpty) return null
   return (
-    <span className={className}>
-      <span className="threads-sidebar-branch">
-        {lead}
-        {branch?.worktree && <GitBranch size={11} strokeWidth={2} className="threads-sidebar-branch-icon" aria-label="Own worktree" />}
-        {branch?.branch && <span className="threads-sidebar-branch-name">{branch.branch}</span>}
-      </span>
+    <span className={className} data-single={single || undefined}>
+      {!single && (
+        <span className="threads-sidebar-branch">
+          <ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />
+          {branch?.worktree && <GitBranch size={11} strokeWidth={2} className="threads-sidebar-branch-icon" aria-label="Own worktree" />}
+          {branch?.branch && <span className="threads-sidebar-branch-name">{branch.branch}</span>}
+        </span>
+      )}
       <ThreadPullRequestCount pullRequests={pullRequests} />
-      <ThreadModelIcon thread={thread} />
+      {end}
+      {model && <ThreadModelIcon thread={thread} />}
     </span>
   )
 }

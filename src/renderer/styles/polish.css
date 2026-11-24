@@ -385,6 +385,7 @@ html[data-theme='high-contrast'] {
 
 /* The list sits inside a Collapse, so its bottom margin adds to the project's 2px: 4px + 2px keeps the 6px gap. */
 .app .threads-sidebar-children {
+  --threads-sidebar-tree-indent: calc(var(--ui-row-x) + 14px);
   margin: 1px 0 4px calc(var(--ui-row-x) + 7px);
   padding-left: 7px;
 }

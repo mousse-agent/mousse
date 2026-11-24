@@ -68,11 +68,13 @@
   will-change: auto;
 }
 
-/* Threads sidebar: the thread whose message is being read aloud. */
+/* Threads sidebar: the thread whose message is being read aloud. Its mark (the wave) takes its status's place, and
+   Pause and Stop take its time's and model's place: on a two-line tree row the lower line, on a one-line row the end of
+   the title's line, on a card its top line. The title keeps its room. */
 .threads-sidebar-speech {
   position: absolute;
   top: 50%;
-  right: 6px;
+  right: calc(var(--ui-row-x, 9px) - 4px);
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -80,8 +82,23 @@
   transform: translateY(-50%);
 }
 
-.threads-sidebar-thread-container:has(.threads-sidebar-card) .threads-sidebar-speech {
+.threads-sidebar-speech-mark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+
+.threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-speech {
+  top: calc(50% + 9.5px);
+}
+
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread > .threads-sidebar-thread-text > .threads-sidebar-thread-sub[data-single]) > .threads-sidebar-speech {
+  top: 50%;
+}
+
+.threads-sidebar-thread-container:has(> .threads-sidebar-card) > .threads-sidebar-speech {
   top: 9px;
+  right: 6px;
   transform: none;
 }
 
@@ -102,32 +119,33 @@
   background: var(--ui-pressed, rgba(127, 127, 127, 0.18));
 }
 
-/* Room for the indicator: the row's content and the hover actions sit left of it. */
+/* What Pause and Stop cover: the time and the model's logo give way to them, and the row keeps their room. */
 .app .threads-sidebar-thread-container.speaking {
-  --sidebar-speech-wave-room: 17px;
-  /* The Stop button beside Pause. */
-  --sidebar-speech-stop-room: 21px;
-  --thread-actions-room: calc(97px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
+  --sidebar-speech-room: 40px;
 }
 
-.app[data-sidebar-motion='off'] .threads-sidebar-thread-container.speaking {
-  --sidebar-speech-wave-room: 0px;
+.app .threads-sidebar-thread-container.speaking:has(> .threads-sidebar-card) {
+  /* The wave before Pause, on a card. */
+  --sidebar-speech-room: 58px;
 }
 
-.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread {
-  padding-right: calc(27px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
+.app .threads-sidebar-thread-container.speaking > .threads-sidebar-thread > .threads-sidebar-thread-text > .threads-sidebar-thread-sub > :not(.threads-sidebar-branch),
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-card-meta > :is(.threads-sidebar-card-status, .threads-sidebar-card-age, .threads-sidebar-model-icon) {
+  display: none;
 }
 
-.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread:not(.threads-sidebar-card) {
-  padding-right: var(--thread-actions-room);
+.app .threads-sidebar-thread-container.speaking > .threads-sidebar-thread > .threads-sidebar-thread-text > .threads-sidebar-thread-sub,
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-card-meta {
+  padding-right: var(--sidebar-speech-room);
 }
 
-.app .threads-sidebar-thread-container.speaking > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
-  right: calc(29px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
+/* Where Pause and Stop share the actions' line (a one-line row, a card), the actions sit left of them. */
+.app .threads-sidebar-thread-container.speaking:is(:has(> .threads-sidebar-card), :has(> .threads-sidebar-thread > .threads-sidebar-thread-text > .threads-sidebar-thread-sub[data-single])) {
+  --thread-actions-room: calc(76px + var(--sidebar-speech-room));
 }
 
-.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-actions {
-  right: calc(25px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
+.app .threads-sidebar-thread-container.speaking:is(:has(> .threads-sidebar-card), :has(> .threads-sidebar-thread > .threads-sidebar-thread-text > .threads-sidebar-thread-sub[data-single])) > .threads-sidebar-thread-actions {
+  right: calc(4px + var(--sidebar-speech-room));
 }
 
 .speech-settings-error,
