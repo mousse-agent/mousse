@@ -131,7 +131,7 @@ export function AllowPrompt({
   const [fields, setFields] = useState<AccessPresetFields>(defaultLevel)
   const name = approval.name || 'This device'
   return (
-    <div className="engine-allow" role="group" aria-label="Pairing request">
+    <div className="engine-allow" role="group" aria-label="Pairing request" data-mousse-decision="">
       <p className="engine-allow-title">Let {name} use this computer?</p>
       {line && <p className="settings-muted">{line}</p>}
       <LevelPicker fields={fields} onChange={setFields} busy={busy} />
