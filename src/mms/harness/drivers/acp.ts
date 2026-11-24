@@ -581,7 +581,8 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     adapter,
     ...registryRuntime,
     configured: () => {
-      if (!source || state.signedOut) return false
+      // A preset with a program of its own (`hooks.program`) needs no command: `launchOf` finds it.
+      if ((!source && !hooks.program) || state.signedOut) return false
       if (registrySource && (!installedNow() || managed()?.broken)) return false
       try {
         launchOf('turn')

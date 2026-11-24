@@ -109,6 +109,16 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     customModels: false,
     homeHint: '~/.grok'
   },
+  opencode: {
+    label: 'OpenCode',
+    iconId: 'opencode',
+    family: 'agent',
+    description: 'The open-source OpenCode agent, with the model providers you signed in to in OpenCode.',
+    // OpenCode keeps one sign-in per computer (its XDG folders): a second entry would share it.
+    multiInstance: false,
+    customModels: false,
+    addHint: 'Mousse uses opencode on this computer, or installs it after adding.'
+  },
   acp: {
     label: 'ACP agent',
     iconId: 'acp',

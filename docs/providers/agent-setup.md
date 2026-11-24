@@ -82,6 +82,28 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
   entry (Move…, optionally with the same API key). An xAI account sign-in is not carried over: sign
   in to Grok on its entry.
 
+## OpenCode
+
+OpenCode runs `opencode acp`, with the entry's own arguments after `acp`. Mousse runs the executable
+set on the entry, else the copy Mousse installed, else the `opencode` on PATH or in an installer
+folder (`$OPENCODE_INSTALL_DIR`, `$XDG_BIN_DIR`, `~/bin`, `~/.opencode/bin`).
+
+- **One entry.** OpenCode keeps its sign-ins and settings in this computer's folders
+  (`~/.config/opencode`, `~/.local/share/opencode/auth.json`) and has no home variable, so a second
+  entry would share them. Its sign-in follows the methods OpenCode offers over ACP. Sign-out forgets
+  Mousse's record only; it never signs OpenCode itself out.
+- **Managed copies.** Mousse installs the release the ACP registry's `opencode` entry names, checked
+  against the registry's SHA-256 and recorded like a registry agent; every launch checks its files
+  first. A managed copy runs with `OPENCODE_DISABLE_AUTOUPDATE=1`, so it never replaces its own
+  files. The user's own `opencode` runs as the user set it up.
+- **Updates.** A newer `@opencode/cli` on npm offers the owner's command: `opencode upgrade` for the
+  installer's copy, `npm`, `pnpm` or `bun` global installs, or
+  `brew upgrade anomalyco/tap/opencode-v2`. A managed copy updates with Reinstall.
+- **More ACP agents…** no longer lists `opencode` or `opencode-v2`. Entries added from the registry
+  before keep working as registry agents.
+- The model APIs OpenCode Zen and OpenCode Go (`pi:opencode`, `pi:opencode-go`) are separate: they
+  run on the Mousse agent and stay offered after OpenCode is added.
+
 ## Claude Code, a second account
 
 For the client name Mousse gives Claude Code (`mousse`, on every route), and what proxies do

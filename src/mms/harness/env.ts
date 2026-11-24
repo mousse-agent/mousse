@@ -144,6 +144,24 @@ export function agyStandalonePaths(base: NodeJS.ProcessEnv = process.env, platfo
 }
 
 /**
+ * Where OpenCode's installer puts `opencode`, even before PATH is updated here: `~/.opencode/bin`,
+ * and the folders earlier installers honoured (`$OPENCODE_INSTALL_DIR`, `$XDG_BIN_DIR`, `~/bin`).
+ * Only absolute folders, each once, searched after PATH.
+ */
+export function opencodeStandalonePaths(base: NodeJS.ProcessEnv = process.env): string[] {
+  const variable = (name: string) => Object.entries(base).find(([key]) => key.toUpperCase() === name)?.[1]?.trim()
+  const home = (process.platform === 'win32' ? variable('USERPROFILE') : variable('HOME')) || homedir()
+  const candidates = [variable('OPENCODE_INSTALL_DIR'), variable('XDG_BIN_DIR'), join(home, 'bin'), join(home, '.opencode', 'bin')]
+  const paths: string[] = []
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute(candidate)) continue
+    const path = resolve(candidate)
+    if (!paths.includes(path)) paths.push(path)
+  }
+  return paths
+}
+
+/**
  * How the environment of an instance with its own home is built, for the drivers that take part
  * (`ownedLaunchEnv`). Mousse's own environment may hold the user's sign-in in more places than a
  * list of credential names can follow, so the families that choose or hold a credential are closed:
@@ -329,7 +347,7 @@ export function instanceEnv(input: {
   if (own) env = withUserEnv(env, { ...own })
   // Standalone installs are found after PATH, wherever the instance's home is.
   const extraSearch = input.driver === 'grok' ? [grokStandaloneBin(base)] : input.driver === 'codex' ? codexStandalonePaths(base)
-    : input.driver === 'antigravity' ? agyStandalonePaths(base) : []
+    : input.driver === 'antigravity' ? agyStandalonePaths(base) : input.driver === 'opencode' ? opencodeStandalonePaths(base) : []
   return {
     instanceId: input.instanceId,
     driver: input.driver,

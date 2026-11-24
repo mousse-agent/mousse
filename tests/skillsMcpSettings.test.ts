@@ -126,7 +126,7 @@ describe('Skills & MCP settings', () => {
     expect(html).toContain('Other agents reach the servers that are on through Mousse.')
     // Where the tools come from, and why they can show twice, is one Details away.
     expect(html).toMatch(/<button[^>]*class="settings-more-btn"[^>]*aria-expanded="false"[^>]*>Details<\/button><span[^>]*hidden=""[^>]*>[^<]*mousse-relay[^<]*appear twice/)
-    for (const label of ['Claude Code', 'Codex', 'Cursor', 'ACP agents', 'Antigravity', 'Grok']) expect(html).toContain(`Share MCP servers with ${label}`)
+    for (const label of ['Claude Code', 'Codex', 'Cursor', 'ACP agents', 'Antigravity', 'Grok', 'OpenCode']) expect(html).toContain(`Share MCP servers with ${label}`)
     for (const runtime of MCP_RELAY_RUNTIMES) {
       expect(html).toMatch(new RegExp(`id="mcp-relay-${runtime}"[^>]*aria-checked="true"|aria-checked="true"[^>]*id="mcp-relay-${runtime}"`))
     }

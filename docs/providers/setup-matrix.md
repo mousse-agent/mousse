@@ -50,6 +50,14 @@ works and [compatibility.md](compatibility.md) for the agent versions.
 | Installed by Mousse | API key | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Install from npm was tested against a local registry (#226); no run with a real key. |
 | Custom command or executable | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: An executable set in Settings starts like the one on PATH; it was not run separately. |
 
+## OpenCode
+
+| Source | Sign-in | OS | State |
+|---|---|---|---|
+| On PATH | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Finding opencode on PATH and in its installer's folders was tested with a fake opencode; no run of the real agent through Mousse. |
+| Installed by Mousse | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: Install from the ACP registry's opencode entry was tested with a fake registry and download; no live install or sign-in. |
+| Custom command or executable | Account in the agent's home | Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64 | Untested: An executable set in Settings starts like the one on PATH; it was not run separately. |
+
 ## Cursor
 
 | Source | Sign-in | OS | State |

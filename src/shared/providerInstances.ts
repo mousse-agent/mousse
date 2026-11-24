@@ -6,9 +6,9 @@ import { AppError } from './errors'
  * of a driver with a stable id. Every caller that picks an agent selects `{ instanceId, model }`.
  * In v1 each vendor driver has exactly one instance, and each pi-ai provider is its own instance.
  */
-export type ProviderDriverKind = 'pi' | 'claude' | 'antigravity' | 'codex' | 'acp' | 'cursor' | 'grok'
+export type ProviderDriverKind = 'pi' | 'claude' | 'antigravity' | 'codex' | 'acp' | 'cursor' | 'grok' | 'opencode'
 
-export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = ['pi', 'claude', 'antigravity', 'codex', 'acp', 'cursor', 'grok']
+export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = ['pi', 'claude', 'antigravity', 'codex', 'acp', 'cursor', 'grok', 'opencode']
 
 export interface ProviderInstanceConfig {
   driver: ProviderDriverKind
@@ -61,7 +61,9 @@ const LEGACY_PROVIDER_BY_DRIVER: Record<Exclude<ProviderDriverKind, 'pi'>, strin
   codex: 'codex',
   acp: '',
   cursor: '',
-  grok: ''
+  grok: '',
+  // Never `opencode`: that names the OpenCode Zen model API (`pi:opencode`), which Pi runs.
+  opencode: ''
 }
 
 /**
