@@ -194,6 +194,14 @@ export class MmsProtocolError extends Error {
   }
 }
 
+/** How long a connection waits for the service to answer its handshake. */
+export const HELLO_TIMEOUT_MS = 10_000
+/**
+ * The code of the error a connection fails with when the service accepted it but never answered the handshake: the
+ * process is there, but its main thread does not run (`GuiMmsController` replaces such a service).
+ */
+export const HELLO_TIMEOUT_CODE = 'hello_timeout'
+
 export interface LocalMmsClientOptions {
   homeDir: string
   ownerToken: string
@@ -203,6 +211,8 @@ export interface LocalMmsClientOptions {
   /** Override endpoint path (tests). */
   endpoint?: string
   requestTimeoutMs?: number
+  /** How long the service has to answer the handshake (`HELLO_TIMEOUT_MS`); tests shorten it. */
+  helloTimeoutMs?: number
   /** Identical concurrent calls of a `SHARED_READ_METHODS` method share one request (GUI windows). */
   shareIdenticalReads?: boolean
 }
@@ -350,7 +360,10 @@ export class LocalMmsClient implements MmsClient {
         resolve(hello)
       }
 
-      const timer = setTimeout(() => fail(new Error('Hello timeout')), 10_000)
+      const timer = setTimeout(
+        () => fail(Object.assign(new Error('Hello timeout'), { code: HELLO_TIMEOUT_CODE })),
+        this.opts.helloTimeoutMs ?? HELLO_TIMEOUT_MS
+      )
 
       const onConnect = (): void => {
         try {

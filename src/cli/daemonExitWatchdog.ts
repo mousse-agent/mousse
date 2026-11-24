@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
 import { getLegacyStopRequestPath, getMmsStopRequestPath } from './mmsRuntime'
 
@@ -83,5 +84,25 @@ export function startDaemonExitWatchdog(opts: DaemonExitWatchdogOptions): Daemon
       worker.postMessage('stop')
       void worker.terminate().catch(() => undefined)
     }
+  }
+}
+
+/**
+ * Ends another service process the way the watchdog ends its own (`end` above): on Windows its whole tree with
+ * `taskkill /T /F`, so the agents, terminals and helpers it started go too; elsewhere with `SIGKILL`. For a service
+ * that was asked to stop and is still there after its watchdog's deadline, because its watchdog cannot run either (the
+ * whole process is frozen) or it predates the watchdog. Never this process.
+ */
+export async function endDaemonProcess(pid: number): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return
+  if (process.platform === 'win32') {
+    await new Promise<void>((resolve) => {
+      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10_000 }, () => resolve())
+    })
+  }
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    /* already gone */
   }
 }
