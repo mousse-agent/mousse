@@ -51,6 +51,16 @@ export interface EngineHostPort {
   tunnel?(connection: EngineConnection, stream: EngineStream): void
   /** The caller said its name in `hello` (`<computer> (<profile>)`, or empty) and its app's session features. */
   calledBy?(caller: EngineCaller, name: string, features: string[]): void
+  /** The session features said in the hello reply (`SESSION_FEATURES` without it). */
+  features?(): readonly string[]
+  /**
+   * The caller opened its `access.*` exchange (`access.open`) on `channel`, and later messages on it. The caller is
+   * checked again for each one; without this port `access.open` is `bad_request`.
+   */
+  access?: {
+    open(caller: EngineCaller, connection: EngineConnection, channel: Channel): void
+    message(caller: EngineCaller, channel: Channel, header: EngineMessage['header']): void
+  }
 }
 
 /**
@@ -60,6 +70,8 @@ export interface EngineHostPort {
  */
 export class EngineHost {
   private readonly subscriptions = new Set<HostSubscription>()
+  /** The caller's `access.*` exchanges on this connection (opened with `access.open`). */
+  private readonly accessChannels = new WeakSet<Channel>()
   private closed = false
   constructor(
     readonly connection: EngineConnection,
@@ -163,6 +175,16 @@ export class EngineHost {
     const h = message.header
     switch (label) {
       case 'mousse.hello':
+        if (this.accessChannels.has(channel)) {
+          this.port.access!.message(caller, channel, h)
+          return
+        }
+        if (h.t === 'access.open') {
+          if (!first || !this.port.access) throw new NetError('bad_request')
+          this.accessChannels.add(channel)
+          this.port.access.open(caller, this.connection, channel)
+          return
+        }
         if (h.t === 'hello') {
           const features = Array.isArray(h.features)
             ? h.features.filter((feature): feature is string => typeof feature === 'string')
@@ -172,7 +194,7 @@ export class EngineHost {
             t: 'hello',
             proto: 1,
             name: this.port.name(),
-            features: [...SESSION_FEATURES]
+            features: [...(this.port.features?.() ?? SESSION_FEATURES)]
           })
         }
         else if (h.t === 'pairback') {

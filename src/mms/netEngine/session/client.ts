@@ -47,6 +47,8 @@ export interface EngineClientPort {
    * client's pairing and the client is live. No signature or v1 author check: the pinned channel is the proof.
    */
   verify(stream: StreamId, record: StoredRecord, snapshot: boolean, client: EngineClient): void
+  /** The session features said in `hello` (`SESSION_FEATURES` without it). */
+  features?(): readonly string[]
 }
 
 const recordsOf = (message: EngineMessage): StoredRecord[] => {
@@ -126,7 +128,7 @@ export class EngineClient implements BridgeClient {
   ): Promise<{ name: string; features: string[] }> {
     const reply = await this.exchange(
       'mousse.hello',
-      { t: 'hello', proto: 1, name, features: [...SESSION_FEATURES] },
+      { t: 'hello', proto: 1, name, features: [...(this.port.features?.() ?? SESSION_FEATURES)] },
       [],
       { deadlineMs, until: 'hello', keepOpen: true }
     )
@@ -134,6 +136,18 @@ export class EngineClient implements BridgeClient {
       ? reply.header.features.filter((feature): feature is string => typeof feature === 'string')
       : []
     return { name: String(reply.header.name ?? ''), features }
+  }
+
+  /**
+   * Opens the one long-lived `access.*` exchange with the other computer (it said `access-ask` in its hello): a
+   * `mousse.hello` stream that starts with `access.open` and that both sides then write on. It ends with the
+   * connection it was opened on.
+   */
+  openAccess(): Channel {
+    if (this.state() !== 'open') throw new NetError('peer_offline')
+    const channel = new Channel(this.current.open('mousse.hello'))
+    channel.send({ t: 'access.open' })
+    return channel
   }
 
   /**

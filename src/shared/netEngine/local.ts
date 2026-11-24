@@ -50,7 +50,12 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.relay.rotate',
   'netEngine.relay.allow',
   'netEngine.relay.disallow',
-  'netEngine.relay.dismiss'
+  'netEngine.relay.dismiss',
+  // The other direction of a one-way pairing: ask for it, cancel that, answer a request, or let it in from here
+  'netEngine.access.ask',
+  'netEngine.access.cancel',
+  'netEngine.access.answer',
+  'netEngine.access.let'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -162,6 +167,28 @@ export interface NetEngineDevice {
   linkValid?: boolean
   /** Its relays (Phase 3), when anything about them needs showing. */
   relay?: NetEngineDeviceRelay
+  /** The missing direction of a pairing made one way, when its row may offer it. */
+  other?: NetEngineOtherWay
+}
+
+/**
+ * The other direction of a one-way pairing on its row. `ask` (it uses this computer): "Use <name> from here…" asks
+ * it, and its owner answers there. `let` (this computer uses it): "Let <name> use this computer…" is this owner's own
+ * decision, made here at once. Offered only while both apps and this helper can, over the live connection.
+ */
+export interface NetEngineOtherWay {
+  offer: 'ask' | 'let'
+  /** Why it can't be done just now; the menu item is disabled with this. */
+  blocked?: string
+  /** This computer asked: waiting for its owner, declined (Not now), or no answer in time. */
+  asked?: 'waiting' | 'declined' | 'expired'
+}
+
+/** Another computer asks to use this one (`netEngine.access.answer {node, request, yes, access?}`). */
+export interface NetEngineAccessAsk {
+  node: string
+  request: string
+  name: string
 }
 
 /** What a device's row shows about relays (Phase 3 §B.5, §B.11). */
@@ -422,6 +449,8 @@ export interface NetEngineStatus {
   devices: NetEngineDevice[]
   /** Computers waiting for Yes or No. */
   approvals: NetEngineApproval[]
+  /** Paired computers asking to use this one too (the other direction of a one-way pairing). */
+  accessAsks?: NetEngineAccessAsk[]
   /** Where this computer listens (`tcp://host:port`), for Add address on the other computer. */
   routes?: string[]
   /** Another profile under this OS account has the new networking on too, so they can read each other's keys. */

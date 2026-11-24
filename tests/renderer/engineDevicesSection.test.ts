@@ -14,6 +14,7 @@ import { accessPreset } from '../../src/shared/net/accessPresets'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
+const { AccessAskHost } = await import('../../src/renderer/components/netEngine/AccessAskHost')
 const { UseComputerDialog } = await import('../../src/renderer/components/netEngine/UseComputerDialog')
 const { engineRow, engineSideRow, engineSides, clockMessage, SHARED_ACCOUNT_LINE } = await import(
   '../../src/renderer/components/netEngine/engineRows'
@@ -1059,5 +1060,91 @@ describe('Connect over SSH (1b §3.4)', () => {
     const d = daemon()
     await mount(createElement(UseComputerDialog, { status: d.state.status, onClose: () => undefined }))
     expect(button('Connect over SSH')).toBeUndefined()
+  })
+})
+
+describe('the other direction of a one-way pairing', () => {
+  const menuItem = (label: string) =>
+    [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) =>
+      item.textContent?.startsWith(label)
+    )
+
+  it('asks from a Can use row, and shows Waiting with a spinner and Cancel', async () => {
+    const d = daemon({ devices: [device({ node: 'n1', direction: 'in', other: { offer: 'ask' } })] })
+    await mount()
+    expect(await menuItems('Studio', 'in')).toEqual(['Use Studio from here…', 'Access', 'Remove…'])
+    await click(menuItem('Use Studio from here…'))
+    expect(d.called('netEngine.access.ask')).toEqual([{ node: 'n1' }])
+
+    await d.change({ devices: [device({ node: 'n1', direction: 'in', other: { offer: 'ask', asked: 'waiting' } })] })
+    expect(host.textContent).toContain('Waiting for Studio to allow this…')
+    expect(host.querySelector('.ui-loader[role="status"]')).toBeTruthy()
+    await menuItems('Studio', 'in')
+    expect(menuItem('Use Studio from here…')!.getAttribute('aria-disabled')).toBe('true')
+    expect(menuItem('Use Studio from here…')!.textContent).toContain('Waiting for an answer.')
+    await click(button('Cancel'))
+    expect(d.called('netEngine.access.cancel')).toEqual([{ node: 'n1' }])
+  })
+
+  it.each([
+    ['declined', 'Studio said Not now'],
+    ['expired', 'No answer from Studio']
+  ] as const)('says when the request was %s, with no spinner', async (asked, line) => {
+    const d = daemon({ devices: [device({ node: 'n1', direction: 'in', other: { offer: 'ask', asked } })] })
+    await mount()
+    expect(host.textContent).toContain(line)
+    expect(host.querySelector('.ui-loader[role="status"]')).toBeNull()
+    await click(button('Dismiss'))
+    expect(d.called('netEngine.access.cancel')).toEqual([{ node: 'n1' }])
+  })
+
+  it('offers it disabled, saying why, while not connected, and not at all where the pairing can’t', async () => {
+    daemon({
+      devices: [
+        device({ node: 'n1', direction: 'in', other: { offer: 'ask', blocked: 'Not connected right now.' } }),
+        device({ node: 'n2', name: 'Server', direction: 'in' })
+      ]
+    })
+    await mount()
+    await menuItems('Studio', 'in')
+    expect(menuItem('Use Studio from here…')!.getAttribute('aria-disabled')).toBe('true')
+    expect(menuItem('Use Studio from here…')!.textContent).toContain('Not connected right now.')
+    // Its menu closes; the other row's opens.
+    await menuItems('Studio', 'in')
+    expect(await menuItems('Server', 'in')).toEqual(['Access', 'Remove…'])
+  })
+
+  it('lets a computer this one uses in from its row: the Allow prompt with how it connects, and the level picked', async () => {
+    const d = daemon({ devices: [device({ node: 'n1', direction: 'out', route: 'lan', other: { offer: 'let' } })] })
+    await mount()
+    expect((await menuItems('Studio', 'out'))[0]).toBe('Let Studio use this computer…')
+    await click(menuItem('Let Studio use this computer…'))
+    expect(document.body.textContent).toContain('Let Studio use this computer?')
+    expect(document.body.textContent).toContain('Connects over Same Wi-Fi, already in use.')
+    await click(radio('Full control'))
+    await click(button('Allow'))
+    expect(d.called('netEngine.access.let')).toEqual([{ node: 'n1', access: accessPreset('full').fields }])
+    expect(document.body.textContent).not.toContain('Let Studio use this computer?')
+  })
+
+  it('shows the Allow prompt app-wide when a paired computer asks, and sends Allow with its level or Not now', async () => {
+    const d = daemon({
+      devices: [device({ node: 'n1', direction: 'out', route: 'tailnet', other: { offer: 'let' } })],
+      accessAsks: [{ node: 'n1', request: 'r1', name: 'Studio' }]
+    })
+    // Devices alone does not ask: the app-wide host does, once, wherever the window is.
+    await mount()
+    expect(document.body.textContent).not.toContain('Let Studio use this computer?')
+    await mount(createElement(AccessAskHost))
+    expect(document.body.textContent).toContain('Let Studio use this computer?')
+    expect(document.body.textContent).toContain('Connects over Tailscale, already in use.')
+    await click(button('Allow'))
+    expect(d.called('netEngine.access.answer')).toEqual([
+      { node: 'n1', request: 'r1', yes: true, access: accessPreset('work').fields }
+    ])
+
+    await d.change({ accessAsks: [{ node: 'n1', request: 'r2', name: 'Studio' }] })
+    await click(button('Not now'))
+    expect(d.called('netEngine.access.answer').at(-1)).toEqual({ node: 'n1', request: 'r2', yes: false })
   })
 })

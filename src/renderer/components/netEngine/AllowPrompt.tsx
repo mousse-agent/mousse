@@ -119,17 +119,21 @@ export const defaultLevel = (): AccessPresetFields => ({ ...accessPreset('work')
 export function AllowPrompt({
   approval,
   busy,
-  onAnswer
+  onAnswer,
+  line
 }: {
-  approval: NetEngineApproval
+  approval: Pick<NetEngineApproval, 'name'>
   busy: boolean
   onAnswer: (yes: boolean, access?: AccessPresetFields) => void
+  /** One line under the question (a paired computer: how it connects). */
+  line?: string
 }) {
   const [fields, setFields] = useState<AccessPresetFields>(defaultLevel)
   const name = approval.name || 'This device'
   return (
     <div className="engine-allow" role="group" aria-label="Pairing request">
       <p className="engine-allow-title">Let {name} use this computer?</p>
+      {line && <p className="settings-muted">{line}</p>}
       <LevelPicker fields={fields} onChange={setFields} busy={busy} />
       <div className="devices-dialog-actions">
         <button type="button" className="settings-btn" disabled={busy} onClick={() => onAnswer(false)}>

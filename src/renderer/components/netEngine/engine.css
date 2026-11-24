@@ -61,8 +61,8 @@
   font-size: var(--settings-fs-small, 12.5px);
 }
 
-/* The main action and the ones beside it keep the usual gap. */
-.engine-dialog .devices-dialog-actions {
+/* The main action and the ones beside it keep the usual gap, also in the Allow prompt wherever it shows. */
+:is(.engine-dialog, .engine-allow) .devices-dialog-actions {
   gap: var(--space-8);
 }
 
