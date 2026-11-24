@@ -77,6 +77,17 @@
       "expiresAt": "2026-11-23T18:57:13.944Z"
     },
     {
+      "task": "fix-thinking-stream-integrity",
+      "session": "LAPTOP-HIEROJK7-dfa141",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "fix-thinking-stream-integrity",
+      "paths": [
+        "src/mms/run/transcript/promptRuntime.ts"
+      ],
+      "claimedAt": "2026-11-24T15:05:22.905Z",
+      "expiresAt": "2026-11-24T17:05:22.905Z"
+    },
+    {
       "task": "mousse/per-provider-limit-refresh-buttons",
       "session": "agibook-9f3712",
       "machine": "agibook",
