@@ -43,6 +43,17 @@
       "expiresAt": "2026-11-23T19:19:19.434Z"
     },
     {
+      "task": "computer-use-awareness-setup-card",
+      "session": "LAPTOP-HIEROJK7-7cd74d",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "computer-use-awareness-setup-card",
+      "paths": [
+        "src/mms/computerUse"
+      ],
+      "claimedAt": "2026-11-24T15:05:07.982Z",
+      "expiresAt": "2026-11-24T17:05:07.982Z"
+    },
+    {
       "task": "fast-automatic-title-naming",
       "session": "LAPTOP-HIEROJK7-e7b696",
       "machine": "LAPTOP-HIEROJK7",
