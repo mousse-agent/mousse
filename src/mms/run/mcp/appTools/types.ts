@@ -128,6 +128,8 @@ export interface AppToolTurn {
   browserRuntime?: BrowserRuntimePort
   /** Stages an applet for the response (a subagent's too, in its own thread); absent when applets are off. */
   onPublishApplet?: (source: unknown) => unknown
+  /** Reads a published applet's stored source in pages (`read_applet`); absent when applets are off and for a bot. */
+  onReadApplet?: (args: Record<string, unknown>) => unknown
   enabledSkills: SkillDescriptor[]
   loadedSkills: Array<{ name: string; content: string }>
   /** A read-only (`shared`) child's workspace capability. */

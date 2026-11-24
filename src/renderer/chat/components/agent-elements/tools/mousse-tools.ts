@@ -162,6 +162,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   automation_update: ["update", "an automation in Mousse"],
   create_quick_action: ["create", "a quick action in Mousse"],
   publish_applet: ["publish", "an applet"],
+  read_applet: ["read", "an applet"],
   // The web, the browser, the look, Git and the profiler
   web_search: ["search", "the web"],
   web_fetch: ["read", "a web page"],

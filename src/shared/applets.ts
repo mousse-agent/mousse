@@ -200,3 +200,23 @@ export function extractAppletParts(
     parts.push({ type: 'text', text: content.slice(cursor) })
   return parts
 }
+/**
+ * The line that stands for an applet where a model reads a reply (a handoff, a run's result, `thread_read`): its source
+ * stays in the applet store, where `read_applet` reads it, and is never repeated into another model's context.
+ */
+export function appletReferenceLine(applet: { title: string; appletId?: string; revisionId?: string }): string {
+  return applet.appletId && applet.revisionId
+    ? `[Applet: ${applet.title} (appletId ${applet.appletId}, revision ${applet.revisionId})]`
+    : `[Applet: ${applet.title}]`
+}
+/**
+ * A stored reply as a model reads it: each published applet is one reference line, not its source. The stored text
+ * keeps its fences, which recovery and a bot's chat match on. A reply with no published applet is its text unchanged,
+ * so an applet that failed to publish keeps its source for the model to fix.
+ */
+export function modelFacingReplyText(message: { content?: unknown; presentationParts?: unknown }): string {
+  const parts = Array.isArray(message.presentationParts) ? (message.presentationParts as AppletPresentationPart[]) : undefined
+  if (parts?.some((part) => part?.type === 'applet'))
+    return parts.map((part) => (part.type === 'applet' ? appletReferenceLine(part.reference) : part.text)).join('')
+  return typeof message.content === 'string' ? message.content : ''
+}

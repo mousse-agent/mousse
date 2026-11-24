@@ -1,4 +1,5 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import { modelFacingReplyText } from '../../../../shared/applets'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import { isLocalOnlyThread, isNativeHelperThread, isSideChatThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, Thread, ThreadNativeHelper, UserQuestionAnswers } from '../../../../shared/types'
@@ -471,8 +472,8 @@ function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageR
 }
 
 /** A thread's messages here as the short views read them. */
-function rowsOf(all: ReadonlyArray<{ role: string; content?: unknown; timestamp?: unknown }>): ViewRow[] {
-  return all.map((message, index) => ({ index, role: message.role, text: typeof message.content === 'string' ? message.content : '', timestamp: message.timestamp }))
+function rowsOf(all: ReadonlyArray<{ role: string; content?: unknown; presentationParts?: unknown; timestamp?: unknown }>): ViewRow[] {
+  return all.map((message, index) => ({ index, role: message.role, text: modelFacingReplyText(message), timestamp: message.timestamp }))
 }
 
 /** The views of `thread_read` an agent may ask for. */

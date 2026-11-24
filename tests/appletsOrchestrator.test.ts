@@ -8,6 +8,7 @@ import { dispatchMethod } from '../src/mms/protocol/handlers'
 import type { AppletReference } from '../src/shared/applets'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { piAdapter } from './run/phase6Fixture'
+import { HandoffService, type HandoffTranscriptSource } from '../src/mms/run/handoff/HandoffService'
 
 const source = {
   schemaVersion: 1,
@@ -205,6 +206,45 @@ it('stages structured tool submissions through the same final publication path a
     .messages.find((message) => message.presentationParts)
   expect(completed?.content).toContain('```mousse-applet')
   expect(completed?.presentationParts?.filter((part) => part.type === 'applet')).toHaveLength(3)
+})
+
+it('hands a published applet to other models as one line, while the stored reply keeps its source', async () => {
+  let transcriptOf: HandoffTranscriptSource | null = null
+  const install = HandoffService.prototype.setTranscriptSource
+  vi.spyOn(HandoffService.prototype, 'setTranscriptSource').mockImplementation(function (this: HandoffService, source) {
+    transcriptOf = source
+    return install.call(this, source)
+  })
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'Here is the chart.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(source)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  const line = `[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`
+  const reply = main.threads.loadThreadData(thread.id).messages.find((message) => message.presentationParts)!
+  // Stored for recovery and bots' chats: the fence with its source.
+  expect(reply.content).toContain(JSON.stringify(source.js))
+  // A parent's result, a handoff to another model, and an agent's thread_read: the line, not the source.
+  expect(results.at(-1)).toBe(`Here is the chart.\n\n[Applet: Calculator]`)
+  const handedOver = transcriptOf!(thread.id).find((item) => item.role === 'assistant')
+  expect(handedOver?.text).toBe(`Here is the chart.\n\n${line}`)
+  const page = await request(main, 'thread.messages', { threadId: thread.id, index: 0 }) as { messages: Array<{ role: string; content: string }> }
+  const read = page.messages.find((message) => message.role === 'assistant')
+  expect(read?.content).toContain(line)
+  expect(read?.content).not.toContain('mousse-applet')
 })
 
 it('keeps one reply row when a tool-published applet follows a reply that already closed', async () => {

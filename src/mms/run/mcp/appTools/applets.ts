@@ -10,11 +10,11 @@ import { plainSchema, type MousseTool } from './types'
 export const PUBLISH_APPLET_TOOL: Tool = {
   name: 'publish_applet',
   description:
-    'Publish a complete offline HTML/CSS/JS illustration or interactive dashboard in this thread. This stages presentation until the response completes; never performs workspace or network actions. Give each part inline (html, css, js) or as a file in this thread\'s folder (htmlPath, cssPath, jsPath); when the page is already on disk, prefer the path over retyping it. A part not given is empty.',
+    'Publish a complete offline HTML/CSS/JS illustration or interactive dashboard in this thread. This stages presentation until the response completes; never performs workspace or network actions. Give each part inline (html, css, js) or as a file in this thread\'s folder (htmlPath, cssPath, jsPath); when the page is already on disk, prefer the path over retyping it. A part not given is empty. To revise a published applet, give its appletId and expectedRevision with edits (exact old_str/new_str replacements in its stored parts, read with read_applet) instead of resending the source; fields not given keep their values.',
   parameters: Type.Object({
     schemaVersion: Type.Literal(1),
-    title: Type.String({ maxLength: 120 }),
-    description: Type.String({ maxLength: 1000 }),
+    title: Type.Optional(Type.String({ maxLength: 120, description: 'Required for a new applet; a revision with edits keeps its title when omitted.' })),
+    description: Type.Optional(Type.String({ maxLength: 1000, description: 'Required for a new applet; a revision with edits keeps its description when omitted.' })),
     html: Type.Optional(Type.String()),
     css: Type.Optional(Type.String()),
     js: Type.Optional(Type.String()),
@@ -24,7 +24,27 @@ export const PUBLISH_APPLET_TOOL: Tool = {
     data: Type.Optional(Type.Unknown()),
     stateVersion: Type.Optional(Type.Integer({ minimum: 1 })),
     appletId: Type.Optional(Type.String()),
-    expectedRevision: Type.Optional(Type.String())
+    expectedRevision: Type.Optional(Type.String()),
+    edits: Type.Optional(Type.Array(Type.Object({
+      part: Type.Union([Type.Literal('html'), Type.Literal('css'), Type.Literal('js')]),
+      old_str: Type.String({ description: 'Text that occurs exactly once in the part.' }),
+      new_str: Type.String({ description: 'Its replacement; empty deletes it.' })
+    }), { description: 'Revise appletId at expectedRevision: applied in order, all or none. Not with html, css, js or their paths.' }))
+  })
+}
+
+/** `read_applet`: one bounded page of a published applet's stored source, so revising never needs it in context. */
+export const READ_APPLET_TOOL: Tool = {
+  name: 'read_applet',
+  description:
+    'Read a published applet\'s stored source, to revise it with publish_applet edits. Without part: the sizes of its parts. With part: up to limit characters from offset (default 16384, at most 65536), or with search the lines that contain that text. Reads the latest revision this conversation shows, or an earlier one it shows by revisionId.',
+  parameters: Type.Object({
+    appletId: Type.String(),
+    revisionId: Type.Optional(Type.String()),
+    part: Type.Optional(Type.Union([Type.Literal('html'), Type.Literal('css'), Type.Literal('js'), Type.Literal('data')])),
+    offset: Type.Optional(Type.Integer({ minimum: 0 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 65536 })),
+    search: Type.Optional(Type.String({ description: 'Text to find in the part; returns the lines that contain it, with line numbers.' }))
   })
 }
 
@@ -88,12 +108,34 @@ export function appletTools(): MousseTool[] {
     handler: (args, ctx) => {
       const publish = ctx.turn.onPublishApplet
       if (!publish) throw new Error('Unknown tool: publish_applet')
-      const read = appletFromFiles(args, ctx.turn.projectPath)
+      // Edits change the stored parts, so no file is read for them; a part or path given beside them is refused later.
+      const read = args.edits !== undefined ? { args } : appletFromFiles(args, ctx.turn.projectPath)
       if ('refused' in read) return refused('invalid_arguments', read.refused)
       try {
         return { text: JSON.stringify(publish(read.args)) }
       } catch (error) {
         return { text: error instanceof Error ? error.message : 'Invalid applet.', isError: true }
+      }
+    }
+  }, {
+    name: READ_APPLET_TOOL.name,
+    description: READ_APPLET_TOOL.description,
+    inputSchema: plainSchema(READ_APPLET_TOOL),
+    definition: () => READ_APPLET_TOOL,
+    access: 'reads',
+    class: 'read',
+    // A bot's applets live in its activations' threads, and its turns have no list of them yet: threads only.
+    listed: (listing) => !listing.botRole,
+    available: (turn) => (turn.onReadApplet && !turn.bot ? true : 'Applets are off for this turn.'),
+    offered: (turn) => Boolean(turn.onReadApplet) && !turn.bot,
+    describe: (args) => `Read applet${typeof args.appletId === 'string' ? ` ${args.appletId}` : ''}`,
+    handler: (args, ctx) => {
+      const read = ctx.turn.onReadApplet
+      if (!read) throw new Error('Unknown tool: read_applet')
+      try {
+        return { text: JSON.stringify(read(args)) }
+      } catch (error) {
+        return { text: error instanceof Error ? error.message : 'The applet could not be read.', isError: true }
       }
     }
   }]
