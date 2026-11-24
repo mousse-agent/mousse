@@ -2,6 +2,21 @@
   "version": 1,
   "claims": [
     {
+      "task": "applet-source-out-of-context",
+      "session": "LAPTOP-HIEROJK7-016dce",
+      "machine": "LAPTOP-HIEROJK7",
+      "branch": "applet-source-out-of-context",
+      "paths": [
+        "src/mms/run/mcp/appTools/applets.ts",
+        "src/mms/applets",
+        "src/shared/appletGuidance.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/run/mcp/appTools/thread.ts"
+      ],
+      "claimedAt": "2026-11-24T14:16:32.764Z",
+      "expiresAt": "2026-11-24T16:16:32.764Z"
+    },
+    {
       "task": "composer-thread-reference-chip",
       "session": "Animatrix-d87084",
       "machine": "Animatrix",
