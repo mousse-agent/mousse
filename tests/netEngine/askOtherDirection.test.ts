@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { Channel } from '../../src/mms/netEngine/session/transport'
 import { newId, type NodeId } from '../../src/shared/net'
 import { accessPreset } from '../../src/shared/net/accessPresets'
-import { Fabric, approveAll, eventually, rowFor, type Computer } from './checks/harness'
+import { Fabric, REAL_HELPER, approveAll, eventually, rowFor, type Computer } from './checks/harness'
 
 const limits = vi.hoisted(() => {
   const set = {
@@ -110,7 +110,7 @@ describe('asking for the other direction of a one-way pairing', () => {
     const ownerName = rowFor(caller, owner)!.name
     expect(ask).toMatchObject({ node: ownerOnCaller, name: ownerName })
     // Nothing is granted by the request itself.
-    expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(false)
+    if (!REAL_HELPER) expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(false)
 
     // What the policy table held when the helper was asked to grant.
     let atGrant: Record<string, unknown> | undefined
@@ -126,12 +126,14 @@ describe('asking for the other direction of a one-way pairing', () => {
       true
     )
     expect(atGrant).toMatchObject(view)
-    const [granted] = sent(caller, 'grant.add_connected')
-    expect(Object.keys(granted!).sort()).toEqual(['conn', 'id', 'name', 'op', 'role'])
-    expect(granted).toMatchObject({ name: ownerName, role: 'owner' })
-    expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(true)
-    // No peer record: the caller is used over its own connection.
-    expect(fabric.network.peersOf(owner.endpoint)).not.toContain(caller.endpoint)
+    if (!REAL_HELPER) {
+      const [granted] = sent(caller, 'grant.add_connected')
+      expect(Object.keys(granted!).sort()).toEqual(['conn', 'id', 'name', 'op', 'role'])
+      expect(granted).toMatchObject({ name: ownerName, role: 'owner' })
+      expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(true)
+      // No peer record: the caller is used over its own connection.
+      expect(fabric.network.peersOf(owner.endpoint)).not.toContain(caller.endpoint)
+    }
     expect(rowFor(caller, owner)?.state).toBe('connected')
     expect(rowFor(caller, owner)?.ways).toBeUndefined()
     expect(caller.mms.netEngine.status().accessAsks).toBeUndefined()
@@ -150,7 +152,7 @@ describe('asking for the other direction of a one-way pairing', () => {
     // Either direction is still removed on its own: the owner stops using the caller, the caller still uses it.
     await owner.dispatch('netEngine.remove', { node: callerOnOwner, direction: 'out' }, true)
     expect(rowFor(owner, caller)).toMatchObject({ ways: 'in' })
-    expect(fabric.network.holds(owner.endpoint, caller.endpoint)).toBe(true)
+    if (!REAL_HELPER) expect(fabric.network.holds(owner.endpoint, caller.endpoint)).toBe(true)
     expect(await accessThere(caller, ownerOnCaller)).toMatchObject({ blocked: false })
   }, 60_000)
 
@@ -325,5 +327,35 @@ describe('asking for the other direction of a one-way pairing', () => {
     await sleep(300)
     expect(device(owner2, pair.callerOnOwner)?.other).toBeUndefined()
     await expect(owner2.dispatch('netEngine.access.ask', { node: pair.callerOnOwner }, true)).rejects.toThrow()
+  }, 60_000)
+})
+
+describe('asking when the connection was announced before its HELLO', () => {
+  const fabric = new Fabric()
+  fabric.network.minor = 2
+  fabric.network.features = [...ALL_FEATURES]
+  fabric.network.bothWays = true
+  // The owner's helper says `both: false` for the caller's connection, as it can on a real network.
+  fabric.network.lateHello = true
+  afterAll(() => fabric.close(), 60_000)
+
+  it('still lets the asker in over that connection after Allow', async () => {
+    const owner = await computer(fabric, 'late-owner'),
+      caller = await computer(fabric, 'late-caller')
+    const { callerOnOwner, ownerOnCaller } = await oneWay(fabric, owner, caller)
+    await eventually(() => expect(device(owner, callerOnOwner)?.other).toEqual({ offer: 'ask' }))
+    await owner.dispatch('netEngine.access.ask', { node: callerOnOwner }, true)
+    const ask = await eventually(() => {
+      const asks = caller.mms.netEngine.status().accessAsks ?? []
+      expect(asks).toHaveLength(1)
+      return asks[0]!
+    })
+    await caller.dispatch(
+      'netEngine.access.answer',
+      { node: ownerOnCaller, request: ask.request, yes: true, access: accessPreset('view').fields },
+      true
+    )
+    await eventually(() => expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true))
+    expect(await accessThere(owner, callerOnOwner)).toMatchObject({ work: false })
   }, 60_000)
 })
