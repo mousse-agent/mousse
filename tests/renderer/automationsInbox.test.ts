@@ -15,6 +15,7 @@ import { onLine, whenChoices } from '../../src/renderer/components/automations/D
 import { draftIdOf } from '../../src/renderer/components/automations/inbox/ChatDraftCard'
 import { setInboxClient, useInboxStore, openRun } from '../../src/renderer/components/automations/inbox/inboxStore'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import { CONNECTING_SHOWN_AFTER_MS, forgetServiceConnection } from '../../src/renderer/lib/serviceConnection'
 
 vi.mock('../../src/renderer/components/bots/face/BotFace', () => ({ BotFace: () => null, BotFaceStill: () => null }))
 vi.mock('../../src/renderer/lib/openThread', () => ({ openThread: vi.fn(async () => undefined) }))
@@ -143,6 +144,9 @@ function inboxOf(runs: InboxRun[], extra: Partial<AutomationInbox> = {}): Automa
   return { runs, tuning: [], meta: [], month: { key: '2026-11', label: 'API keys · Nov', byJob: { deps: { tokens: 1200, costUsd: 0 }, nightly: { tokens: 9000, costUsd: 0.42 } } }, generatedAt: '', ...extra }
 }
 
+/** Main's service connection changes, as the window's bridge delivers them. */
+let serviceChanged: ((state: string) => void) | null = null
+
 function api(index: AutomationIndex, inbox: AutomationInbox) {
   const request = vi.fn(async (method: string, _params?: unknown) => {
     switch (method) {
@@ -169,7 +173,11 @@ function api(index: AutomationIndex, inbox: AutomationInbox) {
     pullRequests: { detail: vi.fn(async () => ({ state: 'open', checks: 'passing', headSha: 'abc' })) },
     settings: { getOptions: async () => ({ llmProviders: [] }), get: async () => ({ permissions: { defaultMode: 'accept_edits' }, provider: {} }) },
     projects: { list: async () => [] },
-    orchestrator: { sendToThread: vi.fn(async () => ({})), abort: vi.fn(async () => true), answerQuestionsDetailed: vi.fn(async () => ({ ok: true })) }
+    orchestrator: { sendToThread: vi.fn(async () => ({})), abort: vi.fn(async () => true), answerQuestionsDetailed: vi.fn(async () => ({ ok: true })) },
+    app: {
+      serviceConnection: vi.fn(async () => 'ready'),
+      onServiceConnectionChanged: vi.fn((cb: (state: string) => void) => { serviceChanged = cb; return () => { serviceChanged = null } })
+    }
   }
 }
 
@@ -195,6 +203,7 @@ const press = async (key: string) => {
 const calls = (mousse: ReturnType<typeof api>, method: string) => mousse.platformRequest.request.mock.calls.filter(([name]) => name === method)
 
 beforeEach(() => {
+  forgetServiceConnection()
   setInboxClient(null)
   useInboxStore.setState({ index: null, inbox: null, counts: null, loadedAt: 0, filter: {}, openRunId: null, pane: 'run', editJobId: null, manageExpanded: null, actionError: null, folds: { bots: false, quiet: false }, composing: null })
   useAppStore.setState({ activeThreadId: null, scheduledOpen: true, projects: [], threads: [] })
@@ -382,6 +391,27 @@ describe('creating an automation', () => {
     expect(listening()).toBe(true)
     // The request is kept for a reload.
     expect(JSON.parse(localStorage.getItem('mousse.automations.request.default')!)).toMatchObject({ runId: RUN_ID, status: 'working' })
+  })
+
+  it('says Connecting… while the service is out of reach, keeps the words and sends nothing until it is back', async () => {
+    const { mousse } = await mountComposer()
+    const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
+    const createReachable = () => !$('[data-testid="inbox-composer-send"]')!.closest('[inert], [aria-hidden="true"]')
+    expect(createReachable()).toBe(true)
+    await act(async () => { serviceChanged!('reconnecting') })
+    await act(async () => { await new Promise((done) => setTimeout(done, CONNECTING_SHOWN_AFTER_MS + 20)) })
+    expect(input.placeholder).toBe('Connecting…')
+    expect(createReachable()).toBe(false)
+    await typeIn(input, 'Every weekday at 9, triage new issues')
+    await enter(input)
+    expect(mousse.orchestrator.sendToThread).not.toHaveBeenCalled()
+    expect(input.value).toBe('Every weekday at 9, triage new issues')
+
+    await act(async () => { serviceChanged!('ready') })
+    expect(input.placeholder).toBe('Describe an automation…')
+    expect(createReachable()).toBe(true)
+    await enter(input)
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledTimes(1)
   })
 
   it('clears the composer and shows the request working before the service has answered the send', async () => {

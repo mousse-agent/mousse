@@ -1459,6 +1459,16 @@ const api = {
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
     installGit: (): Promise<boolean> => ipcRenderer.invoke('app:installGit'),
+    /**
+     * The app's link to its background service: `ready` when connected; `connecting`, `reconnecting`, `failed` and the
+     * rest while it is not.
+     */
+    serviceConnection: (): Promise<string> => ipcRenderer.invoke('app:serviceConnection'),
+    onServiceConnectionChanged: (cb: (state: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, state: string) => cb(state)
+      ipcRenderer.on('app:serviceConnectionChanged', handler)
+      return () => ipcRenderer.removeListener('app:serviceConnectionChanged', handler)
+    },
     gitSetup: (): Promise<GitSetup> => ipcRenderer.invoke('app:gitSetup'),
     onGitSetupChanged: (cb: (setup: GitSetup) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, setup: GitSetup) => cb(setup)

@@ -10,12 +10,12 @@ import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
 import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
 import { SecretRequestRow } from './secrets/SecretRequestRow'
-import { LOADER_DELAY_MS, useShownAfter } from './ui/DelayedLoader'
 import { RefreshCw } from '../lib/icons'
 import { composerWorkspaceFor, isNewEmptyThread } from '../lib/newThread'
 import { localProjectsOf } from '../hooks/useLocalProjects'
 import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import { noteWarmEmptyView, noteWarmScroll, readWarmScroll } from '../lib/warmHandover'
+import { noteConnectingHandover } from '../lib/serviceConnection'
 import './warm-chat.css'
 
 const TOOL_RENDERERS = { ...CHAT_TOOL_RENDERERS, secret_request: SecretRequestRow }
@@ -25,8 +25,9 @@ const noopAsync = async (): Promise<undefined> => undefined
 
 /**
  * The open thread as this window showed it last time (`showWarmView`), until the workspace is ready and the real chat
- * takes its place. The transcript reads and the composer takes typing (its draft is the thread's own, so the real
- * composer keeps it); Send is held until the window is connected. Nothing here asks the service.
+ * takes its place. The transcript reads and the composer says Connecting… and takes typing (its draft is the thread's
+ * own, so the real composer keeps it); Enter holds the message until the window is connected. Nothing here asks the
+ * service.
  *
  * It looks as the real chat will: a new chat shows the same greeting, glow, project and settings rows around the
  * composer (shown, not usable, until connected), and the real chat carries on from where this one was scrolled and
@@ -41,8 +42,13 @@ export function WarmChat({ error, onRetry }: { error?: string | null; onRetry?: 
   const newChatAnimations = useAppStore((s) => s.newChatAnimations)
   const input = useAppStore((s) => s.composerDrafts[s.activeThreadId ?? '__blank__'] ?? '')
   const sendHeld = useAppStore((s) => s.warmSendThreadId !== null)
-  // A start that connects at once shows no line at all.
-  const lineShown = useShownAfter(LOADER_DELAY_MS)
+  // The composer says Connecting… from the first frame. After an error the line above it says so with Retry, and the
+  // composer follows the service as every composer does (`useServiceConnecting`).
+  const connecting = !error
+  const connectingRef = useRef(connecting)
+  connectingRef.current = connecting
+  // The real chat's composer starts as this one ends, and fades the dots out.
+  useEffect(() => () => { if (connectingRef.current) noteConnectingHandover() }, [])
   const uiMessages = useMemo(() => mousseToUIMessages(messages), [messages])
   const setInput = (value: string) => useAppStore.getState().setComposerDraft(threadId, value)
   const send = () => {
@@ -83,7 +89,7 @@ export function WarmChat({ error, onRetry }: { error?: string | null; onRetry?: 
         <span>Could not connect to workspace</span>
         <button type="button" className="warm-chat-retry" onClick={onRetry}><RefreshCw size={12} aria-hidden="true" />Retry</button>
       </div>
-    : (lineShown || sendHeld) && <div className="warm-chat-line" role="status">{sendHeld ? 'Sends when connected' : 'Connecting…'}</div>
+    : sendHeld && <div className="warm-chat-line" role="status">Sends when connected</div>
 
   return (
     <div ref={rootRef} data-mousse="chat" data-warm-start="" className={`chat${newChat ? ' chat--empty' : ''}`} data-new-chat-motion={newChat && !newChatAnimations ? 'off' : undefined} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -119,6 +125,9 @@ export function WarmChat({ error, onRetry }: { error?: string | null; onRetry?: 
               // No model picker: the thread's model shows once the window is connected, without a placeholder first.
               onSend={send}
               sendBlocked={sendHeld ? 'Sends when connected' : null}
+              // Enter holds the message until the window is connected, then it is sent (`holdWarmSend`).
+              connecting={connecting || undefined}
+              sendsWhenConnected
             />
             {newChat && <div inert style={{ display: 'contents' }}>
               <ComposerThreadSettings workspace={workspace} disabled={false} readsGit={false} onChange={noop} onPrivateChange={noop} onExpiryChange={noop} />
