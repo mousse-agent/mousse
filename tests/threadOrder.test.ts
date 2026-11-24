@@ -46,7 +46,7 @@ describe('orderedThreadIds', () => {
   it('does not depend on which projects are expanded, and leaves out what the sidebar leaves out', () => {
     const threads = [
       thread('shown', { projectId: 'p1', order: 1 }),
-      thread('settled', { projectId: 'p1', order: 2, settledAt: '2026-01-02T00:00:00.000Z' }),
+      thread('archived', { projectId: 'p1', order: 2, archivedAt: '2026-01-02T00:00:00.000Z' }),
       thread('draft', { projectId: 'p1', order: 3, startedAt: undefined, name: 'New Thread' }),
       thread('child', {
         projectId: 'p1',

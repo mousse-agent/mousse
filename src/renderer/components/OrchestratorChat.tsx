@@ -1196,9 +1196,9 @@ export function OrchestratorChat() {
       if (targetThreadId) {
         const store = useAppStore.getState()
         const current = store.threads.find((t) => t.id === targetThreadId)
-        if (current && !current.settledAt) {
+        if (current && !current.archivedAt) {
           const siblings = store.threads.filter(
-            (entry) => (entry.projectId ?? null) === (current.projectId ?? null) && !entry.settledAt
+            (entry) => (entry.projectId ?? null) === (current.projectId ?? null) && !entry.archivedAt
           )
           const minOrder = siblings.reduce((min, entry) => Math.min(min, entry.order), current.order)
           store.upsertThread({

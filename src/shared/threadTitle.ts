@@ -27,7 +27,7 @@ export function isThreadStarted(thread: { startedAt?: string; name?: string }): 
 export function findUnstartedThread<T extends {
   projectId?: string
   node?: string
-  settledAt?: string
+  archivedAt?: string
   startedAt?: string
   name?: string
   updatedAt: string
@@ -35,7 +35,7 @@ export function findUnstartedThread<T extends {
   return threads
     .filter(
       (thread) =>
-        !thread.settledAt &&
+        !thread.archivedAt &&
         (projectId !== undefined || !thread.node) &&
         thread.projectId === projectId &&
         !isThreadStarted(thread)

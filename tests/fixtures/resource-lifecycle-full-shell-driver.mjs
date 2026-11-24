@@ -38,13 +38,13 @@ async function check() {
   const proof = { actualMain: config.mainEntry }
   // The daemon's own record of the thread, read from disk: the app no longer lists lifecycle records.
   const lifecycleState = async () => { try { return JSON.parse(readFileSync(join(config.home, 'profiles', config.profileId, 'lifecycle', 'tasks', `${config.threadId}.json`), 'utf8')).state } catch { return undefined } }
-  const settled = () => evaluate(`window.mousse.threads.listAll().then((threads) => Boolean(threads.find((thread) => thread.id === ${JSON.stringify(config.threadId)})?.settledAt))`)
+  const archived = () => evaluate(`window.mousse.threads.listAll().then((threads) => Boolean(threads.find((thread) => thread.id === ${JSON.stringify(config.threadId)})?.archivedAt))`)
   // Archive and Unarchive from the thread's context menu in the sidebar, the way a person does.
   const fromMenu = async (item, want, label) => {
     await until(() => evaluate(`Boolean(${threadRow})`), Boolean, `${label}: row`)
     await evaluate(`${threadRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))`)
     await click(item)
-    await until(settled, (value) => value === want, label)
+    await until(archived, (value) => value === want, label)
   }
   await until(() => evaluate('Boolean(window.mousse && document.querySelector("#root")?.children.length)'), Boolean, 'Production preload')
   await evaluate(`window.mousse.threads.select(${JSON.stringify(config.threadId)})`)
@@ -74,15 +74,15 @@ async function check() {
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
   proof.noDeleteBeforeArchive = true
   await fromMenu('Archive', true, 'Archive from the sidebar')
-  await evaluate(`(() => { const toggle = document.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle'); if (!toggle) throw Error('Archived heading unavailable'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click() })()`)
-  await until(() => evaluate(`Boolean(${threadRow}?.classList.contains('settled'))`), Boolean, 'Archived row')
+  await evaluate(`(() => { const toggle = document.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle'); if (!toggle) throw Error('Archived heading unavailable'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click() })()`)
+  await until(() => evaluate(`Boolean(${threadRow}?.classList.contains('archived'))`), Boolean, 'Archived row')
   if ((await lifecycleState()) !== 'active') throw Error('Archiving moved the thread out of place')
   proof.archivedFromSidebar = true
   await screenshot('02b-archived')
   await fromMenu('Unarchive', false, 'Unarchive')
   proof.unarchived = true
   await fromMenu('Archive', true, 'Archive again')
-  await until(() => evaluate(`Boolean(${threadRow}?.classList.contains('settled'))`), Boolean, 'Archived row again')
+  await until(() => evaluate(`Boolean(${threadRow}?.classList.contains('archived'))`), Boolean, 'Archived row again')
   await rowAction('delete')
   await until(() => evaluate(`Boolean(document.querySelector('[data-testid="archived-delete-confirm"]'))`), Boolean, 'Delete confirmation')
   await screenshot('03-delete-confirm')

@@ -2153,7 +2153,7 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
 
     it("See all counts the threads it started that are not archived, and opens the sidebar's Threads tab filtered to it", async () => {
       const started = (id: string, over: Record<string, unknown> = {}) => ({ id, name: id, createdAt: ago(600), updatedAt: ago(600), startedByBot: { botId: inbox.id, name: inbox.name }, hidden: true as const, ...over })
-      useAppStore.setState({ threads: [started('s1'), started('s2'), started('s3', { settledAt: ago(500) }), started('s4', { lineage: { parentThreadId: 's1' } })] as never, threadsSidebarView: 'projects', sidebarMode: 'threads' })
+      useAppStore.setState({ threads: [started('s1'), started('s2'), started('s3', { archivedAt: ago(500) }), started('s4', { lineage: { parentThreadId: 's1' } })] as never, threadsSidebarView: 'projects', sidebarMode: 'threads' })
       try {
         // Nothing works and nothing is recent, yet the line opens: See all is there.
         await open({ ...inbox, threads: [] })

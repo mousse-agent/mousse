@@ -79,7 +79,7 @@ describe('the snapshot an owner sends', () => {
     const old = new Date(Date.now() - 60 * day).toISOString()
     const recent = new Date(Date.now() - 2 * day).toISOString()
     const threads: Thread[] = Array.from({ length: 2000 }, (_, n) =>
-      row(n, n < 1500 ? { settledAt: old } : n < 1600 ? { settledAt: recent } : {})
+      row(n, n < 1500 ? { archivedAt: old } : n < 1600 ? { archivedAt: recent } : {})
     )
     // A subagent under a dropped parent goes with it; one under a kept parent stays.
     threads.push(

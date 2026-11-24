@@ -156,7 +156,7 @@ function liveBinding(
     throw new DomainRpcError('profile_mismatch', 'Workflow workspace belongs to another profile')
   }
   const thread = owner.threads.getThread(context.threadId)
-  if (!thread || thread.id !== context.threadId || thread.settledAt || thread.projectId !== context.projectId) {
+  if (!thread || thread.id !== context.threadId || thread.archivedAt || thread.projectId !== context.projectId) {
     throw new DomainRpcError('thread_unavailable', 'Workflow thread ownership changed')
   }
   const project = context.projectId ? owner.projects.getProject(context.projectId) : undefined

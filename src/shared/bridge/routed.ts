@@ -546,6 +546,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- thread writes
   'threads.rename': write('thread', ['threadId', 'name'], { required: ['name'] }),
   'threads.pin': write('thread', ['threadId', 'pinned']),
+  'threads.archive': write('thread', ['threadId', 'archived']),
+  // Legacy: `threads.archive` under its old name. An owner keeps it for a caller that runs an older Mousse; a caller
+  // sends it only to an owner that does not advertise `threads.archive` (`ROUTED_RENAMED_METHODS`).
   'threads.settle': write('thread', ['threadId', 'settled']),
   'threads.delete': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
   'threads.regenerateTitle': write('thread', ['threadId']),
@@ -899,6 +902,21 @@ export const routedNetMethod = (method: string): string => `routed.${method}`
 export const isRoutedNetMethod = (name: string): boolean => name.startsWith('routed.')
 export const routedMethodOf = (name: string): string | undefined =>
   isRoutedNetMethod(name) ? name.slice('routed.'.length) : undefined
+
+/**
+ * Rows that were renamed: by new name, the old row and the call as the old row takes it. A caller sends the old row to
+ * an owner that advertises it but not the new one (an owner that runs an older Mousse); the owner keeps the old row
+ * for callers that run an older Mousse.
+ */
+export const ROUTED_RENAMED_METHODS: Readonly<
+  Record<string, { legacy: string; params: (params: Record<string, unknown>) => Record<string, unknown> }>
+> = Object.freeze({
+  // Archived threads were called settled.
+  'threads.archive': {
+    legacy: 'threads.settle',
+    params: ({ archived, ...rest }: Record<string, unknown>) => ({ ...rest, settled: archived })
+  }
+})
 
 /**
  * The params of a call as an owner at `version` of the row takes them, for a row whose newer version

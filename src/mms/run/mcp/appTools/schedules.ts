@@ -221,7 +221,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not this thread or one of its lineage; a job can only be bound to those.`)
     const thread = host.threadMeta?.(threadId)
     if (!thread) throw new Error(`Thread ${threadId} was not found.`)
-    if (thread.settledAt) throw new Error(`Thread ${threadId} is archived; a job cannot be bound to it.`)
+    if (thread.archivedAt) throw new Error(`Thread ${threadId} is archived; a job cannot be bound to it.`)
     let role: string | undefined
     try {
       role = host.botRole?.(threadId)

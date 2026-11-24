@@ -134,7 +134,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     const input = workflowJsonSchemaValidator.validateData(definition.compiled.inputSchema, params.input)
     if (!input.ok) throw new DomainRpcError('invalid_input', input.diagnostics[0]?.message ?? 'Workflow input is invalid')
     const thread = params.threadId ? this.options.threads.getThread(params.threadId) : undefined
-    if (params.threadId && (!thread || thread.settledAt)) throw new DomainRpcError('thread_unavailable', 'Workflow thread is unavailable')
+    if (params.threadId && (!thread || thread.archivedAt)) throw new DomainRpcError('thread_unavailable', 'Workflow thread is unavailable')
     const projectId = params.projectId ?? thread?.projectId
     if (thread && thread.projectId !== projectId) throw new DomainRpcError('project_mismatch', 'Workflow project must match its thread')
     if (projectId && !this.options.projects.getProject(projectId)) throw new DomainRpcError('project_unavailable', 'Workflow project is unavailable')
@@ -196,7 +196,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       const input = workflowJsonSchemaValidator.validateData(definition.compiled.inputSchema, params.input)
       if (!input.ok) throw new DomainRpcError('invalid_input', input.diagnostics[0]?.message ?? 'Workflow input is invalid')
       const thread = params.threadId ? this.options.threads.getThread(params.threadId) : undefined
-      if (params.threadId && (!thread || thread.id !== params.threadId || thread.settledAt)) throw new DomainRpcError('thread_unavailable', 'The selected thread is unavailable in this profile')
+      if (params.threadId && (!thread || thread.id !== params.threadId || thread.archivedAt)) throw new DomainRpcError('thread_unavailable', 'The selected thread is unavailable in this profile')
       const projectId = params.projectId ?? thread?.projectId
       if (thread && thread.projectId !== projectId) throw new DomainRpcError('project_mismatch', 'Workflow project must match its thread')
       if (projectId && !this.options.projects.getProject(projectId)) throw new DomainRpcError('project_unavailable', 'The selected project is unavailable in this profile')
@@ -331,7 +331,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     if (context.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Workflow context belongs to another profile')
     this.options.threads.assertThreadAdmission(context.threadId)
     const thread = this.options.threads.getThread(context.threadId)
-    if (!thread || thread.id !== context.threadId || thread.settledAt || thread.projectId !== context.projectId) throw new DomainRpcError('thread_unavailable', 'Workflow thread ownership changed')
+    if (!thread || thread.id !== context.threadId || thread.archivedAt || thread.projectId !== context.projectId) throw new DomainRpcError('thread_unavailable', 'Workflow thread ownership changed')
     const project = context.projectId ? this.options.projects.getProject(context.projectId) : undefined
     if (context.projectId && !project) throw new DomainRpcError('project_unavailable', 'Workflow project was removed')
     return project?.path

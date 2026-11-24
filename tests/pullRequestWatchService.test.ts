@@ -417,10 +417,10 @@ describe('PullRequestWatchService', () => {
     it('ends when the thread is archived, with a line, and stops polling', async () => {
       h = setup()
       await h.watch()
-      h.store.set('t1', { ...h.store.get('t1')!, settledAt: '2026-10-12T00:05:00Z' })
+      h.store.set('t1', { ...h.store.get('t1')!, archivedAt: '2026-10-12T00:05:00Z' })
       const reads = h.gh.prViews()
       await h.tick()
-      expect(h.service.status('t1').ended?.reason).toBe('settled')
+      expect(h.service.status('t1').ended?.reason).toBe('archived')
       expect(h.gh.prViews()).toBe(reads)
       expect(h.notices.at(-1)!.text).toContain('archived')
     })
@@ -615,7 +615,7 @@ describe('PullRequestWatchService', () => {
 
     it('after the thread was archived', async () => {
       h = setup()
-      await slowRead(h, () => h!.store.set('t1', { ...h!.store.get('t1')!, settledAt: '2026-10-12T01:00:00Z' }))
+      await slowRead(h, () => h!.store.set('t1', { ...h!.store.get('t1')!, archivedAt: '2026-10-12T01:00:00Z' }))
       expect(h.rows()).toEqual([])
       expect(h.notices.map((notice) => notice.text).join('\n')).not.toContain('Update on pull request')
     })

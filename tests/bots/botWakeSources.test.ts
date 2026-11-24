@@ -19,7 +19,7 @@ describe('a thread as a wake sees it', () => {
     ['gone', { thread: () => undefined }, { state: 'deleted' }],
     ['in the trash, even out of sight', { trashed: () => true, reachable: () => false }, { state: 'deleted' }],
     ['out of the bot\'s sight (a bot\'s, private or subagent thread)', { reachable: () => false }, { state: 'unreachable' }],
-    ['archived, even while a run is ending', { thread: () => ({ name: 'Fix login', settledAt: '2026-11-15T10:00:00.000Z' }), working: () => true }, { state: 'archived', title: 'Fix login' }],
+    ['archived, even while a run is ending', { thread: () => ({ name: 'Fix login', archivedAt: '2026-11-15T10:00:00.000Z' }), working: () => true }, { state: 'archived', title: 'Fix login' }],
     ['working', { working: () => true }, { state: 'running', title: 'Fix login' }],
     ['idle after its last run', {}, { state: 'idle', title: 'Fix login', lastRun: { status: 'completed', endedAt: '2026-11-15T10:00:00.000Z' } }],
     ['idle with no run yet', { lastRun: () => undefined }, { state: 'idle', title: 'Fix login' }]

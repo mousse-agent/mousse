@@ -69,7 +69,7 @@ export function EditDetailsPane({ item, onDelete }: { item: AutomationItem; onDe
       setCatalog({
         models: modelGroups(options.llmProviders),
         projects,
-        threads: threads.filter((thread) => !thread.lineage && !thread.settledAt),
+        threads: threads.filter((thread) => !thread.lineage && !thread.archivedAt),
         defaultPermissionMode: normalizePermissionMode(current.permissions?.defaultMode)
       })
     } catch (cause) {

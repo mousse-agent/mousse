@@ -49,7 +49,7 @@ beforeEach(() => {
         if (refuse[threadId]) throw { code: 'thread_delete_blocked', message: refuse[threadId] }
         deleted.push(threadId)
       }),
-      settle: vi.fn(async () => undefined),
+      archive: vi.fn(async () => undefined),
       pin: vi.fn(async () => undefined)
     }
   }
@@ -73,14 +73,14 @@ describe('the thread menu', () => {
   const items = () => [...document.querySelectorAll<HTMLButtonElement>('.threads-context-menu button')].map((button) => button.textContent?.trim())
 
   it('offers Archive and no Delete for a thread that is not archived', async () => {
-    await menu({ settled: false })
+    await menu({ archived: false })
     expect(items()).toContain('Archive')
     expect(items().some((item) => /delete|remove/i.test(item ?? ''))).toBe(false)
   })
 
   it('offers Unarchive and Delete for an archived thread', async () => {
     const onRemove = vi.fn()
-    await menu({ settled: true }, onRemove)
+    await menu({ archived: true }, onRemove)
     expect(items()).toEqual(expect.arrayContaining(['Unarchive', 'Delete…']))
     expect(items()).not.toContain('Settle')
     await click(buttons().find((button) => button.textContent?.trim() === 'Delete…'))
@@ -88,7 +88,7 @@ describe('the thread menu', () => {
   })
 
   it('leaves the delete of an archived thread on another computer to that computer', async () => {
-    await menu({ settled: true, node: LAPTOP, computerName: 'Laptop' })
+    await menu({ archived: true, node: LAPTOP, computerName: 'Laptop' })
     const remove = buttons().find((button) => button.textContent?.trim() === 'Delete…')!
     expect(remove.disabled).toBe(true)
     expect(remove.title).toBe('Delete on Laptop')
@@ -101,9 +101,9 @@ describe('the Archived section', () => {
       projects: [],
       threads: [
         thread('live', { name: 'In use' }),
-        thread('old1', { name: 'Old one', settledAt: at }),
-        thread('old2', { name: 'Old two', settledAt: at }),
-        thread(`${LAPTOP}:far`, { name: 'Far away', settledAt: at, node: LAPTOP })
+        thread('old1', { name: 'Old one', archivedAt: at }),
+        thread('old2', { name: 'Old two', archivedAt: at }),
+        thread(`${LAPTOP}:far`, { name: 'Far away', archivedAt: at, node: LAPTOP })
       ],
       activeThreadId: null,
       threadsSidebarView: 'threads',
@@ -114,7 +114,7 @@ describe('the Archived section', () => {
 
   const row = (id: string) => host.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(id)}"]`)?.closest<HTMLElement>('.threads-sidebar-thread-container')
   const open = async () => {
-    const toggle = host.querySelector<HTMLButtonElement>('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')
+    const toggle = host.querySelector<HTMLButtonElement>('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')
     if (toggle?.getAttribute('aria-expanded') === 'false') await click(toggle)
   }
 

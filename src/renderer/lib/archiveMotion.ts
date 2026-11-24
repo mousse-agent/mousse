@@ -42,10 +42,10 @@ export function withPendingArchives(threads: readonly Thread[], pending: Readonl
   let changed = false
   const next = threads.map((thread) => {
     const mark = pending.get(thread.id)
-    if (mark === undefined || Boolean(thread.settledAt) === (mark !== null)) return thread
+    if (mark === undefined || Boolean(thread.archivedAt) === (mark !== null)) return thread
     changed = true
-    if (mark !== null) return { ...thread, settledAt: mark }
-    const { settledAt: _settledAt, ...rest } = thread
+    if (mark !== null) return { ...thread, archivedAt: mark }
+    const { archivedAt: _archivedAt, ...rest } = thread
     return rest
   })
   return changed ? next : (threads as Thread[])
@@ -79,7 +79,7 @@ export function useArchiveMoves(threads: readonly Thread[], animate = true): Arc
     const started: [string, ArchiveMove][] = []
     for (const thread of threads) {
       const before = previous.get(thread.id)
-      if (before && Boolean(before.settledAt) !== Boolean(thread.settledAt)) started.push([thread.id, { toArchived: Boolean(thread.settledAt), before }])
+      if (before && Boolean(before.archivedAt) !== Boolean(thread.archivedAt)) started.push([thread.id, { toArchived: Boolean(thread.archivedAt), before }])
     }
     if (started.length === 0) return
     for (const [id, move] of started) {
@@ -120,7 +120,7 @@ export function threadsForList(threads: readonly Thread[], moves: ArchiveMoves, 
 export function archiveMotionOf(moves: ArchiveMoves, thread: Thread): 'leave' | 'enter' | undefined {
   const move = moves.get(thread.id)
   if (!move) return undefined
-  return Boolean(thread.settledAt) === move.toArchived ? 'enter' : 'leave'
+  return Boolean(thread.archivedAt) === move.toArchived ? 'enter' : 'leave'
 }
 
 /**

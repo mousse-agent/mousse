@@ -140,7 +140,7 @@ describe('subagent threads in protocol thread lists', () => {
     expect(names(reordered.all)).toEqual([...shown, 'Beta'].sort())
     // A thread is archived before it is deleted.
     const beta = created.threads.find((thread) => thread.name === 'Beta')!.id
-    await gui.request('threads.settle', { threadId: beta, settled: true })
+    await gui.request('threads.archive', { threadId: beta, archived: true })
     const deleted = await gui.request<{ threads: Thread[] }>('threads.delete', { threadId: beta })
     expect(names(deleted.threads)).toEqual(all)
   })

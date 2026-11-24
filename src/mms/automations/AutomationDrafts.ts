@@ -85,7 +85,7 @@ export interface AutomationDraftsDeps {
   remove(id: string): boolean
   pause(id: string, reason?: string, until?: string): ScheduledJob | null
   projects(): Array<{ id: string; name: string }>
-  thread(id: string): Pick<Thread, 'id' | 'projectId' | 'pullRequest' | 'settledAt' | 'botOwned'> | undefined
+  thread(id: string): Pick<Thread, 'id' | 'projectId' | 'pullRequest' | 'archivedAt' | 'botOwned'> | undefined
   /** Whether the bot exists (and is not deleted). */
   botExists?(botId: string): boolean
   /** Turn on with a bot as Who: the bot's schedule, made the way its own schedules are (`BotScheduleBook.add`). */
@@ -342,7 +342,7 @@ export class AutomationDrafts {
       case 'thread_event': {
         const thread = this.deps.thread(trigger.threadId)
         // The same threads the protocol takes: a bot's own thread is the bot's, never an automation's.
-        if (!thread || thread.settledAt || thread.botOwned) problems.push(`There is no thread ${trigger.threadId}.`)
+        if (!thread || thread.archivedAt || thread.botOwned) problems.push(`There is no thread ${trigger.threadId}.`)
         else if (!thread.pullRequest) problems.push('That thread has no pull request to watch.')
         else {
           threadEvent = { threadEvent: { threadId: thread.id, number: thread.pullRequest.number, events: trigger.events } }

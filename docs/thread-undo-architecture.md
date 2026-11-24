@@ -188,7 +188,7 @@ Create durable thread branches/worktrees lazily.
 - Require a clean primary checkout when provisioning the first thread.
 - Explain that dirty primary changes are not automatically imported.
 - Add explicit dirty-state import later (temporary index + user confirmation).
-- Keep worktrees for settled threads initially; reclamation is through explicit GC.
+- Keep worktrees for archived threads initially; reclamation is through explicit GC.
 - Detect moved repositories using the repository ID and repair path hints.
 - Detect missing/manually removed worktrees and rebuild from retained refs.
 
@@ -308,7 +308,7 @@ Exit gate: two windows and a CLI converge on the same operation state.
 - Replace recursive deletion with tombstones; stop main/child/terminal/background work; move data
   to trash; keep refs; hide tombstones; support restore and worktree re-provisioning; GC under the
   repo lease deleting refs only when unreferenced + validated for reachability.
-- Never blanket-prune on directory visibility alone; treat settled threads distinctly.
+- Never blanket-prune on directory visibility alone; treat archived threads distinctly.
 
 Exit gate: delete, restart, restore, purge are deterministic and tested.
 
@@ -339,7 +339,7 @@ edits inside a thread worktree mid-turn; stopped turns; child completion during 
 thread switch; crash at every journal + Git transition; merge/undo/publish conflicts; recovery
 state; repo moved/renamed; missing worktree; Windows `EPERM`/`EBUSY` and transient unavailability;
 project == repo subdirectory; detached/unborn/bare/shallow; hook/LFS/CRLF; submodules/symlinks;
-manual branch delete + GC; settle/delete/restore/purge; compaction pre/post fork; tool-call/result
+manual branch delete + GC; archive/delete/restore/purge; compaction pre/post fork; tool-call/result
 boundaries; published-undo republish; non-Git standalone threads.
 
 ## Delivery recommendation

@@ -75,7 +75,7 @@ describe('subscribed window presentation bootstrap', () => {
     // The thread this profile's window showed last time (the warm start shows it before the service answers).
     it.each([
       ['opens it when it is still open', [{ id: 'newest' }, { id: 'last-shown' }], undefined, 'last-shown'],
-      ['opens the first thread when it was archived since', [{ id: 'newest' }, { id: 'last-shown', settledAt: '2026-11-20T00:00:00Z' }], undefined, 'newest'],
+      ['opens the first thread when it was archived since', [{ id: 'newest' }, { id: 'last-shown', archivedAt: '2026-11-20T00:00:00Z' }], undefined, 'newest'],
       ['opens the first thread when it was deleted since', [{ id: 'newest' }], undefined, 'newest'],
       ['opens the first thread rather than a subagent', [{ id: 'newest' }, { id: 'parent' }, subagent('last-shown', 'parent')], undefined, 'newest'],
       ['keeps the selection the window restored itself', [{ id: 'newest' }, { id: 'last-shown' }, { id: 'restored' }], 'restored', 'restored']

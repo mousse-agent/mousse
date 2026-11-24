@@ -528,7 +528,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         return input.prompt
       })
       await w.attach()
-      w.d.store.setThreadSettled(w.other.id, true)
+      w.d.store.setThreadArchived(w.other.id, true)
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       expect(seen.map((response) => refusalOfResponse(response)?.details)).toEqual([
         expect.objectContaining({ conflict: 'thread_archived' }),

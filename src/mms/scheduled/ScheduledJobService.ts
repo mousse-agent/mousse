@@ -570,7 +570,7 @@ export class ScheduledJobService extends EventEmitter {
 
   /**
    * A scheduled turn's run ended (reported by the orchestrator, from whichever process drained the turn).
-   * Releases the occurrence, records its outcome and settles a `[SILENT]` per-run thread now, not at the next tick.
+   * Releases the occurrence, records its outcome and archives a `[SILENT]` per-run thread now, not at the next tick.
    */
   occurrenceSettled(event: ScheduledOccurrenceSettled): void {
     try {
@@ -588,7 +588,7 @@ export class ScheduledJobService extends EventEmitter {
       if (before && ours && (job || !this.store.getJob(event.jobId))) this.announceRunEnd(before, event.occurrenceKey, { status: event.status, silent, ...(event.error ? { error: event.error } : {}), ...(threadId ? { threadId } : {}), ...(event.retryAt ? { retryAt: event.retryAt } : {}) })
       // A finished run on the project's checkout leaves nothing to keep open: its reply is in the run record and
       // the thread stays reachable from it. A new-worktree thread holds the run's work, so it stays open.
-      if (threadId && (silent || (event.status === 'ok' && before?.workspace?.kind !== 'newWorktree'))) this.settlePerRunThread(event.jobId, threadId)
+      if (threadId && (silent || (event.status === 'ok' && before?.workspace?.kind !== 'newWorktree'))) this.archivePerRunThread(event.jobId, threadId)
       if (job) this.emitUpdated()
     } catch (error) {
       this.lastTickError = error instanceof Error ? error.message : String(error)
@@ -596,9 +596,9 @@ export class ScheduledJobService extends EventEmitter {
   }
 
   /** A per-run thread that is done leaves the sidebar and stops counting toward the job's cap; only a thread this job made is touched. */
-  private settlePerRunThread(jobId: string, threadId: string): void {
+  private archivePerRunThread(jobId: string, threadId: string): void {
     try {
-      if (this.threadStore?.getThread(threadId)?.scheduledJobId === jobId) this.threadStore.setThreadSettled(threadId, true)
+      if (this.threadStore?.getThread(threadId)?.scheduledJobId === jobId) this.threadStore.setThreadArchived(threadId, true)
     } catch {
       /* best effort */
     }
@@ -866,7 +866,7 @@ export class ScheduledJobService extends EventEmitter {
       if (job.threadId) {
         const thread = store.getThread(job.threadId)
         if (!thread) return 'Its thread was deleted'
-        if (thread.settledAt) return 'Its thread was archived'
+        if (thread.archivedAt) return 'Its thread was archived'
       }
       if (job.createdBy && !store.getThread(job.createdBy.threadId)) return 'The thread that created it was deleted'
     } catch {
@@ -1141,7 +1141,7 @@ export class ScheduledJobService extends EventEmitter {
           : { status: result.waiting ? 'waiting' as const : result.error ? 'error' as const : 'ok' as const, silent, ...(result.error ? { error: result.error } : {}) }
         this.announceRunEnd(job, occurrenceKey, { ...outcome, ...(result.threadId ? { threadId: result.threadId } : {}) })
       }
-      if (silent && result.threadId) this.settlePerRunThread(job.id, result.threadId)
+      if (silent && result.threadId) this.archivePerRunThread(job.id, result.threadId)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {

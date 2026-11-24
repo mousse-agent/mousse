@@ -82,7 +82,7 @@ export function pendingThreadRow(input: {
   const { workspace } = input
   const projectId = workspace.projectId
   // On top of its group, as the service puts a thread on its first send.
-  const siblings = input.threads.filter((thread) => (thread.projectId ?? undefined) === projectId && !thread.settledAt && isThreadStarted(thread))
+  const siblings = input.threads.filter((thread) => (thread.projectId ?? undefined) === projectId && !thread.archivedAt && isThreadStarted(thread))
   const order = siblings.reduce((min, thread) => Math.min(min, thread.order), 0) - 1
   const name = pendingRowTitle(trimmed)
   const named = isDefaultThreadName(name) ? {} : { name, titleSource: 'provisional' as const }
@@ -144,7 +144,7 @@ function madeForRow(thread: Thread, row: PendingThreadRow, exclude: ReadonlySet<
     !row.listedAtSend.has(thread.id) &&
     !exclude.has(thread.id) &&
     Boolean(thread.startedAt) &&
-    !thread.settledAt &&
+    !thread.archivedAt &&
     !thread.lineage &&
     !thread.automationManager &&
     Number.isFinite(created) &&

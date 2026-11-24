@@ -155,6 +155,6 @@ export function useOpenSideChat(parentThreadId: string | null): Thread | undefin
   return useAppStore((state) => {
     if (!openId || !parentThreadId) return undefined
     const thread = state.threads.find((entry) => entry.id === openId)
-    return thread && !thread.settledAt && thread.lineage?.parentThreadId === parentThreadId ? thread : undefined
+    return thread && !thread.archivedAt && thread.lineage?.parentThreadId === parentThreadId ? thread : undefined
   })
 }

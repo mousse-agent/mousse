@@ -186,7 +186,7 @@
   flex-grow: 1;
 }
 
-.threads-sidebar-section-settled.collapsed {
+.threads-sidebar-section-archived.collapsed {
   margin-bottom: 4px;
 }
 
@@ -244,7 +244,7 @@
   color: var(--text-primary);
 }
 
-.threads-sidebar-section-settled {
+.threads-sidebar-section-archived {
   margin-top: 12px;
 }
 
@@ -331,7 +331,7 @@
 }
 
 .threads-sidebar-project-icon,
-.threads-sidebar-settled-icon {
+.threads-sidebar-archived-icon {
   flex-shrink: 0;
   color: var(--text-secondary);
 }
@@ -836,18 +836,18 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   margin-top: var(--threads-sidebar-pinned-gap);
 }
 
-.threads-sidebar-settled-count {
+.threads-sidebar-archived-count {
   opacity: 0.7;
 }
 
-.threads-sidebar-settled-list {
+.threads-sidebar-archived-list {
   min-height: 0;
 }
 
 /* Archived rows sit back: their content is faded and grey, the project wash is off, and the row's background
    (hover, selected) is untouched. A row lights up in full colour while it is hovered, has keyboard focus or has
    its menu open. A status that needs the person (input, approval) keeps its colour. */
-.threads-sidebar-settled-list .threads-sidebar-thread.settled :is(
+.threads-sidebar-archived-list .threads-sidebar-thread.archived :is(
   .threads-sidebar-card-mark,
   .threads-sidebar-card-project,
   .threads-sidebar-card-pin,
@@ -862,12 +862,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   transition: opacity var(--ui-dur-fast, 120ms) ease-out, filter var(--ui-dur-fast, 120ms) ease-out;
 }
 
-.threads-sidebar-settled-list .threads-sidebar-thread.settled.project-tinted::after {
+.threads-sidebar-archived-list .threads-sidebar-thread.archived.project-tinted::after {
   opacity: 0;
   transition: opacity var(--ui-dur-fast, 120ms) ease-out;
 }
 
-.threads-sidebar:not(.menu-open) .threads-sidebar-settled-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.settled :is(
+.threads-sidebar:not(.menu-open) .threads-sidebar-archived-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.archived :is(
   .threads-sidebar-card-mark,
   .threads-sidebar-card-project,
   .threads-sidebar-card-status,
@@ -876,7 +876,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   .threads-sidebar-card-sub,
   .threads-sidebar-skeleton
 ),
-.threads-sidebar-settled-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.settled :is(
+.threads-sidebar-archived-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.archived :is(
   .threads-sidebar-card-mark,
   .threads-sidebar-card-project,
   .threads-sidebar-card-status,
@@ -885,16 +885,16 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   .threads-sidebar-card-sub,
   .threads-sidebar-skeleton
 ),
-.threads-sidebar:not(.menu-open) .threads-sidebar-settled-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.settled.project-tinted::after,
-.threads-sidebar-settled-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.settled.project-tinted::after {
+.threads-sidebar:not(.menu-open) .threads-sidebar-archived-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.archived.project-tinted::after,
+.threads-sidebar-archived-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.archived.project-tinted::after {
   opacity: 1;
   filter: none;
 }
 
 /* The pin glyph rests a little fainter than the text around it, lit or not. */
-.threads-sidebar-settled-list .threads-sidebar-thread.settled .threads-sidebar-card-meta > .threads-sidebar-card-pin { opacity: 0.47; }
-.threads-sidebar:not(.menu-open) .threads-sidebar-settled-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.settled .threads-sidebar-card-pin,
-.threads-sidebar-settled-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.settled .threads-sidebar-card-pin {
+.threads-sidebar-archived-list .threads-sidebar-thread.archived .threads-sidebar-card-meta > .threads-sidebar-card-pin { opacity: 0.47; }
+.threads-sidebar:not(.menu-open) .threads-sidebar-archived-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.archived .threads-sidebar-card-pin,
+.threads-sidebar-archived-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.archived .threads-sidebar-card-pin {
   opacity: 0.85;
   filter: none;
 }
@@ -1258,29 +1258,29 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   margin-top: auto;
 }
 
-.threads-sidebar-footer > .threads-sidebar-section.threads-sidebar-section-settled {
+.threads-sidebar-footer > .threads-sidebar-section.threads-sidebar-section-archived {
   display: flex;
   flex-direction: column;
   flex: 0 1 auto;
   min-height: 0;
 }
 
-.threads-sidebar-settled-scroll {
+.threads-sidebar-archived-scroll {
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
 }
 
 /* Archived opens and closes with the shared Collapse, like a project. While it moves, its rows are capped at the
-   room the footer shows under the heading (45vh less `--threads-sidebar-settled-head`, measured on each toggle), so
+   room the footer shows under the heading (45vh less `--threads-sidebar-archived-head`, measured on each toggle), so
    a long list's height and fade play over what is on screen instead of filling the footer in one frame. At rest
    nothing is capped and the list scrolls as above. */
-.threads-sidebar-settled-scroll:has(> .ui-collapse[data-motion]) {
+.threads-sidebar-archived-scroll:has(> .ui-collapse[data-motion]) {
   overflow-y: hidden;
 }
 
-.threads-sidebar-settled-scroll > .ui-collapse[data-motion] > .ui-collapse-clip > * {
-  max-height: calc(45vh - var(--threads-sidebar-settled-head, 48px));
+.threads-sidebar-archived-scroll > .ui-collapse[data-motion] > .ui-collapse-clip > * {
+  max-height: calc(45vh - var(--threads-sidebar-archived-head, 48px));
   overflow: hidden;
 }
 
@@ -1290,43 +1290,43 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
    them, not the clip inside it: mid-motion the grid row is only part of the box (an auto-height grid sizes
    itself by the fr fraction and the row by its square), so the row sits at the bottom of the box and the rows
    overflow it upward, right up to the heading. */
-.threads-sidebar-settled-scroll > .ui-collapse {
+.threads-sidebar-archived-scroll > .ui-collapse {
   align-content: end;
 }
 
-.threads-sidebar-settled-scroll > .ui-collapse > .ui-collapse-clip {
+.threads-sidebar-archived-scroll > .ui-collapse > .ui-collapse-clip {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
 }
 
-.threads-sidebar-settled-scroll > .ui-collapse > .ui-collapse-clip > * {
+.threads-sidebar-archived-scroll > .ui-collapse > .ui-collapse-clip > * {
   flex: none;
 }
 
-.threads-sidebar-settled-scroll > .ui-collapse[data-motion] {
+.threads-sidebar-archived-scroll > .ui-collapse[data-motion] {
   overflow: hidden;
 }
 
-.threads-sidebar-settled-scroll > .ui-collapse[data-motion] > .ui-collapse-clip {
+.threads-sidebar-archived-scroll > .ui-collapse[data-motion] > .ui-collapse-clip {
   overflow: visible;
 }
 
-.threads-sidebar-settled-scroll > .ui-collapse[data-motion='exit'] {
+.threads-sidebar-archived-scroll > .ui-collapse[data-motion='exit'] {
   mask-image: linear-gradient(to top, #000 calc(100% - 20px), transparent calc(100% - 4px));
 }
 
-.threads-sidebar-settled-scroll > .ui-collapse[data-motion='exit'] > .ui-collapse-clip {
+.threads-sidebar-archived-scroll > .ui-collapse[data-motion='exit'] > .ui-collapse-clip {
   mask-image: none;
 }
 
 /* The Archived heading is low emphasis: regular weight, secondary colour, icon and word centred on each other. */
-.app .threads-sidebar-section-settled .threads-sidebar-heading {
+.app .threads-sidebar-section-archived .threads-sidebar-heading {
   font-weight: 400;
   color: var(--text-secondary);
 }
 
-.app .threads-sidebar-section-settled .threads-sidebar-heading-toggle {
+.app .threads-sidebar-section-archived .threads-sidebar-heading-toggle {
   flex: 1;
   min-width: 0;
   align-items: center;
@@ -1334,31 +1334,31 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 /* The count and the chevron sit at the row's end; the chevron turns down while Archived is open, like a project's. */
-.threads-sidebar-settled-count {
+.threads-sidebar-archived-count {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
 
-.threads-sidebar-settled-chevron {
+.threads-sidebar-archived-chevron {
   flex-shrink: 0;
   margin-left: auto;
   color: var(--text-secondary);
   transition: transform 0.15s;
 }
 
-.threads-sidebar-settled-count + .threads-sidebar-settled-chevron {
+.threads-sidebar-archived-count + .threads-sidebar-archived-chevron {
   margin-left: 0;
 }
 
-.threads-sidebar-section-settled.expanded .threads-sidebar-settled-chevron {
+.threads-sidebar-section-archived.expanded .threads-sidebar-archived-chevron {
   transform: rotate(90deg);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .threads-sidebar-settled-chevron { transition: none; }
+  .threads-sidebar-archived-chevron { transition: none; }
 }
 
-.app .threads-sidebar-section-settled .threads-sidebar-heading-toggle > svg {
+.app .threads-sidebar-section-archived .threads-sidebar-heading-toggle > svg {
   display: block;
 }
 
@@ -1694,7 +1694,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 /* A run of archived rows not drawn (ArchivedList): it holds their room, and is never the row the scroll keeps in place. */
-.threads-sidebar-settled-spacer {
+.threads-sidebar-archived-spacer {
   flex: none;
   overflow-anchor: none;
 }

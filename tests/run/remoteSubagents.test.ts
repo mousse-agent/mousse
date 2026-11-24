@@ -72,7 +72,7 @@ class FakeComputer implements RemoteComputersPort {
         return { providers: [], defaultModel: null, permission: { defaultMode: 'accept_edits', limit: this.limit } }
       case 'threads.setPermissionMode':
       case 'threads.setModel':
-      case 'threads.settle':
+      case 'threads.archive':
       case 'threads.setExpiry':
         return {}
       case 'orchestrator.send':

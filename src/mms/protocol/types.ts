@@ -307,6 +307,7 @@ export const PROTOCOL_METHODS = [
   'threads.rename',
   'threads.pin',
   'threads.setHidden',
+  'threads.archive',
   'threads.settle',
   'threads.focus',
   'threads.markSeen',

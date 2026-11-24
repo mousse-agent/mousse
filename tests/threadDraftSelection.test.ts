@@ -44,7 +44,7 @@ describe('new-chat draft selection', () => {
   it('ignores archived drafts', () => {
     expect(findUnstartedThread([
       thread('archived', '2026-09-17T10:00:00.000Z', {
-        settledAt: '2026-09-17T11:00:00.000Z'
+        archivedAt: '2026-09-17T11:00:00.000Z'
       })
     ])).toBeUndefined()
   })

@@ -321,7 +321,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const archived = await f.delegate(callerRun.runId, 'call-a')
       const bot = await f.delegate(callerRun.runId, 'call-b')
       const missing = await f.delegate(callerRun.runId, 'call-c')
-      threads.set(archived.childThreadId, thread(archived.childThreadId, { settledAt: NOW }))
+      threads.set(archived.childThreadId, thread(archived.childThreadId, { archivedAt: NOW }))
       threads.set(bot.childThreadId, thread(bot.childThreadId))
       botThreads.add(bot.childThreadId)
       expect(await call('schedule_create', { ...CREATE, threadId: archived.childThreadId })).toMatchObject({ isError: true, text: expect.stringContaining('archived') })

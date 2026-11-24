@@ -1,5 +1,6 @@
 import { normalizePermissionMode } from '../../../shared/permissionMode'
 import type { Project, Thread, ThreadActivityState } from '../../../shared/types'
+import { archivedAtOf } from '../../../shared/archivedAt'
 import type { ListsStatus } from '../remote/MmsListsSource'
 
 /**
@@ -147,7 +148,9 @@ export function threadRow(
   }
   if (typeof raw.projectId === 'string') row.projectId = raw.projectId
   if (typeof raw.pinnedAt === 'string') row.pinnedAt = raw.pinnedAt
-  if (typeof raw.settledAt === 'string') row.settledAt = raw.settledAt
+  // A computer that runs an older Mousse sends the archive time only as `settledAt`.
+  const archivedAt = archivedAtOf(raw)
+  if (archivedAt) row.archivedAt = archivedAt
   if (typeof raw.startedAt === 'string') row.startedAt = raw.startedAt
   // Only the dimmed state matters to another computer's sidebar.
   if (raw.titleSource === 'provisional') row.titleSource = 'provisional'
@@ -205,6 +208,8 @@ export function sameRow(a: object, b: object): boolean {
 
 interface CacheThread {
   id: string
+  archivedAt?: string
+  /** A copy kept from a computer that runs an older Mousse: `archivedAt` under its old name. */
   settledAt?: string
   updatedAt?: string
   lineage?: { parentThreadId?: string }
@@ -221,12 +226,13 @@ export function fitSnapshot<T extends { threads: CacheThread[]; status?: Record<
 ): T {
   const size = (value: unknown): number => Buffer.byteLength(JSON.stringify(value))
   if (size(snapshot) <= maxBytes) return snapshot
+  const archived = (thread: CacheThread): string | undefined => archivedAtOf(thread)
   const roots = snapshot.threads
     .filter((thread) => !thread.lineage)
     .sort(
       (a, b) =>
-        Number(!a.settledAt) - Number(!b.settledAt) ||
-        (a.settledAt ?? a.updatedAt ?? '').localeCompare(b.settledAt ?? b.updatedAt ?? '') ||
+        Number(!archived(a)) - Number(!archived(b)) ||
+        (archived(a) ?? a.updatedAt ?? '').localeCompare(archived(b) ?? b.updatedAt ?? '') ||
         a.id.localeCompare(b.id)
     )
   const step = Math.max(1, Math.ceil(roots.length / 20))

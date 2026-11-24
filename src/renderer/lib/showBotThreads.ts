@@ -18,8 +18,8 @@ export async function showBotThreads(botId: string): Promise<boolean> {
 }
 
 /** How many threads a bot started that are not archived: the count on its "See all". Subagents are not counted. */
-export function botThreadCount(threads: ReadonlyArray<{ startedByBot?: { botId: string }; settledAt?: string; lineage?: unknown }>, botId: string): number {
+export function botThreadCount(threads: ReadonlyArray<{ startedByBot?: { botId: string }; archivedAt?: string; lineage?: unknown }>, botId: string): number {
   let count = 0
-  for (const thread of threads) if (thread.startedByBot?.botId === botId && !thread.settledAt && !thread.lineage) count += 1
+  for (const thread of threads) if (thread.startedByBot?.botId === botId && !thread.archivedAt && !thread.lineage) count += 1
   return count
 }

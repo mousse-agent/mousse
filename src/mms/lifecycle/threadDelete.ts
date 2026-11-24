@@ -6,6 +6,7 @@ import { DomainRpcError } from '../protocol/domainRegistry'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import type { Thread } from '../../shared/types'
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
+import { withArchivedAt } from '../../shared/archivedAt'
 import type { ResourcePurgeService } from './ResourcePurgeService'
 
 /**
@@ -116,7 +117,7 @@ export interface DeleteOptions {
 /** A delete keeps the thread's worktrees, branches and Git refs; only its expiry takes them (`Thread.expiresAt`). */
 const keepsWork = (intent: DeleteIntent): boolean => !intent.expiry
 
-interface ThreadMeta { id: string; settledAt?: string; lineage?: Thread['lineage'] }
+interface ThreadMeta { id: string; archivedAt?: string; lineage?: Thread['lineage'] }
 
 export class ThreadDeleter {
   constructor(private readonly deps: ThreadDeleteDeps, private readonly busyRetryMs = BUSY_RETRY_MS) {}
@@ -213,15 +214,15 @@ export class ThreadDeleter {
       const path = join(record.location, 'meta.json')
       assertLifecyclePath(record.location, path)
       if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).size > 1024 * 1024) return undefined
-      const meta = JSON.parse(readFileSync(path, 'utf8')) as ThreadMeta
+      const meta = withArchivedAt(JSON.parse(readFileSync(path, 'utf8')) as ThreadMeta)
       return meta.id === taskId ? meta : undefined
     } catch { return undefined }
   }
 
   private isArchived(meta: ThreadMeta): boolean {
-    if (meta.settledAt) return true
+    if (meta.archivedAt) return true
     const root = meta.lineage?.rootThreadId
-    return Boolean(root && root !== meta.id && this.metaOf(root)?.settledAt)
+    return Boolean(root && root !== meta.id && this.metaOf(root)?.archivedAt)
   }
 
   /** True when `taskId`'s lifecycle owner chain reaches one of `ids`: it is trashed and purged with that owner. */
@@ -291,7 +292,7 @@ export class ThreadDeleter {
     const listed = this.deps.getThread(threadId)
     const continuing = !listed && (record?.state === 'trashed' || record?.state === 'purge-started')
     if (!listed && !continuing) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-    if (listed && options.internal && !options.expiry && !listed.settledAt) this.deps.archive(threadId)
+    if (listed && options.internal && !options.expiry && !listed.archivedAt) this.deps.archive(threadId)
     // An expired thread is deleted where it is: it is never archived on its way out.
     if (listed && !options.expiry && !this.isArchived(this.deps.getThread(threadId) ?? listed)) throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
     const intent: DeleteIntent = { human: options.human, discard: options.human && options.discard, at: new Date().toISOString(), ...(options.expiry ? { expiry: true as const } : {}) }

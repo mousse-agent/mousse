@@ -78,7 +78,7 @@ it('settles admitted browser polls before the delete that finishes a purge', asy
   let release = () => {}, poll: Promise<unknown> | undefined, operation: Promise<unknown> | undefined
   try {
     const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'purge with GUI polling' })
-    f.services.threads.setThreadSettled(thread.id, true)
+    f.services.threads.setThreadArchived(thread.id, true)
     await f.services.trashThread(thread.id)
     const peer = await f.connect(f.alice.id, ['browser.viewer.v1'])
     const browser = f.services.platform.browser, status = browser.accessStatus()

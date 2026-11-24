@@ -1875,7 +1875,7 @@ function ComposerThreadChip({ index, token, threadId, hover }: { index: number; 
       className="composer-thread-chip"
       data-thread-chip={index}
       data-status={status}
-      {...(thread?.settledAt !== undefined ? { 'data-archived': '' } : {})}
+      {...(thread?.archivedAt !== undefined ? { 'data-archived': '' } : {})}
       {...(hover ? { 'data-hover': hover } : {})}
     >
       <span className="composer-chip-slot">{parts.head}<MessageSquare size={12} strokeWidth={2} className="composer-thread-chip-icon" aria-hidden /></span>

@@ -168,7 +168,7 @@ describe('thread_create on another computer (issue #1160)', () => {
     expect(out.isError).toBeUndefined()
     const [far] = launchedBy(thread.id)
     expect(out.body).toMatchObject({ threadId: qualifyId(t.node, far!.id), firstMessage: 'failed', firstMessageReason: expect.stringContaining('200 runs') })
-    expect(far!.settledAt).toBeFalsy()
+    expect(far!.archivedAt).toBeFalsy()
     const again = await create({ computer: t.node, firstMessage: 'Go.', clientRequestId: 'refused-first' })
     expect(again.body).toMatchObject({ threadId: out.body.threadId, firstMessage: 'failed', replayed: true })
     expect(launchedBy(thread.id)).toHaveLength(1)

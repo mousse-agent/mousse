@@ -127,7 +127,7 @@ describe('the list the sidebar shows', () => {
       made('bot-chat'),
       made('subagent', { lineage: { parentThreadId: 'a', rootThreadId: 'a', relationship: 'subagent' } }),
       made('manager', { automationManager: true } as Partial<Thread>),
-      made('archived', { settledAt: at })
+      made('archived', { archivedAt: at })
     ]
     const shown = withPendingRows([...listed, ...others], [row], {}, 'd1', undefined, new Set(['bot-chat']))
     expect(shown.threads.map((entry) => entry.id)).toEqual(['a', 'b', ...others.map((entry) => entry.id), 'pending:k1'])

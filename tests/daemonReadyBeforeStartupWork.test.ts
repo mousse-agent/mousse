@@ -29,7 +29,7 @@ describe('daemon start', () => {
     const setup = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
     const cutShort = setup.threads.createThread('Deleted when the service crashed').id
     const other = setup.threads.createThread('Deleted after the restart').id
-    for (const id of [cutShort, other]) setup.threads.setThreadSettled(id, true)
+    for (const id of [cutShort, other]) setup.threads.setThreadArchived(id, true)
     await setup.lifecycle.trash({ taskId: cutShort, operationId: randomUUID() })
     const profileHome = setup.threads.lifecycleStore.profileHome
     await setup.stop()

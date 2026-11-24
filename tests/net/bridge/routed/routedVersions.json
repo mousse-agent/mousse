@@ -739,6 +739,11 @@
     "digest": "2a27f073e7829290",
     "security": "04f7c680ffd36337"
   },
+  "threads.archive": {
+    "version": 1,
+    "digest": "58cd3663c031c258",
+    "security": "ceacd93869361a7a"
+  },
   "threads.backgroundWork": {
     "version": 1,
     "digest": "2a27f073e7829290",

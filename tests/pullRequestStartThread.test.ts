@@ -330,8 +330,8 @@ describe('starting a thread from a pull request', () => {
     expect(second.thread.id).not.toBe(first.thread.id)
     expect(mms.threads.listAllThreads().filter((thread) => thread.pullRequest)).toHaveLength(2)
 
-    mms.threads.setThreadSettled(first.thread.id, true)
-    mms.threads.setThreadSettled(second.thread.id, true)
+    mms.threads.setThreadArchived(first.thread.id, true)
+    mms.threads.setThreadArchived(second.thread.id, true)
     const third = await start()
     expect(third.thread.id).not.toBe(second.thread.id)
   })

@@ -430,7 +430,7 @@ export class RemoteSubagents {
       // is that computer's own choice; nothing is lost there without it.
       this.setState(record, 'done')
       if (remoteThreadId && !record.remoteThreadId)
-        await this.call(record, 'threads.settle', { threadId: remoteThreadId, settled: true }).catch(() => undefined)
+        await this.call(record, 'threads.archive', { threadId: remoteThreadId, archived: true }).catch(() => undefined)
       if (onRefusal === 'settle') await this.deps.engine.settleRemoteRun(record.childRunId, 'failed', { error: `${name} refused the task: ${message}` })
       return { ok: false, code, message }
     }

@@ -300,6 +300,18 @@ describe('remote pending questions', () => {
     expect(p.mms.questions.getPending(requestId)).not.toBeNull()
   })
 
+  it('sends the live metadata of an archived thread with the legacy settledAt an older computer reads', async () => {
+    const p = await setup(),
+      thread = p.mms.threads.createThread('Archived live'),
+      events: ThreadSourceEvent[] = []
+    resources.push(new MmsThreadSource(p.mms).onThread(thread.id, (event) => events.push(event)))
+    const archived = p.mms.threads.setThreadArchived(thread.id, true)
+    // The service tells the stream with the thread's new metadata, as the archive path does.
+    p.mms.threads.emit('updated', archived)
+    const metadata = events.filter((event) => event.type === 'thread.metadata').at(-1) as { data: { thread: Record<string, unknown> } }
+    expect(metadata.data.thread).toMatchObject({ archivedAt: archived.archivedAt, settledAt: archived.archivedAt })
+  })
+
   it('reports question changes from the thread source as display-only deltas', async () => {
     const p = await setup(),
       thread = p.mms.threads.createThread('Live questions'),

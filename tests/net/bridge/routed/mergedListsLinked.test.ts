@@ -270,18 +270,54 @@ describe('another computer’s lists over a real link', () => {
     const threadId = t.qualified(thread.id)
     // Not archived: refused, with what to do first.
     await expect(t.dispatch('threads.delete', { threadId })).rejects.toThrow('Archive the thread before deleting it.')
-    await t.dispatch('threads.settle', { threadId, settled: true })
-    expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+    await t.dispatch('threads.archive', { threadId, archived: true })
+    expect(t.owner.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
     // Archived: deleting for good is done on the computer that runs it, never from another one.
     await expect(t.dispatch('threads.delete', { threadId })).rejects.toThrow('Delete the thread on the computer that runs it.')
     // The trash and restore steps of a delete are not methods anyone can call, here or there.
     await expect(t.dispatch('threads.trash', { threadId })).rejects.toThrow()
     await expect(t.dispatch('threads.restore', { threadId })).rejects.toThrow()
-    expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+    expect(t.owner.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
     expect(t.owner.threads.lifecycleStore.get(thread.id)?.state ?? 'active').toBe('active')
     // Unarchive is routed too: the thread is back where it was.
+    await t.dispatch('threads.archive', { threadId, archived: false })
+    expect(t.owner.threads.getThread(thread.id)?.archivedAt).toBeUndefined()
+  }, 90_000)
+
+  it('archives and unarchives a thread here when a computer that runs an older Mousse calls threads.settle', async () => {
+    const thread = t.owner.threads.createThread('Archived by an older computer')
+    const threadId = t.qualified(thread.id)
+    // The routed call an older computer sends: the old name and key.
+    await t.dispatch('threads.settle', { threadId, settled: true })
+    expect(t.owner.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
     await t.dispatch('threads.settle', { threadId, settled: false })
-    expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeUndefined()
+    expect(t.owner.threads.getThread(thread.id)?.archivedAt).toBeUndefined()
+  }, 90_000)
+
+  it('archives a thread of a computer that runs an older Mousse with threads.settle, the name it advertises', async () => {
+    const thread = t.owner.threads.createThread('Archive me on an older computer')
+    const threadId = t.qualified(thread.id)
+    const client = t.client()
+    const real = client.versions.bind(client)
+    // As a build from before `threads.archive`: its net.info does not name the row.
+    const versions = vi.spyOn(client, 'versions').mockImplementation(async (node, session) => {
+      const { 'threads.archive': _archive, ...older } = (await real(node, session)) ?? {}
+      return older
+    })
+    const calls = vi.spyOn(client, 'call')
+    try {
+      await t.dispatch('threads.archive', { threadId, archived: true })
+      expect(t.owner.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
+      expect(calls.mock.calls.map(([, method, params]) => [method, params])).toEqual([
+        ['threads.archive', expect.objectContaining({ archived: true })],
+        ['threads.settle', expect.objectContaining({ settled: true })]
+      ])
+      await t.dispatch('threads.archive', { threadId, archived: false })
+      expect(t.owner.threads.getThread(thread.id)?.archivedAt).toBeUndefined()
+    } finally {
+      versions.mockRestore()
+      calls.mockRestore()
+    }
   }, 90_000)
 
   it('says which computer a search could not ask when it refuses this device', async () => {

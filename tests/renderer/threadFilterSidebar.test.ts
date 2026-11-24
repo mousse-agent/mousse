@@ -35,10 +35,10 @@ const byBot = (id: string, name: string, over: Partial<Thread> = {}) =>
 const threads = [
   thread('t1', 'Fix steer after the answer'),
   thread('t2', 'Appointment reminders', { projectId: 'p2' }),
-  thread('t3', 'Old export', { projectId: 'p2', settledAt: at }),
+  thread('t3', 'Old export', { projectId: 'p2', archivedAt: at }),
   byBot('a1', 'Nightly build triage'),
   byBot('a2', 'Bump Expo SDK', { projectId: 'p2' }),
-  byBot('a3', 'Notarize the nightly DMG', { settledAt: at })
+  byBot('a3', 'Notarize the nightly DMG', { archivedAt: at })
 ]
 
 function preload(): unknown {
@@ -157,7 +157,7 @@ describe('the sidebar filter', () => {
     expect(chips()).toEqual(['alpha'])
     expect(host.querySelector('[aria-label="Filters"] .bot-face')).not.toBeNull()
     expect(listed().sort()).toEqual(['a1', 'a2'])
-    expect(host.querySelector('.threads-sidebar-settled-count')?.textContent).toBe('1')
+    expect(host.querySelector('.threads-sidebar-archived-count')?.textContent).toBe('1')
   })
 
   it('Archived lists the archived threads in place of the others, and the Archived footer goes', () => {

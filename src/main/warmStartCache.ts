@@ -3,6 +3,7 @@ import type { ProfilePublicDto } from '../shared/profiles/types'
 import type { ProjectIconImage } from '../shared/projectIcon'
 import type { ThreadActivitySnapshot, ThreadActivityState } from '../shared/types'
 import type { WarmStartAppInfo, WarmStartView } from '../shared/warmStart'
+import { withArchivedAt } from '../shared/archivedAt'
 
 /**
  * The warm start: what each profile's window last showed (its thread list, projects, the open thread and that thread's
@@ -162,7 +163,8 @@ export class WarmStartCache {
     return {
       profileId,
       ...(entry.profile ? { profile: entry.profile } : {}),
-      threads: entry.threads as WarmStartView['threads'],
+      // A file written before archived threads were called archived carries their archive time as `settledAt`.
+      threads: entry.threads.map(withArchivedAt) as WarmStartView['threads'],
       projects: (entry.projects ?? []) as WarmStartView['projects'],
       activeThreadId,
       messages: transcript as WarmStartView['messages'],

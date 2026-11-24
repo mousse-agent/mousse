@@ -55,7 +55,7 @@ export function useAppCommands(): void {
   useCommand(
     'thread.archive',
     () => void archiveOpenThread().catch(logFailure('Archiving the thread')),
-    () => Boolean(openStartedThread() && !openStartedThread()!.settledAt)
+    () => Boolean(openStartedThread() && !openStartedThread()!.archivedAt)
   )
   useCommand('project.open', () => useAppStore.getState().setNewProjectOpen(true))
   useCommand('sideCard.toggle', () => {

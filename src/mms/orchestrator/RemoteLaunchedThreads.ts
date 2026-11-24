@@ -8,6 +8,7 @@ import type { RunWaitReply, RunWaitRun } from '../run/runWait'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type RunStatus, type ThreadEvent } from '../run/types'
 import type { MessageRow } from '../run/mcp/appTools/messageRows'
 import type { ThreadActivityState } from '../../shared/types'
+import { archivedAtOf } from '../../shared/archivedAt'
 
 /**
  * The thread tools on a thread of another of the user's computers (issue #1160): `thread_read`, `thread_wait`,
@@ -71,7 +72,7 @@ export interface RemoteListedThread {
   projectId?: string | null
   startedAt?: string | null
   updatedAt: string
-  settledAt?: string | null
+  archivedAt?: string | null
   parentThreadId?: string
   subagent: boolean
   /** That computer says an agent of this computer started it there (any thread of this computer, not only the caller's). */
@@ -638,7 +639,8 @@ export class RemoteLaunchedThreads {
         projectId: typeof thread.projectId === 'string' ? thread.projectId : null,
         startedAt: typeof thread.startedAt === 'string' ? thread.startedAt : null,
         updatedAt: typeof thread.updatedAt === 'string' ? thread.updatedAt : '',
-        settledAt: typeof thread.settledAt === 'string' ? thread.settledAt : null,
+        // A computer that runs an older Mousse sends it as `settledAt`.
+        archivedAt: archivedAtOf(thread) ?? null,
         ...(lineage && typeof lineage.parentThreadId === 'string' ? { parentThreadId: lineage.parentThreadId } : {}),
         subagent: lineage?.relationship === 'subagent',
         startedByAgentHere,

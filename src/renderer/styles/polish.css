@@ -479,7 +479,7 @@ html[data-theme='high-contrast'] {
   border-top: 1px solid var(--ui-line);
 }
 
-.app .threads-sidebar-section-settled {
+.app .threads-sidebar-section-archived {
   margin-top: 8px;
 }
 

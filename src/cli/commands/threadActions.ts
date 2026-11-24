@@ -5,8 +5,8 @@ import { exitWithError, writeOutput } from '../output'
 
 async function resolveThreadId(client: { request<T>(method: string, params?: unknown): Promise<T> }, requested?: string): Promise<string> {
   if (requested) return requested
-  const result = await client.request<{ threads: Array<{ id: string; settledAt?: string }> }>('threads.list')
-  const open = result.threads.filter((thread) => !thread.settledAt)
+  const result = await client.request<{ threads: Array<{ id: string; archivedAt?: string }> }>('threads.list')
+  const open = result.threads.filter((thread) => !thread.archivedAt)
   if (open.length !== 1) throw new Error(`--session is required when ${open.length} open threads are available.`)
   return open[0].id
 }

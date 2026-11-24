@@ -94,14 +94,14 @@ describe('thread runtimes are released', () => {
 
   it('archiving a thread drops its runtime at once', async () => {
     const id = finishedThread('Archived')
-    await orch.settleThread(id, true)
+    await orch.archiveThread(id, true)
     expect(runtimes.get(id)).toBeUndefined()
   })
 
   it('an archived thread still loaded keeps its runtime until its session is released, then the sweep drops it', async () => {
     const id = finishedThread('Archived while loaded')
     orch.getOrCreateSession(id)
-    await orch.settleThread(id, true)
+    await orch.archiveThread(id, true)
     expect(runtimes.get(id)).toBeDefined()
     // Once the session is gone, an archived thread's runtime does not wait for the idle time again.
     clock += 11 * MINUTE
@@ -135,7 +135,7 @@ describe('thread runtimes are released', () => {
     if (orch.hasSession(id)) orch.residency.touch(id)
     orch.residency.sweepNow()
     expect(runtimes.get(id)).toBeDefined()
-    store.setThreadSettled(id, true)
+    store.setThreadArchived(id, true)
     if (orch.hasSession(id)) orch.residency.touch(id)
     orch.residency.sweepNow()
     expect(runtimes.get(id)).toBeDefined()
@@ -201,7 +201,7 @@ describe('thread runtimes are released', () => {
     before.createTask(cutShort, { description: 'cut short', status: 'in_progress' })
     const archived = store.createThread('Archived while its task ran', undefined, undefined, { started: true }).id
     before.createTask(archived, { description: 'cut short too', status: 'in_progress' })
-    store.setThreadSettled(archived, true)
+    store.setThreadArchived(archived, true)
 
     // The first start with the list reads every thread (the fixture's own too), as before, and settles what was running.
     reads.mockClear()
@@ -223,7 +223,7 @@ describe('thread runtimes are released', () => {
     // A thread is taken off the list a little after its work stopped (here at once: a delay of 0).
     await new Promise((settle) => setTimeout(settle, 10))
     // An archived thread's running work is settled at the first restart after it is restored.
-    store.setThreadSettled(archived, false)
+    store.setThreadArchived(archived, false)
     reads.mockClear()
     const third = restart()
     third.beginRestart()

@@ -467,11 +467,11 @@ describe('thread_list, thread_search and any thread of an allowed computer (issu
     expect(list.body.threads.find((entry: Loose) => entry.id === launched.id)).toMatchObject({ startedByYou: true })
     for (const entry of list.body.threads) expect(entry.id.startsWith(`${t.node}:`), entry.id).toBe(true)
     expect(list.text).not.toContain(secret.id)
-    // Archived there, the launched thread leaves the default list and comes back marked with includeSettled.
-    await t.owner.orchestrator.settleThread(launched.far, true)
+    // Archived there, the launched thread leaves the default list and comes back marked with includeArchived.
+    await t.owner.orchestrator.archiveThread(launched.far, true)
     expect((await tool('thread_list', { computer: nameOf() })).body.threads.map((entry: Loose) => entry.id)).not.toContain(launched.id)
-    const settled = await tool('thread_list', { computer: nameOf(), includeSettled: true })
-    expect(settled.body.threads.find((entry: Loose) => entry.id === launched.id)).toMatchObject({ archived: true, archivedAt: expect.any(String), startedByYou: true })
+    const archived = await tool('thread_list', { computer: nameOf(), includeArchived: true })
+    expect(archived.body.threads.find((entry: Loose) => entry.id === launched.id)).toMatchObject({ archived: true, archivedAt: expect.any(String), startedByYou: true })
 
     const search =await tool('thread_search', { computer: nameOf(), query: word })
     expect(search.isError, search.text).toBeUndefined()

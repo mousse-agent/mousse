@@ -61,8 +61,8 @@ export function historyList(history: ThreadHistory, direction: 1 | -1, canOpen: 
 }
 
 /** Whether a history entry can be opened: the thread is still listed, started, and not archived. */
-export function openableThread(thread: Pick<Thread, 'settledAt' | 'startedAt' | 'name' | 'automationManager'> | undefined): boolean {
-  return Boolean(thread && !thread.settledAt && !thread.automationManager && isThreadStarted(thread))
+export function openableThread(thread: Pick<Thread, 'archivedAt' | 'startedAt' | 'name' | 'automationManager'> | undefined): boolean {
+  return Boolean(thread && !thread.archivedAt && !thread.automationManager && isThreadStarted(thread))
 }
 
 interface ThreadHistoryState extends ThreadHistory {

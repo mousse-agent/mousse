@@ -11,7 +11,7 @@ export type WakeThreadState = { state: 'running' | 'idle' | 'archived' | 'delete
 
 export interface WakeThreadDeps {
   /** The thread's record; undefined when it is gone. */
-  thread(threadId: string): { name?: string; settledAt?: string } | undefined
+  thread(threadId: string): { name?: string; archivedAt?: string } | undefined
   /** Whether the thread is in the trash or being deleted. */
   trashed(threadId: string): boolean
   /** Whether a bot whose home thread is `from` may see the thread (`botThreadReach`). */
@@ -28,7 +28,7 @@ export function wakeThreadState(deps: WakeThreadDeps, from: string, threadId: st
   if (!thread || deps.trashed(threadId)) return { state: 'deleted' }
   if (!deps.reachable(from, threadId)) return { state: 'unreachable' }
   const title = thread.name?.trim() || undefined
-  if (thread.settledAt) return { state: 'archived', ...(title ? { title } : {}) }
+  if (thread.archivedAt) return { state: 'archived', ...(title ? { title } : {}) }
   if (deps.working(threadId)) return { state: 'running', ...(title ? { title } : {}) }
   const last = deps.lastRun(threadId)
   return { state: 'idle', ...(title ? { title } : {}), ...(last ? { lastRun: { status: last.status, ...(last.endedAt ? { endedAt: last.endedAt } : {}) } } : {}) }

@@ -22,7 +22,7 @@ describe('which threads the filter keeps', () => {
     ['My threads: a thread of mine', {}, {}, true],
     ['My threads: a bot thread the owner brought into the sidebar', alpha, {}, true],
     ['My threads: a bot thread kept hidden', { ...alpha, hidden: true }, {}, false],
-    ['My threads: a hidden bot thread once archived', { ...alpha, hidden: true, settledAt: at }, {}, true],
+    ['My threads: a hidden bot thread once archived', { ...alpha, hidden: true, archivedAt: at }, {}, true],
     ['Bot threads: a thread of mine', {}, { show: 'bots' }, false],
     ['Bot threads: a hidden bot thread', { ...alpha, hidden: true }, { show: 'bots' }, true],
     ['All: a hidden bot thread', { ...alpha, hidden: true }, { show: 'all' }, true],

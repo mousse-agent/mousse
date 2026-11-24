@@ -36,10 +36,10 @@ export function isSideChatThread(thread: Pick<Thread, 'lineage'>): boolean {
 }
 
 /** The side chats of `parentThreadId` that are not archived, newest first. */
-export function sideChatsOf<T extends Pick<Thread, 'id' | 'lineage' | 'settledAt' | 'updatedAt'>>(parentThreadId: string | null | undefined, threads: readonly T[]): T[] {
+export function sideChatsOf<T extends Pick<Thread, 'id' | 'lineage' | 'archivedAt' | 'updatedAt'>>(parentThreadId: string | null | undefined, threads: readonly T[]): T[] {
   if (!parentThreadId) return []
   return threads
-    .filter((thread) => isSideChatThread(thread) && thread.lineage!.parentThreadId === parentThreadId && !thread.settledAt)
+    .filter((thread) => isSideChatThread(thread) && thread.lineage!.parentThreadId === parentThreadId && !thread.archivedAt)
     .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))
 }
 

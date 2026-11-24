@@ -29,7 +29,7 @@ describe('another computer’s purge records over a real link', () => {
       join(folder, 'terminal-workspace.json'),
       JSON.stringify({ schemaVersion: 1, kind: 'task-terminal-scratch', threadId: thread.id, workspaceRelativePath: 'terminal-workspace' })
     )
-    t.owner.threads.setThreadSettled(thread.id, true)
+    t.owner.threads.setThreadArchived(thread.id, true)
     await t.owner.deleteThreadForGood(thread.id, { human: true, discard: true })
 
     // As an NTFS file index can be: the record's own digest covers it, so it is rewritten with the id.

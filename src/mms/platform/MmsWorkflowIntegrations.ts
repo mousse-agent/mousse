@@ -146,7 +146,7 @@ export class MmsWorkflowIntegrations {
   private async scope(context: ExecutionContext, policy?: ExecutionPolicySnapshot) {
     const projectPath = this.project(context.profileId, context.projectId)
     const thread = this.services.threads.getThread(context.threadId)
-    if (!thread || thread.settledAt || thread.projectId !== context.projectId || !context.runId) throw new DomainRpcError('thread_unavailable', 'Workflow integration thread is unavailable')
+    if (!thread || thread.archivedAt || thread.projectId !== context.projectId || !context.runId) throw new DomainRpcError('thread_unavailable', 'Workflow integration thread is unavailable')
     const manifest = await this.run(context)
     if (manifest.profileId !== context.profileId || manifest.threadId !== context.threadId || manifest.projectId !== context.projectId || manifest.runId !== context.runId || manifest.policySnapshotId !== context.policySnapshotId || manifest.cancellationId !== context.cancellationId || context.turnId !== manifest.runId || context.source !== manifest.source || stableStringify(context.actor) !== stableStringify(manifest.actor)) throw new DomainRpcError('profile_mismatch', 'Workflow integration execution context is not owned by this run')
     if (manifest.state !== 'running') throw new DomainRpcError('capability_denied', 'Workflow integration run is not executing')

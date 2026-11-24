@@ -291,7 +291,7 @@ describe('the thread list after a change', () => {
     await invoke('threads:create', 'Fix it', undefined, { worktreeEnabled: false })
     await invoke('threads:rename', 'local-a', 'Renamed')
     await invoke('threads:pin', 'local-a', true)
-    await invoke('threads:settle', 'local-a', true)
+    await invoke('threads:archive', 'local-a', true)
     await invoke('threads:setModel', 'local-a', { llmProvider: 'p', model: 'm' })
     await invoke('threads:reorder', undefined, ['local-a', 'local-b'])
     expect(lists()).toEqual([])

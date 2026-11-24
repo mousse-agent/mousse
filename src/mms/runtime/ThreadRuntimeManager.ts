@@ -462,7 +462,7 @@ export class ThreadRuntimeManager extends EventEmitter {
       let since = this.lastUse.get(threadId)
       if (since === undefined) this.lastUse.set(threadId, (since = now))
       const thread = this.threadStore?.getThread(threadId)
-      const archived = Boolean(thread?.settledAt)
+      const archived = Boolean(thread?.archivedAt)
       if (!archived && now - since < idleMs) continue
       if (this.releaseRuntime(threadId, keep)) out.push(threadId)
     }
@@ -496,15 +496,15 @@ export class ThreadRuntimeManager extends EventEmitter {
     if (!this.threadStore) return
     const known = this.liveWork?.startupList()
     if (known) {
-      const open = (threadId: string): boolean => { const thread = this.threadStore!.getThread(threadId); return Boolean(thread && !thread.settledAt) }
+      const open = (threadId: string): boolean => { const thread = this.threadStore!.getThread(threadId); return Boolean(thread && !thread.archivedAt) }
       this.restartPending = new Set([...known, ...cutOff].filter(open))
       this.restartArchived = null
       // Listed for a thread that is gone since: nothing to settle there. An archived one stays listed until restored.
       for (const threadId of known) if (!this.threadStore.getThread(threadId)) this.liveWork?.unmark(threadId)
     } else {
       const threads = this.threadStore.listAllThreads()
-      this.restartPending = new Set(threads.filter((thread) => !thread.settledAt).map((thread) => thread.id))
-      this.restartArchived = this.liveWork ? threads.filter((thread) => thread.settledAt).map((thread) => thread.id) : null
+      this.restartPending = new Set(threads.filter((thread) => !thread.archivedAt).map((thread) => thread.id))
+      this.restartArchived = this.liveWork ? threads.filter((thread) => thread.archivedAt).map((thread) => thread.id) : null
     }
     for (const threadId of [...this.restartPending]) {
       const rt = this.runtimes.get(threadId)
@@ -514,7 +514,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     // is gone or archived since is no longer listed, so its mark is dropped.
     for (const threadId of this.unseenDone?.list() ?? []) {
       const thread = this.threadStore.getThread(threadId)
-      if (!thread || thread.settledAt) {
+      if (!thread || thread.archivedAt) {
         this.unseenDone?.delete(threadId)
         continue
       }

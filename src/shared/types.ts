@@ -1797,7 +1797,7 @@ export interface Thread {
   order: number
   pinnedAt?: string
   /** Set while the thread is archived and unavailable for selection. */
-  settledAt?: string
+  archivedAt?: string
   /**
    * Set once the user commits the first message (send/enqueue), so the thread
    * stays in the sidebar even before title generation finishes.

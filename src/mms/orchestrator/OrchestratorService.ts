@@ -810,7 +810,7 @@ export const STARTUP_DRAIN_SPACING_MS = 250
 /** The run record's error for a scheduled occurrence whose run the daemon admitted but never started. */
 const SCHEDULED_NEVER_STARTED = 'Interrupted: never started'
 
-/** Open per-run threads one scheduled job may have; settle or delete some, or bind the job to a thread. */
+/** Open per-run threads one scheduled job may have; archive or delete some, or bind the job to a thread. */
 const MAX_OPEN_SCHEDULED_THREADS = 10
 /** What a scheduled run's agent is told about saying nothing new; hidden from the thread. */
 export const SCHEDULED_SILENT_NOTICE = '[Mousse] The next message comes from a scheduled automation that runs on its own. If this run finds nothing new to report, reply with exactly [SILENT] and nothing else.'
@@ -4068,7 +4068,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The one Stop (issue #142): every public Stop (the protocol's `orchestrator.abort`, with or without
    * a `runId`, `abortRun`, the CLI, the remote hub, Lineage's Stop and Stop all,
-   * `task_cancel`, deleting or settling a thread) comes here, and so does nothing else. An internal
+   * `task_cancel`, deleting or archiving a thread) comes here, and so does nothing else. An internal
    * abort (a steer that restarts the turn, a question that preempts it, a shutdown) stays local, on
    * `abortActiveTurn`, which this wraps and which never calls back.
    *
@@ -4269,7 +4269,7 @@ export class OrchestratorService extends EventEmitter {
           engine.approvals.cancelForThread(id, 'stopped')
           // And what was answered but not yet delivered, or granted but not yet used: nothing before a Stop may act after it.
           engine.approvals.retireDelivery(id)
-          this.closeOpenQuestions(id, reason === 'settled' ? 'archived' : 'stopped')
+          this.closeOpenQuestions(id, reason === 'archived' ? 'archived' : 'stopped')
           // A scheduled prompt that waited behind those approvals may run now.
           const waiting = this.sessions.get(id)
           if (waiting) this.scheduleQueueDrain(waiting)
@@ -4346,7 +4346,7 @@ export class OrchestratorService extends EventEmitter {
     let cancelled = 0
     for (const id of threadIds) {
       try {
-        cancelled += wakes.stopThread(id, !deleted, reason === 'settled' ? 'the thread was archived' : 'the thread was stopped')
+        cancelled += wakes.stopThread(id, !deleted, reason === 'archived' ? 'the thread was archived' : 'the thread was stopped')
       } catch (error) {
         console.warn('a stopped thread\'s wake-ups could not be cancelled', { threadId: id, error: error instanceof Error ? error.message : String(error) })
       }
@@ -5719,7 +5719,7 @@ export class OrchestratorService extends EventEmitter {
     if (store.loadThreadData(intent.threadId).messages.length > 0) return true
     return meta.name !== intent.title
       || meta.updatedAt !== meta.createdAt
-      || Boolean(meta.settledAt)
+      || Boolean(meta.archivedAt)
       || (meta.permissionMode ?? null) !== intent.permissionMode
       || JSON.stringify(meta.modelOverride ?? null) !== JSON.stringify(intent.modelOverride)
   }
@@ -6090,40 +6090,40 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Archives (`settled`) or unarchives a thread: the app's Archive (`threads.settle`) and a bot's `thread_archive` both
+   * Archives (`archived`) or unarchives a thread: the app's Archive (`threads.archive`) and a bot's `thread_archive` both
    * come here. Archiving is a Stop: what the thread still runs ends with it, and its pull request watch ends as archived
-   * (`thread-settled`). Nothing is deleted.
+   * (`thread-archived`). Nothing is deleted.
    */
-  async settleThread(threadId: string, settled: boolean): Promise<Thread> {
+  async archiveThread(threadId: string, archived: boolean): Promise<Thread> {
     if (!this.threadStore) throw new Error('Thread store is not ready.')
-    const thread = this.threadStore.setThreadSettled(threadId, settled)
-    if (settled) {
+    const thread = this.threadStore.setThreadArchived(threadId, archived)
+    if (archived) {
       // The watch ends as archived, not as stopped.
-      this.emit('thread-settled', { threadId })
-      await this.stopThread(threadId, 'settled').catch((error: unknown) => {
-        console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
+      this.emit('thread-archived', { threadId })
+      await this.stopThread(threadId, 'archived').catch((error: unknown) => {
+        console.warn('archiving a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
       })
       // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
       this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
       // Its side chats end with it, and stay ended when it comes back.
-      for (const side of sideChatsOf(threadId, this.threadStore.listAllThreads())) await this.settleThread(side.id, true)
+      for (const side of sideChatsOf(threadId, this.threadStore.listAllThreads())) await this.archiveThread(side.id, true)
     }
     return thread
   }
 
   /**
    * A person who writes in an archived thread wants it back: it is unarchived through the app's own Unarchive
-   * (`settleThread`) before their message or steer runs: from a window, their phone or the CLI. A thread whose expiry
+   * (`archiveThread`) before their message or steer runs: from a window, their phone or the CLI. A thread whose expiry
    * passed stays archived; its send is refused. Agents and bots never come here (`thread_archived`).
    */
   async unarchiveForPerson(threadId: string): Promise<void> {
-    if (!this.threadStore?.getThread(threadId)?.settledAt || this.isExpired(threadId)) return
-    await this.settleThread(threadId, false)
+    if (!this.threadStore?.getThread(threadId)?.archivedAt || this.isExpired(threadId)) return
+    await this.archiveThread(threadId, false)
   }
 
   /**
    * `thread_archive` of another thread: an agent's turn the person started, or the owner's bot from its chat in a turn
-   * that may act on threads (`botSenderOf`), archives or unarchives it through the app's own Archive (`settleThread`). An
+   * that may act on threads (`botSenderOf`), archives or unarchives it through the app's own Archive (`archiveThread`). An
    * agent's archive never ends work: a thread with a run working or paused, there or in a subagent below it, is refused,
    * and the agent stops it first. Never the caller's own thread or a bot's. The change is recorded as an `agent.action`
    * of the thread.
@@ -6141,12 +6141,12 @@ export class OrchestratorService extends EventEmitter {
       botThread = true
     }
     if (!thread || botThread) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available to you.`)
-    if (Boolean(thread.settledAt) === archived) return { status: 'accepted', archived, changed: false }
+    if (Boolean(thread.archivedAt) === archived) return { status: 'accepted', archived, changed: false }
     if (archived) {
       const subtree = [threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])]
       if (subtree.some((id) => engine.getActiveRun(id) || engine.store.getPausedRun(id))) return { status: 'rejected', reason: 'thread_running' }
     }
-    await this.settleThread(threadId, archived)
+    await this.archiveThread(threadId, archived)
     engine.store.appendEvent({
       threadId,
       runId: null,
@@ -6157,7 +6157,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_archive` from a thread's own agent: the person asked it to archive ("settle") its thread when done. A turn
+   * `thread_archive` from a thread's own agent: the person asked it to archive its thread when done. A turn
    * cannot archive the thread it runs in, so the request is kept with the run and done when that turn ends well
    * (`archiveAfterTurnEnds`). Only the thread's own top-level turn that a person started: never a subagent, a bot's
    * thread, or a turn another agent's message started.
@@ -6174,7 +6174,7 @@ export class OrchestratorService extends EventEmitter {
     }
     if (!thread || botThread) throw new McpToolError('mousse_scope_denied', 'thread_archive is not available in this thread.')
     if (thread.lineage?.relationship === 'subagent') return { status: 'rejected', reason: 'subagent' }
-    if (thread.settledAt) return { status: 'accepted', changed: false }
+    if (thread.archivedAt) return { status: 'accepted', changed: false }
     if (engine.getActiveRun(threadId)?.runId !== runId) return { status: 'rejected', reason: 'not_running' }
     if (!this.runStartedByPerson(options.actor)) return { status: 'rejected', reason: 'not_started_by_person' }
     this.archiveAfterTurn.set(threadId, { runId, actor: options.actor })
@@ -6183,7 +6183,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The end of a turn whose agent asked to archive its thread (`archiveOwnThreadAfterTurn`). A turn that ended well is
-   * archived through the app's own Archive (`settleThread`) once its run has let go of the thread, unless that Archive
+   * archived through the app's own Archive (`archiveThread`) once its run has let go of the thread, unless that Archive
    * would end work still outstanding by then (`archiveOwnThreadKept`). The thread then stays, and says why.
    * A turn that failed, paused or was stopped leaves the thread as it is.
    */
@@ -6208,7 +6208,7 @@ export class OrchestratorService extends EventEmitter {
     // yielding, so no turn or message can start between the last check and the archive (an archived thread takes none).
     const remoteWorking = await this.remoteLaunchesWorking([threadId, ...subagentDescendants(threadId, store.listAllThreads())])
     const thread = store.getThread(threadId)
-    if (!thread || thread.settledAt || this.lifecycle.stopping) return
+    if (!thread || thread.archivedAt || this.lifecycle.stopping) return
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
     if (session?.deleted) return
     if (session) this.refreshSessionQueueFromDisk(session)
@@ -6217,8 +6217,8 @@ export class OrchestratorService extends EventEmitter {
       this.sessionAls.run(target, () => this.addSystemMessage(ARCHIVE_AFTER_TURN_KEPT))
       return
     }
-    // `settleThread` marks the thread archived before its first wait.
-    await this.settleThread(threadId, true)
+    // `archiveThread` marks the thread archived before its first wait.
+    await this.archiveThread(threadId, true)
     engine.store.appendEvent({
       threadId,
       runId: null,
@@ -6238,7 +6238,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Whether a thread its agent asked to archive still has local work an Archive would end (`settleThread` is a Stop, and
+   * Whether a thread its agent asked to archive still has local work an Archive would end (`archiveThread` is a Stop, and
    * a Stop reaches all of it): a queued message, a run starting, running, waiting or paused, provider background work (a
    * command it left running), or a question to the person, in the thread or a subagent below it; or a thread one of
    * them launched here that is still working (`remoteLaunchesWorking` asks the other computers). The turn that asked
@@ -17109,7 +17109,7 @@ export class OrchestratorService extends EventEmitter {
     if (this.lifecycle.stopping || !this.threadStore) return
     const store = this.threadStore
     this.recoverGoalsOnce()
-    const ordered = this.startupRecoveryOrder().filter((thread) => !thread.settledAt)
+    const ordered = this.startupRecoveryOrder().filter((thread) => !thread.archivedAt)
     const stopping = (): boolean => this.lifecycle.stopping
     // Threads whose queue has agent commands the journal holds unfinished; all of them when the journal can't be read.
     let journaled: ReadonlySet<string> | undefined
@@ -17170,9 +17170,9 @@ export class OrchestratorService extends EventEmitter {
     if (this.lifecycle.stopping) return
     if (!this.threadStore) return
     const ordered = this.startupRecoveryOrder()
-    for (const thread of ordered) if (!thread.settledAt) this.reclaimForStartup(thread.id)
+    for (const thread of ordered) if (!thread.archivedAt) this.reclaimForStartup(thread.id)
     for (const thread of ordered) {
-      if (thread.settledAt || this.startupDrainScheduled.has(thread.id)) continue
+      if (thread.archivedAt || this.startupDrainScheduled.has(thread.id)) continue
       this.considerStartupDrain(thread.id)
     }
     this.pumpStartupDrainQueue()
@@ -18336,7 +18336,7 @@ export class OrchestratorService extends EventEmitter {
     if (!store) throw new Error('Scheduled turns need the thread store')
     const usable = (id?: string): string | undefined => {
       const thread = id ? store.getThread(id) : undefined
-      return thread && !thread.settledAt ? thread.id : undefined
+      return thread && !thread.archivedAt ? thread.id : undefined
     }
     const existing = usable(ingress.claim?.threadId) ?? usable(ingress.threadId)
     // The project and the requested worktree are checked now, for a saved thread as much as for a new one:
@@ -18358,11 +18358,11 @@ export class OrchestratorService extends EventEmitter {
     }
     if (existing) return { threadId: existing, created: false }
     if (ingress.threadId) throw new Error('Scheduled thread is unavailable')
-    // Only a new worktree per run is a resource that piles up; a run on the project's checkout settles its thread when it ends.
+    // Only a new worktree per run is a resource that piles up; a run on the project's checkout archives its thread when it ends.
     if (ingress.workspace?.kind === 'newWorktree') {
-      const open = store.listAllThreads().filter((thread) => thread.scheduledJobId === ingress.jobId && !thread.settledAt).length
+      const open = store.listAllThreads().filter((thread) => thread.scheduledJobId === ingress.jobId && !thread.archivedAt).length
       if (open >= MAX_OPEN_SCHEDULED_THREADS) {
-        throw new Error(`Job has ${MAX_OPEN_SCHEDULED_THREADS} open per-run worktree threads; settle or delete some, or bind the job to a thread.`)
+        throw new Error(`Job has ${MAX_OPEN_SCHEDULED_THREADS} open per-run worktree threads; archive or delete some, or bind the job to a thread.`)
       }
     }
     // The resolver runs a non-Git project on its own checkout; a job that asked for a new worktree must not.
@@ -18659,7 +18659,7 @@ export class OrchestratorService extends EventEmitter {
     if (!this.threadStore) throw new Error('Scheduled workflow thread store is unavailable')
     if (ingress.threadId) {
       const thread = this.threadStore.getThread(ingress.threadId)
-      if (!thread || thread.settledAt) throw new Error('Scheduled workflow thread is unavailable')
+      if (!thread || thread.archivedAt) throw new Error('Scheduled workflow thread is unavailable')
       return thread.id
     }
     return this.threadStore.ensureExecutionThread(
