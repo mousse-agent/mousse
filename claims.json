@@ -56,19 +56,6 @@
       "expiresAt": "2026-11-24T17:13:10.735Z"
     },
     {
-      "task": "composer-thread-reference-chip",
-      "session": "Animatrix-d87084",
-      "machine": "Animatrix",
-      "branch": "composer-thread-reference-chip",
-      "paths": [
-        "src/renderer/components/ChatComposer.tsx",
-        "src/renderer/lib/composerThreadChips.ts",
-        "src/renderer/styles/app.css"
-      ],
-      "claimedAt": "2026-11-23T17:19:19.434Z",
-      "expiresAt": "2026-11-23T19:19:19.434Z"
-    },
-    {
       "task": "computer-use-awareness-setup-card",
       "session": "LAPTOP-HIEROJK7-7cd74d",
       "machine": "LAPTOP-HIEROJK7",
@@ -91,18 +78,6 @@
       "expiresAt": "2026-11-24T16:48:06.647Z"
     },
     {
-      "task": "fix-local-file-links-blocked",
-      "session": "Animatrix-a0fa6f",
-      "machine": "Animatrix",
-      "branch": "fix-local-file-links-blocked",
-      "paths": [
-        "src/renderer/chat/components/agent-elements/markdown.tsx",
-        "src/renderer/utils/chatLinks.ts"
-      ],
-      "claimedAt": "2026-11-23T16:57:13.944Z",
-      "expiresAt": "2026-11-23T18:57:13.944Z"
-    },
-    {
       "task": "fix-thinking-stream-integrity",
       "session": "LAPTOP-HIEROJK7-dfa141",
       "machine": "LAPTOP-HIEROJK7",
@@ -112,22 +87,6 @@
       ],
       "claimedAt": "2026-11-24T15:05:22.905Z",
       "expiresAt": "2026-11-24T17:11:07.150Z"
-    },
-    {
-      "task": "mousse/per-provider-limit-refresh-buttons",
-      "session": "agibook-9f3712",
-      "machine": "agibook",
-      "branch": "mousse/per-provider-limit-refresh-buttons",
-      "paths": [
-        "src/mms/harness/acp/session.ts",
-        "src/mms/protocol/usageReads.ts",
-        "src/renderer/components/SubscriptionUsagePage.tsx",
-        "src/renderer/components/UsageSections.tsx",
-        "src/renderer/lib/progressiveUsage.ts",
-        "src/shared/providerAuth.ts"
-      ],
-      "claimedAt": "2026-11-23T15:31:51.113Z",
-      "expiresAt": "2026-11-23T17:34:13.947Z"
     },
     {
       "task": "opencode-provider",
@@ -147,34 +106,15 @@
       "expiresAt": "2026-11-24T17:06:46.503Z"
     },
     {
-      "task": "read-aloud-question-cards",
-      "session": "Animatrix-9636dc",
-      "machine": "Animatrix",
-      "branch": "read-aloud-question-cards",
+      "task": "service-idle-memory",
+      "session": "agibook-b17430",
+      "machine": "agibook",
+      "branch": "service-idle-memory",
       "paths": [
-        "src/renderer/components/ComposerQuestionModal.tsx",
-        "src/renderer/chat/components/agent-elements/question/answered-questions-tool.tsx",
-        "src/renderer/chat/components/agent-elements/tools/plan-tool.tsx",
-        "src/renderer/styles/app.css"
+        "src/mms/diagnostics/idleMemoryTrim.ts"
       ],
-      "claimedAt": "2026-11-23T16:20:14.247Z",
-      "expiresAt": "2026-11-23T18:20:14.247Z"
-    },
-    {
-      "task": "remove-project-and-change-folder",
-      "session": "Animatrix-fea599",
-      "machine": "Animatrix",
-      "branch": "remove-project-and-change-folder",
-      "paths": [
-        "src/mms/data/ProjectManager.ts",
-        "src/mms/protocol",
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/preload/index.ts",
-        "src/renderer/components/ThreadsSidebar.tsx",
-        "src/renderer/components/ThreadsContextMenu.tsx"
-      ],
-      "claimedAt": "2026-11-23T15:57:44.023Z",
-      "expiresAt": "2026-11-23T17:57:44.023Z"
+      "claimedAt": "2026-11-24T20:51:51.903Z",
+      "expiresAt": "2026-11-24T22:51:51.903Z"
     }
   ]
 }
