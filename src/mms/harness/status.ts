@@ -157,7 +157,8 @@ export async function probeVersion(input: {
   timeoutMs?: number
 }): Promise<VersionProbe> {
   const { driver, env, managed } = input
-  if (managed?.broken) {
+  // An executable set on the entry runs instead: a broken managed copy does not stop it.
+  if (managed?.broken && !input.override) {
     return {
       install: 'broken',
       runs: { state: 'no', failure: 'files_changed', message: `Installed files changed since install (${managed.broken}). Reinstall to run it.` },

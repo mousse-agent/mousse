@@ -399,6 +399,13 @@ export interface DriverRuntime {
    */
   pinned?(): { version: string }
   /**
+   * The newest version Mousse's own install would update to (a registry agent's current release),
+   * when that is not the driver's `latestVersion`: a managed copy's update follows it instead.
+   */
+  managedLatestVersion?(): string | undefined
+  /** Looks `managedLatestVersion` up again when it is due; true when it changed. */
+  refreshManagedLatest?(): Promise<boolean>
+  /**
    * Checks every installed file against its install record (Recheck, Add, after install); a
    * mismatch shows through `managed().broken`.
    */
@@ -554,6 +561,12 @@ export interface HarnessDriver {
    * executable runs: a sign-out revokes it, and only a sign-in in Mousse restores it.
    */
   readonly ownsSignIn?: boolean
+  /**
+   * The agent signs in once per computer, whatever executable runs (OpenCode's XDG folders): Mousse
+   * never owns the sign-in, not even of its own managed copy. A sign-out in Mousse leaves it alone,
+   * and signing in again only clears Mousse's flag.
+   */
+  readonly sharedSignIn?: boolean
   /**
    * The fixed id an added entry gets from its add input (`pi`: `pi:<provider>`), or a thrown
    * `unsupported` for an input it cannot add. With it, ids are unique per entry, not per driver

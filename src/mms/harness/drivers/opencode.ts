@@ -3,6 +3,7 @@ import type { HarnessCaps, RuntimeFacts } from '../../../shared/harness/types'
 import type { InstallOwner } from '../../../shared/harness/status'
 import { cliLaunch, withUserEnv, type CliLaunch } from '../cliConfig'
 import type { AcpConnection, AcpLaunchRequest } from '../acp/connection'
+import type { AcpLaunch } from '../acp/preset'
 import { OPENCODE_CAPS, OPENCODE_LABEL, OPENCODE_PRESET } from '../acp/presets/opencode'
 import { compatibilityFields } from '../compatibility'
 import type { AgentInstalls, InstalledAgent, RegistrySource } from '../agents/install'
@@ -10,6 +11,7 @@ import { DIST_DIR } from '../agents/receipt'
 import type { AcpRegistry } from '../agents/registry'
 import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver, type ManagedInstall } from '../driver'
 import { cliNames, resolveCommand } from '../env'
+import { LATEST_TTL_MS } from '../latest'
 import { ptyAvailable, type PtySpawn } from '../pty'
 import { createAcpRuntime } from './acp'
 
@@ -35,7 +37,9 @@ export const OPENCODE_NPM_PACKAGE = '@opencode/cli'
 /** The command that updates an OpenCode its owner installed, when Mousse knows one. */
 export function opencodeUpdateCommand(owner: InstallOwner): string | undefined {
   switch (owner) {
+    // OpenCode's own upgrade finds how it was installed, Homebrew included (core or a tap).
     case 'standalone':
+    case 'brew':
       return 'opencode upgrade'
     case 'npm':
       return `npm install -g ${OPENCODE_NPM_PACKAGE}@latest`
@@ -43,8 +47,6 @@ export function opencodeUpdateCommand(owner: InstallOwner): string | undefined {
       return `pnpm add -g ${OPENCODE_NPM_PACKAGE}@latest`
     case 'bun':
       return `bun add -g ${OPENCODE_NPM_PACKAGE}@latest`
-    case 'brew':
-      return 'brew upgrade anomalyco/tap/opencode-v2'
     default:
       return undefined
   }
@@ -53,8 +55,10 @@ export function opencodeUpdateCommand(owner: InstallOwner): string | undefined {
 export interface OpencodeDriverOptions {
   /** Managed installs; without them (and `registry`) Mousse cannot install OpenCode. */
   agents?: AgentInstalls
-  /** The ACP registry: which OpenCode version an install takes. */
-  registry?: Pick<AcpRegistry, 'agent'>
+  /** The ACP registry: which OpenCode version an install takes, and what a managed copy updates to. */
+  registry?: Pick<AcpRegistry, 'agent' | 'cached'>
+  /** Test seam: the clock of the registry's update check. */
+  now?: () => number
   /** Test seam: opens agent connections instead of starting OpenCode. */
   connect?: (context: DriverContext, request: AcpLaunchRequest) => AcpConnection
   /** Test seam: the pseudo-terminal for `terminal` sign-in methods. */
@@ -74,6 +78,8 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
     canInstall: true,
     customModels: false,
     methodLabel: 'OpenCode’s own sign-in',
+    // OpenCode's sign-in is this computer's, whichever executable runs: never Mousse's own.
+    sharedSignIn: true,
     // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
@@ -107,20 +113,28 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
   }
   let verified: { hash: string; atMs: number } | undefined
   let filesChanged: string | undefined
+  /** When the registry was last asked for a managed copy's newest version. */
+  let registryCheckedAt: number | undefined
 
-  /** The executable: the entry's own, else the managed copy, else the one on PATH. */
-  const program = (): { resolved: CliLaunch; managed: boolean; root?: string } | undefined => {
+  /**
+   * The executable: the entry's own, else the managed copy, else the one on PATH. The managed copy
+   * starts as its install record says (the registry's `acp` and variables), with the entry's own
+   * arguments and variables after; the others start as the preset says.
+   */
+  const program = (): { resolved: CliLaunch; launch?: AcpLaunch; managed: boolean; root?: string } | undefined => {
     if (context.config.binaryPath) {
       const resolved = resolveCommand(context.config.binaryPath, context.env)
       return resolved ? { resolved, managed: false } : undefined
     }
     const installed = installedNow()
     if (installed && agents) {
-      const launch = agents.launch(installed, context.env)
-      // The receipt ends with the registry's own arguments (`acp`): the preset adds its own, once.
-      const receiptArgs = installed.receipt.launch.args.filter((arg): arg is string => typeof arg === 'string').length
-      const args = launch.args.slice(0, launch.args.length - receiptArgs)
-      return { resolved: { path: launch.path, command: launch.command, args }, managed: true, root: installed.root }
+      const agent = agents.launch(installed, context.env)
+      return {
+        resolved: { path: agent.path, command: agent.command, args: agent.args },
+        launch: { command: agent.command, args: [...(context.config.args ?? [])], env: { ...agent.env, ...(context.config.env ?? {}) } },
+        managed: true,
+        root: installed.root
+      }
     }
     const found = context.findBinary()
     const resolved = found ? cliLaunch(found) : undefined
@@ -151,7 +165,7 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
     program: () => {
       const found = program()
       if (!found) return undefined
-      return { resolved: found.resolved, ...(found.root && agents ? { track: () => agents.track(found.root!) } : {}) }
+      return { resolved: found.resolved, ...(found.launch ? { launch: found.launch } : {}), ...(found.root && agents ? { track: () => agents.track(found.root!) } : {}) }
     },
     // Only Mousse's own copy is kept from updating itself; the user's own OpenCode runs as they set it up.
     env: (env) => (program()?.managed ? withUserEnv(env, { ...OPENCODE_MANAGED_ENV }) : env),
@@ -177,7 +191,8 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
 
   const runtime: DriverRuntime = {
     ...base,
-    configured: () => !managed()?.broken && base.configured(),
+    // A broken managed copy stops only itself: an executable set on the entry still runs.
+    configured: () => !(program()?.managed && managed()?.broken) && base.configured(),
     llmProvider: () => (runtime.configured() ? { id: context.instanceId, label, models: runtime.models() } : undefined),
     ...(agents && registry ? {
       install: async (onProgress) => {
@@ -193,6 +208,16 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
         })
         filesChanged = undefined
       },
+      managedLatestVersion: () => registry.cached().find((agent) => agent.id === OPENCODE_AGENT_ID)?.version,
+      refreshManagedLatest: async () => {
+        // Asked at most once per `LATEST_TTL_MS`, like the package registries; a failure waits as long.
+        const now = options.now?.() ?? Date.now()
+        if (registryCheckedAt !== undefined && now - registryCheckedAt < LATEST_TTL_MS) return false
+        registryCheckedAt = now
+        const before = registry.cached().find((agent) => agent.id === OPENCODE_AGENT_ID)?.version
+        const after = (await registry.agent(OPENCODE_AGENT_ID).catch(() => undefined))?.version
+        return Boolean(after) && after !== before
+      },
       cancelInstall: () => agents.cancel(context.instanceId),
       installState: () => ({ installing: agents.installing(context.instanceId) }),
       managed,
@@ -206,7 +231,14 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
       removeInstall: async ({ force }) => {
         const source = ownSource()
         if (!source) return { removed: true, bytes: 0 }
-        return agents.removeInstall({ instanceId: context.instanceId, source, force })
+        const result = await agents.removeInstall({ instanceId: context.instanceId, source, force })
+        if (result.removed) {
+          filesChanged = undefined
+          verified = undefined
+          // Nothing keeps running from the deleted files; the next chat starts whatever is found now.
+          base.closeSessions()
+        }
+        return result
       },
       release: async () => {
         const source = ownSource()

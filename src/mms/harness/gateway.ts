@@ -2722,7 +2722,12 @@ export class Harness implements HarnessGateway {
   private updateFor(record: InstanceRecord): UpdateAffordance | undefined {
     const good = this.probes.get(record.instanceId)?.lastGood
     if (!good) return undefined
-    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(latestSourceFor(record.driver, good.binary))
+    const latest = record.runtime.pinned
+      ? record.runtime.pinned().version
+      // Mousse's own copy updates to what its install source publishes, not the package's newest.
+      : good.binary?.owner === 'managed' && record.runtime.managedLatestVersion
+        ? record.runtime.managedLatestVersion()
+        : this.latest.get(latestSourceFor(record.driver, good.binary))
     return updateAffordance(record.driver, good.binary, good.compatibility, latest)
   }
 
@@ -2738,7 +2743,22 @@ export class Harness implements HarnessGateway {
     for (const instanceId of instanceIds) {
       const entry = entries[instanceId]
       const driver = entry?.enabled ? this.drivers.get(entry.driver) : undefined
-      const source = driver ? latestSourceFor(driver, this.probes.get(instanceId)?.lastGood?.binary) : undefined
+      const binary = this.probes.get(instanceId)?.lastGood?.binary
+      const record = driver ? this.recordOrUndefined(instanceId) : undefined
+      const runtime = record?.runtime
+      // Before the first check, Mousse's own install runs when there is one and no executable is set.
+      const runsManaged = binary ? binary.owner === 'managed' : Boolean(runtime?.managed?.()) && !record?.config.binaryPath
+      if (driver && runsManaged && runtime?.managedLatestVersion) {
+        // A managed copy's newest version is its install source's, never the package registry's.
+        const key = `managed:${driver.kind}`
+        if (!runtime.refreshManagedLatest || packages.has(key)) continue
+        packages.add(key)
+        void runtime.refreshManagedLatest().then((changed) => {
+          if (changed && !this.stopped) this.changed(instanceId)
+        }, () => undefined)
+        continue
+      }
+      const source = driver ? latestSourceFor(driver, binary) : undefined
       const key = source?.kind === 'npm' ? source.package : source?.kind === 'brew' ? `brew:${source.name}` : undefined
       if (!source || !key || packages.has(key)) continue
       packages.add(key)
@@ -2838,6 +2858,8 @@ export class Harness implements HarnessGateway {
    */
   private ownsSignIn(record: InstanceRecord): boolean {
     if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
+    // One sign-in per computer: Mousse's own copy uses the user's sign-in too.
+    if (record.driver.sharedSignIn) return false
     if (record.env.home) return true
     return Boolean(record.runtime.managed?.()) && !record.config.binaryPath
   }
