@@ -120,19 +120,6 @@
       ],
       "claimedAt": "2026-11-24T15:06:46.503Z",
       "expiresAt": "2026-11-24T17:06:46.503Z"
-    },
-    {
-      "task": "service-replaced-when-unresponsive",
-      "session": "agibook-159c35",
-      "machine": "agibook",
-      "branch": "service-replaced-when-unresponsive",
-      "paths": [
-        "src/main/mms/GuiMmsController.ts",
-        "src/mms/protocol/client.ts",
-        "src/cli/commands/service.ts"
-      ],
-      "claimedAt": "2026-11-24T20:52:55.726Z",
-      "expiresAt": "2026-11-24T23:17:51.938Z"
     }
   ]
 }
