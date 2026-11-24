@@ -22,7 +22,7 @@ Never write to `~/.mousse`. Read copies: [`real-threads.ts`](real-threads.ts) co
 Write a throwaway script outside the repository that runs every real thread through the old code and the new code, and counts the differences. Run it with `npx tsx` from the task's worktree. Import the new code from the worktree and the old code from a detached worktree at the default branch, or a constant you compare against.
 
 ```ts
-const { realThreads } = require('<worktree>/.agents/skills/check-on-real-data/real-threads')
+const { realThreads } = require('<worktree>/moostack/skills/check-on-real-data/real-threads')
 const fresh = require('<worktree>/src/mms/...')
 const before = require('<default-branch worktree>/src/mms/...')
 let changed = 0, failedBefore = 0, failedNow = 0

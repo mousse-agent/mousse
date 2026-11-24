@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Digests a failed GitHub Actions log so it can be read in a few dozen lines, in any shell.
-//   node .agents/skills/nightly-build-release/filter-log.mjs --run <run id> [--context 4] [--max 150]
-//   node .agents/skills/nightly-build-release/filter-log.mjs <log file> [--context 4] [--max 150]
+//   node moostack/skills/nightly-build-release/filter-log.mjs --run <run id> [--context 4] [--max 150]
+//   node moostack/skills/nightly-build-release/filter-log.mjs <log file> [--context 4] [--max 150]
 // With --run it saves the full failed log to the system temp folder and prints where. Output has three parts:
 // the test summary lines, every "Unhandled Errors" section in full (no line cap), and the other matching
 // lines with surrounding context, limited to --max lines.

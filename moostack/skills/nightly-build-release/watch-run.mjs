@@ -4,7 +4,7 @@
 // finished jobs, the run's state and the jobs still going, so the caller can post an
 // update and start it again. Reported jobs are kept in a file in the temp folder.
 //
-//   node .agents/skills/nightly-build-release/watch-run.mjs <run id> [poll seconds]
+//   node moostack/skills/nightly-build-release/watch-run.mjs <run id> [poll seconds]
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

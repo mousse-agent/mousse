@@ -2,7 +2,7 @@
  * Every thread of every profile on this machine, read from copies so `~/.mousse` is never opened for
  * writing. Import it from a throwaway check script and run that with `npx tsx` from the task's worktree.
  *
- *   import { realThreads } from '<worktree>/.agents/skills/check-on-real-data/real-threads'
+ *   import { realThreads } from '<worktree>/moostack/skills/check-on-real-data/real-threads'
  *   for (const thread of realThreads()) { ... thread.messages ... }
  *
  * Messages are what `thread.db` stores: the rows of the transcript collection, oldest first, hidden ones
