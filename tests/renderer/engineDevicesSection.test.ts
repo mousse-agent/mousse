@@ -14,6 +14,7 @@ import { accessPreset } from '../../src/shared/net/accessPresets'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
+const { AccessAskHost } = await import('../../src/renderer/components/netEngine/AccessAskHost')
 const { UseComputerDialog } = await import('../../src/renderer/components/netEngine/UseComputerDialog')
 const { engineRow, engineSideRow, engineSides, clockMessage, SHARED_ACCOUNT_LINE } = await import(
   '../../src/renderer/components/netEngine/engineRows'
@@ -1119,19 +1120,22 @@ describe('the other direction of a one-way pairing', () => {
     expect((await menuItems('Studio', 'out'))[0]).toBe('Let Studio use this computer…')
     await click(menuItem('Let Studio use this computer…'))
     expect(document.body.textContent).toContain('Let Studio use this computer?')
-    expect(document.body.textContent).toContain('Connects over Same network, already in use.')
+    expect(document.body.textContent).toContain('Connects over Same Wi-Fi, already in use.')
     await click(radio('Full control'))
     await click(button('Allow'))
     expect(d.called('netEngine.access.let')).toEqual([{ node: 'n1', access: accessPreset('full').fields }])
     expect(document.body.textContent).not.toContain('Let Studio use this computer?')
   })
 
-  it('shows the Allow prompt when a paired computer asks, and sends Allow with its level or Not now', async () => {
+  it('shows the Allow prompt app-wide when a paired computer asks, and sends Allow with its level or Not now', async () => {
     const d = daemon({
       devices: [device({ node: 'n1', direction: 'out', route: 'tailnet', other: { offer: 'let' } })],
       accessAsks: [{ node: 'n1', request: 'r1', name: 'Studio' }]
     })
+    // Devices alone does not ask: the app-wide host does, once, wherever the window is.
     await mount()
+    expect(document.body.textContent).not.toContain('Let Studio use this computer?')
+    await mount(createElement(AccessAskHost))
     expect(document.body.textContent).toContain('Let Studio use this computer?')
     expect(document.body.textContent).toContain('Connects over Tailscale, already in use.')
     await click(button('Allow'))

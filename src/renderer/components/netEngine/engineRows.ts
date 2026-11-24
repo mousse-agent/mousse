@@ -1,6 +1,7 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
 import type { RouteClass } from '../../../shared/netEngine/routes'
 import { parseRoute, relayText, routeClass, routeText } from '../../../shared/netEngine/routes'
+import { WAY_LABEL } from './ways'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -258,10 +259,14 @@ export function engineWhere(device: NetEngineDevice): string {
   return device.route ? HOW[device.route] : HOW.lan
 }
 
-/** The way a device's live connection runs, for "Connects over <way>, already in use." */
+/**
+ * The way a device's live connection runs, by the name the way picker gives it, for "Connects over <way>, already
+ * in use." (as "Connects over Same Wi-Fi" reads when using a computer).
+ */
 export function engineWay(device: NetEngineDevice): string {
-  if (device.route === 'relay') return device.via ? `relay ${device.via}` : 'a relay'
-  return ROUTE_WORDS[device.route ?? 'lan']
+  const route = device.route ?? 'lan'
+  if (route === 'relay') return device.via ? `relay ${device.via}` : WAY_LABEL.relay
+  return route === 'ssh' ? ROUTE_WORDS.ssh : WAY_LABEL[route]
 }
 
 /**

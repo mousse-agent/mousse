@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
 import type {
   NetEngineDevice,
@@ -77,38 +77,12 @@ import {
 } from './legacyRows'
 import { LegacyAddonRows, legacyAddonsOn, LegacyRelayRows, legacyRelaysSet, LegacyServeRow } from './LegacyRelayRows'
 import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
+import { useEngineStatus } from './useEngineStatus'
 import { CodeEntry } from './SendLinkParts'
 import { ReachSection } from './ReachSection'
 import { RoutesPanel } from './RoutesPanel'
 import '../../styles/devices.css'
 import './engine.css'
-
-/** Reads `netEngine.status` for this window's profile, again whenever the daemon says it changed. */
-export function useEngineStatus(): {
-  status: NetEngineStatus | undefined
-  read: () => void
-} {
-  const profileId = useAppStore((state) => state.profileId)
-  const [status, setStatus] = useState<NetEngineStatus>()
-  const read = useCallback(() => {
-    const profile = useAppStore.getState().profileId
-    void window.mousse.platformRequest
-      .request<NetEngineStatus>('netEngine.status', {})
-      .then((value) => {
-        if (useAppStore.getState().profileId === profile) setStatus(value)
-      })
-      .catch(() => undefined)
-  }, [])
-  useEffect(() => {
-    setStatus(undefined)
-    read()
-    const off = window.mousse?.netEngine?.onChanged?.((change) => {
-      if (!change.profileId || change.profileId === useAppStore.getState().profileId) read()
-    })
-    return () => off?.()
-  }, [profileId, read])
-  return { status, read }
-}
 
 /** What the group says under its title while networking is not simply on. */
 function helperLine(status: NetEngineStatus): string | undefined {
@@ -187,8 +161,6 @@ export function EngineDevicesSection() {
   const [everywhere, setEverywhere] = useState<NetEngineDevice>()
   // "Let <name> use this computer…": the Allow prompt for a computer this one uses.
   const [letting, setLetting] = useState<NetEngineDevice>()
-  // Requests from other computers closed here without an answer (they expire there).
-  const [setAside, setSetAside] = useState<string[]>([])
   // A `mousse://pair` link that opened Mousse opens Scan or paste with it.
   const offered = useOfferedPairLink()
   const [linkToEnter, setLinkToEnter] = useState<string>()
@@ -1106,34 +1078,21 @@ export function EngineDevicesSection() {
         })()}
 
 
-      {/* A paired computer asks to use this one too; or this owner lets one it uses in from its row. */}
+      {/* This owner lets a computer it uses in from its row. A computer's own ask is AccessAskHost's, app-wide. */}
       {status?.on &&
         !adding &&
+        letting &&
         (() => {
-          const ask = status.accessAsks?.find((item) => !setAside.includes(item.request))
-          const device = letting ?? (ask && status.devices.find((item) => item.node === ask.node))
-          if (!device) return null
-          const close = () => {
-            if (letting) setLetting(undefined)
-            else if (ask) setSetAside((list) => [...list, ask.request])
-          }
+          const device = letting
+          const close = () => setLetting(undefined)
           const answer = async (yes: boolean, access?: AccessPresetFields) => {
-            const done = letting
-              ? yes
-                ? await action('netEngine.access.let', { node: device.node, access })
-                : true
-              : await action('netEngine.access.answer', {
-                  node: device.node,
-                  request: ask!.request,
-                  yes,
-                  ...(yes ? { access } : {})
-                })
+            const done = yes ? await action('netEngine.access.let', { node: device.node, access }) : true
             if (done) close()
           }
           return (
             <Modal open hideTitle title={`Let ${device.name} use this computer?`} onClose={close}>
               <AllowPrompt
-                key={letting ? `let-${device.node}` : ask!.request}
+                key={`let-${device.node}`}
                 approval={device}
                 busy={busy}
                 line={`Connects over ${engineWay(device)}, already in use.`}
