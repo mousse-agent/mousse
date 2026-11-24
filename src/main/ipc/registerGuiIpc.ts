@@ -3150,6 +3150,15 @@ export function registerGuiIpc(
     return info
   })
 
+  // The app's link to its background service, as the composers show it (Connecting… until it is `ready`). Every
+  // window hears each change; a window that opens later asks once (`lib/serviceConnection.ts`).
+  registerHandler('app:serviceConnection', () => guiMms.connectionState)
+  guiMms.on('state', (state: string) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('app:serviceConnectionChanged', state)
+    }
+  })
+
   registerHandler('app:gitSetup', () => guiMms.gitPrerequisite)
   registerHandler('app:installGit', (event) => {
     if (event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) {

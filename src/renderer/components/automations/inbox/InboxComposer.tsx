@@ -9,6 +9,8 @@ import { NewBotDialog } from '../../bots/NewBotDialog'
 import { NEW_BOT_KEY, whoChoices } from '../DraftCard'
 import type { BotChoice } from '../whoDo'
 import { sendToManager } from './draftActions'
+import { useServiceConnecting } from '../../../lib/serviceConnection'
+import { CONNECTING_TEXT, ConnectingDots } from '../../ConnectingDots'
 import { openDrafts, refreshInbox, useInboxStore } from './inboxStore'
 
 export interface InboxComposerHandle {
@@ -49,6 +51,8 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
   const inputRef = useRef<HTMLInputElement>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   const request = useAutomationCreate((state) => state.request)
+  // Not connected to the service: the box says Connecting…, keeps its words and sends nothing.
+  const connecting = useServiceConnecting()
 
   useImperativeHandle(ref, () => ({ focus: () => inputRef.current?.focus() }), [])
 
@@ -79,7 +83,7 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
 
   const send = async () => {
     const words = text.trim()
-    if (!words || sending) return
+    if (!words || sending || connecting) return
     setSending(true)
     const project = local.find((entry) => entry.id === chosenProject)
     // The composer clears at once: the words move to the request's card in the Drafts pane, which shows the manager
@@ -95,15 +99,16 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
       setSending(false)
     }
   }
-  const ready = Boolean(text.trim()) && !sending
+  const ready = Boolean(text.trim()) && !sending && !connecting
 
   return (
-    <div className="inbox-composer-box" ref={boxRef} data-open={open || undefined} data-busy={sending || undefined}>
+    <div className="inbox-composer-box" ref={boxRef} data-open={open || undefined} data-busy={sending || undefined} data-connecting={connecting || undefined}>
       <div className="inbox-composer" onMouseDown={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); inputRef.current?.focus() } }}>
+        <ConnectingDots shown={connecting} />
         <input
           ref={inputRef}
           data-testid="inbox-composer"
-          placeholder="Describe an automation…"
+          placeholder={connecting ? CONNECTING_TEXT : 'Describe an automation…'}
           aria-label="Describe an automation"
           title={`New automation · ${newKey()} · ? for shortcuts`}
           value={text}
@@ -123,6 +128,8 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
           aria-busy={sending || undefined}
           title={sending ? 'Sending…' : text.trim() ? 'Create · Enter' : 'Describe it first'}
           disabled={!ready}
+          inert={connecting}
+          aria-hidden={connecting || undefined}
           onClick={() => void send()}
         >
           {sending ? <Loader2 size={14} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : <ArrowUp size={14} strokeWidth={2.2} aria-hidden="true" />}

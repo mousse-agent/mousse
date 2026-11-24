@@ -18,6 +18,8 @@ import { BotChatView } from '../bots/BotChatView'
 import { BotDialogs } from '../bots/BotDialogs'
 import { BotFace } from '../bots/face/BotFace'
 import { Mascot } from './mascot/Mascot'
+import { useServiceConnecting } from '../../lib/serviceConnection'
+import { CONNECTING_TEXT, ConnectingDots } from '../ConnectingDots'
 import '../../styles/chats.css'
 import '../../styles/bots.css'
 
@@ -39,6 +41,8 @@ export function ChatWorkspace() {
   const cancel = useChatsStore((s) => s.cancel)
   const projects = useAppStore((s) => s.projects)
   const textarea = useRef<HTMLTextAreaElement>(null)
+  // Not connected to the service: the composer says Connecting…, keeps the draft and sends nothing.
+  const connecting = useServiceConnecting()
   const transcript = useRef<HTMLDivElement>(null)
   const [mentions, setMentions] = useState<Record<string, BotId[]>>({})
   const running = chat?.run?.state === 'running'
@@ -81,9 +85,10 @@ export function ChatWorkspace() {
         {chat.pendingQuestions?.[0] && <div className="chat-approval"><ComposerQuestionModal pending={chat.pendingQuestions[0]}
           onSubmit={(answers) => { void window.mousse.orchestrator.answerQuestions(chat.pendingQuestions![0]!.requestId, answers).then(() => useChatsStore.getState().refresh()).catch((error) => useChatsStore.setState(actionError(error))) }}
           onDismiss={() => { void window.mousse.orchestrator.dismissQuestions(chat.pendingQuestions![0]!.requestId).then(() => useChatsStore.getState().refresh()).catch((error) => useChatsStore.setState(actionError(error))) }} /></div>}
-        <form className="agent-chat-composer" onSubmit={(event) => { event.preventDefault(); if (draft.trim() && !running && !loading && !network?.readonly) void send(draft, network ? selection : undefined) }}>
-          <textarea ref={textarea} aria-label="Message agents" placeholder={`Message ${chat.kind === 'group' ? '#' : ''}${chat.name}${network ? ' · select bots with Mention' : ' — @ an agent'}`} value={draft} disabled={loading || network?.readonly} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
-          <div className="agent-chat-composer-controls"><details className="chat-mention-menu"><summary><AtSign size={15} />Mention{network && !!selection.length && ` (${selection.length})`}</summary><div>{agents.map((agent) => <button type="button" key={agent.id} aria-pressed={network ? selection.includes(agent.id as BotId) : undefined} onClick={(event) => { if (network) setMentions(previous => ({ ...previous, [chat.id]: selection.includes(agent.id as BotId) ? selection.filter(id => id !== agent.id) : [...selection, agent.id as BotId] })); else setDraft(`${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}@${agent.slug} `); if (!network) event.currentTarget.closest('details')?.removeAttribute('open'); textarea.current?.focus() }}><ChatAvatar name={agent.name} small />{agent.name}<span>{network ? selection.includes(agent.id as BotId) ? 'Selected' : 'Select' : `@${agent.slug}`}</span></button>)}</div></details><span className="chat-composer-device">{network ? 'Mentioned bots use their own devices' : 'Agents run on this device'}</span>{running ? <button type="button" className="chat-send-button" aria-label="Stop agent run" onClick={() => void cancel()}><Square size={14} /></button> : <button type="submit" className="chat-send-button" disabled={!draft.trim() || loading || network?.readonly} aria-label="Send message"><ArrowUp size={16} /></button>}</div>
+        <form className="agent-chat-composer" data-connecting={connecting || undefined} onSubmit={(event) => { event.preventDefault(); if (draft.trim() && !running && !loading && !connecting && !network?.readonly) void send(draft, network ? selection : undefined) }}>
+          <ConnectingDots shown={connecting} />
+          <textarea ref={textarea} aria-label="Message agents" placeholder={connecting ? CONNECTING_TEXT : `Message ${chat.kind === 'group' ? '#' : ''}${chat.name}${network ? ' · select bots with Mention' : ' — @ an agent'}`} value={draft} disabled={loading || network?.readonly} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
+          <div className="agent-chat-composer-controls" inert={connecting} aria-hidden={connecting || undefined}><details className="chat-mention-menu"><summary><AtSign size={15} />Mention{network && !!selection.length && ` (${selection.length})`}</summary><div>{agents.map((agent) => <button type="button" key={agent.id} aria-pressed={network ? selection.includes(agent.id as BotId) : undefined} onClick={(event) => { if (network) setMentions(previous => ({ ...previous, [chat.id]: selection.includes(agent.id as BotId) ? selection.filter(id => id !== agent.id) : [...selection, agent.id as BotId] })); else setDraft(`${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}@${agent.slug} `); if (!network) event.currentTarget.closest('details')?.removeAttribute('open'); textarea.current?.focus() }}><ChatAvatar name={agent.name} small />{agent.name}<span>{network ? selection.includes(agent.id as BotId) ? 'Selected' : 'Select' : `@${agent.slug}`}</span></button>)}</div></details><span className="chat-composer-device">{network ? 'Mentioned bots use their own devices' : 'Agents run on this device'}</span>{running ? <button type="button" className="chat-send-button" aria-label="Stop agent run" onClick={() => void cancel()}><Square size={14} /></button> : <button type="submit" className="chat-send-button" disabled={!draft.trim() || loading || network?.readonly} aria-label="Send message"><ArrowUp size={16} /></button>}</div>
         </form>
       </> : firstBot ? <div className="chat-workspace-empty">
         <BotFace look={FIRST_BOT_LOOK} state="idle" size={96} view="full" className="bot-empty-face" />

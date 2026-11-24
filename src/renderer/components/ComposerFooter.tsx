@@ -139,6 +139,12 @@ export interface ComposerFooterProps {
   sendMode?: ComposerSendModeProps
   /** Buttons of the caller's own, left of Attach (a bot's chat: emoji). */
   extraActions?: ReactNode
+  /**
+   * The app is not connected to its service: the controls fade out and cannot be reached, keeping the row's height
+   * (connecting-dots.css). `connectingNote` is said in their place.
+   */
+  connecting?: boolean
+  connectingNote?: string | null
 }
 
 /** The permission chip and the model button with its picker. */
@@ -409,7 +415,9 @@ export function ComposerFooter({
   sendLabel,
   sendBlocked = null,
   extraActions,
-  sendMode
+  sendMode,
+  connecting = false,
+  connectingNote = null
 }: ComposerFooterProps) {
   const bindings = useCommandBindings()
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
@@ -486,13 +494,16 @@ export function ComposerFooter({
     )
   }
 
+  // While connecting the controls stay laid out, so the row keeps its height, but are hidden and out of reach.
+  const away = connecting ? { inert: true, 'aria-hidden': true } as const : {}
   return (
-    <div className="composer-footer">
-      <div className="composer-footer-left">
+    <div className="composer-footer" data-connecting={connecting ? '' : undefined}>
+      {connecting && connectingNote ? <span className="composer-connecting-note" role="status">{connectingNote}</span> : null}
+      <div className="composer-footer-left" {...away}>
         {run ? <ComposerRunControls run={run} permission={permission} /> : null}
       </div>
 
-      <div className="composer-footer-right">
+      <div className="composer-footer-right" {...away}>
         {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={run.workInProgress ?? stoppable} /> : null}
 
         {extraActions}
