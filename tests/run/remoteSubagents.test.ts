@@ -572,4 +572,12 @@ describe('a remote subagent\'s result', () => {
     ]
     expect(finalAssistantText(messages, 'u1')).toBe('Here.\n\n[Applet: Costs (appletId applet_a, revision rev_a)]')
   })
+
+  it('names an applet that failed to publish too, never passing its source on', () => {
+    const fence = '```mousse-applet\n' + JSON.stringify({ schemaVersion: 1, title: 'Chart', description: '', html: '<h1>big</h1>', css: '', js: '' }) + '\n```\n'
+    // A publication that failed keeps the fence as the reply's text, with no applet part to name it.
+    const content = `Here.\n\n${fence}Done.`
+    const messages = [{ id: 'a1', role: 'assistant', content, presentationParts: [{ type: 'text', text: 'Here.\n\n' }, { type: 'text', text: `${fence}\nApplet unavailable: publication failed.\n` }, { type: 'text', text: 'Done.' }] }]
+    expect(finalAssistantText(messages, null)).toBe('Here.\n\n[Applet: Chart]\nDone.')
+  })
 })

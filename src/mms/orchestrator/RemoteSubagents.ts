@@ -1,4 +1,4 @@
-import { modelFacingReplyText } from '../../shared/applets'
+import { appletFencesAsLines, modelFacingReplyText } from '../../shared/applets'
 import { ROUTED_AGENT_KEY, ROUTED_DEADLINE_KEY, ROUTED_DEADLINE_SINCE, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { qualifyId } from '../../shared/threadRef'
 import type { ThreadRunsOn } from '../../shared/types'
@@ -96,7 +96,8 @@ export function finalAssistantText(messages: unknown, userMessageId: string | nu
   for (let at = messages.length - 1; at > from; at -= 1) {
     const message: unknown = messages[at]
     if (!isRecord(message) || message.role !== 'assistant') continue
-    const text = modelFacingReplyText(message)
+    // An applet that failed to publish stays a fence in its reply: it is named too, never passed on as source.
+    const text = appletFencesAsLines(modelFacingReplyText(message))
     if (text.trim()) return text
   }
   return undefined

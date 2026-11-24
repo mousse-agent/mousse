@@ -86,7 +86,7 @@ export function readAppletSource(
     if (args.search !== undefined || args.offset !== undefined) throw new AppletValidationError('Name a part (html, css or js) to read or search.')
     return {
       parts: Object.fromEntries(APPLET_PARTS.map((part) => [part, { chars: source[part].length, lines: lineCount(source[part]) }])),
-      ...(source.data !== undefined ? { dataChars: JSON.stringify(source.data).length } : {}),
+      ...(source.data !== undefined ? { dataChars: JSON.stringify(source.data, null, 2).length } : {}),
       stateVersion: source.stateVersion,
       hint: 'Read a part with part (and offset/limit for long ones), or find text in it with search.'
     }

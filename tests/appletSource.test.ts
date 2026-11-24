@@ -59,7 +59,7 @@ describe('appletRevisionFromEdits', () => {
 
 describe('readAppletSource', () => {
   it('without a part, gives the sizes to choose what to read', () => {
-    expect(readAppletSource(base, {})).toMatchObject({ parts: { html: { chars: base.html.length, lines: 3 }, css: { chars: base.css.length, lines: 1 }, js: { chars: 6, lines: 1 } }, dataChars: 10, stateVersion: 2 })
+    expect(readAppletSource(base, {})).toMatchObject({ parts: { html: { chars: base.html.length, lines: 3 }, css: { chars: base.css.length, lines: 1 }, js: { chars: 6, lines: 1 } }, dataChars: JSON.stringify(base.data, null, 2).length, stateVersion: 2 })
   })
 
   it('pages a part from an offset, saying where the next page starts', () => {
