@@ -427,6 +427,19 @@ export class EngineHelper {
   }
 
   /**
+   * Calls `identity` back once on a connection it dialled here, whether or not this computer uses it yet: true once
+   * that computer served the call (its hello answered, so it holds a live grant for this one), false otherwise.
+   */
+  async served(identity: string): Promise<boolean> {
+    for (const [conn, event] of [...this.ups]) {
+      if (event.identity !== identity || event.dir !== 'in') continue
+      if (!this.connections.get(conn)?.isOpen() || this.callsBack(conn, event) === 'no') continue
+      if (await this.tryCallBack(conn, event)) return true
+    }
+    return false
+  }
+
+  /**
    * Whether inbound connection `conn` (`event` its `conn.up`) carries this computer's calls to its caller: `yes`
    * when `conn.up` said `both` or a call back went through, `try` when it said `both: false` before the caller
    * opened a stream (so before its HELLO, maybe) and no call back was refused as one way, else `no`.

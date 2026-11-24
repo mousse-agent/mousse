@@ -28,6 +28,13 @@ export interface EngineAccessPort {
   applyAccess(node: NodeId, access: AccessPresetFields): void
   /** This computer may use `node` now: its call back on the other computer's connection is attached. */
   dial(node: NodeId): Promise<void>
+  /**
+   * Calls `node` back once over its own connection, whether or not this computer uses it yet: whether that computer
+   * served the call (so it holds a grant for this one).
+   */
+  served(node: NodeId): Promise<boolean>
+  /** Ends this computer's calls to `node` that a `served` left open. */
+  release(node: NodeId): void
   /** A test's crash point (`EnginePairing.checkpoint`). */
   checkpoint(step: PairingStep): void
   changed(): void
@@ -55,8 +62,6 @@ interface Prompt {
 }
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/
-/** Request ids kept per pairing to drop a repeat: the newest this many. */
-const SEEN_IDS = 64
 
 /** The grant's name: the row's name within the helper's 1 to 128 bytes, cut on a character. */
 export function grantName(name: string, fallback: string): string {
@@ -84,7 +89,9 @@ const only = (header: EngineMessage['header'], keys: readonly string[]): boolean
  *   one at a time and not sooner than `accessPromptGapMs` after the last. Allow saves the level first, then the
  *   helper grants that peer over the live connection (`grant.add_connected`), then the row records it.
  * - `access.state {granted}` tells what the sender grants the receiver, at setup and after each change. Nothing a
- *   message says grants anything here: only this owner's Allow (or Let) does.
+ *   message says grants anything here: only this owner's Allow (or Let) does. Nor does one alone move a row: this
+ *   computer starts using the other only on an Allow to its own request, or once a call over the connection was
+ *   served there, and never in a direction its owner removed until that owner asks again.
  */
 export class EngineAccess {
   private readonly clients = new Map<NodeId, AccessLink>()
@@ -93,9 +100,10 @@ export class EngineAccess {
   private readonly lastAsk = new Map<NodeId, number>()
   private readonly prompts = new Map<NodeId, Prompt>()
   private readonly lastPrompt = new Map<NodeId, number>()
-  private readonly seen = new Map<NodeId, Set<string>>()
-  /** What each pairing last said it grants this computer, this run. */
-  private readonly heard = new Map<NodeId, boolean>()
+  /** Request ids each other computer sent, with when they came, oldest first (`firstSeen`). */
+  private readonly seen = new Map<NodeId, Map<string, number>>()
+  /** Pairings whose "it grants this computer" is being checked with a call. */
+  private readonly checking = new Set<NodeId>()
   /** Grants being made, so a second Allow joins the first. */
   private readonly granting = new Map<NodeId, Promise<void>>()
   private stopped = false
@@ -260,11 +268,7 @@ export class EngineAccess {
       }
       return
     }
-    const seen = this.seen.get(node) ?? new Set<string>()
-    this.seen.set(node, seen)
-    if (seen.has(id)) return
-    seen.add(id)
-    if (seen.size > SEEN_IDS) seen.delete(seen.values().next().value!)
+    if (!this.firstSeen(node, id)) return
     if (this.prompts.has(node)) return
     const now = Date.now()
     if (now - (this.lastPrompt.get(node) ?? -Infinity) < engineLimits().accessPromptGapMs) return
@@ -277,6 +281,24 @@ export class EngineAccess {
     timer.unref?.()
     this.prompts.set(node, { id, timer })
     this.port.changed()
+  }
+
+  /**
+   * Whether `id` is a request `node` has not sent before, remembering it if so. An id is kept for `accessSeenMs`
+   * however many come after it: while `accessSeenIds` are kept, a new one is refused rather than an old one dropped.
+   */
+  private firstSeen(node: NodeId, id: string): boolean {
+    const now = Date.now()
+    const seen = this.seen.get(node) ?? new Map<string, number>()
+    this.seen.set(node, seen)
+    // Kept in the order they came: the oldest go once their time is up.
+    for (const [old, at] of seen) {
+      if (now - at < engineLimits().accessSeenMs) break
+      seen.delete(old)
+    }
+    if (seen.has(id) || seen.size >= engineLimits().accessSeenIds) return false
+    seen.set(id, now)
+    return true
   }
 
   /** It cancelled its request: the prompt closes. */
@@ -303,27 +325,47 @@ export class EngineAccess {
   }
 
   /**
-   * What it grants this computer now. Information only: it never grants anything here. This computer starts using
-   * it when it says so while this computer waits for an answer, or after it said it did not (its owner let this
-   * computer in from there); a computer whose owner stopped using it is not used again by a repeat.
+   * What it says it grants this computer now: information only, so the message alone changes nothing here. A `true`
+   * (its owner let this computer in from there, say) is checked with one call over its connection, and only a call
+   * it served (its helper holds a grant for this computer) adds the direction.
    */
   private stated(node: NodeId, granted: boolean): void {
-    const before = this.heard.get(node)
-    this.heard.set(node, granted)
-    if (!granted) return
-    if (this.asks.get(node)?.state === 'waiting' || before === false) {
-      const ask = this.asks.get(node)
-      if (ask) clearTimeout(ask.timer)
-      this.asks.delete(node)
-      this.gained(node)
-    }
+    if (!granted || this.checking.has(node) || !this.mayGain(node)) return
+    this.checking.add(node)
+    void this.port
+      .served(node)
+      .catch(() => false)
+      .then((served) => {
+        this.checking.delete(node)
+        if (!served) return
+        if (!this.stopped && this.mayGain(node)) {
+          const ask = this.asks.get(node)
+          if (ask) clearTimeout(ask.timer)
+          this.asks.delete(node)
+          return this.gained(node)
+        }
+        // The row changed while the call ran: unless this computer uses it now (an Allow came meanwhile), the call
+        // it opened ends.
+        const row = this.port.peers.serving(node)
+        if (this.stopped || !row || row.ways === 'in') this.port.release(node)
+      })
+  }
+
+  /**
+   * Whether this computer may start using `node`: it is only let in, and this computer's owner did not remove that
+   * it uses it (until that owner asks again).
+   */
+  private mayGain(node: NodeId): boolean {
+    const row = this.port.peers.serving(node)
+    return (
+      !!row && row.ways === 'in' && row.state === 'connected' && !row.source && !row.revoking && !row.stoppedUsing
+    )
   }
 
   /** It let this computer in: its row lists both directions and this computer uses it over its connection. */
   private gained(node: NodeId): void {
-    const row = this.port.peers.serving(node)
-    if (row?.ways === 'in' && row.state === 'connected' && !row.source)
-      this.port.peers.advance(node, ['connected'], { ways: null })
+    if (!this.mayGain(node)) return
+    this.port.peers.advance(node, ['connected'], { ways: null })
     this.port.changed()
     void this.port.dial(node).catch(() => undefined)
   }
@@ -380,6 +422,8 @@ export class EngineAccess {
     if (!this.send(node, { t: 'access.request', id }))
       throw new NetError('peer_offline', 'Not connected right now.')
     this.lastAsk.set(node, now)
+    // This owner asks again for a direction it removed: an Allow, or a call it serves, may add it now.
+    if (row.stoppedUsing) this.port.peers.update(node, { stoppedUsing: null })
     const ask: Ask = { id, state: 'waiting' }
     ask.timer = setTimeout(() => {
       if (this.asks.get(node) !== ask || ask.state !== 'waiting') return

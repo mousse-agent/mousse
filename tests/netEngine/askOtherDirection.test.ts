@@ -13,10 +13,12 @@ const limits = vi.hoisted(() => {
   const set = {
     MOUSSE_NET_ENGINE_ACCESS_ASK_MS: '2500',
     MOUSSE_NET_ENGINE_ACCESS_ASK_GAP_MS: '600',
-    MOUSSE_NET_ENGINE_ACCESS_PROMPT_GAP_MS: '600'
+    MOUSSE_NET_ENGINE_ACCESS_PROMPT_GAP_MS: '600',
+    MOUSSE_NET_ENGINE_ACCESS_SEEN_MS: '4000',
+    MOUSSE_NET_ENGINE_ACCESS_SEEN_IDS: '8'
   }
   Object.assign(process.env, set)
-  return { askMs: 2500, gapMs: 600 }
+  return { askMs: 2500, gapMs: 600, seenMs: 4000, seenIds: 8 }
 })
 
 const ALL_FEATURES = ['invite-way', 'route-readiness', 'join-probe', 'grant-revoke-local', 'grant-roles', 'grant-add-connected']
@@ -256,6 +258,77 @@ describe('asking for the other direction of a one-way pairing', () => {
     await sleep(200)
     expect(device(owner, callerOnOwner)?.other?.asked).toBe('waiting')
     expect(rowFor(owner, caller)?.ways).toBe('in')
+  }, 60_000)
+
+  it('never prompts twice for one request id, however many others come after it', async () => {
+    const owner = await computer(fabric, 'ids-owner'),
+      caller = await computer(fabric, 'ids-caller')
+    const { callerOnOwner, ownerOnCaller } = await oneWay(fabric, owner, caller)
+    await eventually(() => expect(device(owner, callerOnOwner)?.other).toEqual({ offer: 'ask' }))
+    const toCaller = exchange(owner, callerOnOwner)
+    toCaller.send({ t: 'access.request', id: 'first' })
+    await eventually(() => expect(caller.mms.netEngine.status().accessAsks![0]).toMatchObject({ request: 'first' }))
+    await caller.dispatch('netEngine.access.answer', { node: ownerOnCaller, request: 'first', yes: false }, true)
+    const flooded = Date.now()
+
+    // Far more new ids than are remembered, then the first again and a new one, each after the prompt gap.
+    for (let n = 0; n < 100; n++) toCaller.send({ t: 'access.request', id: `flood-${n}` })
+    await sleep(limits.gapMs + 100)
+    toCaller.send({ t: 'access.request', id: 'first' })
+    await sleep(200)
+    expect(caller.mms.netEngine.status().accessAsks).toBeUndefined()
+    toCaller.send({ t: 'access.request', id: 'while-full' })
+    await sleep(200)
+    expect(caller.mms.netEngine.status().accessAsks).toBeUndefined()
+
+    // Once the remembered ids' time is up, a new request prompts again.
+    await sleep(Math.max(0, flooded + limits.seenMs + 100 - Date.now()))
+    toCaller.send({ t: 'access.request', id: 'later' })
+    await eventually(() => expect(caller.mms.netEngine.status().accessAsks![0]).toMatchObject({ request: 'later' }))
+  }, 60_000)
+
+  it('is not used on a message saying it grants, and a direction removed here stays removed until asked again', async () => {
+    const owner = await computer(fabric, 'say-owner'),
+      caller = await computer(fabric, 'say-caller')
+    const { callerOnOwner, ownerOnCaller } = await oneWay(fabric, owner, caller)
+    await eventually(() => expect(device(owner, callerOnOwner)?.other).toEqual({ offer: 'ask' }))
+    const toOwner = exchange(caller, ownerOnCaller)
+    const sayGranted = async () => {
+      toOwner.send({ t: 'access.state', granted: false })
+      toOwner.send({ t: 'access.state', granted: true })
+      await sleep(500)
+    }
+
+    // The caller says it grants the owner, but holds no grant: the owner's row stays one way and nothing is dialled.
+    await sayGranted()
+    expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(false)
+    expect(rowFor(owner, caller)?.ways).toBe('in')
+    expect(device(owner, callerOnOwner)?.direction).toBe('in')
+    expect(owner.mms.netEngine.online(callerOnOwner)).toBe(false)
+
+    // Its owner then lets the owner in from its row: a call it serves adds the direction.
+    await caller.dispatch('netEngine.access.let', { node: ownerOnCaller, access: accessPreset('view').fields }, true)
+    await eventually(() => {
+      expect(rowFor(owner, caller)?.ways).toBeUndefined()
+      expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true)
+    })
+
+    // The owner stops using the caller, which still lets it in: the same messages do not put that direction back.
+    await owner.dispatch('netEngine.remove', { node: callerOnOwner, direction: 'out' }, true)
+    expect(rowFor(owner, caller)).toMatchObject({ ways: 'in', stoppedUsing: true })
+    await sayGranted()
+    expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(true)
+    expect(rowFor(owner, caller)?.ways).toBe('in')
+    expect(owner.mms.netEngine.online(callerOnOwner)).toBe(false)
+
+    // Asking again is the owner adding it back: the caller still grants it, so the direction returns.
+    await eventually(() => expect(device(owner, callerOnOwner)?.other?.offer).toBe('ask'))
+    await owner.dispatch('netEngine.access.ask', { node: callerOnOwner }, true)
+    await eventually(() => {
+      expect(rowFor(owner, caller)?.ways).toBeUndefined()
+      expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true)
+    })
+    expect(rowFor(owner, caller)?.stoppedUsing).toBeUndefined()
   }, 60_000)
 
   it('lets the other computer in from its own row, and both rows follow', async () => {

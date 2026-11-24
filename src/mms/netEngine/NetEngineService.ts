@@ -1717,6 +1717,15 @@ export class NetEngineService implements EngineDirectoryPort {
         const row = peers.serving(node)
         if (row && this.helper && !sessions.online(node)) await this.helper.dial(row.endpoint)
       },
+      served: async (node) => {
+        const row = peers.serving(node)
+        return !!row && !!this.helper && (await this.helper.served(row.endpoint))
+      },
+      release: (node) => {
+        const row = peers.serving(node)
+        if (row) this.helper?.dropCallBack(row.endpoint)
+        sessions.closeClients(node, 'peer_forgotten')
+      },
       checkpoint: (step) => pairing.checkpoint(step),
       changed: () => this.changed()
     })

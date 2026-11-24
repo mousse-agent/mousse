@@ -1265,6 +1265,7 @@ export class EnginePairing {
     })
     peers.advance(node, ['connected'], {
       ways: 'in',
+      stoppedUsing: true,
       offered: null,
       approved: null,
       share: null,
@@ -1435,14 +1436,15 @@ const removedWhileJoining = (): NetError => new NetError('cancelled', 'Removed w
 
 /**
  * A row this computer had with the host before Connect: one it only used turns both ways when "Also let" is ticked;
- * one that lets the host in already stays so (Connect never takes access away).
+ * one that lets the host in already stays so (Connect never takes access away). Joining it is this owner adding the
+ * use of it again, which a removal of that use no longer holds back.
  */
 function joinWays(
   row: EnginePeerRow,
   back: boolean
-): { ways?: EnginePeerRow['ways'] | null; oneWay: true | null } {
-  if (back) return { oneWay: null, ...(row.ways === 'out' ? { ways: null } : {}) }
-  return { oneWay: true, ...(!row.ways && row.grant === '' ? { ways: 'out' as const } : {}) }
+): { ways?: EnginePeerRow['ways'] | null; oneWay: true | null; stoppedUsing: null } {
+  if (back) return { oneWay: null, stoppedUsing: null, ...(row.ways === 'out' ? { ways: null } : {}) }
+  return { oneWay: true, stoppedUsing: null, ...(!row.ways && row.grant === '' ? { ways: 'out' as const } : {}) }
 }
 
 /** The other computer refuses this one (it removed it, or never let it in). */

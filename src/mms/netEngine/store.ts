@@ -93,6 +93,11 @@ export interface EnginePeerRow {
    * helper confirms it is gone (`grant.revoke_local`): recovery finishes it, and nothing gives that grant a row again.
    */
   revoking?: string
+  /**
+   * This computer's owner removed that it uses the other computer (on a row now `in`): nothing the other computer
+   * says or serves puts that direction back, until this owner asks for it again.
+   */
+  stoppedUsing?: boolean
 }
 
 export type EngineWays = 'in' | 'out'
@@ -135,6 +140,7 @@ export type EnginePeerChange = Partial<
   ways?: EngineWays | null
   oneWay?: true | null
   revoking?: string | null
+  stoppedUsing?: true | null
 }
 
 const COLUMNS: Record<keyof EnginePeerChange, string> = {
@@ -154,7 +160,8 @@ const COLUMNS: Record<keyof EnginePeerChange, string> = {
   link: 'link',
   ways: 'ways',
   oneWay: 'one_way',
-  revoking: 'revoking'
+  revoking: 'revoking',
+  stoppedUsing: 'stopped_using'
 }
 
 /** Columns kept as JSON text; an empty list is stored as NULL. */
@@ -180,7 +187,8 @@ const ADDED_COLUMNS = [
   'link',
   'ways',
   'one_way',
-  'revoking'
+  'revoking',
+  'stopped_using'
 ]
 
 export const isServingState = (state: EnginePeerState): boolean =>
@@ -201,7 +209,7 @@ export class EnginePeerStore {
   constructor(private readonly db: NetDatabase) {
     db.transaction(() => {
       db.database.exec(
-        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT,source TEXT,approved TEXT,share TEXT,offered TEXT,ssh TEXT,link TEXT,ways TEXT,one_way TEXT,revoking TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_pending_access(invitation TEXT PRIMARY KEY,local_id TEXT NOT NULL) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
+        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT,source TEXT,approved TEXT,share TEXT,offered TEXT,ssh TEXT,link TEXT,ways TEXT,one_way TEXT,revoking TEXT,stopped_using TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_pending_access(invitation TEXT PRIMARY KEY,local_id TEXT NOT NULL) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
       )
       // A table from before the journal or address columns gets them.
       const columns = new Set(
@@ -232,7 +240,7 @@ export class EnginePeerStore {
       }
       this.db.database
         .prepare(
-          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,addresses,source,approved,share,offered,ssh,link,ways,one_way,revoking) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,addresses,source,approved,share,offered,ssh,link,ways,one_way,revoking,stopped_using) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
         )
         .run(
           saved.localId,
@@ -254,7 +262,8 @@ export class EnginePeerStore {
           columnValue('link', saved.link),
           saved.ways ?? null,
           columnValue('oneWay', saved.oneWay || null),
-          saved.revoking ?? null
+          saved.revoking ?? null,
+          columnValue('stoppedUsing', saved.stoppedUsing || null)
         )
     })
     return saved
@@ -567,7 +576,8 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     ...(link ? { link } : {}),
     ...(row.ways === 'in' || row.ways === 'out' ? { ways: row.ways } : {}),
     ...(row.one_way === 'true' ? { oneWay: true } : {}),
-    ...(typeof row.revoking === 'string' ? { revoking: row.revoking } : {})
+    ...(typeof row.revoking === 'string' ? { revoking: row.revoking } : {}),
+    ...(row.stopped_using === 'true' ? { stoppedUsing: true } : {})
   }
 }
 
