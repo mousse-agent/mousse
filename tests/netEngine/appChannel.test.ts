@@ -311,7 +311,8 @@ describe('the helper, as the app sees it', () => {
     helper.onPaused((reason) => seen.push(reason))
     const hello = helper.hello()
     const asked = JSON.parse(p.written[0]!.body.toString('utf8'))
-    expect(asked).toMatchObject({ op: 'hello', proto: [1, 1], name: 'Desk', profile: 'profile-1' })
+    // The app offers 1.2; a 1.1 helper answers with its own minor.
+    expect(asked).toMatchObject({ op: 'hello', proto: [1, 2], name: 'Desk', profile: 'profile-1' })
     p.push(jsonFrame({ re: asked.id, proto: [1, 1], identity: 'ab', paused: 'journal' }))
     await hello
     expect(helper.speaks(1)).toBe(true)
