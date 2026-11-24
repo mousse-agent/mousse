@@ -123,7 +123,8 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
 
   it('a person\'s turn that asks is archived once it ends well, through the app\'s Archive, not while it still runs', async () => {
     const w = world()
-    const archivedEvents: string[] = []\n    w.d.orch.on('thread-archived', (event: { threadId: string }) => archivedEvents.push(event.threadId))
+    const archivedEvents: string[] = []
+    w.d.orch.on('thread-archived', (event: { threadId: string }) => archivedEvents.push(event.threadId))
     let archivedDuringTurn: boolean | undefined
     w.adapter.onArchived = () => { archivedDuringTurn = w.archived() }
     await w.send('archive yourself when done')
