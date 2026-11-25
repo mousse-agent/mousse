@@ -32,6 +32,7 @@ afterEach(() => {
 })
 
 const INK = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h16v16z"/></svg>').toString('base64')}`
+const TILE = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16"/><path fill="#fff" d="M4 4h8v8z"/></svg>').toString('base64')}`
 
 function acpEntry(instanceId: string, displayName: string, agentId: string, icon?: Pick<InstanceSnapshot, 'iconDataUrl' | 'iconMonochrome'>): InstanceSnapshot {
   return snapshot({
@@ -77,21 +78,24 @@ function openPicker(providers: ProviderWithStatus[]) {
 
 const tab = (name: string) => document.querySelector<HTMLElement>(`.model-picker-rail [role="tab"][aria-label="${name}"]`)!
 const badge = (name: string) => tab(name).querySelector('.model-picker-instance-badge')?.textContent ?? null
-/** The generic mark is the only outlined icon (a crosshair of circles). */
-const isGeneric = (name: string) => Boolean(tab(name).querySelector('svg circle'))
+/** The logo a tab draws: a brand, `agent:<registry id>` for a registry icon, or `generic`. */
+const logo = (name: string) => tab(name).querySelector('[data-provider-icon]')?.getAttribute('data-provider-icon') ?? null
 
 describe('ACP agents on the model picker rail', () => {
   it('shows each agent its own logo, and badges only a second entry of the same agent', () => {
+    openPicker([listing('acp:opencode', 'OpenCode'), listing('acp:goose', 'Goose'), listing('acp:work', 'Goose Work'), listing('acp:tile', 'Tile')])
+    // The entries' snapshots arrive after the menu opened: until then every agent but OpenCode
+    // looked the same (generic), and the badges follow the logos once they are known.
     act(() => applySnapshotsEvent({
       scope: DEVICE_SCOPE,
       snapshots: [
         acpEntry('acp:opencode', 'OpenCode', 'opencode'),
         acpEntry('acp:goose', 'Goose', 'goose', { iconDataUrl: INK, iconMonochrome: true }),
-        acpEntry('acp:work', 'Goose Work', 'goose', { iconDataUrl: INK, iconMonochrome: true })
+        acpEntry('acp:work', 'Goose Work', 'goose', { iconDataUrl: INK, iconMonochrome: true }),
+        acpEntry('acp:tile', 'Tile', 'tile-agent', { iconDataUrl: TILE, iconMonochrome: false })
       ]
     }))
-    openPicker([listing('acp:opencode', 'OpenCode'), listing('acp:goose', 'Goose'), listing('acp:work', 'Goose Work')])
-    for (const name of ['OpenCode', 'Goose', 'Goose Work']) expect(isGeneric(name), name).toBe(false)
-    expect([badge('OpenCode'), badge('Goose'), badge('Goose Work')]).toEqual([null, null, 'W'])
+    expect([logo('OpenCode'), logo('Goose'), logo('Goose Work'), logo('Tile')]).toEqual(['opencode', 'agent:goose', 'agent:goose', 'agent:tile-agent'])
+    expect([badge('OpenCode'), badge('Goose'), badge('Goose Work'), badge('Tile')]).toEqual([null, null, 'W', null])
   })
 })

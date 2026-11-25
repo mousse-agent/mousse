@@ -1,7 +1,8 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it } from 'vitest'
-import { normalizeProviderId, ProviderIcon, providerIconKey, resetRegisteredIcons } from '../../src/renderer/lib/providerIcons'
+import { normalizeProviderId, ProviderIcon, providerIconKey, providerMakerId, resetRegisteredIcons } from '../../src/renderer/lib/providerIcons'
+import { makerLabelOf } from '../../src/renderer/components/ModelFamilyMenu'
 import { applySnapshotsEvent, DEVICE_SCOPE, instanceBadges, useProviderSnapshotsStore } from '../../src/renderer/lib/providerSnapshots'
 import { iconIdOf } from '../../src/renderer/components/providers/providerView'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
@@ -131,21 +132,59 @@ describe('ACP agent logos', () => {
   })
   const generic = () => render('acp')
 
+  // Registry ids (tests/harness/fixtures/acp-registry-icons-2026-11-24.json) Mousse ships a logo for.
   it.each([
     ['acp:opencode', 'opencode'],
+    ['acp:opencode-v2', 'opencode'],
     ['acp:gemini', 'google'],
-    ['acp:gemini-cli', 'google'],
+    ['acp:antigravity-acp', 'google'],
     ['acp:github-copilot-cli', 'copilot'],
-    ['acp:github-copilot', 'copilot'],
     ['acp:qwen-code', 'qwen'],
+    ['acp:kimi', 'kimi'],
     ['acp:kimi-code', 'kimi'],
     ['acp:minimax-code', 'minimax'],
     ['acp:mistral-vibe', 'mistral'],
-    ['acp:glm-acp-agent', 'zhipu']
+    ['acp:glm-acp-agent', 'zhipu'],
+    ['acp:grok-build', 'xai'],
+    ['acp:cursor', 'cursor']
   ])('%s shows the %s logo Mousse ships', (providerId, brand) => {
     expect(normalizeProviderId(providerId)).toBe(brand)
     expect(render(providerId)).toBe(render(brand))
     expect(render(providerId)).not.toBe(generic())
+  })
+
+  // A custom entry (its own command, no registry source) is named freely: a brand's name inside
+  // its id is not that brand.
+  it.each([
+    ['acp:metadata-agent', 'meta', 'Meta'],
+    ['acp:openai-helper', 'openai', 'OpenAI'],
+    ['acp:my-gemini-wrapper', 'google', 'Google'],
+    ['acp:opencode-fork', 'opencode', 'OpenCode']
+  ])('a custom %s shows the generic mark and is not %s', (providerId, brand, brandLabel) => {
+    applySnapshotsEvent({ scope: DEVICE_SCOPE, snapshots: [acpEntry(providerId)] })
+    expect(render(providerId)).toBe(generic())
+    expect(providerIconKey(providerId)).toBe('generic')
+    // The model picker names the maker of its models, since the entry is not that maker.
+    expect(providerMakerId(providerId)).not.toBe(brand)
+    expect(makerLabelOf(providerId, providerId.slice(4), { brandId: brand, brandLabel })).toBe(brandLabel)
+  })
+
+  it('takes the agent an entry runs from this computer first, and from other scopes only when they agree', () => {
+    const project = (projectId: string) => ({ kind: 'project' as const, projectId })
+    applySnapshotsEvent({ scope: project('a'), snapshots: [acpEntry('acp:work', 'opencode'), acpEntry('acp:shared', 'goose', { iconDataUrl: INK, iconMonochrome: true })] })
+    applySnapshotsEvent({ scope: project('b'), snapshots: [acpEntry('acp:shared', 'goose', { iconDataUrl: INK, iconMonochrome: true }), acpEntry('acp:split', 'opencode')] })
+    applySnapshotsEvent({ scope: project('c'), snapshots: [acpEntry('acp:split', 'tile-agent', { iconDataUrl: TILE, iconMonochrome: false })] })
+    applySnapshotsEvent({ scope: DEVICE_SCOPE, snapshots: [acpEntry('acp:work', 'goose', { iconDataUrl: INK, iconMonochrome: true })] })
+    // This computer's `acp:work` runs Goose, whatever scope loaded last.
+    expect(providerIconKey('acp:work')).toBe('agent:goose')
+    applySnapshotsEvent({ scope: project('a'), snapshots: [acpEntry('acp:work', 'opencode'), acpEntry('acp:shared', 'goose', { iconDataUrl: INK, iconMonochrome: true })] })
+    expect(providerIconKey('acp:work')).toBe('agent:goose')
+    // Only in projects: shown when they agree, generic when they run different agents.
+    expect(providerIconKey('acp:shared')).toBe('agent:goose')
+    expect(providerIconKey('acp:split')).toBe('generic')
+    // A scope that is gone is forgotten.
+    useProviderSnapshotsStore.setState((state) => ({ scopes: Object.fromEntries(Object.entries(state.scopes).filter(([key]) => key !== 'project:c')) }))
+    expect(providerIconKey('acp:split')).toBe('opencode')
   })
 
   it('names an entry by the registry agent it runs, whatever it is called, else by its own id', () => {

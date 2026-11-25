@@ -65,6 +65,7 @@ function GenericProviderIcon({ size = 14, className }: { size?: number; classNam
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
+      data-provider-icon="generic"
       style={{ flexShrink: 0 }}
     >
       <circle cx="12" cy="12" r="8.5" />
@@ -202,14 +203,17 @@ const PROVIDER_ASSET_ICONS: Record<string, ProviderAsset> = {
   zhipu: { src: zhipuAsset }
 }
 
+/** `iconKey` names the logo drawn (`data-provider-icon`): a brand, `agent:<registry id>` or `generic`. */
 function ProviderAssetIcon({
   asset,
   size,
-  className
+  className,
+  iconKey
 }: {
   asset: ProviderAsset
   size: number
   className?: string
+  iconKey?: string
 }) {
   if (asset.monochrome) {
     const mask = `url("${asset.src}")`
@@ -218,6 +222,7 @@ function ProviderAssetIcon({
         className={className}
         aria-hidden
         data-provider-mark="mono"
+        data-provider-icon={iconKey}
         style={{
           display: 'block',
           width: size,
@@ -244,6 +249,7 @@ function ProviderAssetIcon({
       className={className}
       alt=""
       aria-hidden
+      data-provider-icon={iconKey}
       style={{
         display: 'block',
         width: size,
@@ -257,15 +263,21 @@ function ProviderAssetIcon({
 
 /**
  * ACP registry icons, as the daemon cleaned and cached them. Agents by registry id, and ACP
- * entries by instance id with the registry agent they run, so a renamed entry (`acp:work` running
- * OpenCode) still finds its agent's logo. Filled from provider snapshots and registry searches.
+ * entries by snapshot scope and instance id with the registry agent they run, so a renamed entry
+ * (`acp:work` running OpenCode) still finds its agent's logo. Filled from provider snapshots and
+ * registry searches.
  */
 interface RegistryIcon {
   dataUrl: string
   monochrome: boolean
 }
+interface InstanceAgent {
+  agentId?: string
+  icon?: RegistryIcon
+}
 const agentIcons = new Map<string, RegistryIcon>()
-const instanceAgents = new Map<string, { agentId?: string; icon?: RegistryIcon }>()
+/** By snapshot scope (`scopeKey`), then instance id: `acp:work` may run another agent elsewhere. */
+const instanceAgents = new Map<string, Map<string, InstanceAgent>>()
 const iconListeners = new Set<() => void>()
 let iconVersion = 0
 
@@ -307,32 +319,43 @@ export function registerProviderIcons(agents: ReadonlyArray<{ id: string } & Ico
   if (changed) iconsChanged()
 }
 
-/** The registry agents entries run, and their icons, from provider snapshots. */
-export function registerInstanceIcons(
-  snapshots: ReadonlyArray<Pick<InstanceSnapshot, 'instanceId' | 'config' | 'iconDataUrl' | 'iconMonochrome'>>
-): void {
+type IconSnapshot = Pick<InstanceSnapshot, 'instanceId' | 'config' | 'iconDataUrl' | 'iconMonochrome'>
+
+/**
+ * The registry agents entries run, and their icons, from the provider snapshots of every scope on
+ * screen (by `scopeKey`). Scopes and entries no longer there are forgotten.
+ */
+export function syncInstanceIcons(byScope: Readonly<Record<string, ReadonlyArray<IconSnapshot>>>): void {
   let changed = false
-  for (const snapshot of snapshots) {
-    const source = snapshot.config?.source
-    const agentId = source?.kind === 'registry' ? source.agentId : undefined
-    const icon = registryIconOf(snapshot)
-    const known = instanceAgents.get(snapshot.instanceId)
-    // Only entries that run a registry agent (or carry its icon) are kept.
-    if (!agentId && !icon) {
-      if (known) {
-        instanceAgents.delete(snapshot.instanceId)
+  for (const scope of [...instanceAgents.keys()]) {
+    if (byScope[scope]) continue
+    instanceAgents.delete(scope)
+    changed = true
+  }
+  for (const [scope, snapshots] of Object.entries(byScope)) {
+    const before = instanceAgents.get(scope)
+    const entries = new Map<string, InstanceAgent>()
+    for (const snapshot of snapshots) {
+      const source = snapshot.config?.source
+      const agentId = source?.kind === 'registry' ? source.agentId : undefined
+      const icon = registryIconOf(snapshot)
+      // Only entries that run a registry agent (or carry its icon) are kept.
+      if (!agentId && !icon) continue
+      entries.set(snapshot.instanceId, { ...(agentId ? { agentId } : {}), ...(icon ? { icon } : {}) })
+      if (agentId && icon && !sameIcon(agentIcons.get(agentId), icon)) {
+        agentIcons.set(agentId, icon)
         changed = true
       }
-      continue
     }
-    if (!known || known.agentId !== agentId || !sameIcon(known.icon, icon)) {
-      instanceAgents.set(snapshot.instanceId, { ...(agentId ? { agentId } : {}), ...(icon ? { icon } : {}) })
-      changed = true
-    }
-    if (agentId && icon && !sameIcon(agentIcons.get(agentId), icon)) {
-      agentIcons.set(agentId, icon)
-      changed = true
-    }
+    const same =
+      before?.size === entries.size &&
+      [...entries].every(([id, entry]) => {
+        const known = before.get(id)
+        return known !== undefined && known.agentId === entry.agentId && sameIcon(known.icon, entry.icon)
+      })
+    if (same) continue
+    instanceAgents.set(scope, entries)
+    changed = true
   }
   if (changed) iconsChanged()
 }
@@ -342,6 +365,27 @@ export function resetRegisteredIcons(): void {
   agentIcons.clear()
   instanceAgents.clear()
   iconsChanged()
+}
+
+/** Snapshot scope of this computer's own entries (`scopeKey(DEVICE_SCOPE)`). */
+const DEVICE_SCOPE_KEY = 'device'
+
+/**
+ * The registry agent an entry runs: this computer's entry of that id, else the one every other
+ * scope agrees on. Two scopes that run different agents under one id show neither, so a logo never
+ * flips with whichever scope loaded last.
+ */
+function instanceAgentOf(instanceId: string): InstanceAgent | undefined {
+  const own = instanceAgents.get(DEVICE_SCOPE_KEY)?.get(instanceId)
+  if (own) return own
+  let found: InstanceAgent | undefined
+  for (const [scope, entries] of instanceAgents) {
+    const entry = scope === DEVICE_SCOPE_KEY ? undefined : entries.get(instanceId)
+    if (!entry) continue
+    if (found && (found.agentId !== entry.agentId || !sameIcon(found.icon, entry.icon))) return undefined
+    found = entry
+  }
+  return found
 }
 
 type ResolvedIcon =
@@ -363,7 +407,7 @@ function bundledKey(providerId: string): string | undefined {
  * `acp:` slug), else the generic mark.
  */
 function resolveProviderIcon(providerId: string, fields?: IconFields): ResolvedIcon {
-  const instance = instanceAgents.get(providerId)
+  const instance = instanceAgentOf(providerId)
   if (instance?.agentId) {
     const brand = bundledKey(instance.agentId)
     if (brand) return { kind: 'bundled', key: brand }
@@ -394,14 +438,37 @@ export function providerMakerId(providerId: string): string {
 }
 
 /**
+ * ACP registry agents whose logo Mousse ships, by exact registry id. A custom `acp:<slug>` entry
+ * (a command of its own, not from the registry) matches only these: its slug is a name anyone
+ * picks, so `acp:metadata-agent` is not Meta's and `acp:openai-helper` not OpenAI's.
+ */
+const ACP_AGENT_BRANDS: Readonly<Record<string, string>> = {
+  'antigravity-acp': 'google',
+  cursor: 'cursor',
+  gemini: 'google',
+  'github-copilot-cli': 'copilot',
+  'glm-acp-agent': 'zhipu',
+  'grok-build': 'xai',
+  kimi: 'kimi',
+  'kimi-code': 'kimi',
+  'minimax-code': 'minimax',
+  'mistral-vibe': 'mistral',
+  opencode: 'opencode',
+  'opencode-v2': 'opencode',
+  'qwen-code': 'qwen'
+}
+
+/**
  * Maps a provider id to a logo key. Accepts legacy `llmProvider` names
  * (`codex`, `claude-subscription`), provider instance ids (`claude`,
  * `antigravity`, `codex`, `pi:<provider>`, added `<driver>:<slug>`) and pi-ai provider ids.
+ * An ACP entry (`acp:<slug>`) is a known agent only by its exact slug (`acp:opencode`), else `acp`.
  */
 export function normalizeProviderId(providerId: string): string {
   let id = providerId.trim().toLowerCase()
-  // A model API is named by its provider, an ACP agent by its slug (`acp:opencode` is OpenCode).
-  if ((id.startsWith('pi:') || id.startsWith('acp:')) && id.length > id.indexOf(':') + 1) id = id.slice(id.indexOf(':') + 1)
+  if (id.startsWith('acp:')) return Object.hasOwn(ACP_AGENT_BRANDS, id.slice(4)) ? ACP_AGENT_BRANDS[id.slice(4)]! : 'acp'
+  // A model API is named by its provider.
+  if (id.startsWith('pi:') && id.length > 3) id = id.slice(3)
   // Added instances are `<driver>:<slug>` (a second Claude Code account is `claude:work`).
   else if (/^[a-z-]+:./.test(id)) id = id.slice(0, id.indexOf(':'))
   if (id === 'claude' || id === 'claude-subscription') return 'claude'
@@ -449,11 +516,11 @@ export function ProviderIcon({ providerId, size = 14, className, icon }: Provide
   if (resolved.kind === 'registry') {
     // A one-ink mark follows the text colour (a mask); a mark of several colours is an image.
     const asset: ProviderAsset = { src: resolved.icon.dataUrl, monochrome: resolved.icon.monochrome }
-    return <ProviderAssetIcon asset={asset} size={size} className={className} />
+    return <ProviderAssetIcon asset={asset} size={size} className={className} iconKey={resolved.key} />
   }
   if (resolved.kind === 'bundled') {
     const asset = PROVIDER_ASSET_ICONS[resolved.key]
-    if (asset) return <ProviderAssetIcon asset={asset} size={size} className={className} />
+    if (asset) return <ProviderAssetIcon asset={asset} size={size} className={className} iconKey={resolved.key} />
     const Icon = PROVIDER_ICONS[resolved.key]
     if (Icon) return <Icon size={size} className={className} />
   }
