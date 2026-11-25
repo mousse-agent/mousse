@@ -285,7 +285,8 @@ export function ThreadCardBody({
   preview,
   pullRequests,
   statusWithAge = false,
-  linkStatus
+  linkStatus,
+  terseStatus = false
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure' | 'worktreeEnabled' | 'modelOverride'>
   projectName?: string
@@ -316,6 +317,11 @@ export function ThreadCardBody({
   statusWithAge?: boolean
   /** A thread link's card: the status its link shows (`threadLinkStatus`), so the two never differ. */
   linkStatus?: ThreadLinkStatus
+  /**
+   * The Threads list's card: Working, Waiting, Paused and Done are the icon alone, named in its title. A thread link's
+   * card keeps the words, since the pointer passes through it and could never show the title.
+   */
+  terseStatus?: boolean
 }) {
   return (
     <>
@@ -330,7 +336,7 @@ export function ThreadCardBody({
           )}
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
-          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} terse />
+          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} terse={terseStatus} />
           <ThreadModelIcon thread={thread} />
         </span>
         {isRenaming ? (
@@ -1461,6 +1467,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         {layout === 'card' ? (
           <ThreadCardBody
+            terseStatus
             thread={thread}
             projectName={group?.project.name}
             project={group?.project}
