@@ -9823,8 +9823,18 @@ export class OrchestratorService extends EventEmitter {
     try {
       const continued = engine.getRun(runId)?.outcome?.continuationOf
       const source = continued ? engine.getRun(continued) : null
-      // A bot's work that reached its runtime's step cap goes on in a fresh turn: no restart happened.
-      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : isProviderTurnCap(source.outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.` : `Continuing run ${source.ordinal} after a restart.`)
+      if (!source) return
+      const outcome = source.outcome
+      // Only a run the daemon's stop cut off (interrupted, or uncertain with a tool in flight) was continued after a
+      // restart. A bot's work that reached its runtime's step cap, met a permission wall or goes on after its owner
+      // answered continues in a fresh turn with no restart.
+      const restarted = outcome?.interruptedBy === 'daemon_restart' || outcome?.uncertainReason === 'non_idempotent_tool_in_flight'
+      this.addSystemMessage(
+        outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.`
+          : isProviderTurnCap(outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.`
+            : restarted ? `Continuing run ${source.ordinal} after a restart.`
+              : `Continuing run ${source.ordinal}.`
+      )
     } catch (error) {
       console.warn('run engine continuation note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
