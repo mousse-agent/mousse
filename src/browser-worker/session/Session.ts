@@ -1145,6 +1145,9 @@ export class ManagedSession {
     const childCollections: CollectedObservation[] = []
     let remainingElements = requestedMax - collected.elements.length
     let childObservationTruncated = attachedFrames.length > MAX_ATTACHED_FRAMES_PER_OBSERVATION
+    // Frames read, and frames that could not be (not placed in the page, or gone meanwhile).
+    let observedFrames = 0
+    let skippedFrames = 0
     for (const frame of attachedFrames.slice(0, MAX_ATTACHED_FRAMES_PER_OBSERVATION)) {
       if (collected.truncated || remainingElements <= 0) {
         childObservationTruncated ||= attachedFrames.length > 0
@@ -1152,9 +1155,15 @@ export class ManagedSession {
       }
       // A frame still enabling its domains is read once they are on, not halfway.
       await this.frameEnables.get(frame.sessionId)?.catch(() => undefined)
-      if (!this.frames.has(frame.sessionId)) continue
+      if (!this.frames.has(frame.sessionId)) {
+        skippedFrames += 1
+        continue
+      }
       const offset = await this.frameViewportOffset(tab, frame)
-      if (!offset) continue
+      if (!offset) {
+        skippedFrames += 1
+        continue
+      }
       try {
         const child = await collectStructuredObservation(this.requireChrome().cdp, frame.sessionId, {
           visibleOnly: optionalBoolean(params.visibleOnly),
@@ -1166,13 +1175,17 @@ export class ManagedSession {
         if (previousLoader && previousLoader !== child.loaderId) this.refs.invalidateFrame('frame_' + frame.frameId)
         this.frameLoaders.set(frame.sessionId, child.loaderId)
         childCollections.push(child)
+        observedFrames += 1
         remainingElements -= child.elements.length
         if (child.truncated) {
           childObservationTruncated = true
           break
         }
       } catch (error) {
-        if (error instanceof CdpDisconnectedError) continue
+        if (error instanceof CdpDisconnectedError) {
+          skippedFrames += 1
+          continue
+        }
         throw error
       }
     }
@@ -1215,7 +1228,7 @@ export class ManagedSession {
       ...(screenshot ? { screenshot } : {}),
       truncated: collected.truncated || childObservationTruncated,
       ...(collected.continuation ? { continuation: collected.continuation } : {}),
-      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(attachedFrames.length ? ['oopif-attached'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
+      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(observedFrames ? ['oopif-attached'] : []), ...(skippedFrames ? ['oopif-observation-skipped'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
       provenance: 'untrusted-page'
     }
   }

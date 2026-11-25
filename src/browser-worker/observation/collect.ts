@@ -12,6 +12,8 @@ const MAX_TEXT = 240
 const CHAR_BUDGET = 12_000
 const SKIP_ROLES = new Set(['none', 'presentation', 'InlineTextBox', 'generic'])
 const SECRET_TYPES = new Set(['password'])
+/** Controls kept without a layout box when the page gave no layout at all: dropping them would hide the form. */
+const INTERACTIVE_ROLES = new Set(['textbox', 'button', 'combobox', 'checkbox', 'radio', 'link', 'listbox', 'menuitem', 'tab', 'switch', 'searchbox', 'spinbutton', 'slider'])
 
 interface AxNode {
   nodeId: string
@@ -192,8 +194,15 @@ export async function collectStructuredObservation(
   let emitted = 0
   const counts = new Map<string, number>()
   const axById = new Map(ax.nodes.map((node) => [node.nodeId, node]))
+  const axRole = (node: AxNode) => boundText(axString(node.role) || axString(node.chromeRole), MAX_ROLE)
+  // No layout boxes at all (the snapshot failed, or came back empty): controls are kept and the reader is told.
+  const layoutMissing = layout.size === 0
+  if (layoutMissing && !warnings.includes('layout-snapshot-unavailable')
+    && ax.nodes.some((node) => node.backendDOMNodeId && !node.ignored && INTERACTIVE_ROLES.has(axRole(node)))) {
+    warnings.push('layout-snapshot-unavailable')
+  }
   for (const node of ax.nodes) {
-    const role = boundText(axString(node.role) || axString(node.chromeRole), MAX_ROLE)
+    const role = axRole(node)
     if (!node.backendDOMNodeId) continue
     if (node.ignored && SKIP_ROLES.has(role) && !axString(node.name) && !axString(node.value)) continue
     const name = boundText(axString(node.name), MAX_NAME)
@@ -207,7 +216,7 @@ export async function collectStructuredObservation(
     const checked = axProperty(node, 'checked')
     const localBounds = box ? toViewportBounds(box.bounds, viewport) : undefined
     if (visibleOnly && (hiddenProp || (localBounds && !intersectsViewport(localBounds, viewport)))) continue
-    if (visibleOnly && !localBounds && !['dialog', 'alert', 'heading'].includes(role)) continue
+    if (visibleOnly && !localBounds && !['dialog', 'alert', 'heading'].includes(role) && !(layoutMissing && INTERACTIVE_ROLES.has(role))) continue
     const bounds = localBounds ? translateBounds(localBounds, options.viewportOffset) : undefined
     seen += 1
     if (seen <= offset) continue
