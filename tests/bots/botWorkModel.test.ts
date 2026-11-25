@@ -167,7 +167,7 @@ describe('work on a model the owner named', () => {
   it('only a chat turn the owner\'s own message started may name a model: not a first greeting, not a run, not a reminder', async () => {
     const pick = { instanceId: 'claude', model: 'opus' }
     // The bot's first greeting has no owner message.
-    const greeting = await f.bots.enqueueChat(botId, 'hello-again', 'Say hello.')
+    const greeting = await f.bots.enqueueChat(botId, 'create:again', 'Say hello.')
     const hello = await start(f, greeting.id)
     expect((await call(greeting.id, 'work_start', { title: 'Job', brief: 'Do it.', model: pick })).text).toMatch(/^Only the owner can ask for a model/)
     expect(runs()).toEqual([])
@@ -192,7 +192,7 @@ describe('work on a model the owner named', () => {
     const IOS = { instanceId: 'claude', model: 'opus', effort: 'high', credential: 'subscription' as const }
     f.bots.setCustomSlot(botId, 'iosdev', IOS, 'iOS apps, Swift, Xcode')
     // A first greeting has no owner message: a slot still routes its work, as the owner set it up for this.
-    const greeting = await f.bots.enqueueChat(botId, 'hello-again', 'Say hello.')
+    const greeting = await f.bots.enqueueChat(botId, 'create:again', 'Say hello.')
     const hello = await start(f, greeting.id)
     const routed = await call(greeting.id, 'work_start', { title: 'Build the app', brief: 'Fix the Xcode build.', slot: 'iOSDev' })
     expect(routed.value).toMatchObject({ status: 'started' })

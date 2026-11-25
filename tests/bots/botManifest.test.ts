@@ -43,6 +43,13 @@ describe('botManifestDigest', () => {
     expect(botManifestDigest(manifest({ mcp: [{ serverId: 'gitlab', tool: 'create_issue' }] }))).not.toBe(base)
   })
 
+  // Stored grants are approved by this digest: what a turn may do by its start (`BOT_TURN_KINDS`, #1360) is not part of
+  // a grant, so changing it never asks the owner again. The value is the one the build before #1360 wrote.
+  it('a stored grant hashes as it did when it was approved', () => {
+    const stored = manifest({ tools: ['read', 'edit', 'shell'], appTools: ['web_search', 'web_fetch', 'bot_schedule_add', 'escalate', 'run_report', 'threads', 'browser'] })
+    expect(botManifestDigest(stored)).toBe('59d7d34674af007da7c383871d8f56723c12ce8121e73025432855e208b35459')
+  })
+
   it('a grant approved with a work time keeps its digest, and a revision without one is a subset of it', () => {
     const old = manifest({ budget: { maxActiveMs: 60 * 60_000, maxToolCalls: 50 } })
     // The same canonical form as when it was approved: work time first, then the other limits.

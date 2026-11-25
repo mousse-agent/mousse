@@ -242,6 +242,11 @@ export interface BotAuthority {
    */
   threadsReadOnly?: 'not_owner'
   /**
+   * The tools this turn holds that what started it may not call, each with what the bot is told (`BOT_TURN_KINDS`): a
+   * chat turn is offered the same tools whatever started it, and a cell that says no is refused here, at the call.
+   */
+  turnRefusals?: ReadonlyMap<string, string>
+  /**
    * How the turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search` (Claude Code loads any listed tool
    * itself) or `use_tool` (Codex, Pi: the thread lists the core set and calls the rest through `use_tool`). Absent: none.
    */

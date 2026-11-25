@@ -246,7 +246,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'remind',
-    description: 'Remind the owner once, at a time: give inMinutes for "in 20 minutes", or at for a date and time in their local time ("2026-11-14T09:00"). text is what you will say then, written to the owner. Add work (a brief) to do something at that time instead of only saying it, for example check the weather and tell them. Repeating reminders are schedules (bot_schedule_add). Confirm the time to the owner in words.',
+    description: 'Remind the owner once, at a time: give inMinutes for "in 20 minutes", or at for a date and time in their local time ("2026-11-14T09:00"). text is what you will say then, written to the owner. Add work (a brief) to do something at that time instead of only saying it, for example check the weather and tell them (from the chat only: a reminder a run sets only says its text). Repeating reminders are schedules (bot_schedule_add). Confirm the time to the owner in words.',
     parameters: Type.Object({
       text: Type.String({ description: 'The reminder, as you will say it to the owner.' }),
       inMinutes: Type.Optional(Type.Number({ description: 'Minutes from now.' })),
@@ -259,7 +259,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_wait',
-    description: 'Wait in this work for a time (5 minutes to 7 days), a thread going idle, or a pull request merge, checks or review, then carry on here with what you have seen. why says what to do then. End your turn after setting it. Chat uses wake; scheduled runs and subagents cannot wait.',
+    description: 'Wait in this work for a time (5 minutes to 7 days), a thread going idle, or a pull request merge, checks or review, then carry on here with what you have seen. why says what to do then. End your turn after setting it. Chat uses wake; runs started by hand and subagents cannot wait.',
     parameters: Type.Object({
       why: Type.String({ description: 'What you will do then, standing on its own, as a note to yourself.' }),
       inMinutes: Type.Optional(Type.Number({ description: 'Minutes from now.' })),
@@ -285,7 +285,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'watch_start',
-    description: `Run a command in the background, and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up, so the same command with the same brief started again and again before your owner writes is refused as a loop. Run as many as you need at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
+    description: `Run a command in the background, and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up, so the same command with the same brief started again and again before your owner writes is refused as a loop. Run as many as you need at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on. Started from work or a run, it never holds the run up: it ends on its own, and your chat wakes with what happened.`,
     parameters: Type.Object({
       command: Type.String({ description: 'The command line.' }),
       brief: Type.String({ description: 'What you will do when it ends, standing on its own, as a note to yourself.' }),
@@ -522,12 +522,12 @@ export function ownerModelChoice(owner: string, options: readonly BotModelOption
 const NOT_A_BOT = 'Only a bot can use this.'
 const NO_PICTURES_HERE = "Pictures can't be made here. Nothing was made."
 const NO_IMAGE_MODEL_LINE = "Your owner hasn't picked an image model for you. Tell them they can pick one in About → Runs on, in the Images row."
-const CHAT_ONLY = 'Only your chat hands out work, sets reminders and wake-ups, and starts background commands. In a run, do the work yourself and say in your report what should happen next.'
+const CHAT_ONLY = 'Only your chat hands out, stops and adds to work, and sets wake-ups. In a run, do the work yourself and say in your report what should happen next.'
 /** `question_answer` outside the chat: only the chat hears the owner's words to pass on. */
 const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
 /** `show_card` where it is never offered (a consult, a subagent): what it would show goes in words. */
 const CARDS_OFF = "You can't show cards from here: say it in words."
-/** `bot_list` and `bot_send` where they are never offered (a scheduled run, a consult, a subagent). */
+/** `bot_list` and `bot_send` where they are never offered (a run started by hand, a consult, a subagent). */
 const BOT_MESSAGES_OFF = "You can't message your owner's other bots from here. Say in your report what you would have told them."
 const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in your report instead.'
 const error = (text: string): ToolOutcome => ({ text, isError: true })
@@ -973,7 +973,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
-        if (call.lane !== 'chat') return error(CHAT_ONLY)
+        // Any turn that holds it (`BOT_TURN_KINDS`): the chat, work and runs. The engine checks the turn's start again.
         const text = typeof args.text === 'string' ? args.text.trim() : ''
         if (!text) return error('remind needs the text you will say.')
         const due = reminderTime(args.inMinutes, args.at)
@@ -1085,7 +1085,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
-        if (call.lane !== 'chat') return error(CHAT_ONLY)
+        // Any turn that holds it (`BOT_TURN_KINDS`); from a run it is detached: its end wakes the chat, never the run.
         const watchers = call.deps.host.watchers
         if (!watchers) return error("Background commands can't run here.")
         if (typeof args.command !== 'string' || !args.command.trim()) return error('watch_start needs the command to run.')

@@ -2,10 +2,11 @@
  * A bot's background commands (`watch_start`), over a real engine, a real `bots.db` and real processes (a small Node
  * script run through the shell, as a bot's command is). Each ends one way and wakes the bot once in its chat with what
  * happened; one stopped, or whose bot is paused, wakes nothing and leaves no process behind; a restart wakes the bot to
- * say it stopped it. Any chat turn of a bot holding "run commands" starts one, whatever started the turn.
+ * say it stopped it. Any chat turn of a bot holding "run commands" starts one, whatever started the turn, and so does a
+ * run (#1360), detached: the run never waits for it.
  *
  * Ends: exit (code and output), a matching line, the time limit, Stop by the bot, Stop by the owner, the bot paused,
- * a restart. Refusals: no "run commands", work instead of the chat, a match that could run long, too many at once.
+ * a restart. Refusals: no "run commands", a match that could run long, too many at once.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -209,11 +210,27 @@ describe('who may start one', () => {
     expect(f.store.waitingReminders(botId)).toEqual([])
   })
 
-  it('work is refused; no count of how many run at once', async () => {
+  it('work starts one detached (#1360): the run ends with its report, and the chat wakes when the command ends', async () => {
     await allowCommands()
     const turn = await chat('Research and watch', 'm1')
     const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Look it up.', key: 'k1' })
-    expect(() => f.bots.tools.watchers!.start(botId, workId, { command: command('sleep', join(dir, 'w.pid')), brief: 'x' })).toThrow('Only your chat')
+    await finish(f, turn.payload, 'completed', { text: 'On it.' })
+    const work = await start(f, workId)
+    const pidFile = join(dir, `work-${Date.now()}.pid`)
+    const { watcherId } = f.bots.tools.watchers!.start(botId, workId, { command: command('exit', pidFile), brief: 'Tell them how the build went.', title: 'Nightly build' })
+    await finish(f, work.payload, 'completed', { text: 'I started the build.' })
+    // The run never waits for it: it ended with its report, while the command may still run.
+    expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
+    expect(await woken(watcherId)).toContain('exited with code 3')
+    // Its end wakes the chat, never the run.
+    expect(wakeTurn(watcherId)!.lane).toBe('chat')
+    expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
+    expect(f.store.dispatches(workId).filter((dispatch) => dispatch.kind === 'start' || dispatch.kind === 'continue')).toHaveLength(1)
+  })
+
+  it('no count of how many run at once', async () => {
+    await allowCommands()
+    const turn = await chat('Watch them all', 'm1')
     // Past the old cap of three.
     const files = Array.from({ length: 5 }, (_, n) => join(dir, `n${n}-${Date.now()}.pid`))
     for (const file of files) f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('sleep', file), brief: 'x' })

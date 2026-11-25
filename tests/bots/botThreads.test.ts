@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { threadsActOf, threadsReadOnlyOf } from '../../src/mms/bots/activation/BotEngine'
+import type { BotActivationTrigger } from '../../src/shared/bots/personal/definition'
 import { BOT_SCHEDULES_NOT_OWNER_TEXT, BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { botCatalogueGroup } from '../../src/shared/bots/personal/catalogue'
@@ -122,17 +123,19 @@ describe('"use your threads" in the bot engine', () => {
 
   // A chat turn the owner's message or tapped answer started, a turn a thread's outcome or an unanswered question
   // started, and every run, may start, message, stop or archive threads; a chat turn another message started is told why not.
-  const turns: Array<[string, { lane: 'chat' | 'run'; idempotencyKey: string }, boolean, string]> = [
+  // A run is read by its trigger (`deriveBotProvenance`): one with none names no start, and only reads (#1360).
+  const turns: Array<[string, { lane: 'chat' | 'run'; idempotencyKey: string; trigger?: BotActivationTrigger }, boolean, string]> = [
     ['the owner\'s message', { lane: 'chat', idempotencyKey: 'chat:req-1' }, true, ''],
     ['the owner\'s tapped answer', { lane: 'chat', idempotencyKey: 'answer:req-1' }, true, ''],
-    ['work the chat handed off', { lane: 'run', idempotencyKey: 'work:act-1:call-1' }, true, ''],
-    ['a reminder\'s work', { lane: 'run', idempotencyKey: 'reminder:r1' }, true, ''],
-    ['a wake', { lane: 'run', idempotencyKey: 'wake:w1' }, true, ''],
+    ['work the chat handed off', { lane: 'run', idempotencyKey: 'work:act-1:call-1', trigger: { kind: 'work', input: 'Do it', title: 'Job', from: 'act-1' } }, true, ''],
+    ['a reminder\'s work', { lane: 'run', idempotencyKey: 'reminder:r1', trigger: { kind: 'work', input: 'Do it', title: 'Job', from: 'r1' } }, true, ''],
+    ['a run started by hand', { lane: 'run', idempotencyKey: 'manual:m1', trigger: { kind: 'manual', input: 'Do it' } }, true, ''],
+    ['a run whose trigger names no start', { lane: 'run', idempotencyKey: 'wake:w1' }, false, BOT_THREADS_NOT_OWNER_TEXT],
     // A turn a thread's outcome starts in the chat may carry on the work it was told about (#1359).
     ['a wake in the chat', { lane: 'chat', idempotencyKey: 'wake:w1' }, true, ''],
     ['a question no one answered', { lane: 'chat', idempotencyKey: 'question:q1:default' }, true, ''],
     ['a thread outcome notice', { lane: 'chat', idempotencyKey: 'job:j1:a1' }, true, ''],
-    ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z' }, true, ''],
+    ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z', trigger: { kind: 'schedule', input: 'Check', scheduleId: 's1', occurrenceAt: '2026-11-13T09:00:00.000Z' } }, true, ''],
     ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, true, ''],
     ['another bot\'s message', { lane: 'chat', idempotencyKey: 'botmsg:m1' }, false, BOT_THREADS_NOT_OWNER_TEXT],
     // Resume's retry of a turn a usage limit stopped acts as its original could.

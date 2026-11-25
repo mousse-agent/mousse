@@ -6,14 +6,15 @@
  *
  * What each case covers, by what can happen to work that waits on a question:
  * - answers: a tap, a reply in the owner's words on the bubble, the chat passing on what they wrote there
- *   (`question_answer`, only from a chat turn their own message started), a second answer from another device
+ *   (`question_answer`, from a chat turn their own message or tapped answer started), a second answer from another device
  * - ends: Stop, the grant revoked, a full queue, the question's bubble forgotten; each withdraws the question and says so
  * - Forget of the answer: before the work read it (it waits again), after (it stays with the work, and its copies in the
  *   work's prompt, the captured continuation and the chat's relay call go); of the bubble while the asking turn still
  *   runs, or before a restart (the work ends); a relay of words the owner forgot is refused
  * - restarts: while it waits, between the answer and the resume, right after `ask_owner` with its dispatch cut
  * - several pieces each waiting: an answer wakes only its own
- * - where it is never offered: a scheduled run, a consult (subagents: botWorkSubagents.test.ts)
+ * - a scheduled run asks and waits the same way (#1360); a run started by hand and a consult are never offered it
+ *   (subagents: botWorkSubagents.test.ts)
  * - what a tap never does: widen the grant, or let the work act on threads or models
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -237,12 +238,12 @@ describe('work that asks', () => {
 })
 
 describe('the chat passes on an answer (question_answer)', () => {
-  it('only from a chat turn the owner’s own message started: never from one a tap started', async () => {
+  it('from a chat turn the owner’s message or (#1360) tapped answer started', async () => {
     const { workId, work, bubble, questionId } = await workThatAsks()
     await endTurn(work)
     // The chat knows what its work waits on, with the id to pass an answer on with.
     expect(f.bots.questionLines(botId)).toEqual([`"Flat hunt" waits for the owner's answer to your question "${FLATS.question}" (Flat A · Flat B · Something else) [${questionId}]. If the owner answers it in the chat, pass it on with question_answer.`])
-    // A chat question the owner taps: the turn it starts is not their own words, so it can't pass anything on.
+    // A chat question the owner taps: the turn it starts carries their answer, so it may pass one on too.
     const asking = await chat('Anything else?', 'c1')
     await tool('ask_owner', asking.prepared, asking.payload.threadId, { question: 'Shall I also look at parking?', yesNo: true })
     await finish(f, asking.payload, 'completed', { text: 'One thing.' })
@@ -251,15 +252,12 @@ describe('the chat passes on an answer (question_answer)', () => {
     const tapped = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const tappedTurn = await start(f, tapped.id)
     expect(tappedTurn.prepared.authority.appTools.has('question_answer')).toBe(true)
-    expect(await tool('question_answer', tappedTurn.prepared, tappedTurn.payload.threadId, { questionId, answer: 'Flat A' })).toMatchObject({ isError: true })
-    await finish(f, tappedTurn.payload, 'completed', { text: 'OK.' })
-    expect(f.store.question(questionId)?.status).toBe('open')
-    // The owner's own words in the chat are passed on, and the bubble says it was answered in the chat.
-    const own = await chat('Go with the second one', 'c2')
-    expect(JSON.parse((await tool('question_answer', own.prepared, own.payload.threadId, { questionId, answer: 'The second one, Flat B' })).text)).toMatchObject({ ok: true })
-    expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { text: 'The second one, Flat B', by: 'chat' }, answerMessage: own.message.id })
+    const tappedRow = f.store.get("SELECT id FROM bot_messages WHERE activation_id = ? AND author = 'owner' ORDER BY seq DESC LIMIT 1", tapped.id)!.id
+    expect(JSON.parse((await tool('question_answer', tappedTurn.prepared, tappedTurn.payload.threadId, { questionId, answer: 'The second one, Flat B' })).text)).toMatchObject({ ok: true })
+    // The answer keeps the owner's row the tap wrote, so Forget reaches it; the bubble says it was answered in the chat.
+    expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { text: 'The second one, Flat B', by: 'chat' }, answerMessage: tappedRow })
+    await finish(f, tappedTurn.payload, 'completed', { text: 'Got it, carrying on with the flats.' })
     expect(chatOf(f, botId).find((message) => message.id === bubble.id)?.question).toMatchObject({ status: 'answered', by: 'chat', answer: 'The second one, Flat B' })
-    await finish(f, own.payload, 'completed', { text: 'Got it, carrying on with the flats.' })
     await flush()
     expect(mainDispatches(workId).at(-1)!.prompt.text).toBe(`[Mousse] Your owner answered your question "${FLATS.question}" in the chat: The second one, Flat B. Carry on where you left off.`)
     // Once answered, it can't be answered again.
@@ -517,16 +515,37 @@ describe('restarts', () => {
   })
 })
 
-describe('where it is never offered', () => {
-  it('a scheduled run is not offered it, and is told to ask in its report', async () => {
+describe('a scheduled run that asks (#1360)', () => {
+  it('waits for the answer holding no slot, skips its next occurrence meanwhile, and a tap carries it on in its own thread', async () => {
     const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Check new listings.', occurrenceAt: new Date(f.clock.now).toISOString() })
     if (scheduled.kind !== 'started') throw new Error(scheduled.kind)
     await flush()
     const run = await start(f, scheduled.activationId)
+    expect(run.prepared.authority.appTools.has('ask_owner')).toBe(true)
+    expect(JSON.parse((await tool('ask_owner', run.prepared, run.payload.threadId, FLATS)).text)).toEqual({ asked: true, note: QUESTION_WORK_ASKED_TEXT })
+    await endTurn(run)
+    expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'blocked', endReason: 'question' })
+    const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === scheduled.activationId)!
+    // While it waits, the schedule's next occurrence is skipped, not stacked.
+    f.clock.now += 60 * 60_000
+    expect(f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Check new listings.', occurrenceAt: new Date(f.clock.now).toISOString() })).toMatchObject({ kind: 'skipped' })
+    await tap(bubble.question!.questionId, 'Flat B')
+    await flush()
+    expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'running', threadId: run.payload.threadId })
+    expect(mainDispatches(scheduled.activationId).at(-1)!.prompt.text).toContain('Flat B')
+  })
+
+  it('a run started by hand is not offered it, and is told to ask in its report', async () => {
+    const manual = await f.bots.activate({ botId, input: 'Check new listings.', clientRequestId: 'by-hand' })
+    await flush()
+    const run = await start(f, manual.id)
     expect(run.prepared.authority.appTools.has('ask_owner')).toBe(false)
-    expect(f.bots.askOwner(botId, scheduled.activationId, { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: true })).toEqual({ asked: false, text: QUESTION_NOT_OFFERED_TEXT })
+    expect(f.bots.askOwner(botId, manual.id, { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: true })).toEqual({ asked: false, text: QUESTION_NOT_OFFERED_TEXT })
     expect(f.store.countQuestions(botId, {})).toBe(0)
   })
+})
+
+describe('where it is never offered', () => {
 
   it('work is offered ask_owner but not question_answer; a consult is offered neither', async () => {
     const definitions = f.host.definitions

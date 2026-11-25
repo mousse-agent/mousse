@@ -488,11 +488,12 @@ describe('background commands', () => {
     expect(bots.watched).toEqual([])
   })
 
-  it('work never starts or stops one', async () => {
+  // #1360: a run starts one (the engine checks its start, `BOT_TURN_KINDS`); stopping one stays the chat's.
+  it('work hands a start to the engine, and never stops one', async () => {
     const bots = fakeBots('run')
-    expect(await bots.call('watch_start', { command: 'make', brief: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
+    expect(await bots.call('watch_start', { command: 'make', brief: 'x' })).not.toMatchObject({ isError: true })
+    expect(bots.watched.map((entry) => entry.input.command)).toEqual(['make'])
     expect(await bots.call('watch_stop', { watcherId: 'rem_w1' })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
-    expect(bots.watched).toEqual([])
   })
 })
 

@@ -36,7 +36,7 @@ async function chat(text: string, id: string, replyTo?: string) {
 const summary = () => f.bots.service.list().bots.find((bot) => bot.id === botId)!
 
 describe('the chat is the front desk', () => {
-  it('a chat turn gets the work and reminder tools and not what can take long; work gets the web and, of the work tools, only work_models', async () => {
+  it('a chat turn gets the work and reminder tools and not what can take long; work gets the web and, of the work tools, its wait, models, reminders and background commands', async () => {
     const { prepared, payload, activation } = await chat('Find me a good vacuum', 'm1')
     const allowed = prepared.policy.tools!.allow!
     for (const tool of BOT_WORK_TOOLS) expect(allowed).toContain(tool)
@@ -48,9 +48,11 @@ describe('the chat is the front desk', () => {
     const workAllowed = work.prepared.policy.tools!.allow!
     expect(workAllowed).toContain('web_search')
     expect(workAllowed).toContain('web_fetch')
-    // Of the chat's work tools, work keeps its wait tool and the list of models, which its subagents may run on.
-    for (const tool of BOT_WORK_TOOLS) if (tool !== 'work_models' && tool !== 'work_wait') expect(workAllowed).not.toContain(tool)
-    expect(workAllowed).toContain('work_models')
+    // Of the chat's work tools, work keeps its wait tool, the list of models its subagents may run on, and (#1360)
+    // reminders and background commands, detached; it hands out no work and stops none.
+    const kept = ['work_models', 'work_wait', 'remind', 'watch_start']
+    for (const tool of BOT_WORK_TOOLS) if (!kept.includes(tool)) expect(workAllowed).not.toContain(tool)
+    for (const tool of kept) expect(workAllowed).toContain(tool)
     expect(work.prepared.prompt).toContain('Compare three vacuums under £250.')
     expect(work.prepared.lane).toBe('run')
   })

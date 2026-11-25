@@ -11,21 +11,22 @@ beforeEach(async () => {
 })
 afterEach(() => { f.close(); vi.restoreAllMocks(); vi.unstubAllEnvs() })
 
-// Owner message, coalesced message, tap, first message, wake, default, other bot, unknown.
+// Owner message, coalesced message, tap, first message, wake, default, other bot, unknown (sets none since #1360).
 it.each([
   ['chat:m1', true], ['chat:after:m1', true], ['answer:q1', true],
   ['create:b1', false], ['wake:r1', false], ['question:q1:default', false],
-  ['botmsg:b2', false], ['future:start', false]
-])('stores who set text and work reminders in %s', async (key, ownerSet) => {
+  ['botmsg:b2', false], ['future:start', null]
+] as const)('stores who set text and work reminders in %s', async (key, ownerSet) => {
   await f.bots.service.chatSend({ botId, text: 'Remind me', clientRequestId: 'm1' })
   const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
   f.store.run('UPDATE bot_activations SET idempotency_key = ?, provenance = NULL WHERE id = ?', key, turn.id)
   for (const work of [undefined, { title: 'Check', brief: 'Check it' }]) {
-    const r = f.bots.addReminder(botId, turn.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Tea', work })
-    expect(f.store.reminder(r.reminderId)?.ownerSet).toBe(ownerSet)
+    const add = () => f.bots.addReminder(botId, turn.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Tea', work })
+    if (ownerSet === null) { expect(add).toThrow(/can't set a reminder/); continue }
+    expect(f.store.reminder(add().reminderId)?.ownerSet).toBe(ownerSet)
   }
   const job = f.bots.tools.schedules.add(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check' }, turn.id)
-  expect(f.scheduler.listJobs().find(j => j.bot?.scheduleId === job.scheduleId)?.bot?.ownerAsked === true).toBe(ownerSet)
+  expect(f.scheduler.listJobs().find(j => j.bot?.scheduleId === job.scheduleId)?.bot?.ownerAsked === true).toBe(ownerSet === true)
 })
 
 it('leaves legacy inserts unknown and stores wakes as the bot’s own', async () => {

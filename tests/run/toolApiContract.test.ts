@@ -1,7 +1,7 @@
 /**
- * The tool API contract as the default branch has it before the thread and bot tool APIs are joined
- * (docs: Thread API & Bot API unification, PR 1a). It records today's behaviour; a later change to a row is a decision
- * the change names, never an accident.
+ * The tool API contract of the thread and bot tool APIs (docs: Thread API & Bot API unification). PR 1a recorded the
+ * default branch's behaviour; PR 1b-i (#1360) changed the cells marked Δ below, the rows of `BOT_TURN_KINDS`. Any other
+ * change to a row is a decision the change names, never an accident.
  *
  * What started a bot's turn (its provenance) decides what the turn may do. Every start the engine writes is a row:
  * the owner's message and its continuation, a tapped answer, the bot's first message (also when Resume retried it), a
@@ -47,12 +47,14 @@ describe('what started a turn, and the rules that read it', () => {
     ['botmsg:b1:m1', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
     ['resume:act1', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
     ['action:a1', 'chat', manual, 'action_result', false, 'run', 'not_owner', true],
-    ['future:start', 'chat', manual, 'unknown', false, 'run', 'not_owner', true],
+    // Δ #1360: a start no build names asks nobody.
+    ['future:start', 'chat', manual, 'unknown', false, 'run', 'not_owner', false],
     // No build writes these (the owner's retries are `chat:resume:`, `answer:resume:`): behind a `resume:`, never the owner's.
     ['resume:chat:msg', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
     ['resume:answer:q', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
     ['work:k1', 'run', work, 'work', false, 'run', undefined, true],
-    ['sched:b:s1:t', 'run', schedule, 'schedule', false, 'run', undefined, false],
+    // Δ #1360: a scheduled run asks its owner, and waits for the answer as work does.
+    ['sched:b:s1:t', 'run', schedule, 'schedule', false, 'run', undefined, true],
     ['manual:m1', 'run', manual, 'manual', false, 'run', undefined, false],
     ['chat:in-a-run', 'run', manual, 'manual', false, 'run', undefined, false]
   ]
@@ -69,9 +71,11 @@ describe('what started a turn, and the rules that read it', () => {
   const STORED: Array<[string, BotLane, BotActivationTrigger, BotActivationProvenance, boolean, BotLane, 'not_owner' | undefined, boolean]> = [
     ['future:start', 'chat', manual, 'owner_message', true, 'chat', undefined, true],
     ['chat:msg', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
-    ['answer:q', 'chat', manual, 'unknown', false, 'run', 'not_owner', true],
+    ['answer:q', 'chat', manual, 'unknown', false, 'run', 'not_owner', false],
     ['manual:m1', 'run', manual, 'work', false, 'run', undefined, true],
-    ['work:k1', 'run', work, 'manual', false, 'run', undefined, false]
+    ['work:k1', 'run', work, 'manual', false, 'run', undefined, false],
+    // Δ #1360: a chat turn's provenance on a run is not trusted: it reads as a start no build names.
+    ['manual:m1', 'run', manual, 'owner_message', false, 'run', 'not_owner', false]
   ]
   it.each(STORED)('%s (%s, %j) stored as %s', (idempotencyKey, lane, trigger, provenance, owner, memoryLane, readOnly, asks) => {
     const stored = { lane, idempotencyKey, trigger, provenance }
@@ -121,41 +125,48 @@ interface Observed {
   held: string[]
   /** The turn may start subagents (`BotAuthority.subagents`, what `subagent_start` checks first). */
   subagents: boolean
-  /** Each call: `ok`, or the refusal's code. `question_answer` also says when only the owner's own message may pass one on. */
+  /** Each call: `ok`, or the refusal's code. `question_answer` also says when only the owner's message or tap may pass one on. */
   calls: Record<string, string>
 }
 
 /**
  * A chat turn: every start holds the same tools (#1360: the tool list never changes with the start); what it may do is
  * refused at the call. `say` (a schedule's fixed line) needs the owner's message or tap (`memoryLane`). `question_answer`
- * needs the owner's own message; past that rule, the made-up question is not found (`refused:failed`).
+ * needs the owner's own message or (Δ #1360) tapped answer; past that rule, the made-up question is not found
+ * (`refused:failed`). Δ #1360: a start no build names (`unknown`) only reads and answers: its reminders, background
+ * commands, questions, messages to bots and work are refused at the call (`turnRefusals`).
  */
 const CHAT_HELD = ['ask_owner', 'bot_schedule_add', 'bot_send', 'question_answer', 'remind', 'watch_start', 'work_start']
 function chatTurn(provenance: BotActivationProvenance, memoryLane: BotLane, threadsReadOnly: 'not_owner' | null): Observed {
-  const owner = provenance === 'owner_message'
+  const owner = provenance === 'owner_message' || provenance === 'owner_tap'
+  const acts = provenance === 'unknown' ? 'refused:not_granted' : 'ok'
   return {
     provenance, memoryLane, threadsReadOnly, held: CHAT_HELD, subagents: false,
     calls: {
       thread_change: threadsReadOnly ? 'refused:not_granted' : 'ok',
-      say: memoryLane === 'chat' ? 'ok' : 'refused:failed', remind: 'ok', watch_start: 'ok', ask_owner: 'ok',
-      question_answer: owner ? 'refused:failed' : 'refused:owner_message_only', bot_send: 'ok', work_start: 'ok', subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
+      say: memoryLane === 'chat' ? 'ok' : 'refused:failed', remind: acts, watch_start: acts, ask_owner: acts,
+      question_answer: owner ? 'refused:failed' : 'refused:owner_message_only', bot_send: acts, work_start: acts, subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
     }
   }
 }
-/** A run: only the chat sets reminders, starts background commands or hands out work; it changes no schedule. */
+/**
+ * A run: it hands out no work and changes no schedule. Δ #1360: every run sets reminders and starts background commands
+ * (detached: the chat wakes when one ends); a scheduled run asks its owner, waits and messages other bots, as work does.
+ */
 function runTurn(provenance: 'work' | 'schedule' | 'manual'): Observed {
-  const work = provenance === 'work'
+  const asks = provenance !== 'manual'
   return {
-    provenance, memoryLane: 'run', threadsReadOnly: null, held: work ? ['ask_owner', 'bot_schedule_add', 'bot_send', 'subagent_start', 'work_wait'] : ['bot_schedule_add', 'subagent_start'], subagents: true,
+    provenance, memoryLane: 'run', threadsReadOnly: null,
+    held: asks ? ['ask_owner', 'bot_schedule_add', 'bot_send', 'remind', 'subagent_start', 'watch_start', 'work_wait'] : ['bot_schedule_add', 'remind', 'subagent_start', 'watch_start'], subagents: true,
     calls: {
       thread_change: 'ok',
-      say: 'refused:failed', remind: 'refused:not_granted', watch_start: 'refused:not_granted', ask_owner: work ? 'ok' : 'refused:unavailable', question_answer: 'refused:unavailable',
-      bot_send: work ? 'ok' : 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'ok', work_wait: work ? 'ok' : 'refused:not_granted'
+      say: 'refused:failed', remind: 'ok', watch_start: 'ok', ask_owner: asks ? 'ok' : 'refused:unavailable', question_answer: 'refused:unavailable',
+      bot_send: asks ? 'ok' : 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'ok', work_wait: asks ? 'ok' : 'refused:not_granted'
     }
   }
 }
 
-// One row per start: what the default branch does today. A cell a later change moves is that change's decision.
+// One row per start, with the Δ cells of #1360 (in chatTurn and runTurn). A cell a later change moves is that change's decision.
 const EXPECTED: Record<Start, Observed> = {
   'chat:msg': chatTurn('owner_message', 'chat', null),
   'chat:after:msg': chatTurn('owner_message', 'chat', null),
@@ -262,7 +273,7 @@ describe('the turn-kind matrix through registered dispatch', () => {
       for (const [label, name, args] of CALLS) {
         const outcome = await call(name, { ...args, clientRequestId: `${label}-1` })
         const refusal = refusalOf(outcome)
-        calls[label] = !refusal ? (outcome.isError ? 'error' : 'ok') : label === 'question_answer' && /own message started/.test(refusal.message) ? 'refused:owner_message_only' : `refused:${refusal.code}`
+        calls[label] = !refusal ? (outcome.isError ? 'error' : 'ok') : label === 'question_answer' && /can pass on their answer/.test(refusal.message) ? 'refused:owner_message_only' : `refused:${refusal.code}`
       }
     } finally {
       spawn.mockRestore()

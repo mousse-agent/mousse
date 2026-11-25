@@ -2,6 +2,7 @@ import type { BotActivationRow, BotStore, BotReminderRow } from '../store/BotSto
 import { wakeInput } from '../../../shared/bots/personal/wakes'
 import type { BotWorkItem } from '../../../shared/bots/personal/chat'
 import { questionGoneText, QUESTION_WORK_WAITING_TEXT } from '../../../shared/bots/personal/questions'
+import { runProvenance, turnRights } from './turnKinds'
 
 /** Read access for line text, continuation context and owner controls. Future wait/action readers belong here. */
 export interface WorkWaitLookups {
@@ -23,7 +24,7 @@ interface WaitRule {
   rank: number
   /** Stored end reasons, including the marker written by the wake source before a slot is free. */
   reasons: readonly string[]
-  allows(row: Pick<BotActivationRow, 'lane' | 'trigger'>): boolean
+  allows(row: ParkRow): boolean
   ready(row: BotActivationRow, facts: WorkWaitFacts): boolean
   stranded(row: BotActivationRow, facts: WorkWaitFacts): boolean
   endReason: string
@@ -40,7 +41,13 @@ interface WaitRule {
   clearLiveChip: boolean
   republishQuestion: boolean
 }
-const workOnly: WaitRule['allows'] = (row) => row.lane === 'run' && row.trigger.kind === 'work'
+/** A run as the rules read it: its lane and trigger, and its stored provenance when the caller has the row. */
+type ParkRow = Pick<BotActivationRow, 'lane' | 'trigger'> & Partial<Pick<BotActivationRow, 'provenance'>>
+/** What started the run (`bot_activations.provenance`); a row read without one, its trigger's kind. */
+const runKindOf = (row: ParkRow) => row.lane === 'run' ? row.provenance ?? runProvenance(row.trigger.kind) : undefined
+const workOnly: WaitRule['allows'] = (row) => runKindOf(row) === 'work'
+/** Work and a scheduled run (`BOT_TURN_KINDS`'s `workWait` and `asksOwner`): each parks on its own wait or question. */
+const parksRun: WaitRule['allows'] = (row) => row.lane === 'run' && turnRights('run', runKindOf(row)!).workWait
 const nothingToWaitFor = (title: string) => `I stopped "${title}": nothing could let it carry on any more. Ask me again if you still want it.`
 
 /** Rebuilt from the delivered row when a continuation can actually be dispatched. */
@@ -52,7 +59,7 @@ export function workWaitInput(wait: BotReminderRow, clock: (iso: string) => stri
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
   approval: {
-    rank: 0, reasons: ['approval', 'approval_answered'], allows: (row) => workOnly(row) || row.lane === 'run' && row.trigger.kind === 'schedule',
+    rank: 0, reasons: ['approval', 'approval_answered'], allows: (row) => workOnly(row) || runKindOf(row) === 'schedule',
     ready: (row, facts) => row.endReason === 'approval_answered' && facts.approvalReady(row),
     stranded: (row, facts) => !facts.approvalExists(row),
     endReason: 'action_gone', endLine: nothingToWaitFor, resume: 'continue', checkBeforeResume: true,
@@ -65,7 +72,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: true, republishQuestion: false
   },
   waiting: {
-    rank: 1, reasons: ['waiting', 'wait_ready'], allows: workOnly,
+    rank: 1, reasons: ['waiting', 'wait_ready'], allows: parksRun,
     ready: (row, _facts) => row.endReason === 'wait_ready',
     stranded: (row, facts) => !facts.timerExists(row),
     endReason: 'wait_gone', endLine: nothingToWaitFor, resume: 'continue',
@@ -82,7 +89,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: true, republishQuestion: false
   },
   question: {
-    rank: 0, reasons: ['question', 'question_answered'], allows: workOnly,
+    rank: 0, reasons: ['question', 'question_answered'], allows: parksRun,
     ready: (row, _facts) => row.endReason === 'question_answered',
     stranded: (row, facts) => !facts.questionExists(row),
     endReason: 'question_gone', endLine: questionGoneText, resume: 'continue', continuation: (_row, _facts) => ({ questionAnswered: true }), checkBeforeResume: true,
@@ -130,7 +137,7 @@ export function workWaitRule(row: Pick<BotActivationRow, 'endReason'>): WaitRule
   return Object.values(WORK_WAIT_RULES).find((rule) => rule.reasons.some((reason) => reason === row.endReason))
 }
 export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(Object.values(WORK_WAIT_RULES).flatMap((rule) => rule.reasons))
-export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'>): boolean {
+export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'> & Partial<Pick<BotActivationRow, 'provenance'>>): boolean {
   return row.status === 'blocked' && Boolean(workWaitRule(row)?.allows(row))
 }
 
