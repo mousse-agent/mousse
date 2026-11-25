@@ -98,19 +98,6 @@
       ],
       "claimedAt": "2026-11-25T18:09:20.891Z",
       "expiresAt": "2026-11-25T20:09:20.891Z"
-    },
-    {
-      "task": "routed-thread-rows-keep-computer",
-      "session": "Avarnics-Mac-mini.local-44471e",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "routed-thread-rows-keep-computer",
-      "paths": [
-        "src/mms/bridge/routed/ThreadRouter.ts",
-        "src/renderer/components/OrchestratorChat.tsx",
-        "src/renderer/components/sideCard/DeviceSection.tsx"
-      ],
-      "claimedAt": "2026-11-25T18:09:50.461Z",
-      "expiresAt": "2026-11-25T20:09:50.461Z"
     }
   ]
 }
