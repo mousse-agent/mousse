@@ -7,6 +7,7 @@ import {
   type ProviderToolEvent
 } from '../../../../shared/agentActivity'
 import { recordSubagentCall, toolResultText } from '../../../../shared/subagentTools'
+import { mousseToolOfName, USE_TOOL, useToolTargetOf } from '../../../../shared/cuaActivity'
 import { claudeActivityComplete, claudeActivityStart, claudeCallContext, type ClaudeCallContext } from './claudeActivity'
 import type { ClaudeMetricsCollector } from './metrics'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
@@ -69,6 +70,8 @@ export class TurnFrames {
   private readonly contexts = new Map<string, ClaudeCallContext>()
   /** A Mousse subagent call's bounded record input (its title, subagent and delegation id), per open call. */
   private readonly recordInputs = new Map<string, Record<string, unknown>>()
+  /** The tool each open bot `use_tool` call runs, once its arguments are in: every later event of the call says it. */
+  private readonly useToolTargets = new Map<string, string>()
   /** The call a subagent's call ran under, per open call. */
   private readonly parents = new Map<string, string | undefined>()
   /** Open calls whose result was a hand-off placeholder: only these end on their task's notification. */
@@ -318,12 +321,15 @@ export class TurnFrames {
         const activity = claudeActivityStart(name, input, isRoot)
         this.contexts.set(block.id, claudeCallContext(name, input, isRoot))
         if (subagentRecord) this.recordInputs.set(block.id, subagentRecord.input)
+        const useToolTarget = mousseToolOfName(name) === USE_TOOL ? useToolTargetOf(input) : undefined
+        if (useToolTarget) this.useToolTargets.set(block.id, useToolTarget)
         if (subagentRecord || activity) {
           this.sink.onTool?.({
             phase: 'start',
             callId: block.id,
             title: name,
             toolName: name,
+            ...(useToolTarget ? { useToolTarget } : {}),
             ...(subagentRecord ? { record: subagentRecord } : {}),
             ...(activity ? { activity } : {}),
             ...(this.parents.get(block.id) ? { parentCallId: this.parents.get(block.id) } : {})
@@ -355,12 +361,14 @@ export class TurnFrames {
           if (early) this.endTask(callId, early)
           continue
         }
+        const useToolTarget = this.useToolTargets.get(callId)
         this.sink.onTool?.({
           phase: 'complete',
           callId,
           title,
           ...(subagentRecord ? { record: subagentRecord } : {}),
-          ...(completion.activity ? { toolName: title, activity: completion.activity } : {})
+          ...(completion.activity ? { toolName: title, activity: completion.activity } : {}),
+          ...(useToolTarget ? { useToolTarget } : {})
         })
         this.forget(callId)
       }
@@ -378,6 +386,7 @@ export class TurnFrames {
     this.tools.delete(callId)
     this.contexts.delete(callId)
     this.recordInputs.delete(callId)
+    this.useToolTargets.delete(callId)
     this.parents.delete(callId)
     this.handedOff.delete(callId)
     this.earlyEnds.delete(callId)

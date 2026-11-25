@@ -11,6 +11,7 @@ import {
   type ActivityTodoItem
 } from '../../../../shared/agentActivity'
 import { subagentToolName } from '../../../../shared/subagentTools'
+import { classifyCuaCall, guardedInput, isGuardedCall } from '../../../../shared/cuaActivity'
 
 /**
  * What Claude Code's tool calls say about the work, as typed activity fields. `claudeActivityStart`
@@ -235,7 +236,9 @@ export function claudeActivityStart(name: string, input: unknown, isRoot: boolea
       break
   }
   const server = serverOf(name)
-  const kept = capRecord(args)
+  // A computer use call keeps only what its allowlist lets through, before anything is cut to fit.
+  const call = classifyCuaCall(name, { input: args })
+  const kept = isGuardedCall(call) ? guardedInput(call, args) : capRecord(args)
   return { kind: 'generic', ...(server ? { server } : {}), ...(kept ? { input: kept } : {}) }
 }
 

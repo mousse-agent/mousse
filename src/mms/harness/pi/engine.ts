@@ -26,7 +26,8 @@ import type {
   TurnResult,
   TurnSink
 } from '../adapter'
-import { CumulativeStream } from '../../run/transcript/promptRuntime'
+import { CuaRowGuard, CumulativeStream } from '../../run/transcript/promptRuntime'
+import { mousseToolOfName, USE_TOOL, useToolTargetOf } from '../../../shared/cuaActivity'
 import type { ProviderRef } from '../../run/types'
 import type { InstanceEnv } from '../env'
 import { killTree } from '../spawn'
@@ -402,6 +403,14 @@ interface PiCut {
   carried?: PiSteer[]
 }
 
+/** Holds each call's row of a turn to what a transcript keeps of a computer use call, from its start to its end. */
+const turnToolRows = new WeakMap<object, CuaRowGuard>()
+function toolRowsOf(turn: object): CuaRowGuard {
+  let guard = turnToolRows.get(turn)
+  if (!guard) turnToolRows.set(turn, (guard = new CuaRowGuard()))
+  return guard
+}
+
 /** One turn on a process: the attempt, its tools, the episode and the event state. */
 class PiTurn {
   readonly episode: WriterEpisode
@@ -473,7 +482,7 @@ class PiTurn {
   promptAccepted = false
   progressed = false
   readonly startedAt = Date.now()
-  readonly openTools = new Map<string, { name: string; mousse: boolean }>()
+  readonly openTools = new Map<string, { name: string; mousse: boolean; useToolTarget?: string }>()
   /** Pi file calls awaiting their success and truncation result, by call id. */
   readonly fileCalls = new Map<string, { completed(success: boolean, read?: BotFileReadResult): void }>()
   /** A bot's built-in calls with a `started` ledger row, by call id. */
@@ -2270,7 +2279,8 @@ export class PiRpcEngine implements ProviderAdapter {
           if (failed) turn.host.tools.toolLedger?.failed(row)
           else turn.host.tools.toolLedger?.commit(row)
         }
-        sink.tool({
+        // A computer use call's row keeps only its allowlisted outcome (`CuaRowGuard`), known by the call's id.
+        sink.tool(toolRowsOf(turn).apply({
           kind: open?.mousse ? 'mcp_tool_call' : 'build_tool_result',
           phase: 'complete',
           callId,
@@ -2278,7 +2288,7 @@ export class PiRpcEngine implements ProviderAdapter {
           summary: failed ? 'The tool returned an error.' : 'The tool returned successfully.',
           details: [`Tool: ${name}`],
           response: textOf(event.result).slice(0, 4000)
-        })
+        }, { toolName: name, ...(open?.useToolTarget ? { useToolTarget: open.useToolTarget } : {}), ...(failed ? { status: 'failed' } : {}) }))
         if (!failed && (name === 'edit' || name === 'write')) {
           const args = (event.args ?? {}) as { content?: string; newText?: string; edits?: Array<{ newText?: string }> }
           const lines = name === 'write' ? linesOf(args.content) : linesOf(args.newText) + (args.edits ?? []).reduce((sum, edit) => sum + linesOf(edit.newText), 0)
@@ -2428,10 +2438,12 @@ export class PiRpcEngine implements ProviderAdapter {
     }
     if (turn.openTools.has(callId)) return
     if (announced) turn.announced.add(callId)
-    turn.openTools.set(callId, { name, mousse })
+    // A bot's use_tool keeps the tool it runs, so its end is held as that call too.
+    const useToolTarget = mousse && mousseToolOfName(name) === USE_TOOL ? useToolTargetOf(args) : undefined
+    turn.openTools.set(callId, { name, mousse, ...(useToolTarget ? { useToolTarget } : {}) })
     // A note that came before this call keeps its own row, above it; the next one starts below.
     turn.reply.break()
-    turn.sink.tool({
+    turn.sink.tool(toolRowsOf(turn).apply({
       kind: mousse ? 'mcp_tool_call' : 'build_tool_call',
       phase: 'start',
       callId,
@@ -2439,7 +2451,7 @@ export class PiRpcEngine implements ProviderAdapter {
       summary: mousse ? name : 'Called a local project tool (Pi coding agent).',
       details: [`Tool: ${name}`],
       response: JSON.stringify(args ?? {}, null, 2)
-    })
+    }, { toolName: name, args: args ?? {}, ...(useToolTarget ? { useToolTarget } : {}) }))
   }
 
   // -- Steers (docs/design/steer-and-interruptions.md §3.2) ---------------------------------------

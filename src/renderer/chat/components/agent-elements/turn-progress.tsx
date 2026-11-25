@@ -9,7 +9,7 @@ import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { parseMcpToolType } from "./tools/tool-registry";
-import { mousseToolLabels, mousseToolOf } from "./tools/mousse-tools";
+import { cuaPresentation, mousseToolLabels, mousseToolOf } from "./tools/mousse-tools";
 import { isCompactionRow, thoughtSourceOf, thoughtTextFromPart, type ToolPartBase } from "./utils/assistant-blocks";
 import { liveThoughtText, thoughtHeadline } from "./utils/format-tool";
 import { commandLabel } from "../../../../shared/agentActivity";
@@ -99,7 +99,7 @@ export type TurnProgressInput = {
   now: number;
 };
 
-type Part = { type?: string; state?: string; input?: unknown; text?: string; subagentTool?: unknown; toolCallId?: string };
+type Part = { type?: string; state?: string; input?: unknown; output?: unknown; text?: string; subagentTool?: unknown; toolCallId?: string; useToolTarget?: unknown };
 
 /** Fields a call's row has before its arguments arrive; they say nothing about what it will do. */
 const PLACEHOLDER_INPUT_KEYS = new Set(["label", "cwd"]);
@@ -161,6 +161,9 @@ function callDetail(part: Part & { type: string }): string | undefined {
  * detail. The live row says a call that just finished this way, and a run of one call is titled with it.
  */
 export function callPhrase(part: Part & { type: string }, tense: "running" | "done" | "failed"): { label: string; detail?: string } {
+  // A computer use call says what it did and one kept detail, never its raw arguments.
+  const cua = cuaPresentation(part);
+  if (cua) return { label: cua.labels[tense], ...(cua.detail ? { detail: cua.detail } : {}) };
   const detail = callDetail(part);
   const mousseTool = mousseToolOf(part.type);
   if (mousseTool) {
@@ -190,6 +193,11 @@ export function callTitle(part: { type: string; state?: string; input?: unknown 
 }
 
 function toolProgress(part: Part): TurnProgress {
+  const cua = cuaPresentation(part);
+  if (cua) {
+    const label = `${cua.labels.running}…`;
+    return cua.input ? { kind: "running-tool", label, title: cua.detail, detail: cua.detail, tool: part.type } : { kind: "preparing-tool", label, tool: part.type };
+  }
   const detail = inputDetail(part.input);
   if (part.type === "tool-Subagent" || part.type === "tool-Task" || part.type === "tool-Agent" || part.subagentTool) {
     return { kind: "running-tool", label: "Running subagent…", title: detail, detail };

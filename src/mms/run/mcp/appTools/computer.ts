@@ -113,7 +113,9 @@ export function driverOutcome(result: DriverCallResult): ToolOutcome {
   }
   if (!texts.length && result.structuredContent !== undefined) texts.push(JSON.stringify(result.structuredContent))
   if (dropped) texts.push(`[${dropped} more image${dropped === 1 ? '' : 's'} left out]`)
-  const text = cut(texts.join('\n') || (result.isError ? 'The driver returned an error.' : 'Done.'), MAX_TEXT)
+  // A result of images only says what it captured: that line is all a saved row keeps of it, never the images.
+  const fallback = result.isError ? 'The driver returned an error.' : images.length === 1 ? 'Captured screenshot' : images.length > 1 ? `Captured ${images.length} images` : 'Done.'
+  const text = cut(texts.join('\n') || fallback, MAX_TEXT)
   return { text, ran: true, ...(result.isError ? { isError: true } : {}), ...(images.length ? { images } : {}) }
 }
 

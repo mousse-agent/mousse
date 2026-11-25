@@ -1,4 +1,5 @@
-import type { ActivityPatch, ProviderToolEvent } from '../../../shared/agentActivity'
+import { BACKGROUND_SUMMARY, INTERRUPTED_SUMMARY, type ActivityPatch, type ProviderToolEvent } from '../../../shared/agentActivity'
+import { classifyCuaCall, guardedInput, guardedOutput, guardedTitle, isGuardedCall, mousseToolOfName, normalizeUseToolTarget } from '../../../shared/cuaActivity'
 import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
 
 /**
@@ -133,6 +134,108 @@ export function runtimeToolEvent(event: RuntimeToolEvent): StreamingLlmToolEvent
     ...(activity ? { activity } : {}),
     ...(event.parentCallId ? { parentCallId: event.parentCallId } : {})
   }
+}
+
+/** What a runtime knows of a call beside its event: its name, the `use_tool` target it read, and how it ended. */
+export interface ToolEventHint {
+  toolName?: string
+  useToolTarget?: string
+  /** The call's arguments, when the event does not carry them where the guard reads them. */
+  args?: unknown
+  /** `unfinished`: the run ended before the call reported its end. */
+  status?: string
+}
+
+/** Summaries a closer writes, which say nothing of the call itself. */
+const CLOSING_SUMMARIES: ReadonlySet<string> = new Set([...Object.values(INTERRUPTED_SUMMARY), BACKGROUND_SUMMARY])
+
+/** A provider's server name, kept only when it is a plain name. */
+function plainServer(server: unknown): string | undefined {
+  return typeof server === 'string' && /^[\w.-]{1,64}$/.test(server) ? server : undefined
+}
+
+function argsJson(response: string | undefined): Record<string, unknown> | undefined {
+  const trimmed = response?.trim()
+  if (!trimmed?.startsWith('{')) return undefined
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Holds every tool event of one turn to what a transcript may keep of a computer use call (`src/shared/cuaActivity.ts`),
+ * following each call by its id from its first start to its end: a runtime that names the call or its `use_tool` target
+ * only on some of its events (ACP's updates, Cursor's unfinished closure, Claude Code's first start) still gets the
+ * call's row held from the first. Any other call's event passes unchanged, except that a call the run left
+ * `unfinished` ends interrupted.
+ */
+export class CuaRowGuard {
+  private readonly calls = new Map<string, { toolName?: string; useToolTarget?: string; input?: Record<string, unknown> }>()
+
+  constructor(private readonly options: { aborted?: () => boolean } = {}) {}
+
+  apply(event: StreamingLlmToolEvent, hint: ToolEventHint = {}): StreamingLlmToolEvent {
+    const closed = this.closeUnfinished(event, hint.status)
+    const known = event.callId ? this.calls.get(event.callId) : undefined
+    const named = hint.toolName ?? event.activity?.toolName
+    // A name that reads as a Mousse tool is kept over one that does not (a title, a later event's other spelling).
+    const toolName = known?.toolName && (mousseToolOfName(known.toolName) || !named) ? known.toolName : (named ?? known?.toolName)
+    const args = hint.args ?? event.activity?.input ?? event.input ?? (event.phase === 'start' ? argsJson(event.response) : undefined)
+    const target = normalizeUseToolTarget(hint.useToolTarget) ?? known?.useToolTarget
+    const call = classifyCuaCall(toolName, { input: args, useToolTarget: target })
+    const resolved = call.kind === 'use_tool_cua' ? call.tool : call.kind === 'use_tool_other' ? call.inner : target
+    const input = args !== undefined && isGuardedCall(call) ? guardedInput(call, args) : undefined
+    if (event.callId) {
+      if (event.phase === 'complete') this.calls.delete(event.callId)
+      else this.calls.set(event.callId, { ...(toolName ? { toolName } : {}), ...(resolved ? { useToolTarget: resolved } : {}), ...((input ?? known?.input) ? { input: input ?? known?.input } : {}) })
+    }
+    if (call.kind === 'other') return closed
+    // A `use_tool` of any other tool keeps its row as it is, and says which tool it ran.
+    if (call.kind === 'use_tool_other') return { ...closed, activity: { ...closed.activity, useToolTarget: call.inner } }
+
+    const patch = closed.activity
+    const failed = patch?.status === 'failed' || hint.status === 'failed' || /returned an error/i.test(closed.summary ?? '')
+    const title = guardedTitle(call, input ?? known?.input)
+    const server = plainServer(patch && 'server' in patch ? patch.server : undefined)
+    const output = closed.phase === 'complete' && patch?.status !== 'interrupted' ? guardedOutput(call, patch?.output ?? closed.response, failed) : undefined
+    const activity: ActivityPatch = {
+      kind: 'generic',
+      ...(toolName ? { toolName } : {}),
+      ...(server ? { server } : {}),
+      ...(patch?.status ? { status: patch.status } : closed.phase === 'complete' && failed ? { status: 'failed' as const } : {}),
+      ...(patch?.interruptedBy ? { interruptedBy: patch.interruptedBy } : {}),
+      ...(patch?.summary && CLOSING_SUMMARIES.has(patch.summary) ? { summary: patch.summary } : {}),
+      ...(patch?.notMovable ? { notMovable: true } : {}),
+      ...(input ? { input } : {}),
+      ...(output !== undefined ? { output } : {})
+    }
+    const { input: _input, response: _response, ...rest } = closed
+    return { ...rest, title, summary: failed ? 'The tool returned an error.' : title, details: [], activity }
+  }
+
+  /** A call the run ended before it reported its end: interrupted, by a Stop or for want of a result. */
+  private closeUnfinished(event: StreamingLlmToolEvent, status: string | undefined): StreamingLlmToolEvent {
+    if (status !== 'unfinished' || event.phase !== 'complete' || event.activity?.status) return event
+    const interruptedBy = this.options.aborted?.() ? 'stop' : 'no_result'
+    return { ...event, activity: { ...event.activity, status: 'interrupted', interruptedBy, summary: INTERRUPTED_SUMMARY[interruptedBy] } }
+  }
+}
+
+/**
+ * One turn's tool events as timeline calls (`runtimeToolEvent`), each held by the turn's `CuaRowGuard`. An adapter
+ * makes one per turn and sends every tool event through it.
+ */
+export function createRuntimeToolMapper(options: { aborted?: () => boolean } = {}): (event: RuntimeToolEvent & { status?: string }) => StreamingLlmToolEvent {
+  const guard = new CuaRowGuard(options)
+  return (event) =>
+    guard.apply(runtimeToolEvent(event), {
+      ...(event.toolName ? { toolName: event.toolName } : {}),
+      ...(event.useToolTarget ? { useToolTarget: event.useToolTarget } : {}),
+      ...(event.status ? { status: event.status } : {})
+    })
 }
 
 /** The part of a turn sink (`TurnSink`) the text and thinking relays write to. */
