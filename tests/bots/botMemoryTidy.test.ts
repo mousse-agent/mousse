@@ -21,7 +21,7 @@ async function setup() {
 it.each(['queued', 'running', 'work', 'question', 'paused', 'deleted'])('leaves refs alone for %s and puts copies away on a later tick', async (state) => {
   const { botId, firstActivation, memory } = await setup()
   if (state === 'queued' || state === 'running') f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', state, firstActivation)
-  if (state === 'work') f.store.run("UPDATE bot_activations SET lane = 'run', status = 'blocked', end_reason = 'question', trigger_json = ? WHERE id = ?", JSON.stringify({ kind: 'work', title: 'Check.', input: 'Check.' }), firstActivation)
+  if (state === 'work') f.store.run("UPDATE bot_activations SET lane = 'run', status = 'blocked', end_reason = 'question', trigger_json = ?, provenance = NULL WHERE id = ?", JSON.stringify({ kind: 'work', title: 'Check.', input: 'Check.' }), firstActivation)
   if (state === 'question') {
     f.store.insertQuestion({ id: 'q', botId, activationId: firstActivation, dispatchN: 1, lane: 'chat', spec: { question: 'Which?', choices: ['A', 'B'] }, createdAt: f.store.now() })
     f.store.setQuestionMessage('q', 'question-message')

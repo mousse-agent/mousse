@@ -19,7 +19,7 @@ it.each([
 ])('stores who set text and work reminders in %s', async (key, ownerSet) => {
   await f.bots.service.chatSend({ botId, text: 'Remind me', clientRequestId: 'm1' })
   const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
-  f.store.run('UPDATE bot_activations SET idempotency_key = ? WHERE id = ?', key, turn.id)
+  f.store.run('UPDATE bot_activations SET idempotency_key = ?, provenance = NULL WHERE id = ?', key, turn.id)
   for (const work of [undefined, { title: 'Check', brief: 'Check it' }]) {
     const r = f.bots.addReminder(botId, turn.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Tea', work })
     expect(f.store.reminder(r.reminderId)?.ownerSet).toBe(ownerSet)
