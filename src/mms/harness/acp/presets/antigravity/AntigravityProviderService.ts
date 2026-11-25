@@ -500,7 +500,7 @@ export class AntigravityProviderService {
     try {
       const text = await this.acp.oneShot({ cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() })
       // `agy` answers a model whose quota is used up with a notice as the reply ("⚠ Individual quota reached. …"): never an answer.
-      if (AGY_QUOTA_NOTICE.test(text)) throw harnessAppError({ code: 'rate_limited', message: `Antigravity's quota for this model is used up: ${text.trim().replace(/^⚠\s*/, '')}` })
+      if (AGY_QUOTA_NOTICE.test(text)) throw harnessAppError({ code: 'rate_limited', scope: 'model', message: `Antigravity's quota for this model is used up: ${text.trim().replace(/^⚠\s*/, '')}` })
       return { text }
     } finally {
       // The ended process may hold the folder a moment longer on Windows: a leftover empty folder is harmless.

@@ -106,6 +106,101 @@ describe('the title prompt row', () => {
   })
 })
 
+describe('First line only', () => {
+  let root: Root
+  let host: HTMLElement
+  let home: string
+  let store: SettingsStore
+
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    home = mkdtempSync(join(tmpdir(), 'mousse-title-mode-'))
+    store = new SettingsStore(MousseConfigStore.load(home))
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  /** Settings > Agents over a real settings store, with `providers` connected. */
+  const show = (providers: LlmProviderOption[] = [CLAUDE]) => {
+    const draw = () => act(() => root.render(createElement(AgentsSettings, {
+      settings: store.get(),
+      options: { ...OPTIONS, llmProviders: providers, botProviders: providers },
+      updateSettings: async (partial) => {
+        store.set(partial)
+        draw()
+      }
+    })))
+    draw()
+  }
+  /** The title settings as a restarted daemon reads them from disk. */
+  const reloaded = () => new SettingsStore(MousseConfigStore.load(home)).get().title
+  const picker = () => host.querySelector<HTMLButtonElement>('#agents-title-model')!
+  const firstLineOnly = () => [...document.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'First line only')
+  const useAutomatic = () => host.querySelector<HTMLButtonElement>('button[aria-label="Use automatic"]')
+  const promptRow = () => host.querySelector<HTMLElement>('[data-settings-anchor="agents-title-prompt"]')!
+  const mouseDown = (target: Element) => act(() => { target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+
+  it('is offered with no connected model, in a menu at the picker that an outside click closes, and is saved', () => {
+    show([])
+    expect(picker().disabled).toBe(false)
+    act(() => picker().click())
+    const choice = firstLineOnly()!
+    // The menu is its own floating layer, outside the settings page, as the picker's menu is with models listed.
+    expect(host.contains(choice)).toBe(false)
+    // A click inside the menu keeps it open; one outside closes it.
+    mouseDown(choice)
+    expect(firstLineOnly()).toBeDefined()
+    mouseDown(document.body)
+    expect(firstLineOnly()).toBeUndefined()
+
+    act(() => picker().click())
+    act(() => firstLineOnly()!.click())
+    expect(reloaded().mode).toBe('off')
+    expect(picker().getAttribute('aria-label')).toContain('First line only')
+  })
+
+  it('Use automatic leaves First line only and keeps the title prompt', () => {
+    store.set({ title: { prompt: 'Always in English' } })
+    store.set({ title: { llmProvider: '', model: '', mode: 'off' } })
+    show()
+    act(() => useAutomatic()!.click())
+    expect(reloaded()).toMatchObject({ prompt: 'Always in English' })
+    expect(reloaded().mode).toBeUndefined()
+    expect(useAutomatic()).toBeNull()
+  })
+
+  it('a chosen model replaces First line only, and clearing it later goes back to Automatic', () => {
+    store.set({ title: { llmProvider: '', model: '', mode: 'off' } })
+    store.set({ title: { llmProvider: 'claude-subscription', model: 'haiku', instanceId: 'claude' } })
+    store.set({ title: { llmProvider: '', model: '' } })
+    expect(reloaded().mode).toBeUndefined()
+  })
+
+  it('turns the title prompt off only for First line only', () => {
+    store.set({ title: { prompt: 'Always in English' } })
+    show()
+    expect(host.querySelector<HTMLTextAreaElement>('#agents-title-prompt')!.disabled).toBe(false)
+    store.set({ title: { prompt: '' } })
+    show()
+    expect(promptRow().querySelector('button')!.disabled).toBe(false)
+
+    store.set({ title: { llmProvider: '', model: '', mode: 'off' } })
+    show()
+    expect(promptRow().querySelector('button')!.disabled).toBe(true)
+    store.set({ title: { prompt: 'Always in English' } })
+    show()
+    expect(host.querySelector<HTMLTextAreaElement>('#agents-title-prompt')!.disabled).toBe(true)
+    // The text is kept for when a model names threads again.
+    expect(reloaded().prompt).toBe('Always in English')
+  })
+})
+
 describe('a title request with a title prompt', () => {
   const messages = [{ id: 'm1', role: 'user', content: 'Fix the OAuth callback retries in the login flow', timestamp: 1 }] as ChatMessage[]
 

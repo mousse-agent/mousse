@@ -573,7 +573,10 @@ export interface MousseSettings {
     /** Provider instances (`providers.instances` in the profile config); owned by the daemon. */
     instances?: Record<string, unknown>
   }
-  /** Lightweight model used to name chats. Blank values use the best connected default. */
+  /**
+   * The model that names threads and their worktree branches. Blank values are Automatic: a fast connected model Mousse
+   * picks (`TitleModelIndex`), unless `mode` is `off`.
+   */
   title: {
     llmProvider: LlmProviderId
     model: string
@@ -582,6 +585,11 @@ export interface MousseSettings {
     instanceId?: string
     /** The person's own instructions for the title model (`titleSystemPrompt`); absent or blank for none. */
     prompt?: string
+    /**
+     * With no model chosen: `off` ("First line only") names threads from their first line and never calls a model;
+     * absent or `auto` is Automatic. Ignored while a model is chosen.
+     */
+    mode?: 'auto' | 'off'
   }
   /**
    * The model bots run on when a bot's own choice is automatic (Bot Phase 1 §5.6). Blank values are
@@ -646,6 +654,11 @@ export interface LlmModelOption {
   speeds?: Array<'fast' | 'slow'>
   /** `false`: this model cannot run a single request (chat titles) even though its provider can. */
   oneShot?: false
+  /**
+   * The model an alias runs, when it differs from `id` (Claude Code's `haiku` → `claude-haiku-5-5`): what Mousse's
+   * model catalog knows it by, for Automatic naming's ranking.
+   */
+  resolvedId?: string
   /** The model takes images, when its catalogue says so. */
   images?: true
   /** Context window in tokens, when its catalogue says so. */
