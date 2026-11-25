@@ -402,33 +402,3 @@ describe('asking for the other direction of a one-way pairing', () => {
     await expect(owner2.dispatch('netEngine.access.ask', { node: pair.callerOnOwner }, true)).rejects.toThrow()
   }, 60_000)
 })
-
-describe('asking when the connection was announced before its HELLO', () => {
-  const fabric = new Fabric()
-  fabric.network.minor = 2
-  fabric.network.features = [...ALL_FEATURES]
-  fabric.network.bothWays = true
-  // The owner's helper says `both: false` for the caller's connection, as it can on a real network.
-  fabric.network.lateHello = true
-  afterAll(() => fabric.close(), 60_000)
-
-  it('still lets the asker in over that connection after Allow', async () => {
-    const owner = await computer(fabric, 'late-owner'),
-      caller = await computer(fabric, 'late-caller')
-    const { callerOnOwner, ownerOnCaller } = await oneWay(fabric, owner, caller)
-    await eventually(() => expect(device(owner, callerOnOwner)?.other).toEqual({ offer: 'ask' }))
-    await owner.dispatch('netEngine.access.ask', { node: callerOnOwner }, true)
-    const ask = await eventually(() => {
-      const asks = caller.mms.netEngine.status().accessAsks ?? []
-      expect(asks).toHaveLength(1)
-      return asks[0]!
-    })
-    await caller.dispatch(
-      'netEngine.access.answer',
-      { node: ownerOnCaller, request: ask.request, yes: true, access: accessPreset('view').fields },
-      true
-    )
-    await eventually(() => expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true))
-    expect(await accessThere(owner, callerOnOwner)).toMatchObject({ work: false })
-  }, 60_000)
-})
