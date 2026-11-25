@@ -1445,7 +1445,14 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   color: var(--text-primary);
 }
 
-/* Where a row dragged in the Threads tab will land. */
+/* Where a dragged project or thread will land. */
+.threads-sidebar-project.drop-before,
+.threads-sidebar-project.drop-after {
+  position: relative;
+}
+
+.threads-sidebar-project.drop-before::before,
+.threads-sidebar-project.drop-after::before,
 .threads-sidebar-thread-container.drop-before::before,
 .threads-sidebar-thread-container.drop-after::before {
   content: "";
@@ -1459,10 +1466,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   z-index: 1;
 }
 
+.threads-sidebar-project.drop-before::before,
 .threads-sidebar-thread-container.drop-before::before {
   top: -2px;
 }
 
+.threads-sidebar-project.drop-after::before,
 .threads-sidebar-thread-container.drop-after::before {
   bottom: -2px;
 }
