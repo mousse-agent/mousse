@@ -99,6 +99,7 @@ import {
 import { formatSentChip } from '../../shared/inlineAttachments'
 
 import { admitAttachments, type ChipStatus } from '../lib/attachmentPreparation'
+import { countRender } from '../chat/components/agent-elements/render-counts'
 
 export interface AttachedFile {
   id: string
@@ -311,6 +312,7 @@ export function ChatComposer({
   connecting: connectingProp,
   sendsWhenConnected = false
 }: ChatComposerProps) {
+  countRender('ChatComposer')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const attachmentsRowRef = useRef<HTMLDivElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -372,7 +374,18 @@ export function ChatComposer({
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
   // Caret of the text box, or -1 while a range is selected (a range is never a mention).
-  const [caret, setCaret] = useState(0)
+  // Moving the caret across ordinary text does not trigger a React re-render; state updates only
+  // when entering, moving within, or leaving an `@mention` query.
+  const caretRef = useRef(0)
+  const mentionCaretRef = useRef(0)
+  const [caret, setCaretState] = useState(0)
+  const setCaret = useCallback((next: number, value = inputValueRef.current) => {
+    caretRef.current = next
+    if (findMentionQueryAtCaret(value, next) === null && findMentionQueryAtCaret(value, mentionCaretRef.current) === null) return
+    if (next === mentionCaretRef.current) return
+    mentionCaretRef.current = next
+    setCaretState(next)
+  }, [])
   // True between compositionstart and compositionend of an input method.
   const composingRef = useRef(false)
   const [mentionSearch, setMentionSearch] = useState<MentionSearchState | null>(null)
@@ -904,7 +917,7 @@ export function ChatComposer({
   // Put the text box at `edit`: new value, caret after the inserted text, focus kept.
   const commitEdit = (edit: { value: string; caret: number }) => {
     onInputChange(edit.value)
-    setCaret(edit.caret)
+    setCaret(edit.caret, edit.value)
     requestAnimationFrame(() => {
       const target = composerInputRef.current
       if (!target) return
@@ -1154,8 +1167,10 @@ export function ChatComposer({
   }
 
   // Skill and quote tokens are painted as pills behind the text that spells them.
-  const renderInputBackdrop = () => {
-    const chip = skillToken ? { start: skillToken.index, end: skillToken.index + skillToken.length } : null
+  const skillIndex = skillToken?.index
+  const skillLength = skillToken?.length
+  const inputBackdrop = useMemo(() => {
+    const chip = skillIndex !== undefined && skillLength !== undefined ? { start: skillIndex, end: skillIndex + skillLength } : null
     const quotes = quoteSpans.map((span) => ({ start: span.index, end: span.index + span.length }))
     const threads = threadChips.map((span, index) => ({
       start: span.index,
@@ -1175,7 +1190,7 @@ export function ChatComposer({
         {input.endsWith('\n') ? '\u200B' : null}
       </>
     )
-  }
+  }, [input, skillIndex, skillLength, quoteSpans, threadChips, attachmentChips, chipHover])
 
   // Shift+Enter (or a picker-free new line) on a list item starts the next item, as the textarea's own
   // typing would: through insertText, so undo and the input event stay native.
@@ -1534,7 +1549,7 @@ export function ChatComposer({
 
       <div className="composer-input-wrap">
         <div ref={backdropRef} className="composer-input-backdrop" aria-hidden="true">
-          {renderInputBackdrop()}
+          {inputBackdrop}
         </div>
         <textarea
           ref={composerInputRef}
@@ -1545,7 +1560,7 @@ export function ChatComposer({
           onChange={(e) => {
             setSuggestionsDismissed(false)
             setSelectedSuggestion(0)
-            setCaret(readCaret(e.target))
+            setCaret(readCaret(e.target), e.target.value)
             nativeValueRef.current = e.target.value
             // A space or new line typed after a thread link, or a drop, may make a chip (see the effect above).
             const typed = e.nativeEvent as InputEvent

@@ -5,6 +5,8 @@ import type { Device } from '../lib/netDevices'
 import { cachedRemoteComposerOptions, onRemoteComposerOptionsRead, readRemoteComposerOptions, type RemoteComposerOptions } from '../lib/remoteComputers'
 import { useAppStore } from '../stores/appStore'
 
+const NO_NODES: ReadonlySet<string> = new Set()
+
 /**
  * The user's devices that a chat can be started on (none while threads of other computers are not routed), kept
  * by the one reader of `bridge.nodes` that the thread views share (`lib/computers.ts`); `refresh` reads again
@@ -12,9 +14,15 @@ import { useAppStore } from '../stores/appStore'
  */
 export function useRunOnDevices(): { devices: readonly Device[]; notSharing: ReadonlySet<string>; refresh: () => void } {
   const { devices } = useComputers()
-  const threads = useAppStore((state) => state.threads)
-  const projects = useAppStore((state) => state.projects)
-  const notSharing = useMemo(() => notSharingNodes([...threads, ...projects]), [threads, projects])
+  // Derive a primitive key inside the selector so unrelated thread touches/updates never re-render the chat.
+  const notSharingKey = useAppStore((state) => {
+    const nodes = notSharingNodes([...state.threads, ...state.projects])
+    return nodes.size === 0 ? '' : [...nodes].sort().join('\n')
+  })
+  const notSharing = useMemo(
+    () => (notSharingKey ? new Set(notSharingKey.split('\n')) : NO_NODES),
+    [notSharingKey]
+  )
   // Each computer's models are read once it is connected, so picking it shows them at once.
   useEffect(() => {
     for (const device of devices)
