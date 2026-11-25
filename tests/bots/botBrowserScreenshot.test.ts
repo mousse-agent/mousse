@@ -54,7 +54,8 @@ function fakeService(): BotBrowserService {
 
 /** One activation's browser_screenshot, the way the bot's app tool makes it (on a model that sees images). */
 async function screenshot(activationId: string, filesFolder?: string) {
-  const bots = new BotBrowsers({ profileId, browser: fakeService, homeThread: () => 'home', setTimer: () => ({ clear: () => undefined }) })
+  const service = fakeService()
+  const bots = new BotBrowsers({ profileId, browser: () => service, homeThread: () => 'home', setTimer: () => ({ clear: () => undefined }) })
   const turn = bots.turn({ botId: BOT, activationId, lane: 'run', homeThreadId: 'home', runId: `run-${activationId}`, signal: new AbortController().signal, ...(filesFolder ? { filesFolder } : {}) })!
   const binding = { ...turn.binding, vision: true }
   const opened = await dispatchBrowserTool({ port: turn.runtime, binding, name: 'browser_open', args: { url: 'https://example.com/' } })
