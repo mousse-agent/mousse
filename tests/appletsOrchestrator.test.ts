@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
-import { modelFacingReplyText, type AppletReference } from '../src/shared/applets'
+import { type AppletReference } from '../src/shared/applets'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { piAdapter } from './run/phase6Fixture'
 import { HandoffService, type HandoffTranscriptSource } from '../src/mms/run/handoff/HandoffService'
@@ -362,24 +362,34 @@ it('names an applet on an earlier reply row, also after a row that left a code b
   expect(results.at(-1)).not.toContain(source.js)
 })
 
-it('names an applet that failed to publish beside one whose title has line breaks', () => {
-  const published = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Totals\n~~~js', description: '' }
-  const named = modelFacingReplyText({
-    role: 'assistant',
-    content: '',
-    presentationParts: [{ type: 'applet', reference: published }, { type: 'text', text: fence(source) + '\n\nApplet unavailable: publication failed.\n' }]
+it('publishes a tool-staged applet before an applet fence the reply left unfinished, which stays unpublished', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
   })
-  expect(named).toContain('[Applet: Totals ~~~js (appletId applet_a, revision rev_a)]')
-  expect(named).toContain('[Applet: Calculator]')
-  expect(named).not.toContain(source.js)
-})
+  const draft = { ...source, title: 'Draft', js: 'window.draft = "DRAFT_SOURCE"' }
+  const adapter = piAdapter(() => 'Almost:\n~~~mousse-applet\n' + JSON.stringify(draft))
+  const startTurn = adapter.startTurn.bind(adapter)
+  // A separator then backticks in a string: the staged fence still holds the whole source.
+  const ls = String.fromCharCode(0x2028)
+  const staged = { ...source, html: '<pre>' + ls + '```' + ls + '</pre>' }
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(staged)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
 
-it('names every valid applet in a reply, also past the three a reply may publish', () => {
-  const malformed = '```mousse-applet\nnot JSON\n```'
-  const reply = [malformed, malformed, malformed, fence(source)].join('\n')
-  const named = modelFacingReplyText({ role: 'assistant', content: reply })
-  expect(named).toContain('[Applet: Calculator]')
-  expect(named).not.toContain(source.js)
+  expect(main.applets.list(thread.id).map((applet) => applet.title)).toEqual(['Calculator'])
+  const ref = reference(main, thread.id)
+  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+  expect(results.at(-1)).toContain('[Applet: Draft]')
+  expect(results.at(-1)).not.toContain('DRAFT_SOURCE')
+  expect(results.at(-1)).not.toContain(source.js)
 })
 
 it('names an applet that failed to publish to other models, without its source', async () => {

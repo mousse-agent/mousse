@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, closeOpenCodeBlock, modelFacingReplyText, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, modelFacingReplyText, openCodeBlockStart, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -16338,7 +16338,9 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // Applets published by tool join the turn's last reply as fences, so they publish with it.
-    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+    // U+2028 and U+2029 in a string are escaped: publication would read a line start after one, where three backticks
+    // in the source would end the fence early.
+    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source).replace(/\p{Zl}|\p{Zp}/gu, (c) => '\\u' + c.charCodeAt(0).toString(16)) + '\n```').join('')
     // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
@@ -16349,12 +16351,13 @@ export class OrchestratorService extends EventEmitter {
     const earlierReplies = this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
     // The streamed row never held the applet fences, so it is matched on the reply text alone.
     const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
-    // The fences join that last row. A code block the row leaves open is closed first, judged on the row alone (an
-    // earlier row is a reply of its own): inside the open block the fences would be text, neither published nor named.
+    // The fences join that last row, before a code block the row leaves open, judged on the row alone (an earlier row is
+    // a reply of its own): inside the open block they would be text, and closing it could publish an unfinished applet.
     const split = replyOnlyText.endsWith(finalReplyText)
     const earlierText = split ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
     const lastReply = split ? finalReplyText : replyOnlyText
-    const lastText = (appletFences ? closeOpenCodeBlock(lastReply) : lastReply) + appletFences
+    const open = appletFences ? openCodeBlockStart(lastReply) : -1
+    const lastText = open === -1 ? lastReply + appletFences : lastReply.slice(0, open) + appletFences + '\n\n' + lastReply.slice(open)
     const displayText = earlierText + lastText
     // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source:
     // by title until the reply publishes them, then as the reply shows them (below).

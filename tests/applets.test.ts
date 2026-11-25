@@ -113,6 +113,10 @@ describe('applets sized to the viewport', () => {
     // Loading, recovering and exporting an applet already published still accept it.
     expect(validateAppletSubmission(submission).css).toBe(submission.css)
   })
+  it('quotes a long selector shortened, as the reason goes back to the model', () => {
+    const selector = '.chart_' + 'x'.repeat(5_000) + ' body'
+    expect(() => validateAppletSubmission({ ...source, css: `${selector}{height:100%}` }, { publishing: true })).toThrow(/"\.chart_x{52}…" in css/)
+  })
   it.each(accepted)('accepts %s', (_name, change) => {
     expect(() => validateAppletSubmission({ ...source, ...change }, { publishing: true })).not.toThrow()
   })
@@ -331,6 +335,8 @@ describe('applet source kept from a model', () => {
     ['an indented fence in another case', '   ~~~~ Mousse-Applet\n' + body + '\n~~~~\nDone.'],
     ['CRLF line ends', 'Here:\r\n```mousse-applet\r\n' + body + '\r\n```\r\nDone.'],
     ['a fence opening inside another one, closing after it', '~~~mousse-applet\n{"title": "Outer"}\n```mousse-applet\n' + body + '\n~~~\n"' + CANARY + '"\n```\nDone.'],
+    ['a fence opening mid-line, as a stopped run joins rows', 'Checking. ~~~mousse-applet\n' + body + '\n~~~\nDone.'],
+    ['a body whose string holds a line separator and backticks', '```mousse-applet\n{"html": "<pre>' + LS + '```' + LS + '</pre>", "js": "' + CANARY + '"}\n```\nDone.'],
     ['a failed publication as the reply shows it', 'Here:\n```mousse-applet\n' + JSON.stringify(withCanary, null, 2) + '\n```\n\nApplet unavailable: publication failed.']
   ]
 
@@ -346,10 +352,13 @@ describe('applet source kept from a model', () => {
     expect(redactAppletFences('Here:\n' + fence(withCanary) + 'Done.')).toBe('Here:\n[Applet: Calculator]\nDone.')
     expect(redactAppletFences('Here:\n```mousse-applet\n' + body)).toBe('Here:\n[Applet: Calculator]')
     expect(redactAppletFences('```mousse-applet\nnot json\n```')).toBe('[Applet]')
-    expect(redactAppletFences('Plain ```mousse-applet``` text\n```js\nx\n```')).toBe('Plain ```mousse-applet``` text\n```js\nx\n```')
+    expect(redactAppletFences('Checking. ~~~mousse-applet\n' + body + '\n~~~\nDone.')).toBe('Checking. [Applet: Calculator]\nDone.')
+    expect(redactAppletFences('A mousse-applet fence:\n```js\nx\n```')).toBe('A mousse-applet fence:\n```js\nx\n```')
+    // Only a top-level title names it: a stopped body's data is not a title.
+    expect(redactAppletFences('```mousse-applet\n{"data":{"title":"Dataset heading"},"js":"')).toBe('[Applet]')
   })
 
-  it('reads each stored part on its own, and keeps a reference line to one line', () => {
+  it('reads a stored reply whole, and keeps a reference line to one line', () => {
     const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Totals' + LS + '```js', description: 'd' }
     const named = modelFacingReplyText({
       role: 'assistant',
@@ -362,6 +371,17 @@ describe('applet source kept from a model', () => {
     })
     expect(named).not.toContain(CANARY)
     expect(named).toBe('Here:\n[Applet: Totals ```js (appletId applet_a, revision rev_a)]\n\n[Applet: Calculator]\n\nApplet unavailable: publication failed.')
+  })
+
+  it('cuts a published applet\'s outer fence that publication did not read, to its end', () => {
+    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Calculator', description: 'd' }
+    const named = modelFacingReplyText({
+      role: 'assistant',
+      content: 'unused',
+      presentationParts: [{ type: 'text', text: ' ~~~mousse-applet\n' }, { type: 'applet', reference }, { type: 'text', text: '\n' + CANARY + '\n~~~\nDone.' }]
+    })
+    expect(named).not.toContain(CANARY)
+    expect(named).toContain('Done.')
   })
 
   it('passes a person\'s pasted fence on as written', () => {
