@@ -154,12 +154,13 @@ export function validateAppletSubmission(
 }
 /**
  * Call with complete=false during streaming: all source remains inert text. `publishing` applies the checks for a new
- * applet (see validateAppletSubmission); recovering an earlier reply leaves it off.
+ * applet (see validateAppletSubmission); recovering an earlier reply leaves it off. `uncapped` reads every fence, past the
+ * three a message may publish, for a reader that names them rather than publishing them.
  */
 export function extractAppletParts(
   content: string,
   complete: boolean,
-  options: { publishing?: boolean } = {}
+  options: { publishing?: boolean; uncapped?: boolean } = {}
 ): AppletExtractedPart[] {
   if (!complete) return [{ type: 'text', text: content }]
   const parts: AppletExtractedPart[] = []
@@ -180,7 +181,7 @@ export function extractAppletParts(
     const start = opening.index
     if (start > cursor) parts.push({ type: 'text', text: content.slice(cursor, start) })
     try {
-      if (++count > APPLETS_PER_MESSAGE)
+      if (++count > APPLETS_PER_MESSAGE && !options.uncapped)
         throw new AppletValidationError('Only three applets are allowed per message.')
       parts.push({
         type: 'submission',
@@ -248,7 +249,7 @@ const lineEnd = (parts: readonly unknown[], at: number): string => (at < parts.l
  */
 export function appletFencesAsLines(text: string): string {
   if (!text.includes('mousse-applet')) return text
-  const parts = extractAppletParts(text, true)
+  const parts = extractAppletParts(text, true, { uncapped: true })
   if (!parts.some((part) => part.type === 'submission')) return text
   return parts
     .map((part, at) => (part.type === 'submission' ? appletReferenceLine(part.submission) + lineEnd(parts, at) : part.type === 'error' ? part.source : part.text))

@@ -53,7 +53,7 @@ describe('appletRevisionFromEdits', () => {
   })
 
   it('keeps a schema version the call gives, for validation to refuse', () => {
-    expect(() => validateAppletSubmission(appletRevisionFromEdits({ ...revise, schemaVersion: 2 }, base))).toThrow(/schema version/)
+    for (const schemaVersion of [2, null]) expect(() => validateAppletSubmission(appletRevisionFromEdits({ ...revise, schemaVersion }, base))).toThrow(/schema version/)
   })
 
   it.each(['html', 'css', 'js', 'htmlPath', 'cssPath', 'jsPath'])('refuses edits given with %s', (key) => {
@@ -87,6 +87,13 @@ describe('readAppletSource', () => {
     expect(found.matches[0]).toMatchObject({ line: 1, column: 20_001, text: expect.stringContaining('needle0') })
     expect(found.matches.every((match, i) => match.text.includes(`needle${i}`))).toBe(true)
     expect(found.matches.reduce((chars, match) => chars + match.text.length, 0)).toBeLessThanOrEqual(APPLET_READ_MAX_CHARS)
+  })
+
+  it('never cuts an emoji at either end of a search excerpt', () => {
+    const emoji = { ...base, js: '😀'.repeat(2_000) + 'X' + '😀'.repeat(2_000) }
+    const [match] = (readAppletSource(emoji, { part: 'js', search: 'X' }) as { matches: Array<{ text: string }> }).matches
+    expect(match!.text).toContain('X')
+    expect(match!.text).toMatch(/^😀[\s\S]*😀$/u)
   })
 
   it('keeps the matches of wide characters within a page in bytes', () => {

@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
-import type { AppletReference } from '../src/shared/applets'
+import { modelFacingReplyText, type AppletReference } from '../src/shared/applets'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { piAdapter } from './run/phase6Fixture'
 import { HandoffService, type HandoffTranscriptSource } from '../src/mms/run/handoff/HandoffService'
@@ -291,6 +291,50 @@ it('publishes a tool-staged applet after a reply that left a code block open, an
   const ref = reference(main, thread.id)
   expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
   expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('publishes a tool-staged applet on a last row that follows a row left with an open code block', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const first = 'Trying it:\n~~~js\nconst open = true\n'
+  const adapter = piAdapter(() => 'Chart updated.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    // The first row ends at a tool call with a block still open; the turn's last row is a reply of its own.
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: first, contentIndex: 0 })
+    sink.text({ phase: 'complete', content: first, contentIndex: 0 })
+    sink.tool({ phase: 'start', callId: 'edit', kind: 'mcp_tool_call', title: 'publish_applet', summary: '', details: [] })
+    host.tools.onPublishApplet!(source)
+    sink.tool({ phase: 'complete', callId: 'edit', kind: 'mcp_tool_result', title: 'publish_applet', summary: '', details: [] })
+    // The last row streams only its own text; the turn's text is both rows, as a runtime reports it.
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: 'Chart updated.', contentIndex: 0 })
+    const result = await startTurn(input, sink, ctl, host)
+    return { ...result, text: first + result.text }
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  const replies = main.threads.loadThreadData(thread.id).messages.filter((message) => message.role === 'assistant' && !message.kind)
+  expect(replies.length).toBeGreaterThan(1)
+  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('names every valid applet in a reply, also past the three a reply may publish', () => {
+  const malformed = '```mousse-applet\nnot JSON\n```'
+  const reply = [malformed, malformed, malformed, fence(source)].join('\n')
+  const named = modelFacingReplyText({ role: 'assistant', content: reply })
+  expect(named).toContain('[Applet: Calculator]')
+  expect(named).not.toContain(source.js)
 })
 
 it('names an applet that failed to publish to other models, without its source', async () => {

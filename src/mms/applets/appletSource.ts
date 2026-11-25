@@ -108,7 +108,7 @@ export function appletRevisionFromEdits(args: Record<string, unknown>, base: App
   const parts = applyAppletEdits(base, edits)
   return {
     // A version the call gives is validated like any submission's, not replaced.
-    schemaVersion: rest.schemaVersion ?? 1,
+    schemaVersion: rest.schemaVersion === undefined ? 1 : rest.schemaVersion,
     title: rest.title ?? base.title,
     description: rest.description ?? base.description,
     ...parts,
@@ -159,8 +159,12 @@ export function readAppletSource(
       const context = lines.slice(from, to).join('\n')
       // A minified part can be one long line: a long excerpt is cut around the match, so the match is always in it.
       const hit = lines.slice(from, index).reduce((at, line) => at + line.length + 1, 0) + column
-      const start = context.length <= SEARCH_EXCERPT_CHARS ? 0 : Math.max(0, Math.min(hit - SEARCH_EXCERPT_CHARS / 2, context.length - SEARCH_EXCERPT_CHARS))
-      const excerpt = context.slice(start, start + SEARCH_EXCERPT_CHARS)
+      let start = context.length <= SEARCH_EXCERPT_CHARS ? 0 : Math.max(0, Math.min(hit - SEARCH_EXCERPT_CHARS / 2, context.length - SEARCH_EXCERPT_CHARS))
+      // Neither end cuts a surrogate pair, so the excerpt can be copied into an edit as it is.
+      if (start > 0 && isPairAt(context, start - 1)) start -= 1
+      let end = Math.min(context.length, start + SEARCH_EXCERPT_CHARS)
+      if (end < context.length && isPairAt(context, end - 1)) end += 1
+      const excerpt = context.slice(start, end)
       // Wide or escaped characters make an excerpt several times its length in bytes: the matches stop at one page's bytes.
       const size = jsonLength(excerpt)
       if (bytes + size > APPLET_READ_MAX_BYTES) {
