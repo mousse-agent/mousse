@@ -118,13 +118,16 @@ describe('bots.db v13 → v14', () => {
     expect(asksOwner(store.activation('copied-work')!)).toBe(true)
   })
 
-  it('a stored provenance only a newer build knows reads as its lane, key and trigger give', () => {
+  it('a stored provenance only a newer build knows reads as unknown, never as its key or trigger would give', () => {
     const store = open(folder())
-    store.insertActivation({ id: 'botmsg', botId: 'b', revision: 'r', grantDigest: 'g', trigger: manual, idempotencyKey: 'botmsg:b2:m2', status: 'queued', createdAt: T, lane: 'chat' }, {})
+    // An owner's key and a work run: what their key and trigger give would let them act and ask.
+    store.insertActivation({ id: 'owner', botId: 'b', revision: 'r', grantDigest: 'g', trigger: manual, idempotencyKey: 'chat:m9', status: 'queued', createdAt: T, lane: 'chat' }, {})
     store.insertActivation({ id: 'run', botId: 'b', revision: 'r', grantDigest: 'g', trigger: work, idempotencyKey: 'work:k9', status: 'queued', createdAt: T, lane: 'run' }, {})
     store.run("UPDATE bot_activations SET provenance = 'owner_voice'")
-    expect([store.activation('botmsg')!.provenance, store.activation('run')!.provenance]).toEqual(['botmsg', 'work'])
-    expect(threadsReadOnlyOf(store.activation('botmsg')!)).toBe('not_owner')
+    const [owner, run] = [store.activation('owner')!, store.activation('run')!]
+    expect([owner.provenance, run.provenance]).toEqual(['unknown', 'unknown'])
+    expect([ownerChatTurn(owner), memoryLaneOf(owner), threadsReadOnlyOf(owner)]).toEqual([false, 'run', 'not_owner'])
+    expect(asksOwner(run)).toBe(false)
   })
 
   it('reopens without change, and an older build refuses the database', () => {

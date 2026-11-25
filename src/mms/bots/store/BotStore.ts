@@ -904,7 +904,7 @@ export interface BotActivationRow {
    * `end_reason` while it runs, so `bots.db` needs no new column and older builds still read it.
    */
   offline: boolean
-  /** What started it: stored since v14, derived from its key and trigger for an older row (`deriveBotProvenance`). */
+  /** What started it: stored since v14, derived from its key and trigger for an older row (`deriveBotProvenance`), `unknown` for a stored value this build does not know. */
   provenance: BotActivationProvenance
 }
 
@@ -1181,7 +1181,9 @@ function activationOf(row: Row): BotActivationRow {
     reloadPending: num(row.reload_pending) === 1,
     selection: json<ProviderSelection>(row.selection_json),
     offline: row.status === 'running' && row.end_reason === BOT_OFFLINE_REASON,
-    provenance: stored && PROVENANCES.has(stored) ? stored as BotActivationProvenance : deriveBotProvenance({ lane, idempotencyKey: row.idempotency_key as string, trigger })
+    // NULL: a row written before v14, read from its lane, key and trigger. A value this build does not know (a newer
+    // build's start) is `unknown`, never what its key or trigger would give: it gets no right a known start has.
+    provenance: stored === null ? deriveBotProvenance({ lane, idempotencyKey: row.idempotency_key as string, trigger }) : PROVENANCES.has(stored) ? stored as BotActivationProvenance : 'unknown'
   }
 }
 
