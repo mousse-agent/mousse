@@ -11,7 +11,10 @@ export type AppletPart = (typeof APPLET_PARTS)[number]
 /** Characters `read_applet` returns by default, and at most. */
 export const APPLET_READ_DEFAULT_CHARS = 16 * 1024
 export const APPLET_READ_MAX_CHARS = 64 * 1024
-/** UTF-8 bytes of source one read returns at most, so a page of wide characters (CJK, emoji) is no larger than one of ASCII. */
+/**
+ * Bytes of source one read returns at most, as the tool's JSON result carries it (UTF-8, escapes included), so a page of
+ * wide characters (CJK, emoji) or of escaped ones (tabs, quotes) is no larger than one of plain ASCII.
+ */
 export const APPLET_READ_MAX_BYTES = 64 * 1024
 const SEARCH_MAX_MATCHES = 20
 const SEARCH_CONTEXT_LINES = 2
@@ -25,9 +28,27 @@ const isPart = (value: unknown): value is AppletPart => (APPLET_PARTS as readonl
 const isPairAt = (text: string, at: number): boolean =>
   at + 1 < text.length && (text.charCodeAt(at) & 0xfc00) === 0xd800 && (text.charCodeAt(at + 1) & 0xfc00) === 0xdc00
 
+/** The bytes one character takes in a JSON string: `\t`, `\"` and `\\` take two, other control characters and a lone surrogate `\uXXXX`. */
+function jsonBytes(text: string, at: number): number {
+  const code = text.charCodeAt(at)
+  if (code < 0x20) return code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6
+  if (code === 0x22 || code === 0x5c) return 2
+  if (code < 0x80) return 1
+  if (code < 0x800) return 2
+  if ((code & 0xf800) === 0xd800) return isPairAt(text, at) ? 4 : 6
+  return 3
+}
+
+/** The bytes `text` takes in a JSON string (`jsonBytes`). */
+function jsonLength(text: string): number {
+  let bytes = 0
+  for (let at = 0; at < text.length; at += isPairAt(text, at) ? 2 : 1) bytes += jsonBytes(text, at)
+  return bytes
+}
+
 /**
- * Where a page from `start` ends: at most `chars` characters and `bytes` UTF-8 bytes, never inside a surrogate pair,
- * and never empty (a pair at `start` is returned whole even when `chars` is 1).
+ * Where a page from `start` ends: at most `chars` characters and `bytes` bytes as JSON carries them, never inside a
+ * surrogate pair, and never empty (a pair at `start` is returned whole even when `chars` is 1).
  */
 function pageEnd(text: string, start: number, chars: number, bytes: number): number {
   const last = Math.min(text.length, start + chars)
@@ -35,8 +56,7 @@ function pageEnd(text: string, start: number, chars: number, bytes: number): num
   let used = 0
   while (end < text.length) {
     const pair = isPairAt(text, end)
-    const code = text.charCodeAt(end)
-    const size = pair ? 4 : code < 0x80 ? 1 : code < 0x800 ? 2 : 3
+    const size = jsonBytes(text, end)
     const next = end + (pair ? 2 : 1)
     if (end > start && (next > last || used + size > bytes)) break
     used += size
@@ -87,7 +107,8 @@ export function appletRevisionFromEdits(args: Record<string, unknown>, base: App
   const { edits, ...rest } = args
   const parts = applyAppletEdits(base, edits)
   return {
-    schemaVersion: 1,
+    // A version the call gives is validated like any submission's, not replaced.
+    schemaVersion: rest.schemaVersion ?? 1,
     title: rest.title ?? base.title,
     description: rest.description ?? base.description,
     ...parts,
@@ -140,8 +161,8 @@ export function readAppletSource(
       const hit = lines.slice(from, index).reduce((at, line) => at + line.length + 1, 0) + column
       const start = context.length <= SEARCH_EXCERPT_CHARS ? 0 : Math.max(0, Math.min(hit - SEARCH_EXCERPT_CHARS / 2, context.length - SEARCH_EXCERPT_CHARS))
       const excerpt = context.slice(start, start + SEARCH_EXCERPT_CHARS)
-      // Wide characters make an excerpt up to three times its length in bytes: the matches stop at one page's bytes.
-      const size = Buffer.byteLength(excerpt, 'utf8')
+      // Wide or escaped characters make an excerpt several times its length in bytes: the matches stop at one page's bytes.
+      const size = jsonLength(excerpt)
       if (bytes + size > APPLET_READ_MAX_BYTES) {
         full = true
         continue
@@ -157,12 +178,14 @@ export function readAppletSource(
   if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > APPLET_READ_MAX_CHARS)
     throw new AppletValidationError(`limit must be between 1 and ${APPLET_READ_MAX_CHARS} characters.`)
   if ((offset as number) > 0 && (offset as number) >= text.length) throw new AppletValidationError(`offset ${offset} is past the end of ${args.part}, which has ${text.length} characters.`)
-  const end = pageEnd(text, offset as number, limit as number, APPLET_READ_MAX_BYTES)
+  // An offset inside a surrogate pair starts at the pair, so the page never begins with half a character.
+  const start = (offset as number) > 0 && isPairAt(text, (offset as number) - 1) ? (offset as number) - 1 : (offset as number)
+  const end = pageEnd(text, start, limit as number, APPLET_READ_MAX_BYTES)
   return {
     part: args.part,
-    offset,
+    offset: start,
     totalChars: text.length,
-    text: text.slice(offset as number, end),
+    text: text.slice(start, end),
     ...(end < text.length ? { nextOffset: end } : {})
   }
 }

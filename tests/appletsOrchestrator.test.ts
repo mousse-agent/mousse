@@ -270,6 +270,29 @@ it('gives a parent the line, not the source, of an applet the model wrote as a f
   expect(results.at(-1)).toBe(`Before\n[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]\nAfter`)
 })
 
+it('publishes a tool-staged applet after a reply that left a code block open, and passes on its line', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'Here is the chart.\n```js\nconst open = true')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(source)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
 it('names an applet that failed to publish to other models, without its source', async () => {
   let transcriptOf: HandoffTranscriptSource | null = null
   const install = HandoffService.prototype.setTranscriptSource
@@ -288,7 +311,9 @@ it('names an applet that failed to publish to other models, without its source',
   // A valid applet that revises one this thread never published: publication fails when the reply completes.
   const stale = { ...source, appletId: 'applet_missing', expectedRevision: 'rev_missing' }
   main.orchestrator.setHarness(testHarness({ adapters: [piAdapter(() => 'Before\n' + fence(stale) + '\nAfter')], profileHome: main.getProfileHomeDir() }))
-  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+  // A person's message never publishes: a fence pasted there reaches the next model as written.
+  const asked = 'Fix this:\n' + fence(source)
+  await main.orchestrator.send({ content: asked, mode: 'agent' }, false, { threadId: thread.id })
 
   expect(main.applets.list(thread.id)).toEqual([])
   const reply = main.threads.loadThreadData(thread.id).messages.find((message) => message.role === 'assistant')!
@@ -296,6 +321,7 @@ it('names an applet that failed to publish to other models, without its source',
   expect(results.at(-1)).toBe('Before\n[Applet: Calculator]\nAfter')
   const handedOver = transcriptOf!(thread.id).find((item) => item.role === 'assistant')
   expect(handedOver?.text).toBe('Before\n[Applet: Calculator]\nAfter')
+  expect(transcriptOf!(thread.id).find((item) => item.role === 'user')?.text).toBe(asked)
   const page = await request(main, 'thread.messages', { threadId: thread.id, index: 0 }) as { messages: Array<{ role: string; content: string }> }
   const read = page.messages.find((message) => message.role === 'assistant')
   expect(read?.content).toContain('[Applet: Calculator]')

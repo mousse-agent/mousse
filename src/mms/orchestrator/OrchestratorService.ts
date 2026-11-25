@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, appletFencesAsLines, modelFacingReplyText, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appletFencesAsLines, closeOpenCodeBlock, modelFacingReplyText, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -16318,7 +16318,8 @@ export class OrchestratorService extends EventEmitter {
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
     const replyOnlyText = stripActionBlocks(assistantText)
-    const displayText = replyOnlyText + appletFences
+    // A reply that leaves a code block open would hold the fences as text: they would neither publish nor read as lines.
+    const displayText = (appletFences ? closeOpenCodeBlock(replyOnlyText) : replyOnlyText) + appletFences
     // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source:
     // by title until the reply publishes them, then as the reply shows them (below).
     let resultText = appletFencesAsLines(displayText)

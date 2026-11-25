@@ -214,11 +214,31 @@ export function appletReferenceLine(applet: { title: string; appletId?: string; 
  * that never published (`appletFencesAsLines`) one line naming it. The stored text keeps its fences, which recovery and
  * a bot's chat match on. A fence that is not a valid applet stays, for the model to fix.
  */
-export function modelFacingReplyText(message: { content?: unknown; presentationParts?: unknown }): string {
+export function modelFacingReplyText(message: { role?: unknown; content?: unknown; presentationParts?: unknown }): string {
+  // A person's message never publishes an applet: a fence pasted there is what they wrote, kept for the model to read.
+  if (message.role === 'user') return typeof message.content === 'string' ? message.content : ''
   const parts = Array.isArray(message.presentationParts) ? (message.presentationParts as AppletPresentationPart[]) : undefined
   if (parts?.some((part) => part?.type === 'applet'))
     return appletFencesAsLines(parts.map((part, at) => (part.type === 'applet' ? appletReferenceLine(part.reference) + lineEnd(parts, at) : part.text)).join(''))
   return appletFencesAsLines(typeof message.content === 'string' ? message.content : '')
+}
+/**
+ * `text` with a code block it leaves open closed, as `extractAppletParts` reads blocks, so a fence appended after it
+ * is a block of its own and not text inside the open one.
+ */
+export function closeOpenCodeBlock(text: string): string {
+  const probe = text.endsWith('\n') ? text : text + '\n'
+  const openings = /^(`{3,}|~{3,})([^\r\n]*)\r?\n/gm
+  let opening: RegExpExecArray | null
+  while ((opening = openings.exec(probe))) {
+    const marker = opening[1]
+    const closing = new RegExp(`^${marker[0]}{${marker.length},}[ \t]*(?:\\r?\\n|$)`, 'gm')
+    closing.lastIndex = openings.lastIndex
+    const end = closing.exec(probe)
+    if (!end) return probe + marker
+    openings.lastIndex = end.index + end[0].length
+  }
+  return text
 }
 /** A fence ends its line, so the line standing for it does too, unless it ends the text. */
 const lineEnd = (parts: readonly unknown[], at: number): string => (at < parts.length - 1 ? '\n' : '')

@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { APPLET_READ_MAX_BYTES, APPLET_READ_MAX_CHARS, APPLET_SEARCH_MAX_CHARS, applyAppletEdits, appletRevisionFromEdits, readAppletSource } from '../src/mms/applets/appletSource'
-import type { AppletSubmission } from '../src/shared/applets'
+import { validateAppletSubmission, type AppletSubmission } from '../src/shared/applets'
 
 const base: AppletSubmission = {
   schemaVersion: 1,
@@ -50,6 +50,10 @@ describe('appletRevisionFromEdits', () => {
   it('keeps every field the call leaves out, and takes the ones it gives', () => {
     expect(appletRevisionFromEdits(revise, base)).toEqual({ ...base, css: 'h1 { color: red; }', appletId: 'applet_a', expectedRevision: 'rev_a' })
     expect(appletRevisionFromEdits({ ...revise, title: 'Spend', data: { rows: 4 }, stateVersion: 3 }, base)).toMatchObject({ title: 'Spend', description: 'Monthly costs', data: { rows: 4 }, stateVersion: 3 })
+  })
+
+  it('keeps a schema version the call gives, for validation to refuse', () => {
+    expect(() => validateAppletSubmission(appletRevisionFromEdits({ ...revise, schemaVersion: 2 }, base))).toThrow(/schema version/)
   })
 
   it.each(['html', 'css', 'js', 'htmlPath', 'cssPath', 'jsPath'])('refuses edits given with %s', (key) => {
@@ -114,6 +118,15 @@ describe('readAppletSource', () => {
     const emoji = { ...base, js: '😀b' }
     expect(readAppletSource(emoji, { part: 'js', limit: 1 })).toMatchObject({ text: '😀', nextOffset: 2 })
     expect(readAppletSource(emoji, { part: 'js', offset: 2, limit: 1 })).toMatchObject({ text: 'b' })
+    // An offset inside the emoji starts at the emoji.
+    expect(readAppletSource(emoji, { part: 'js', offset: 1, limit: 1 })).toMatchObject({ offset: 0, text: '😀', nextOffset: 2 })
+  })
+
+  it('counts the escapes the JSON result adds toward a page', () => {
+    const tabs = { ...base, html: '\t'.repeat(APPLET_READ_MAX_CHARS) }
+    const page = readAppletSource(tabs, { part: 'html', limit: APPLET_READ_MAX_CHARS })
+    expect(Buffer.byteLength(JSON.stringify(page.text))).toBeLessThanOrEqual(APPLET_READ_MAX_BYTES + 2)
+    expect(page.nextOffset).toBe(APPLET_READ_MAX_BYTES / 2)
   })
 
   it.each([
