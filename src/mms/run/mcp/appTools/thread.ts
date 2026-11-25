@@ -1706,7 +1706,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const all = host.threadMessages(threadId)
     if (view === 'summary') {
       const { status, activeRunId, waitingOnSubagents, ...about } = localSummary(meta, all.length)
-      const lastReply = [...all].reverse().map((message) => message.role === 'assistant' ? modelFacingReplyText(message) : '').find((text) => text.trim())
+      // From the newest back, so only the replies up to the last one with text are read.
+      let lastReply: string | undefined
+      for (let at = all.length - 1; at >= 0 && !lastReply; at -= 1) {
+        const text = all[at]!.role === 'assistant' ? modelFacingReplyText(all[at]!) : ''
+        if (text.trim()) lastReply = text
+      }
       return botData(`Thread «${title}»`, {
         threadId,
         link: threadLink(threadId),

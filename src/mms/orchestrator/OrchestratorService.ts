@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, appletInsertionPoint, modelFacingReplyText, publishedApplets, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appendStagedApplets, appletReferenceLine, modelFacingReplyText, publishedApplets, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -16576,17 +16576,15 @@ export class OrchestratorService extends EventEmitter {
     const earlierReplies = this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
     // The streamed row never held the applet fences, so it is matched on the reply text alone.
     const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
-    // The fences join that last row, judged on the row alone (an earlier row is a reply of its own): at its end, or before
-    // a code block or an applet fence it leaves open (`appletInsertionPoint`).
+    // The fences end that last row, judged on the row alone (an earlier row is a reply of its own; `appendStagedApplets`).
     const split = replyOnlyText.endsWith(finalReplyText)
     const earlierText = split ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
     const lastReply = split ? finalReplyText : replyOnlyText
-    const insertAt = appletFences ? appletInsertionPoint(lastReply) : lastReply.length
-    const lastText = insertAt === lastReply.length ? lastReply + appletFences : lastReply.slice(0, insertAt) + appletFences + '\n\n' + lastReply.slice(insertAt)
-    const displayText = earlierText + lastText
-    // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source:
-    // by title until the reply publishes them, then as the reply shows them (below).
-    let resultText = redactAppletFences(displayText)
+    const displayText = earlierText + appendStagedApplets(lastReply, appletFences)
+    // The run's result (what a parent or `thread_wait` reads) is the text the model wrote with its applet fences cut, and
+    // the staged applets after it, by title until the reply publishes them, then by reference line (below). Fences added
+    // to the text are never read with it, where their closing lines could end a cut early.
+    let resultText = [redactAppletFences(replyOnlyText), ...stagedApplets.map((source) => appletReferenceLine({ title: source.title }))].filter(Boolean).join('\n\n')
     const finalText = unshownReplyText(displayText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
@@ -16629,8 +16627,8 @@ export class OrchestratorService extends EventEmitter {
         finalMessage.presentationParts = publishAppletPresentation(this.appletStore, { threadId: session.threadId, messageId: finalMessage.id, turnId, content: finalMessage.content })
         this.persist(true)
         this.emitMessageUpdated(finalMessage)
-        // The turn's text again, with the last row's published applets named by their reference lines.
-        if (finalMessage.presentationParts) resultText = redactAppletFences(displayText, publishedApplets(finalMessage.presentationParts))
+        // The text the model wrote again, with the last row's published applets named by their reference lines.
+        if (finalMessage.presentationParts) resultText = redactAppletFences(replyOnlyText, publishedApplets(finalMessage.presentationParts))
       }
     }
 

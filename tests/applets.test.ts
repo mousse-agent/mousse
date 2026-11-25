@@ -7,7 +7,7 @@ import {
   APPLET_SOURCE_LIMIT,
   APPLET_STATE_LIMIT,
   extractAppletParts,
-  appletInsertionPoint,
+  appendStagedApplets,
   modelFacingReplyText,
   redactAppletFences,
   validateAppletSubmission
@@ -373,7 +373,7 @@ describe('applet source kept from a model', () => {
     const content = ' ~~~mousse-applet\n' + fence(source) + CANARY + '\n~~~\nDone.'
     expect(redactAppletFences(content, [reference])).toBe(' [Applet]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\nDone.')
     // A published applet the text does not name by its title still reaches the model, after the text.
-    expect(redactAppletFences('Done.', [reference])).toBe('Done.\n[Applet: Calculator (appletId applet_a, revision rev_a)]')
+    expect(redactAppletFences('Done.', [reference])).toBe('Done.\n\n[Applet: Calculator (appletId applet_a, revision rev_a)]')
   })
 
   it('names a published applet the same when its result is redacted again', () => {
@@ -385,14 +385,13 @@ describe('applet source kept from a model', () => {
   })
 
   it.each([
-    ['at the end', 'Done.', 5],
-    ['before a code block left open', 'Here:\n```js\nx', 6],
-    ['before the line an applet fence opens on, when the open block is inside it', 'Here:\nDraft: ```mousse-applet\n~~~json\n{}\n```', 6],
-    ['before an applet fence that never closes', 'Here:\n~~~mousse-applet\n{', 6]
-  ])('puts a staged applet %s', (_name, reply, at) => {
-    expect(appletInsertionPoint(reply)).toBe(at)
+    ['after the text', 'Done.', 'Done.F'],
+    ['after closing a code block the reply leaves open', 'Here:\n```js\nx', 'Here:\n```js\nx\n```F'],
+    ['after an applet fence the reply leaves open, which stays open', 'Here:\n~~~mousse-applet\n{', 'Here:\n~~~mousse-applet\n{F'],
+    ['after a closed block that mentions an applet fence', '```js\n// ~~~mousse-applet\n```\nDone.', '```js\n// ~~~mousse-applet\n```\nDone.F']
+  ])('puts staged applets %s', (_name, reply, staged) => {
+    expect(appendStagedApplets(reply, 'F')).toBe(staged)
   })
-
   it('scans a long run of tildes once', () => {
     expect(redactAppletFences('mousse-applet\n' + '~'.repeat(1_000_000) + 'x')).toHaveLength(1_000_015)
   })

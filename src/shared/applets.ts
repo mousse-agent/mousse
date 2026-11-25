@@ -229,8 +229,8 @@ export function modelFacingReplyText(message: { role?: unknown; content?: unknow
   // A person's message never publishes an applet: a fence pasted there is what they wrote, kept for the model to read.
   return message.role === 'user' ? content : redactAppletFences(content, publishedApplets(message.presentationParts))
 }
-/** Where the code block `text` leaves open starts, as `extractAppletParts` reads blocks, or -1. */
-function openCodeBlockStart(text: string): number {
+/** The marker of the code block `text` leaves open, as `extractAppletParts` reads blocks, if any. */
+function openCodeBlock(text: string): string | undefined {
   const probe = text.endsWith('\n') ? text : text + '\n'
   const openings = /^(`{3,}|~{3,})([^\r\n]*)\r?\n/gm
   let opening: RegExpExecArray | null
@@ -239,10 +239,10 @@ function openCodeBlockStart(text: string): number {
     const closing = new RegExp(`^${marker[0]}{${marker.length},}[ \t]*(?:\\r?\\n|$)`, 'gm')
     closing.lastIndex = openings.lastIndex
     const end = closing.exec(text)
-    if (!end) return opening.index
+    if (!end) return marker
     openings.lastIndex = end.index + end[0].length
   }
-  return -1
+  return undefined
 }
 /**
  * Where an applet fence may open, read more widely than publication reads one: anywhere on a line (a stopped run's
@@ -333,18 +333,18 @@ export function redactAppletFences(text: string, published: readonly AppletRefer
     cursor = cut.end
   }
   out += text.slice(cursor)
-  return used < references.length ? [out, ...references.slice(used)].join('\n') : out
+  return used < references.length ? [out, ...references.slice(used)].filter(Boolean).join('\n\n') : out
 }
 
 /**
- * Where fences added to a reply (applets a tool staged) go: at its end, or before a code block it leaves open, inside
- * which they would be text (and closing the block could publish an applet the model left unfinished). Never inside an
- * applet fence as `redactAppletFences` reads one, where their closing line could end its cut early: before the line
- * that fence opens on.
+ * `text`, a reply, with `fences` (applets a tool staged) after everything the model wrote, so they never fall inside
+ * an applet fence as `redactAppletFences` reads one, where their closing lines could end its cut early. A code block
+ * the reply leaves open is closed first, or the fences would be text inside it; one an applet fence leaves open is not,
+ * so an applet the model left unfinished is never published.
  */
-export function appletInsertionPoint(text: string): number {
-  const open = openCodeBlockStart(text)
-  const at = open === -1 ? text.length : open
-  const around = appletCuts(text).find((cut) => cut.start < at && (at < cut.end || (at === cut.end && !cut.closed)))
-  return around ? text.lastIndexOf('\n', around.start - 1) + 1 : at
+export function appendStagedApplets(text: string, fences: string): string {
+  if (!fences) return text
+  const open = openCodeBlock(text)
+  if (!open || appletCuts(text).some((cut) => !cut.closed)) return text + fences
+  return (text.endsWith('\n') ? text : text + '\n') + open + fences
 }

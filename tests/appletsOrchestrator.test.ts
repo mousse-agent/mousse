@@ -329,7 +329,7 @@ it('publishes a tool-staged applet on a last row that follows a row left with an
   expect(results.at(-1)).not.toContain(source.js)
 })
 
-it('stages an applet before the line of an applet fence that holds an open block, so the fence is still cut whole', async () => {
+it('closes a code block left open inside a closed applet fence before staging an applet, and still cuts the fence whole', async () => {
   const { main, thread } = await fixture()
   main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
   const results: Array<string | undefined> = []
@@ -422,7 +422,7 @@ it('names an applet on an earlier reply row, also after a row that left a code b
   expect(results.at(-1)).not.toContain(source.js)
 })
 
-it('publishes a tool-staged applet before an applet fence the reply left unfinished, which stays unpublished', async () => {
+it('publishes a tool-staged applet whose source holds a separator then backticks, and never an applet the reply left unfinished', async () => {
   const { main, thread } = await fixture()
   main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
   const results: Array<string | undefined> = []
@@ -444,12 +444,22 @@ it('publishes a tool-staged applet before an applet fence the reply left unfinis
   main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
   await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
 
-  expect(main.applets.list(thread.id).map((applet) => applet.title)).toEqual(['Calculator'])
-  const ref = reference(main, thread.id)
-  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
-  expect(results.at(-1)).toContain('[Applet: Draft]')
-  expect(results.at(-1)).not.toContain('DRAFT_SOURCE')
-  expect(results.at(-1)).not.toContain(source.js)
+  // The staged fence follows the unfinished one, which publication reads as text to the end, as on master: neither publishes.
+  expect(main.applets.list(thread.id)).toEqual([])
+  expect(results.at(-1)).toBe('Almost:\n[Applet: Draft]\n\n[Applet: Calculator]')
+
+  // Without the unfinished fence, the staged one publishes whole.
+  const second = await fixture()
+  second.main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const plain = piAdapter(() => 'Here:')
+  const startPlain = plain.startTurn.bind(plain)
+  plain.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(staged)
+    return startPlain(input, sink, ctl, host)
+  }
+  second.main.orchestrator.setHarness(testHarness({ adapters: [plain], profileHome: second.main.getProfileHomeDir() }))
+  await second.main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: second.thread.id })
+  expect(second.main.applets.list(second.thread.id).map((applet) => applet.title)).toEqual(['Calculator'])
 })
 
 it('names an applet that failed to publish to other models, without its source', async () => {
