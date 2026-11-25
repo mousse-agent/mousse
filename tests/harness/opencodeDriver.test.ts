@@ -272,16 +272,22 @@ describe('a managed OpenCode', () => {
     }
   }
 
+  /**
+   * The registry: `current` is what it publishes now, `cached()` what Mousse last read from it, which
+   * changes only when it is asked (`agent`), as `AcpRegistry` keeps its snapshot.
+   */
   function installation(current: RegistryAgent) {
     const installationHome = tempDir('mousse-opencode-installs-')
+    let snapshot = [current]
     const registry: Registry = {
       current,
       asked: 0,
       agent: async (id: string) => {
         registry.asked += 1
+        snapshot = [registry.current]
         return registry.current.id === id ? registry.current : undefined
       },
-      cached: () => [registry.current]
+      cached: () => snapshot
     }
     const downloads: string[] = []
     const agents = new AgentInstalls({
@@ -358,7 +364,12 @@ describe('a managed OpenCode', () => {
 
     const own = fakeOpencode(join(tempDir('mousse-opencode-own-'), 'bin'))
     const { runtime, driver, env } = userSetup({ agents: shared.agents, registry: shared.registry, binaryPath: own })
+    // Recheck reads the installed files only of a copy that runs: this entry's copy is not, so it
+    // is never found broken and the entry stays usable.
+    await runtime.verifyInstall!(new AbortController().signal)
+    expect(runtime.managed!()!.broken).toBeUndefined()
     expect(runtime.configured()).toBe(true)
+    // A start checks no managed files either: the user's executable starts.
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
     expect(spawned).toHaveLength(1)
     expect(spawned[0]).toMatchObject({ command: own, args: ['acp'] })
@@ -476,15 +487,26 @@ describe('a managed OpenCode', () => {
       const { harness, shared, clock, npmAsked, snapshot } = await providers('2.5.0')
       expect((await snapshot()).update).toBeUndefined()
       expect(npmAsked).toEqual([])
-      expect(shared.registry.asked).toBeGreaterThan(0)
+      // Opening the page asked the registry already.
+      const asked = shared.registry.asked
 
+      // The registry publishes 2.4.2. Within the wait it is not asked again, so nothing is offered.
       shared.registry.current = entry('2.4.2')
-      clock.now += LATEST_TTL_MS
-      await harness.instances.recheck(ID)
-      expect((await snapshot()).update).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '2.4.2' })
-
       const events: HarnessGatewayEvent[] = []
       const unsubscribe = harness.instances.subscribe((event) => events.push(event))
+      clock.now += LATEST_TTL_MS - 1_000
+      expect((await snapshot()).update).toBeUndefined()
+      expect(shared.registry.asked).toBe(asked)
+
+      // Once it is due, the next look asks it, and the open page is sent the newer release without a recheck.
+      clock.now += 1_000
+      await snapshot()
+      expect(shared.registry.asked).toBe(asked + 1)
+      const offered = (event: HarnessGatewayEvent) =>
+        event.type === 'snapshots' && event.data.snapshots.some((entry) => entry.instanceId === ID && entry.update?.latestVersion === '2.4.2')
+      await waitFor(() => events.some(offered))
+      expect((await snapshot()).update).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '2.4.2' })
+
       await harness.instances.update(ID)
       await waitFor(async () => (await snapshot()).binary?.version === '2.4.2')
       expect((await snapshot()).update).toBeUndefined()

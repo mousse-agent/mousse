@@ -191,8 +191,9 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
 
   const runtime: DriverRuntime = {
     ...base,
-    // A broken managed copy stops only itself: an executable set on the entry still runs.
-    configured: () => !(program()?.managed && managed()?.broken) && base.configured(),
+    // A broken managed copy stops only itself: `checkManaged` reads the copy only while it is what runs,
+    // so an entry with its own executable never finds it broken.
+    configured: () => !managed()?.broken && base.configured(),
     llmProvider: () => (runtime.configured() ? { id: context.instanceId, label, models: runtime.models() } : undefined),
     ...(agents && registry ? {
       install: async (onProgress) => {
