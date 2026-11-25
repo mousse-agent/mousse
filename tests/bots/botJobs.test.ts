@@ -9,8 +9,8 @@ import { getDefaultSettings } from '../../src/shared/settings'
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { threadsActOf } from '../../src/mms/bots/activation/BotEngine'
-import { jobAskerOf, jobStateOf, jobStep, type JobThreadView } from '../../src/mms/bots/jobs'
-import { BOT_REPORT_MAX_CHARS } from '../../src/shared/bots/personal/jobs'
+import { jobAskerOf, jobResultOf, jobStateOf, jobStep, resultLine, type JobThreadView } from '../../src/mms/bots/jobs'
+import { BOT_JOB_LINE_CHARS, BOT_REPORT_MAX_CHARS, jobLine } from '../../src/shared/bots/personal/jobs'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 describe('a thread\'s standing as a job', () => {
@@ -39,6 +39,63 @@ describe('a thread\'s standing as a job', () => {
     ['a wake, its own', { lane: 'chat', idempotencyKey: 'wake:w1', trigger: { kind: 'manual', input: 'woke' } }, undefined, { askedBy: 'self', request: 'Do the thing' }]
   ] as const)('who asked, from %s', (_name, row, ownerText, expected) => {
     expect(jobAskerOf(row as never, ownerText, 'Do the thing')).toEqual(expected)
+  })
+
+  describe('what the owner asked, when their message is longer than one line holds', () => {
+    const chat = { lane: 'chat', idempotencyKey: 'chat:r1', trigger: { kind: 'manual', input: 'x' } } as never
+    const long = `Fix the login page in Web, ${'then tidy the settings page and the docs, '.repeat(5)}and tell me.`
+
+    it.each([
+      // It may ask for several things: each job names the part its thread was handed.
+      ['a long message', long, 'Fix the login redirect in Web.', 'Fix the login redirect in Web.'],
+      // Handed nothing to name: the message, cut to the line.
+      ['a long message, nothing handed', long, '  ', jobLine(long)],
+      // Long only in its spacing: one line holds it.
+      ['a message long only in its spacing', `Fix X in Y${' '.repeat(BOT_JOB_LINE_CHARS)}`, 'Fix the login redirect in Web.', 'Fix X in Y']
+    ])('%s', (_name, ownerText, sent, request) => {
+      expect(jobAskerOf(chat, ownerText, sent)).toEqual({ askedBy: 'owner', request })
+    })
+  })
+})
+
+describe('a job\'s answer and its one line', () => {
+  const longReply = `Fixed the login redirect. ${'The detail of what changed. '.repeat(20)}`
+
+  it.each([
+    // The run kept a progress message and then its final reply: the final reply is the answer.
+    ['a progress message, then the reply', 'Looking at the logs now.\n\nFixed the login redirect.', 'Fixed the login redirect.', 'Fixed the login redirect.'],
+    // The run's kept text is capped: the start of the reply is enough to know it is this run's.
+    ['a reply the kept text holds only the start of', `Looking now.\n\n${longReply.slice(0, BOT_JOB_LINE_CHARS + 10)}`, longReply, longReply.trim()],
+    // The last reply is an earlier turn's: what the run kept stands.
+    ['a last reply from another turn', 'Fixed page B.', 'Fixed page A.', 'Fixed page B.'],
+    ['no last reply', 'Fixed page B.', undefined, 'Fixed page B.'],
+    // A turn the owner started keeps no run result: the thread's last reply.
+    ['nothing kept', undefined, 'Fixed page A.', 'Fixed page A.'],
+    ['nothing kept, a blank reply', '  ', '  ', undefined]
+  ])('the answer: %s', (_name, recorded, lastReply, answer) => {
+    expect(jobResultOf(recorded, lastReply)).toBe(answer)
+  })
+
+  it.each([
+    ['the first line', 'Fixed the redirect.\nDetails.', 'Fixed the redirect.'],
+    ['past blank lines', '\n  \nFixed the redirect.', 'Fixed the redirect.'],
+    ['past a heading', '## Summary\n\nFixed the redirect.', 'Fixed the redirect.'],
+    ['past rules and a code fence', '---\n* * *\n___\n```ts\nconst fixed = true\n```', 'const fixed = true'],
+    ['past a setext underline', '=====\nFixed the redirect.', 'Fixed the redirect.'],
+    // A heading's words when the answer has nothing else.
+    ['only headings', '# Done\n\n## Nothing else', 'Done'],
+    // Words that start with layout characters are words.
+    ['an issue number', '#1873 is merged.', '#1873 is merged.'],
+    ['a bold line', '**Fixed** the redirect.', '**Fixed** the redirect.'],
+    ['a list item', '- Fixed the redirect.', '- Fixed the redirect.'],
+    ['nothing', '\n  \n', undefined],
+    ['no answer', undefined, undefined]
+  ])('the line: %s', (_name, result, line) => {
+    expect(resultLine(result)).toBe(line)
+  })
+
+  it('the line is held to one ledger line', () => {
+    expect(resultLine(`## Report\n${'word '.repeat(100)}`)).toBe(jobLine('word '.repeat(100)))
   })
 })
 
@@ -111,6 +168,16 @@ describe('the ledger in the bot engine', () => {
     // Three days later the ledger still names the thread that did it.
     f.clock.now += 3 * 24 * 60 * 60 * 1000
     expect(f.store.recentJobs(botId, 6)).toEqual([expect.objectContaining({ id: jobId, threadId: 't1', state: 'done', line: 'Fixed the login redirect.' })])
+  })
+
+  it('a long message names on its job what that thread was handed; the ledger line skips the answer\'s heading', async () => {
+    const jobId = await handOff(`Fix the login page in project Web, ${'then tidy the settings page and the docs, '.repeat(5)}and tell me.`, 't9', 'm9')
+    // handOff hands the thread "Fix the login redirect in Web."
+    expect(f.store.job(jobId)).toMatchObject({ askedBy: 'owner', request: 'Fix the login redirect in Web.' })
+    threads.set('t9', { status: 'done', title: 'Fix the login page', result: '## Summary\n\n---\nFixed the login redirect.\nDetails below.' })
+    f.bots.threadRunEnded('t9')
+    await flush()
+    expect(f.store.job(jobId)).toMatchObject({ state: 'done', line: 'Fixed the login redirect.' })
   })
 
   it('a thread waiting for a person is a notice; an answer moves it back quietly; its end is a second notice', async () => {
