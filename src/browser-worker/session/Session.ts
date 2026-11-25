@@ -2557,9 +2557,10 @@ export class ManagedSession {
 
   /**
    * Where an attached frame from another site sits in its tab's viewport (CSS pixels), or null when
-   * it cannot be placed. The frame is matched to its `<iframe>` by id first (its own frame tree's id
-   * when the tab's tree names it otherwise), then by its URL, then by its origin; a frame matched by
-   * URL or origin must be laid out, so a hidden helper frame from the same site is never taken for it.
+   * it cannot be placed or is not laid out (a 0×0 or hidden `<iframe>`). Its `<iframe>` is found by
+   * the frame id it was attached with, then by the id its own frame tree gives; a tab's frame tree
+   * lists only frames of its own process, so it is a last resort, matched by URL then by origin
+   * among frames that are laid out, so a hidden helper frame from the same site is never taken for it.
    */
   private async frameViewportBounds(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<FrameBounds | null> {
     try {
@@ -2568,6 +2569,32 @@ export class ManagedSession {
       visited.add(frame.sessionId)
       const cdp = this.requireChrome().cdp
       const siblings = this.framesOf(tab)
+      const place = async (entry: FrameTreeEntry): Promise<FrameBounds | null> => {
+        if (!entry.id) return null
+        const parent = entry.parentId ? siblings.find((other) => other !== frame && other.frameId === entry.parentId) : undefined
+        const parentBounds = parent ? await this.frameViewportBounds(tab, parent, new Set(visited)) : { x: 0, y: 0, width: 0, height: 0 }
+        if (!parentBounds) return null
+        const box = await this.frameOwnerBounds(parent?.sessionId ?? tab.cdpSessionId, entry.id)
+        return box ? { x: parentBounds.x + box.x, y: parentBounds.y + box.y, width: box.width, height: box.height } : null
+      }
+      // The ids it was attached with are the frame's own: its `<iframe>` is asked for directly.
+      const direct = await place({ id: frame.frameId, parentId: frame.parentFrameId })
+      if (direct) return direct
+      const own = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: frame.sessionId }).catch(() => undefined)
+      const root = own?.frameTree?.frame
+      const rootParentId = root?.parentId ?? frame.parentFrameId
+      if (root?.id && (root.id !== frame.frameId || rootParentId !== frame.parentFrameId)) {
+        const placed = await place({ id: root.id, parentId: rootParentId })
+        if (placed) {
+          frame.frameId = root.id
+          frame.parentFrameId = rootParentId
+          frame.url = sanitizeUrl(root.url ?? frame.url) || frame.url
+          return placed
+        }
+      }
+      // Last resort: the tab's own frame tree, by URL then by origin, among frames not claimed by another.
+      const url = frameUrlKey(root?.url ?? frame.url)
+      if (!url) return null
       const candidates: FrameTreeEntry[] = []
       const tree = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
       const visit = (node: FrameTreeNode | undefined) => {
@@ -2577,69 +2604,30 @@ export class ManagedSession {
         }
       }
       visit(tree.frameTree)
-      const claimed = (id: string) => siblings.some((other) => other !== frame && other.frameId === id)
-      const place = async (entry: FrameTreeEntry, laidOut: boolean): Promise<FrameBounds | null> => {
-        if (!entry.id) return null
-        const parent = entry.parentId ? siblings.find((other) => other !== frame && other.frameId === entry.parentId) : undefined
-        const parentBounds = parent ? await this.frameViewportBounds(tab, parent, new Set(visited)) : { x: 0, y: 0, width: 0, height: 0 }
-        if (!parentBounds) return null
-        const own = await this.frameOwnerBounds(parent?.sessionId ?? tab.cdpSessionId, entry.id, laidOut)
-        return own ? { x: parentBounds.x + own.x, y: parentBounds.y + own.y, width: own.width, height: own.height } : null
+      const open = candidates.filter((entry) => entry.id && entry.id !== frame.frameId && entry.id !== root?.id && !siblings.some((other) => other !== frame && other.frameId === entry.id))
+      const blank = url === 'about:blank'
+      const byUrl = open.filter((entry) => {
+        const entryUrl = frameUrlKey(entry.url ?? '')
+        return entryUrl === url && (blank || entryUrl !== 'about:blank')
+      })
+      const origin = originOf(url)
+      const byOrigin = origin ? open.filter((entry) => !byUrl.includes(entry) && originOf(entry.url ?? '') === origin) : []
+      for (const entry of [...byUrl, ...byOrigin]) {
+        const placed = await place(entry)
+        if (!placed || !entry.id) continue
+        frame.frameId = entry.id
+        frame.parentFrameId = entry.parentId
+        frame.url = sanitizeUrl(root?.url ?? entry.url ?? frame.url) || frame.url
+        return placed
       }
-      let url = frameUrlKey(frame.url)
-      let match = candidates.find((entry) => entry.id === frame.frameId)
-      if (match) {
-        const bounds = await place(match, false)
-        if (!bounds) return null
-        frame.parentFrameId = match.parentId
-        frame.url = sanitizeUrl(match.url ?? frame.url) || frame.url
-        return bounds
-      }
-      // The tab's tree does not name it: the frame's own tree says which frame it is and where it is now.
-      const own = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: frame.sessionId }).catch(() => undefined)
-      const root = own?.frameTree?.frame
-      if (root?.url) url = frameUrlKey(root.url)
-      if (root?.id) match = candidates.find((entry) => entry.id === root.id)
-      let bounds: FrameBounds | null = null
-      if (match) bounds = await place(match, false)
-      else {
-        const open = candidates.filter((entry) => entry.id && !claimed(entry.id))
-        const tried = new Set<FrameTreeEntry>()
-        const blank = url === 'about:blank'
-        for (const entry of open) {
-          const entryUrl = frameUrlKey(entry.url ?? '')
-          if (!url || entryUrl !== url || (entryUrl === 'about:blank' && !blank)) continue
-          tried.add(entry)
-          bounds = await place(entry, true)
-          if (bounds) {
-            match = entry
-            break
-          }
-        }
-        const origin = originOf(url)
-        if (!match && origin) {
-          for (const entry of open) {
-            if (tried.has(entry) || originOf(entry.url ?? '') !== origin) continue
-            bounds = await place(entry, true)
-            if (bounds) {
-              match = entry
-              break
-            }
-          }
-        }
-      }
-      if (!match?.id || !bounds) return null
-      frame.frameId = match.id
-      frame.parentFrameId = match.parentId
-      frame.url = sanitizeUrl(root?.url ?? match.url ?? frame.url) || frame.url
-      return bounds
+      return null
     } catch {
       return null
     }
   }
 
-  /** The box of the `<iframe>` holding a frame, in the viewport of the session that holds that element. */
-  private async frameOwnerBounds(sessionId: string, frameId: string, laidOut: boolean): Promise<FrameBounds | null> {
+  /** The box of the `<iframe>` holding a frame, in the viewport of the session that holds that element; null when it has no area. */
+  private async frameOwnerBounds(sessionId: string, frameId: string): Promise<FrameBounds | null> {
     try {
       const cdp = this.requireChrome().cdp
       const owner = await cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId }, { sessionId })
@@ -2650,7 +2638,8 @@ export class ManagedSession {
       const xs = [quad[0], quad[2], quad[4], quad[6]]
       const ys = [quad[1], quad[3], quad[5], quad[7]]
       const bounds = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }
-      if (laidOut && (bounds.width <= 0 || bounds.height <= 0)) return null
+      // A 0×0 `<iframe>` shows nothing: its frame is not read, nor taken for another.
+      if (bounds.width <= 0 || bounds.height <= 0) return null
       return bounds
     } catch {
       return null
