@@ -4175,7 +4175,11 @@ export class ClaudeSubscriptionProviderService {
           success = false
           resumedWithSteer = true
           steerUnanswered = false
-          if (frames.text) frames.text += '\n\n'
+          // The blank line before the steered reply is Mousse's own: the row that opens after the steer drops it.
+          if (frames.text) {
+            input.onTextSeparator?.(frames.text.length, '\n\n')
+            frames.text += '\n\n'
+          }
         }
       }
       input.signal?.throwIfAborted()
