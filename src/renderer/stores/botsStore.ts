@@ -54,7 +54,7 @@ export interface BotChatCache {
 
 /** A `/` command that asks first (`/forget`, `/forget history`, `/reset`). */
 export type BotConfirmCommand = 'forget' | 'forget-history' | 'reset'
-export type BotDialog = { kind: 'rename' | 'look' | 'delete'; botId: string } | { kind: 'confirm'; botId: string; command: BotConfirmCommand }
+export type BotDialog = { kind: 'rename' | 'look' | 'delete' | 'fullTrust'; botId: string } | { kind: 'confirm'; botId: string; command: BotConfirmCommand }
 
 /** A line Mousse shows in a bot's chat for the owner alone (a `/` command's result): never sent, never the bot's. */
 export interface BotLocalNote { id: string; at: string; text: string; error?: true }

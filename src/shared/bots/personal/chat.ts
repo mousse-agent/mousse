@@ -408,6 +408,8 @@ export interface BotReminderItem {
 export interface BotDetail {
   summary: BotSummary
   permissions: BotPermissionItem[]
+  /** "Allow everything" is on (`BotManifest.fullTrust`). Absent from older services, which have no such switch. */
+  fullTrust?: boolean
   runs: BotRunItem[]
   /** Waiting reminders, soonest first; absent from older services. */
   reminders?: BotReminderItem[]

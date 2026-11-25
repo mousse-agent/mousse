@@ -50,6 +50,15 @@ describe('botManifestDigest', () => {
     expect(botManifestDigest(stored)).toBe('59d7d34674af007da7c383871d8f56723c12ce8121e73025432855e208b35459')
   })
 
+  // "Allow everything" (#1363) is stored only when on: a grant without it, as every stored one is, hashes as before.
+  it('Allow everything is part of the digest only when on', () => {
+    const stored = manifest({ tools: ['read', 'edit', 'shell'], appTools: ['web_search', 'web_fetch', 'bot_schedule_add', 'escalate', 'run_report', 'threads', 'browser'] })
+    expect(botManifestDigest({ ...stored, fullTrust: undefined })).toBe('59d7d34674af007da7c383871d8f56723c12ce8121e73025432855e208b35459')
+    expect(canonicalManifest(stored)).not.toHaveProperty('fullTrust')
+    expect(botManifestDigest({ ...stored, fullTrust: true })).not.toBe(botManifestDigest(stored))
+    expect(manifestProblem({ ...stored, fullTrust: false })).toBe('Allow everything is on, or left out.')
+  })
+
   it('a grant approved with a work time keeps its digest, and a revision without one is a subset of it', () => {
     const old = manifest({ budget: { maxActiveMs: 60 * 60_000, maxToolCalls: 50 } })
     // The same canonical form as when it was approved: work time first, then the other limits.
@@ -97,6 +106,20 @@ describe('the subset rule', () => {
     const unlimited = manifest({ budget: { maxToolCalls: 50 } })
     expect(manifestSubset(unlimited, granted)).toBe(false)
     expect(addedPermissions(unlimited, granted).map((line) => line.text)).toEqual(['No limit on model requests (retries included)'])
+  })
+
+  // What approve() moves work onto (a subset of the new grant) and what it ends (anything the old one gave that the new
+  // one does not): Allow everything and how tightly an MCP tool is held count as permissions too.
+  it.each([
+    ['Allow everything added', manifest({ fullTrust: true }), manifest(), ['Allow everything: every tool and permission a bot can be given, without asking']],
+    ['Allow everything taken away', manifest(), manifest({ fullTrust: true }), []],
+    ['an MCP tool no longer asking first', manifest(), manifest({ mcp: [{ serverId: 'github', tool: 'create_issue', level: 'asks_first' }] }), ['Use the MCP tool `create_issue` without asking first']],
+    ['an MCP tool asking first again', manifest({ mcp: [{ serverId: 'github', tool: 'create_issue', level: 'asks_first' }] }), manifest(), []]
+  ])('%s', (_name, wanted, granted, added) => {
+    expect(addedPermissions(wanted, granted).map((line) => line.text)).toEqual(added)
+    expect(manifestSubset(wanted, granted)).toBe(added.length === 0)
+    // The other way round is the other answer: what one adds, the other takes away.
+    expect(manifestSubset(granted, wanted)).toBe(added.length > 0)
   })
 
   it('with nothing granted, everything is listed', () => {

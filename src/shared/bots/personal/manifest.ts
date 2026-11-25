@@ -1,7 +1,7 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
 import { COMPUTER_TOOL_NAMES } from '../../computerUse'
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
-import { isNeutralTool, type NeutralTool } from '../../harness/tools'
+import { isNeutralTool, NEUTRAL_TOOLS, type NeutralTool } from '../../harness/tools'
 import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
@@ -310,6 +310,9 @@ export const BOT_MCP_SERVER_SWITCH = 'default:mcp:'
 export const BOT_SKILLS_SWITCH = 'default:skills'
 export const BOT_AUTOMATIONS_SWITCH = 'default:automations'
 
+/** About's switch for "Allow everything" (`BotManifest.fullTrust`), as `bots.permissions.set` names it. */
+export const BOT_FULL_TRUST_PERMISSION = 'full_trust'
+
 /** Whether `id` is one of the switches of what every bot has by default. */
 export function isBotDefaultSwitch(id: string): boolean {
   return id === BOT_MCP_SWITCH || id === BOT_SKILLS_SWITCH || id === BOT_AUTOMATIONS_SWITCH || (id.startsWith(BOT_MCP_SERVER_SWITCH) && id.length > BOT_MCP_SERVER_SWITCH.length)
@@ -452,7 +455,23 @@ export function canonicalManifest(manifest: BotManifest): BotManifest {
     skills: sorted(manifest.skills, (skill) => skill),
     workspace: workspaceOf(foldersOf(manifest.workspace)),
     budget,
-    audience: manifest.audience
+    audience: manifest.audience,
+    // Only when true: a grant without it keeps the digest it was approved under.
+    ...(manifest.fullTrust === true ? { fullTrust: true as const } : {})
+  }
+}
+
+/**
+ * What "Allow everything" (`fullTrust`) gives: every built-in tool and every Mousse app tool a bot can be granted, added
+ * to `manifest`. Its MCP tools, skills and limits stay as they are: MCP and skills come to every bot unless switched off
+ * (`BotEngine.withDefaults`), and a tool that asks first still asks. A manifest without it is returned as it is.
+ */
+export function withFullTrust(manifest: BotManifest): BotManifest {
+  if (manifest.fullTrust !== true) return manifest
+  return {
+    ...manifest,
+    tools: [...new Set<NeutralTool>([...manifest.tools, ...NEUTRAL_TOOLS])],
+    appTools: [...new Set([...manifest.appTools, ...BOT_APP_TOOLS])]
   }
 }
 
@@ -489,6 +508,7 @@ export function manifestProblem(value: unknown): string | undefined {
     if (key !== 'maxUsd' && !Number.isSafeInteger(limit)) return `The limit ${key} must be a whole number.`
   }
   if (manifest.audience !== 'owner') return 'Bots for other people are not available yet.'
+  if (manifest.fullTrust !== undefined && manifest.fullTrust !== true) return 'Allow everything is on, or left out.'
   return undefined
 }
 
@@ -512,7 +532,8 @@ function currentPlatform(): string {
 
 /**
  * Whether `wanted` asks for nothing beyond `granted`: every tool, app tool, MCP tool and skill is
- * granted, and every limit is at most the granted one (a limit the grant has and `wanted` drops is
+ * granted, no MCP tool goes without asking first where the grant asks first, "Allow everything" only where the grant
+ * has it, and every limit is at most the granted one (a limit the grant has and `wanted` drops is
  * wider, so it is not a subset). A stored `workspace` grants nothing, so it is never asked about.
  */
 export function manifestSubset(wanted: BotManifest, granted: BotManifest): boolean {
@@ -526,12 +547,16 @@ export function manifestSubset(wanted: BotManifest, granted: BotManifest): boole
 export function addedPermissions(wanted: BotManifest, granted: BotManifest | null): BotPermissionLine[] {
   if (!granted) return describeManifest(wanted)
   const lines: BotPermissionLine[] = []
+  if (wanted.fullTrust === true && granted.fullTrust !== true) lines.push(FULL_TRUST_LINE)
   const tools = new Set(granted.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
   const appTools = new Set(granted.appTools)
   for (const tool of wanted.appTools) if (!appTools.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
+  // A tool the grant holds as asking first, wanted without asking: a looser hold is more, as a new tool is.
+  const asksFirst = new Set(granted.mcp.filter((pair) => pair.level === 'asks_first').map(mcpIdentity))
+  for (const pair of wanted.mcp) if (pair.level !== 'asks_first' && asksFirst.has(mcpIdentity(pair))) lines.push({ kind: 'mcp', text: `Use the MCP tool \`${pair.tool}\` without asking first` })
   const skills = new Set(granted.skills)
   for (const skill of wanted.skills) if (!skills.has(skill)) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
   for (const key of BUDGET_KEYS) {
@@ -545,7 +570,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
 
 /** Every permission of a manifest, in plain words. */
 export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
-  const lines: BotPermissionLine[] = []
+  const lines: BotPermissionLine[] = manifest.fullTrust === true ? [FULL_TRUST_LINE] : []
   for (const tool of manifest.tools) lines.push(toolLine(tool))
   for (const tool of manifest.appTools) if (!BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   for (const pair of manifest.mcp) lines.push(mcpLine(pair))
@@ -559,6 +584,9 @@ function unique(lines: BotPermissionLine[]): BotPermissionLine[] {
   const seen = new Set<string>()
   return lines.filter((line) => !seen.has(line.text) && Boolean(seen.add(line.text)))
 }
+
+/** "Allow everything" in the approval's words. */
+const FULL_TRUST_LINE: BotPermissionLine = { kind: 'full_trust', text: 'Allow everything: every tool and permission a bot can be given, without asking' }
 
 const TOOL_WORDS: Record<NeutralTool, string> = {
   read: 'Read files',
@@ -648,6 +676,8 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
     skills: within(wanted.skills, granted.skills, (skill) => skill),
     workspace: null,
     budget,
-    audience: 'owner'
+    audience: 'owner',
+    // Only what both give: the revision asks for it and the grant holds it.
+    ...(wanted.fullTrust === true && granted.fullTrust === true ? { fullTrust: true as const } : {})
   }
 }
