@@ -511,8 +511,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const draggedItem = useRef<DraggedSidebarItem | null>(null)
   const suppressClick = useRef(false)
-  // Where a row dragged in the Threads tab would land: before or after this thread.
-  const [feedDrop, setFeedDrop] = useState<{ id: string; after: boolean } | null>(null)
+  // Where a dragged project or thread would land: before or after this row, shown as a line.
+  const [rowDrop, setRowDrop] = useState<{ type: DraggedSidebarItem['type']; id: string; after: boolean } | null>(null)
   const threadFeedOrder = useAppStore((s) => s.threadFeedOrder)
   const setThreadFeedOrder = useAppStore((s) => s.setThreadFeedOrder)
 
@@ -910,7 +910,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   /** Moves the row dragged in the Threads tab before or after `target`, or to the end without one. */
   const dropFeedThread = (target?: string, after = false) => {
     const dragged = draggedItem.current
-    setFeedDrop(null)
+    setRowDrop(null)
     // A filtered list holds only some threads: its order is not the tab's.
     if (!dragged?.feed || dragged.id === target || filtering) return
     suppressClick.current = true
@@ -918,8 +918,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     setThreadFeedOrder(arrangeThreadFeed(feedThreads.flatMap((thread) => (unmadeRows.has(thread.id) ? [] : [thread.id])), dragged.id, target, after))
   }
 
-  const reorderBefore = async (target: DraggedSidebarItem) => {
+  /** Moves the dragged project, or thread within its project, before or after `target`. */
+  const reorderAt = async (target: DraggedSidebarItem, after: boolean) => {
     const dragged = draggedItem.current
+    setRowDrop(null)
     if (!dragged || !canDropOn(target)) return
     suppressClick.current = true
     window.setTimeout(() => { suppressClick.current = false }, 0)
@@ -927,7 +929,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       // One entry per group: a project on several computers is dragged as one.
       const ids = projectGroups.map((group) => group.id)
       ids.splice(ids.indexOf(dragged.id), 1)
-      ids.splice(ids.indexOf(target.id), 0, dragged.id)
+      ids.splice(ids.indexOf(target.id) + (after ? 1 : 0), 0, dragged.id)
       await window.mousse.projects.reorder(ids)
       return
     }
@@ -936,13 +938,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const group = threads.filter((thread) => groupIdOf(thread.projectId) === dragged.projectId && !isPendingRowId(thread.id))
     const ids = group.map((thread) => thread.id)
     ids.splice(ids.indexOf(dragged.id), 1)
-    ids.splice(ids.indexOf(target.id), 0, dragged.id)
+    ids.splice(ids.indexOf(target.id) + (after ? 1 : 0), 0, dragged.id)
     await window.mousse.threads.reorder(dragged.projectId, ids)
+  }
+
+  /** The lower half of a row drops after it, so a row can also go last. */
+  const dropsInLowerHalf = (event: React.DragEvent) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    return event.clientY > rect.top + rect.height / 2
   }
 
   const endDrag = () => {
     draggedItem.current = null
-    setFeedDrop(null)
+    setRowDrop(null)
   }
 
 
@@ -1356,12 +1364,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // Cards in the Threads tab can be dragged into an order of their own (archived and Needs me rows cannot).
     const feed = layout === 'card' && !isArchived && !inNeedsMe
     const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), pinned: Boolean(thread.pinnedAt), ...(feed ? { feed } : {}) }
-    const dropLine = !inNeedsMe && feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
-    // The lower half of a row drops after it, so a row can also go last.
-    const dropsAfter = (event: React.DragEvent) => {
-      const rect = event.currentTarget.getBoundingClientRect()
-      return event.clientY > rect.top + rect.height / 2
-    }
+    const dropLine = !inNeedsMe && rowDrop?.type === 'thread' && rowDrop.id === thread.id ? (rowDrop.after ? ' drop-after' : ' drop-before') : ''
 
     return (
 
@@ -1425,18 +1428,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           // Nothing drops onto a row the service has not made yet, or a chat not sent yet.
           if (inNeedsMe || actionless || !canDropOn(dragItem)) return
           event.preventDefault()
-          if (!feed) return
           event.stopPropagation()
-          const after = dropsAfter(event)
-          if (feedDrop?.id !== thread.id || feedDrop.after !== after) setFeedDrop({ id: thread.id, after })
+          const after = dropsInLowerHalf(event)
+          if (rowDrop?.type !== 'thread' || rowDrop.id !== thread.id || rowDrop.after !== after) setRowDrop({ type: 'thread', id: thread.id, after })
         }}
 
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
           if (inNeedsMe || actionless) return
-          if (feed) dropFeedThread(thread.id, dropsAfter(event))
-          else void reorderBefore(dragItem)
+          if (feed) dropFeedThread(thread.id, dropsInLowerHalf(event))
+          else void reorderAt(dragItem, dropsInLowerHalf(event))
         }}
 
         onDragEnd={endDrag}
@@ -1824,7 +1826,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                 <div
                   key={project.id}
-                  className="threads-sidebar-project"
+                  className={`threads-sidebar-project${rowDrop?.type === 'project' && rowDrop.id === project.id ? (rowDrop.after ? ' drop-after' : ' drop-before') : ''}`}
                   data-project-id={project.id}
                   data-active-project={activeGroupId === group.id || undefined}
                   // The folder icon's color: the group's hue, as on its threads' cards (polish.css).
@@ -1832,11 +1834,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                   draggable={!isRenaming}
                   onDragStart={(event) => startDrag(event, { type: 'project', id: project.id })}
                   onDragOver={(event) => {
-                    if (canDropOn({ type: 'project', id: project.id })) event.preventDefault()
+                    if (!canDropOn({ type: 'project', id: project.id })) {
+                      // Over a row it cannot drop on, no line promises a place.
+                      if (rowDrop) setRowDrop(null)
+                      return
+                    }
+                    event.preventDefault()
+                    // The lower half of the group drops after it, so a project can also go last.
+                    const after = dropsInLowerHalf(event)
+                    if (rowDrop?.type !== 'project' || rowDrop.id !== project.id || rowDrop.after !== after) setRowDrop({ type: 'project', id: project.id, after })
                   }}
                   onDrop={(event) => {
                     event.preventDefault()
-                    void reorderBefore({ type: 'project', id: project.id })
+                    void reorderAt({ type: 'project', id: project.id }, dropsInLowerHalf(event))
                   }}
                   onDragEnd={endDrag}
                 >
@@ -2043,14 +2053,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             const rows = event.currentTarget.querySelectorAll('.threads-sidebar-thread-container')
             const bottom = rows[rows.length - 1]?.getBoundingClientRect().bottom
             const last = [...feedRows].reverse().find((thread) => !unmadeRows.has(thread.id))
-            if (last && bottom !== undefined && event.clientY > bottom && (feedDrop?.id !== last.id || !feedDrop.after)) {
-              setFeedDrop({ id: last.id, after: true })
+            if (last && bottom !== undefined && event.clientY > bottom && (rowDrop?.type !== 'thread' || rowDrop.id !== last.id || !rowDrop.after)) {
+              setRowDrop({ type: 'thread', id: last.id, after: true })
             }
           }}
           onDrop={(event) => {
             if (!draggedItem.current?.feed) return
             event.preventDefault()
-            if (feedDrop) dropFeedThread(feedDrop.id, feedDrop.after)
+            if (rowDrop?.type === 'thread') dropFeedThread(rowDrop.id, rowDrop.after)
           }}
         >
           {/* Cards render only while the tab shows (or is coming in), so a change to the list does not redraw a hidden copy of it. */}
