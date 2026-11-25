@@ -33,6 +33,7 @@ import type {
   FileAsset,
   EditorInfo,
   FileEntry,
+  FileMediaSource,
   FileText,
   FileGrepResponse,
   FileSearchResponse,
@@ -563,6 +564,12 @@ const api = {
     /** A preview's size and write time (`mtimeMs` absent from an older daemon), without reading it. */
     assetStamp: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<{ size: number; mtimeMs?: number }> =>
       ipcRenderer.invoke('fs:assetStamp', filePath, projectId, threadId, root),
+    /** Opens a byte-range streaming URL (`mousse-media://`) for a video file without buffering it in memory. */
+    openMediaUrl: (filePath: string, projectId?: string, threadId?: string | null, root?: string, details?: boolean): Promise<FileMediaSource> =>
+      ipcRenderer.invoke('fs:openMediaUrl', filePath, projectId, threadId, root, details),
+    /** Releases a streaming URL returned by `openMediaUrl` when the preview closes or reloads. */
+    releaseMediaUrl: (url: string): Promise<void> =>
+      ipcRenderer.invoke('fs:releaseMediaUrl', url),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string, expectedRoot?: string): Promise<void> =>
       ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root, expectedRoot),
     /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
