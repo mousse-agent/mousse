@@ -115,6 +115,11 @@ export interface BotToolHost {
      * notes while it runs), or `start` (when it starts or goes on).
      */
     reach?(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start'
+    /**
+     * Whether a note chat activation `from` passes on carries the owner's own message: false on a turn no owner message
+     * started (a job notice, a wake), whose note is the bot's own update and is never credited to the owner.
+     */
+    fromOwner?(botId: string, from: string): boolean
   }
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>

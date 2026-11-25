@@ -3293,7 +3293,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A notice turn whose owner wrote meanwhile: told once to wrap up (`queueChatInTx`).
     const wrapUp = this.wrapUps.has(row.id) && !outstanding.some((entry) => entry.wrapUp)
     if (!regive && !notes.length && !ended.length && !wrapUp) return undefined
-    const noteText = row.lane === 'chat' ? chatSteerText(notes.map((note) => note.text)) : noteSteerText(notes.map((note) => note.text))
+    const noteText = row.lane === 'chat' ? chatSteerText(notes.map((note) => note.text)) : noteSteerText(notes.map((note) => ({ text: note.text, fromOwner: !botAuthoredNote(note.fromMessage) })))
     const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteText] : []), ...ended.map(([, text]) => text), ...(wrapUp ? [OWNER_WAITS_STEER] : [])]
     return { text: parts.join('\n\n'), ids: notes.map((note) => note.id), ...(regive ? { regiveFor: live.compactions } : {}), ...(ended.length ? { subagents: ended.map(([thread]) => thread) } : {}), ...(wrapUp ? { wrapUp: true as const } : {}) }
   }
@@ -3316,12 +3316,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const pack = (whole ?? this.packs.get(row.id))?.trim()
     const request = this.store.dispatch(row.id, 1)?.prompt.text.trim()
-    const added = this.store.all('SELECT text FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NOT NULL ORDER BY id', row.id).map((entry) => String(entry.text).trim()).filter(Boolean)
+    const notes = this.store.all('SELECT text, from_message FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NOT NULL ORDER BY id', row.id)
+      .map((entry) => ({ text: String(entry.text).trim(), own: botAuthoredNote(entry.from_message as string | null) })).filter((entry) => entry.text)
+    const added = notes.filter((note) => !note.own).map((note) => note.text)
+    const passed = notes.filter((note) => note.own).map((note) => note.text)
     return [
       '[Mousse] Your context was just summarised to make room. Here again is your memory and what you were asked, so you keep to them. Nothing about the job changed; carry on where you left off.',
       ...(pack ? [pack] : []),
       ...(request ? [`What you were asked:\n${request}`] : []),
-      ...(added.length ? [`What the owner added since:\n${added.map((text) => `- ${text}`).join('\n')}`] : [])
+      ...(added.length ? [`What the owner added since:\n${added.map((text) => `- ${text}`).join('\n')}`] : []),
+      ...(passed.length ? [`${OWN_NOTES_HEADING}\n${passed.map((text) => `- ${text}`).join('\n')}`] : [])
     ].join('\n\n')
   }
 
@@ -8528,7 +8532,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       list: (botId) => this.listWork(botId),
       stop: (botId, workId) => this.stopWork(botId, workId),
       note: (botId, workId, note, from) => this.noteWork(botId, workId, note, from),
-      reach: (botId, workId) => this.noteReach(botId, workId)
+      reach: (botId, workId) => this.noteReach(botId, workId),
+      fromOwner: (botId, from) => this.noteFromOwner(botId, from)
     },
     questions: {
       ask: (botId, activationId, spec, follow) => this.askOwner(botId, activationId, spec, follow),
@@ -8982,6 +8987,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
+   * Where a note from chat activation `from` came from (`bot_work_notes.from_message`): the owner's message its turn
+   * holds, or, on a turn no owner message started (a job notice, a wake), the bot's own chat (`BOT_NOTE_SOURCE_PREFIX`).
+   */
+  private noteSourceOf(from: string): string {
+    return this.ownerMessageOf(from) ?? `${BOT_NOTE_SOURCE_PREFIX}${from}`
+  }
+
+  /** Whether a note `work_note` passes on from chat activation `from` carries the owner's own message (`noteSourceOf`). */
+  noteFromOwner(botId: string, from: string): boolean {
+    const row = this.store.activation(from)
+    return !row || row.botId !== botId || this.ownerMessageOf(from) !== undefined
+  }
+
+  /**
    * `work_note`: something the owner added, for work that runs or waits. Waiting work gets it with its request. Running
    * work gets it at its turn's next step when its runtime takes notes while it runs (`steerFor`), else when its current
    * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it, nor work that waits for
@@ -9000,7 +9019,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!['queued', 'running', 'waiting_grant'].includes(current.status) && !workWaits(current)) return 'held' as const
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
       if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
-      this.store.addWorkNote(workId, botId, text, from ? this.ownerMessageOf(from) : undefined)
+      this.store.addWorkNote(workId, botId, text, from ? this.noteSourceOf(from) : undefined)
       if ((botAsksFirst(this.host.settings?.get()) || this.actions.forWork(workId)) && (!from || (this.store.activation(from) && ownerChatTurn(this.store.activation(from)!))))
         this.store.run(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1') ON CONFLICT(bot_id, key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`, botId, `cursor:action-note:${workId}`)
       return 'noted' as const
@@ -9029,9 +9048,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The owner's messages to a chat turn, whole and in order: each may run to several lines.
     if (row.lane === 'chat') return { text: `The owner also wrote:\n\n${marked.join('\n\n')}${repeats ? `\n\n${CHAT_NOTE_REPEAT_LINE}` : ''}`, ids }
     const lines = marked.map((note) => `- ${note}`)
+    // The owner's notes, then what the bot's own chat passed on from a turn the owner did not start: never credited to them.
+    const own = notes.map((note) => botAuthoredNote(note.fromMessage))
+    const heading = (index: number): string => own[index] ? OWN_NOTES_HEADING : 'The owner added while you worked:'
+    const ownerLines = lines.filter((_, index) => !own[index])
+    const ownLines = lines.filter((_, index) => own[index])
+    const sections = [
+      ...(ownerLines.length ? [`The owner added while you worked:\n${ownerLines.join('\n')}`] : []),
+      ...(ownLines.length ? [`${OWN_NOTES_HEADING}\n${ownLines.join('\n')}`] : [])
+    ]
     return {
-      text: `The owner added while you worked:\n${lines.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
-      events: notes.map((note, index) => ({ at: note.at, text: `The owner added while you worked:\n${lines[index]}${repeated[index] ? `\n${NOTE_REPEAT_LINE}` : ''}` })),
+      text: `${sections.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
+      events: notes.map((note, index) => ({ at: note.at, text: `${heading(index)}\n${lines[index]}${repeated[index] ? `\n${NOTE_REPEAT_LINE}` : ''}` })),
       ids
     }
   }
@@ -10956,11 +10984,51 @@ export function chatSteerText(messages: readonly string[]): string {
 }
 
 /**
- * The owner's notes as they reach running work in the middle of its turn: framed as the owner's addition to the job,
- * never as a new task, and with what its report must lead with.
+ * A note to work as it reaches the work: its text, and whether the owner's own message is behind it. A plain string is
+ * the owner's (what every note was before the bot's own chat could pass one on from a turn the owner did not start).
  */
-export function noteSteerText(notes: readonly string[]): string {
-  return `${mousseMessage({ from: 'owner', reply: 'required' }, notes.map((note) => `- ${note}`).join('\n'))}\n\nThe owner added this to your job while you work. Take it into account from here on. If it changes what you found so far, update it. When you report, lead with what changed because of it, in plain words.`
+export type WorkNoteText = string | { readonly text: string; readonly fromOwner: boolean }
+
+/**
+ * `from_message` of a note the bot's own chat passed on from a turn no owner message started (a job notice, a wake):
+ * the chat activation it came from, behind this prefix. It never matches an owner's message id, so Forget and the
+ * chat's join bookkeeping (`answeredOwnerMessageOf`, `moveOwnerMessages`) never take it for one.
+ */
+export const BOT_NOTE_SOURCE_PREFIX = 'activation:'
+
+/** Whether a note's `from_message` marks it as the bot's own (`BOT_NOTE_SOURCE_PREFIX`) rather than the owner's. */
+export function botAuthoredNote(fromMessage: string | null | undefined): boolean {
+  return typeof fromMessage === 'string' && fromMessage.startsWith(BOT_NOTE_SOURCE_PREFIX)
+}
+
+/** The note texts split by who is behind them: the owner's, and the bot's own chat's. */
+function splitNotes(notes: readonly WorkNoteText[]): { owner: string[]; own: string[] } {
+  const owner: string[] = []
+  const own: string[] = []
+  for (const note of notes) {
+    if (typeof note === 'string') owner.push(note)
+    else (note.fromOwner ? owner : own).push(note.text)
+  }
+  return { owner, own }
+}
+
+/** The heading over notes the bot's own chat passed on to work (`botAuthoredNote`), where the owner's say they added them. */
+const OWN_NOTES_HEADING = 'Your own chat passed on while you worked (an update of your own, not from the owner; never say they sent it):'
+
+/** What a note the bot's own chat passed on means to the work: not the owner's words, so never credited to them. */
+const OWN_NOTE_LINE = 'This update came from your own chat while you worked, not from the owner: they did not send it. Take it into account from here on. If it changes what you found so far, update it. When you report, never say the owner sent or told you this.'
+
+/**
+ * The owner's notes as they reach running work in the middle of its turn: framed as the owner's addition to the job,
+ * never as a new task, and with what its report must lead with. A note the bot's own chat passed on (`fromOwner:
+ * false`) is framed as Mousse's notice of its own update instead, so the report never credits the owner with it.
+ */
+export function noteSteerText(notes: readonly WorkNoteText[]): string {
+  const { owner, own } = splitNotes(notes)
+  return [
+    ...(owner.length ? [`${mousseMessage({ from: 'owner', reply: 'required' }, owner.map((note) => `- ${note}`).join('\n'))}\n\nThe owner added this to your job while you work. Take it into account from here on. If it changes what you found so far, update it. When you report, lead with what changed because of it, in plain words.`] : []),
+    ...(own.length ? [mousseNotice({ kind: 'work_note' }, [own.map((note) => `- ${note}`).join('\n'), OWN_NOTE_LINE])] : [])
+  ].join('\n\n')
 }
 
 /** What work that ran out of room says with its ask: that it stopped short and goes on when allowed, then what it had. */
