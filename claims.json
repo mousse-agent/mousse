@@ -92,20 +92,20 @@
     },
     {
       "task": "opencode-provider",
-      "session": "LAPTOP-HIEROJK7-365028",
-      "machine": "LAPTOP-HIEROJK7",
+      "session": "Animatrix-504a69",
+      "machine": "Animatrix",
       "branch": "opencode-provider",
       "paths": [
         "src/mms/harness/drivers/opencode.ts",
         "src/mms/harness/acp/presets/opencode.ts",
         "src/mms/harness/gateway.ts",
-        "src/mms/harness/driver.ts",
         "src/mms/harness/status.ts",
-        "src/shared/harness/status.ts",
+        "src/mms/harness/driver.ts",
+        "src/shared/privacy/outbound.ts",
         "tests/harness/opencodeDriver.test.ts"
       ],
-      "claimedAt": "2026-11-24T15:06:46.503Z",
-      "expiresAt": "2026-11-24T17:06:46.503Z"
+      "claimedAt": "2026-11-25T02:26:08.022Z",
+      "expiresAt": "2026-11-25T04:26:08.022Z"
     }
   ]
 }
