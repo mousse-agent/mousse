@@ -69,6 +69,7 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
+import { ManagedCloudflare } from './cloudflare/service'
 import { EnginePlus } from './plus'
 import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
@@ -178,6 +179,7 @@ export class NetEngineService implements EngineDirectoryPort {
   private starting?: Promise<void>
   /** When each condition a device's row reports began (`<node> finishing|in|out`), while it holds. */
   private readonly since = new Map<string, number>()
+  readonly cloudflare: ManagedCloudflare
   /** Wakes the windows when a condition is due to show (`rowStuckMs` after it began). */
   private stuckTimer?: ReturnType<typeof setTimeout>
   /** Mousse Plus and "Remove on all my hosts", as the helper reports them (Phase 4). */
@@ -199,6 +201,7 @@ export class NetEngineService implements EngineDirectoryPort {
   constructor(
     private readonly options: {
       profileDir: string
+      installationHome?: string
       profileId: string
       net: NetService
       bridge(): BridgeProfileService | undefined
@@ -210,6 +213,11 @@ export class NetEngineService implements EngineDirectoryPort {
       loginStart?: LoginStartQuestion
     }
   ) {
+    this.cloudflare = new ManagedCloudflare(
+      join(this.directory, 'cloudflare'),
+      join(options.installationHome ?? options.profileDir, 'runtimes', 'cloudflared'),
+      () => this.changed()
+    )
     options.net.onSetAside((suffix) => this.setAside(suffix))
   }
 
@@ -320,6 +328,7 @@ export class NetEngineService implements EngineDirectoryPort {
   status(): NetEngineStatus {
     const helper = this.helperStatus()
     const text = 'text' in helper ? helper.text : undefined
+    const cloudflare = this.cloudflare.status()
     return {
       enabled: !!this.settings()?.enabled,
       on: this.on(),
@@ -344,6 +353,7 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(this.started?.pairing.links().length ? { links: this.started.pairing.links() } : {}),
       ...(this.started?.pairing.joins().length ? { joins: this.started.pairing.joins() } : {}),
       ...(this.reach() ? { reach: this.reach() } : {}),
+      ...(cloudflare ? { cloudflare } : {}),
       ...(this.relayView ? { relays: relaysStatus(this.relayView) } : {}),
       ...(this.options.net.v1On()
         ? {}
@@ -1917,6 +1927,7 @@ export class NetEngineService implements EngineDirectoryPort {
   async stop(): Promise<void> {
     await this.starting?.catch(() => undefined)
     if (this.started) this.started.ending = true
+    await this.cloudflare.useOrigin(undefined)
     // A's Add over SSH holds this run's store: the next start (after Start over, say) makes its own.
     this.sshFlow?.dispose()
     this.sshFlow = undefined
@@ -2057,6 +2068,7 @@ export class NetEngineService implements EngineDirectoryPort {
       if (this.helper !== helper) return
       this.helper = undefined
       this.relayView = undefined
+      void this.cloudflare.useOrigin(undefined)
     })
     const told = this.selfName()
     await helper.hello()
@@ -2070,6 +2082,23 @@ export class NetEngineService implements EngineDirectoryPort {
     // Its relays, and what each pairing's relays need (Phase 3); a helper without them says so once.
     if (this.helper === helper) this.rereadRelays()
     if (this.helper === helper) await this.keepShownReach(helper).catch(() => undefined)
+    // A helper that takes a managed tunnel lists `managed-tunnel`; `managed_tunnel` in its hello says its local
+    // origin runs now (false when the port could not bind).
+    if (this.helper === helper && helper.has('managed-tunnel') && helper.info.managed_tunnel === true &&
+        typeof helper.info.ws_port === 'number' && helper.info.ws_port > 0 && helper.info.ws_port <= 65535) {
+      void this.cloudflare.useOrigin({
+        port: helper.info.ws_port,
+        test: async (route) =>
+          this.helper === helper && (await this.testRoute(route)).ok && this.helper === helper,
+        advertise: async (route) => {
+          if (this.helper !== helper) throw new NetError('peer_offline')
+          const answer = await helper.request('routes.managed_tunnel', { route })
+          if (this.helper !== helper) throw new NetError('peer_offline')
+          helper.info.routes = strings(answer.routes)
+          this.changed()
+        }
+      })
+    }
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) {
       if (engineControl('route-leak')) await this.openLeak(helper)

@@ -54,6 +54,7 @@ export class ProcessSupervisor {
       state(state: 'provisioning' | 'degraded' | 'failed'): void
       maxRestarts?: number
       cwd?: string
+      env?: NodeJS.ProcessEnv
     }
   ) {}
   start(): void {
@@ -63,7 +64,7 @@ export class ProcessSupervisor {
     const child = (this.child = spawn(this.options.binary, this.options.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-      env: cleanEnvironment(),
+      env: this.options.env ?? cleanEnvironment(),
       cwd: this.options.cwd
     }))
     const read = (chunk: Buffer) => {
