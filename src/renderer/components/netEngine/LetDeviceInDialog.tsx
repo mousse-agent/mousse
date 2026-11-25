@@ -59,7 +59,13 @@ export function LetDeviceInDialog({
   const picker = hasFeatures(status, 'route-readiness', 'invite-way')
   // A code or link names its way only to a helper that takes one.
   const pickWay = hasFeatures(status, 'invite-way')
-  const [step, setStep] = useState<Step>(() => initial ?? (picker ? { kind: 'pick' } : { kind: 'code' }))
+  // Until networking has started, what the helper offers is unknown: the picker waits for its ways, and only a
+  // running helper without the picker goes straight to a code. Once running, the step holds through a restart.
+  const [chosen, setStep] = useState<Step | undefined>(initial)
+  const step: Step = chosen ?? (ready && !picker ? { kind: 'code' } : { kind: 'pick' })
+  useEffect(() => {
+    if (!chosen && ready) setStep(step)
+  }, [chosen, ready, step])
   // The tunnel's setup is a step here when this computer can run Cloudflare Tunnel itself.
   const managedTunnel = hasFeatures(status, 'managed-tunnel') && !!engine?.cloudflare
   const setUp = (way: NetEngineWay) => (way === 'tunnel' && managedTunnel ? setStep({ kind: 'tunnel' }) : onSetUp(way))

@@ -208,12 +208,25 @@ export function modelsWithPrefs(listed: readonly LlmModelOption[], prefs: ModelP
   for (const model of listed) {
     if (seen.has(model.id)) continue
     seen.add(model.id)
-    entries.push({ id: model.id, label: canonicalModelName(model.label, model.id), source: 'catalog', capabilities: listedCapabilities(model), hidden: hidden.has(model.id), favorite: favorites.has(model.id), ...(model.older ? { older: true as const } : {}) })
+    entries.push({
+      id: model.id,
+      label: canonicalModelName(model.label, model.id),
+      source: 'catalog',
+      capabilities: listedCapabilities(model),
+      hidden: hidden.has(model.id),
+      favorite: favorites.has(model.id),
+      ...(model.older ? { older: true as const } : {}),
+      ...(model.oneShot === false ? { oneShot: false as const } : {}),
+      ...(model.resolvedId && model.resolvedId !== model.id ? { resolvedId: model.resolvedId } : {})
+    })
   }
+  // A custom model runs on the transport of the provider's first listed model, so it runs one-shots
+  // exactly when that model does (as `visibleProviderOption` lists it).
+  const customOneShot = listed[0]?.oneShot === false ? { oneShot: false as const } : {}
   for (const model of prefs.custom) {
     if (seen.has(model.id)) continue
     seen.add(model.id)
-    entries.push({ id: model.id, label: model.label ?? model.id, source: 'custom', capabilities: model.capabilities, hidden: hidden.has(model.id), favorite: favorites.has(model.id) })
+    entries.push({ id: model.id, label: model.label ?? model.id, source: 'custom', capabilities: model.capabilities, hidden: hidden.has(model.id), favorite: favorites.has(model.id), ...customOneShot })
   }
   if (!prefs.order.length) return entries
   const rank = new Map(prefs.order.map((id, index) => [id, index]))

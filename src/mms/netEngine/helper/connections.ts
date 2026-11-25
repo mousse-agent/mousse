@@ -5,6 +5,7 @@ import { parseRelayDestination } from '../../../shared/netEngine/routes'
 import { engineLimits } from '../limits'
 import {
   ENGINE_LABELS,
+  GRANT_ROLE,
   type EngineConnection,
   type EngineRoute,
   type EngineLabel,
@@ -45,7 +46,8 @@ class HelperStream implements EngineStream {
     readonly label: EngineLabel,
     readonly cls: StreamClass,
     private readonly channel: AppChannel,
-    private readonly gone: () => void
+    private readonly gone: () => void,
+    readonly role?: string
   ) {}
 
   /** The sink the channel delivers this stream's bytes to. */
@@ -158,12 +160,6 @@ class HelperStream implements EngineStream {
   }
 }
 
-/** The helper's own error code of a failed request (`details.helper`), if it named one. */
-function helperCode(error: unknown): string | undefined {
-  const helper = error instanceof NetError ? (error.details as { helper?: unknown } | undefined)?.helper : undefined
-  return typeof helper === 'string' ? helper : undefined
-}
-
 /** One connection the helper reported up (`conn.up`), as the engine session uses it. */
 export class HelperConnection implements EngineConnection {
   private readonly streamListeners: Array<(stream: EngineStream) => void> = []
@@ -173,8 +169,6 @@ export class HelperConnection implements EngineConnection {
   private readonly streams = new Set<HelperStream>()
   private open_ = true
   private live = 0
-  /** The helper refused a stream toward the caller as `one_way`: the connection carries calls one way only. */
-  oneWay = false
   /** This side's opens past the connection's stream cap, in order. */
   private readonly waiting: Array<() => void> = []
   readonly id: string
@@ -211,24 +205,21 @@ export class HelperConnection implements EngineConnection {
           stream.bound(handle)
           if (!this.open_) stream.reset('peer_offline')
         })
-        .catch((error) => {
-          if (helperCode(error) === 'one_way') this.oneWay = true
-          stream.failed(error instanceof NetError ? error.code : 'peer_offline')
-        })
+        .catch((error) => stream.failed(error instanceof NetError ? error.code : 'peer_offline'))
     }
     if (this.live < engineLimits().appStreamsPerConnection) start()
     else this.waiting.push(start)
     return stream
   }
 
-  /** A stream the other side opened (`stream.incoming`), accepted. */
-  incoming(handle: number, label: EngineLabel, cls: StreamClass): void {
+  /** A stream the other side opened (`stream.incoming`), accepted, with the role of the grant it is served under. */
+  incoming(handle: number, label: EngineLabel, cls: StreamClass, role?: string): void {
     if (!this.open_ || this.live >= engineLimits().appStreamsPerConnection) {
       this.channel.reset(handle, 'refused')
       return
     }
     this.live += 1
-    const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream))
+    const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream), role)
     this.streams.add(stream)
     this.channel.bind(handle, cls, stream.sink)
     stream.bound(handle)
@@ -305,16 +296,7 @@ export class EngineHelper {
   private readonly reverse = new Map<number, HelperConnection>()
   /** The `conn.up` of each connection the helper holds up, by its number, until its `conn.down`. */
   private readonly ups = new Map<number, Record<string, unknown>>()
-  /**
-   * Inbound connections whose `conn.up` said `both: false` while the caller's HELLO had not arrived (a helper
-   * announces an inbound connection once it is live, which can be first, and `both` follows the minor that HELLO
-   * agrees): the caller has opened a stream since, so the helper knows the minor and a call toward the caller settles
-   * it. `heard` once a stream came; then `carries` (a call back went through) or `oneWay` (refused as `one_way`).
-   */
-  private readonly heard = new Set<number>()
-  private readonly carries = new Set<number>()
-  private readonly oneWay = new Set<number>()
-  /** The call back being tried on each such connection, by its number: whether it went through. */
+  /** The call back being tried on each inbound connection (`served`), by its number: whether it went through. */
   private readonly trying = new Map<number, Promise<boolean>>()
   /** Connections up for an identity with no pairing here yet, by the helper's number. */
   private readonly unclaimed = new Map<number, Record<string, unknown>>()
@@ -343,19 +325,21 @@ export class EngineHelper {
       this.reverse.clear()
       this.unclaimed.clear()
       this.ups.clear()
-      this.forgetCallBacks()
+      this.trying.clear()
     })
   }
 
   /**
    * The helper's `hello` with this computer's name and profile; answers what it said of itself. The app offers
    * protocol 1.2 (pairing flow §1): a 1.2 helper lists what it implements in `features`; a 1.1 helper answers
-   * `[1, 1]` with no list, and a 1.0 helper `[1, 0]`, serving 1a's messages only.
+   * `[1, 1]` with no list, and a 1.0 helper `[1, 0]`, serving 1a's messages only. The app says it takes streams of
+   * grants whose role is not `owner` (`grant-roles`): a helper hands those only to an app that said so (§8.4).
    */
   async hello(): Promise<Record<string, unknown>> {
     const profile = this.options.profile?.()
     const answer = await this.channel.request('hello', {
       proto: [1, 2],
+      features: ['grant-roles'],
       name: this.options.name(),
       ...(profile ? { profile } : {})
     })
@@ -370,18 +354,8 @@ export class EngineHelper {
    */
   async dial(identity: string): Promise<{ conn?: number; already: boolean }> {
     // A connection the other computer dialled that carries calls both ways is this computer's way to it: no dial back.
-    const back = this.callBack(identity)
-    if (back) {
-      // One not known to carry calls back is tried; if the call does not go through, this computer dials after all.
-      void back.through.then((through) => {
-        if (!through) void this.dialOut(identity).catch(() => undefined)
-      })
-      return { conn: back.conn, already: true }
-    }
-    return this.dialOut(identity)
-  }
-
-  private async dialOut(identity: string): Promise<{ conn?: number; already: boolean }> {
+    const both = this.callBack(identity)
+    if (both !== undefined) return { conn: both, already: true }
     const answer = await this.channel.request('dial', { identity })
     this.reattach(identity)
     return {
@@ -408,20 +382,16 @@ export class EngineHelper {
   /**
    * This computer's calls to `identity` over a connection it was dialled on that carries calls both ways: attached
    * (again, when its use ended, as a hello the other computer refused before it granted this computer). Answers that
-   * connection's number and whether it is this computer's way there (`through`, settled once a call back that was
-   * not known to go through has been tried), or undefined without one.
+   * connection's number, or undefined without one. The helper says `both` only once the caller's HELLO agreed it.
    */
-  callBack(identity: string): { conn: number; through: Promise<boolean> } | undefined {
+  callBack(identity: string): number | undefined {
     if (this.options.peers.byIdentity(identity)?.uses === false) return undefined
     for (const [conn, event] of this.ups) {
-      if (event.identity !== identity || event.dir !== 'in') continue
+      if (event.identity !== identity || event.dir !== 'in' || event.both !== true) continue
       const inbound = this.connections.get(conn)
       if (!inbound?.isOpen()) continue
-      const back = this.callsBack(conn, event)
-      if (back === 'no') continue
-      if (back === 'try') return { conn, through: this.tryCallBack(conn, event) }
       if (!this.reverse.get(conn)?.isOpen()) this.attachReverse(conn, event, 'outbound')
-      return { conn, through: Promise.resolve(true) }
+      return conn
     }
     return undefined
   }
@@ -432,21 +402,11 @@ export class EngineHelper {
    */
   async served(identity: string): Promise<boolean> {
     for (const [conn, event] of [...this.ups]) {
-      if (event.identity !== identity || event.dir !== 'in') continue
-      if (!this.connections.get(conn)?.isOpen() || this.callsBack(conn, event) === 'no') continue
+      if (event.identity !== identity || event.dir !== 'in' || event.both !== true) continue
+      if (!this.connections.get(conn)?.isOpen()) continue
       if (await this.tryCallBack(conn, event)) return true
     }
     return false
-  }
-
-  /**
-   * Whether inbound connection `conn` (`event` its `conn.up`) carries this computer's calls to its caller: `yes`
-   * when `conn.up` said `both` or a call back went through, `try` when it said `both: false` before the caller
-   * opened a stream (so before its HELLO, maybe) and no call back was refused as one way, else `no`.
-   */
-  private callsBack(conn: number, event: Record<string, unknown>): 'yes' | 'try' | 'no' {
-    if (event.both === true || this.carries.has(conn)) return 'yes'
-    return event.both === false && this.heard.has(conn) && !this.oneWay.has(conn) ? 'try' : 'no'
   }
 
   /** Calls the caller back on inbound connection `conn` once (one try at a time): whether it went through. */
@@ -457,17 +417,10 @@ export class EngineHelper {
       if (!this.attachReverse(conn, event, 'outbound', undefined, resolve)) resolve(false)
     }).then((through) => {
       this.trying.delete(conn)
-      if (through && this.ups.has(conn)) this.carries.add(conn)
       return through
     })
     this.trying.set(conn, tried)
     return tried
-  }
-
-  private forgetCallBacks(conn?: number): void {
-    for (const set of [this.heard, this.carries, this.oneWay, this.trying])
-      if (conn === undefined) set.clear()
-      else set.delete(conn)
   }
 
   /**
@@ -500,8 +453,6 @@ export class EngineHelper {
       () => settled?.(true),
       () => {
         connection.close('refused')
-        // The caller's helper takes no calls on its connection (a minor before 3): none is tried on it again.
-        if (connection.oneWay && this.ups.has(conn)) this.oneWay.add(conn)
         settled?.(false)
       }
     )
@@ -516,11 +467,13 @@ export class EngineHelper {
 
   /**
    * Whether the helper implements `feature` (its 1.2 `hello` lists it). A new field or operation is sent only then:
-   * an older helper ignores a field it does not know and would answer as if it had not been sent.
+   * an older helper ignores a field it does not know and would answer as if it had not been sent. `grant-roles` is
+   * read from any helper that lists it (a 1.0 or 1.1 helper lists nothing): without it every grant is `owner`, so
+   * the app lets a device in below Full control only when it is listed.
    */
   has(feature: EngineFeature): boolean {
     const features = this.info.features
-    return this.speaks(2) && Array.isArray(features) && features.includes(feature)
+    return (this.speaks(2) || feature === 'grant-roles') && Array.isArray(features) && features.includes(feature)
   }
 
   /** What the helper implements beyond 1.1, as its `hello` listed it. */
@@ -658,7 +611,7 @@ export class EngineHelper {
       if (typeof event.conn !== 'number') return
       this.unclaimed.delete(event.conn)
       this.ups.delete(event.conn)
-      this.forgetCallBacks(event.conn)
+      this.trying.delete(event.conn)
       const reason = typeof event.reason === 'string' ? event.reason : 'closed'
       const other = this.reverse.get(event.conn)
       this.reverse.delete(event.conn)
@@ -684,6 +637,7 @@ export class EngineHelper {
         label = event.label
       if (typeof handle !== 'number') return
       const cls = event.class === 'bulk' ? 'bulk' : 'interactive'
+      const role = typeof event.role === 'string' && GRANT_ROLE.test(event.role) ? event.role : undefined
       // Only the engine's labels (the helper resets the rest too).
       if (!connection || typeof label !== 'string' || !(ENGINE_LABELS as readonly string[]).includes(label)) {
         this.channel.reset(handle, 'refused')
@@ -706,23 +660,17 @@ export class EngineHelper {
           this.channel.reset(handle, 'refused')
           return
         }
-        served.incoming(handle, label as EngineLabel, cls)
+        served.incoming(handle, label as EngineLabel, cls, role)
         return
       }
-      connection.incoming(handle, label as EngineLabel, cls)
-      // The dialler opened a stream (so its HELLO came): this computer may call it back on the same connection, when
-      // it uses that one.
-      const conn = event.conn as number
-      if (!up) return
-      this.heard.add(conn)
+      connection.incoming(handle, label as EngineLabel, cls, role)
+      // The dialler opened a stream: this computer may call it back on the same connection, when it uses that one.
       if (
-        this.reverse.get(conn)?.isOpen() ||
-        this.options.peers.byIdentity(String(up.identity))?.uses === false
+        up?.both === true &&
+        !this.reverse.get(event.conn as number)?.isOpen() &&
+        this.options.peers.byIdentity(String(up.identity))?.uses !== false
       )
-        return
-      const back = this.callsBack(conn, up)
-      if (back === 'yes') this.attachReverse(conn, up, 'outbound')
-      else if (back === 'try') void this.tryCallBack(conn, up)
+        this.attachReverse(event.conn as number, up, 'outbound')
     }
   }
 }

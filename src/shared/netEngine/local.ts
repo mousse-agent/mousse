@@ -137,6 +137,11 @@ export interface NetEngineDevice {
   /** Its last connection attempt failed on a certificate outside its validity window (either clock may be wrong). */
   certificateWindow?: boolean
   /**
+   * Its access here changed, but networking has not applied it yet (the helper refused the grant's new role): it may
+   * still list and remove this computer's devices. Tried again on its own.
+   */
+  accessPending?: boolean
+  /**
    * Its SSH login failed in a way only the owner can fix (§1.4): nothing logs in again until the owner checks it
    * and presses Retry.
    */

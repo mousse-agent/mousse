@@ -417,13 +417,14 @@ describe('pairing one way', () => {
 describe('a 1.2 operation is sent only when the helper lists its feature', () => {
   const fabric = new Fabric()
   fabric.network.minor = 2
-  fabric.network.features = []
+  // Roles only, so its devices can be let in below Full control.
+  fabric.network.features = ['grant-roles']
   afterAll(() => fabric.close(), 60_000)
 
   it('refuses the way picker, the link check and removing one direction, and sends the helper nothing new', async () => {
     const owner = await computer(fabric, 'old-owner'),
       caller = await computer(fabric, 'old-caller')
-    expect(owner.mms.netEngine.status().features).toBeUndefined()
+    expect(owner.mms.netEngine.status().features).toEqual(['grant-roles'])
     await expect(owner.dispatch('netEngine.routes.available', {}, true)).rejects.toMatchObject({
       details: { reason: 'not_supported' }
     })

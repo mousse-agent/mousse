@@ -4,9 +4,15 @@
  * owner named is used only while it is there.
  */
 import { describe, expect, it } from 'vitest'
+import { botModelCandidates } from '../../src/mms/bots/model/candidates'
 import { chooseBotModel, effortFor, nameMatch, type BotModelCandidate } from '../../src/mms/bots/model/chooseModel'
+import type { BotRuntimeHold } from '../../src/mms/bots/seams'
+import { bundledModelCatalog } from '../../src/mms/models/modelCatalog'
+import { UsageLimitTracker } from '../../src/mms/models/usageLimits'
 import { botModelTier, patternModelTier } from '../../src/shared/bots/personal/modelTiers'
+import type { RunPolicy } from '../../src/shared/harness/types'
 import type { ModelCatalog } from '../../src/shared/modelCatalog'
+import { model as listedModel, snapshot } from '../providerSnapshotFixture'
 
 const now = new Date('2026-11-07T10:00:00.000Z')
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -122,10 +128,48 @@ describe('model tiers', () => {
     expect(patternModelTier('haiku')).toBe('small')
   })
 
+  it('Codex and Antigravity families: luna small, terra standard, sol and astra frontier; a Gemini flash stays standard unless the catalog says small', () => {
+    expect(patternModelTier('gpt-6-luna')).toBe('small')
+    expect(patternModelTier('gpt-6.1-terra')).toBe('standard')
+    expect(patternModelTier('gpt-6.2-sol')).toBe('frontier')
+    expect(patternModelTier('gpt-6.2-astra')).toBe('frontier')
+    expect(patternModelTier('gemini-4-hydrogen')).toBe('standard')
+    expect(patternModelTier('gemini-4-neon')).toBe('frontier')
+    expect(botModelTier('gemini-3-flash', catalog)).toBe('standard')
+    expect(patternModelTier('gemini-3.8-flash')).toBe('standard')
+    expect(botModelTier('gemini-3.8-flash', bundledModelCatalog())).toBe('small')
+    expect(botModelTier('gpt-6-luna', bundledModelCatalog())).toBe('small')
+  })
+
   it('names match by exact words before family words', () => {
     expect(nameMatch('claude-opus-5-5', { model: 'claude-opus-5-5' })).toBe(2)
     expect(nameMatch('opus', { model: 'claude-opus-5-5' })).toBe(1)
     expect(nameMatch('Opus 5.5', { model: 'claude-opus-5-5', names: ['opus 5.5'] })).toBe(2)
     expect(nameMatch('gpt', { model: 'claude-opus-5-5' })).toBe(0)
+  })
+})
+
+describe('a usage limit on one model', () => {
+  const policy: RunPolicy = { mode: 'default', origin: 'bot', approvals: 'grants', tools: { allow: ['read'] }, authority: { kind: 'bot', digest: 'd1' } }
+  const hold: BotRuntimeHold = { canHoldBot: () => ({ ok: true }) } as unknown as BotRuntimeHold
+  const models = [listedModel('gemini-4-neon', { capabilities: { efforts: [], images: false } }), listedModel('gemini-4-hydrogen', { capabilities: { efforts: [], images: false } })]
+
+  it("skips that model alone: the entry's other models stay candidates, and the limit passes at its reset", () => {
+    const limits = new UsageLimitTracker()
+    limits.markModelLimited('antigravity', 'gemini-4-hydrogen', '2026-11-07T12:00:00.000Z')
+    const candidates = botModelCandidates({
+      snapshots: [snapshot({ instanceId: 'antigravity', driver: 'antigravity', auth: { credential: 'subscription' } })],
+      models: () => models,
+      hold,
+      policy,
+      catalog: bundledModelCatalog(),
+      limitUntil: (instanceId, model) => limits.limitUntil(instanceId, model, now)
+    })
+    expect(candidates.map((candidate) => [candidate.model, candidate.limitedUntil])).toEqual([
+      ['gemini-4-neon', undefined],
+      ['gemini-4-hydrogen', '2026-11-07T12:00:00.000Z']
+    ])
+    expect(chooseBotModel({ mode: 'auto', depth: 'normal' }, candidates, now)).toMatchObject({ selection: { model: 'gemini-4-neon' } })
+    expect(chooseBotModel({ mode: 'auto', depth: 'normal' }, candidates, new Date('2026-11-07T12:00:01.000Z'))).toMatchObject({ selection: { model: 'gemini-4-hydrogen' } })
   })
 })

@@ -80,6 +80,16 @@ describe('a direction of a pairing', () => {
     expect(engineSideRow(away, 'in')).toMatchObject({ line: 'Not connected now' })
     expect(engineSideRow(away, 'in').warn).toBeUndefined()
   })
+
+  it('says on Can use when a level change is not applied yet, keeping Access and Remove', () => {
+    const pending = device({ node: 'n1', accessPending: true })
+    expect(engineSideRow(pending, 'in')).toMatchObject({
+      line: 'Access change not applied yet',
+      warn: true,
+      actions: ['access', 'remove']
+    })
+    expect(engineSideRow(pending, 'out')).toMatchObject({ line: 'Connected' })
+  })
 })
 
 /** The daemon behind the section: a status, and every call it was asked. */
@@ -546,6 +556,18 @@ describe('Let a device in', () => {
     expect(d.called('netEngine.invite')).toEqual([{}])
     expect(document.querySelector('[role="timer"]')?.textContent).toMatch(/^used once · expires in [45]:\d\d$/)
     expect(document.body.textContent).toContain('Update networking to pick how it connects.')
+  })
+
+  it('opened while networking starts, waits for the ways and shows the picker, making no code', async () => {
+    // A starting helper has not said what it offers yet.
+    const d = daemon({ helper: { state: 'starting' } }, { 'netEngine.routes.available': () => ways })
+    await mount()
+    await click(button(/Let a device in/))
+    expect(d.called('netEngine.invite')).toEqual([])
+    await d.change({ helper: { state: 'running' }, features: ['route-readiness', 'invite-way'] })
+    expect(document.body.textContent).toContain('How will it connect?')
+    expect(radio('Same Wi-Fi')!.getAttribute('aria-checked')).toBe('true')
+    expect(d.called('netEngine.invite')).toEqual([])
   })
 
   it('asks Allow with Work on threads picked, sends the level with Allow, and says it can use this computer', async () => {

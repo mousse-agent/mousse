@@ -12,10 +12,14 @@ const raw = JSON.parse(readFileSync(join(root, 'src/mms/models/models.json'), 'u
   format: unknown
   revision: unknown
   models: Array<Record<string, unknown>>
+  namingProviders?: unknown
 }
 const packageVersion = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version
-/** The brand each maker's full names start with (#490: `short` is `name` without it). */
-const BRANDS: Record<string, string> = { anthropic: 'Claude' }
+/**
+ * The brand each maker's full names start with (#490: `short` is `name` without it). OpenAI's and
+ * Google's agents name their models by id alone, so their `short` is the whole `name`.
+ */
+const BRANDS: Record<string, string> = { anthropic: 'Claude', openai: '', google: '' }
 const FIELDS = new Set(['id', 'name', 'short', 'maker', 'family', 'tier', 'released', 'older', 'efforts', 'routes'])
 
 describe('bundled model catalog', () => {
@@ -52,11 +56,24 @@ describe('bundled model catalog', () => {
     }
   })
 
-  it('gives every model a tier for bots: Fable and Opus frontier, Sonnet standard, Haiku small', () => {
+  it('gives every model the tier of its family, for bots and Automatic naming', () => {
     // Revision 2 added the tiers (Bot Phase 1 §5.6).
     expect(raw.revision as number).toBeGreaterThanOrEqual(2)
-    const byFamily: Record<string, string> = { fable: 'frontier', opus: 'frontier', sonnet: 'standard', haiku: 'small' }
+    const byFamily: Record<string, string> = {
+      fable: 'frontier', opus: 'frontier', sonnet: 'standard', haiku: 'small',
+      luna: 'small', terra: 'standard', sol: 'frontier', astra: 'frontier',
+      flash: 'small', hydrogen: 'standard', argon: 'frontier', neon: 'frontier', carbon: 'frontier'
+    }
     for (const model of raw.models) expect(model.tier, String(model.id)).toBe(byFamily[model.family as string])
+  })
+
+  it('lists the providers Automatic naming tries, ending with any other provider', () => {
+    const list = raw.namingProviders as string[]
+    expect(Array.isArray(list) && list.length > 0).toBe(true)
+    for (const entry of list) expect(typeof entry === 'string' && entry.trim() === entry && entry.length > 0, String(entry)).toBe(true)
+    expect(new Set(list).size).toBe(list.length)
+    expect(list.at(-1)).toBe('*')
+    expect(bundledModelCatalog().namingProviders).toEqual(list)
   })
 
   it('lists reasoning levels for a current model whose family\x27s previous model has them', () => {
@@ -90,7 +107,7 @@ describe('bundled model catalog', () => {
     for (const model of raw.models) {
       const brand = BRANDS[model.maker as string]
       expect(brand, `${model.id}: maker ${model.maker}`).toBeDefined()
-      expect(model.name, String(model.id)).toBe(`${brand} ${model.short}`)
+      expect(model.name, String(model.id)).toBe(brand ? `${brand} ${model.short}` : model.short)
     }
   })
 

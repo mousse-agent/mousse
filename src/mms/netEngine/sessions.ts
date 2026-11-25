@@ -17,6 +17,8 @@ export interface EngineSessionHooks {
   onPathInUse?(connection: EngineConnection): void
   /** An inbound connection of this pairing came up or closed (whether it can reach this computer). */
   onServingChanged?(node: NodeId): void
+  /** The other computer's hello said this computer's role there (§8.4), on a connection made now. */
+  onRoleThere?(node: NodeId, role: string): void
 }
 
 /**
@@ -77,6 +79,7 @@ export class EngineSessions {
     const said = await client.hello(this.options.name())
     if (client.state() !== 'open') throw new NetError('peer_offline')
     this.said.set(node, said.features)
+    if (said.role) this.options.hooks.onRoleThere?.(node, said.role)
     this.handoffReady.add(client)
     const current = this.ready.get(node)
     if (current && current !== client && current.state() === 'open') {

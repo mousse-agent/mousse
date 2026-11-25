@@ -144,6 +144,46 @@ describe('a thread worktree starts on a temporary branch and is named in the bac
   })
 })
 
+describe("only the message's own words name a branch, never a pasted diff", () => {
+  const ask = () => namer({}, async () => 'retries')
+  const send = (text: string) => requestBranchName(threadDir('one'), 'thread-one', text)
+  /** The task's words as the title model got them. */
+  const words = (calls: ReturnType<typeof vi.fn>): string => (calls.mock.calls[0]![0].prompt as string).split('\n').slice(1).join('\n')
+
+  it.each([
+    ['a two-line diff', '-oldValue\n+newValue'],
+    ['an indented two-line diff', '-  oldValue\n+  newValue'],
+    ['a unified diff hunk with indented changes', 'diff --git a/src/retry.ts b/src/retry.ts\nindex 1a2b3c4..5d6e7f8 100644\n--- a/src/retry.ts\n+++ b/src/retry.ts\n@@ -1,3 +1,3 @@\n export function retries() {\n-  return 3\n+  return 5\n }']
+  ])('%s alone: no request, the temporary name stays', async (_case, text) => {
+    const calls = ask()
+    expect(await send(text)).toBeUndefined()
+    expect(calls).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a diff in a paragraph of its own', 'Fix retries\n\n-oldValue\n+newValue'],
+    ['a diff under the words', 'Fix retries\n-  oldValue\n+  newValue']
+  ])('%s: only the words are sent', async (_case, text) => {
+    const calls = ask()
+    expect(await send(text)).toBe('mousse/retries')
+    expect(words(calls)).toBe('Fix retries')
+  })
+
+  it.each([
+    ['- list item', 'list item'],
+    ['--watch crashes on Windows', 'crashes on Windows'],
+    ['-webkit-scrollbar is ignored', 'is ignored'],
+    ['+page.svelte loads twice', 'loads twice'],
+    ['+1 button is misaligned', 'button is misaligned'],
+    ['Make the retry limit configurable', 'Make the retry limit configurable']
+  ])('%j is not a diff: it is sent', async (text, kept) => {
+    const calls = ask()
+    await send(text)
+    expect(calls).toHaveBeenCalledTimes(1)
+    expect(words(calls)).toContain(kept)
+  })
+})
+
 describe('recovering a failed worktree provision leaves branches without proof of ownership alone', () => {
   async function writeFailedProvision(dir: string, branch: string, head: string): Promise<ThreadWorkspaceManager> {
     const manager = new ThreadWorkspaceManager(dir)

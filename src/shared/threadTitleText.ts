@@ -355,7 +355,8 @@ export function titleSystemPrompt(custom?: string): string {
   return `${TITLE_SYSTEM_PROMPT}\nThe person's own instructions for titles follow. Where they differ from the rules above, follow them:\n${own}`
 }
 
-function hintLine(hints: TitleHints, images: number): string {
+/** The hints line of a naming request: a command, images, files, a page element, and what was left out. */
+export function hintLine(hints: TitleHints, images: number): string {
   const parts: string[] = []
   if (hints.skill) parts.push(`command /${hints.skill}`)
   if (images) parts.push(images === 1 ? '1 image' : `${images} images`)
@@ -368,10 +369,9 @@ function hintLine(hints: TitleHints, images: number): string {
 /**
  * The title model's user prompt: the cleaned first request, up to two later requests (Regenerate), the
  * opening of the first reply and short hints, each within its own budget. Empty fields are left out, and
- * the whole prompt with {@link TITLE_SYSTEM_PROMPT} stays within {@link TITLE_PROMPT_BUDGET}. `withBranch` asks for the
- * thread's branch name too, in the format the naming request's system prompt gives (`threadNaming.ts`).
+ * the whole prompt with {@link TITLE_SYSTEM_PROMPT} stays within {@link TITLE_PROMPT_BUDGET}.
  */
-export function buildTitlePrompt(context: TitleContext, withBranch = false): string {
+export function buildTitlePrompt(context: TitleContext): string {
   const request = cleanTitleText(context.request)
   const later = (context.later ?? [])
     .map((text) => cleanTitleText(text, LATER_BUDGET).text)
@@ -380,12 +380,12 @@ export function buildTitlePrompt(context: TitleContext, withBranch = false): str
   const reply = context.reply ? replyGist(context.reply) : ''
   const hints = hintLine(request.hints, context.images ?? 0)
   const build = (fields: { later: string[]; reply: string; request: string }): string => [
-    withBranch ? 'Write the sidebar title and the branch name for this thread.' : 'Write the sidebar title for this thread.',
+    'Write the sidebar title for this thread.',
     `Request: ${fields.request || '(no words, only attachments or a paste)'}`,
     ...fields.later.map((text) => `Later request: ${text}`),
     ...(fields.reply ? [`Reply began: ${fields.reply}`] : []),
     ...(hints ? [`Hints: ${hints}`] : []),
-    ...(withBranch ? [] : ['Title:'])
+    'Title:'
   ].join('\n')
   let fields = { later, reply, request: request.text }
   let prompt = build(fields)

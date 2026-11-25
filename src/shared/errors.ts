@@ -144,7 +144,9 @@ const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'req
   // Which threads a device's agents may change on the computer that refused (`agent_reach`): none, launched or all.
   'reach',
   // How many retries a provider's failed request had (`ProviderRetries`): `{ attempt, max }`.
-  'retries', 'max'])
+  'retries', 'max',
+  // A harness `rate_limited` error's reset (ISO), and whether it holds the whole entry or one model (`HarnessError.scope`).
+  'resetAt', 'scope'])
 
 /** Explicit safe detail vocabulary. New domain fields need an audited addition. */
 export function safeErrorDetails(value: unknown): unknown {
