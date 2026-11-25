@@ -82,17 +82,6 @@
       "expiresAt": "2026-11-25T04:26:34.799Z"
     },
     {
-      "task": "fix-thinking-stream-integrity",
-      "session": "LAPTOP-HIEROJK7-dfa141",
-      "machine": "LAPTOP-HIEROJK7",
-      "branch": "fix-thinking-stream-integrity",
-      "paths": [
-        "src/mms/run/transcript/promptRuntime.ts"
-      ],
-      "claimedAt": "2026-11-24T15:05:22.905Z",
-      "expiresAt": "2026-11-25T04:59:29.667Z"
-    },
-    {
       "task": "issue-1830-grant-roles",
       "session": "Avarnics-Mac-mini.local-c3024a",
       "machine": "Avarnics-Mac-mini.local",
