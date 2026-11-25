@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { NodeId } from '../../shared/net'
+import { isNetErrorCode, NET_ERRORS, type NodeId } from '../../shared/net'
 import { notSharingNodes, refreshComputers, useComputers } from '../lib/computers'
 import type { Device } from '../lib/netDevices'
 import { cachedRemoteComposerOptions, onRemoteComposerOptionsRead, readRemoteComposerOptions, type RemoteComposerOptions } from '../lib/remoteComputers'
@@ -27,10 +27,17 @@ export function useRunOnDevices(): { devices: readonly Device[]; notSharing: Rea
 /** The longest wait between attempts to read a computer's models while it does not answer. */
 const RETRY_MAX_MS = 15_000
 
+/** That computer refused this device (not allowed, removed, not a member): asking again on a timer gets the same answer. */
+function refused(error: unknown): boolean {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  return isNetErrorCode(code) && NET_ERRORS[code].category === 'denied'
+}
+
 /**
  * The models another computer offers a chat that runs there (a new one, or a thread of it): its
  * last answer at once, then a fresh one. While it does not answer, it is asked again, sooner at
- * first; until it has answered once, `loaded` is false.
+ * first; until it has answered once, `loaded` is false. A computer that refuses this device is
+ * asked again only when the window comes back into focus or a send there was refused.
  */
 export function useRemoteComposerOptions(node: NodeId | undefined): RemoteComposerOptions & { loaded: boolean } {
   const [state, setState] = useState<{ node: NodeId; options: RemoteComposerOptions } | undefined>()
@@ -50,9 +57,10 @@ export function useRemoteComposerOptions(node: NodeId | undefined): RemoteCompos
           delay = 1000
           setState({ node, options })
         },
-        () => {
+        (error: unknown) => {
           if (cancelled) return
           clearTimeout(timer)
+          if (refused(error)) return
           timer = setTimeout(read, delay)
           delay = Math.min(delay * 2, RETRY_MAX_MS)
         }

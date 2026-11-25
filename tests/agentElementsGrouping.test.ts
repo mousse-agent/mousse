@@ -69,6 +69,11 @@ describe('thoughtHeadline', () => {
     ['a path ending in a dot word', 'Open ~/.mousse/config now. Then edit.', 'Open ~/.mousse/config now.'],
     ['version numbers', 'Node 24.2.0 is fine. Next.', 'Node 24.2.0 is fine.'],
     ['initials', 'Ask J. Smith first. Then go.', 'Ask J. Smith first.'],
+    ['an ellipsis mid-sentence', 'Working... checking files. Next.', 'Working... checking files.'],
+    ['an ellipsis before a capital', 'Hmm... Let me check. Next.', 'Hmm... Let me check.'],
+    // A number before a dot and a space does end a sentence ("1. Check" as a list item is a marker, stripped above).
+    ['a number at the end of a sentence', 'Version 1. Next step.', 'Version 1.'],
+    ['a numbered list item', '1. Check the file. Then go.', 'Check the file.'],
     ['inside inline code', 'Run `a. b` then go. Next.', 'Run a. b then go.'],
     // Plain text out.
     ['inline markdown is dropped', 'A **bold** move with `code`. More.', 'A bold move with code.'],
@@ -81,6 +86,19 @@ describe('thoughtHeadline', () => {
     ['missing', undefined, ''],
   ] as const)('%s', (_name, content, expected) => {
     expect(thoughtHeadline(content)).toBe(expected)
+  })
+
+  // [case, the thought so far, the live line, the line once it is finished]
+  it.each([
+    ['a paragraph of a stray word or two keeps the one before it', 'Check the file.\n\ne.', 'Check the file.', 'e.'],
+    ['a new paragraph just begun', 'Check the file.\n\nI', 'Check the file.', 'I'],
+    ['the start of a bold title still being written', 'Check the file.\n\n**', 'Check the file.', ''],
+    ['a paragraph with four characters is its own line', 'Check the file.\n\nNext', 'Next', 'Next'],
+    ['a stub with nothing before it is all there is', 'I', 'I', 'I'],
+    ['stubs back to back go back to the last full paragraph', 'Check the file.\n\nI\n\ne.', 'Check the file.', 'e.'],
+  ] as const)('a thought being written: %s', (_name, content, live, finished) => {
+    expect(thoughtHeadline(content, { live: true })).toBe(live)
+    expect(thoughtHeadline(content)).toBe(finished)
   })
 
   it('cuts a long sentence at 200 code points, never inside an emoji', () => {

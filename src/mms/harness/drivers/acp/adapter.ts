@@ -166,14 +166,16 @@ export class AcpAdapter implements ProviderAdapter {
         },
         onText: (content) => {
           progress()
-          // The reply began: the thought before it is done, and one that resumes after it is a new row.
-          streams.thinking.break()
+          // The reply began: the thought before it is done, and one that resumes after it is a new row. Only
+          // visible text does that: an empty or whitespace-only chunk leaves the thought open.
+          if (streams.text.hasContentDelta(content)) streams.thinking.break()
           streams.text.update(content)
         },
+        onTextSeparator: (atOffset, sep) => streams.text.markSyntheticSeparator(atOffset, sep),
         onThinking: (content) => {
           progress()
           // A thought after text keeps the text above it, as a tool call does.
-          streams.text.break()
+          if (streams.thinking.hasContentDelta(content)) streams.text.break()
           streams.thinking.update(content)
         },
         onTool: (event) => {

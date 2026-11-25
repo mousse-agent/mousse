@@ -61,33 +61,64 @@ describe('the computer tools a thread is listed and may call', () => {
       known: () => (opts.known ? { state: opts.known, enabled: true, installable: true } : undefined),
       allowedFor: opts.allowed ?? (() => true),
       listTools: async () => ({ tools: [{ name: 'click', description: 'Clicks an element. More text.', inputSchema: {} }], instructions: 'Read the window first.' }),
-      call: vi.fn(async () => ({ content: [{ type: 'text', text: 'clicked' }] }))
+      call: vi.fn(async () => ({ content: [{ type: 'text', text: 'clicked' }] })),
+      requestSetup: vi.fn(async () => ({ text: '[computer-use:setup_needed] Computer use is not set up on Ada: off.' }))
     }
     const list = computerTools({ computerUse: () => cu } as unknown as AppToolHost)
-    return { cu, list, listedFor: (threadId: string) => list.filter((tool) => tool.listed?.({ threadId } as never) !== false).map((tool) => tool.name) }
+    const named = (name: string) => list.find((tool) => tool.name === name)!
+    const listedFor = (threadId: string, listing: Record<string, unknown> = {}) => list.filter((tool) => tool.listed?.({ threadId, ...listing } as never) !== false).map((tool) => tool.name)
+    return { cu, list, named, listedFor }
   }
 
-  it('lists both tools for a thread, none for a thread a bot without it started, and none while off or the driver is missing', () => {
-    expect(tools({}).listedFor('t1')).toEqual(['computer_tools', 'computer_use'])
-    expect(tools({ known: 'found' }).listedFor('t1')).toEqual(['computer_tools', 'computer_use'])
-    expect(tools({ allowed: (id) => id !== 'bot-thread' }).listedFor('bot-thread')).toEqual([])
-    expect(tools({ enabled: false }).listedFor('t1')).toEqual([])
-    expect(tools({ known: 'missing' }).listedFor('t1')).toEqual([])
+  // The setup request stays listed whatever the driver's state, so setting it up changes the list only once.
+  it.each([
+    ['on, not looked at yet', {}, ['computer_use_request', 'computer_tools', 'computer_use']],
+    ['on and found', { known: 'found' }, ['computer_use_request', 'computer_tools', 'computer_use']],
+    ['on and broken (a call says what is wrong)', { known: 'broken' }, ['computer_use_request', 'computer_tools', 'computer_use']],
+    ['on, driver missing', { known: 'missing' }, ['computer_use_request']],
+    ['on, driver being installed', { known: 'installing' }, ['computer_use_request']],
+    ['off in Settings', { enabled: false }, ['computer_use_request']],
+    ['a thread a bot without it started', { allowed: () => false }, []]
+  ] as const)('lists for a thread: %s', (_name, opts, expected) => {
+    expect(tools(opts as Parameters<typeof tools>[0]).listedFor('t1')).toEqual(expected)
+  })
+
+  it('never lists the setup request for a subagent, nor for a bot turn that does not hold it', () => {
+    expect(tools({}).listedFor('t1', { subagent: true })).toEqual(['computer_tools', 'computer_use'])
+    expect(tools({}).listedFor('t1', { botRole: 'consult', botTurnTools: new Set(['computer_use_request']) })).not.toContain('computer_use_request')
+    expect(tools({}).listedFor('t1', { botRole: 'activation', botTurnTools: new Set() })).not.toContain('computer_use_request')
+    expect(tools({}).listedFor('t1', { botRole: 'activation', botTurnTools: new Set(['computer_use_request']) })).toContain('computer_use_request')
   })
 
   it('refuses a call from a thread that may not use it, and runs one that may', async () => {
     const denied = tools({ allowed: () => false })
-    expect(denied.list[1].available?.({ threadId: 'bot-thread' } as never)).toMatch(/started by a bot/)
+    expect(denied.named('computer_use').available?.({ threadId: 'bot-thread' } as never)).toMatch(/started by a bot/)
     const off = tools({ enabled: false })
-    expect(off.list[1].available?.({ threadId: 't1' } as never)).toMatch(/off in Settings/)
+    expect(off.named('computer_use').available?.({ threadId: 't1' } as never)).toMatch(/off in Settings/)
     const ok = tools({})
-    expect(ok.list[1].available?.({ threadId: 't1' } as never)).toBe(true)
-    const result = await ok.list[1].handler({ tool: 'click', arguments: { element: 3 } }, { signal: new AbortController().signal } as never)
+    expect(ok.named('computer_use').available?.({ threadId: 't1' } as never)).toBe(true)
+    const result = await ok.named('computer_use').handler({ tool: 'click', arguments: { element: 3 } }, { signal: new AbortController().signal } as never)
     expect(ok.cu.call).toHaveBeenCalledWith('click', { element: 3 }, expect.any(AbortSignal))
     expect(result).toMatchObject({ text: 'clicked' })
-    const listing = await ok.list[0].handler({}, {} as never)
+    const listing = await ok.named('computer_tools').handler({}, {} as never)
     expect(listing.text).toContain('Read the window first.')
     expect(listing.text).toContain('- click: Clicks an element.')
+  })
+
+  it('the setup request needs a person, is refused to a subagent and to a thread a bot without the computer started, and passes on the thread and why', async () => {
+    const ok = tools({ enabled: false })
+    const request = ok.named('computer_use_request')
+    expect(request.needsPerson).toBe(true)
+    expect(request.available?.({ threadId: 't1', subagent: true } as never)).toMatch(/not a subagent/)
+    expect(tools({ allowed: () => false }).named('computer_use_request').available?.({ threadId: 'bot-thread' } as never)).toMatch(/started by a bot/)
+    expect(request.available?.({ threadId: 't1' } as never)).toBe(true)
+    const signal = new AbortController().signal
+    // Held again in the call, whichever way it came.
+    expect(await request.handler({ reason: 'Open Figma' }, { turn: { threadId: 't1', subagent: true }, signal } as never)).toMatchObject({ isError: true })
+    expect(await request.handler({ reason: '  ' }, { turn: { threadId: 't1' }, signal } as never)).toMatchObject({ isError: true })
+    expect(ok.cu.requestSetup).not.toHaveBeenCalled()
+    expect(await request.handler({ reason: 'Open Figma' }, { turn: { threadId: 't1' }, signal } as never)).toMatchObject({ text: expect.stringContaining('[computer-use:setup_needed]') })
+    expect(ok.cu.requestSetup).toHaveBeenCalledWith({ threadId: 't1', reason: 'Open Figma', signal })
   })
 
   it("keeps a driver result's images within bounds and says what it left out", () => {
@@ -203,6 +234,47 @@ describe('what Settings is told about the driver', () => {
     finishOld('cua-driver 0.38.0')
     await old
     expect(d.known()).toMatchObject({ path: other, version: '0.39.0' })
+  })
+
+  it('counts as installing until the look after the installer has answered: a second click and a status in between start nothing', async () => {
+    let finishLook: (output: string) => void = () => undefined
+    let looks = 0
+    const { d, runInstaller } = driver({ version: () => (++looks === 1 ? new Promise<string>((resolve) => { finishLook = resolve }) : Promise.resolve('cua-driver 0.38.0')) })
+    const first = d.install()
+    await vi.waitFor(() => expect(looks).toBe(1))
+    // The installer has finished; the look after it has not.
+    expect(d.known()).toMatchObject({ state: 'installing' })
+    expect(await d.status(true)).toMatchObject({ state: 'installing' })
+    expect(d.install()).toBe(first)
+    finishLook('cua-driver 0.38.0')
+    expect(await first).toMatchObject({ state: 'found', version: '0.38.0' })
+    expect(runInstaller).toHaveBeenCalledTimes(1)
+    expect(d.known()).toMatchObject({ state: 'found' })
+  })
+
+  it('says the installer failed even when a driver that runs was already there, and only in that answer', async () => {
+    const { d } = driver({ files: [exe], installer: async () => { throw new Error('network down') } })
+    expect(await d.install()).toMatchObject({ state: 'found', error: 'The installer failed: network down' })
+    const next = await d.status(true)
+    expect(next.state).toBe('found')
+    expect(next.error).toBeUndefined()
+  })
+
+  it('finds a driver installed outside Mousse at the next refreshed look', async () => {
+    const files = new Set<string>()
+    const d = new ComputerUseDriver({ settings: () => ({ enabled: true }), platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), telemetryOff: async () => undefined, version: async () => 'cua-driver 0.38.0', exists: (path) => files.has(path) })
+    expect(await d.status(true)).toMatchObject({ state: 'missing' })
+    files.add(exe)
+    expect(await d.status(true)).toMatchObject({ state: 'found', source: 'default' })
+  })
+
+  it.each([
+    ['missing', [] as string[], 'missing'],
+    ['broken', [join('/opt', 'mine')], 'broken']
+  ] as const)('a chosen driver that is %s says chosen, and the PATH or the default folder is not taken instead', async (_name, files, state) => {
+    const chosen = join('/opt', 'mine')
+    const { d } = driver({ files: [exe, ...files], chosen, version: async () => { throw new Error('bad') } })
+    expect(await d.status(true)).toMatchObject({ state, source: 'chosen' })
   })
 
   it("says it didn't start when the driver fails to run, and says why an install failed", async () => {

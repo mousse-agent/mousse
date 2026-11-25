@@ -49,6 +49,8 @@ import { formatBinding } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
 import { openSettingsSection } from '../lib/settingsNavigation'
 import { COMPOSER_SEND_EVENT } from '../lib/composerEvents'
+import { takesConnectingHandover, useServiceConnecting } from '../lib/serviceConnection'
+import { CONNECTING_TEXT, ConnectingDots } from './ConnectingDots'
 import { useComposerNotice } from './ComposerNotice'
 import { composerMarkdownSpans, listContinuation, type MarkdownKind } from '../lib/composerMarkdown'
 import {
@@ -217,6 +219,14 @@ export interface ChatComposerProps {
    * `onRefused` gets a line naming it. `remote`: the thread runs on another computer, which takes images only.
    */
   attachRules?: { remote: boolean; onRefused: (line: string) => void }
+  /**
+   * Whether the composer says Connecting…; by default, while the app is not connected to its service
+   * (`useServiceConnecting`). Its placeholder says so, dots move behind its text and its toolbar's controls fade out;
+   * the draft stays and can be edited, and nothing is sent.
+   */
+  connecting?: boolean
+  /** Enter while connecting still reaches `onSend`: the parent keeps the message and sends it once connected. */
+  sendsWhenConnected?: boolean
 }
 
 /** A chip under the pointer: a thread chip (and whether on its remove mark) or an attachment chip, by its place in its list. */
@@ -297,12 +307,27 @@ export function ChatComposer({
   messageLimit = Infinity,
   attachmentStatus,
   sendBlocked = null,
-  attachRules
+  attachRules,
+  connecting: connectingProp,
+  sendsWhenConnected = false
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const attachmentsRowRef = useRef<HTMLDivElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  const serviceConnecting = useServiceConnecting()
+  // Taking the warm start composer's place, this one starts as that one ended (Connecting…) and fades to connected.
+  const [handover, setHandover] = useState(() => connectingProp === undefined && takesConnectingHandover())
+  useEffect(() => {
+    if (!handover) return
+    // Two frames: the first paints it as the warm start left it, so the fade starts from there.
+    let frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => setHandover(false)) })
+    return () => cancelAnimationFrame(frame)
+  }, [handover])
+  const connecting = connectingProp ?? (serviceConnecting || handover)
+  // A model menu left open when the connection dropped closes with the rest of the toolbar.
+  const closeModelMenu = run?.modelMenuOpen ? run.onModelMenuOpenChange : undefined
+  useEffect(() => { if (connecting) closeModelMenu?.(false) }, [connecting, closeModelMenu])
   // The send mode is a choice only while a reply runs: idle, Enter just sends. A card that takes the message (an open
   // question, a waiting approval: `sendLabel`) keeps Enter for itself.
   const [threadSendMode, setThreadSendMode] = useThreadSendMode(sendModeThreadId)
@@ -391,7 +416,7 @@ export function ChatComposer({
   useCommand(
     'composer.dictate',
     () => (isRecording ? dictation.stop() : startDictation()),
-    () => !disabled && isShown(composerInputRef.current) && (isRecording || (!recordingPending && !transcribing))
+    () => !disabled && isShown(composerInputRef.current) && (isRecording || (!connecting && !recordingPending && !transcribing))
   )
   const [pendingReferences, setPendingReferences] = useState(0)
   // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
@@ -496,6 +521,7 @@ export function ChatComposer({
     pendingReferences === 0 &&
     !disabled &&
     !sendBlocked &&
+    (!connecting || sendsWhenConnected) &&
     skillsPickerQuery === null
 
   useEffect(() => {
@@ -1326,7 +1352,7 @@ export function ChatComposer({
       // Alt+Enter, the earlier steer key, still steers. With no run every Enter sends.
       // With nothing typed, the chord sends the next queued message now, as Send now on it does: also while an
       // approved command still runs (the turn can be stopped but does not count as running).
-      if ((loading || stoppable) && isSteerKey(e, platform) && trimmedInput.length === 0 && !hasAttachments && onSteerQueued?.()) {
+      if ((loading || stoppable) && !connecting && isSteerKey(e, platform) && trimmedInput.length === 0 && !hasAttachments && onSteerQueued?.()) {
         markSteerKey()
         return
       }
@@ -1431,6 +1457,7 @@ export function ChatComposer({
 
   return (
     <div data-mousse="composer" className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
+      <ConnectingDots shown={connecting} instant={handover} />
       {banner}
       {previewing && (
         <PastedTextPreview
@@ -1560,7 +1587,7 @@ export function ChatComposer({
           onPaste={handlePaste}
           onFocus={resizeDraft}
           placeholder={
-            placeholder ?? (loading
+            connecting ? CONNECTING_TEXT : placeholder ?? (loading
               ? sendMode === 'steer'
                 ? `Steer the reply · ${formatBinding(STEER_BINDING, platform)} queues`
                 : `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
@@ -1704,6 +1731,8 @@ export function ChatComposer({
         allowAttachWhileLoading
         permission={permission}
         extraActions={extraActions}
+        connecting={connecting}
+        connectingNote={connecting && (input.length > 0 || hasAttachments) ? CONNECTING_TEXT : null}
         {...(sendModeShown ? { sendMode: { mode: sendMode, onSwitch: switchSendMode } } : {})}
       />
     </div>

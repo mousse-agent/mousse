@@ -194,6 +194,14 @@ export class MmsProtocolError extends Error {
   }
 }
 
+/** How long a connection waits for the service to answer its handshake. */
+export const HELLO_TIMEOUT_MS = 10_000
+/**
+ * The code of the error a connection fails with when the service accepted it but never answered the handshake: the
+ * process is there, but its main thread does not run (`GuiMmsController` replaces such a service).
+ */
+export const HELLO_TIMEOUT_CODE = 'hello_timeout'
+
 export interface LocalMmsClientOptions {
   homeDir: string
   ownerToken: string
@@ -203,6 +211,8 @@ export interface LocalMmsClientOptions {
   /** Override endpoint path (tests). */
   endpoint?: string
   requestTimeoutMs?: number
+  /** How long the service has to answer the handshake (`HELLO_TIMEOUT_MS`); tests shorten it. */
+  helloTimeoutMs?: number
   /** Identical concurrent calls of a `SHARED_READ_METHODS` method share one request (GUI windows). */
   shareIdenticalReads?: boolean
 }
@@ -246,6 +256,7 @@ export class LocalMmsClient implements MmsClient {
   private readonly commands = new ClientCommandReceiver()
   private _hello: ProtocolHelloOk | null = null
   private _connected = false
+  private _lastReceivedAt = 0
   private closing = false
   private lastSequence = 0
   private needsResnapshot = false
@@ -260,6 +271,14 @@ export class LocalMmsClient implements MmsClient {
   private subscribeEventBuffer: ProtocolEvent[] = []
 
   constructor(private readonly opts: LocalMmsClientOptions) {}
+
+  /**
+   * When anything last arrived from the service on this connection (the handshake answer, a response, an event, a part
+   * of one): proof its main thread ran then. `GuiMmsController` asks an idle service whether it still answers.
+   */
+  get lastReceivedAt(): number {
+    return this._lastReceivedAt
+  }
 
   get connected(): boolean {
     return this._connected
@@ -337,6 +356,7 @@ export class LocalMmsClient implements MmsClient {
         // before residual same-chunk frames are processed.
         this._connected = true
         this._hello = hello
+        this._lastReceivedAt = Date.now()
         this.commands.bindWriter((envelope) => {
           try {
             this.write(envelope, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES)
@@ -350,7 +370,10 @@ export class LocalMmsClient implements MmsClient {
         resolve(hello)
       }
 
-      const timer = setTimeout(() => fail(new Error('Hello timeout')), 10_000)
+      const timer = setTimeout(
+        () => fail(Object.assign(new Error('Hello timeout'), { code: HELLO_TIMEOUT_CODE })),
+        this.opts.helloTimeoutMs ?? HELLO_TIMEOUT_MS
+      )
 
       const onConnect = (): void => {
         try {
@@ -692,6 +715,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private onData(chunk: Buffer): void {
+    this._lastReceivedAt = Date.now()
     try {
       this.decoder.push(chunk)
       for (const frame of this.decoder.shiftAll()) {

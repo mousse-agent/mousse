@@ -2,8 +2,10 @@
  * A thread's `actions.json`: its turns and other actions, in order. A turn reads it several times (outside changes, its
  * start, its end, its checkpoint) and rewrites it two or three times, and the file grows with every turn the thread has
  * run. What was read is kept by file signature (`cacheSignature`), so a read of an unchanged file costs one `lstat`, and a
- * write that would leave the bytes as they are is skipped.
+ * write that would leave the bytes as they are is skipped. The cache keeps the parsed actions and a digest of the text,
+ * not the text: a file of a long thread is hundreds of kilobytes, and the service keeps it for as long as it runs.
  */
+import { createHash } from 'node:crypto'
 import { closeSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ThreadAction } from '../../shared/threadActions'
@@ -12,7 +14,13 @@ import { cacheSignature } from '../data/FileSignature'
 
 export const ACTIONS_FILE = 'actions.json'
 
-interface ActionsRead { signature: string; text: string; actions: readonly ThreadAction[] }
+interface ActionsRead {
+  signature: string
+  /** The text's length and digest, to tell whether a write would leave the bytes as they are. */
+  chars: number
+  digest: string
+  actions: readonly ThreadAction[]
+}
 
 /**
  * The last read of each thread's file, by path. A file whose signature is unchanged holds the same bytes: every write
@@ -49,28 +57,32 @@ function forget(path: string): void {
   const read = reads.get(path)
   if (!read) return
   reads.delete(path)
-  readChars -= read.text.length
+  readChars -= read.chars
+}
+
+function digestOf(text: string): string {
+  return createHash('sha256').update(text).digest('base64')
 }
 
 function remember(path: string, read: ActionsRead): void {
-  if (read.text.length > READ_CHARS_MAX) return
+  if (read.chars > READ_CHARS_MAX) return
   reads.set(path, read)
-  readChars += read.text.length
+  readChars += read.chars
   while (readChars > READ_CHARS_MAX) forget(reads.keys().next().value!)
 }
 
-/** The file's text and actions as they are now; `text` is undefined when there is no file. */
-function current(threadDirectory: string): { text?: string; actions: readonly ThreadAction[] } {
+/** The file's actions as they are now, shared and frozen; none when there is no file. */
+function current(threadDirectory: string): readonly ThreadAction[] {
   const path = join(threadDirectory, ACTIONS_FILE)
   const signature = signatureOf(path)
   const cached = reads.get(path)
   if (signature && cached?.signature === signature) {
     // Most recently used last, for the bound.
     reads.delete(path); reads.set(path, cached)
-    return cached
+    return cached.actions
   }
   forget(path)
-  if (signature === undefined) return { actions: [] }
+  if (signature === undefined) return []
   let read: { signature: string | undefined; text: string }
   try {
     const fd = openSync(path, 'r')
@@ -79,24 +91,23 @@ function current(threadDirectory: string): { text?: string; actions: readonly Th
       read = { signature: cacheSignature(fstatSync(fd, { bigint: true })), text: readFileSync(fd, 'utf8') }
     } finally { closeSync(fd) }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { actions: [] }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw error
   }
   actionsFileCounts.reads += 1
   const actions = deepFreeze(JSON.parse(read.text) as ThreadAction[])
-  if (read.signature) remember(path, { signature: read.signature, text: read.text, actions })
-  return { text: read.text, actions }
+  if (read.signature) remember(path, { signature: read.signature, chars: read.text.length, digest: digestOf(read.text), actions })
+  return actions
 }
 
 /** The thread's actions, shared and frozen: a caller that changes one copies it first. */
 export function readActions(threadDirectory: string): readonly ThreadAction[] {
-  return current(threadDirectory).actions
+  return current(threadDirectory)
 }
 
 /** The thread's actions as a new list of new objects the caller may change. */
 export function readActionsCopy(threadDirectory: string): ThreadAction[] {
-  const { text } = current(threadDirectory)
-  return text === undefined ? [] : JSON.parse(text) as ThreadAction[]
+  return structuredClone(current(threadDirectory)) as ThreadAction[]
 }
 
 /**
@@ -108,7 +119,7 @@ export function writeActions(threadDirectory: string, actions: readonly ThreadAc
   const text = `${JSON.stringify(actions, null, 2)}
 `
   const cached = reads.get(path)
-  if (cached?.text === text && signatureOf(path) === cached.signature) return
+  if (cached?.chars === text.length && cached.digest === digestOf(text) && signatureOf(path) === cached.signature) return
   forget(path)
   actionsFileCounts.writes += 1
   atomicWriteFileSync(path, text)

@@ -30,6 +30,7 @@ import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
 import { holdControl, type HoldControl } from '../support/steerHoldControl'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../src/shared/types'
 import { serializeAppError, type AppError } from '../../src/shared/errors'
+import { transcriptSink } from '../support/transcriptSink'
 
 // ----- transcript frames (codex app-server JSON-RPC lines) -----------------------------------
 
@@ -1178,9 +1179,11 @@ describe('CodexAdapter', () => {
     const sink = recordingSink()
     const client = {
       configured: () => true,
-      chat: async (chatInput: { onThinking?: (text: string) => void; onText?: (text: string) => void }) => {
+      chat: async (chatInput: { onThinking?: (text: string) => void; onText?: (text: string) => void; onThinkingSeparator?: (atOffset: number, sep: string) => void }) => {
         chatInput.onThinking?.('Reading the test')
         chatInput.onText?.('It is flaky.')
+        // The service's blank line between two reasoning items, which it says is its own.
+        chatInput.onThinkingSeparator?.('Reading the test'.length, '\n\n')
         chatInput.onThinking?.('Reading the test\n\nChecking the order')
         throw new Error('done')
       }
@@ -2514,5 +2517,61 @@ describe('a bot turn on Codex', () => {
     expect(calls).toEqual([])
     await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
     replay.assertDone()
+  })
+})
+
+/**
+ * Codex's reasoning and messages reach the saved rows as Codex wrote them: each reasoning summary part is a paragraph,
+ * an empty delta splits nothing, a completed message's corrected text replaces what streamed, and the blank line the
+ * service puts between two messages is dropped from a row that opens there, while the message's own indentation stays.
+ */
+describe('Codex rows keep the model\'s words', () => {
+  const reasoning = (itemId: string, delta: string, summaryIndex?: number) =>
+    note('item/reasoning/summaryTextDelta', { threadId: T, turnId: 'turn-1', itemId, delta, ...(summaryIndex === undefined ? {} : { summaryIndex }) })
+  const delta = (itemId: string, value: string) => note('item/agentMessage/delta', { threadId: T, turnId: 'turn-1', itemId, delta: value })
+  const command = (id: string) => [
+    note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'commandExecution', id, command: id, status: 'inProgress' } }),
+    note('item/completed', { threadId: T, turnId: 'turn-1', item: { type: 'commandExecution', id, command: id, status: 'completed', exitCode: 0 } })
+  ]
+  const agentMessage = (id: string, phase: 'started' | 'completed', text: string) =>
+    note(`item/${phase}`, { threadId: T, turnId: 'turn-1', item: { type: 'agentMessage', id, text } })
+
+  it('reasoning parts, empty deltas, a corrected message and a second message', async () => {
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      reasoning('r-1', 'Plan', 0),
+      // An empty message delta while Codex reasons: no reply starts, and the thought goes on in its row.
+      agentMessage('msg-0', 'started', ''),
+      delta('msg-0', ''),
+      reasoning('r-1', '', 0),
+      // The next summary part of the same item is a paragraph of its own.
+      reasoning('r-1', 'Check', 1),
+      ...command('ls'),
+      // A new reasoning item after a call is a new row, without the service's blank line.
+      reasoning('r-2', 'More'),
+      agentMessage('msg-1', 'started', ''),
+      delta('msg-1', 'Hello'),
+      delta('msg-1', ' wrld'),
+      agentMessage('msg-1', 'completed', 'Hello world'),
+      ...command('pwd'),
+      agentMessage('msg-2', 'started', ''),
+      delta('msg-2', '    indented'),
+      agentMessage('msg-2', 'completed', '    indented'),
+      completed('completed')
+    ])
+    const transcript = transcriptSink()
+    const result = await new CodexAdapter(() => service(replay)).startTurn(input(), transcript.sink, control(), host())
+    replay.assertDone()
+    expect(result.text).toBe('Hello world\n\n    indented')
+    expect(transcript.rows()).toEqual([
+      { kind: 'thinking', content: 'Plan\n\nCheck' },
+      { kind: 'tool', content: 'ls' },
+      { kind: 'thinking', content: 'More' },
+      { kind: 'text', content: 'Hello world' },
+      { kind: 'tool', content: 'pwd' },
+      { kind: 'text', content: '    indented' }
+    ])
   })
 })

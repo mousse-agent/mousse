@@ -131,6 +131,8 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     }
     case 'computer_tools':
       return { kind: 'computer', icon: 'web', live: 'using the computer' }
+    case 'computer_use_request':
+      return { kind: 'computer', icon: 'ask', live: 'asking you to set up computer use' }
     case 'computer_use': {
       const action = str(args.tool)
       return { kind: 'computer', icon: 'web', live: 'using the computer', ...(action ? { detail: shortChipText(action, 30) } : {}) }

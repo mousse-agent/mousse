@@ -1,8 +1,8 @@
-import { EventEmitter } from 'node:events'
+import { EventEmitter, getEventListeners } from 'node:events'
 import type { Socket } from 'node:net'
 import { describe, expect, it, vi } from 'vitest'
 import { EnvelopeAssembler, envelopeFrames } from '../src/mms/protocol/envelopeChunks'
-import { OUTBOUND_MAX_PENDING, OutboundWriter } from '../src/mms/protocol/outboundWriter'
+import { OUTBOUND_ENTRY_DEADLINE_MS, OUTBOUND_MAX_PENDING, OutboundWriter } from '../src/mms/protocol/outboundWriter'
 import { OUTBOUND_BATCH_BYTES } from '../src/mms/protocol/connectionEventWriter'
 import { supersedingKey } from '../src/mms/protocol/server'
 import { FrameDecoder } from '../src/mms/protocol/framing'
@@ -146,6 +146,46 @@ describe('outbound producer limits', () => {
     expect(failure).toHaveBeenCalledOnce()
     writer.close()
     await Promise.allSettled(pending)
+  })
+
+  it('keeps no timer or listener once a write has finished', async () => {
+    vi.useFakeTimers()
+    try {
+      const socket = bufferingSocket()
+      const writer = new OutboundWriter(socket, vi.fn())
+      const caller = new AbortController()
+      // A reply streams many small frames; each used to leave a minute-long deadline behind it.
+      await Promise.all(Array.from({ length: 50 }, (_, index) => writer.enqueue(1, () => [Buffer.from(`frame-${index}`)], caller.signal)!))
+      expect(vi.getTimerCount()).toBe(0)
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0)
+      writer.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fails an entry the peer takes too slowly to finish within the deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const socket = bufferingSocket()
+      const failure = vi.fn()
+      const writer = new OutboundWriter(socket, failure)
+      // Each frame fills a batch, and the peer drains one every 10 seconds: never a stall, but 90 seconds in all.
+      const slow = writer.enqueue(1, () => Array.from({ length: 10 }, () => Buffer.alloc(OUTBOUND_BATCH_BYTES)))!
+      slow.catch(() => {})
+      for (let step = 0; step < 5; step++) {
+        await vi.advanceTimersByTimeAsync(10_000)
+        socket.flush()
+      }
+      expect(failure).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(OUTBOUND_ENTRY_DEADLINE_MS - 50_000)
+      await expect(slow).rejects.toBeDefined()
+      expect(failure).toHaveBeenCalledOnce()
+      expect(socket.write.mock.calls.length).toBeLessThan(10)
+      writer.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('hands frames to Node without waiting for each write to finish while the peer keeps up', async () => {

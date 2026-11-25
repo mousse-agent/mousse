@@ -80,7 +80,7 @@ export interface EngineLimits {
    * its exit, and the stop must not wait on that.
    */
   helperStderrDrainMs: number
-  /** How often Add device reads a camera frame for a pairing code. */
+  /** How often Scan its code reads a camera frame for a pairing code. */
   scanIntervalMs: number
   /** How long a start keeps trying while another helper still holds the endpoint. */
   helperLockWaitMs: number
@@ -90,6 +90,8 @@ export interface EngineLimits {
   joinDeadlineMs: number
   /** How long the other direction of a pairing may take to come up once the joiner asked for it (`pairback`). */
   pairbackDeadlineMs: number
+  /** How long "Use another computer" waits for its check that the computer answers (`join.probe`). */
+  joinProbeDeadlineMs: number
   /** The wait before a pairing step that failed (a grant not saved, a pairback not answered) is tried again. */
   pairingRetryMs: number
   /** How long a renewed path may take to answer hello and give back each live subscription's head (§3.6). */
@@ -151,6 +153,29 @@ export interface EngineLimits {
   plusReadRetryMs: number
   /** How many times the Plus state and the removals are asked for at hello before the app waits for an event. */
   plusReadTries: number
+  /**
+   * How long a request to use the other computer of a one-way pairing waits for its owner to press Allow or Not now
+   * ("Use <name> from here…"); past it the row says it expired and the other computer's prompt closes.
+   */
+  accessAskMs: number
+  /** The least time between two such requests from this computer to one other computer. */
+  accessAskGapMs: number
+  /**
+   * The least time between two Allow prompts one other computer can raise here by asking: a request sooner than this
+   * after the last one is dropped without a prompt.
+   */
+  accessPromptGapMs: number
+  /**
+   * How long a request id another computer sent is remembered, so a repeat of it never prompts again. Far longer
+   * than a request lives (`accessAskMs`); a request is never repeated after it ends.
+   */
+  accessSeenMs: number
+  /**
+   * The most request ids remembered per other computer within `accessSeenMs`: while that many are held, a new
+   * request is dropped without a prompt, so none is forgotten early. Above what one computer asking no sooner than
+   * `accessAskGapMs` can send in that time.
+   */
+  accessSeenIds: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -194,6 +219,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   helperInitDeadlineMs: 60_000,
   joinDeadlineMs: 15 * 60_000,
   pairbackDeadlineMs: 60_000,
+  joinProbeDeadlineMs: 15_000,
   pairingRetryMs: 5_000,
   pathSwitchDeadlineMs: 30_000,
   pathDrainMs: 25 * 60_000,
@@ -216,7 +242,12 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   relayReadRetryMs: 1_000,
   relayReadTries: 5,
   plusReadRetryMs: 1_000,
-  plusReadTries: 5
+  plusReadTries: 5,
+  accessAskMs: 2 * 60_000,
+  accessAskGapMs: 30_000,
+  accessPromptGapMs: 20_000,
+  accessSeenMs: 60 * 60_000,
+  accessSeenIds: 256
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -257,6 +288,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS',
   joinDeadlineMs: 'MOUSSE_NET_ENGINE_JOIN_DEADLINE_MS',
   pairbackDeadlineMs: 'MOUSSE_NET_ENGINE_PAIRBACK_DEADLINE_MS',
+  joinProbeDeadlineMs: 'MOUSSE_NET_ENGINE_JOIN_PROBE_DEADLINE_MS',
   pairingRetryMs: 'MOUSSE_NET_ENGINE_PAIRING_RETRY_MS',
   pathSwitchDeadlineMs: 'MOUSSE_NET_ENGINE_PATH_SWITCH_DEADLINE_MS',
   pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
@@ -279,7 +311,12 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   relayReadRetryMs: 'MOUSSE_NET_ENGINE_RELAY_READ_RETRY_MS',
   relayReadTries: 'MOUSSE_NET_ENGINE_RELAY_READ_TRIES',
   plusReadRetryMs: 'MOUSSE_NET_ENGINE_PLUS_READ_RETRY_MS',
-  plusReadTries: 'MOUSSE_NET_ENGINE_PLUS_READ_TRIES'
+  plusReadTries: 'MOUSSE_NET_ENGINE_PLUS_READ_TRIES',
+  accessAskMs: 'MOUSSE_NET_ENGINE_ACCESS_ASK_MS',
+  accessAskGapMs: 'MOUSSE_NET_ENGINE_ACCESS_ASK_GAP_MS',
+  accessPromptGapMs: 'MOUSSE_NET_ENGINE_ACCESS_PROMPT_GAP_MS',
+  accessSeenMs: 'MOUSSE_NET_ENGINE_ACCESS_SEEN_MS',
+  accessSeenIds: 'MOUSSE_NET_ENGINE_ACCESS_SEEN_IDS'
 })
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */

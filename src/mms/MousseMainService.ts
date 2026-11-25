@@ -350,7 +350,10 @@ export class MousseMainService extends MmsProfileServices {
       return services.personalBots ? services.botBrowsers : null
     })
     // Settings → Computer use: whether Cua Driver is here, and its installer.
-    registerComputerUseMethods(this.domains, async (profileId) => (await profile(profileId)).orchestrator.computerUse())
+    registerComputerUseMethods(this.domains, async (profileId) => {
+      const { orchestrator } = await profile(profileId)
+      return { driver: orchestrator.computerUse(), setup: orchestrator.computerUseSetup() }
+    })
     registerAutomationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {

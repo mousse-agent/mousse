@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useDaemonCall } from '../devices/useDaemonCall'
+import { ChoiceRow } from './pairingParts'
 
 interface Resolved {
   routeId: string
@@ -88,20 +89,23 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
   return (
     <div className="engine-ssh" data-step={step.kind}>
       {step.kind === 'target' && (
-        <form className="engine-paste" onSubmit={(event) => void resolve(event)}>
-          <input
-            className="settings-input"
-            value={target}
-            autoFocus
-            placeholder="user@host"
-            aria-label="SSH address"
-            title="Uses your SSH keys or agent, never a password."
-            onChange={(event) => setTarget(event.target.value)}
-          />
-          <button type="submit" className="settings-btn" disabled={busy || !target.trim()}>
-            Continue
-          </button>
-        </form>
+        <>
+          <form className="engine-paste" onSubmit={(event) => void resolve(event)}>
+            <input
+              className="settings-input"
+              value={target}
+              autoFocus
+              placeholder="Host or SSH config alias"
+              aria-label="SSH address"
+              title="user@host, a host name, or a Host alias from your SSH config."
+              onChange={(event) => setTarget(event.target.value)}
+            />
+            <button type="submit" className="settings-btn ui-btn-primary" disabled={busy || !target.trim()}>
+              Continue
+            </button>
+          </form>
+          <p className="settings-muted">Uses your SSH keys or agent, never a password.</p>
+        </>
       )}
 
       {step.kind === 'key' && (
@@ -120,12 +124,12 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
           <div className="devices-dialog-actions">
             <button
               type="button"
-              className="settings-btn primary"
+              className="settings-btn ui-btn-primary"
               data-mousse-decision=""
               disabled={busy}
               onClick={() => void trust(step.resolved, step.probe)}
             >
-              Trust
+              Trust and continue
             </button>
           </div>
         </div>
@@ -133,44 +137,56 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
 
       {step.kind === 'profile' && (
         <div className="engine-confirm">
-          <fieldset className="engine-share" aria-label="Profile">
-            <legend title={`This computer will use the profile you pick on ${step.list.computer}.`}>
+          <div className="engine-choices">
+            <p
+              id="engine-ssh-profile-title"
+              className="engine-choices-title"
+              title={`This computer will use the profile you pick on ${step.list.computer}.`}
+            >
               Profile on {step.list.computer}
-            </legend>
-            {step.list.profiles.map((profile) => (
-              <label key={profile.selector} className="engine-share-item">
-                <input
-                  type="radio"
-                  name="ssh-profile"
-                  checked={choice === profile.selector}
-                  onChange={() => setChoice(profile.selector)}
+            </p>
+            <div className="engine-choice-list" role="radiogroup" aria-labelledby="engine-ssh-profile-title">
+              {step.list.profiles.map((profile) => (
+                <ChoiceRow
+                  key={profile.selector}
+                  selected={choice === profile.selector}
+                  disabled={busy}
+                  label={profile.label}
+                  onPick={() => setChoice(profile.selector)}
                 />
-                {profile.label}
-              </label>
-            ))}
-            <label className="engine-share-item">
-              <input
-                type="radio"
-                name="ssh-profile"
-                checked={choice === NEW}
-                onChange={() => setChoice(NEW)}
+              ))}
+              <ChoiceRow
+                selected={choice === NEW}
+                disabled={busy}
+                label="New profile…"
+                onPick={() => setChoice(NEW)}
               />
-              New profile
-            </label>
+            </div>
             {choice === NEW && (
               <input
                 className="settings-input"
                 value={label}
+                autoFocus
                 placeholder="Name"
                 aria-label="New profile name"
                 onChange={(event) => setLabel(event.target.value)}
               />
             )}
-          </fieldset>
+          </div>
+          <div className="engine-ssh-effects" role="group" aria-label="What Connect does">
+            <p className="engine-ssh-effects-title">What Connect does</p>
+            <ul>
+              <li>{step.list.computer} lets this computer in. Nothing the other way.</li>
+              <li title="Nothing on that computer listens for others.">
+                {step.list.computer} opens no port.
+              </li>
+              <li>Every connection goes through SSH.</li>
+            </ul>
+          </div>
           <div className="devices-dialog-actions">
             <button
               type="button"
-              className="settings-btn primary"
+              className="settings-btn ui-btn-primary"
               disabled={busy}
               title={`${step.list.computer} won’t use this computer unless you add it there too.`}
               onClick={() => void connect(step.resolved, step.list)}

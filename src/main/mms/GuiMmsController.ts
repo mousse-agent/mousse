@@ -24,6 +24,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
+import { endDaemonProcess } from '../../cli/daemonExitWatchdog'
 import { rotateStartupLogSync, STARTUP_LOG_CAP_ENV, STARTUP_LOG_FILE, STARTUP_LOG_MAX_BYTES } from '../../cli/startupLog'
 import { daemonCommand } from './daemonCommand'
 import { ensureWindowsGit, withWindowsGitPath } from './windowsGit'
@@ -31,6 +32,7 @@ import { nativeGitEnvironment, nativeGitInstaller, installNativeGit, type Native
 import type { GitSetup } from '../../shared/gitSetup'
 import {
   canonicalizeHome,
+  clearStopRequest,
   DAEMON_OWNER_TOKEN_ENV,
   pollUntilRuntimeReady,
   readStopRequest,
@@ -48,7 +50,7 @@ import {
   resolveOwnerStatus,
   type MmsOwnerRecord
 } from '../../mms/ownership/MmsOwnerLease'
-import { LocalMmsClient } from '../../mms/protocol/client'
+import { HELLO_TIMEOUT_CODE, HELLO_TIMEOUT_MS, LocalMmsClient } from '../../mms/protocol/client'
 import { FIRST_SEND_BINDING_CAPABILITY, THREAD_ROWS_CAPABILITY, type ProtocolEvent, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
@@ -130,6 +132,29 @@ export const GUI_DAEMON_START_TIMEOUT_MS = 90_000
  * gone by then.
  */
 export const EXITING_SERVICE_WAIT_MS = 30_000
+/**
+ * A service that holds the home, with its process alive, but has not answered a single handshake for this long is
+ * stuck: its main thread does not run (a deadlock, a native hang, an endless loop). It is replaced
+ * (`replaceUnresponsiveService`). Counted from the start of the first unanswered handshake, and well above a slow
+ * start (7 s or more) or a briefly busy service.
+ */
+export const UNRESPONSIVE_SERVICE_MS = 60_000
+/** ...and only after at least this many handshakes in a row, all to that same service, went unanswered. */
+export const UNRESPONSIVE_SERVICE_ATTEMPTS = 3
+/**
+ * How long an unresponsive service asked to stop gets to exit before it is ended from here. Its own watchdog thread
+ * ends it 8 s after the stop request (`DAEMON_EXIT_DEADLINE_MS` plus the watchdog's slack), main thread or not; this
+ * is for a service whose watchdog cannot run either (the whole process is frozen) or that predates it.
+ */
+export const UNRESPONSIVE_STOP_GRACE_MS = 15_000
+/**
+ * A connected service that has sent nothing for this long is asked whether it still answers (`health`, a read every
+ * service version has; any reply counts, an error too). A connection with traffic is never asked. Probes left without
+ * a reply count toward `UNRESPONSIVE_SERVICE_MS` like unanswered handshakes.
+ */
+export const SERVICE_PROBE_IDLE_MS = 15_000
+/** How long a probe waits for the reply. */
+export const SERVICE_PROBE_TIMEOUT_MS = 10_000
 
 export interface GuiMmsControllerOptions {
   homeDir?: string
@@ -149,6 +174,30 @@ export interface GuiMmsControllerOptions {
   /** Base reconnect backoff ms. */
   reconnectBaseMs?: number
   requestTimeoutMs?: number
+  /** How long the service has to answer a handshake (`HELLO_TIMEOUT_MS`); tests shorten it. */
+  helloTimeoutMs?: number
+  /** When and how a service that never answers is replaced (`replaceUnresponsiveService`); tests shorten and script it. */
+  unresponsiveService?: {
+    /** `UNRESPONSIVE_SERVICE_MS` */
+    afterMs?: number
+    /** `UNRESPONSIVE_STOP_GRACE_MS` */
+    stopGraceMs?: number
+    /** Ends the service's process when it outlives the stop (`endDaemonProcess`). */
+    endProcess?: (pid: number) => Promise<void> | void
+    /** `SERVICE_PROBE_IDLE_MS` */
+    probeIdleMs?: number
+    /** `SERVICE_PROBE_TIMEOUT_MS` */
+    probeTimeoutMs?: number
+  }
+}
+
+/** The service whose handshakes or probes have gone unanswered, every attempt since `since` (`noteUnanswered`). */
+interface UnansweredService {
+  token: string
+  processInstanceId: string
+  pid: number
+  since: number
+  attempts: number
 }
 
 export interface ThreadSnapshotResult {
@@ -264,6 +313,20 @@ export class GuiMmsController extends EventEmitter {
   private readonly endpointOverride?: string
   private readonly ownerTokenOverride?: string
   private readonly requestTimeoutMs?: number
+  private readonly helloTimeoutMs: number
+  private readonly unresponsiveAfterMs: number
+  private readonly unresponsiveStopGraceMs: number
+  private readonly endServiceProcess: (pid: number) => Promise<void> | void
+  private readonly probeIdleMs: number
+  private readonly probeTimeoutMs: number
+  /** Handshakes or probes in a row that the same live service left unanswered (`noteUnanswered`). */
+  private unanswered: UnansweredService | null = null
+  /** A service found stuck, to be replaced before the next connection attempt (`connectToService`). */
+  private stuckService: { owner: MmsOwnerRecord; unanswered: UnansweredService; noticedBy: string } | null = null
+  /** The next look at whether the main connection's service still answers (`watchLiveness`). */
+  private probeTimer: ReturnType<typeof setTimeout> | null = null
+  /** The replacement of an unresponsive service in progress; a second connection attempt that decides the same waits. */
+  private replacing: Promise<void> | null = null
   /** The owner token of the service the last connection attempt went to. */
   private connectingToToken: string | null = null
   /** Where main writes what happens to its service connections (`<home>/logs/gui-connection.log`). */
@@ -295,6 +358,12 @@ export class GuiMmsController extends EventEmitter {
     this.maxReconnect = opts.maxReconnectAttempts ?? 12
     this.reconnectBaseMs = opts.reconnectBaseMs ?? 500
     this.requestTimeoutMs = opts.requestTimeoutMs
+    this.helloTimeoutMs = opts.helloTimeoutMs ?? HELLO_TIMEOUT_MS
+    this.unresponsiveAfterMs = opts.unresponsiveService?.afterMs ?? UNRESPONSIVE_SERVICE_MS
+    this.unresponsiveStopGraceMs = opts.unresponsiveService?.stopGraceMs ?? UNRESPONSIVE_STOP_GRACE_MS
+    this.endServiceProcess = opts.unresponsiveService?.endProcess ?? endDaemonProcess
+    this.probeIdleMs = opts.unresponsiveService?.probeIdleMs ?? SERVICE_PROBE_IDLE_MS
+    this.probeTimeoutMs = opts.unresponsiveService?.probeTimeoutMs ?? SERVICE_PROBE_TIMEOUT_MS
   }
 
   /** The owner token of a service this controller started whose process has not exited. */
@@ -777,6 +846,7 @@ export class GuiMmsController extends EventEmitter {
       clientType: 'gui',
       requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES, ...(this.attachedBrowserHost ? [BROWSER_ATTACHED_V1_CAPABILITY] : [])],
       requestTimeoutMs: this.requestTimeoutMs,
+      helloTimeoutMs: this.helloTimeoutMs,
       // Views of a window ask the same reads at the same moment; one request answers them all (#420).
       shareIdenticalReads: true
     })
@@ -1147,30 +1217,194 @@ export class GuiMmsController extends EventEmitter {
   /**
    * Finds or starts the service and connects to it. A service that still holds the home after its endpoint went away
    * (it is shutting down, or its server ended) can serve no one: it is asked to stop and waited for, and then the next
-   * service is found or started. Meanwhile the windows keep their loading state.
+   * service is found or started. So is one whose process is alive but has answered no handshake or probe for a minute
+   * (`noteUnanswered`). Meanwhile the windows keep their loading state.
    */
   private async connectToService(): Promise<ProtocolHelloOk> {
     // Tests may inject endpoint+token without a full runtime publication.
     const injected = Boolean(this.endpointOverride && this.ownerTokenOverride)
     const leaveBy = Date.now() + EXITING_SERVICE_WAIT_MS
     for (;;) {
+      const stuck = this.stuckService
+      if (stuck) {
+        this.stuckService = null
+        try {
+          await this.replaceUnresponsiveService(stuck.owner, stuck.unanswered, stuck.noticedBy)
+        } catch (err) {
+          if (!this.quitting && !this.held) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
+          throw err
+        }
+      }
       if (!injected) await this.ensureDaemonReady()
       this.assertMayConnect()
       let gone: string | null
       try {
-        return await this.connectOnce()
+        const hello = await this.connectOnce()
+        this.unanswered = null
+        return hello
       } catch (err) {
         gone = injected ? null : this.unreachableOwner(err)
+        const timedOut = (err as { code?: unknown } | null)?.code === HELLO_TIMEOUT_CODE
+        // Any other outcome starts the count of unanswered attempts again.
+        if (!timedOut) this.unanswered = null
+        const unanswered = timedOut ? this.noteUnanswered(this.connectingToToken, Date.now() - this.helloTimeoutMs) : null
         // After stop, the failure is stop's doing: stay stopped.
-        if (!gone || Date.now() >= leaveBy || this.quitting || this.held) {
+        if ((!gone && !unanswered) || (gone && Date.now() >= leaveBy) || this.quitting || this.held) {
           if (!this.quitting && !this.held) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
           throw err
         }
+        if (unanswered) {
+          this.stuckService = { ...unanswered, noticedBy: 'handshake' }
+          continue
+        }
         this.log('service.unreachable', { error: describeLinkError(err) })
       }
-      writeStopRequest(this.homeDir, gone, { shared: true })
-      await this.waitForServiceToLeave(gone, leaveBy)
+      writeStopRequest(this.homeDir, gone!, { shared: true })
+      await this.waitForServiceToLeave(gone!, leaveBy)
     }
+  }
+
+  /** Whether a service found unresponsive may be replaced from here: never one the dev script or a test runs. */
+  private get mayReplaceService(): boolean {
+    return !this.disableAutoStart && !this.managedDaemon && !this.endpointOverride && !this.ownerTokenOverride
+  }
+
+  /**
+   * Counts a handshake the service accepted but never answered, or a probe of a connected service left without a reply
+   * (`watchLiveness`), when it went to the live service that holds this home (`token`). `startedAt` is when that
+   * attempt began. Returns the service once it has left every attempt unanswered for `UNRESPONSIVE_SERVICE_MS`, at
+   * least `UNRESPONSIVE_SERVICE_ATTEMPTS` times in a row: it is stuck and is replaced. Anything answered, or a
+   * different service (one that restarted meanwhile has another token and process instance), starts the count again.
+   */
+  private noteUnanswered(token: string | null, startedAt: number): { owner: MmsOwnerRecord; unanswered: UnansweredService } | null {
+    if (!this.mayReplaceService) {
+      this.unanswered = null
+      return null
+    }
+    const status = resolveOwnerStatus(this.homeDir)
+    const owner = status.owned ? status.record : null
+    if (!owner || owner.token !== token || canonicalizeHome(owner.home) !== this.homeDir) {
+      this.unanswered = null
+      return null
+    }
+    const previous = this.unanswered
+    const same = previous !== null && previous.token === owner.token &&
+      previous.processInstanceId === owner.processInstanceId && previous.pid === owner.pid
+    const unanswered: UnansweredService = same
+      ? { ...previous, attempts: previous.attempts + 1 }
+      : { token: owner.token, processInstanceId: owner.processInstanceId, pid: owner.pid, since: startedAt, attempts: 1 }
+    this.unanswered = unanswered
+    if (unanswered.attempts < UNRESPONSIVE_SERVICE_ATTEMPTS || Date.now() - unanswered.since < this.unresponsiveAfterMs) return null
+    return { owner, unanswered }
+  }
+
+  /**
+   * While the main connection is ready, looks every `SERVICE_PROBE_IDLE_MS` at when the service last sent anything. A
+   * service that sent something since needs nothing more. One idle that long is sent a probe (`health`); anything
+   * arriving before the probe's timeout counts as the answer, even an error from a service without that method. A probe
+   * left without a reply counts toward replacing the service (`noteUnanswered`); once it is found stuck, the connection
+   * is closed and the reconnect replaces the service before it connects again.
+   */
+  private watchLiveness(client: LocalMmsClient, token: string): void {
+    this.clearProbeTimer()
+    if (!this.mayReplaceService) return
+    const watching = (): boolean => this.client === client && client.connected && !this.quitting && !this.held
+    /** When the last probe left without a reply was sent; anything that arrived after it starts the count again. */
+    let unansweredAt: number | null = null
+    const next = (delayMs: number): void => {
+      this.probeTimer = setTimeout(() => { this.probeTimer = null; void look() }, Math.max(1, delayMs))
+    }
+    const look = async (): Promise<void> => {
+      if (!watching()) return
+      if (unansweredAt !== null && client.lastReceivedAt >= unansweredAt) {
+        unansweredAt = null
+        this.unanswered = null
+      }
+      const idleMs = Date.now() - client.lastReceivedAt
+      if (idleMs < this.probeIdleMs) {
+        next(this.probeIdleMs - idleMs)
+        return
+      }
+      const sentAt = Date.now()
+      await client.request('health', undefined, this.probeTimeoutMs, { fresh: true }).catch(() => undefined)
+      if (!watching()) return
+      if (client.lastReceivedAt >= sentAt) {
+        unansweredAt = null
+        this.unanswered = null
+        next(this.probeIdleMs)
+        return
+      }
+      unansweredAt = sentAt
+      const stuck = this.noteUnanswered(token, sentAt)
+      if (!stuck) {
+        next(this.probeIdleMs)
+        return
+      }
+      this.stuckService = { ...stuck, noticedBy: 'probe' }
+      // The reconnect replaces the service first (`connectToService`), then starts the next one.
+      this.disconnectUnsub?.()
+      this.disconnectUnsub = null
+      await client.close().catch(() => undefined)
+      this.mainConnectionLost('probe')
+    }
+    next(this.probeIdleMs)
+  }
+
+  private clearProbeTimer(): void {
+    if (this.probeTimer) {
+      clearTimeout(this.probeTimer)
+      this.probeTimer = null
+    }
+  }
+
+  /**
+   * Replaces a service that holds the home but answers nothing (`noteUnanswered`). It is asked to stop the usual way,
+   * with a stop request, which its own watchdog thread acts on even while its main thread is stuck; one still there
+   * after `UNRESPONSIVE_STOP_GRACE_MS` is ended (`endDaemonProcess`), after checking it is still that same process.
+   * The next service then starts the usual way, and recovers the turns that were running, as after any restart.
+   */
+  private async replaceUnresponsiveService(owner: MmsOwnerRecord, unanswered: UnansweredService, noticedBy: string): Promise<void> {
+    if (!this.replacing) {
+      const replacing = this.endUnresponsiveService(owner, unanswered, noticedBy)
+      this.replacing = replacing
+      void replacing.finally(() => { if (this.replacing === replacing) this.replacing = null }).catch(() => undefined)
+    }
+    await this.replacing
+  }
+
+  private async endUnresponsiveService(owner: MmsOwnerRecord, unanswered: UnansweredService, noticedBy: string): Promise<void> {
+    const since = Date.now()
+    this.setState('connecting')
+    this.log('service.unresponsive', {
+      noticedBy,
+      pid: owner.pid,
+      attempts: unanswered.attempts,
+      unansweredMs: since - unanswered.since
+    })
+    writeStopRequest(this.homeDir, owner.token, { shared: true })
+    let endBy = since + this.unresponsiveStopGraceMs
+    let ended = false
+    while (this.ownerHolds(owner.token)) {
+      this.assertMayConnect()
+      if (Date.now() >= endBy) {
+        if (ended) {
+          throw linkError('service_unresponsive', 'The Mousse service stopped answering and could not be ended')
+        }
+        ended = true
+        endBy = Date.now() + this.unresponsiveStopGraceMs
+        // Only the very process that went unanswered: the lease is re-read, and the pid must still be its pid.
+        const current = resolveOwnerStatus(this.homeDir).record
+        if (current && current.token === owner.token && current.pid === owner.pid &&
+            current.processInstanceId === owner.processInstanceId) {
+          this.log('service.ending', { pid: owner.pid })
+          await this.endServiceProcess(owner.pid)
+        }
+      }
+      await sleepAsync(SERVICE_POLL_INTERVAL_MS)
+    }
+    clearStopRequest(this.homeDir, owner.token)
+    this.unanswered = null
+    this.log('service.replaced', { pid: owner.pid, ended, waitedMs: Date.now() - since })
   }
 
   /** The service the failed connection went to, when it still holds the home but its endpoint is gone. */
@@ -1429,6 +1663,7 @@ export class GuiMmsController extends EventEmitter {
       clientType: 'gui',
       requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES],
       requestTimeoutMs: this.requestTimeoutMs,
+      helloTimeoutMs: this.helloTimeoutMs,
       // Views of a window ask the same reads at the same moment; one request answers them all (#420).
       shareIdenticalReads: true
     })
@@ -1480,6 +1715,7 @@ export class GuiMmsController extends EventEmitter {
       }
 
       this.setState('ready')
+      this.watchLiveness(client, owner.token)
       return hello
     } catch (err) {
       try {
@@ -1589,6 +1825,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private detachEventHandlers(): void {
+    this.clearProbeTimer()
     if (this.disconnectTimer) {
       clearInterval(this.disconnectTimer)
       this.disconnectTimer = null

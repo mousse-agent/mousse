@@ -112,6 +112,7 @@ import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
+import { ComputerUseSetupCard } from './ComputerUseSetupCard'
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
@@ -2226,6 +2227,8 @@ export function OrchestratorChat() {
           </div>
         </div>
 
+        {/* Computer use the agent asked to set up: nothing waits on it, it applies from the agent's next turn. */}
+        <ComputerUseSetupCard threadId={activeThreadId} remoteNode={remoteNode} remoteHostName={remoteComputer?.name} messages={messages} />
         <ComposerNoticeSource notice={queue.error ? { tone: 'error', title: queue.error, onDismiss: queue.clearError } : null} />
         <ComposerNoticeSource notice={queue.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, shortTitle: 'Your edit is in the composer', onDismiss: queue.dismissDraftMoved } : null} />
         <ComposerNoticeSource notice={queue.notice ? { tone: 'info', title: queue.notice, onDismiss: queue.clearNotice } : null} />

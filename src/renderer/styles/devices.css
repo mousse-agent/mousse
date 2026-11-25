@@ -53,7 +53,7 @@
   white-space: pre-wrap;
 }
 
-/* Add device and remove dialogs. */
+/* Devices' add and remove dialogs. */
 .devices-dialog {
   display: flex;
   flex-direction: column;
@@ -259,11 +259,12 @@
 }
 
 /*
- * A phone asks to join, and another computer asks to open its editor here, over every screen, Settings and
- * floating dialogs (the quick action editor) included.
+ * A phone asks to join, and another computer asks to open its editor here or to use this computer, over every
+ * screen, Settings and floating dialogs (the quick action editor) included.
  */
 .modal-overlay.enrollment-prompt,
-.modal-overlay.editor-ask-prompt {
+.modal-overlay.editor-ask-prompt,
+.modal-overlay.access-ask-prompt {
   z-index: calc(var(--z-floating, 50000) + 1);
   /* The prompt renders outside .settings-page, so it carries the tokens its content and buttons use. */
   --space-4: 4px;

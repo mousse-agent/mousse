@@ -319,6 +319,12 @@ const api = {
       ipcRenderer.on('secrets:requestsChanged', handler)
       return () => ipcRenderer.removeListener('secrets:requestsChanged', handler)
     },
+    /** A thread's computer use setup card changed; read it with `computerUse.setupRequest.get`. */
+    onComputerUseSetupRequestChanged: (cb: (payload: { threadId: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { threadId: string }) => cb(payload)
+      ipcRenderer.on('computerUse:setupRequestChanged', handler)
+      return () => ipcRenderer.removeListener('computerUse:setupRequestChanged', handler)
+    },
     /** A secret was added, used, removed or expired (Settings → Secrets). */
     onSecretsChanged: (cb: () => void): (() => void) => {
       const handler = () => cb()
@@ -1459,6 +1465,16 @@ const api = {
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
     installGit: (): Promise<boolean> => ipcRenderer.invoke('app:installGit'),
+    /**
+     * The app's link to its background service: `ready` when connected; `connecting`, `reconnecting`, `failed` and the
+     * rest while it is not.
+     */
+    serviceConnection: (): Promise<string> => ipcRenderer.invoke('app:serviceConnection'),
+    onServiceConnectionChanged: (cb: (state: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, state: string) => cb(state)
+      ipcRenderer.on('app:serviceConnectionChanged', handler)
+      return () => ipcRenderer.removeListener('app:serviceConnectionChanged', handler)
+    },
     gitSetup: (): Promise<GitSetup> => ipcRenderer.invoke('app:gitSetup'),
     onGitSetupChanged: (cb: (setup: GitSetup) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, setup: GitSetup) => cb(setup)

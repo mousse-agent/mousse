@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { filterLog, formatFiltered } from '../.agents/skills/nightly-build-release/filter-log.mjs'
+import { filterLog, formatFiltered } from '../moostack/skills/nightly-build-release/filter-log.mjs'
 
 const stamp = (text: string) => `Test (linux)\tRun tests\t2026-11-17T10:00:00.0000000Z ${text}`
 

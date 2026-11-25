@@ -64,9 +64,10 @@ const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { 
 const rowOf = (node: string) => document.querySelector<HTMLElement>(`[data-device-node="${node}"]`)!
 const buttonIn = (element: ParentNode, name: string) => [...element.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent?.trim() === name)
 const menuItem = (name: string) => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.trim() === name)
-/** Opens a device's Access from its row menu (Hide access closes it). */
+/** Opens a device's Access from its Can use this computer row's menu (Hide access closes it). */
 const openAccess = async (name: string) => {
-  await act(async () => document.querySelector<HTMLElement>(`[aria-label="Actions for ${name}"]`)!.click())
+  const actions = document.querySelector<HTMLElement>(`[data-device-side="in"] [aria-label="Actions for ${name}"]`)!
+  await act(async () => actions.click())
   const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => /^(Hide access|Access)$/.test(entry.textContent?.trim() ?? ''))!
   await act(async () => item.click())
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })

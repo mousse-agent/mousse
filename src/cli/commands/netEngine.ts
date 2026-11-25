@@ -20,7 +20,7 @@ export const NET_ENGINE_HELP = `Usage:
   mousse-cli net-engine status
   mousse-cli net-engine devices
   mousse-cli net-engine invite [--link]
-  mousse-cli net-engine join <link> [--yes]
+  mousse-cli net-engine join <link> [--both] [--yes]
   mousse-cli net-engine remove <device>
   mousse-cli net-engine addresses <device> <route>...
   mousse-cli net-engine routes [--lan on|off] [--tailnet on|off] [--public <host:port>] [--tunnel <url>] [--port <N>] [--test]
@@ -38,7 +38,9 @@ you to confirm. invite --link makes a link to send in a chat, and shows a six-di
 person another way; after a wrong code it shows a new one. Both wait until the pairing finishes or you press Ctrl+C, which ends the invitation.
 join opens a link made with invite --link. It lists the addresses it will contact and asks before dialling, then
 asks for the code shown on the other computer. The code is read from the terminal only, never from an argument or
-a pipe; without a terminal join refuses. --yes skips the address question and also needs a terminal.
+a pipe; without a terminal join refuses. --yes skips the address question and also needs a terminal. join pairs one
+way, as Mousse does by default: this computer uses the other one, and the other one can't use this one. --both also
+lets the other computer use this one.
 remove ends a pairing on both computers.
 addresses sets the addresses this computer dials a device at, replacing the ones set before: tcp://host:port,
 wss://host/.../mousse-net/1, ws://127.0.0.1:port/.../mousse-net/1 for a tunnel client on this computer, or ssh://.
@@ -58,7 +60,8 @@ export type NetEngineCliRequest =
   | { kind: 'status' }
   | { kind: 'devices' }
   | { kind: 'invite'; link: boolean }
-  | { kind: 'join'; ticket: string; yes: boolean }
+  /** `both`: the other computer may use this one too (Connect's "Also let"); unset pairs one way. */
+  | { kind: 'join'; ticket: string; yes: boolean; both: boolean }
   | { kind: 'remove'; device: string }
   | { kind: 'addresses'; device: string; routes: string[] }
   | { kind: 'routes'; config: NetEngineRoutesChange; test: boolean }
@@ -148,9 +151,11 @@ export function prepareNetEngineCommand(args: ParsedArgs): NetEngineCliRequest {
       }
       // An in-person code proves the two computers are side by side only when a camera reads it (§5).
       if (kind === 1)
-        invalid('This is an in-person pairing code: scan it with Add device in Mousse. Use invite --link to pair from a terminal.')
+        invalid('This is an in-person pairing code: scan it with Use another computer in Mousse. Use invite --link to pair from a terminal.')
       const yes = args.flags.get('yes')
-      return { kind: 'join', ticket: first, yes: yes === true }
+      const both = args.flags.get('both')
+      if (both !== undefined && both !== true) invalid('--both takes no value.')
+      return { kind: 'join', ticket: first, yes: yes === true, both: both === true }
     }
     case 'remove':
       if (!first || rest.length) invalid('net-engine remove takes one device.')
@@ -510,7 +515,7 @@ async function invite(
       ? [created.uri, shown(created.code, created.attemptsLeft), 'Send the link in a chat. Read the code to them another way.']
           .filter(Boolean)
           .join('\n')
-      : [terminalQr(created.uri), 'Scan this with Add device on the other computer.'].join('\n')
+      : [terminalQr(created.uri), 'Scan this with Use another computer on the other computer.'].join('\n')
   )
   let code = created.code
   let left = created.attemptsLeft
@@ -568,12 +573,15 @@ async function join(
     ticket: request.ticket
   })
   if (preview.kind === 1)
-    invalid('This is an in-person pairing code: scan it with Add device in Mousse.')
+    invalid('This is an in-person pairing code: scan it with Use another computer in Mousse.')
   if (preview.expired) invalid('This link has expired. Ask for a new one.')
   const destination = (entry: NetEngineJoinPreview['destinations'][number]): string => `${entry.label} (${entry.cls})`
+  const other = preview.name ?? facts.name ?? 'the computer in this link'
   io.say(
     [
-      `Connect to ${preview.name ?? facts.name ?? 'the computer in this link'}? It will also be able to use this computer.`,
+      request.both
+        ? `Connect to ${other}? It will also be able to use this computer.`
+        : `Connect to ${other}? One way: it won't be able to use this computer.`,
       `It will contact: ${preview.destinations.map(destination).join(', ') || 'nothing (no address it can use)'}`
     ].join('\n')
   )
@@ -617,13 +625,16 @@ async function join(
     // Connect approves the destinations listed above (§1.3); nothing of this computer's is shared beyond the LAN.
     const answer = await client.request<{ node: string; status: NetEngineStatus }>(
       NET_ENGINE_CLI_METHODS.join,
-      { ticket: request.ticket, arrival: 'link' },
+      { ticket: request.ticket, arrival: 'link', back: request.both },
       engineLimits().cliJoinWaitMs
     )
     const row = answer.status?.devices?.find((device) => device.node === answer.node)
+    const name = row?.name ?? preview.name ?? 'the other computer'
     io.emit(
       { node: answer.node },
-      `Paired with ${row?.name ?? preview.name ?? 'the other computer'}. The other direction finishes on its own.`
+      request.both
+        ? `Paired with ${name}. The other direction finishes on its own.`
+        : `Paired with ${name}, one way: this computer uses it.`
     )
     return 0
   } finally {

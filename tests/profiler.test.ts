@@ -142,8 +142,11 @@ describe('the profiler in the service', () => {
     const { settings, events, domains, mms, protocolServer } = fakeService(dir)
     const created: MemoryMonitor[] = []
     const now = { t: T0 }
-    const handle = prepareMemoryMonitor({ mms, protocolServer, homeDir: dir, version: '0.1.3', env: {}, createMonitor: () => { const m = testMonitor(dir, now); created.push(m); return m } })!
+    const idleTrim = { start: vi.fn(), stop: vi.fn() }
+    const handle = prepareMemoryMonitor({ mms, protocolServer, homeDir: dir, version: '0.1.3', env: {}, idleTrim, createMonitor: () => { const m = testMonitor(dir, now); created.push(m); return m } })!
     handle.start()
+    // The idle heap trim is not a profiler feature: it runs with the service, with the profiler off.
+    expect(idleTrim.start).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(10 * 60_000)
     expect(created).toHaveLength(0)
     expect(existsSync(join(dir, 'diagnostics', 'memory.jsonl'))).toBe(false)
@@ -167,6 +170,7 @@ describe('the profiler in the service', () => {
     expect(profilerService()?.monitor()).toBeNull()
     handle.stop()
     expect(profilerService()).toBeNull()
+    expect(idleTrim.stop).toHaveBeenCalledOnce()
   })
 
   it('asks the app for a report on request and resolves when its answer carries the id', async () => {

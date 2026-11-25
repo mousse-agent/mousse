@@ -129,7 +129,7 @@ export function legacyLine(
     const step = connectStep(device)
     return {
       line: 'Not connected here',
-      detail: step && 'hint' in step ? 'Pair it again with Add device.' : 'Connect from its menu.'
+      detail: step && 'hint' in step ? 'Pair it again from Devices.' : 'Connect from its menu.'
     }
   }
   if (device.state === 'open')

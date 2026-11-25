@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pickForTiming, summarizeSizes } from '../.agents/skills/check-on-real-data/real-threads'
+import { pickForTiming, summarizeSizes } from '../moostack/skills/check-on-real-data/real-threads'
 
 describe('real-thread report helpers', () => {
   it('summarises sizes without thread identity', () => {

@@ -233,6 +233,11 @@ export function bridgeProtocolEvent(
       if (threadId != null) broadcast('secrets:requestsChanged', { threadId })
       return true
     }
+    case 'computerUse.setupRequest.changed': {
+      // Only the thread id: a window reads the thread's setup card itself.
+      if (threadId != null) broadcast('computerUse:setupRequestChanged', { threadId })
+      return true
+    }
     case 'secrets.changed': {
       broadcast('secrets:changed', {})
       return true

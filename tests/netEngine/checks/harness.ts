@@ -1236,6 +1236,15 @@ export function deviceState(on: Computer, node: NodeId): string | undefined {
   return on.mms.netEngine.status().devices.find((row) => row.node === node)?.state
 }
 
+/**
+ * The row reads Connected for the whole pairing: a one-way row (the owner's before pairback) is connected for its one
+ * direction only. A row added over SSH is one way by design.
+ */
+export function connectedWhole(on: Computer, node: NodeId): boolean {
+  const device = on.mms.netEngine.status().devices.find((row) => row.node === node)
+  return device?.state === 'connected' && (!device.direction || device.source === 'ssh')
+}
+
 /** Waits until each computer's row for the other reads Connected; answers the caller's id on the owner. */
 export async function connectedBothWays(
   owner: Computer,
@@ -1248,10 +1257,7 @@ export async function connectedBothWays(
       onCaller = rowFor(caller, owner)
     if (!onOwner || !onCaller)
       throw new Error(`rows: owner ${onOwner?.state}, caller ${onCaller?.state}`)
-    if (
-      deviceState(owner, onOwner.localId) !== 'connected' ||
-      deviceState(caller, onCaller.localId) !== 'connected'
-    )
+    if (!connectedWhole(owner, onOwner.localId) || !connectedWhole(caller, onCaller.localId))
       throw new Error(`owner ${onOwner.state}, caller ${onCaller.state}`)
     callerOnOwner = onOwner.localId
   }, timeout)

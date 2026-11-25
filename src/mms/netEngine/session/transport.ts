@@ -15,6 +15,19 @@ export const ENGINE_LABELS = [
 export type EngineLabel = (typeof ENGINE_LABELS)[number]
 
 /**
+ * What this app understands beyond protocol 1, said in `mousse.hello` both ways. `one-way`: a computer it let in
+ * may never pair back, and its row is complete without that.
+ */
+export const SESSION_FEATURES = ['one-way'] as const
+
+/**
+ * Said beside `SESSION_FEATURES` only while this computer's helper can grant over a live connection
+ * (`grant-add-connected`): a computer of a one-way pairing may ask for the other direction (`access.*` messages on
+ * one long-lived `mousse.hello` stream the calling side opens with `access.open`).
+ */
+export const ACCESS_FEATURE = 'access-ask'
+
+/**
  * One stream of a connection, as the helper hands it to the app: ordered bytes each way, a FIN, or a reset.
  * The helper process and the in-memory test link both implement it.
  */

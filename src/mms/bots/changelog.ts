@@ -187,6 +187,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-20',
     text: 'Quiet hours are gone: banners, nudges and your questions’ defaults no longer wait for a quiet time. When your owner says when not to be disturbed, save it with memory_save as an owner entry and follow it.',
     gone: [/quiet hours now exist/i]
+  },
+  {
+    id: 35,
+    date: '2026-11-24',
+    text: 'When your owner allows "use the computer" but computer use isn\'t set up on this computer, work they asked for in your chat can call computer_use_request once: they get a setup card, and the computer tools are yours from your next turn. Never wait for it; after Not now, carry on without it.'
   }
 ]
 

@@ -51,7 +51,7 @@ const COMMANDS = new Set([
 // These switches never consume a following workflow name or run ID.
 const BOOLEAN_FLAGS = new Set([
   'wait', 'no-wait', 'draft', 'yes', 'deny',
-  'approve', 'listen', 'protect', 'disable', 'become-authority', 'follow', 'headless', 'private'
+  'approve', 'listen', 'protect', 'disable', 'become-authority', 'follow', 'headless', 'private', 'both'
 ])
 
 function defaultGlobals(): CliGlobals {

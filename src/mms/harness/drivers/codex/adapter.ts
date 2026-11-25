@@ -234,16 +234,19 @@ export class CodexAdapter implements ProviderAdapter {
       },
       onText: (text) => {
         progress()
-        // The reply began: the thought before it is done, and one that resumes after it is a new row.
-        streams.thinking.break()
+        // The reply began: the thought before it is done, and one that resumes after it is a new row. Only
+        // visible text does that: a whitespace-only part leaves the thought open.
+        if (streams.text.hasContentDelta(text)) streams.thinking.break()
         streams.text.update(text)
       },
       onThinking: (text) => {
         progress()
         // A thought after text keeps the text above it, as a tool call does.
-        streams.text.break()
+        if (streams.thinking.hasContentDelta(text)) streams.text.break()
         streams.thinking.update(text)
       },
+      onTextSeparator: (atOffset, sep) => streams.text.markSyntheticSeparator(atOffset, sep),
+      onThinkingSeparator: (atOffset, sep) => streams.thinking.markSyntheticSeparator(atOffset, sep),
       onTool: (event) => {
         progress()
         // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
