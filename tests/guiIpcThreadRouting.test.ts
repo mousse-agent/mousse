@@ -693,3 +693,12 @@ it('selects a cold admitted thread through sidebar IPC while the transcript and 
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 }, 30_000)
+
+describe('a checkout switch the service refuses', () => {
+  it('answers with its code, which a thrown error would lose on its way to the window, so the send makes a new thread', async () => {
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.') })
+    await expect(invoke('threads:setWorktreeEnabled', 'thread-1', true, true)).resolves.toMatchObject({ ok: false, code: 'worktree_locked' })
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('thread_not_found', 'Thread not found') })
+    await expect(invoke('threads:setWorktreeEnabled', 'thread-1', true)).rejects.toMatchObject({ code: 'thread_not_found' })
+  })
+})
