@@ -58,14 +58,14 @@
     },
     {
       "task": "fast-automatic-title-naming",
-      "session": "LAPTOP-HIEROJK7-e7b696",
-      "machine": "LAPTOP-HIEROJK7",
+      "session": "Animatrix-b7fc61",
+      "machine": "Animatrix",
       "branch": "fast-automatic-title-naming",
       "paths": [
-        "src/mms/models"
+        "src/mms/orchestrator"
       ],
-      "claimedAt": "2026-11-24T14:48:06.647Z",
-      "expiresAt": "2026-11-24T16:48:06.647Z"
+      "claimedAt": "2026-11-25T02:26:34.799Z",
+      "expiresAt": "2026-11-25T04:26:34.799Z"
     },
     {
       "task": "fix-thinking-stream-integrity",
