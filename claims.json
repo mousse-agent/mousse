@@ -122,21 +122,6 @@
       ],
       "claimedAt": "2026-11-25T18:29:30.139Z",
       "expiresAt": "2026-11-25T20:29:30.139Z"
-    },
-    {
-      "task": "sidebar-computer-filter",
-      "session": "agibook-d7affa",
-      "machine": "agibook",
-      "branch": "sidebar-computer-filter",
-      "paths": [
-        "src/renderer/lib/threadFilter.ts",
-        "src/renderer/stores/threadFilterStore.ts",
-        "src/renderer/components/sidebar/ThreadFilterBar.tsx",
-        "src/renderer/components/ThreadsSidebar.tsx",
-        "src/renderer/styles/thread-filter.css"
-      ],
-      "claimedAt": "2026-11-25T18:44:57.616Z",
-      "expiresAt": "2026-11-25T20:44:57.616Z"
     }
   ]
 }
