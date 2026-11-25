@@ -94,23 +94,6 @@
       ],
       "claimedAt": "2026-11-25T02:21:03.217Z",
       "expiresAt": "2026-11-25T04:21:03.217Z"
-    },
-    {
-      "task": "opencode-provider",
-      "session": "Animatrix-504a69",
-      "machine": "Animatrix",
-      "branch": "opencode-provider",
-      "paths": [
-        "src/mms/harness/drivers/opencode.ts",
-        "src/mms/harness/acp/presets/opencode.ts",
-        "src/mms/harness/gateway.ts",
-        "src/mms/harness/status.ts",
-        "src/mms/harness/driver.ts",
-        "src/shared/privacy/outbound.ts",
-        "tests/harness/opencodeDriver.test.ts"
-      ],
-      "claimedAt": "2026-11-25T02:26:08.022Z",
-      "expiresAt": "2026-11-25T04:31:01.002Z"
     }
   ]
 }
