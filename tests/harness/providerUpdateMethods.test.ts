@@ -32,7 +32,8 @@ describe('the install method, from the executable path', () => {
     '/usr/local/bin/codex': '/usr/local/lib/node_modules/@openai/codex/bin/codex.js',
     '/opt/homebrew/bin/claude': '/opt/homebrew/Caskroom/claude-code/2.1.300/claude',
     '/Users/me/.local/bin/claude': '/Users/me/.local/share/claude/versions/2.1.300',
-    '/usr/local/bin/mystery': '/opt/mystery/mystery'
+    '/usr/local/bin/mystery': '/opt/mystery/mystery',
+    '/Users/me/.local/bin/codex': '/Users/me/.codex/packages/standalone/releases/0.170.0-aarch64-apple-darwin/bin/codex'
   }
   const realpath = (path: string) => links[path] ?? path
 
@@ -40,6 +41,14 @@ describe('the install method, from the executable path', () => {
     expect(installOwnerOf('/usr/local/bin/codex', 'path', realpath)).toBe('npm')
     expect(installOwnerOf('/opt/homebrew/bin/claude', 'path', realpath)).toBe('brew')
     expect(installOwnerOf('/Users/me/.local/bin/claude', 'path', realpath)).toBe('standalone')
+    expect(installOwnerOf('/Users/me/.local/bin/codex', 'path', realpath)).toBe('standalone')
+  })
+
+  it('knows the Codex and agy installers\' own folders, Windows ones too', () => {
+    expect(installOwnerOf('/Users/me/.codex/packages/standalone/current/bin/codex', 'path', realpath)).toBe('standalone')
+    expect(installOwnerOf('C:\\Users\\Me\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe', 'path', realpath)).toBe('standalone')
+    expect(installOwnerOf('C:\\Users\\Me\\AppData\\Local\\agy\\bin\\agy.exe', 'path', realpath)).toBe('standalone')
+    expect(installOwnerOf('/Users/me/.local/bin/agy', 'path', realpath)).toBe('standalone')
   })
 
   it('reads the path itself when there is no link, and says unknown when nothing proves an owner', () => {
@@ -80,9 +89,9 @@ describe('the update command per install method', () => {
     })
   })
 
-  it('Codex: the package manager that installed it', () => {
+  it('Codex: its own updater for the standalone install, the package manager otherwise', () => {
     expect(Object.fromEntries(methods.map((owner) => [owner, codex.updateCommand?.(owner)]))).toEqual({
-      standalone: undefined,
+      standalone: 'codex update',
       npm: 'npm install -g @openai/codex@latest',
       pnpm: 'pnpm add -g @openai/codex@latest',
       bun: 'bun add -g @openai/codex@latest',

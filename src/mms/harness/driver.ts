@@ -714,6 +714,17 @@ export function compareVersions(a: string, b: string): number {
   return 0
 }
 
+/**
+ * Folders a CLI's own installer writes, whose CLI updates itself (`claude update`, `codex update`,
+ * `agy update`): the shared `~/.local` folders, Codex's standalone packages and its Windows folder,
+ * and Google's Windows folder for `agy`. Lowercase, with forward slashes.
+ */
+const STANDALONE_FOLDERS = [
+  '/.local/bin/', '/.local/share/', '/.grok/bin/', '/.opencode/bin/',
+  '/.codex/packages/standalone/', '/appdata/local/programs/openai/codex/',
+  '/appdata/local/agy/'
+]
+
 /** The install owner a binary path proves, from where package managers put their executables. */
 export function installOwner(path: string | undefined, source: 'path' | 'managed' | 'override' | 'bundled'): InstallOwner {
   if (source === 'managed') return 'managed'
@@ -724,7 +735,7 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (normalized.includes('/.bun/')) return 'bun'
   if (normalized.includes('/node_modules/') || normalized.includes('/npm/') || normalized.endsWith('.cmd')) return 'npm'
   if (normalized.includes('/winget/')) return 'winget'
-  if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/') || normalized.includes('/.opencode/bin/')) return 'standalone'
+  if (STANDALONE_FOLDERS.some((folder) => normalized.includes(folder))) return 'standalone'
   return 'unknown'
 }
 

@@ -318,6 +318,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     botHold: () => ({ runtime: 'codex', hostedSearch: 'off_without_web' }),
     nativeToolNames: (neutral) => CODEX_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
+      // The standalone installer's Codex reinstalls itself from OpenAI's install script.
+      if (owner === 'standalone') return 'codex update'
       if (owner === 'npm') return 'npm install -g @openai/codex@latest'
       if (owner === 'pnpm') return 'pnpm add -g @openai/codex@latest'
       if (owner === 'bun') return 'bun add -g @openai/codex@latest'

@@ -104,9 +104,9 @@ describe('the update on offer', () => {
 
   it('a standalone install never gets an npm command', () => {
     expect(offer(at('/home/me/.local/bin/fakecli', '2.1.0', 'standalone'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0', untested: true })
-    // The real drivers: Claude updates itself, Codex has no standalone command, `/usr/local/bin` is not brew.
+    // The real drivers: Claude and Codex update themselves, `/usr/local/bin` is not brew.
     expect(claudeCodeDriver().updateCommand?.('standalone')).toBe('claude update')
-    expect(codexDriver({ builtIn: () => ({}) as never }).updateCommand?.('standalone')).toBeUndefined()
+    expect(codexDriver({ builtIn: () => ({}) as never }).updateCommand?.('standalone')).toBe('codex update')
     expect(installOwner('/usr/local/bin/codex', 'path')).toBe('unknown')
     expect(offer(at('/usr/local/bin/codex', '0.150.0', installOwner('/usr/local/bin/codex', 'path')), '0.163.0', codexDriver({ builtIn: () => ({}) as never })))
       .toEqual({ kind: 'notice', latestVersion: '0.163.0' })
