@@ -3769,6 +3769,123 @@ it.each(['narrowing', 'pause', 'forget', 'failed', 'asks first off'] as const)('
   expect(t.calls).toEqual([])
 })
 
+/** Holds the owner's MCP connection open (a slow connect) until released: the moment between a call's checks and its send. */
+function connecting(manager: unknown) {
+  const live = manager as { connect(...args: unknown[]): Promise<unknown> }
+  const original = live.connect.bind(live)
+  let release!: () => void
+  let arrive!: () => void
+  const open = new Promise<void>(resolve => { release = resolve })
+  const reached = new Promise<void>(resolve => { arrive = resolve })
+  vi.spyOn(live, 'connect').mockImplementationOnce(async (...args: unknown[]) => { arrive(); await open; return original(...args) })
+  return { reached, release }
+}
+
+it.each(['nothing', 'server switch', 'MCP off'] as const)("a chat turn's call that may write, with %s changed while it connects, reaches the server only if still allowed", async change => {
+  const t = await setup(false, true)
+  await finish(f, t.work.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send it from here.', clientRequestId: 'chat-quick' })
+  const talk = await start(f, f.store.laneActivations(t.botId, 'chat', ['running'])[0]!.id)
+  const gate = connecting(t.manager)
+  const sending = callForBot({ bot: talk.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'quick-write', signal: new AbortController().signal })
+  await gate.reached
+  if (change === 'server switch') f.bots.setPermission(t.botId, 'default:mcp:mail', false)
+  if (change === 'MCP off') t.setMcpEnabled(false)
+  gate.release()
+  const outcome = await sending
+  if (change === 'nothing') {
+    expect(outcome.text).toContain('delivered')
+    expect(t.calls).toEqual([t.args])
+    return
+  }
+  expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('nothing was sent') })
+  expect(t.calls).toEqual([])
+})
+
+it('a bot paused after Send marked its call running, before it reached the server, sends nothing and settles failed', async () => {
+  const t = await setup(true, true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const gate = connecting(t.manager)
+  const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await gate.reached
+  expect(f.bots.actions.get(a.id)!.status).toBe('running')
+  f.bots.pauseBot(t.botId)
+  gate.release()
+  await sending
+  expect(f.bots.actions.get(a.id)!.status).toBe('failed')
+  expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toContain('paused, so nothing was sent')
+  expect(t.calls).toEqual([])
+})
+
+it('/clear withdraws a chat card that outlived its turn: a stale Send sends nothing, and the same request gets a card again', async () => {
+  const t = await setup(true)
+  const { row, talk, action } = await chatHold(t)
+  await finish(f, talk.payload)
+  expect(f.store.activation(row.id)!.status).toBe('done')
+  await f.bots.clearChat(t.botId)
+  expect(f.bots.actions.get(action.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  await expect(f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })).rejects.toThrow()
+  expect(t.calls).toEqual([])
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send it after all.', clientRequestId: 'after-clear' })
+  const again = await start(f, f.store.laneActivations(t.botId, 'chat', ['running'])[0]!.id)
+  const outcome = await callForBot({ bot: again.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'after-clear-call', signal: new AbortController().signal })
+  expect(outcome.text).toBe('This call is held for your owner. End your turn now.')
+})
+
+it("a chat turn that held a call reads the owner's later message, then ends done; its card stays and the chat is free", async () => {
+  const t = await setup(true)
+  const { row, talk, action } = await chatHold(t)
+  // The owner writes again while the turn runs: the turn goes on to read it, never parked on its card.
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Also, say hi to them.', clientRequestId: 'chat-more' })
+  await finish(f, talk.payload, 'completed', { text: 'Held it for you.' })
+  expect(f.store.activation(row.id)!.status).toBe('running')
+  const next = f.store.lastMainDispatch(row.id)!
+  expect(next.n).toBeGreaterThan(1)
+  await finish(f, (await start(f, row.id, next.n)).payload, 'completed', { text: 'Hi.' })
+  expect(f.store.activation(row.id)!.status).toBe('done')
+  expect(f.bots.actions.get(action.id)!.status).toBe('open')
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Anything else?', clientRequestId: 'chat-free' })
+  expect(f.store.laneActivations(t.botId, 'chat', ['running']).map(r => r.id)).not.toContain(row.id)
+  expect(f.store.laneActivations(t.botId, 'chat', ['running'])).toHaveLength(1)
+})
+
+it('a chat turn a restart cut off once it held a call ends done, keeps its card, and Send still runs it', async () => {
+  const t = await setup(true)
+  const { row, talk, action } = await chatHold(t)
+  f.runs.markTerminal(talk.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup(); await flush()
+  expect(f.store.activation(row.id)!.status).toBe('done')
+  expect(f.bots.actions.get(action.id)!.status).toBe('open')
+  await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+
+it("a chat card's result no turn can carry (its grant revoked while it ran) is told once in the chat, and never later", async () => {
+  const t = await setup(true)
+  const { talk, action } = await chatHold(t)
+  await finish(f, talk.payload)
+  const grant = f.store.activeGrant(t.botId)!
+  vi.mocked(t.manager.callTool).mockImplementationOnce(async (_name, args) => {
+    f.bots.revoke(t.botId)
+    t.calls.push(structuredClone(args))
+    return { content: [{ type: 'text', text: 'delivered' }] } as never
+  })
+  await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  expect(f.bots.actions.get(action.id)!.status).toBe('done')
+  expect(resultTurns(t.botId)).toEqual([])
+  const notices = () => f.store.all("SELECT text FROM bot_messages WHERE bot_id = ? AND id = ?", t.botId, `bm_${action.id}_result`)
+  expect(notices()).toEqual([{ text: expect.stringMatching(/^Mail · .+ was sent\. .+ can't follow up on it now\.$/) }])
+  // Approved again: still no turn for it, and the notice is not repeated.
+  f.store.approve(t.botId, grant.digest, grant.manifest)
+  f.bots.actions.transition(action.id, 'done', 'done', { text: 'delivered' })
+  await flush()
+  expect(resultTurns(t.botId)).toEqual([])
+  expect(notices()).toHaveLength(1)
+})
+
 it('C6 introduction and first card commit together or neither is kept', async () => {
   const t = await setup(true)
   f.store.run("CREATE TRIGGER fail_c6_card BEFORE INSERT ON bot_actions BEGIN SELECT RAISE(ABORT, 'card failed'); END")

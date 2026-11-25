@@ -178,6 +178,69 @@ describe('budgets, deadlines and the owner writing', () => {
     expect(waiting.get(WRITE)!.signal.aborted).toBe(true)
   })
 
+  it('calls that overlap share the total on the clock: one started while another runs gets only what is left of it', async () => {
+    f.host.chatCallLimits = { callMs: 1_000, turnMs: 1_200 }
+    const talk = await chat('Look two things up.', 'm1')
+    const call = registryFor(talk)
+    hangs = new Set([READ, 'web_search'])
+    const reading = use(call, READ)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    // Started while the first still runs: about 700 ms of the 1,200 are left, so it is cut by the total, before its
+    // own 1,000 ms, and the two never keep the turn busy past 1,200 ms together.
+    const search = refusalOf(await call('web_search', { query: 'two' }))?.refused
+    expect(search).toMatchObject({ code: 'work_required', message: expect.stringContaining("this turn's") })
+    expect(refusalOf(await reading)?.refused.code).toBe('work_required')
+    const before = sent.length
+    expect(refusalOf(await call('web_fetch', { url: 'https://example.com' }))?.refused.message).toContain("didn't run")
+    expect(sent).toHaveLength(before)
+  })
+
+  it.each([
+    ['from another device', async () => { await f.bots.service.chatSend({ botId, text: 'From my phone: stop.', clientRequestId: 'p1', from: { limit: 'ask' } }) }],
+    ['while a turn the owner did not start runs', async () => { await f.bots.service.chatSend({ botId, text: 'Actually, wait.', clientRequestId: 'm2' }) }]
+  ] as const)('a message %s that waits for its own turn still stops the running call that only reads', async (_case, write) => {
+    f.host.chatCallLimits = { callMs: 5_000, turnMs: 10_000 }
+    const notOwner = _case.startsWith('while')
+    let talk
+    if (notOwner) {
+      const row = f.store.activation((await f.bots.enqueueChat(botId, 'botmsg:b1:m1', 'Another bot asks you to read the note.')).id)!
+      await flush()
+      talk = { activation: row, ...(await start(f, row.id)) }
+    } else talk = await chat('Read my trip note.', 'm1')
+    const call = registryFor(talk)
+    hangs = new Set([READ, WRITE])
+    const reading = use(call, READ)
+    const writing = use(call, WRITE)
+    await flush()
+    await write()
+    // The message did not join this turn: it was queued as a turn of its own.
+    expect(f.store.laneActivations(botId, 'chat', ['queued'])).toHaveLength(1)
+    expect(refusalOf(await reading)?.refused).toMatchObject({ code: 'cancelled', message: expect.stringContaining('comes to you after this turn') })
+    expect(waiting.get(WRITE)!.signal.aborted).toBe(false)
+    waiting.get(WRITE)!.answer('Issue #12 filed.')
+    expect((await writing).text).toContain('Issue #12 filed.')
+  })
+
+  it('a tool whose server drops its read-only hint while it runs is never stopped by the owner, and its deadline is uncertain', async () => {
+    f.host.chatCallLimits = { callMs: 400, turnMs: 10_000 }
+    const talk = await chat('Read my trip note.', 'm1')
+    const call = registryFor(talk)
+    hangs = new Set([READ])
+    const note = SERVERS[1]!.tools[0]!
+    try {
+      const reading = use(call, READ)
+      await flush()
+      // The listing as it is now says nothing of only reading: the call may write.
+      note.readOnlyHint = false
+      await f.bots.service.chatSend({ botId, text: 'Actually, wait.', clientRequestId: 'm2' })
+      await flush()
+      expect(waiting.get(READ)!.signal.aborted).toBe(false)
+      expect(refusalOf(await reading)?.refused).toMatchObject({ code: 'uncertain' })
+    } finally {
+      note.readOnlyHint = true
+    }
+  })
+
   it("holds a turn's calls to their total: once it is spent, nothing more is sent", async () => {
     f.host.chatCallLimits = { callMs: 150, turnMs: 250 }
     const talk = await chat('Look a few things up.', 'm1')

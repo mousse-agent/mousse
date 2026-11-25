@@ -215,7 +215,8 @@ interface Host {
    * of its own, written in the same `bots.db` transaction as the status (`action_result`).
    */
   resulted?(action: ActionRow): void
-  execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<BotMcpCallOutcome>
+  /** Sends held call `action` (`running`): `assertRunning(action.id)` is its last fence before the server sees it. */
+  execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>, action: ActionRow): Promise<BotMcpCallOutcome>
 }
 const pending = new Set(['open', 'approved', 'running'])
 export class BotActionChanged extends Error { constructor(message: string, readonly code = 'bot_action_changed') { super(message) } }
@@ -274,6 +275,15 @@ export class BotActions {
   withdrawWork(id: string, to?: 'done' | 'failed' | 'cancelled'): void {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved') AND NOT (lane = 'chat' AND ? = 'done')", id, to ?? null))
       this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' }, 'bot_action_work_ended')
+  }
+  /**
+   * The owner cleared the chat (`/clear`, inside its transaction): every chat turn's call not yet sent goes with its
+   * card, so no stale Send runs it and it holds back no same request. One already sent finishes.
+   */
+  withdrawChat(botId: string): void {
+    for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND lane = 'chat' AND status IN ('open', 'approved')", botId))
+      if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'Your owner cleared the chat, so nothing was sent.' }, 'bot_action_owner_removed'))
+        this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
   }
   /** Rollback retires all unstarted calls together; an already dispatched call finishes. */
   withdrawDisabled(): void {
@@ -470,6 +480,8 @@ export class BotActions {
       throw new BotActionChanged(botActionRefusalText('bot_action_gone'), 'bot_action_gone')
     }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
+    // Paused after Send marked it running, before it reached the server: it is not sent (it settles failed).
+    if (this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged('This bot was paused, so nothing was sent. Carry on without it when resumed.', 'bot_action_owner_paused')
   }
   /** Admission may retire stale lifecycle state; it never approves or dispatches the call. */
   check(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): void {
@@ -558,7 +570,7 @@ export class BotActions {
     if (!action.exec_args || !this.transition(id, 'approved', 'running')) return
     this.executing.add(id)
     try {
-      const result = await this.host.execute(row, JSON.parse(action.target_json), JSON.parse(action.exec_args))
+      const result = await this.host.execute(row, JSON.parse(action.target_json), JSON.parse(action.exec_args), action)
       // A transport failure can have happened after the server acted. Never promise that retrying is safe.
       this.transition(id, 'running', result.isError ? result.callState ?? 'uncertain' : 'done', result)
     } catch (error) {

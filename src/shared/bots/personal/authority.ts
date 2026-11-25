@@ -144,8 +144,13 @@ export interface BotQuickCalls {
   run<T extends { text: string; isError?: boolean }>(input: {
     /** The tool's name, for what the bot is told. */
     tool: string
-    /** Known to only read: `web_search`, `web_fetch`, `secret_fetch`, an MCP tool `mcpReadOnly` says is. */
+    /** Known to only read when it starts: `web_search`, `web_fetch`, `secret_fetch`, an MCP tool `mcpReadOnly` says is. */
     readOnly: boolean
+    /**
+     * Whether it is still known to only read (an MCP tool's listing can change while it runs): a steer stops, and a
+     * deadline answers `work_required` for, only a call read-only when it started and still now. Absent: always.
+     */
+    stillReadOnly?(): boolean
     /** The call's own stop (an explicit Stop, the turn's end). */
     signal: AbortSignal
     call(signal: AbortSignal): Promise<T>
@@ -224,6 +229,11 @@ export interface BotAuthority {
   waiting(): boolean
   /** Allowlist, path containment across the roots (real paths), skill and MCP identity, and the wait. */
   check(call: NormalisedCall): BotCheck
+  /**
+   * Whether `check` would allow `call` now, decided without side effects (no ask, no chip, no count): a call checked
+   * once already is checked again with it right before it is sent.
+   */
+  allows?(call: NormalisedCall): boolean
   /**
    * One native call that stands for several neutral tools (Claude's `Glob`): allowed when any of
    * them passes. Decided without side effects, so a wall or an ask is raised once, only when all are refused.

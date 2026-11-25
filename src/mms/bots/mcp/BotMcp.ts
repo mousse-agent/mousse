@@ -387,10 +387,18 @@ export class BotMcp implements BotMcpHost {
     const certainty = options.heldAction ? { callState: 'failed' as const } : {}
     if (signal.aborted) return { ...certainty, text: `The call to ${tool.serverName} was stopped.`, isError: true }
     if (!this.deps.enabled()) return { ...certainty, text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
-    const descriptor = options.heldAction ? this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool) : undefined
-    const pin: McpToolExecutionPin | undefined = options.heldAction && descriptor?.configRevision ? {
+    // Every call is pinned to the tool as it is listed now, so the manager checks it again once its connection is ready,
+    // right before it is sent: the server still set up and on, its config and schema the same, MCP still on, and the
+    // caller's own fence (`assertDispatchActive`: the bot's grant and switches, a held call still running). A call whose
+    // tool has no installed revision (only a test's catalogue) goes unpinned, unless it is held: that one is refused.
+    const descriptor = this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool)
+    const pin: McpToolExecutionPin | undefined = descriptor?.configRevision ? {
       installationId: installationOf(tool.server), toolName: tool.tool, configRevision: descriptor.configRevision,
-      schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64), assertDispatchActive: options.assertDispatchActive
+      schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64),
+      assertDispatchActive: () => {
+        if (!this.deps.enabled()) throw Object.assign(new Error('MCP is turned off in Settings.'), { category: 'disabled', code: 'bot_mcp_off' })
+        options.assertDispatchActive?.()
+      }
     } : undefined
     if (options.heldAction && !pin) return { ...certainty, text: 'This tool has no installed revision to bind the approved call to. Nothing was sent.', isError: true }
     const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
@@ -417,8 +425,15 @@ ${kept}` } : { ...certainty, ...framed }
     } catch (error) {
       const failure = timeout.signal.aborted && !signal.aborted ? timeout.signal.reason : error
       if (!signal.aborted && !options.heldAction) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
-      const bindingChanged = options.heldAction && ['stale_revision', 'bot_action_changed'].includes(String((failure as { code?: string })?.code))
-      return { ...(options.heldAction ? { callState: (failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched ? 'failed' as const : 'uncertain' as const } : {}), text: bindingChanged ? 'This changed since you saw it. Nothing was sent. Ask for a fresh review before trying again.' : failureText(tool.serverName, failure, signal), isError: true }
+      const code = String((failure as { code?: string })?.code)
+      const bindingChanged = options.heldAction && ['stale_revision', 'bot_action_changed'].includes(code)
+      // Refused by a fence right before it was sent (`assertDispatchActive`): Mousse's own words say why; nothing was sent.
+      const fenced = !bindingChanged && (code === 'bot_mcp_off' || code === 'bot_permission_changed' || code.startsWith('bot_action_'))
+      const text = bindingChanged ? 'This changed since you saw it. Nothing was sent. Ask for a fresh review before trying again.'
+        : fenced ? code === 'bot_mcp_off' ? `MCP is turned off in Mousse's Settings now, so nothing was sent to ${tool.serverName}. Carry on without it, and say so in your report.` : String((failure as Error).message)
+          : !options.heldAction && code === 'stale_revision' ? `${tool.serverName} was changed in Mousse a moment ago, so this call didn't run. Carry on without it, and say so in your report.`
+            : failureText(tool.serverName, failure, signal)
+      return { ...(options.heldAction ? { callState: (failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched ? 'failed' as const : 'uncertain' as const } : {}), text, isError: true }
     } finally {
       clearTimeout(timer)
     }
@@ -493,7 +508,7 @@ export function mcpAskFor(servers: readonly BotMcpServer[], named: { serverId?: 
  */
 export async function callForBot(input: {
   /** `activationId` and `workspace`: where a result's pictures are kept for the owner (`keepToolImages`); absent: nowhere. */
-  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace' | 'holdMcp' | 'quickCalls'>>
+  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace' | 'holdMcp' | 'quickCalls' | 'allows'>>
   /** The name the runtime called: the relay's on Claude Code and Codex, the provider name on Pi. */
   name: string
   args: Record<string, unknown>
@@ -517,14 +532,23 @@ export async function callForBot(input: {
   if (!decided.ok) return { ...(input.heldAction ? { callState: 'failed' as const } : {}), text: checkMessage(decided), isError: true }
   if (!offered) return { text: `${target.serverName}'s tools are allowed now, but this turn started without them: you get them when it ends.`, isError: true }
   const { activationId, workspace } = input.bot
+  const asked = { kind: 'mcp' as const, server: target.server, tool: target.tool, serverName: target.serverName, args: input.args }
+  const fence = (): void => {
+    if (input.heldAction) input.assertDispatchActive?.()
+    // The grant and the bot's switches, again once the connection is ready (no ask, no chip): one turned off while it
+    // connected stops it here.
+    else if (input.bot.allows && !input.bot.allows(asked)) throw Object.assign(new Error(`Your permission for ${target.serverName}'s ${target.tool} changed before it was sent, so nothing was sent. Carry on without it.`), { code: 'bot_permission_changed' })
+  }
   const call = (signal: AbortSignal) => input.mcp.call(offered, input.args, signal, {
     images: input.images === true,
-    ...(input.heldAction ? { heldAction: true, assertDispatchActive: input.assertDispatchActive, sanitizeResult: input.sanitizeResult } : {}),
+    assertDispatchActive: fence,
+    ...(input.heldAction ? { heldAction: true, sanitizeResult: input.sanitizeResult } : {}),
     keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
   })
   const signal = AbortSignal.any([input.signal, input.bot.time.signal])
-  // A chat turn's call runs within its budgets: stopped when the owner writes only if it is known to only read.
+  // A chat turn's call runs within its budgets: stopped when the owner writes only if it is known to only read, when it
+  // starts and still when they write (its listing read each time, never as the turn started).
   const quick = input.heldAction ? undefined : input.bot.quickCalls
   if (!quick) return call(signal)
-  return quick.run({ tool: `${offered.serverName}'s ${offered.tool}`, readOnly: quick.mcpReadOnly(offered), signal, call })
+  return quick.run({ tool: `${offered.serverName}'s ${offered.tool}`, readOnly: quick.mcpReadOnly(offered), stillReadOnly: () => quick.mcpReadOnly(offered), signal, call })
 }

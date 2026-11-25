@@ -15,6 +15,8 @@ export const BOT_CHAT_TOOL_MS = 45_000
 export const BOT_CHAT_RESULT_CHARS = 32_000
 
 const STEERED = Symbol('steered')
+/** The owner wrote, and their message waits for a turn of its own. */
+const STEERED_QUEUED = Symbol('steered-queued')
 const DEADLINE = Symbol('deadline')
 
 export interface ChatQuickCallsOptions {
@@ -30,10 +32,17 @@ export interface ChatQuickCallsOptions {
 
 const seconds = (ms: number): string => `${Math.round(ms / 1000)} seconds`
 
-/** One chat turn's quick calls: what they spent, and the calls known to only read that run now. */
+/**
+ * One chat turn's quick calls: the time they kept the turn busy, and the calls known to only read that run now. The
+ * total is counted on the clock while any call runs, so calls that overlap share it: however they overlap, a turn's
+ * calls keep it busy at most `turnMs` (each new call is bounded by what is left of it when it starts).
+ */
 export class ChatQuickCalls implements BotQuickCalls {
+  /** Busy time of calls that ended; `busySince` while any runs. */
   private spentMs = 0
-  private readonly reading = new Set<AbortController>()
+  private running = 0
+  private busySince = 0
+  private readonly reading = new Map<AbortController, () => boolean>()
   private readonly callMs: number
   private readonly turnMs: number
   private readonly now: () => number
@@ -48,13 +57,24 @@ export class ChatQuickCalls implements BotQuickCalls {
     return this.options.mcpReadOnly(tool)
   }
 
-  /** The owner wrote while the turn runs: every call known to only read stops now; any other goes on to its end. */
-  steered(): void {
-    for (const controller of this.reading) controller.abort(STEERED)
+  /** How long the turn's calls have kept it busy so far. */
+  private busyMs(): number {
+    return this.spentMs + (this.running ? this.now() - this.busySince : 0)
   }
 
-  async run<T extends { text: string; isError?: boolean }>(input: { tool: string; readOnly: boolean; signal: AbortSignal; call(signal: AbortSignal): Promise<T> }): Promise<T | { text: string; isError: true; callState?: 'uncertain' }> {
-    const left = this.turnMs - this.spentMs
+  /**
+   * The owner wrote while the turn runs: every call known to only read, when it started and still now, stops now; any
+   * other goes on to its end. `joined`: the message joins this turn (it reads it next); otherwise it waits for a turn of
+   * its own.
+   */
+  steered(joined = true): void {
+    for (const [controller, stillReadOnly] of this.reading) {
+      if (stillReadOnly()) controller.abort(joined ? STEERED : STEERED_QUEUED)
+    }
+  }
+
+  async run<T extends { text: string; isError?: boolean }>(input: { tool: string; readOnly: boolean; stillReadOnly?(): boolean; signal: AbortSignal; call(signal: AbortSignal): Promise<T> }): Promise<T | { text: string; isError: true; callState?: 'uncertain' }> {
+    const left = this.turnMs - this.busyMs()
     if (left <= 0) {
       return {
         text: refusalText('work_required', `This turn has used its ${seconds(this.turnMs)} for calls in the chat, so ${input.tool} didn't run. Hand the rest to work with work_start: it has the time.`, { fix: 'work_start' }),
@@ -63,10 +83,11 @@ export class ChatQuickCalls implements BotQuickCalls {
     }
     const ms = Math.min(this.callMs, left)
     const own = new AbortController()
-    if (input.readOnly) this.reading.add(own)
+    const stillReadOnly = input.stillReadOnly ?? (() => true)
+    if (input.readOnly) this.reading.set(own, stillReadOnly)
     const timer = setTimeout(() => own.abort(DEADLINE), ms)
     timer.unref?.()
-    const started = this.now()
+    if (this.running++ === 0) this.busySince = this.now()
     try {
       const call = input.call(AbortSignal.any([input.signal, own.signal]))
       // What comes after the cut is dropped, a failure too.
@@ -82,14 +103,13 @@ export class ChatQuickCalls implements BotQuickCalls {
         if ('done' in first) return bounded(first.done)
       }
       const reason = own.signal.reason
-      if (reason === STEERED) {
-        return {
-          text: refusalText('cancelled', `Stopped: your owner wrote while ${input.tool} ran, and nothing came of it. Read what they wrote first; call it again only if it is still needed.`, { retry: 'after_change' }),
-          isError: true
-        }
+      if (reason === STEERED || reason === STEERED_QUEUED) {
+        const next = reason === STEERED ? 'Read what they wrote first; call it again only if it is still needed.' : 'Their message comes to you after this turn: end this turn now, and call it again then only if it is still needed.'
+        return { text: refusalText('cancelled', `Stopped: your owner wrote while ${input.tool} ran, and nothing came of it. ${next}`, { retry: 'after_change' }), isError: true }
       }
       const which = ms < this.callMs ? `this turn's ${seconds(this.turnMs)} for calls in the chat` : `the ${seconds(this.callMs)} a call in the chat may take`
-      if (input.readOnly) {
+      // Read-only when it started and still now: stopping it changed nothing.
+      if (input.readOnly && stillReadOnly()) {
         return {
           text: refusalText('work_required', `${input.tool} ran past ${which}, so it was stopped and nothing came of it. Hand this job to work with work_start: it has the time.`, { fix: 'work_start' }),
           isError: true
@@ -104,7 +124,7 @@ export class ChatQuickCalls implements BotQuickCalls {
     } finally {
       clearTimeout(timer)
       this.reading.delete(own)
-      this.spentMs += this.now() - started
+      if (--this.running === 0) this.spentMs += this.now() - this.busySince
     }
   }
 }

@@ -696,6 +696,8 @@ export class BotChatService {
         if (late) this.store.recordQuestionCopy(late.id, activationId, lateLineOf(this.store.question(late.id) ?? late))
         prompt = [...moved.map((question) => movedOnLine(question.spec)), body].join('\n\n')
         // A message that joins a turn is read by it as it answers, or with its request: it starts no turn of its own.
+        // Whatever it does, the chat turn running now stops its calls known to only read (`ChatQuickCalls.steered`).
+        this.engine.ownerWroteInTx(input.botId, joined)
         if (joined) this.engine.joinChatTurnInTx(input.botId, joined, posted.id, prompt)
         else if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
         // A message from another device that continues a turn waiting at a wall holds the rest of that turn to the

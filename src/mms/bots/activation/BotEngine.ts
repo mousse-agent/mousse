@@ -762,7 +762,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : {}), activationId: row.id, lane: row.lane, ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     sentAlone: () => this.scheduledCallChecks.clear(),
     settled: (row) => { const action = this.actions.forWork(row.id); if (action?.card_json !== null) this.chat.republish(action!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
-    execute: async (row, target, args) => {
+    execute: async (row, target, args, action) => {
       const mcp = this.host.mcp
       const tool = mcp?.offered(new Set([`${target.server}::${target.tool}`]))[0]
       if (!mcp?.call || !tool) throw new BotActionChanged('This tool changed. Nothing was sent.')
@@ -771,12 +771,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const timer = row.lane === 'chat' ? setTimeout(() => stop.abort(Object.assign(new Error('Timed out'), { category: 'timeout' })), this.host.chatCallLimits?.actionMs ?? BOT_CHAT_ACTION_MS) : undefined
       timer?.unref?.()
       const signal = stop.signal
-      const actionId = this.actions.forWork(row.id)!.id
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
         check: () => this.actionPair(row, target) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
       }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema?.(target)), assertDispatchActive: () => {
-        this.actions.assertRunning(actionId)
+        this.actions.assertRunning(action.id)
       } }).finally(() => clearTimeout(timer))
     },
     resulted: action => this.actionResultInTx(action)
@@ -6205,7 +6204,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       // Work never goes on while the question it asked its owner is still open (after a restart, a reload, the turn cap,
       // more room or the internet back): it waits for the answer instead, holding no run slot.
-      if (this.approvalPending(current.id)) {
+      // A chat turn's held call never parks it: its card outlives the turn (`BotActions.withdrawWork`).
+      if (current.lane === 'run' && this.approvalPending(current.id)) {
         this.park(current, 'approval')
         return { kind: 'approval' }
       }
@@ -8059,8 +8059,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (ended) this.afterEnd(ended)
       return
     }
-    if (this.approvalPending(row.id)) {
+    if (row.lane === 'run' && this.approvalPending(row.id)) {
       if (this.store.db.transaction(() => this.park(row, 'approval', ['running']))) this.releaseParked(this.store.activation(row.id) ?? row, 'approval')
+      return
+    }
+    // A chat turn cut off once it held a call for its owner had ended its turn: it ends done, its card left open for
+    // the owner, and the chat's slot is free (as when its turn ends, `advance`).
+    if (row.lane === 'chat' && this.actions.pendingInTurn(row.id, main.n)) {
+      const ended = this.store.db.transaction(() => this.store.moveActivation(row.id, ['running'], 'done', { endReason: null }) ? this.store.activation(row.id) : undefined)
+      if (ended) this.afterEnd(ended)
       return
     }
     if (this.store.workWait(row.id)?.status === 'waiting') {
@@ -8577,6 +8584,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     await this.endAll([...this.store.laneActivations(botId, 'chat', [...NOT_ENDED]), ...waiting], 'stopped', () => {
       this.store.withdrawAsks(botId)
       this.store.withdrawQuestions(botId)
+      // A chat turn's held call outlived its turn: its card goes now, so nothing it holds is sent or holds back a request.
+      this.actions.withdrawChat(botId)
       this.store.run("DELETE FROM bot_messages WHERE bot_id = ? AND id IN (SELECT message_id FROM bot_actions WHERE bot_id = ?)", botId, botId)
     })
     // Deleted once the turns stopped, so a turn ending meanwhile adds no row to the cleared chat.
@@ -8786,15 +8795,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A chat turn's held call reached its end (`BotActions.transition`, inside its transaction): its result reaches the
    * owner's chat once, as a turn of its own (`action:<actionId>`, provenance `action_result`), so a crash between the two
    * neither loses nor repeats it. That turn holds the owner's threads as the turn that held the call did, and to its
-   * device's limit. A bot that can't run now gets no turn: the card shows the outcome.
+   * device's limit. A paused bot's turn waits for Resume. A bot that can't be admitted now (its grant was revoked or
+   * narrowed meanwhile, or its thread is in the trash) gets no turn, now or later: the outcome is told in its chat
+   * instead, once, as a notice (`bm_<action>_result`), and the bot reads it in its next turn (`journal`).
    */
   private actionResultInTx(action: ActionRow): void {
     const origin = this.store.activation(action.activation_id)
     if (!origin) return
+    // Exactly once, either way: a result told in the chat gets no turn later, and one with a turn gets no notice.
+    if (this.store.activationByKey(`action:${action.id}`) || this.store.message(`bm_${action.id}_result`)) return
     let admitted: ReturnType<BotEngine['admissible']>
     try {
       admitted = this.admissible(action.bot_id)
     } catch {
+      this.actionResultNoticeInTx(action, origin)
       return
     }
     const limit = origin.trigger.kind === 'manual' ? origin.trigger.owner?.limit : undefined
@@ -8808,12 +8822,32 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (inserted) this.store.db.afterCommit(() => { this.changed({ botId: action.bot_id }); this.pumpLater(action.bot_id) })
   }
 
+  /** What a held call's result turn would have carried, as a notice in the chat when no turn can (`actionResultInTx`). */
+  private actionResultNoticeInTx(action: ActionRow, origin: BotActivationRow): void {
+    const settled = this.store.get('SELECT status, card_json FROM bot_actions WHERE id = ?', action.id)
+    const card = JSON.parse(String(settled?.card_json ?? '{}')) as { serverName?: string; actionTitle?: string }
+    const what = [card.serverName, card.actionTitle].filter(Boolean).join(' · ') || 'The held action'
+    const outcome = settled?.status === 'done' ? 'was sent' : settled?.status === 'uncertain' ? "may or may not have gone through" : 'was not sent'
+    this.chat.post({
+      id: `bm_${action.id}_result`, botId: action.bot_id, author: 'bot', kind: 'notice', external: true, activationId: origin.id, lane: 'chat',
+      text: `${what} ${outcome}. ${this.botName(action.bot_id) ?? 'The bot'} can't follow up on it now.`
+    })
+  }
+
   joinChatTurnInTx(botId: string, activationId: string, messageId: string, input: string): void {
     this.store.addWorkNote(activationId, botId, input, messageId)
+    this.store.db.afterCommit(() => this.changed({ botId, activationId }))
+  }
+
+  /**
+   * The owner wrote in the bot's chat (inside the transaction that wrote it), whatever its message then does: joins the
+   * running chat turn (`joined`), or waits for a turn of its own (from another device, a tap, while a held call's result
+   * or another turn the owner did not start runs). The chat turn running now stops its calls known to only read, so it
+   * reads the message at its next step, or ends sooner and frees the chat for it.
+   */
+  ownerWroteInTx(botId: string, joined: string | undefined): void {
     this.store.db.afterCommit(() => {
-      // The owner wrote: the turn's calls known to only read stop now, so it reads their message at its next step.
-      this.quickCalls.get(activationId)?.calls.steered()
-      this.changed({ botId, activationId })
+      for (const row of this.store.laneActivations(botId, 'chat', ['running'])) this.quickCalls.get(row.id)?.calls.steered(row.id === joined)
     })
   }
 
@@ -8828,7 +8862,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const calls = new ChatQuickCalls({
       ...(this.host.chatCallLimits ?? {}),
       mcpReadOnly: (tool) => {
-        if (tool.readOnlyHint !== true) return false
+        // The tool as it is listed now, never as the turn was offered it: a hint the server dropped since is no hint.
+        const listed = this.host.mcp?.offered(new Set([`${tool.server}::${tool.tool}`]))[0]
+        if (listed?.readOnlyHint !== true) return false
         // Only a level the owner's answer stored: a tool held to asks first is never taken as one that only reads.
         const grant = this.store.activeGrant(row.botId)
         const pair = grant && this.heldPair(row.botId, grant.manifest, tool.server, tool.tool)
