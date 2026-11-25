@@ -27,6 +27,7 @@ import { BotAskReplies } from './BotAskReplies'
 import { BotReminderReplies } from './BotReminderReplies'
 import { BotQuestionReplies } from './BotQuestionReplies'
 import { BotSecretRequests } from './BotSecretRequests'
+import { ComputerUseSetupCard } from '../ComputerUseSetupCard'
 import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
@@ -1195,6 +1196,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
         {/* A secret the bot asked for: typed into its private card, never into the chat. */}
         <BotSecretRequests homeThreadId={bot.homeThreadId} botName={bot.name} />
+        {/* Computer use one of the bot's turns asked to set up: whatever is chosen applies from its next turn. */}
+        <ComputerUseSetupCard threadId={bot.homeThreadId} />
         {pasted.offer}
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />

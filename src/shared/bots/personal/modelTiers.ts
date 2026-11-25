@@ -1,7 +1,8 @@
 import type { ModelCatalog, ModelCatalogEntry, ModelCatalogTier } from '../../modelCatalog'
 
 /**
- * Model tiers for bots' hidden model choice (Bot Phase 1 §5.6). The catalog's `tier` always wins;
+ * Model tiers for bots' hidden model choice (Bot Phase 1 §5.6) and Automatic thread naming
+ * (`TitleModelIndex`). The catalog's `tier` always wins;
  * for models outside it (Pi's OpenAI, xAI and Gemini models, Claude Code's aliases) a short table of
  * id patterns gives one. A model neither knows is `unknown`, used only when nothing better exists.
  * Browser-safe.
@@ -21,13 +22,21 @@ const TIER_PATTERNS: ReadonlyArray<readonly [pattern: string, tier: ModelCatalog
   ['grok-*mini*', 'small'],
   ['gemini-*flash-lite*', 'small'],
   ['gemma*', 'small'],
+  ['gpt-*-luna*', 'small'],
   ['*opus*', 'frontier'],
+  ['gpt-*-sol*', 'frontier'],
+  ['gpt-*-astra*', 'frontier'],
+  ['gemini-*-argon*', 'frontier'],
+  ['gemini-*-neon*', 'frontier'],
+  ['gemini-*-carbon*', 'frontier'],
   ['*fable*', 'frontier'],
   ['gpt-*-pro*', 'frontier'],
   ['o*-pro*', 'frontier'],
   ['gemini-*-pro*', 'frontier'],
   ['grok-*heavy*', 'frontier'],
   ['*sonnet*', 'standard'],
+  ['gpt-*-terra*', 'standard'],
+  ['gemini-*-hydrogen*', 'standard'],
   ['gpt-*', 'standard'],
   ['o3*', 'standard'],
   ['o4*', 'standard'],

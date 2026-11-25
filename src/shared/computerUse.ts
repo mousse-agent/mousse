@@ -38,8 +38,91 @@ export interface ComputerUseStatus {
   installCommand?: string
 }
 
-export const COMPUTER_USE_METHODS = ['computerUse.status', 'computerUse.install'] as const
+export const COMPUTER_USE_METHODS = ['computerUse.status', 'computerUse.install', 'computerUse.setupRequest.get', 'computerUse.setupRequest.dismiss'] as const
 export type ComputerUseMethod = (typeof COMPUTER_USE_METHODS)[number]
+
+/**
+ * The tool an agent calls when it needs computer use and it isn't set up here: it shows the person a setup card above
+ * the composer and returns at once, never waiting for them. What the person does there applies from the next turn.
+ */
+export const COMPUTER_USE_REQUEST_TOOL = 'computer_use_request'
+
+/** A thread's open setup card changed (asked for, dismissed, installed, enabled); carries only the thread id. */
+export const COMPUTER_USE_SETUP_REQUEST_EVENT = 'computerUse.setupRequest.changed'
+
+/** An open setup card, as `computerUse.setupRequest.get` returns it. */
+export interface ComputerUseSetupRequestView {
+  requestId: string
+  /** The thread the card shows in: the thread that asked, or a bot's chat for any of its turns. */
+  threadId: string
+  /** The thread whose agent asked. */
+  originThreadId: string
+  /** This computer's name. */
+  hostName: string
+  /** Why the agent asked, as plain text, clipped. */
+  reason: string
+  createdAt: string
+}
+
+/** Longest `reason` a card keeps. */
+export const COMPUTER_USE_REASON_MAX = 240
+
+/**
+ * What `computer_use_request` returned, as the first thing of its result: `setup_needed` (a card is shown), `ready`
+ * (computer use works here) or `declined` (the person said Not now). Saved transcripts keep only this line, so a
+ * window of another computer can say a past request happened without any of the call's other text.
+ */
+export type ComputerUseRequestOutcome = 'setup_needed' | 'ready' | 'declined'
+
+/** Longest outcome line, marker included. */
+export const COMPUTER_USE_OUTCOME_MAX = 240
+
+const OUTCOME_LINE = /^\[computer-use:(setup_needed|ready|declined)\][^\r\n]*/
+
+/** A host name as an outcome line carries it: one line, no colon or brackets, at most 64 characters. */
+export function outcomeHostName(name: string): string {
+  return name.replace(/[\r\n:[\]]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 64) || 'this computer'
+}
+
+/** `[computer-use:<outcome>] <text>`, on one line and within `COMPUTER_USE_OUTCOME_MAX`. */
+export function computerUseOutcomeText(outcome: ComputerUseRequestOutcome, text: string): string {
+  return `[computer-use:${outcome}] ${text.replace(/\s+/g, ' ').trim()}`.slice(0, COMPUTER_USE_OUTCOME_MAX)
+}
+
+/** The outcome line a `computer_use_request` result starts with, within bounds; undefined when it has none. */
+export function extractComputerUseRequestOutcome(output: string | undefined): string | undefined {
+  if (typeof output !== 'string') return undefined
+  const match = OUTCOME_LINE.exec(output.trimStart())
+  return match ? match[0].slice(0, COMPUTER_USE_OUTCOME_MAX) : undefined
+}
+
+/** An outcome line's outcome, and for `setup_needed` the host it names; undefined for anything else. */
+export function parseComputerUseOutcome(output: string | undefined): { outcome: ComputerUseRequestOutcome; hostName?: string } | undefined {
+  const line = extractComputerUseRequestOutcome(output)
+  if (!line) return undefined
+  const outcome = OUTCOME_LINE.exec(line)![1] as ComputerUseRequestOutcome
+  const host = outcome === 'setup_needed' ? / set up on ([^:\r\n[\]]{1,64}):/.exec(line)?.[1]?.trim() : undefined
+  return { outcome, ...(host ? { hostName: host } : {}) }
+}
+
+/**
+ * The Mousse tool a call's name names, in any runtime's spelling (`mcp__mousse__x`, Antigravity's `mcp_mousse_x`,
+ * `mousse.x`, an ACP title `x (mousse MCP Server)`, or a bare name), else undefined.
+ */
+function mousseToolName(name: string | undefined): string | undefined {
+  if (typeof name !== 'string') return undefined
+  const match = /^(?:mcp__mousse__|mcp_mousse_|mousse(?:__|[./:] ?))?([a-z][a-z0-9_]*)(?: \(mousse MCP Server\))?$/.exec(name.trim())
+  return match?.[1]
+}
+
+/** Whether a call named `toolName` with `input` is `computer_use_request`, directly or through a bot's `use_tool`. */
+export function isComputerUseRequestCall(toolName: string | undefined, input?: unknown): boolean {
+  const tool = mousseToolName(toolName)
+  if (tool === COMPUTER_USE_REQUEST_TOOL) return true
+  if (tool !== 'use_tool' || !input || typeof input !== 'object') return false
+  const inner = (input as { tool?: unknown }).tool
+  return typeof inner === 'string' && mousseToolName(inner) === COMPUTER_USE_REQUEST_TOOL
+}
 
 /** The official installers (https://cua.ai/docs/cua-driver). */
 export const CUA_INSTALL_PS1 = 'https://cua.ai/driver/install.ps1'

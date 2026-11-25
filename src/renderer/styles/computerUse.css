@@ -124,3 +124,70 @@
   .cu-panel,
   .cu-btn { transition: none; }
 }
+
+/* The setup card an agent's computer_use_request opened: one raised surface in the composer's column, in the flow (so
+   it never covers a question dialog), lit like the app's dialogs. A line (enabled, or set up on another computer) is
+   the same surface with one row of text. */
+.cu-setup-card {
+  margin: 0 0 var(--space-8);
+  padding: var(--space-12) var(--space-16);
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-dialog-edge);
+  animation: approval-in 0.22s ease;
+}
+
+.cu-setup-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.cu-setup-reason {
+  margin: var(--space-4) 0 0;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  user-select: text;
+  -webkit-user-select: text;
+  overflow-wrap: anywhere;
+}
+
+.cu-setup-line {
+  margin: var(--space-4) 0 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.cu-setup-line.is-error { color: var(--danger); }
+.cu-setup-line .cu-quiet { white-space: nowrap; }
+
+.cu-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-8);
+  margin-top: var(--space-12);
+}
+
+.cu-setup-actions .composer-question-btn.is-quiet { margin-right: auto; margin-left: -8px; }
+
+.cu-setup-card.is-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-12) var(--space-8) var(--space-16);
+}
+
+.cu-setup-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cu-setup-card { animation: none; }
+}

@@ -558,6 +558,18 @@ describe('Let a device in', () => {
     expect(document.body.textContent).toContain('Update networking to pick how it connects.')
   })
 
+  it('opened while networking starts, waits for the ways and shows the picker, making no code', async () => {
+    // A starting helper has not said what it offers yet.
+    const d = daemon({ helper: { state: 'starting' } }, { 'netEngine.routes.available': () => ways })
+    await mount()
+    await click(button(/Let a device in/))
+    expect(d.called('netEngine.invite')).toEqual([])
+    await d.change({ helper: { state: 'running' }, features: ['route-readiness', 'invite-way'] })
+    expect(document.body.textContent).toContain('How will it connect?')
+    expect(radio('Same Wi-Fi')!.getAttribute('aria-checked')).toBe('true')
+    expect(d.called('netEngine.invite')).toEqual([])
+  })
+
   it('asks Allow with Work on threads picked, sends the level with Allow, and says it can use this computer', async () => {
     const d = daemon()
     await mount()

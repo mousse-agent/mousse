@@ -55,6 +55,21 @@ function withTitlePrompt(title: MousseSettings['title']): MousseSettings['title'
   return kept ? { ...rest, prompt: kept } : rest
 }
 
+/**
+ * The title settings with their mode as read: `off` (First line only) only while no model is chosen. Anything else
+ * (blank, `auto`, a value this version does not know) is Automatic, kept as no mode at all.
+ */
+function withTitleMode(title: MousseSettings['title']): MousseSettings['title'] {
+  const { mode, ...rest } = title
+  const chosen = Boolean(rest.llmProvider?.trim() && rest.model?.trim())
+  return mode === 'off' && !chosen ? { ...rest, mode: 'off' } : rest
+}
+
+/** An update that changes how threads are named: their model, or First line only. */
+function changesTitleNaming(update: { llmProvider?: unknown; model?: unknown; mode?: unknown } | undefined): boolean {
+  return Boolean(update) && (update!.llmProvider !== undefined || update!.model !== undefined || update!.mode !== undefined)
+}
+
 /** A selection without a reasoning level or name. */
 function withoutLevel<T extends object>(selection: T): T {
   if (!selection || typeof selection !== 'object') return selection
@@ -110,7 +125,7 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     branches: normalizeBranchNamingSettings(settings.branches),
     errorReports: normalizeErrorReportSettings(settings.errorReports),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
-    ...(settings.title ? { title: withTitlePrompt(withInstance(settings.title)) } : {}),
+    ...(settings.title ? { title: withTitleMode(withTitlePrompt(withInstance(settings.title))) } : {}),
     // The bot's depth sets the level, so a bot model keeps none.
     ...(settings.botModel ? { botModel: withoutLevel(withInstance(settings.botModel)) } : {}),
     integrations: {
@@ -223,6 +238,9 @@ export class SettingsStore {
     if (partial.title) normalized.title = cleared(normalized.title, partial.title)
     // A cleared title prompt is written blank for the same reason.
     if (partial.title && Object.hasOwn(partial.title, 'prompt')) normalized.title = { ...normalized.title, prompt: normalized.title.prompt ?? '' }
+    // And the mode: a model chosen, or Automatic again, writes it blank over a stored First line only.
+    // (Blank is only ever on disk: reading drops it.)
+    if (changesTitleNaming(partial.title)) normalized.title = { ...normalized.title, mode: (normalized.title.mode ?? '') as MousseSettings['title']['mode'] }
     // The bot model keeps no level, so only its instance is cleared.
     if (partial.botModel && namesProviderOnly(partial.botModel)) normalized.botModel = { ...normalized.botModel, instanceId: '' }
     const skillModels = Object.entries(partial.integrations?.skills?.model ?? {})

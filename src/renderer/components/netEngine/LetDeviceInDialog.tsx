@@ -46,7 +46,13 @@ export function LetDeviceInDialog({
   const engine = status && status.helper.state !== 'not_in_build' ? status : undefined
   const ready = engine?.helper.state === 'running'
   const picker = hasFeatures(status, 'route-readiness', 'invite-way')
-  const [step, setStep] = useState<Step>(() => (picker ? { kind: 'pick' } : { kind: 'code' }))
+  // Until networking has started, what the helper offers is unknown: the picker waits for its ways, and only a
+  // running helper without the picker goes straight to a code. Once running, the step holds through a restart.
+  const [chosen, setStep] = useState<Step>()
+  const step: Step = chosen ?? (ready && !picker ? { kind: 'code' } : { kind: 'pick' })
+  useEffect(() => {
+    if (!chosen && ready) setStep(step)
+  }, [chosen, ready, step])
   // A device asked to come in (or was let in): the dialog shows only that.
   const [answering, setAnswering] = useState(false)
   const { busy, error, setError, call } = useDaemonCall()

@@ -73,6 +73,7 @@ const DECISIONS: Record<string, string> = {
   'browser access for agents (browser panel)': 'src/renderer/components/browser/BrowserToolbarParts.tsx',
   'a device enrollment request': 'src/renderer/components/EnrollmentRequestPrompt.tsx',
   'a phone enrollment left in Settings': 'src/renderer/components/MousseIdSection.tsx',
+  'a device asking to be let in (Allow, over any screen)': 'src/renderer/components/netEngine/AllowPrompt.tsx',
   'an editor access request': 'src/renderer/components/EditorAskPrompt.tsx',
   'an editor access request left in Settings': 'src/renderer/components/devices/DeviceAccessRows.tsx',
   'an SSH route approval': 'src/renderer/components/devices/ApproveSshRouteDialog.tsx',

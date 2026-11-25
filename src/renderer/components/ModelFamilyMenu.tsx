@@ -653,8 +653,27 @@ function ProfileModelFamilyMenu({
     syncPanelPosition()
   }
 
-  if (providers.length === 0 && !unavailableProviders?.length) {
+  const empty = providers.length === 0 && !unavailableProviders?.length
+  if (empty && !runFooter) {
     return <>{emptyState}</>
+  }
+  // No models but a footer action (a settings picker's "First line only"): the footer alone, in the same anchored shell,
+  // so it sits at the picker and an outside click closes it.
+  if (empty) {
+    const emptyShell = (
+      <div
+        className={`composer-model-picker-shell model-picker-shell${portaled ? ' composer-model-picker-shell-floating' : ''}${closing ? ' is-closing' : ''}`}
+        aria-hidden={closing || undefined}
+        ref={setShellNode}
+        style={portaled ? floatingStyle : undefined}
+      >
+        <div className="model-picker-panel has-footer">
+          {emptyState ? <div className="model-picker-empty">{emptyState}</div> : null}
+          <div ref={footerRef} className="model-picker-footer">{runFooter}</div>
+        </div>
+      </div>
+    )
+    return portaled ? <FloatingPortal>{emptyShell}</FloatingPortal> : emptyShell
   }
   const unavailableQuery = searchQuery.trim().toLowerCase()
   const matchingUnavailable = favoritesShown && !searching

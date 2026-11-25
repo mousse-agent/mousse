@@ -64,7 +64,16 @@ async function titleProfile(options: { work?: boolean } = {}) {
   const oneShot = vi.fn(async (_spec: OneShotSpec, _signal: AbortSignal) => ({ text: '"A title."' }))
   // The pi runtime lists its provider (as the real one does while credentialed).
   const piListing = adapterDriver(pi, { runtime: { oneShot } })
-  const piDriver = { ...piListing, create: (context: Parameters<typeof piListing.create>[0]) => ({ ...piListing.create(context), llmProvider: () => piProviders.find((provider) => `pi:${provider.id}` === context.instanceId) }) }
+  // Signed in with an API key, listing its provider's models, as the real one does.
+  const piDriver = { ...piListing, create: (context: Parameters<typeof piListing.create>[0]) => {
+    const provider = piProviders.find((each) => `pi:${each.id}` === context.instanceId)
+    return {
+      ...piListing.create(context),
+      llmProvider: () => provider,
+      models: () => provider?.models ?? [],
+      auth: async () => ({ state: 'signed_in' as const, credential: 'api_key' as const })
+    }
+  } }
   const harness = testHarness({ drivers: [piDriver, adapterDriver(claude, { runtime: { llmProvider: () => claudeListing } })], instances })
   return { harness, instances, oneShot }
 }
@@ -85,11 +94,18 @@ function titleOrchestrator(profile: Awaited<ReturnType<typeof titleProfile>>, ti
 }
 
 describe('chat title model', () => {
-  it('Automatic (the default setting) names chats from their first line, with no model call', async () => {
-    const { orch, oneShot } = titleOrchestrator(await titleProfile(), getDefaultSettings().title)
-    // Even with an API provider connected, as on master.
-    expect(await orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('hello there')
-    expect(oneShot).not.toHaveBeenCalled()
+  it('Automatic (the default setting) names chats on the best connected model; First line only asks none', async () => {
+    const profile = await titleProfile()
+    // The providers' first checks have run: Automatic reads what they found and never waits for them.
+    await profile.harness.instances.snapshots({ kind: 'device' })
+    const automatic = titleOrchestrator(profile, getDefaultSettings().title)
+    expect(await automatic.orch.generateThreadTitle([{ role: 'user', content: 'Fix the login redirect' }])).toBe('A title')
+    // OpenAI's small model, the one instance here that runs single requests (Claude Code's runtime here has none).
+    expect(profile.oneShot).toHaveBeenCalledTimes(1)
+    expect(profile.oneShot.mock.calls[0]![0]).toMatchObject({ model: 'gpt-mini', task: 'title' })
+    const off = titleOrchestrator(profile, { ...getDefaultSettings().title, mode: 'off' })
+    expect(await off.orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('hello there')
+    expect(profile.oneShot).toHaveBeenCalledTimes(1)
   })
 
   it('passes the Regenerate action through to the selected provider', async () => {
