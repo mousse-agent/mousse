@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
+import { isPackageOwner, privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -499,6 +499,13 @@ export interface HarnessInstances {
 export interface HarnessRegistry {
   /** Agents of the ACP registry that fit this computer, best match first. */
   search(query: string): Promise<RegistryAgentView[]>
+  /** A registry agent's cached icon, read from disk only. */
+  icon?(agentId: string): { iconDataUrl: string; iconMonochrome: boolean } | undefined
+  /**
+   * Fetches a registry agent's icon when the cached list names one never fetched for this version
+   * of the agent; never downloads the list. True when one was stored.
+   */
+  cacheIcon?(agentId: string): Promise<boolean>
 }
 
 export type HarnessGatewayEvent =
@@ -632,14 +639,20 @@ const SHELL_PATH_WAIT_MS = 3_000
 const LATEST_CHECK_INTERVAL_MS = 60 * 60_000
 
 /**
- * Where the newest version of an instance's CLI is read: Homebrew's own tap for a copy Homebrew
- * installed (the version `brew upgrade` reaches), else the driver's source.
+ * Where the newest version of an instance's CLI is read: for a driver published under several
+ * names, the package or formula the copy came from (none when that is unknown); else Homebrew's
+ * own tap for a copy Homebrew installed (the version `brew upgrade` reaches); else the driver's source.
  */
-export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
-  if (binary?.owner === 'brew' && driver.brewName) {
-    const brew = binary.path ? join(dirname(binary.path), 'brew') : undefined
-    return { kind: 'brew', name: driver.brewName, ...(brew && existsSync(brew) ? { brew } : {}) }
+export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName' | 'packageOf'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
+  const brewSource = (name: string): LatestVersionSource => {
+    const brew = binary?.path ? join(dirname(binary.path), 'brew') : undefined
+    return { kind: 'brew', name, ...(brew && existsSync(brew) ? { brew } : {}) }
   }
+  if (driver.packageOf && isPackageOwner(binary?.owner)) {
+    if (!binary?.package) return undefined
+    return binary.owner === 'brew' ? brewSource(binary.package) : { kind: 'npm', package: binary.package }
+  }
+  if (binary?.owner === 'brew' && driver.brewName) return brewSource(driver.brewName)
   return driver.latestVersion
 }
 
@@ -907,6 +920,8 @@ export class Harness implements HarnessGateway {
   readonly instanceMap: ProviderInstanceService
   private readonly drivers = new Map<HarnessDriverKind, HarnessDriver>()
   private readonly records = new Map<string, InstanceRecord>()
+  /** Registry agents whose icon is being fetched for a snapshot. */
+  private readonly iconRequests = new Set<string>()
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
@@ -2685,6 +2700,7 @@ export class Harness implements HarnessGateway {
       ...(limits ? { permissionLimits: limits } : {}),
       ...(cacheHour ? { promptCacheHour: cacheHour } : {}),
       config: this.configView(record),
+      ...this.registryIconOf(record),
       models: {
         entries,
         ...(names ? { names } : {}),
@@ -2750,7 +2766,12 @@ export class Harness implements HarnessGateway {
   private updateFor(record: InstanceRecord): UpdateAffordance | undefined {
     const good = this.probes.get(record.instanceId)?.lastGood
     if (!good) return undefined
-    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(latestSourceFor(record.driver, good.binary))
+    const latest = record.runtime.pinned
+      ? record.runtime.pinned().version
+      // Mousse's own copy updates to what its install source publishes, not the package's newest.
+      : good.binary?.owner === 'managed' && record.runtime.managedLatestVersion
+        ? record.runtime.managedLatestVersion()
+        : this.latest.get(latestSourceFor(record.driver, good.binary))
     return updateAffordance(record.driver, good.binary, good.compatibility, latest)
   }
 
@@ -2766,7 +2787,22 @@ export class Harness implements HarnessGateway {
     for (const instanceId of instanceIds) {
       const entry = entries[instanceId]
       const driver = entry?.enabled ? this.drivers.get(entry.driver) : undefined
-      const source = driver ? latestSourceFor(driver, this.probes.get(instanceId)?.lastGood?.binary) : undefined
+      const binary = this.probes.get(instanceId)?.lastGood?.binary
+      const record = driver ? this.recordOrUndefined(instanceId) : undefined
+      const runtime = record?.runtime
+      // Before the first check, Mousse's own install runs when there is one and no executable is set.
+      const runsManaged = binary ? binary.owner === 'managed' : Boolean(runtime?.managed?.()) && !record?.config.binaryPath
+      if (driver && runsManaged && runtime?.managedLatestVersion) {
+        // A managed copy's newest version is its install source's, never the package registry's.
+        const key = `managed:${driver.kind}`
+        if (!runtime.refreshManagedLatest || packages.has(key)) continue
+        packages.add(key)
+        void runtime.refreshManagedLatest().then((changed) => {
+          if (changed && !this.stopped) this.changed(instanceId)
+        }, () => undefined)
+        continue
+      }
+      const source = driver ? latestSourceFor(driver, binary) : undefined
       const key = source?.kind === 'npm' ? source.package : source?.kind === 'brew' ? `brew:${source.name}` : undefined
       if (!source || !key || packages.has(key)) continue
       packages.add(key)
@@ -2866,6 +2902,8 @@ export class Harness implements HarnessGateway {
    */
   private ownsSignIn(record: InstanceRecord): boolean {
     if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
+    // One sign-in per computer: Mousse's own copy uses the user's sign-in too.
+    if (record.driver.sharedSignIn) return false
     if (record.env.home) return true
     return Boolean(record.runtime.managed?.()) && !record.config.binaryPath
   }
@@ -2888,6 +2926,29 @@ export class Harness implements HarnessGateway {
         ? { source: { kind: 'registry' as const, agentId: record.config.source.agentId, version: record.config.source.version, distribution: record.config.source.distribution } }
         : {})
     }
+  }
+
+  /**
+   * A registry agent's cached icon. When there is none yet (just added, or added before Mousse
+   * cached icons), it is fetched once in the background and the snapshots go out again once it is
+   * stored; a failed or refused icon is not fetched again from here (`AcpRegistry.cacheIcon`).
+   */
+  private registryIconOf(record: InstanceRecord): { iconDataUrl?: string; iconMonochrome?: boolean } {
+    const source = record.config.source
+    const registry = this.options.registry
+    if (source?.kind !== 'registry' || !registry?.icon) return {}
+    const icon = registry.icon(source.agentId)
+    if (icon) return icon
+    const agentId = source.agentId
+    if (registry.cacheIcon && !this.iconRequests.has(agentId)) {
+      this.iconRequests.add(agentId)
+      void registry.cacheIcon(agentId)
+        .then((stored) => {
+          if (stored) this.emitSnapshots({ kind: 'device' })
+        }, () => undefined)
+        .finally(() => this.iconRequests.delete(agentId))
+    }
+    return {}
   }
 
   private displayName(record: InstanceRecord): string {

@@ -14,6 +14,7 @@ import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { grokDriver } from '../../src/mms/harness/drivers/grok'
+import { opencodeDriver } from '../../src/mms/harness/drivers/opencode'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createHarnessGateway } from '../../src/mms/harness/gateway'
 import { instanceEnv } from '../../src/mms/harness/env'
@@ -74,7 +75,7 @@ describe('what each connection gets', () => {
   })
 
   it('an agent with no documented switch says so and gets nothing', () => {
-    for (const driver of [grokDriver(), cursorDriver(), acpDriver()] as HarnessDriver[]) {
+    for (const driver of [grokDriver(), opencodeDriver(), cursorDriver(), acpDriver()] as HarnessDriver[]) {
       expect(telemetryView(driver, { home: 'private', telemetry: 'off' }, '/home'), driver.kind).toEqual({ setting: 'none' })
       expect(telemetryEnforced(driver, { home: 'private', telemetry: 'off' }, '/home'), driver.kind).toBeUndefined()
     }

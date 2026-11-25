@@ -88,7 +88,10 @@ export const COMPATIBILITY: Readonly<Record<CompatibilityKey, CompatibilityRow>>
   'acp:grok': {
     tested: { min: '1.0.70', max: '1.0.70' },
     evidence: [{ version: '1.0.70', kind: 'smoke', ref: '#226' }]
-  }
+  },
+  // No version of OpenCode has been run against Mousse yet: no tested range, so none is judged.
+  opencode: { evidence: [] },
+  'acp:opencode': { evidence: [] }
 } satisfies Record<CompatibilityKey, CompatibilityRow>)
 
 /** What a driver or preset takes from its row: its tested range and known-broken versions. */

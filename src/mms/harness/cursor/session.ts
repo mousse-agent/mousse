@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { ActivityPatch } from '../../../shared/agentActivity'
-import { extractComputerUseRequestOutcome, isComputerUseRequestCall } from '../../../shared/computerUse'
+import { classifyCuaCall, guardedInput, guardedOutput, isGuardedCall, mousseToolOfName, USE_TOOL, useToolTargetOf } from '../../../shared/cuaActivity'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
 import { redactCursorText, type CursorAgentSetup, type CursorHostMethods, type CursorUsage } from '../hosts/cursorProtocol'
@@ -44,6 +44,8 @@ export interface CursorToolEvent {
   toolName?: string
   /** The typed fields Cursor's call carries (a search's pattern, and on completion its result count). */
   activity?: ActivityPatch
+  /** A Mousse `use_tool` call: the tool it runs (`cursorUseToolTarget`), on every event of the call. */
+  useToolTarget?: string
   /** On completion: `unfinished` when the run ended before the tool reported its own end. */
   status?: 'completed' | 'unfinished'
 }
@@ -216,6 +218,13 @@ export function cursorToolName(toolCall: unknown): string | undefined {
   return `cursor_${type.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()}`
 }
 
+/** The tool a Cursor MCP call of Mousse's `use_tool` runs, read from its arguments; undefined for any other call. */
+export function cursorUseToolTarget(toolCall: unknown): string | undefined {
+  const call = record(toolCall)
+  if (str(call?.type) !== 'mcp' || mousseToolOfName(cursorToolName(toolCall)) !== USE_TOOL) return undefined
+  return useToolTargetOf(record(record(call?.args)?.args))
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
 }
@@ -285,14 +294,21 @@ export function cursorToolActivity(toolCall: unknown): ActivityPatch | undefined
   const call = record(toolCall)
   const type = str(call?.type)
   if (type === 'mcp') {
-    // A finished computer_use_request (directly or through a bot's use_tool) keeps only its outcome line; any other MCP
-    // call, or one without that line, keeps nothing here.
+    // A computer use call (directly or through a bot's use_tool) keeps only what its allowlist lets through: its kept
+    // arguments, and once it ends a bounded outcome (a computer_use_request's outcome line) or a fixed failure label.
+    // Any other MCP call keeps nothing here.
+    const args = record(record(call?.args)?.args)
+    const cua = classifyCuaCall(cursorToolName(toolCall), { input: args, useToolTarget: cursorUseToolTarget(toolCall) })
+    if (!isGuardedCall(cua)) return undefined
+    const input = args ? guardedInput(cua, args) : undefined
     const result = record(call?.result)
     const value = record(result?.value)
-    if (result?.status !== 'success' || !value || value.isError === true) return undefined
-    if (!isComputerUseRequestCall(cursorToolName(toolCall), record(record(call?.args)?.args))) return undefined
-    const output = extractComputerUseRequestOutcome(records(value.content).map((block) => str(record(block.text)?.text) ?? '').join('\n'))
-    return output ? { output } : undefined
+    const ended = result?.status === 'success' || result?.status === 'error'
+    const failed = result?.status === 'error' || value?.isError === true
+    const text = records(value?.content).map((block) => str(record(block.text)?.text) ?? '').join('\n')
+    const output = ended ? guardedOutput(cua, text, failed) : undefined
+    const patch = { ...(input ? { input } : {}), ...(output ? { output } : {}), ...(ended && failed ? { status: 'failed' } : {}) } as ActivityPatch
+    return Object.keys(patch).length ? patch : undefined
   }
   if (type !== 'grep' && type !== 'glob') return undefined
   const args = record(call?.args) ?? {}
@@ -718,7 +734,8 @@ export class CursorSessions {
         const { historyKey: _stale, ...rest } = saved
         store.setSaved(input.threadId, { ...rest, runIds: [...rest.runIds, runId].slice(-RECORDED_RUNS) })
       }
-      const tools = new Map<string, string>()
+      // Each open call's title and name, so the run's end closes it as the call it was.
+      const tools = new Map<string, { title: string; toolName?: string; useToolTarget?: string }>()
       const base = progress.text ? `${progress.text}\n\n` : ''
       if (base) input.onTextSeparator?.(progress.text.length, '\n\n')
       let runText = ''
@@ -741,10 +758,11 @@ export class CursorSessions {
               const callId = str(update.callId)
               if (!callId) return
               const title = cursorToolTitle(update.toolCall, label)
-              tools.set(callId, title)
               const toolName = cursorToolName(update.toolCall)
+              const useToolTarget = cursorUseToolTarget(update.toolCall)
+              tools.set(callId, { title, ...(toolName ? { toolName } : {}), ...(useToolTarget ? { useToolTarget } : {}) })
               const activity = cursorToolActivity(update.toolCall)
-              input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}), ...(activity ? { activity } : {}) })
+              input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}), ...(useToolTarget ? { useToolTarget } : {}), ...(activity ? { activity } : {}) })
               return
             }
             case 'tool-call-completed': {
@@ -752,12 +770,15 @@ export class CursorSessions {
               if (!callId) return
               const activity = cursorToolActivity(update.toolCall)
               // The finished call carries its whole call again: its name, as at its start.
-              const toolName = cursorToolName(update.toolCall)
+              const open = tools.get(callId)
+              const toolName = cursorToolName(update.toolCall) ?? open?.toolName
+              const useToolTarget = cursorUseToolTarget(update.toolCall) ?? open?.useToolTarget
               input.onTool?.({
                 phase: 'complete',
                 callId,
-                title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label),
+                title: open?.title ?? cursorToolTitle(update.toolCall, label),
                 ...(toolName ? { toolName } : {}),
+                ...(useToolTarget ? { useToolTarget } : {}),
                 status: 'completed',
                 ...(activity ? { activity } : {})
               })
@@ -819,7 +840,8 @@ export class CursorSessions {
         clearInterval(steerTimer)
         stop.removeEventListener('abort', onStop)
       }
-      for (const [callId, title] of tools) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
+      for (const [callId, { title, toolName, useToolTarget }] of tools)
+        input.onTool?.({ phase: 'complete', callId, title, ...(toolName ? { toolName } : {}), ...(useToolTarget ? { useToolTarget } : {}), status: 'unfinished' })
       if ('hostExited' in end) {
         if (steerFailure) throw steerFailure
         throw new CursorHostExitedError('while the run streamed')

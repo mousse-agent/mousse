@@ -13,7 +13,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../adapter'
-import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptRuntime'
+import { createRuntimeToolMapper, promptStreams } from '../../../run/transcript/promptRuntime'
 
 type AcpToolEvent = Parameters<NonNullable<AcpChatInput['onTool']>>[0]
 
@@ -110,6 +110,8 @@ export class AcpAdapter implements ProviderAdapter {
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     const streams = promptStreams(sink)
+    // One per turn: it follows each call by its id, so a computer use call's row stays held on every event.
+    const toolRows = createRuntimeToolMapper({ aborted: () => input.signal.aborted })
     const progress = (): void => {
       sink.progress()
       ctl.heartbeat()
@@ -191,7 +193,7 @@ export class AcpAdapter implements ProviderAdapter {
           // A native background tool (`run_command`, `invoke_subagent`) is not a Mousse MCP call: keeping the
           // bearer across its turn lets the reactive continuation still call Mousse MCP tools.
           else toolCalls.set(event.callId, event.status === 'completed' || (event.status === 'background' && !mousseServerToolOf(event.toolName ?? '')) ? 'completed' : 'failed')
-          sink.tool(runtimeToolEvent(withClosure(event, input.signal.aborted)))
+          sink.tool(toolRows(withClosure(event, input.signal.aborted)))
         },
         // The ref names the agent's session once there is one, so stop and terminate find it.
         ...(client.interrupt ? { onSession: (sessionId: string) => sink.providerRef({ ...providerRef, sessionId }) } : {}),

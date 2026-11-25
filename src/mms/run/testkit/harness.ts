@@ -12,7 +12,7 @@ import type { McpTurnBinding } from '../mcp/appTools/registry'
 /** The turn binding each real driver declares (`harness/drivers/*`), for test drivers of the same kind. */
 const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> = { claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn', pi: 'per_call' }
 /** Who asks before a relayed tool runs, as each real driver declares (`HarnessDriver.relay`); pi has no relay. */
-const RELAY_APPROVALS: Partial<Record<ProviderAdapter['driver'], 'runtime' | 'mousse'>> = { claude: 'runtime', codex: 'mousse', cursor: 'mousse', acp: 'runtime', antigravity: 'runtime', grok: 'runtime' }
+const RELAY_APPROVALS: Partial<Record<ProviderAdapter['driver'], 'runtime' | 'mousse'>> = { claude: 'runtime', codex: 'mousse', cursor: 'mousse', acp: 'runtime', antigravity: 'runtime', grok: 'runtime', opencode: 'runtime' }
 // As the real Claude Code and Codex drivers declare.
 const MCP_IMAGE_RESULTS: Partial<Record<ProviderAdapter['driver'], boolean>> = { claude: true, codex: true }
 // As the real Claude Code driver declares: Mousse masks secrets in its tool results before it keeps them.

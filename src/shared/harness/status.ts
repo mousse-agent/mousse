@@ -25,6 +25,11 @@ export interface InstanceBinary {
   version?: string
   source: BinarySource
   owner?: InstallOwner
+  /**
+   * The npm package or Homebrew formula its owner installed it from, for a CLI published under more
+   * than one (`HarnessDriver.packageOf`); absent when the driver has one or Mousse cannot tell.
+   */
+  package?: string
   /** Updating it needs rights this user lacks (a root-owned npm prefix); Mousse never runs sudo. */
   needsElevation?: boolean
 }
@@ -220,6 +225,13 @@ export interface InstanceSnapshot {
   promptCacheHour?: PromptCacheHour
   /** The stored settings the editor shows; present on daemons with the harness gateway. */
   config?: InstanceConfigView
+  /**
+   * A registry agent's icon as Mousse cached it: a `data:image/svg+xml` URL, never a remote one.
+   * Absent until the icon is cached, and for every other entry.
+   */
+  iconDataUrl?: string
+  /** The icon is one ink, drawn in the text colour (a mask); otherwise it is drawn as an image. */
+  iconMonochrome?: boolean
   models: {
     entries: InstanceModel[]
     /**

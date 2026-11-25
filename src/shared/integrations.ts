@@ -311,9 +311,9 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
 export const MOUSSE_BUILTIN_TOOL_IDS: string[] = MOUSSE_BUILTIN_TOOLS.map((tool) => tool.id)
 
 /** Runtimes that can attach the MCP relay: every driver kind except the in-process pi loop. */
-export type McpRelayRuntime = 'claude' | 'codex' | 'cursor' | 'acp' | 'antigravity' | 'grok'
+export type McpRelayRuntime = 'claude' | 'codex' | 'cursor' | 'acp' | 'antigravity' | 'grok' | 'opencode'
 
-export const MCP_RELAY_RUNTIMES: readonly McpRelayRuntime[] = ['claude', 'codex', 'cursor', 'acp', 'antigravity', 'grok']
+export const MCP_RELAY_RUNTIMES: readonly McpRelayRuntime[] = ['claude', 'codex', 'cursor', 'acp', 'antigravity', 'grok', 'opencode']
 
 export interface McpRelaySettings {
   /** Per runtime: `false` turns the relay off for it. Absent or `true`: on. */

@@ -15,7 +15,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../adapter'
-import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptRuntime'
+import { createRuntimeToolMapper, promptStreams } from '../../../run/transcript/promptRuntime'
 import { AppError } from '../../../../shared/errors'
 import type { ClaudeLockedTurn } from '../../claude/locked'
 import { systemTempDirs } from '../../../bots/grants/compile'
@@ -166,6 +166,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     const cwd = locked ? locked.cwd : input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
     const streams = promptStreams(sink)
+    // One per turn: it follows each call by its id, so a computer use call's row stays held on every event.
+    const toolRows = createRuntimeToolMapper({ aborted: () => input.signal.aborted })
     // Resolved once per turn so a retry after context overflow runs with the same servers and skills.
     let integrations: ClaudeTurnIntegrations | undefined
     try {
@@ -284,7 +286,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
           streams.text.break()
         }
         toolStarted = true
-        sink.tool(runtimeToolEvent(event))
+        sink.tool(toolRows(event))
       },
       onMetrics: (report) => {
         metrics = report

@@ -11,6 +11,7 @@ import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { grokDriver } from '../../src/mms/harness/drivers/grok'
+import { opencodeDriver } from '../../src/mms/harness/drivers/opencode'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { HARNESS_CAP_KEYS } from '../../src/shared/harness/types'
 import type { ProviderAdapter } from '../../src/mms/harness/adapter'
@@ -61,9 +62,9 @@ describe('MCP turn binding (PR 2 §2)', () => {
   })
 
   it('every runtime but pi attaches the MCP relay; Codex and Cursor leave its approvals to Mousse, the rest to the runtime', () => {
-    const drivers = [...DRIVERS, cursorDriver(), grokDriver()]
+    const drivers = [...DRIVERS, cursorDriver(), grokDriver(), opencodeDriver()]
     expect(Object.fromEntries(drivers.map((driver) => [driver.kind, driver.relay?.approvals ?? null]))).toEqual({
-      claude: 'runtime', codex: 'mousse', cursor: 'mousse', antigravity: 'runtime', acp: 'runtime', grok: 'runtime', pi: null
+      claude: 'runtime', codex: 'mousse', cursor: 'mousse', antigravity: 'runtime', acp: 'runtime', grok: 'runtime', opencode: 'runtime', pi: null
     })
     for (const real of drivers) {
       const adapter = { driver: real.kind, capabilities: real.caps(real.decodeConfig(undefined)), startTurn: unused, interrupt: unused } as unknown as ProviderAdapter

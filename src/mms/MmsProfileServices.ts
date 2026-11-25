@@ -37,6 +37,7 @@ import { claudeCodeDriver } from './harness/drivers/claudeCode'
 import { codexDriver } from './harness/drivers/codex'
 import { cursorDriver } from './harness/drivers/cursor'
 import { grokDriver } from './harness/drivers/grok'
+import { opencodeDriver } from './harness/drivers/opencode'
 import { piDriver } from './harness/drivers/pi'
 import { findPiRuntime, piRpcProfileOptions } from './harness/drivers/pi/profile'
 import { decodeModelPrefs } from './harness/catalog'
@@ -706,9 +707,11 @@ export class MmsProfileServices {
         antigravityDriver({ builtIn: () => this.antigravity }),
         acpDriver({ agents: agentInstalls }),
         cursorDriver(),
-        grokDriver({ agents: agentInstalls })
+        grokDriver({ agents: agentInstalls }),
+        opencodeDriver({ agents: agentInstalls, registry: agentRegistry })
       ],
-      registry: { search: (query) => agentRegistry.search(query) },
+      // Search, and the icons snapshots carry (cached under `<installationHome>/agents/icons`).
+      registry: agentRegistry,
       // A sign-in the profiles share (the pi-ai credentials) stays while another profile still uses it.
       // With no host to ask, it is treated as in use: the credential is kept.
       otherProfilesUse: (instanceId) =>

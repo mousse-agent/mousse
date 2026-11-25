@@ -4,7 +4,7 @@ import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import type { McpToolInfo } from "./tool-registry";
 import { Wrench } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
-import { mousseToolLabels, mousseToolOf } from "./mousse-tools";
+import { cuaPresentation, mousseToolLabels, mousseToolOf } from "./mousse-tools";
 import { MousseToolIcon } from "./mousse-tool-icon";
 import { codeHighlighter } from "../code-highlighter";
 import { codeOnlyComponents } from "../code-block";
@@ -159,6 +159,14 @@ export function unwrapMcpOutput(output: any): any {
   return output;
 }
 
+/** Text as a fenced code block (JSON when it reads as JSON), or null when there is nothing to show. */
+function fenced(text: string | null): string | null {
+  const trimmed = text?.trim();
+  if (!text || !trimmed) return null;
+  const language = trimmed.startsWith("{") || trimmed.startsWith("[") ? "json" : "text";
+  return `\`\`\`${language}\n${text}\n\`\`\``;
+}
+
 function formatOutputForDisplay(output: any): string {
   const unwrapped = unwrapMcpOutput(output);
   if (typeof unwrapped === "string") {
@@ -179,11 +187,19 @@ export const McpTool = memo(function McpTool({
   const { isPending, isInterrupted, isError } = getToolStatus(part, chatStatus);
   const failed = isError && !isPending;
 
+  // A computer use call, whatever runtime made it: what it did in words, one detail, and only what its allowlist keeps
+  // of its arguments and result (a row saved before that existed included).
+  const cua = useMemo(
+    () => cuaPresentation(part),
+    [part.type, part.input, part.output, part.state, part.useToolTarget],
+  );
+
   // Mousse's own tools: its logo and what the call does, in words ("Creating a thread in Mousse").
   const mousse = useMemo(() => {
+    if (cua) return cua.labels;
     const tool = mousseToolOf(part.type);
     return tool ? mousseToolLabels(tool) : null;
-  }, [part.type]);
+  }, [cua, part.type]);
 
   const title = useMemo(() => {
     if (mousse) return isPending ? mousse.running : failed ? mousse.failed : mousse.done;
@@ -195,25 +211,23 @@ export const McpTool = memo(function McpTool({
   }, [mousse, part.state, isPending, failed, mcpInfo]);
 
   const subtitle = useMemo(() => {
+    if (cua) return cua.detail ?? "";
     if (part.state === "input-streaming") return "";
     return formatMcpArgs(part.input);
-  }, [part.input, part.state]);
+  }, [cua, part.input, part.state]);
 
   const displayOutput = useMemo(() => {
-    if (!part.output) return null;
-    return formatOutputForDisplay(part.output);
-  }, [part.output]);
+    const output = cua ? cua.output : part.output;
+    if (!output) return null;
+    return formatOutputForDisplay(output);
+  }, [cua, part.output]);
 
-  const codeBlock = useMemo(() => {
-    if (!displayOutput) return null;
-    const trimmed = displayOutput.trim();
-    if (!trimmed) return null;
-    const language =
-      trimmed.startsWith("{") || trimmed.startsWith("[") ? "json" : "text";
-    return `\`\`\`${language}\n${displayOutput}\n\`\`\``;
-  }, [displayOutput]);
+  const codeBlock = useMemo(() => fenced(displayOutput), [displayOutput]);
 
-  const hasExpandableContent = !!codeBlock && !isPending;
+  // A computer use row shows what it ran as well as what came of it.
+  const inputBlock = useMemo(() => (cua?.input ? fenced(JSON.stringify(cua.input, null, 2)) : null), [cua]);
+
+  const hasExpandableContent = (!!codeBlock || !!inputBlock) && !isPending;
 
   if (isInterrupted) {
     return (
@@ -236,9 +250,16 @@ export const McpTool = memo(function McpTool({
         expandable={hasExpandableContent}
         defaultOpen={defaultOpen}
       >
+        {inputBlock && (
+          <div className="an-markdown an-tool-quiet-output text-[14px]" aria-label="Input">
+            <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }} components={codeOnlyComponents}>
+              {inputBlock}
+            </Streamdown>
+          </div>
+        )}
         {codeBlock && (
           // The output in the same plain block as a command's: no header bar, no border.
-          <div className="an-markdown an-tool-quiet-output text-[14px]">
+          <div className="an-markdown an-tool-quiet-output text-[14px]" aria-label={inputBlock ? "Output" : undefined}>
             <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }} components={codeOnlyComponents}>
               {codeBlock}
             </Streamdown>

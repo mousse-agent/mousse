@@ -14,6 +14,7 @@ import { offersRedirectPaste, refusedText } from '../src/renderer/components/pro
 import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
 import { ProvidersSettings } from '../src/renderer/components/providers/ProvidersSettings'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
+import { addedInstanceId, defaultInstanceId } from '../src/mms/harness/instances'
 
 const noop = async () => undefined
 const actions: InstanceActions = {
@@ -396,6 +397,7 @@ describe('Add provider choices', () => {
       ['new', 'ChatGPT subscription'],
       ['new', 'Cursor'],
       ['new', 'Grok'],
+      ['new', 'OpenCode'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…'],
       ['new', 'Claude Code (API key)']
@@ -430,11 +432,26 @@ describe('Add provider choices', () => {
       ['new', 'Antigravity'],
       ['new', 'Cursor'],
       ['new', 'Grok'],
+      ['new', 'OpenCode'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…'],
       ['new', 'Claude Code (API key)']
     ])
     expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && (choice.driver === 'codex' || choice.existing === undefined)))).toBe(true)
+  })
+
+  it('offers OpenCode as an agent once, and keeps the OpenCode Zen and Go model APIs offered beside it', () => {
+    const apis = [addOption('opencode', { label: 'OpenCode Zen' }), addOption('opencode-go', { label: 'OpenCode Go' })]
+    expect(addChoices([claude, codex], apis).find((choice) => choice.key === 'new:opencode')).toMatchObject({ kind: 'new', label: 'OpenCode', iconId: 'opencode', group: 'Agents', driver: 'opencode' })
+    // Never seeded on the user's setup: an added entry's id is `opencode:<name>`, never the model API's `opencode`.
+    expect(defaultInstanceId('opencode')).toBeUndefined()
+    const instanceId = addedInstanceId('opencode', 'OpenCode', [])
+    expect(instanceId).toBe('opencode:opencode')
+    const opencode = snapshot({ instanceId, driver: 'opencode', displayName: 'OpenCode', builtIn: false })
+    const after = addChoices([claude, codex, opencode], apis)
+    // One entry: OpenCode keeps one sign-in per computer.
+    expect(after.some((choice) => choice.kind === 'new' && choice.driver === 'opencode')).toBe(false)
+    expect(after.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['OpenCode Zen', 'OpenCode Go'])
   })
 
   it('lists model APIs not added yet', () => {

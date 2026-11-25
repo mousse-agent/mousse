@@ -559,6 +559,12 @@ export interface RegistryAgentView {
   env: Record<string, string>
   /** Why it cannot be added here; absent when it can. */
   unsupported?: string
+  /** The registry's icon, cleaned and cached by Mousse: a `data:image/svg+xml` URL, never a remote one. */
+  iconDataUrl?: string
+  /** The icon is one ink, drawn in the text colour (a mask); otherwise it is drawn as an image. */
+  iconMonochrome?: boolean
+  /** The icon is being fetched: a search a moment later returns it. */
+  iconPending?: boolean
 }
 
 /** `instances.removeInstall`: deleted, or still used by other entries (`force` deletes anyway). */

@@ -48,6 +48,11 @@ export interface DriverInfo {
   /** Also added from the ACP registry: the Add dialog offers it as its own choice ("More ACP agents…"). */
   registry?: { addLabel: string; description: string }
   /**
+   * Each entry runs an agent of its own: its logo is the registry agent's it runs, else its own id
+   * (`acp:opencode`), never `iconId`.
+   */
+  iconPerEntry?: boolean
+  /**
    * Added as Mousse-managed (its own download and sign-in, `setup: managed`) or on the user's own
    * CLI (`setup: existing`); the Add dialog asks which (Codex).
    */
@@ -109,6 +114,16 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     customModels: false,
     homeHint: '~/.grok'
   },
+  opencode: {
+    label: 'OpenCode',
+    iconId: 'opencode',
+    family: 'agent',
+    description: 'The open-source OpenCode agent, with the model providers you signed in to in OpenCode.',
+    // OpenCode keeps one sign-in per computer (its XDG folders): a second entry would share it.
+    multiInstance: false,
+    customModels: false,
+    addHint: 'Mousse uses opencode on this computer, or installs it after adding.'
+  },
   acp: {
     label: 'ACP agent',
     iconId: 'acp',
@@ -117,6 +132,7 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     multiInstance: true,
     customModels: false,
     customCommand: true,
+    iconPerEntry: true,
     addLabel: 'Custom command',
     registry: { addLabel: 'More ACP agents…', description: 'Agents listed in the ACP registry. Mousse downloads and installs them.' }
   },
@@ -134,9 +150,18 @@ export function isApiInstance(snapshot: Pick<InstanceSnapshot, 'driver'>): boole
   return DRIVER_INFO[snapshot.driver].family === 'api'
 }
 
-/** Logo for an instance: API instances by provider (`pi:openai` → OpenAI), agents by driver. */
-export function iconIdOf(snapshot: Pick<InstanceSnapshot, 'driver' | 'instanceId'>): string {
-  return isApiInstance(snapshot) ? snapshot.instanceId : DRIVER_INFO[snapshot.driver].iconId
+/**
+ * Logo for an instance: API instances by provider (`pi:openai` → OpenAI), ACP agents by the
+ * registry agent they run (whatever the entry is called) or else by their id (`acp:opencode`),
+ * other agents by driver.
+ */
+export function iconIdOf(snapshot: Pick<InstanceSnapshot, 'driver' | 'instanceId'> & { config?: Pick<NonNullable<InstanceSnapshot['config']>, 'source'> }): string {
+  const info = DRIVER_INFO[snapshot.driver]
+  if (info.iconPerEntry) {
+    const source = snapshot.config?.source
+    return source?.kind === 'registry' ? source.agentId : snapshot.instanceId
+  }
+  return isApiInstance(snapshot) ? snapshot.instanceId : info.iconId
 }
 
 const ANTIGRAVITY_TAG_PREFIX = 'agy_acp_server_'

@@ -23,7 +23,7 @@ import {
 import { findListedModel, modelLabelParts } from '../../shared/modelChoice'
 import { shortModelName } from '../../shared/modelNames'
 import { resolveModelChoice } from '../lib/modelChoice'
-import { ProviderIcon, normalizeProviderId, providerMakerId } from '../lib/providerIcons'
+import { ProviderIcon, providerIconKey, providerMakerId } from '../lib/providerIcons'
 import { instanceBadges } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
@@ -264,7 +264,7 @@ function ProfileModelFamilyMenu({
         uniqueProviders.set(key, { ...existing, models: [...models.values()] })
       }
       const listed = [...uniqueProviders.values()]
-      const badges = instanceBadges(listed.map((provider) => ({ key: listingKey(provider), iconKey: normalizeProviderId(provider.id), label: provider.label })))
+      const badges = instanceBadges(listed.map((provider) => ({ key: listingKey(provider), iconKey: providerIconKey(provider.id), label: provider.label })))
       return listed.map((provider) => {
         const grouped = groupProviderModels(provider.id, provider.label, provider.models)
         // Families follow the saved model order (Settings > Providers), not a newest-first guess.

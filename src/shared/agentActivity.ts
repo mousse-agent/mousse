@@ -84,7 +84,17 @@ export type AgentActivityItem = ActivityBase &
         background?: boolean
         durationMs?: number
       }
-    | { kind: 'generic'; server?: string; input?: Record<string, unknown>; output?: string }
+    | {
+        kind: 'generic'
+        server?: string
+        input?: Record<string, unknown>
+        output?: string
+        /**
+         * The tool a bot's `use_tool` call ran, read from its arguments when it was saved: a row whose arguments were
+         * cut to fit (`capRecord`) still says it, so the window can tell it from a computer use call.
+         */
+        useToolTarget?: string
+      }
   )
 
 export type ActivityKind = AgentActivityItem['kind']
@@ -123,6 +133,11 @@ export interface ProviderToolEvent {
   activity?: ActivityPatch
   /** The provider's id of the call this one ran under (a subagent's child). */
   parentCallId?: string
+  /**
+   * The tool a bot's `use_tool` call runs, as the runtime read it from the call's arguments (`useToolTargetOf`), on
+   * every event once it knows them: the turn's tool mapper holds a computer use call's row from it.
+   */
+  useToolTarget?: string
 }
 
 export const ACTIVITY_OUTPUT_CAP_BYTES = 64 * 1024

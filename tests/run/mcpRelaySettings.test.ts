@@ -27,7 +27,7 @@ describe('MCP relay settings', () => {
     const runtimes: Partial<Record<McpRelayRuntime, boolean>> = { codex: false, cursor: true }
     const settings = { enabled: true, relay: { runtimes } }
     expect(Object.fromEntries(MCP_RELAY_RUNTIMES.map((runtime) => [runtime, relayEnabledFor(settings, runtime)]))).toEqual({
-      claude: true, codex: false, cursor: true, acp: true, antigravity: true, grok: true
+      claude: true, codex: false, cursor: true, acp: true, antigravity: true, grok: true, opencode: true
     })
   })
 

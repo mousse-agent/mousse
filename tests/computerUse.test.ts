@@ -127,6 +127,14 @@ describe('the computer tools a thread is listed and may call', () => {
     expect(outcome.images).toHaveLength(4)
     expect(outcome.text).toBe('shot\n[2 more images left out]')
   })
+
+  it('says what a result of images only captured, the line a saved row keeps of it', () => {
+    const image = { type: 'image', data: 'AAAA', mimeType: 'image/png' }
+    expect(driverOutcome({ content: [image] })).toMatchObject({ text: 'Captured screenshot', images: [{ data: 'AAAA' }] })
+    expect(driverOutcome({ content: [image, image, image] }).text).toBe('Captured 3 images')
+    expect(driverOutcome({ content: [image], isError: true }).text).toBe('The driver returned an error.')
+    expect(driverOutcome({ content: [] }).text).toBe('Done.')
+  })
 })
 
 describe('finding Cua Driver', () => {

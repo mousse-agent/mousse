@@ -21,7 +21,7 @@ import type {
 } from '../../adapter'
 import { providerStatusError, readProviderStatus, readUsageLimit } from '../../../orchestrator/providerErrors'
 import { isMousseServerTool } from '../../../run/mcp/attachment'
-import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptRuntime'
+import { createRuntimeToolMapper, promptStreams } from '../../../run/transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
 
 /** The slice of the provider service a turn drives. */
@@ -182,6 +182,8 @@ export class CodexAdapter implements ProviderAdapter {
     const cwd = (bot ? bot.workspace?.files ?? bot.workspace?.scratch : undefined) ?? input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
     const streams = promptStreams(sink)
+    // One per turn: it follows each call by its id, so a computer use call's row stays held on every event.
+    const toolRows = createRuntimeToolMapper({ aborted: () => input.signal.aborted })
     // Output, an accepted steer or a tool makes a replay after context overflow unsafe.
     let progressed = false
     const progress = (): void => {
@@ -254,7 +256,7 @@ export class CodexAdapter implements ProviderAdapter {
           streams.thinking.break()
           streams.text.break()
         }
-        sink.tool(runtimeToolEvent(event))
+        sink.tool(toolRows(event))
       },
       onToolNotification: (event) => {
         // Codex names a call of a server Mousse serves `mcp__mousse__<tool>` or `mcp__mousse-relay__<tool>`.
