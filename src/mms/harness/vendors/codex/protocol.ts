@@ -418,7 +418,8 @@ export interface CodexNotificationMap {
   'item/commandExecution/outputDelta': { threadId: string; turnId: string; itemId: string; delta: string }
   /** The model's plan for the turn; there is no completion of its own. */
   'turn/plan/updated': { threadId: string; turnId: string; explanation: string | null; plan: Array<{ step: string; status: string }> }
-  'item/reasoning/summaryTextDelta': { threadId: string; turnId: string; itemId: string; delta: string }
+  /** `summaryIndex`: which summary part of the reasoning item the delta belongs to; a new part is a new paragraph. */
+  'item/reasoning/summaryTextDelta': { threadId: string; turnId: string; itemId: string; delta: string; summaryIndex?: number }
   'thread/tokenUsage/updated': {
     threadId: string
     turnId: string

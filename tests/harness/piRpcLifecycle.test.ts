@@ -11,6 +11,7 @@ import type { ChatImageAttachment } from '../../src/shared/types'
 import { isRetriesExhausted } from '../../src/shared/harness/types'
 import { SteerHold, type PendingSteerFacts } from '../../src/mms/orchestrator/steerHold'
 import { cleanBase, scratchDir } from './piRpcFixture'
+import { transcriptSink } from '../support/transcriptSink'
 
 // The engine's process lifecycle against a stand-in for Pi's RPC mode (`fixtures/pi-rpc-stub.mjs`):
 // stalls, crashes with a helper that holds Pi's output, warm Stop, failed turns, refs during cold
@@ -188,6 +189,37 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     await run(engine, t)
     // Every output reports progress, the retried reply's included: one before the retry, three after it.
     expect(order).toEqual(['progress', 'progress', 'retry', 'progress', 'progress', 'progress'])
+  }, 30_000)
+
+  it('streams the reply into a row at its first words, closes it at a tool call, and the next step\'s words open a row as written', async () => {
+    const { engine, project } = setup()
+    const assistant = { type: 'message_start', message: { role: 'assistant' } }
+    const textStart = { type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 0 } }
+    const delta = (text: string) => ({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text } })
+    const call = { type: 'toolCall', id: 'c1', name: 'bash', arguments: { command: 'ls' } }
+    const cwd = project('p', { events: [
+      { type: 'turn_start' },
+      assistant,
+      // Pi starts a text block before its first words: no row opens for it.
+      textStart,
+      delta('old'),
+      { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'old' }, call], stopReason: 'toolUse' } },
+      { type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'ls' } },
+      { type: 'tool_execution_end', toolCallId: 'c1', toolName: 'bash', result: { content: [{ type: 'text', text: 'a.ts' }] }, isError: false },
+      { type: 'turn_start' },
+      assistant,
+      textStart,
+      // The next step's words, indented as the model wrote them; the reply joins the steps with a blank line of its own.
+      delta('    next'),
+      { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '    next' }], stopReason: 'stop' } }
+    ] })
+    const t = turn(cwd)
+    const transcript = transcriptSink()
+    t.sink.text = transcript.sink.text
+    t.sink.tool = transcript.sink.tool
+    const result = await run(engine, t)
+    expect(result.text).toBe('old\n\n    next')
+    expect(transcript.rows().map(({ kind, content }) => kind === 'tool' ? kind : `${kind}:${content}`)).toEqual(['text:old', 'tool', 'text:    next'])
   }, 30_000)
 
   it('reports the prompt cache lifetime where Pi says how much it wrote for an hour, and none where it does not', async () => {

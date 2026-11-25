@@ -856,6 +856,14 @@ export class MmsProtocolServer {
         emitToSubscribers(this.ring.push('secrets.requests.changed', { threadId: payload.threadId }, payload.threadId))
       })
     }
+    // Computer use setup cards: only the thread id travels; a window of this computer reads the card itself. Nothing
+    // waits on one, so the thread's state stays as it is.
+    const computerSetup = typeof services.orchestrator.computerUseSetup === 'function' ? services.orchestrator.computerUseSetup() : undefined
+    if (computerSetup) {
+      onEmitter(computerSetup, 'changed', (payload: { threadId: string }) => {
+        emitToSubscribers(this.ring.push('computerUse.setupRequest.changed', { threadId: payload.threadId }, payload.threadId))
+      })
+    }
     if (services.secretsChanged) {
       onEmitter(services.secretsChanged, 'changed', () => {
         emitToSubscribers(this.ring.push('secrets.changed', {}, undefined))

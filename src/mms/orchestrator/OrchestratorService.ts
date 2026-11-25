@@ -430,6 +430,8 @@ import {
 import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
 import { ComputerUseDriver } from '../computerUse/ComputerUseDriver'
+import { ComputerUseSetupRequests } from '../computerUse/ComputerUseSetupRequests'
+import { computerNameIfKnown } from '../computerName'
 import { computerUseAllowed } from '../run/mcp/appTools/computer'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
@@ -2136,6 +2138,28 @@ export class OrchestratorService extends EventEmitter {
       }
     })
     return this.computerDriver
+  }
+
+  private computerSetup?: ComputerUseSetupRequests
+
+  /**
+   * The setup cards agents' `computer_use_request` opens in this profile's threads, made on first use. A bot's card
+   * shows in its chat, whichever of its threads asked.
+   */
+  computerUseSetup(): ComputerUseSetupRequests {
+    this.computerSetup ??= new ComputerUseSetupRequests({
+      status: (refresh) => this.computerUse().status(refresh),
+      enabled: () => this.settingsStore.get().agentAccess.computerUse !== false,
+      hostName: () => computerNameIfKnown() ?? 'this computer',
+      targetOf: (threadId) => {
+        try {
+          return this.botThreads?.homeOf?.(threadId) ?? threadId
+        } catch {
+          return threadId
+        }
+      }
+    })
+    return this.computerSetup
   }
 
   /**
@@ -5032,7 +5056,8 @@ export class OrchestratorService extends EventEmitter {
           known: () => driver.known(),
           allowedFor: (threadId) => this.computerUseFor(threadId),
           listTools: () => driver.listTools(),
-          call: (name, args, signal) => driver.call(name, args, signal)
+          call: (name, args, signal) => driver.call(name, args, signal),
+          requestSetup: (input) => this.computerUseSetup().request(input)
         }
       },
       // Settings → Labs → Profiler, read at every listing and call; the service's profiler is installation-wide.

@@ -207,9 +207,14 @@ export class ComputerUseDriver {
 
   /** The driver now, as Settings shows it. `refresh`: look again now, not from the last minute's answer. */
   async status(refresh = false): Promise<ComputerUseStatus> {
+    if (this.installing) return { ...this.statusBase(this.options.settings().enabled), state: 'installing' }
+    return await this.look(refresh)
+  }
+
+  /** `status` without the installer's early answer: the installer's own last look runs through it. */
+  private async look(refresh: boolean): Promise<ComputerUseStatus> {
     const { enabled, driverPath } = this.options.settings()
     const base = this.statusBase(enabled)
-    if (this.installing) return { ...base, state: 'installing' }
     const key = driverPath ?? ''
     if (!refresh && this.cached && this.cached.key === key && Date.now() - this.cached.at < STATUS_TTL_MS) return { ...this.cached.status, ...base }
     const look = ++this.looks
@@ -252,7 +257,8 @@ export class ComputerUseDriver {
   /** The last answer of `status`, without looking (for a listing, which can't wait). Undefined before the first look. */
   known(): ComputerUseStatus | undefined {
     const { driverPath } = this.options.settings()
-    if (this.installing) return undefined
+    // The installer runs: the tools stay unlisted until it ends and its last look has answered.
+    if (this.installing) return { ...this.statusBase(this.options.settings().enabled), state: 'installing' }
     const key = driverPath ?? ''
     if (!this.cached || this.cached.key !== key) {
       // Whether a driver is there at all is a look at files, answered now: the first listing already leaves out the
@@ -271,24 +277,39 @@ export class ComputerUseDriver {
     return this.cached.status
   }
 
-  /** Runs the official installer once at a time, then looks again. */
+  /**
+   * Runs the official installer once at a time, then looks again. It counts as installing until that last look has
+   * answered, so a second click meanwhile gets the same answer and never starts a second installer. A failed installer
+   * is said in this answer even when a driver that runs was already there (`found` with `error`), so the person isn't
+   * told it installed; the next look of the driver says `found` without it.
+   */
   install(): Promise<ComputerUseStatus> {
     if (this.installing) return this.installing
     if (cuaInstallCommand(this.platform) === undefined) return this.status()
     this.installError = undefined
-    const work = (async () => {
+    let work: Promise<ComputerUseStatus> | undefined = undefined
+    work = (async () => {
+      let failed: string | undefined
       try {
         await (this.options.runInstaller ?? runInstaller)(this.platform)
       } catch (error) {
-        this.installError = `The installer failed: ${line(error)}`
-      } finally {
-        this.installing = undefined
+        failed = this.installError = `The installer failed: ${line(error)}`
       }
-      // The installer may have added its folder to the PATH of new processes only: its default folder is looked in too.
-      return await this.status(true)
+      try {
+        // The installer may have added its folder to the PATH of new processes only: its default folder is looked in too.
+        const status = await this.look(true)
+        return failed && !status.error ? { ...status, error: failed } : status
+      } finally {
+        if (this.installing === work) this.installing = undefined
+      }
     })()
     this.installing = work
     return work
+  }
+
+  /** Whether the installer runs now (its last look included). */
+  isInstalling(): boolean {
+    return this.installing !== undefined
   }
 
   /** The driver's path when it runs and computer use is on; undefined otherwise. */

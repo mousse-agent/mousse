@@ -1,7 +1,7 @@
 import { APPLET_GENERATION_GUIDANCE } from '../../appletGuidance'
 import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
 import { PROFILER_TOOL_NAMES } from '../../diagnostics/profiler'
-import { COMPUTER_TOOL_NAMES } from '../../computerUse'
+import { COMPUTER_TOOL_NAMES, COMPUTER_USE_REQUEST_TOOL } from '../../computerUse'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 
 /**
@@ -106,7 +106,7 @@ const BOTS_GUIDANCE = "bot_list names your owner's other bots and says what each
 
 const SCHEDULES_GUIDANCE = "Mousse's scheduled jobs: work done in your owner's threads or projects later or on a cadence (schedule_create, schedule_list, schedule_update, schedule_pause, schedule_run, schedule_delete). You see and change only the jobs you made. Something only you do at a time stays bot_schedule_add (reminders)."
 
-const COMPUTER_GUIDANCE = "Apps on this computer, through Cua Driver: computer_tools lists the driver's tools and its rules; computer_use runs one by name. Read a window narrowly first, act on the element tokens it returns, and check the result. Use it for what lives only in an app's window; a page belongs in your browser. It works only while your owner has Settings → Computer use on and the driver installed; when a call says it isn't, tell them so."
+const COMPUTER_GUIDANCE = "Apps on this computer, through Cua Driver: computer_tools lists the driver's tools and its rules; computer_use runs one by name. Read a window narrowly first, act on the element tokens it returns, and check the result. Use it for what lives only in an app's window; a page belongs in your browser. It works only while your owner has Settings → Computer use on and the driver installed. When computer_tools and computer_use aren't yours but you hold computer_use_request (work your owner asked for in your chat), call it once with why: your owner gets a setup card, and the tools are yours from your next turn; never wait for it. Otherwise say in your report that computer use needs setting up."
 
 const PROFILER_GUIDANCE = "Mousse's own monitor of its memory and CPU, by process, for when your owner asks why Mousse is slow or uses a lot of memory. It works only while your owner has the profiler and agent access on in Settings → Labs; when a call says it is off, tell them so. A watch over minutes (profiler_watch) is for your work."
 
@@ -140,7 +140,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   {
     id: 'computer',
     line: 'apps on this computer: windows, clicks, typing (needs "use the computer")',
-    tools: [...COMPUTER_TOOL_NAMES],
+    tools: [...COMPUTER_TOOL_NAMES, COMPUTER_USE_REQUEST_TOOL],
     guidance: COMPUTER_GUIDANCE
   },
   {

@@ -98,6 +98,13 @@ export function liveThoughtText(content: string | undefined): string {
   return stripInlineMarkdown(latest).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
 }
 
+/** Fewer visible characters than this, and a live thought's newest paragraph has only begun (`thoughtHeadline`). */
+const STUB_MIN = 4;
+
+function isStub(paragraph: string): boolean {
+  return paragraph.replace(/\s/g, "").length < STUB_MIN;
+}
+
 /** Longest headline, in code points: a row cuts it at its width well before this. */
 const HEADLINE_MAX = 200;
 
@@ -152,8 +159,8 @@ function cutCodePoints(text: string, max: number): string {
 /**
  * Where the first sentence of `text` ends (the index after its closing mark), or -1 while it has not ended. A sentence
  * ends at `.`, `?` or `!` (with any closing quotes, brackets or emphasis after it) followed by white space or the end.
- * It does not end inside inline code, on an abbreviation ("e.g.", "etc.", "vs."), on a single initial, or on a dot
- * inside a name or path ("config.ts", "v1.2"), which has no space after it.
+ * It does not end inside inline code, on an abbreviation ("e.g.", "etc.", "vs."), on a single initial, on an ellipsis
+ * ("Working... checking files."), or on a dot inside a name or path ("config.ts", "v1.2"), which has no space after it.
  */
 function firstSentenceEnd(text: string): number {
   let inCode = false;
@@ -168,7 +175,9 @@ function firstSentenceEnd(text: string): number {
     while (end < text.length && /["'”’)\]*_]/.test(text[end]!)) end += 1;
     if (end < text.length && !/\s/.test(text[end]!)) continue;
     if (char === ".") {
-      // The word the dot closes: an abbreviation or an initial does not end the sentence; nor does "..." mid-thought.
+      // A dot of an ellipsis does not end the sentence.
+      if (text[index - 1] === "." || text[index + 1] === ".") continue;
+      // The word the dot closes: an abbreviation or an initial does not end the sentence.
       const word = /([\p{L}\p{N}.]*)$/u.exec(text.slice(0, index))?.[1] ?? "";
       const bare = word.toLowerCase();
       if (ABBREVIATIONS.has(bare) || /^\p{L}$/u.test(word)) continue;
@@ -186,8 +195,11 @@ function firstSentenceEnd(text: string): number {
  *
  * So the line changes only when a new section or a new untitled paragraph starts (and while a paragraph's first words
  * are still arriving): a long thought moves on section by section, and never reflows with every word.
+ *
+ * `live`: the thought is still being written. Its newest paragraph may be only a first word or two ("I", "**"); until
+ * it has STUB_MIN visible characters the line keeps the paragraph before it. A finished thought reads as written.
  */
-export function thoughtHeadline(content: string | undefined): string {
+export function thoughtHeadline(content: string | undefined, options: { live?: boolean } = {}): string {
   if (!content?.trim()) return "";
   const allLines = content.split("\n");
   const code = fencedLines(allLines);
@@ -201,8 +213,9 @@ export function thoughtHeadline(content: string | undefined): string {
   // before it.
   const prose = allLines.map((line, index) => (code[index] ? "" : line)).join("\n");
   const paragraphs = prose.split(/\n\s*\n/).filter((block) => block.trim());
-  const newest = paragraphs[paragraphs.length - 1];
+  let newest = paragraphs[paragraphs.length - 1];
   if (!newest) return "";
+  if (options.live && isStub(newest)) newest = [...paragraphs].reverse().find((block) => !isStub(block)) ?? newest;
   const lines = newest.split("\n").map((line) => line.trim()).filter(Boolean);
   // List markers and quote marks are not words of the sentence.
   const body = lines

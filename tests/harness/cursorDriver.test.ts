@@ -26,6 +26,7 @@ import { FakeCursorHost, hostFailure } from './fakeCursorHost'
 import { CURSOR_CAPS } from '../../src/mms/harness/drivers/cursor'
 import { holdControl, type HoldControl } from '../support/steerHoldControl'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
+import { transcriptSink } from '../support/transcriptSink'
 
 const FIXTURES = join(__dirname, '..', 'run', 'fixtures')
 const INSTANCE = 'cursor:work'
@@ -51,7 +52,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
   const texts = new Map<string, string>()
-  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; cwd?: string | null; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl } = {}): TurnSpec => ({
+  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; cwd?: string | null; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl; sink?: TurnSpec['sink'] } = {}): TurnSpec => ({
     binding,
     input: {
       threadId,
@@ -64,7 +65,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       nativeHistory: options.history ?? '',
       signal: options.signal ?? new AbortController().signal
     } as unknown as TurnInput,
-    sink: (options.hold ? options.hold.wrap.bind(options.hold) : <S>(sink: S) => sink)({
+    sink: (options.hold ? options.hold.wrap.bind(options.hold) : <S>(sink: S) => sink)(options.sink ?? {
       text: (event: { phase: string; content: string }) => event.phase !== 'start' && texts.set(threadId, event.content),
       thinking: () => {},
       tool: options.tool ?? (() => {}),
@@ -790,5 +791,55 @@ describe('ending the host for a stuck stop', () => {
     running = true
     sessions.terminate(key)
     expect((sessions as unknown as { endingFor?: string }).endingFor).toBe('a')
+  })
+})
+
+/**
+ * Cursor's words reach the saved rows as written: an empty delta opens and splits nothing, a blank line Cursor wrote
+ * after a tool call in the same run stays, and a steered run's row drops only the blank line the session put between
+ * the two runs' text.
+ */
+describe("Cursor rows keep the agent's words", () => {
+  it('empty deltas, a blank line after a tool call, and a steered run', async () => {
+    let runs = 0
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: () => ({ runId: `run-${++runs}` }),
+      cancel: (params, fake) => {
+        setTimeout(() => fake.emit({ event: 'run_end', runId: params.runId as string, status: 'cancelled' }), 5)
+        return { cancelled: true }
+      }
+    })
+    const delta = (runId: string, update: Record<string, unknown>) => host.emit({ event: 'delta', runId, update } as never)
+    const shell = { type: 'shell', args: { command: 'npm test' } }
+    const hold = holdControl(CURSOR_CAPS, { questions: { pending: () => false } })
+    const { turn } = setup(host.connect)
+    const transcript = transcriptSink()
+    const handle = await turn('thread', { hold, sink: transcript.sink })
+    const running = (n: number) => vi.waitFor(() => expect(hold.log.filter(([event]) => event === 'providerTurn')).toHaveLength(n))
+    await running(1)
+    delta('run-1', { type: 'thinking-delta', text: 'Check the fil' })
+    delta('run-1', { type: 'text-delta', text: '' })
+    delta('run-1', { type: 'thinking-delta', text: '' })
+    delta('run-1', { type: 'thinking-delta', text: 'e.' })
+    delta('run-1', { type: 'text-delta', text: 'old' })
+    delta('run-1', { type: 'tool-call-started', callId: 'call-1', toolCall: shell })
+    delta('run-1', { type: 'tool-call-completed', callId: 'call-1', toolCall: { ...shell, result: { status: 'success', value: { exitCode: 0 } } } })
+    delta('run-1', { type: 'text-delta', text: '\n\n    next' })
+    await vi.waitFor(() => expect(transcript.rows().at(-1)).toEqual({ kind: 'text', content: '\n\n    next' }))
+    // A person's steer while Cursor writes: the run is cancelled, and the steer is the next run.
+    hold.steer('Use pnpm')
+    await running(2)
+    delta('run-2', { type: 'text-delta', text: '    more' })
+    host.emit({ event: 'run_end', runId: 'run-2', status: 'finished' } as never)
+    const result = await handle.result
+    expect(result).toMatchObject({ aborted: false, text: 'old\n\n    next\n\n    more' })
+    expect(transcript.rows()).toEqual([
+      { kind: 'thinking', content: 'Check the file.' },
+      { kind: 'text', content: 'old' },
+      { kind: 'tool', content: 'Shell: npm test' },
+      { kind: 'text', content: '\n\n    next' },
+      { kind: 'text', content: '    more' }
+    ])
   })
 })

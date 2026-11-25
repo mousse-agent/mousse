@@ -12,6 +12,10 @@ import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmTool
  * start/delta/complete events the transcript expects: `start` before the first delta, and
  * `complete` only when something started. `break` closes the current segment: the next update
  * starts a new one with only what came after.
+ *
+ * A new segment keeps the runtime's text exactly as written (leading blank lines, indentation), except
+ * for a separator the source itself put between two parts (`markSyntheticSeparator`): a segment that
+ * begins there drops it. A segment opens only on text that is not all whitespace.
  */
 export class CumulativeStream {
   private started = false
@@ -19,19 +23,50 @@ export class CumulativeStream {
   /** How much of the runtime's cumulative text the closed segments hold. */
   private offset = 0
   private seen = 0
+  /** Separators the source put into its cumulative text, by the offset where each starts. */
+  private readonly syntheticSeparators = new Map<number, string>()
 
   constructor(private readonly emit: (phase: 'start' | 'delta' | 'complete', content: string) => void) {}
 
   update(content: string): void {
-    this.seen = content.length
-    const segment = this.segment(content)
-    if (this.offset && !segment) return
     if (!this.started) {
+      const start = this.resolveStart(content)
+      const segment = start ? content.slice(start) : content
+      // Nothing worth a row yet: an empty or whitespace-only part waits for the text after it.
+      if (!segment.trim()) return
+      this.offset = start
+      for (const pos of this.syntheticSeparators.keys()) if (pos < start) this.syntheticSeparators.delete(pos)
+      this.seen = content.length
       this.emit('start', '')
       this.started = true
+      this.latest = segment
+      this.emit('delta', segment)
+      return
     }
+    this.seen = content.length
+    const segment = this.segment(content)
+    if (segment === this.latest) return
     this.latest = segment
     this.emit('delta', segment)
+  }
+
+  /**
+   * The source put `sep` into its cumulative text at `atOffset` (a blank line between two replies, or
+   * two summaries): a segment that opens there drops it. Recorded whether a segment is open or not.
+   */
+  markSyntheticSeparator(atOffset: number, sep = '\n\n'): void {
+    this.syntheticSeparators.set(atOffset, sep)
+  }
+
+  /**
+   * Whether `content` adds something visible to this stream: new non-whitespace text, or a changed
+   * snapshot. Another stream breaks only for that, so an empty or whitespace-only update leaves its row open.
+   */
+  hasContentDelta(content: string): boolean {
+    const segment = this.segment(content)
+    if (!this.started) return segment.trim().length > 0
+    if (segment.startsWith(this.latest)) return segment.slice(this.latest.length).trim().length > 0
+    return segment.trim() !== this.latest.trim()
   }
 
   /**
@@ -52,9 +87,31 @@ export class CumulativeStream {
     this.offset = this.seen
   }
 
-  /** What of the runtime's cumulative text came after the last break. */
+  /** What of the runtime's cumulative text came after the last break, verbatim. */
   private segment(content: string): string {
-    return this.offset ? content.slice(this.offset).replace(/^\s+/, '') : content
+    const start = this.resolveStart(content)
+    return start ? content.slice(start) : content
+  }
+
+  /**
+   * Where the next segment begins: past the last break and, while no segment is open, past each
+   * separator the source recorded there (with any whitespace before it that opened no segment).
+   */
+  private resolveStart(content: string): number {
+    let start = this.offset
+    if (this.started || start === 0) return start
+    while (start > 0) {
+      let next: [number, string] | undefined
+      for (const entry of this.syntheticSeparators) {
+        const [pos] = entry
+        if (pos >= start && pos <= content.length && (!next || pos < next[0])) next = entry
+      }
+      if (!next) break
+      const [pos, sep] = next
+      if (content.slice(start, pos).trim().length !== 0 || !content.startsWith(sep, pos)) break
+      start = pos + sep.length
+    }
+    return start
   }
 }
 

@@ -41,6 +41,7 @@ const VERBS: Record<string, readonly [ing: string, past: string]> = {
   read: ["reading", "read"],
   remove: ["removing", "removed"],
   reorder: ["reordering", "reordered"],
+  request: ["requesting", "requested"],
   run: ["running", "ran"],
   save: ["saving", "saved"],
   search: ["searching", "searched"],
@@ -140,6 +141,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   list_tasks: ["list", "tasks in Mousse"],
   update_task: ["update", "a task in Mousse"],
   list_computers: ["list", "computers in Mousse"],
+  computer_use_request: ["request", "computer use setup"],
   list_models: ["list", "models in Mousse"],
   // Asking the person
   ask_user: ["ask", "you a question"],
