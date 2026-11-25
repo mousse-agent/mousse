@@ -379,8 +379,10 @@ export class ThreadRouter implements ThreadRouterPort {
   /**
    * The threads a result carries (`thread`, and the new one of a fork) as this computer lists them: the owner's copy
    * says nothing of which computer runs it, of its place here, or of whether that computer can be reached, so a window
-   * that stores it would show the thread as one of its own. A thread the merged lists hold keeps its row's place and
-   * state; one they do not hold yet (just made) still names its computer.
+   * that stores it would show the thread as one of its own. A thread the merged lists hold keeps its row's place;
+   * one they do not hold yet (just made) still names its computer. The answer itself shows that computer can be reached
+   * and still shares the thread, so neither the row's offline nor its not-shared mark carries over (a row read from the
+   * cache would otherwise show the thread offline until the next list arrives).
    */
   private withListedThreads(node: NodeId, result: Record<string, unknown>): Record<string, unknown> {
     let out = result
@@ -391,15 +393,7 @@ export class ThreadRouter implements ThreadRouterPort {
       if (ref?.node !== node) continue
       const { offline: _offline, notShared: _notShared, ...rest } = thread
       const row = this.lists?.row(thread.id)
-      const listed = row
-        ? {
-            ...rest,
-            node,
-            order: row.order,
-            ...(row.offline ? { offline: true } : {}),
-            ...(row.notShared ? { notShared: true } : {})
-          }
-        : { ...rest, node }
+      const listed = row ? { ...rest, node, order: row.order } : { ...rest, node }
       out = { ...out, [key]: listed }
     }
     return out
