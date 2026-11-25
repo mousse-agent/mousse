@@ -46,6 +46,21 @@ import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens, zonedDay
  * reader and writer of the memory tables; each write runs in one `bots.db` transaction.
  */
 
+/**
+ * A bot's chat reply is journaled twice over: as its chat row (`bm:<id>`, written with the chat message) and as the
+ * assistant message capture copies from the home thread (`<threadId>:<messageId>`). Either may come first: capture
+ * usually runs as the dispatch ends, before its reply is posted; a later copy (a late final message) comes after.
+ * `reply` is the chat row and `copy` the captured row of the same words: the same activation (the same thread when
+ * either has none), and the same text, or the chat row's text being the copy's words followed by the cards it carries
+ * (`\n\n…`). The status lines a turn says between its steps are never posted, so their copies stay.
+ */
+const CHAT_REPLY_COPY = (copy: string) =>
+  `${copy}.kind = 'bot_msg' AND ${copy}.lane IS 'chat' AND substr(${copy}.source_key, 1, 3) <> 'bm:'`
+const SAME_CHAT_REPLY = (reply: string, copy: string) =>
+  `${reply}.bot_id = ${copy}.bot_id AND ${reply}.kind = 'bot_msg' AND ${reply}.lane IS 'chat' AND substr(${reply}.source_key, 1, 3) = 'bm:'
+    AND (${reply}.activation_id = ${copy}.activation_id OR ((${reply}.activation_id IS NULL OR ${copy}.activation_id IS NULL) AND ${reply}.thread_id = ${copy}.thread_id))
+    AND (${reply}.text = ${copy}.text OR substr(${reply}.text, 1, length(${copy}.text) + 2) = ${copy}.text || char(10) || char(10))`
+
 /** The `bots.db` connection the store works on (`BotStore.db`). */
 export type BotMemoryDb = Pick<ProfileDatabase, 'statement' | 'inTransaction' | 'transaction' | 'database'>
 
@@ -340,6 +355,12 @@ export class BotMemoryStore {
       if (inserted && row.kind === 'owner_msg')
         tx.statement(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, 'last_owner_msg_at', ?)
           ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value WHERE excluded.value > bot_memory_state.value`).run(row.botId, when)
+      // A chat reply whose thread copy capture already wrote: the chat row stands for both, so the copy goes (one copy
+      // per reply, the latest), and the history, search and an export hold the reply once.
+      if (inserted && row.kind === 'bot_msg' && row.lane === 'chat' && row.sourceKey.startsWith('bm:'))
+        tx.statement(`DELETE FROM bot_journal WHERE seq = (SELECT c.seq FROM bot_journal c, bot_journal r
+          WHERE r.seq = ? AND c.bot_id = r.bot_id AND c.seq < r.seq AND c.redacted_at IS NULL AND ${CHAT_REPLY_COPY('c')} AND ${SAME_CHAT_REPLY('r', 'c')}
+          ORDER BY c.seq DESC LIMIT 1)`).run(num(inserted.seq)!)
       return inserted ? num(inserted.seq)! : undefined
     } catch (error) {
       throw new BotJournalError(error)
@@ -360,6 +381,11 @@ export class BotMemoryStore {
     const existing = this.get('SELECT seq, json, redacted_at FROM bot_journal WHERE bot_id = ? AND source_key = ?', row.botId, row.sourceKey)
     const json = { ...((row.json as Record<string, unknown> | undefined) ?? {}), sha256: sha256(row.text), ...(partial ? { partial: true } : {}) }
     if (!existing) {
+      // Its chat row is journaled already: the copy would be the same reply twice.
+      if (row.kind === 'bot_msg' && row.lane === 'chat' && !row.sourceKey.startsWith('bm:') && this.get(`SELECT 1 FROM bot_journal r,
+          (SELECT ? AS bot_id, ? AS thread_id, ? AS activation_id, ? AS text) c
+        WHERE r.bot_id = ? AND ${SAME_CHAT_REPLY('r', 'c')} LIMIT 1`,
+      row.botId, row.threadId ?? null, row.activationId ?? null, row.text, row.botId)) return
       for (const part of row.kind === 'notice' ? requestJournalRows({ ...row, json }) : [{ ...row, json }])
         this.appendInTx(this.db, part, row.at)
       return
@@ -388,8 +414,10 @@ export class BotMemoryStore {
 
   /** Searchable messages, without loading their text or counting tool and bookkeeping rows. */
   messageHistory(botId: string): { count: number; since?: string } {
-    const row = this.get(`SELECT COUNT(*) AS n, MIN(at) AS since FROM bot_journal
-      WHERE bot_id = ? AND kind IN ('owner_msg', 'bot_msg', 'run_report') AND redacted_at IS NULL`, botId)!
+    // A reply's thread copy kept from before copies were dropped (`CHAT_REPLY_COPY`) is not a message of its own.
+    const row = this.get(`SELECT COUNT(*) AS n, MIN(j.at) AS since FROM bot_journal j
+      WHERE j.bot_id = ? AND j.kind IN ('owner_msg', 'bot_msg', 'run_report') AND j.redacted_at IS NULL
+        AND NOT (${CHAT_REPLY_COPY('j')} AND EXISTS (SELECT 1 FROM bot_journal r WHERE ${SAME_CHAT_REPLY('r', 'j')}))`, botId)!
     return { count: num(row.n) ?? 0, ...(typeof row.since === 'string' ? { since: row.since } : {}) }
   }
 

@@ -11,7 +11,8 @@ import { BotJournalError, type BotMemoryStore } from './BotMemoryStore'
  * generations may be canonical), never `messages.json`, and keeps a cursor per thread in
  * `bot_memory_state`, so a run after a crash copies only what is new. Every row is keyed
  * `<threadId>:<messageId>`, so copying twice adds nothing. WP2's engine calls it after every
- * dispatch and once at startup (`catchUp`).
+ * dispatch and once at startup (`catchUp`). A chat reply is journaled once: its chat row (`bm:<id>`)
+ * stands for its home-thread copy, whichever of the two is written first (`BotMemoryStore.putCaptured`).
  */
 
 /** A bot thread to copy: the home thread is the chat lane; run and consult threads, their activation's lane. */
