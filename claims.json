@@ -3,19 +3,18 @@
   "claims": [
     {
       "task": "acp-agent-logos",
-      "session": "LAPTOP-HIEROJK7-a1f832",
-      "machine": "LAPTOP-HIEROJK7",
-      "branch": "t3/acp-provider-icons",
+      "session": "Animatrix-cafae8",
+      "machine": "Animatrix",
+      "branch": "acp-agent-logos",
       "paths": [
-        "src/mms/harness/agents/registry.ts",
         "src/mms/harness/agents/registryIcons.ts",
+        "src/mms/harness/agents/registry.ts",
         "src/renderer/lib/providerIcons.tsx",
-        "src/shared/privacy/outbound.ts",
-        "src/mms/harness/gateway.ts",
-        "src/renderer/components/providers/RegistryAgents.tsx"
+        "src/renderer/components/providers/RegistryAgents.tsx",
+        "src/shared/privacy/outbound.ts"
       ],
-      "claimedAt": "2026-11-24T15:06:33.185Z",
-      "expiresAt": "2026-11-24T17:06:33.185Z"
+      "claimedAt": "2026-11-25T02:39:48.204Z",
+      "expiresAt": "2026-11-25T04:39:48.204Z"
     },
     {
       "task": "applet-source-out-of-context",
