@@ -6,6 +6,8 @@
  * project's repository, as another operation would, so the worktree step lasts as long as the test wants.
  * Rows: one empty thread sent (listed, and named from its message); one whose title model never answers (its agent still
  * gets the turn); two sent one after the other (their order, during the setup and after it).
+ * The send asks the title model for the title alone; the branch is asked for apart, once the message is accepted. Both
+ * requests may be in flight at once, so the scripted model answers, and is counted, by request (`task`).
  */
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -22,6 +24,14 @@ import { findUnstartedThread } from '../../src/shared/threadTitle'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
+
+type NamingSpec = { task?: string; prompt: string }
+type NamingAnswer = { text: string } | Promise<{ text: string }>
+/** A scripted title model: `title` answers title requests, `branch` branch name requests. */
+const namingModel = (title: (spec: NamingSpec) => NamingAnswer, branch: (spec: NamingSpec) => NamingAnswer) =>
+  vi.fn(async (spec: NamingSpec) => (spec.task === 'branch_name' ? branch(spec) : title(spec)))
+/** How many requests of `task` the scripted model got. */
+const asked = (model: { mock: { calls: Array<[NamingSpec]> } }, task: 'title' | 'branch_name') => model.mock.calls.filter(([spec]) => spec.task === task).length
 
 describe("a new chat's thread while its first turn is set up", () => {
   let home: string | undefined
@@ -119,14 +129,15 @@ describe("a new chat's thread while its first turn is set up", () => {
   it('gives the agent its turn while the title model has not answered', async () => {
     const w = world()
     w.d.settings.title = { ...w.d.settings.title, ...PI }
-    // The naming request never answers.
-    const oneShot = vi.fn(() => new Promise<never>(() => undefined))
+    // The naming requests never answer.
+    const oneShot = namingModel(() => new Promise<never>(() => undefined), () => new Promise<never>(() => undefined))
     ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
     const draft = w.emptyThread()
     await w.d.orch.send('Please plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
     await waitFor(() => w.pi.turns.length === 1, 'the agent to get the turn', 40_000)
     expect(w.pi.turns[0]!.prompt).toMatch(/Please plan the release for Friday$/)
-    expect(oneShot).toHaveBeenCalledTimes(1)
+    // One title request; the branch's own request may be in flight too.
+    expect(asked(oneShot, 'title')).toBe(1)
     expect(w.d.store.getThread(draft.id)).toMatchObject({ name: 'Plan the release for Friday', titleSource: 'provisional' })
   })
 
@@ -135,22 +146,27 @@ describe("a new chat's thread while its first turn is set up", () => {
     w.d.settings.title = { ...w.d.settings.title, ...PI }
     let answerStopped!: (answer: { text: string }) => void
     const stoppedAnswer = new Promise<{ text: string }>((resolve) => { answerStopped = resolve })
-    const oneShot = vi.fn(async () => ({ text: 'Title: Fix checkout retries\nBranch: checkout-retries' }))
-      .mockImplementationOnce(() => stoppedAnswer)
+    let titles = 0
+    // The first title request (the cancelled send's) answers late. A branch request names the message it was asked
+    // about, so a branch named from the cancelled message would show as `stale-release`.
+    const oneShot = namingModel(
+      () => (titles++ === 0 ? stoppedAnswer : { text: 'Fix checkout retries' }),
+      (spec) => ({ text: /checkout/i.test(spec.prompt) ? 'checkout-retries' : 'stale-release' })
+    )
     ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
     const draft = w.emptyThread()
     await w.holdRepository()
     await w.d.orch.send('Plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
-    await waitFor(() => w.preparingWorktree(draft.id) && oneShot.mock.calls.length === 1, 'the first send to wait on setup and naming')
+    await waitFor(() => w.preparingWorktree(draft.id) && asked(oneShot, 'title') === 1, 'the first send to wait on setup and naming')
     expect(w.d.store.getThread(draft.id)!.name).toBe('Plan the release for Friday')
     expect((await w.d.orch.stopThread(draft.id, 'user', { clientRequestId: 'stop-first' })).ok).toBe(true)
     await waitFor(() => w.idle(draft.id), 'the cancelled send to settle')
     expect(w.d.store.getThread(draft.id)!.name).toBe('New Chat')
 
     await w.d.orch.send('Please fix checkout retries', false, { threadId: draft.id, clientRequestId: 'second', awaitMode: 'ack' })
-    await waitFor(() => oneShot.mock.calls.length === 2, 'the second send to ask for a new name')
+    await waitFor(() => asked(oneShot, 'title') === 2, 'the second send to ask for a new name')
     expect(w.d.store.getThread(draft.id)!.name).toBe('Fix checkout retries')
-    answerStopped({ text: 'Title: Stale release plan\nBranch: stale-release' })
+    answerStopped({ text: 'Stale release plan' })
     w.freeRepository()
     await waitFor(() => w.pi.turns.length === 1 && w.idle(draft.id), 'the new turn to finish', 40_000)
     expect(w.pi.turns[0]!.prompt).toMatch(/Please fix checkout retries$/)
@@ -164,7 +180,8 @@ describe("a new chat's thread while its first turn is set up", () => {
     const draft = w.emptyThread()
     w.d.settings.title = { ...w.d.settings.title, ...PI }
     const naming = Promise.withResolvers<{ text: string }>()
-    const oneShot = vi.fn(() => naming.promise)
+    let title: () => NamingAnswer = () => naming.promise
+    const oneShot = namingModel(() => title(), (spec) => ({ text: /checkout/i.test(spec.prompt) ? 'checkout-retries' : 'friday-release' }))
     ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
     const snapshot = Promise.withResolvers<void>()
     // The first turn takes a start snapshot, as it does when the worktree's retained baseline cannot be used (`ownWorktreeStart`).
@@ -177,11 +194,11 @@ describe("a new chat's thread while its first turn is set up", () => {
       return recordOutsideChanges.call(this, options)
     })
     await w.d.orch.send('Plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
-    await waitFor(() => checkpoint.mock.calls.length === 1 && oneShot.mock.calls.length === 1, 'snapshot setup and the naming request')
+    await waitFor(() => checkpoint.mock.calls.length === 1 && asked(oneShot, 'title') === 1, 'snapshot setup and the naming request')
     const before = w.localBranches()
     expect(before).toContainEqual(expect.stringMatching(/^mousse\/[0-9a-f]{8}$/))
     try {
-      naming.resolve({ text: 'Title: Friday release plan\nBranch: friday-release' })
+      naming.resolve({ text: 'Friday release plan' })
       await waitFor(() => w.d.store.getThread(draft.id)?.name === 'Friday release plan', 'the naming answer to be received')
       // If a rename started, let its real Git operation finish while the snapshot is still paused.
       await Promise.allSettled(renaming.mock.results.map(({ value }) => value))
@@ -195,7 +212,7 @@ describe("a new chat's thread while its first turn is set up", () => {
       expect(w.pi.turns).toHaveLength(0)
       expect(w.localBranches()).toEqual(before)
 
-      oneShot.mockResolvedValue({ text: 'Title: Checkout retries\nBranch: checkout-retries' })
+      title = () => ({ text: 'Checkout retries' })
       await w.d.orch.send('Fix checkout retries', false, { threadId: draft.id, clientRequestId: 'retry', awaitMode: 'ack' })
       await waitFor(() => w.pi.turns.length === 1 && w.idle(draft.id), 'the accepted Send to finish', 40_000)
       await waitFor(() => w.localBranches().includes('mousse/checkout-retries'), 'the branch to use the accepted first message', 40_000)
@@ -246,24 +263,26 @@ describe("a new chat's thread while its first turn is set up", () => {
     const draft = w.emptyThread()
     w.d.settings.title = { ...w.d.settings.title, ...PI }
     const naming = Promise.withResolvers<{ text: string }>()
-    const oneShot = vi.fn(() => naming.promise)
+    const branchNaming = Promise.withResolvers<{ text: string }>()
+    const oneShot = namingModel(() => naming.promise, () => branchNaming.promise)
     ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
     const interrupt = vi.spyOn(w.pi, 'interrupt')
     const renaming = vi.spyOn(ThreadWorkspaceManager.prototype, 'renameOwnBranch')
     try {
       await w.d.orch.send('Plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
-      await waitFor(() => w.pi.turns.length === 1 && oneShot.mock.calls.length === 1, 'the running provider and naming request', 40_000)
+      await waitFor(() => w.pi.turns.length === 1 && asked(oneShot, 'title') === 1, 'the running provider and naming request', 40_000)
       const before = w.localBranches()
       const stopped = w.d.orch.stopThread(draft.id, 'user', { clientRequestId: 'stop-first' })
       await waitFor(() => interrupt.mock.calls.length > 0, 'Stop to reach the running provider')
-      naming.resolve({ text: 'Title: Stale release title\nBranch: stale-release' })
+      naming.resolve({ text: 'Stale release title' })
+      branchNaming.resolve({ text: 'stale-release' })
       reply.resolve('Done')
       expect((await stopped).ok).toBe(true)
       await waitFor(() => w.idle(draft.id) && w.d.store.getThread(draft.id)?.titleSource === 'auto', 'the stopped turn and naming to settle')
       expect(w.d.store.getThread(draft.id)?.name).toBe('Plan the release for Friday')
       await Promise.allSettled(renaming.mock.results.map(({ value }) => value))
       expect(w.localBranches()).toEqual(before)
-    } finally { naming.resolve({ text: '' }); reply.resolve('Done') }
+    } finally { naming.resolve({ text: '' }); branchNaming.resolve({ text: '' }); reply.resolve('Done') }
   })
 
   it('keeps two threads started one after the other in the order they were sent, during their setup and after it', async () => {

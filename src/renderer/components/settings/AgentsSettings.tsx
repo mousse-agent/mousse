@@ -72,9 +72,10 @@ function CacheTimeRow() {
  * The optional title prompt under Thread titles: a dimmed row with Add while empty; the text box shows
  * while it is being written or once it has text, and saves when it loses focus (blank removes it).
  */
-function TitlePromptRow({ prompt, automatic, updateSettings }: {
+function TitlePromptRow({ prompt, off, updateSettings }: {
   prompt: string
-  automatic: boolean
+  /** Thread titles are set to First line only: no model reads the prompt, so the row is off (and keeps its text). */
+  off: boolean
   updateSettings: (partial: MousseSettingsUpdate) => Promise<void>
 }) {
   const [editing, setEditing] = useState(false)
@@ -99,10 +100,10 @@ function TitlePromptRow({ prompt, automatic, updateSettings }: {
       anchor="agents-title-prompt"
       htmlFor={open ? 'agents-title-prompt' : undefined}
       indent
-      disabled={!open || automatic}
-      description={automatic ? <span title="Automatic names threads from their first line, without a model.">Used with a chosen title model.</span> : undefined}
+      disabled={!open || off}
+      description={off ? <span title="First line only names threads without a model.">Used when a model names threads.</span> : undefined}
       control={!open && (
-        <button type="button" className="settings-btn" onClick={() => setEditing(true)}>Add</button>
+        <button type="button" className="settings-btn" disabled={off} onClick={() => setEditing(true)}>Add</button>
       )}
     >
       {open && (
@@ -111,6 +112,7 @@ function TitlePromptRow({ prompt, automatic, updateSettings }: {
           className="agents-title-prompt"
           rows={2}
           maxLength={TITLE_PROMPT_MAX}
+          disabled={off}
           autoFocus={editing && !prompt}
           value={draft}
           placeholder="e.g. Start each title with an emoji"
@@ -150,11 +152,13 @@ export function AgentsSettings({
   // Titles are one request with no tools: only instances (and models) that run one are offered.
   const titleProviders = oneShotProviderOptions(providers)
 
-  // Blank title keys mean "Automatic": threads are named from their first line, with no model call.
+  // Blank title keys mean "Automatic": the first line names the thread at once, then the best connected model renames
+  // it. `mode: 'off'` with blank keys is "First line only": no model is asked.
   // Show the saved mode.
   const titleProvider = settings.title?.llmProvider ?? ''
   const titleModel = settings.title?.model ?? ''
   const titleIsAutomatic = !titleProvider || !titleModel
+  const titleIsOff = titleIsAutomatic && settings.title?.mode === 'off'
   // A stored choice the picker no longer offers (a Bedrock model, an agent without one-shots) cannot run:
   // say so instead of showing an empty picker while titles quietly fall back.
   const titleInstance = settings.title?.instanceId
@@ -211,14 +215,16 @@ export function AgentsSettings({
           titleId="agents-title-model-title"
           description={titleUnavailable
             ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name threads here, so threads keep their first line as the title. Choose another model or Automatic.`
-            : 'Automatic picks a fast connected model to name threads.'}
-          titleAction={!titleIsAutomatic && (
+            : titleIsOff
+              ? 'Threads keep their first line as the title. Automatic picks a fast connected model to name threads.'
+              : 'Automatic picks a fast connected model to name threads.'}
+          titleAction={(!titleIsAutomatic || titleIsOff) && (
             <button
               type="button"
               className="settings-title-icon-btn"
               aria-label="Use automatic"
               title="Use automatic"
-              onClick={() => void updateSettings({ title: { llmProvider: '', model: '' } })}
+              onClick={() => void updateSettings({ title: { llmProvider: '', model: '', mode: 'auto' } })}
             >
               <RotateCcw size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
@@ -227,7 +233,7 @@ export function AgentsSettings({
             <SettingsModelPicker
               id="agents-title-model"
               ariaLabel="Thread title model"
-              placeholder="Automatic"
+              placeholder={titleIsOff ? 'First line only' : 'Automatic'}
               providers={titleProviders}
               providerId={titleIsAutomatic ? '' : titleProvider}
               instanceId={titleIsAutomatic ? undefined : settings.title?.instanceId}
@@ -235,12 +241,18 @@ export function AgentsSettings({
               effort={titleIsAutomatic ? undefined : settings.title?.effort}
               onSelect={(llmProvider, pick, instanceId) =>
                 // Always the whole selection: a write without the instance or level clears it.
-                void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, ...(pick.effort ? { effort: pick.effort } : {}) } })
+                void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, ...(pick.effort ? { effort: pick.effort } : {}), mode: 'auto' } })
               }
+              clear={{
+                label: 'First line only',
+                title: 'Name threads from their first line, without a model.',
+                active: titleIsOff,
+                onClear: () => void updateSettings({ title: { llmProvider: '', model: '', mode: 'off' } })
+              }}
             />
           }
         />
-        <TitlePromptRow prompt={settings.title?.prompt ?? ''} automatic={titleIsAutomatic} updateSettings={updateSettings} />
+        <TitlePromptRow prompt={settings.title?.prompt ?? ''} off={titleIsOff} updateSettings={updateSettings} />
         <SettingsRow
           title="Bot model"
           anchor="agents-bot-model"

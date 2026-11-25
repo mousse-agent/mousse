@@ -12,6 +12,7 @@ The agent skills Mousse is built with. Each one is a folder in `skills/` with a 
 | `check-on-real-data` | Storage, sync, size-limit and performance changes | Proves the change against copies of the real threads on this machine. Read-only on `~/.mousse`. |
 | `mousse-ui` | Building, restyling or reviewing UI in `src/renderer` | Mousse's UI and UX principles, and how to tell a screen is slop. |
 | `nightly-build-release` | "Build a nightly" | Publishes a nightly prerelease of master, fixing whatever blocks it until one is out. |
+| `update-model-catalog` | Adding, retiring or re-tiering bundled models | Checks models live on signed-in providers, then updates the catalog, tiers, bundled test and docs together. |
 | `gh-attach-images` | Screenshots or videos for a PR or issue | Attaches them with `gh --attach`, never by committing them to the repository. |
 | `debug-journal` | "Fixed" after a long debugging session | Appends one line on the root cause and the faster path to `journal.md`. |
 | `end-session` | Only an explicit "end the session" | Keeps local experiments or publishes the chosen outcome, and leaves a handoff. |

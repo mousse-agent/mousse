@@ -3,22 +3,23 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import type { NamingOrigin } from '../harness/driver'
 import { SEMANTIC_BRANCH_KINDS, branchNameFromModel, withBranchPrefix } from '../../shared/mousseBranches'
 import { normalizeBranchNamingSettings, type BranchNamingSettings } from '../../shared/settings'
+import { cleanTitleText, hintLine } from '../../shared/threadTitleText'
 
 /**
  * Naming a thread's worktree branch after its first message, in the background.
  *
- * The worktree is made at once on `<prefix>/<random id>` (`temporaryBranchName`). Once it is ready, the profile's
- * namer gives the title model's name for it (`requestBranchName`): the answer to the request the first send made for the
- * thread's title and branch together (`OrchestratorService.nameThreadOnFirstSend`), or a request of its own. The
- * workspace renames its branch to it. Nothing waits on that: the turn starts on the temporary name, and every failure (no
- * title model, a refusal, the timeout, an answer that names nothing usable, a name already taken) leaves the temporary
- * name as it is.
+ * The worktree is made at once on `<prefix>/<random id>` (`temporaryBranchName`). Once the first message is accepted,
+ * the profile's namer asks the title model (the chosen one, or Automatic's) for a name of its own
+ * (`requestBranchName`), apart from the thread's title, which the send asked for already. The workspace renames its
+ * branch to it. Nothing waits on that: the turn starts on the temporary name, and every failure (no title model, a
+ * refusal, the timeout, an answer that names nothing usable, a name already taken) leaves the temporary name as it is.
+ * The model sees the message's own words only (`branchNamingPrompt`), never pasted code, logs or diffs.
  */
 
 /** How long the title model may take to name a branch before the temporary name is kept. */
 export const BRANCH_NAMING_TIMEOUT_MS = 30_000
 
-/** The most of the first message the title model sees. */
+/** The most of the first message's cleaned words the title model sees. */
 const NAMING_TEXT_MAX = 2_000
 
 export interface BranchNameRequest {
@@ -81,11 +82,46 @@ export function branchNamingRules(settings: BranchNamingSettings): string[] {
   return rules
 }
 
-/** The request the title model gets for a branch name alone. */
-export function branchNamingPrompt(text: string, settings: BranchNamingSettings): { system: string; prompt: string } {
-  const message = text.trim().slice(0, NAMING_TEXT_MAX)
+/** A line that opens a unified diff: its `diff --git` or `index` header, a file header, or a hunk header. */
+const DIFF_HEADER = /^(?:diff --git |index [0-9a-f]{6,}\.\.[0-9a-f]{6,}|(?:---|\+\+\+) \S|@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@)/
+/** A diff's removed or added line (`-old`, `+  new`); never `--watch` or `++i`. */
+const REMOVED_LINE = /^-(?!-)/
+const ADDED_LINE = /^\+(?!\+)/
+
+/**
+ * The message without the diffs pasted into it, paragraph by paragraph, before the usual cleaning: a paragraph with a
+ * diff header keeps only the lines before it; one with both a removed and an added line drops every such line. A list
+ * item (`- step`) or a word that starts with a sign (`--watch`, `+page.svelte`) stays when the paragraph has no diff.
+ */
+export function withoutPastedDiffs(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .split(/\n\s*\n/)
+    .map((paragraph) => {
+      const lines = paragraph.split('\n')
+      const header = lines.findIndex((line) => DIFF_HEADER.test(line))
+      if (header !== -1) return lines.slice(0, header).join('\n')
+      if (lines.some((line) => REMOVED_LINE.test(line)) && lines.some((line) => ADDED_LINE.test(line)))
+        return lines.filter((line) => !REMOVED_LINE.test(line) && !ADDED_LINE.test(line)).join('\n')
+      return paragraph
+    })
+    .filter((paragraph) => paragraph.trim())
+    .join('\n\n')
+}
+
+/**
+ * The request the title model gets for a branch name alone: the message's own words, cleaned as for titles (no code,
+ * logs, stack traces, diffs or reference data), and its hints. Undefined when nothing that names the work is left (a
+ * pasted diff alone): the branch then keeps its temporary name and no model is asked.
+ */
+export function branchNamingPrompt(text: string, settings: BranchNamingSettings): { system: string; prompt: string } | undefined {
+  const { text: words, hints } = cleanTitleText(withoutPastedDiffs(text), NAMING_TEXT_MAX)
+  const named = Boolean(hints.skill || hints.files.length || hints.browserElement)
+  if (!words && !named) return undefined
+  const hintText = hintLine(hints, 0)
   const system = ['You name Git branches for coding tasks. Reply with the branch name only: one line, no quotes, no explanation.', ...branchNamingRules(settings)]
-  return { system: system.join('\n'), prompt: `The task:\n${message}` }
+  const prompt = [`The task:\n${words || '(no words)'}`, ...(hintText ? [`Hints: ${hintText}`] : [])].join('\n')
+  return { system: system.join('\n'), prompt }
 }
 
 /**
@@ -96,7 +132,10 @@ export async function requestBranchName(threadDirectory: string, threadId: strin
   const namer = namerFor(threadDirectory)
   if (!namer || !text.trim() || cancellation?.aborted) return undefined
   const settings = branchNamingFor(threadDirectory)
-  const { system, prompt } = branchNamingPrompt(text, settings)
+  const request = branchNamingPrompt(text, settings)
+  // Nothing in the message names the work (a pasted diff alone): no model is asked.
+  if (!request) return undefined
+  const { system, prompt } = request
   const timeout = new AbortController()
   const signal = cancellation ? AbortSignal.any([cancellation, timeout.signal]) : timeout.signal
   let onAbort!: () => void
