@@ -1,9 +1,13 @@
-import { botModelTier, catalogEntryFor, type BotModelTier } from '../../../shared/bots/personal/modelTiers'
+import { catalogEntryFor } from '../../../shared/bots/personal/modelTiers'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { InstanceModel, RunPolicy } from '../../../shared/harness/types'
 import type { ModelCatalog } from '../../../shared/modelCatalog'
+import { accountOf, candidateTier, credentialOf, instanceReady } from '../../models/modelCandidates'
 import type { BotRuntimeHold } from '../seams'
 import type { BotModelCandidate } from './chooseModel'
+
+// Shared with Automatic thread naming (`models/modelCandidates.ts`).
+export { accountOf, candidateTier, credentialOf, instanceReady }
 
 /**
  * The models a bot may run on (Bot Phase 1 §5.6), built in the daemon from the provider snapshots:
@@ -22,23 +26,11 @@ export interface BotCandidateInput {
   catalog?: ModelCatalog
   /** Instances at their usage limit, until when (ISO). */
   limited?: ReadonlyMap<string, string>
-}
-
-/** Whether an instance is ready to run a turn now: enabled, signed in (or needing none) and running. */
-export function instanceReady(snapshot: InstanceSnapshot): boolean {
-  return snapshot.enabled.effective && (snapshot.auth.state === 'signed_in' || snapshot.auth.state === 'not_required') && snapshot.runs.state === 'yes'
-}
-
-function credentialOf(snapshot: InstanceSnapshot): BotModelCandidate['credential'] {
-  // Codex runs only on a ChatGPT sign-in (never an API key) and sets no credential of its own.
-  if (snapshot.driver === 'codex') return 'subscription'
-  return snapshot.auth.credential ?? 'unknown'
-}
-
-/** The signed-in account's id (a salted hash), when the entry can tell it. */
-export function accountOf(snapshot: InstanceSnapshot): string | undefined {
-  const id = snapshot.auth.account?.id
-  return id && id !== 'unknown' ? id : undefined
+  /**
+   * Until when a model on an instance is at its usage limit, the instance's own limit included
+   * (`UsageLimitTracker.limitUntil`); undefined while it is not. Read before `limited`.
+   */
+  limitUntil?(instanceId: string, model: string): string | undefined
 }
 
 function namesOf(model: InstanceModel, catalog: ModelCatalog | undefined): string[] {
@@ -51,7 +43,7 @@ export function botModelCandidates(input: BotCandidateInput): BotModelCandidate[
   const candidates: BotModelCandidate[] = []
   for (const snapshot of input.snapshots) {
     if (!instanceReady(snapshot)) continue
-    const limitedUntil = input.limited?.get(snapshot.instanceId)
+    const instanceLimit = input.limited?.get(snapshot.instanceId)
     const account = accountOf(snapshot)
     let order = 0
     for (const model of input.models(snapshot.instanceId)) {
@@ -61,12 +53,14 @@ export function botModelCandidates(input: BotCandidateInput): BotModelCandidate[
       const listed = order++
       if (!input.hold.canHoldBot(snapshot.instanceId, input.policy, model.id).ok) continue
       const entry = catalogEntryFor(model.id, input.catalog)
+      // A model at its own limit (one Antigravity model's quota) is skipped while the entry's other models stay.
+      const limitedUntil = input.limitUntil?.(snapshot.instanceId, model.id) ?? instanceLimit
       candidates.push({
         instanceId: snapshot.instanceId,
         model: model.id,
         efforts: [...model.capabilities.efforts],
         ...(model.capabilities.defaultEffort ? { defaultEffort: model.capabilities.defaultEffort } : {}),
-        tier: candidateTier(snapshot.driver, model.id, input.catalog),
+        tier: candidateTier(snapshot.driver, model.id, input.catalog, model.resolvedId),
         credential: credentialOf(snapshot),
         ...(account ? { account } : {}),
         ...(entry ? { released: entry.released } : {}),
@@ -77,16 +71,6 @@ export function botModelCandidates(input: BotCandidateInput): BotModelCandidate[
     }
   }
   return candidates
-}
-
-/**
- * A model's tier on an entry. Codex's `default` is the model Codex picks for the account: a
- * standard one. Claude Code's `default` stands for Opus or Sonnet by plan, so it stays `unknown` and
- * its `sonnet` and `opus` entries are ranked instead.
- */
-function candidateTier(driver: string, model: string, catalog: ModelCatalog | undefined): BotModelTier {
-  if (driver === 'codex' && model === 'default') return 'standard'
-  return botModelTier(model, catalog)
 }
 
 /**

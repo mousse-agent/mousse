@@ -1610,7 +1610,8 @@ describe('older Claude models', () => {
     // The live alias first (its extras), then the candidates newest first; nothing listed live and no other route.
     expect(first.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-runs', 'ember-refused', 'ember-remapped', 'ember-unknown', 'ember-old-20290101'])
     expect(service.llmProvider()?.models).toEqual([
-      { id: 'ember', label: 'Ember 9', efforts: undefined },
+      // The alias names the model it resolved to, for Automatic naming's ranking.
+      { id: 'ember', label: 'Ember 9', efforts: undefined, resolvedId: 'ember-live' },
       { id: 'ember-runs', label: 'Ember ember-runs', efforts: ['low', 'high'], thinkingOff: false, defaultEffort: 'high', older: true },
       { id: 'ember-old-20290101', label: 'Ember ember-old', older: true }
     ])

@@ -2093,7 +2093,7 @@ export class CodexProviderService {
           throw harnessAppError({ code: 'model_unavailable', message: `Codex does not list ${baseId}. Refresh models or choose another title model in Settings → Agents.` })
         // Always the listed model, `default` included, with its own default effort when none is chosen.
         this.assertAccount(conn)
-        return await runCodexDirectOneShot({ model: listed.model || listed.id, effort: effort ?? listed.defaultReasoningEffort, token, spec }, signal, this.dependencies.directStream)
+        return await runCodexDirectOneShot({ model: listed.model || listed.id, effort: effort ?? namingEffort(spec, listed) ?? listed.defaultReasoningEffort, token, spec }, signal, this.dependencies.directStream)
       }
       const cwd = this.standaloneWorkspace('one-shot')
       const locked = codexOneShotConfig((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers)
@@ -2108,6 +2108,7 @@ export class CodexProviderService {
       // profile's config names, which was never checked.
       const pinned = listed.model || listed.id
       const model = { model: pinned }
+      const turnEffort = effort ?? namingEffort(spec, listed)
       const started = await this.requestThread(conn, 'thread/start', {
         cwd,
         approvalPolicy: 'never',
@@ -2159,7 +2160,7 @@ export class CodexProviderService {
         approvalPolicy: 'never',
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
         ...model,
-        ...(effort ? { effort } : {})
+        ...(turnEffort ? { effort: turnEffort } : {})
       })
       // Not tied to the signal: once sent, a stop has to interrupt the turn Codex started.
       turnId = turn.turn.id
@@ -4145,4 +4146,13 @@ export function createCodexProviderService(
   options: CodexServiceOptions = {}
 ): CodexProviderService {
   return new CodexProviderService(profileHome, questions, deps, options)
+}
+
+/**
+ * A thread title or branch name with no reasoning level chosen runs at `low` when the model offers it: a short naming
+ * answer gains nothing from more reasoning, and it comes sooner. Any other request, or a chosen level, is left alone.
+ */
+function namingEffort(spec: Pick<OneShotSpec, 'task'>, listed: Pick<CodexModel, 'supportedReasoningEfforts'>): string | undefined {
+  if (spec.task !== 'title' && spec.task !== 'branch_name') return undefined
+  return listed.supportedReasoningEfforts.some((effort) => effort.reasoningEffort === 'low') ? 'low' : undefined
 }

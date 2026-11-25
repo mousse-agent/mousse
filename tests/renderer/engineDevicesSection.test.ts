@@ -80,6 +80,16 @@ describe('a direction of a pairing', () => {
     expect(engineSideRow(away, 'in')).toMatchObject({ line: 'Not connected now' })
     expect(engineSideRow(away, 'in').warn).toBeUndefined()
   })
+
+  it('says on Can use when a level change is not applied yet, keeping Access and Remove', () => {
+    const pending = device({ node: 'n1', accessPending: true })
+    expect(engineSideRow(pending, 'in')).toMatchObject({
+      line: 'Access change not applied yet',
+      warn: true,
+      actions: ['access', 'remove']
+    })
+    expect(engineSideRow(pending, 'out')).toMatchObject({ line: 'Connected' })
+  })
 })
 
 /** The daemon behind the section: a status, and every call it was asked. */
@@ -548,6 +558,18 @@ describe('Let a device in', () => {
     expect(document.body.textContent).toContain('Update networking to pick how it connects.')
   })
 
+  it('opened while networking starts, waits for the ways and shows the picker, making no code', async () => {
+    // A starting helper has not said what it offers yet.
+    const d = daemon({ helper: { state: 'starting' } }, { 'netEngine.routes.available': () => ways })
+    await mount()
+    await click(button(/Let a device in/))
+    expect(d.called('netEngine.invite')).toEqual([])
+    await d.change({ helper: { state: 'running' }, features: ['route-readiness', 'invite-way'] })
+    expect(document.body.textContent).toContain('How will it connect?')
+    expect(radio('Same Wi-Fi')!.getAttribute('aria-checked')).toBe('true')
+    expect(d.called('netEngine.invite')).toEqual([])
+  })
+
   it('asks Allow with Work on threads picked, sends the level with Allow, and says it can use this computer', async () => {
     const d = daemon()
     await mount()
@@ -753,6 +775,135 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect([...host.querySelectorAll<HTMLElement>('[title]')].some((item) => item.title.includes('x.example'))).toBe(true)
     await click(button('Use'))
     expect(d.called('netEngine.address.use')).toEqual([{ node: 'n1' }])
+  })
+
+  it('sets up Cloudflare Tunnel from its way in Let a device in, and makes a code for it only once it runs', async () => {
+    const lan = { way: 'lan', state: 'ready', routes: ['tcp://192.168.1.20:47100'] }
+    let tunnel: Record<string, unknown> = { way: 'tunnel', state: 'unavailable', reason: 'not_configured', routes: [] }
+    const d = daemon(
+      {
+        features: ['route-readiness', 'invite-way', 'managed-tunnel'],
+        reach: { lan: true, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+        sendLink: true,
+        cloudflare: { state: 'off' }
+      },
+      { 'netEngine.routes.available': () => ({ ways: [lan, tunnel] }) }
+    )
+    await mount()
+    await click(button(/Let a device in/))
+    await click(radio('Cloudflare Tunnel')!.querySelector<HTMLButtonElement>('button')!)
+    // The setup is a step of the dialog: the tunnel on the owner's own domain is picked.
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Cloudflare Tunnel')
+    expect(radio('Set one up')!.getAttribute('aria-checked')).toBe('true')
+    expect(button('Make code')).toBeUndefined()
+    await click(button('Sign in to Cloudflare'))
+    expect(d.called('netEngine.cloudflare.connect')).toEqual([{}])
+
+    for (const state of ['preparing', 'sign_in', 'connecting'] as const) {
+      await d.change({ cloudflare: { state } })
+      expect(button('Make code')).toBeUndefined()
+      if (state === 'sign_in') {
+        // Closed mid-way, Reach this computer opens the same step again.
+        await click(button('Close'))
+        await click(button('Continue setup'))
+        expect(radio('Set one up')).toBeTruthy()
+        expect(button('Cancel')).toBeTruthy()
+      }
+    }
+    expect(d.called('netEngine.invite')).toEqual([])
+
+    // The tunnel is published: the helper reports the tunnel way ready.
+    tunnel = { way: 'tunnel', state: 'ready', routes: ['wss://mousse.example.net/mousse-net/1'] }
+    await d.change({ cloudflare: { state: 'connected', hostname: 'mousse.example.net' } })
+    expect(document.body.textContent).toContain('mousse.example.net is running')
+    await click(button('Make code'))
+    expect(d.called('netEngine.invite')).toEqual([{ way: 'tunnel' }])
+    expect(document.querySelector('[role="timer"]')?.textContent).toMatch(/^Works over Cloudflare Tunnel · /)
+    // A link instead carries the same way alone.
+    await click(button('Send a link with a code instead'))
+    await click(button('Make link'))
+    expect(d.called('netEngine.invite').at(-1)).toMatchObject({ kind: 'link', way: 'tunnel' })
+  })
+
+  it('makes no code for a running tunnel the helper does not report ready, and says why', async () => {
+    const d = daemon(
+      {
+        features: ['route-readiness', 'invite-way', 'managed-tunnel'],
+        reach: { lan: true, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+        cloudflare: { state: 'connected', hostname: 'mousse.example.net' }
+      },
+      {
+        'netEngine.routes.available': () => ({
+          ways: [{ way: 'tunnel', state: 'unavailable', reason: 'origin_unavailable', routes: [] }]
+        })
+      }
+    )
+    await mount()
+    await click(button(/Let a device in/))
+    await click(radio('Cloudflare Tunnel')!.querySelector<HTMLButtonElement>('button')!)
+    expect(document.body.textContent).toContain('mousse.example.net · Tunnel isn’t answering')
+    expect(button('Make code')!.disabled).toBe(true)
+    expect(d.called('netEngine.invite')).toEqual([])
+  })
+
+  it('sends a person with their own tunnel to Reach this computer for its address', async () => {
+    const d = daemon(
+      {
+        features: ['route-readiness', 'invite-way', 'managed-tunnel'],
+        reach: { lan: true, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+        cloudflare: { state: 'off' }
+      },
+      {
+        'netEngine.routes.available': () => ({
+          ways: [{ way: 'tunnel', state: 'unavailable', reason: 'not_configured', routes: [] }]
+        })
+      }
+    )
+    await mount()
+    await click(button(/Let a device in/))
+    await click(radio('Cloudflare Tunnel')!.querySelector<HTMLButtonElement>('button')!)
+    await click(radio('Use my own tunnel'))
+    await click(button('Paste address'))
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(d.called('netEngine.cloudflare.connect')).toEqual([])
+  })
+
+  it('asks before forgetting a Cloudflare connection', async () => {
+    const d = daemon({
+      reach: { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+      cloudflare: { state: 'failed', canForget: true }
+    })
+    await mount()
+    await click(button('Set up'))
+    await click(button('Forget connection…'))
+    expect(d.called('netEngine.cloudflare.forget')).toEqual([])
+    await click(button('Forget connection'))
+    expect(d.called('netEngine.cloudflare.forget')).toEqual([{}])
+  })
+
+  it('copies the local tunnel origin before saving a URL and sends a pairing link over it after setup', async () => {
+    const reach = { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 }
+    const d = daemon({ reach, sendLink: true, features: ['invite-way'] })
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      await mount()
+      const moreWays = [...host.querySelectorAll('summary')].find((item) =>
+        item.textContent?.includes('More ways')
+      )
+      await click(moreWays)
+      await click(button('Copy local origin'))
+      expect(writeText).toHaveBeenCalledWith('http://127.0.0.1:47101')
+      expect(d.called('netEngine.routes.config')).toEqual([])
+      expect(button('Send pairing link')).toBeUndefined()
+
+      await d.change({ reach: { ...reach, tunnels: ['wss://x.example/mousse-net/1'] } })
+      await click(button('Send pairing link'))
+      await click(button('Make link'))
+      expect(d.called('netEngine.invite')).toEqual([expect.objectContaining({ kind: 'link', way: 'tunnel' })])
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   it('saves Reach through the daemon, tests a route, and says a failed test may be the network', async () => {

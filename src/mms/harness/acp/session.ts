@@ -20,7 +20,8 @@ import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
 import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
-import { AGENT_DEFAULT_MODEL, agentModels, agentModes, modelOptions, planModeId, type ModelControl } from './models'
+import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, planModeId, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
 import {
   answerPermission,
   classifyGenericOption,
@@ -185,6 +186,8 @@ export interface AcpProcess extends AcpConnection {
   info?: AcpAgentInfo
   /** How the session's model is chosen. */
   modelControl?: ModelControl
+  /** The session's `thought_level` select config option, when the active model offers one. */
+  thoughtConfig?: ThoughtConfig
   /** The session's modes, the one it started in and the one it is in. */
   modes?: Array<{ id: string; name: string }>
   defaultModeId?: string
@@ -389,6 +392,7 @@ export interface SavedAcpSession {
 
 export interface SessionSetup {
   modelControl?: ModelControl
+  thoughtConfig?: ThoughtConfig
   modes?: Array<{ id: string; name: string }>
   defaultModeId?: string
 }
@@ -1222,6 +1226,7 @@ export class AcpSessions {
     const { models, control } = agentModels(session, active.info?.meta)
     const modes = agentModes(session)
     active.modelControl = control.kind === 'none' && known?.modelControl ? known.modelControl : control
+    active.thoughtConfig = thoughtConfigOption(session) ?? known?.thoughtConfig
     active.modes = modes.modes.length ? modes.modes : known?.modes ?? []
     active.defaultModeId = known?.defaultModeId ?? modes.current
     active.currentModeId = modes.current ?? known?.currentModeId ?? active.defaultModeId
@@ -1372,21 +1377,89 @@ export class AcpSessions {
     return null
   }
 
-  /** Sets the session's model: a fixed option (preset), else the control the session offers. */
+  /**
+   * Resolves a requested model string (`gemini-4-neon:xhigh`, `gemini-4-neon`, or a legacy
+   * `gemini-4-neon-high` id) against the store's listed models, separating any reasoning level.
+   */
+  private resolveListedModel(model: string): { modelId: string; effort?: string; listed?: LlmModelOption } {
+    const listed = this.options.store.models()
+    const exact = listed.find((entry) => entry.id === model)
+    if (exact) return { modelId: exact.id, listed: exact }
+
+    const parsed = parseThinkingSuffixFromModelId(model)
+    if (parsed.effort) {
+      const byBase = listed.find((entry) => entry.id === parsed.baseId)
+      if (byBase) return { modelId: byBase.id, effort: parsed.effort, listed: byBase }
+    }
+
+    // Legacy Antigravity selections stored the reasoning level in the model id (`gemini-4-neon-high`):
+    // map them onto the base model when the agent now lists base ids with separate `thought_level` efforts.
+    for (const entry of listed) {
+      if (!entry.efforts?.length || !model.startsWith(`${entry.id}-`)) continue
+      const suffix = model.slice(entry.id.length + 1)
+      if (entry.efforts.includes(suffix)) return { modelId: entry.id, effort: suffix, listed: entry }
+    }
+
+    return { modelId: parsed.baseId, ...(parsed.effort ? { effort: parsed.effort } : {}) }
+  }
+
+  /** Sets the session's model (and `thought_level` when advertised): a fixed option (preset), else the control the session offers. */
   private async selectModel(active: AcpProcess, model: string): Promise<void> {
     const { label, store, quirks } = this.options
-    if (quirks.modelConfigId) {
-      if (!store.models().some((entry) => entry.id === model)) throw new Error(`This ${label} model is unavailable for the signed-in account`)
-      await active.connection.agent.request(methods.agent.session.setConfigOption, { sessionId: active.sessionId!, configId: quirks.modelConfigId, value: model })
-      return
+    const resolved = this.resolveListedModel(model)
+    const setModel = async (): Promise<unknown> => {
+      if (quirks.modelConfigId) {
+        if (!resolved.listed) throw new Error(`This ${label} model is unavailable for the signed-in account`)
+        return await active.connection.agent.request(methods.agent.session.setConfigOption, {
+          sessionId: active.sessionId!,
+          configId: quirks.modelConfigId,
+          value: resolved.modelId
+        })
+      }
+      if (resolved.modelId === AGENT_DEFAULT_MODEL) return undefined
+      const listed = store.models()
+      if (listed.length && !resolved.listed) throw new Error(`This ${label} model is unavailable for the signed-in account`)
+      const control = active.modelControl ?? { kind: 'none' }
+      if (control.kind === 'config') {
+        return await active.connection.agent.request(methods.agent.session.setConfigOption, {
+          sessionId: active.sessionId!,
+          configId: control.configId,
+          value: resolved.modelId
+        })
+      }
+      if (control.kind === 'set_model') {
+        await active.connection.agent.request('session/set_model', { sessionId: active.sessionId!, modelId: resolved.modelId })
+        return undefined
+      }
+      throw new Error(`${label} offers no model choice; use its default model`)
     }
-    if (model === AGENT_DEFAULT_MODEL) return
-    const listed = store.models()
-    if (listed.length && !listed.some((entry) => entry.id === model)) throw new Error(`This ${label} model is unavailable for the signed-in account`)
-    const control = active.modelControl ?? { kind: 'none' }
-    if (control.kind === 'config') await active.connection.agent.request(methods.agent.session.setConfigOption, { sessionId: active.sessionId!, configId: control.configId, value: model })
-    else if (control.kind === 'set_model') await active.connection.agent.request('session/set_model', { sessionId: active.sessionId!, modelId: model })
-    else throw new Error(`${label} offers no model choice; use its default model`)
+    const response = await setModel()
+    const responseOptions = (response as { configOptions?: unknown } | null)?.configOptions
+    if (Array.isArray(responseOptions) && responseOptions.length > 0) {
+      active.thoughtConfig = thoughtConfigOption({ configOptions: responseOptions })
+    }
+    active.turnSignal?.throwIfAborted()
+    const thought = active.thoughtConfig
+    if (!thought) return
+    const requested = resolved.effort && thought.values.includes(resolved.effort) ? resolved.effort : undefined
+    const fallback = !requested && resolved.listed?.defaultEffort &&
+      thought.values.includes(resolved.listed.defaultEffort) &&
+      thought.currentValue !== resolved.listed.defaultEffort
+      ? resolved.listed.defaultEffort
+      : undefined
+    const target = requested ?? fallback
+    if (!target) return
+    const thoughtResponse = await active.connection.agent.request(methods.agent.session.setConfigOption, {
+      sessionId: active.sessionId!,
+      configId: thought.configId,
+      value: target
+    })
+    const updatedOptions = (thoughtResponse as { configOptions?: unknown } | null)?.configOptions
+    if (Array.isArray(updatedOptions) && updatedOptions.length > 0) {
+      active.thoughtConfig = thoughtConfigOption({ configOptions: updatedOptions })
+    } else {
+      active.thoughtConfig = { ...thought, currentValue: target }
+    }
   }
 
   /** Puts the session in the agent's plan mode for a plan turn, and back for a normal one. */
@@ -1701,7 +1774,11 @@ export class AcpSessions {
         }
       }
       if (event.sessionUpdate === 'config_option_update' && event.configOptions) {
-        const updated = quirks.modelConfigId ? modelOptions({ configOptions: event.configOptions }) : agentModels({ configOptions: event.configOptions }).models
+        current.thoughtConfig = thoughtConfigOption({ configOptions: event.configOptions })
+        const raw = quirks.modelConfigId
+          ? modelOptions({ configOptions: event.configOptions })
+          : agentModels({ configOptions: event.configOptions }).models
+        const updated = mergeModelOptions(store.models(), raw, event.configOptions)
         if (updated.length) store.setModels(updated)
       }
       if (event.sessionUpdate === 'current_mode_update' && typeof event.currentModeId === 'string') current.currentModeId = event.currentModeId
@@ -1769,13 +1846,19 @@ export class AcpSessions {
         const instructions = current.instructionsHash ? { instructionsHash: current.instructionsHash } : {}
         store.setSaved(input.threadId, { sessionId: current.sessionId!, cwd: input.cwd, instanceId, ...instructions })
         if (quirks.modelConfigId) {
-          const models = modelOptions((session ?? {}) as Pick<NewSessionResponse, 'configOptions'>)
+          const models = modelOptions((session ?? {}) as Pick<NewSessionResponse, 'configOptions'> & Record<string, unknown>)
           if (models.length) store.setModels(models)
+          current.thoughtConfig = thoughtConfigOption(session)
         } else {
           this.observeSession(current, session ?? {}, known)
           store.setSaved(input.threadId, {
             sessionId: current.sessionId!, cwd: input.cwd, instanceId, ...instructions,
-            setup: { ...(current.modelControl ? { modelControl: current.modelControl } : {}), modes: current.modes ?? [], ...(current.defaultModeId ? { defaultModeId: current.defaultModeId } : {}) }
+            setup: {
+              ...(current.modelControl ? { modelControl: current.modelControl } : {}),
+              ...(current.thoughtConfig ? { thoughtConfig: current.thoughtConfig } : {}),
+              modes: current.modes ?? [],
+              ...(current.defaultModeId ? { defaultModeId: current.defaultModeId } : {})
+            }
           })
         }
         this.sessions.set(input.threadId, current)
@@ -2219,6 +2302,7 @@ export class AcpSessions {
       input.signal.throwIfAborted()
       input.onActivity()
       // The session's model control, read without recording anything: this session is not the profile's.
+      active.thoughtConfig = thoughtConfigOption(session)
       if (!quirks.modelConfigId) active.modelControl = agentModels(session, active.info?.meta).control
       await this.selectModel(active, input.model)
       input.signal.throwIfAborted()

@@ -10,7 +10,8 @@ import type {
   NetEngineDevice,
   NetEngineJoinPreview,
   NetEngineLinkJoin,
-  NetEngineStatus
+  NetEngineStatus,
+  NetEngineWay
 } from '../../../shared/netEngine/local'
 import type { AccessPresetFields } from '../../../shared/net/accessPresets'
 import { ROUTE_WORDS, unreachableDetail } from './engineRows'
@@ -76,9 +77,12 @@ const triesLeft = (left: number): string => (left === 1 ? '1 try left' : `${left
  */
 export function SendLinkPanel({
   status,
+  way,
   onInvitation
 }: {
   status: NetEngineStatus | undefined
+  /** The one way the link carries; every way when unset. */
+  way?: NetEngineWay
   /** The invitation shown now (the dialog ends it on close), or undefined once it ended or was used. */
   onInvitation: (invitation: string | undefined) => void
 }) {
@@ -102,7 +106,7 @@ export function SendLinkPanel({
     setMade(undefined)
     void call<{ invitation: string; uri: string; code?: string; attemptsLeft?: number }>(
       'netEngine.invite',
-      { kind: 'link', access: level }
+      { kind: 'link', access: level, ...(way ? { way } : {}) }
     ).then((answer) => {
       if (!answer || !live) return
       setMade(answer.value)
@@ -111,7 +115,7 @@ export function SendLinkPanel({
     return () => {
       live = false
     }
-  }, [round, call, level])
+  }, [round, call, level, way])
 
   const shown = made && status?.links?.find((link) => link.invitation === made.invitation)
   const code = shown?.code ?? made?.code ?? ''

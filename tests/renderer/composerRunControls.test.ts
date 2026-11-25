@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ComposerFooter, type ComposerFooterProps, type ComposerRunProps } from '../../src/renderer/components/ComposerFooter'
+import { modelOptions } from '../../src/mms/harness/acp/models'
 import * as icons from '../../src/renderer/lib/icons'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import type { PermissionMode } from '../../src/shared/permissionMode'
@@ -129,6 +130,82 @@ describe('composer model picker', () => {
     expect(checkedLevel()).toBe('High')
     act(() => level('Low').click())
     expect(onModelSelect).toHaveBeenCalledWith(id, `${model}-low`, undefined)
+  })
+
+  it('shows reasoning levels for native Antigravity agy models from session/new configOptions and availableModels', async () => {
+    // Recorded agy 1.5.16 session/new response shape: base model IDs in configOptions[model],
+    // active model's thought_level select, and per-level variants in models.availableModels.
+    const models = modelOptions({
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: 'gemini-4-neon',
+          options: [
+            { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+            { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+            { value: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+            { value: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+            { value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+          ]
+        },
+        {
+          id: 'thought_level',
+          name: 'Thinking Level',
+          category: 'thought_level',
+          type: 'select',
+          currentValue: 'high',
+          options: [
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'high', name: 'High' },
+            { value: 'xhigh', name: 'Extra' }
+          ]
+        }
+      ],
+      models: {
+        currentModelId: 'gemini-4-neon-high',
+        availableModels: [
+          { modelId: 'gemini-4-neon-high', name: 'Gemini 4 Neon (High)' },
+          { modelId: 'gemini-4-neon-xhigh', name: 'Gemini 4 Neon (XHigh)' },
+          { modelId: 'gemini-4-neon-medium', name: 'Gemini 4 Neon (Medium)' },
+          { modelId: 'gemini-4-neon-low', name: 'Gemini 4 Neon (Low)' },
+          { modelId: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)' },
+          { modelId: 'gemini-4-argon-high', name: 'Gemini 4 Argon (High)' },
+          { modelId: 'gemini-4-argon-low', name: 'Gemini 4 Argon (Low)' },
+          { modelId: 'claude-opus-5-5-low', name: 'Claude Opus 5.5 (Low)' },
+          { modelId: 'claude-opus-5-5-medium', name: 'Claude Opus 5.5 (Medium)' },
+          { modelId: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
+          { modelId: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+          { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+        ]
+      }
+    } as never)
+
+    const { onModelSelect } = render({
+      providerId: 'antigravity',
+      modelId: 'gemini-4-neon:xhigh',
+      providers: [provider(models, false, 'Google Antigravity', 'antigravity')]
+    })
+
+    expect(columnModel()).toBe('Gemini 4 Neon')
+    expect(levels()).toEqual(['Low', 'Medium', 'HighDefault', 'Extra high'])
+    expect(checkedLevel()).toBe('Extra high')
+    act(() => level('Medium').click())
+    expect(onModelSelect).toHaveBeenCalledWith('antigravity', 'gemini-4-neon:medium', undefined)
+
+    // Hovering Claude Opus 5.5 shows its three levels and notes that Extra high falls back to default.
+    await hover('Opus 5.5')
+    expect(columnModel()).toBe('Opus 5.5')
+    expect(levels()).toEqual(['Low', 'Medium', 'HighDefault'])
+    expect(checkedLevel()).toBe('HighDefault')
+    expect(note()).toContain("Extra high isn't offered")
+
+    // Models without thinking levels show none.
+    await hover('GPT-OSS 120B')
+    expect(column()!.querySelector('.model-picker-run-empty')!.textContent).toBe('None for this model')
   })
 
   it('shows "Opus 5.5 High" with no separator, the level apart, and opens one picker', () => {

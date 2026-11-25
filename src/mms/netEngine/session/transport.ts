@@ -31,8 +31,16 @@ export const ACCESS_FEATURE = 'access-ask'
  * One stream of a connection, as the helper hands it to the app: ordered bytes each way, a FIN, or a reset.
  * The helper process and the in-memory test link both implement it.
  */
+/** A grant's role as the wire defines it (wire §7): 1 to 32 bytes of `[a-z0-9-]`. */
+export const GRANT_ROLE = /^[a-z0-9-]{1,32}$/
+
 export interface EngineStream {
   readonly label: EngineLabel
+  /**
+   * On a stream the other computer opened: the role of this computer's grant it is served under, as the helper
+   * named it (`stream.incoming {role}`, pairing flow §8.4). Absent from a helper that does not say.
+   */
+  readonly role?: string
   write(bytes: Uint8Array): void
   /** FIN: nothing more is written this way. */
   end(): void

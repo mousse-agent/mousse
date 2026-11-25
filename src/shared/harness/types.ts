@@ -299,6 +299,11 @@ export interface HarnessError {
   instanceId?: string
   /** `rate_limited`: when the limit resets (ISO time). */
   resetAt?: string
+  /**
+   * `rate_limited`: what the limit holds. `model`: the requested model alone (an Antigravity model's own quota); its
+   * other models still run. Absent or `instance`: the whole entry.
+   */
+  scope?: 'instance' | 'model'
   /** `policy_unenforceable`: the capabilities the instance lacks. */
   missing?: Array<keyof HarnessCaps>
   /**
@@ -460,6 +465,10 @@ export interface InstanceModel {
   favorite: boolean
   /** An older model the agent does not list itself (`LlmModelOption.older`). */
   older?: true
+  /** `false`: this model cannot run a single request (chat titles) even though its instance can (`LlmModelOption.oneShot`). */
+  oneShot?: false
+  /** The model an alias runs (`haiku` → `claude-haiku-5-5`), when the agent says (`LlmModelOption.resolvedId`). */
+  resolvedId?: string
 }
 
 /** Instance settings the Add dialog and editor change. `null` clears a field back to its default. */
