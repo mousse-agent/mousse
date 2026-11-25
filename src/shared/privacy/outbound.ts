@@ -186,7 +186,8 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'link',
     hosts: [
       'accounts.google.com', 'agentclientprotocol.com', 'api.example.com', 'auth.x.ai', 'chatgpt.com', 'code.claude.com',
-      'example.com', 'example.invalid', 'name.example.com', 'unavailable.invalid', 'www.apple.com', 'www.w3.org'
+      'dash.cloudflare.com', 'example.com', 'example.invalid', 'login.cloudflareaccess.org', 'name.example.com',
+      'unavailable.invalid', 'www.apple.com', 'www.w3.org'
     ]
   },
   {

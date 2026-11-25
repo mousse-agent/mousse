@@ -78,6 +78,7 @@ vi.mock('electron', async () => {
     nativeTheme: { shouldUseDarkColors: true },
     powerSaveBlocker: { start: () => 0, stop: () => undefined },
     dialog: { showErrorBox: vi.fn() }, shell: { openExternal: vi.fn() },
+    protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
     session: { fromPartition: () => ({ getUserAgent: () => 'test', setUserAgent: vi.fn() }) }
   }
 })

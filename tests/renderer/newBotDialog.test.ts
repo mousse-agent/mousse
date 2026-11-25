@@ -524,6 +524,8 @@ describe('Runs on with rows (#673)', () => {
     const option = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.title.includes(entry))
     if (!option()) await click(document.querySelector<HTMLElement>(`[role="tab"][aria-label="${entry}"]`) ?? undefined)
     await click(option())
+    // Picking a model leaves the menu open for its reasoning level; toggle it closed before moving to the next row.
+    if (menu()) await click(rowPicker(label))
   }
 
   it('shows Computer, then Talk and Work, each one picker; the first bot starts empty and Create bot waits for both', async () => {

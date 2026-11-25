@@ -12,7 +12,7 @@ it('fences mounted private completions and preserves original retries', async ()
   let child: ChildProcess | undefined, exited: Promise<number | null> | undefined
   try {
     // The chat Markdown pulls in KaTeX lazily; esbuild bundles its stylesheet and needs loaders for the fonts it references.
-    await build({ entryPoints: [resolve('tests/fixtures/net-gui/mounted-lifecycle/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' }, define: { 'process.env.NODE_ENV': '"development"' } })
+    await build({ entryPoints: [resolve('tests/fixtures/net-gui/mounted-lifecycle/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.svg': 'dataurl', '.png': 'dataurl', '.webp': 'dataurl', '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' }, define: { 'process.env.NODE_ENV': '"development"' } })
     await build({ entryPoints: [resolve('tests/fixtures/net-gui/mounted-lifecycle/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', external: ['electron'] })
     // I remove inherited run-as-node only for the owned Electron child.
     const env: NodeJS.ProcessEnv = { ...process.env, MOUSSE_GUI_MOUNTED_DIRECTORY: directory }; delete env.ELECTRON_RUN_AS_NODE
