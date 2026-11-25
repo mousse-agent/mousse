@@ -329,6 +329,51 @@ it('publishes a tool-staged applet on a last row that follows a row left with an
   expect(results.at(-1)).not.toContain(source.js)
 })
 
+it('names an applet on an earlier reply row, also after a row that left a code block open', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const rows = ['Trying it:\n```js\nconst open = true\n', 'Here it is:\n' + fence(source) + '\n']
+  const adapter = piAdapter(() => 'Done.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    // Two rows, each ended by a tool call, then the last row: the turn's text is all three, as a runtime reports it.
+    rows.forEach((row, at) => {
+      sink.text({ phase: 'start', content: '', contentIndex: 0 })
+      sink.text({ phase: 'delta', content: row, contentIndex: 0 })
+      sink.text({ phase: 'complete', content: row, contentIndex: 0 })
+      sink.tool({ phase: 'start', callId: `call-${at}`, kind: 'mcp_tool_call', title: 'Read', summary: '', details: [] })
+      sink.tool({ phase: 'complete', callId: `call-${at}`, kind: 'mcp_tool_result', title: 'Read', summary: '', details: [] })
+    })
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: 'Done.', contentIndex: 0 })
+    const result = await startTurn(input, sink, ctl, host)
+    return { ...result, text: rows.join('') + result.text }
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  expect(results.at(-1)).toContain('Here it is:\n[Applet: Calculator]')
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('names an applet that failed to publish beside one whose title has line breaks', () => {
+  const published = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Totals\n~~~js', description: '' }
+  const named = modelFacingReplyText({
+    role: 'assistant',
+    content: '',
+    presentationParts: [{ type: 'applet', reference: published }, { type: 'text', text: fence(source) + '\n\nApplet unavailable: publication failed.\n' }]
+  })
+  expect(named).toContain('[Applet: Totals ~~~js (appletId applet_a, revision rev_a)]')
+  expect(named).toContain('[Applet: Calculator]')
+  expect(named).not.toContain(source.js)
+})
+
 it('names every valid applet in a reply, also past the three a reply may publish', () => {
   const malformed = '```mousse-applet\nnot JSON\n```'
   const reply = [malformed, malformed, malformed, fence(source)].join('\n')

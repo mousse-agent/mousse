@@ -56,6 +56,13 @@ describe('appletRevisionFromEdits', () => {
     for (const schemaVersion of [2, null]) expect(() => validateAppletSubmission(appletRevisionFromEdits({ ...revise, schemaVersion }, base))).toThrow(/schema version/)
   })
 
+  it.each([
+    ['a null title', { title: null }, /title must be text/],
+    ['a misspelled field', { descripton: 'Spend' }, /unsupported fields/]
+  ])('keeps %s for validation to refuse, as a full submission would', (_name, extra, reason) => {
+    expect(() => validateAppletSubmission(appletRevisionFromEdits({ ...revise, ...extra }, base))).toThrow(reason)
+  })
+
   it.each(['html', 'css', 'js', 'htmlPath', 'cssPath', 'jsPath'])('refuses edits given with %s', (key) => {
     expect(() => appletRevisionFromEdits({ ...revise, [key]: 'x' }, base)).toThrow(`Give edits or ${key}, not both`)
   })

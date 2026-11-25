@@ -106,17 +106,15 @@ export function appletRevisionFromEdits(args: Record<string, unknown>, base: App
     if (args[key] !== undefined) throw new AppletValidationError(`Give edits or ${key}, not both: edits change the stored parts.`)
   const { edits, ...rest } = args
   const parts = applyAppletEdits(base, edits)
-  return {
-    // A version the call gives is validated like any submission's, not replaced.
-    schemaVersion: rest.schemaVersion === undefined ? 1 : rest.schemaVersion,
-    title: rest.title ?? base.title,
-    description: rest.description ?? base.description,
-    ...parts,
-    ...('data' in rest ? (rest.data === undefined ? {} : { data: rest.data }) : base.data === undefined ? {} : { data: base.data }),
-    stateVersion: rest.stateVersion ?? base.stateVersion,
-    appletId: rest.appletId,
-    expectedRevision: rest.expectedRevision
-  }
+  // Every field the call gives is kept as given, so validation refuses a wrong one (a null title, a misspelled field)
+  // as it would in a full submission; only a field left out takes the revision's value.
+  const submission: Record<string, unknown> = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined))
+  Object.assign(submission, parts)
+  const inherited: Record<string, unknown> = { schemaVersion: 1, title: base.title, description: base.description, stateVersion: base.stateVersion }
+  for (const [key, value] of Object.entries(inherited)) if (!(key in submission)) submission[key] = value
+  // data given as undefined removes it; left out, it is the revision's.
+  if (!('data' in rest) && base.data !== undefined) submission.data = base.data
+  return submission
 }
 
 const lineCount = (text: string): number => (text ? text.split('\n').length : 0)

@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, appletFencesAsLines, closeOpenCodeBlock, modelFacingReplyText, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appletFencesAsLines, appletFencesAsLinesByRow, closeOpenCodeBlock, modelFacingReplyText, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -16326,13 +16326,14 @@ export class OrchestratorService extends EventEmitter {
     const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
     // The fences join that last row. A code block the row leaves open is closed first, judged on the row alone (an
     // earlier row is a reply of its own): inside the open block the fences would be text, neither published nor named.
-    const lastRow = appletFences && replyOnlyText.endsWith(finalReplyText)
-    const earlierText = lastRow ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
-    const lastText = lastRow ? closeOpenCodeBlock(finalReplyText) + appletFences : replyOnlyText + appletFences
+    const split = replyOnlyText.endsWith(finalReplyText)
+    const earlierText = split ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
+    const lastReply = split ? finalReplyText : replyOnlyText
+    const lastText = (appletFences ? closeOpenCodeBlock(lastReply) : lastReply) + appletFences
     const displayText = earlierText + lastText
     // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source:
     // by title until the reply publishes them, then as the reply shows them (below).
-    let resultText = appletFencesAsLines(earlierText) + appletFencesAsLines(lastText)
+    let resultText = appletFencesAsLinesByRow(earlierText, earlierReplies) + appletFencesAsLines(lastText)
     const finalText = unshownReplyText(displayText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
@@ -16377,7 +16378,7 @@ export class OrchestratorService extends EventEmitter {
         this.emitMessageUpdated(finalMessage)
         // The last row's applets as published (or not): the turn's earlier rows, then that row with its references.
         if (finalMessage.presentationParts && displayText.endsWith(finalMessage.content))
-          resultText = appletFencesAsLines(displayText.slice(0, displayText.length - finalMessage.content.length)) + modelFacingReplyText(finalMessage)
+          resultText = appletFencesAsLinesByRow(displayText.slice(0, displayText.length - finalMessage.content.length), earlierReplies) + modelFacingReplyText(finalMessage)
       }
     }
 

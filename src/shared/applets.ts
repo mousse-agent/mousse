@@ -154,13 +154,14 @@ export function validateAppletSubmission(
 }
 /**
  * Call with complete=false during streaming: all source remains inert text. `publishing` applies the checks for a new
- * applet (see validateAppletSubmission); recovering an earlier reply leaves it off. `uncapped` reads every fence, past the
- * three a message may publish, for a reader that names them rather than publishing them.
+ * applet (see validateAppletSubmission); recovering an earlier reply leaves it off. `naming` is for a reader that names applets
+ * rather than publishing them: it reads every fence, past the three a message may publish and past a block left open
+ * (which publication reads as text to the end), so a valid applet is never passed on as its source.
  */
 export function extractAppletParts(
   content: string,
   complete: boolean,
-  options: { publishing?: boolean; uncapped?: boolean } = {}
+  options: { publishing?: boolean; naming?: boolean } = {}
 ): AppletExtractedPart[] {
   if (!complete) return [{ type: 'text', text: content }]
   const parts: AppletExtractedPart[] = []
@@ -174,14 +175,17 @@ export function extractAppletParts(
     const closing = new RegExp(`^${marker[0]}{${marker.length},}[ \t]*(?:\\r?\\n|$)`, 'gm')
     closing.lastIndex = openings.lastIndex
     const end = closing.exec(content)
-    if (!end) break
+    if (!end) {
+      if (options.naming) continue
+      break
+    }
     const bodyStart = openings.lastIndex
     openings.lastIndex = end.index + end[0].length
     if (opening[2].trim() !== 'mousse-applet') continue
     const start = opening.index
     if (start > cursor) parts.push({ type: 'text', text: content.slice(cursor, start) })
     try {
-      if (++count > APPLETS_PER_MESSAGE && !options.uncapped)
+      if (++count > APPLETS_PER_MESSAGE && !options.naming)
         throw new AppletValidationError('Only three applets are allowed per message.')
       parts.push({
         type: 'submission',
@@ -206,9 +210,11 @@ export function extractAppletParts(
  * stays in the applet store, where `read_applet` reads it, and is never repeated into another model's context.
  */
 export function appletReferenceLine(applet: { title: string; appletId?: string; revisionId?: string }): string {
+  // One line: a title's own line breaks would start lines that could read as a code fence.
+  const title = applet.title.replace(/\s*[\r\n]+\s*/g, ' ')
   return applet.appletId && applet.revisionId
-    ? `[Applet: ${applet.title} (appletId ${applet.appletId}, revision ${applet.revisionId})]`
-    : `[Applet: ${applet.title}]`
+    ? `[Applet: ${title} (appletId ${applet.appletId}, revision ${applet.revisionId})]`
+    : `[Applet: ${title}]`
 }
 /**
  * A stored reply as a model reads it: each published applet is one reference line, not its source, and a valid applet
@@ -241,6 +247,24 @@ export function closeOpenCodeBlock(text: string): string {
   }
   return text
 }
+/**
+ * `text`, a turn's reply rows one after another (`rows`, in order), with each row's applets named on that row alone
+ * (`appletFencesAsLines`): a code block one row leaves open is not read into the next, where it would hide a fence.
+ * Text no row accounts for is named as one piece.
+ */
+export function appletFencesAsLinesByRow(text: string, rows: readonly string[]): string {
+  let named = ''
+  let rest = text
+  for (const row of rows) {
+    const part = row.trim()
+    if (!part) continue
+    const at = rest.indexOf(part)
+    if (at === -1) break
+    named += appletFencesAsLines(rest.slice(0, at)) + appletFencesAsLines(part)
+    rest = rest.slice(at + part.length)
+  }
+  return named + appletFencesAsLines(rest)
+}
 /** A fence ends its line, so the line standing for it does too, unless it ends the text. */
 const lineEnd = (parts: readonly unknown[], at: number): string => (at < parts.length - 1 ? '\n' : '')
 /**
@@ -249,7 +273,7 @@ const lineEnd = (parts: readonly unknown[], at: number): string => (at < parts.l
  */
 export function appletFencesAsLines(text: string): string {
   if (!text.includes('mousse-applet')) return text
-  const parts = extractAppletParts(text, true, { uncapped: true })
+  const parts = extractAppletParts(text, true, { naming: true })
   if (!parts.some((part) => part.type === 'submission')) return text
   return parts
     .map((part, at) => (part.type === 'submission' ? appletReferenceLine(part.submission) + lineEnd(parts, at) : part.type === 'error' ? part.source : part.text))
