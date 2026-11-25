@@ -299,43 +299,40 @@ describe('the helper, as the app sees it', () => {
   })
 
 
-  it('calls back on a connection announced before its HELLO once, and dials out when that is refused as one way', async () => {
-    const p = pipe()
-    const helper = new EngineHelper(new AppChannel(p.app), {
-      peers: { byIdentity: () => ({ node: 'node' as NodeId, grant: '1', endpoint: 'ab' }) },
-      // This computer's client says hello over the reversed connection; an inbound one needs nothing here.
-      attach: (connection) =>
-        connection.direction === 'inbound'
-          ? Promise.resolve()
-          : new Promise((resolve, reject) =>
-              connection.open('mousse.hello').onEnd((reason) => (reason ? reject(new Error(reason)) : resolve()))
-            ),
-      name: () => 'Desk'
-    })
-    const asked = (op: string) =>
-      p.written
-        .filter((frame) => frame.type === FRAME_JSON)
-        .map((frame) => JSON.parse(frame.body.toString('utf8')) as { id: number; op: string; conn?: number })
-        .filter((message) => message.op === op)
-    const settle = () => new Promise((resolve) => setImmediate(resolve))
-    // Announced before the caller's HELLO: `both: false`. The caller has opened a stream since.
-    p.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'ab', dir: 'in', grant: 1, both: false }))
-    p.push(jsonFrame({ ev: 'stream.incoming', conn: 1, handle: 1, label: 'mousse.rpc', class: 'interactive' }))
-    await settle()
-    const [back] = asked('stream.open')
-    expect(back).toMatchObject({ conn: 1, label: 'mousse.hello' })
-    expect(await helper.dial('ab')).toEqual({ conn: 1, already: true })
-    expect(asked('dial')).toHaveLength(0)
-    // The caller's helper takes no calls on its connection: this computer dials it instead.
-    p.push(jsonFrame({ re: back!.id, error: 'one_way', reason: 'the caller on this connection does not take calls on it' }))
-    await settle()
-    expect(asked('dial')).toHaveLength(1)
-    // Not tried again on that connection, by a dial or by the caller's next stream.
-    p.push(jsonFrame({ ev: 'stream.incoming', conn: 1, handle: 2, label: 'mousse.rpc', class: 'interactive' }))
-    void helper.dial('ab').catch(() => undefined)
-    await settle()
-    expect(asked('stream.open')).toHaveLength(1)
-    expect(asked('dial')).toHaveLength(2)
+  it('calls back over an inbound connection only when the helper says it carries calls both ways, else dials', async () => {
+    for (const both of [true, false]) {
+      const p = pipe()
+      const helper = new EngineHelper(new AppChannel(p.app), {
+        peers: { byIdentity: () => ({ node: 'node' as NodeId, grant: '1', endpoint: 'ab' }) },
+        // This computer's client says hello over the reversed connection; an inbound one needs nothing here.
+        attach: (connection) =>
+          connection.direction === 'inbound'
+            ? Promise.resolve()
+            : new Promise((resolve, reject) =>
+                connection.open('mousse.hello').onEnd((reason) => (reason ? reject(new Error(reason)) : resolve()))
+              ),
+        name: () => 'Desk'
+      })
+      const asked = (op: string) =>
+        p.written
+          .filter((frame) => frame.type === FRAME_JSON)
+          .map((frame) => JSON.parse(frame.body.toString('utf8')) as { id: number; op: string; conn?: number })
+          .filter((message) => message.op === op)
+      const settle = () => new Promise((resolve) => setImmediate(resolve))
+      // The helper announces an inbound connection once the caller's HELLO agreed what it carries.
+      p.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'ab', dir: 'in', grant: 1, both }))
+      p.push(jsonFrame({ ev: 'stream.incoming', conn: 1, handle: 1, label: 'mousse.rpc', class: 'interactive' }))
+      await settle()
+      void helper.dial('ab').catch(() => undefined)
+      await settle()
+      if (both) {
+        expect(asked('stream.open')).toMatchObject([{ conn: 1, label: 'mousse.hello' }])
+        expect(asked('dial')).toHaveLength(0)
+      } else {
+        expect(asked('stream.open')).toHaveLength(0)
+        expect(asked('dial')).toMatchObject([{ identity: 'ab' }])
+      }
+    }
   })
 
   it('says its name and profile in hello, and keeps whether networking is paused', async () => {

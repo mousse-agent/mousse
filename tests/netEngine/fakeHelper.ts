@@ -176,12 +176,6 @@ export class FakeNetwork {
    * for the dialled side (refused without one). Off: such opens answer `one_way`.
    */
   bothWays = false
-  /**
-   * The dialled side announces each inbound connection before the caller's HELLO arrives, as a real helper may on a
-   * real network: its `conn.up` says `both: false` though the connection carries calls both ways (`stream.open`
-   * still goes by the minor the HELLO agreed).
-   */
-  lateHello = false
   /** Identities no one can dial (a computer that only dials out, behind its firewall); they still dial others. */
   readonly outboundOnly = new Set<string>()
   /** What each identity's helper listens on besides what it advertises (its loopback listener, say). */
@@ -772,7 +766,7 @@ export class FakeHelper {
       dir,
       ...fields,
       deadline: 0,
-      both: this.network.bothWays && !(dir === 'in' && this.network.lateHello),
+      both: this.network.bothWays,
       ...(conn.route ? { route: conn.route } : {})
     })
   }
