@@ -140,10 +140,8 @@ export function SettingsModelPicker({
                 onClick={() => { close(); clear.onClear() }}>{clear.label}</button>
             } : {})
           })}
-          onSelect={(nextProviderId, nextModelId, nextInstanceId) => {
-            close()
-            choose(nextProviderId, nextModelId, nextInstanceId)
-          }}
+          // A model click keeps the picker open for its level; a level or speed closes it.
+          onSelect={choose}
         />
       )}
     </div>

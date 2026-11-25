@@ -200,8 +200,8 @@ function SideChatColumn({ thread }: { thread: Thread }) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
 
+  // The picker stays open on a model click; a level or speed in it closes it (`modelPickerRunSettings`).
   const selectModel = async (providerId: string, modelId: string) => {
-    setModelMenuOpen(false)
     const provider = providers.find((entry) => entry.id === providerId)
     const instance = provider ? { ...(provider.instanceId ? { instanceId: provider.instanceId } : {}), llmProvider: provider.llmProvider } : { llmProvider: providerId }
     try {
