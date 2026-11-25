@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { ActivityPatch } from '../../../shared/agentActivity'
+import { extractComputerUseRequestOutcome, isComputerUseRequestCall } from '../../../shared/computerUse'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
 import { redactCursorText, type CursorAgentSetup, type CursorHostMethods, type CursorUsage } from '../hosts/cursorProtocol'
@@ -283,6 +284,16 @@ function searchFound(type: 'grep' | 'glob', value: Record<string, unknown>): Sea
 export function cursorToolActivity(toolCall: unknown): ActivityPatch | undefined {
   const call = record(toolCall)
   const type = str(call?.type)
+  if (type === 'mcp') {
+    // A finished computer_use_request (directly or through a bot's use_tool) keeps only its outcome line; any other MCP
+    // call, or one without that line, keeps nothing here.
+    const result = record(call?.result)
+    const value = record(result?.value)
+    if (result?.status !== 'success' || !value || value.isError === true) return undefined
+    if (!isComputerUseRequestCall(cursorToolName(toolCall), record(record(call?.args)?.args))) return undefined
+    const output = extractComputerUseRequestOutcome(records(value.content).map((block) => str(record(block.text)?.text) ?? '').join('\n'))
+    return output ? { output } : undefined
+  }
   if (type !== 'grep' && type !== 'glob') return undefined
   const args = record(call?.args) ?? {}
   const query = type === 'grep' ? str(args.pattern) : str(args.globPattern)
@@ -740,10 +751,13 @@ export class CursorSessions {
               const callId = str(update.callId)
               if (!callId) return
               const activity = cursorToolActivity(update.toolCall)
+              // The finished call carries its whole call again: its name, as at its start.
+              const toolName = cursorToolName(update.toolCall)
               input.onTool?.({
                 phase: 'complete',
                 callId,
                 title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label),
+                ...(toolName ? { toolName } : {}),
                 status: 'completed',
                 ...(activity ? { activity } : {})
               })

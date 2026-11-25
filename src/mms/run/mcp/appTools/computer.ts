@@ -1,14 +1,21 @@
-import { COMPUTER_TOOLS_TOOL, COMPUTER_USE_TOOL, type ComputerUseStatus } from '../../../../shared/computerUse'
+import { COMPUTER_TOOLS_TOOL, COMPUTER_USE_REQUEST_TOOL, COMPUTER_USE_TOOL, type ComputerUseStatus } from '../../../../shared/computerUse'
 import type { DriverCallResult, DriverTool } from '../../../computerUse/ComputerUseDriver'
 import type { AppToolHost } from './host'
-import type { JsonSchema, MousseTool, ToolImage, ToolOutcome } from './types'
+import type { AppToolTurn, JsonSchema, MousseTool, ToolImage, ToolListing, ToolOutcome } from './types'
 
 /**
  * Computer use (`src/shared/computerUse.ts`): `computer_tools` lists Cua Driver's own tools and rules, and
  * `computer_use` runs one of them by name. Two fixed tools rather than the driver's forty-odd, so the list a runtime
  * caches never changes with the driver's version, and a bot's permission names them. Listed for every thread while
- * Settings → Computer use is on and a driver may be there; a thread a bot started lists them only while that bot holds
- * "use the computer", and a bot's own turn only while its grant does (`compileBotThread`).
+ * Settings → Computer use is on and a driver may be there (not while it is missing or being installed); a thread a bot
+ * started lists them only while that bot holds "use the computer", and a bot's own turn only while its grant does
+ * (`compileBotThread`). A thread whose list leaves them out lists them at the turn after the person sets it up: that
+ * changes the thread's capability revision, and the runtime lists again.
+ *
+ * `computer_use_request` is how an agent that needs the computer asks for that setup: a card above the composer, never a
+ * wait (`ComputerUseSetupRequests`). It is listed for a thread's own agent (never a subagent) wherever it may use the
+ * computer, whatever the driver's state, so the list stays the same; a call needs a turn a person started. A bot's run
+ * its owner asked for in the chat holds it while the bot holds "use the computer".
  */
 
 /** What the computer tools read, at every listing and call. */
@@ -21,6 +28,8 @@ export interface ComputerUseToolHost {
   allowedFor(threadId: string): boolean
   listTools(): Promise<{ tools: DriverTool[]; instructions?: string }>
   call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<DriverCallResult>
+  /** Opens the setup card of `threadId` unless computer use is ready or the person said Not now; returns the outcome. */
+  requestSetup?(input: { threadId: string; reason: string; signal?: AbortSignal }): Promise<{ text: string; isError?: true }>
 }
 
 /** What `computerUseAllowed` reads of a thread. */
@@ -67,6 +76,15 @@ const TOOLS_SCHEMA: JsonSchema = {
   additionalProperties: false
 }
 
+const REQUEST_SCHEMA: JsonSchema = {
+  type: 'object',
+  properties: {
+    reason: { type: 'string', description: 'Why you need computer use, in one short sentence the user reads on the card.' }
+  },
+  required: ['reason'],
+  additionalProperties: false
+}
+
 const USE_SCHEMA: JsonSchema = {
   type: 'object',
   properties: {
@@ -108,11 +126,33 @@ function summary(description: string): string {
 
 export function computerTools(host: AppToolHost): MousseTool[] {
   const computer = () => host.computerUse?.()
-  // Listed while on and allowed for the thread, unless the driver is known to be missing (then Settings is the fix).
+  // Listed while on and allowed for the thread, unless the driver is known to be missing or is being installed (setting
+  // it up is the fix). A broken driver stays listed: a slow first look must not change the list back and forth, and a
+  // call says what is wrong.
   const listed = (threadId: string | undefined): boolean => {
     const cu = computer()
-    if (!cu?.enabled() || cu.known()?.state === 'missing') return false
+    if (!cu?.enabled()) return false
+    const state = cu.known()?.state
+    if (state === 'missing' || state === 'installing') return false
     return threadId === undefined || cu.allowedFor(threadId)
+  }
+  // The setup request: a thread's own agent where it may use the computer, or a bot's run that holds it.
+  const requestListed = (listing: ToolListing): boolean => {
+    if (listing.botRole) return listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(COMPUTER_USE_REQUEST_TOOL))
+    if (!computer() || listing.subagent) return false
+    return listing.threadId === undefined || computer()!.allowedFor(listing.threadId)
+  }
+  const requestAvailable = (turn: AppToolTurn): true | string => {
+    if (turn.subagent) return "Only the thread's own agent asks for computer use, not a subagent."
+    if (turn.bot) {
+      // A bot asks only in work its owner asked for in its chat: never from a schedule, a reminder or another bot.
+      if (!turn.bot.appTools.has(COMPUTER_USE_REQUEST_TOOL)) return 'Ask your owner for "use the computer" with escalate first.'
+      if (turn.bot.ownerRequested !== true) return 'Only work your owner asked for in your chat can ask for computer use. Say in your report that it needs setting up.'
+      return true
+    }
+    if (!computer()) return 'Computer use is not available in this Mousse.'
+    if (!computer()!.allowedFor(turn.threadId)) return 'This thread was started by a bot that may not use the computer.'
+    return true
   }
   const available = (threadId: string): true | string => {
     const cu = computer()
@@ -121,6 +161,27 @@ export function computerTools(host: AppToolHost): MousseTool[] {
     return true
   }
   return [
+    {
+      name: COMPUTER_USE_REQUEST_TOOL,
+      description: "Computer use: when you need to see or operate apps on this computer and computer_tools and computer_use are not among your tools, ask the user to set it up. It shows them a setup card (install Cua Driver, or turn computer use on) and returns at once; don't wait for it. Once set up, the computer tools are yours from your next turn. Ask once; after Not now, carry on without it.",
+      inputSchema: REQUEST_SCHEMA,
+      access: 'actsAsCaller',
+      class: 'read',
+      needsPerson: true,
+      listed: requestListed,
+      available: requestAvailable,
+      describe: () => 'Ask to set up computer use',
+      handler: async (args, ctx) => {
+        const cu = computer()
+        if (!cu?.requestSetup) return { text: 'Computer use is not available in this Mousse.', isError: true }
+        // Held again here, whichever way the call came (directly, or through a bot's use_tool).
+        const held = requestAvailable(ctx.turn)
+        if (held !== true) return { text: held, isError: true }
+        const reason = typeof args.reason === 'string' ? args.reason : ''
+        if (!reason.trim()) return { text: 'Say in reason why you need computer use.', isError: true }
+        return await cu.requestSetup({ threadId: ctx.turn.threadId, reason, signal: ctx.signal })
+      }
+    },
     {
       name: COMPUTER_TOOLS_TOOL,
       description: "Computer use: lists the tools of Cua Driver, which sees and operates apps on this computer (windows, clicks, typing), and its rules. Read it once before computer_use. Pass tool to get one tool's full description and input schema.",
