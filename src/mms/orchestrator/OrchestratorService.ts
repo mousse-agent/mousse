@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, appletFencesAsLines, appletFencesAsLinesByRow, closeOpenCodeBlock, modelFacingReplyText, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, closeOpenCodeBlock, modelFacingReplyText, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -15196,7 +15196,7 @@ export class OrchestratorService extends EventEmitter {
       runTerminalMarked = true
       // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages,
       // with each applet as a line, also one a stopped turn streamed whole but never published.
-      const named = resultText ? appletFencesAsLines(resultText) : resultText
+      const named = resultText ? redactAppletFences(resultText) : resultText
       const mask = named ? this.secretMaskerFor?.(session.threadId) : undefined
       const kept = mask && named ? mask(named) : named
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText: kept }))
@@ -16358,7 +16358,7 @@ export class OrchestratorService extends EventEmitter {
     const displayText = earlierText + lastText
     // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source:
     // by title until the reply publishes them, then as the reply shows them (below).
-    let resultText = appletFencesAsLinesByRow(earlierText, earlierReplies) + appletFencesAsLines(lastText)
+    let resultText = redactAppletFences(displayText)
     const finalText = unshownReplyText(displayText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
@@ -16403,7 +16403,7 @@ export class OrchestratorService extends EventEmitter {
         this.emitMessageUpdated(finalMessage)
         // The last row's applets as published (or not): the turn's earlier rows, then that row with its references.
         if (finalMessage.presentationParts && displayText.endsWith(finalMessage.content))
-          resultText = appletFencesAsLinesByRow(displayText.slice(0, displayText.length - finalMessage.content.length), earlierReplies) + modelFacingReplyText(finalMessage)
+          resultText = redactAppletFences(displayText.slice(0, displayText.length - finalMessage.content.length)) + modelFacingReplyText(finalMessage)
       }
     }
 
