@@ -73,17 +73,6 @@
       "expiresAt": "2026-11-25T08:03:52.715Z"
     },
     {
-      "task": "fix-files-video-player-lag",
-      "session": "agibook-cb0518",
-      "machine": "agibook",
-      "branch": "fix-files-video-player-lag",
-      "paths": [
-        "src/renderer/components/FilesPanel.tsx"
-      ],
-      "claimedAt": "2026-11-25T07:15:18.469Z",
-      "expiresAt": "2026-11-25T09:15:18.469Z"
-    },
-    {
       "task": "issue-1830-grant-roles",
       "session": "Avarnics-Mac-mini.local-c3024a",
       "machine": "Avarnics-Mac-mini.local",
