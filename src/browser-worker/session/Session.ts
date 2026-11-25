@@ -84,6 +84,26 @@ interface AttachedFrameState {
   pageSessionId: string
 }
 
+interface FrameTreeEntry { id?: string; parentId?: string; url?: string }
+interface FrameTreeNode { frame?: FrameTreeEntry; childFrames?: unknown }
+interface FrameBounds { x: number; y: number; width: number; height: number }
+
+/** A frame's URL as frame trees give it: without credentials or fragment. */
+function frameUrlKey(value: string): string {
+  const url = sanitizeUrl(value)
+  const hash = url.indexOf('#')
+  return hash >= 0 ? url.slice(0, hash) : url
+}
+
+function originOf(value: string): string | undefined {
+  try {
+    const origin = new URL(value).origin
+    return origin && origin !== 'null' ? origin : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * A page or frame carrying the automation mark (`navigator.webdriver`), by its CDP session: every one
  * Chromium attached, each held before its first script until its mark was set.
@@ -1130,6 +1150,9 @@ export class ManagedSession {
         childObservationTruncated ||= attachedFrames.length > 0
         break
       }
+      // A frame still enabling its domains is read once they are on, not halfway.
+      await this.frameEnables.get(frame.sessionId)?.catch(() => undefined)
+      if (!this.frames.has(frame.sessionId)) continue
       const offset = await this.frameViewportOffset(tab, frame)
       if (!offset) continue
       try {
@@ -2473,38 +2496,107 @@ export class ManagedSession {
   }
 
   private async frameViewportOffset(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<{ x: number; y: number } | null> {
+    const bounds = await this.frameViewportBounds(tab, frame, visited)
+    return bounds ? { x: bounds.x, y: bounds.y } : null
+  }
+
+  /**
+   * Where an attached frame from another site sits in its tab's viewport (CSS pixels), or null when
+   * it cannot be placed. The frame is matched to its `<iframe>` by id first (its own frame tree's id
+   * when the tab's tree names it otherwise), then by its URL, then by its origin; a frame matched by
+   * URL or origin must be laid out, so a hidden helper frame from the same site is never taken for it.
+   */
+  private async frameViewportBounds(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<FrameBounds | null> {
     try {
       if (frame.pageSessionId !== tab.cdpSessionId) return null
       if (visited.has(frame.sessionId)) return null
       visited.add(frame.sessionId)
+      const cdp = this.requireChrome().cdp
       const siblings = this.framesOf(tab)
-      const candidates: Array<{ id?: string; parentId?: string; url?: string }> = []
-      const tree = await this.requireChrome().cdp.send<{ frameTree?: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown[] } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
-      const visit = (node: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown } | undefined) => {
-        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as Array<{ frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown }> : []) {
+      const candidates: FrameTreeEntry[] = []
+      const tree = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
+      const visit = (node: FrameTreeNode | undefined) => {
+        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) {
           if (child.frame) candidates.push(child.frame)
           visit(child)
         }
       }
       visit(tree.frameTree)
-      const candidate = candidates.find((entry) => entry.id === frame.frameId)
-        ?? candidates.find((entry) => entry.id && !siblings.some((other) => other !== frame && other.frameId === entry.id))
-      if (candidate?.id) {
-        frame.frameId = candidate.id
-        frame.parentFrameId = candidate.parentId
-        frame.url = sanitizeUrl(candidate.url ?? frame.url)
+      const claimed = (id: string) => siblings.some((other) => other !== frame && other.frameId === id)
+      const place = async (entry: FrameTreeEntry, laidOut: boolean): Promise<FrameBounds | null> => {
+        if (!entry.id) return null
+        const parent = entry.parentId ? siblings.find((other) => other !== frame && other.frameId === entry.parentId) : undefined
+        const parentBounds = parent ? await this.frameViewportBounds(tab, parent, new Set(visited)) : { x: 0, y: 0, width: 0, height: 0 }
+        if (!parentBounds) return null
+        const own = await this.frameOwnerBounds(parent?.sessionId ?? tab.cdpSessionId, entry.id, laidOut)
+        return own ? { x: parentBounds.x + own.x, y: parentBounds.y + own.y, width: own.width, height: own.height } : null
       }
-      if (!frame.frameId) return null
-      const parent = frame.parentFrameId ? siblings.find((entry) => entry.frameId === frame.parentFrameId) : undefined
-      const parentOffset = parent ? await this.frameViewportOffset(tab, parent, visited) : { x: 0, y: 0 }
-      if (!parentOffset) return null
-      const parentSessionId = parent?.sessionId ?? tab.cdpSessionId
-      const owner = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId: frame.frameId }, { sessionId: parentSessionId })
+      let url = frameUrlKey(frame.url)
+      let match = candidates.find((entry) => entry.id === frame.frameId)
+      if (match) {
+        const bounds = await place(match, false)
+        if (!bounds) return null
+        frame.parentFrameId = match.parentId
+        frame.url = sanitizeUrl(match.url ?? frame.url) || frame.url
+        return bounds
+      }
+      // The tab's tree does not name it: the frame's own tree says which frame it is and where it is now.
+      const own = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: frame.sessionId }).catch(() => undefined)
+      const root = own?.frameTree?.frame
+      if (root?.url) url = frameUrlKey(root.url)
+      if (root?.id) match = candidates.find((entry) => entry.id === root.id)
+      let bounds: FrameBounds | null = null
+      if (match) bounds = await place(match, false)
+      else {
+        const open = candidates.filter((entry) => entry.id && !claimed(entry.id))
+        const tried = new Set<FrameTreeEntry>()
+        const blank = url === 'about:blank'
+        for (const entry of open) {
+          const entryUrl = frameUrlKey(entry.url ?? '')
+          if (!url || entryUrl !== url || (entryUrl === 'about:blank' && !blank)) continue
+          tried.add(entry)
+          bounds = await place(entry, true)
+          if (bounds) {
+            match = entry
+            break
+          }
+        }
+        const origin = originOf(url)
+        if (!match && origin) {
+          for (const entry of open) {
+            if (tried.has(entry) || originOf(entry.url ?? '') !== origin) continue
+            bounds = await place(entry, true)
+            if (bounds) {
+              match = entry
+              break
+            }
+          }
+        }
+      }
+      if (!match?.id || !bounds) return null
+      frame.frameId = match.id
+      frame.parentFrameId = match.parentId
+      frame.url = sanitizeUrl(root?.url ?? match.url ?? frame.url) || frame.url
+      return bounds
+    } catch {
+      return null
+    }
+  }
+
+  /** The box of the `<iframe>` holding a frame, in the viewport of the session that holds that element. */
+  private async frameOwnerBounds(sessionId: string, frameId: string, laidOut: boolean): Promise<FrameBounds | null> {
+    try {
+      const cdp = this.requireChrome().cdp
+      const owner = await cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId }, { sessionId })
       if (!owner.backendNodeId) return null
-      const quads = await this.requireChrome().cdp.send<{ quads?: number[][] }>('DOM.getContentQuads', { backendNodeId: owner.backendNodeId }, { sessionId: parentSessionId })
+      const quads = await cdp.send<{ quads?: number[][] }>('DOM.getContentQuads', { backendNodeId: owner.backendNodeId }, { sessionId })
       const quad = quads.quads?.[0]
       if (!quad || quad.length < 8) return null
-      return { x: parentOffset.x + Math.min(quad[0], quad[2], quad[4], quad[6]), y: parentOffset.y + Math.min(quad[1], quad[3], quad[5], quad[7]) }
+      const xs = [quad[0], quad[2], quad[4], quad[6]]
+      const ys = [quad[1], quad[3], quad[5], quad[7]]
+      const bounds = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }
+      if (laidOut && (bounds.width <= 0 || bounds.height <= 0)) return null
+      return bounds
     } catch {
       return null
     }
