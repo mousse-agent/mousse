@@ -85,6 +85,17 @@
       "expiresAt": "2026-11-25T21:33:04.096Z"
     },
     {
+      "task": "fix/bot-two-lane-orchestration",
+      "session": "agibook-28032c",
+      "machine": "agibook",
+      "branch": "fix/bot-two-lane-orchestration",
+      "paths": [
+        "src/mms/bots/jobs.ts"
+      ],
+      "claimedAt": "2026-11-25T19:46:53.534Z",
+      "expiresAt": "2026-11-25T21:46:53.534Z"
+    },
+    {
       "task": "fix/browser-automation-bugs",
       "session": "agibook-664429",
       "machine": "agibook",
