@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, modelFacingReplyText, openCodeBlockStart, publishedApplets, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appletInsertionPoint, modelFacingReplyText, publishedApplets, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -16576,13 +16576,13 @@ export class OrchestratorService extends EventEmitter {
     const earlierReplies = this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
     // The streamed row never held the applet fences, so it is matched on the reply text alone.
     const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
-    // The fences join that last row, before a code block the row leaves open, judged on the row alone (an earlier row is
-    // a reply of its own): inside the open block they would be text, and closing it could publish an unfinished applet.
+    // The fences join that last row, judged on the row alone (an earlier row is a reply of its own): at its end, or before
+    // a code block or an applet fence it leaves open (`appletInsertionPoint`).
     const split = replyOnlyText.endsWith(finalReplyText)
     const earlierText = split ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
     const lastReply = split ? finalReplyText : replyOnlyText
-    const open = appletFences ? openCodeBlockStart(lastReply) : -1
-    const lastText = open === -1 ? lastReply + appletFences : lastReply.slice(0, open) + appletFences + '\n\n' + lastReply.slice(open)
+    const insertAt = appletFences ? appletInsertionPoint(lastReply) : lastReply.length
+    const lastText = insertAt === lastReply.length ? lastReply + appletFences : lastReply.slice(0, insertAt) + appletFences + '\n\n' + lastReply.slice(insertAt)
     const displayText = earlierText + lastText
     // The run's result (what a parent or `thread_wait` reads) names the turn's applets instead of carrying their source:
     // by title until the reply publishes them, then as the reply shows them (below).

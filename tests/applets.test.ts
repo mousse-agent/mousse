@@ -7,6 +7,7 @@ import {
   APPLET_SOURCE_LIMIT,
   APPLET_STATE_LIMIT,
   extractAppletParts,
+  appletInsertionPoint,
   modelFacingReplyText,
   redactAppletFences,
   validateAppletSubmission
@@ -364,7 +365,7 @@ describe('applet source kept from a model', () => {
     // The stored parts are not read: publication's added text could end a cut early.
     const content = 'Here:\n' + fence({ ...source, title: totals.title }) + '\n' + fence(withCanary) + 'Done.'
     const named = modelFacingReplyText({ role: 'assistant', content, presentationParts: [{ type: 'text', text: CANARY }, { type: 'applet', reference: totals }] })
-    expect(named).toBe('Here:\n[Applet: Totals ```js (appletId applet_a, revision rev_a)]\n\n[Applet: Calculator]\nDone.')
+    expect(named).toBe('Here:\n[Applet: Totals ``js (appletId applet_a, revision rev_a)]\n\n[Applet: Calculator]\nDone.')
   })
 
   it('names a published applet inside an outer fence publication did not read, and cuts the outer one to its end', () => {
@@ -373,6 +374,23 @@ describe('applet source kept from a model', () => {
     expect(redactAppletFences(content, [reference])).toBe(' [Applet]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\nDone.')
     // A published applet the text does not name by its title still reaches the model, after the text.
     expect(redactAppletFences('Done.', [reference])).toBe('Done.\n[Applet: Calculator (appletId applet_a, revision rev_a)]')
+  })
+
+  it('names a published applet the same when its result is redacted again', () => {
+    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Demo ~~~mousse-applet', description: 'd' }
+    const once = redactAppletFences(fence({ ...source, title: reference.title }) + 'Done.', [reference])
+    // The title is an opening too, inside the fence: the cut runs to the end, which only hides more.
+    expect(once).toContain('[Applet: Demo ~~mousse-applet (appletId applet_a, revision rev_a)]')
+    expect(redactAppletFences(once)).toBe(once)
+  })
+
+  it.each([
+    ['at the end', 'Done.', 5],
+    ['before a code block left open', 'Here:\n```js\nx', 6],
+    ['before the line an applet fence opens on, when the open block is inside it', 'Here:\nDraft: ```mousse-applet\n~~~json\n{}\n```', 6],
+    ['before an applet fence that never closes', 'Here:\n~~~mousse-applet\n{', 6]
+  ])('puts a staged applet %s', (_name, reply, at) => {
+    expect(appletInsertionPoint(reply)).toBe(at)
   })
 
   it('scans a long run of tildes once', () => {

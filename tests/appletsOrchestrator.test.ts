@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
-import { type AppletReference } from '../src/shared/applets'
+import { modelFacingReplyText, type AppletReference } from '../src/shared/applets'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { piAdapter } from './run/phase6Fixture'
 import { HandoffService, type HandoffTranscriptSource } from '../src/mms/run/handoff/HandoffService'
@@ -327,6 +327,32 @@ it('publishes a tool-staged applet on a last row that follows a row left with an
   expect(replies.length).toBeGreaterThan(1)
   expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
   expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('stages an applet before the line of an applet fence that holds an open block, so the fence is still cut whole', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'Draft: ```mousse-applet\n~~~json\n{"html":"SOURCE_CANARY"}\n```')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(source)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  const reply = main.threads.loadThreadData(thread.id).messages.find((message) => message.presentationParts)!
+  for (const text of [results.at(-1), modelFacingReplyText(reply)]) {
+    expect(text).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+    expect(text).not.toContain('SOURCE_CANARY')
+  }
 })
 
 it('cuts a fence a row opened and the last row went on with, also after a tool-staged applet publishes', async () => {
