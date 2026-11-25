@@ -33,10 +33,10 @@ import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { ArchivedList } from './sidebar/ArchivedList'
-import { ThreadFilterBar, type BotOption, type ProjectOption } from './sidebar/ThreadFilterBar'
+import { ThreadFilterBar, type BotOption, type ComputerOption, type ProjectOption } from './sidebar/ThreadFilterBar'
 import { useThreadFilterStore } from '../stores/threadFilterStore'
 import { useBotsStore } from '../stores/botsStore'
-import { filterNarrows, lastUsedBy, threadInFilter, type ThreadFilter } from '../lib/threadFilter'
+import { filterNarrows, lastUsedBy, LOCAL_COMPUTER_ID, queryWords, threadInFilter, type ThreadFilter } from '../lib/threadFilter'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
 import { threadsForList, useArchiveMotionRows, usePendingArchives, withPendingArchives } from '../lib/archiveMotion'
 import { Collapse, COLLAPSE_LONG_LIST, motionAllowed } from './ui/Collapse'
@@ -525,8 +525,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
 
-  // The filter row's (ThreadFilterBar): Show, a bot, a project, Archived and what is typed; the Projects tab's unticked
-  // projects. Show and the unticked projects are this profile's.
+  // The filter row's (ThreadFilterBar): Show, a bot, a project, a computer, Archived and what is typed; the Projects
+  // tab's unticked projects. Show and the unticked projects are this profile's.
   const profileId = useAppStore((s) => s.profileId)
   // Before the window's profile is known the list is the warm start's (showWarmView): shown as it was, not acted on.
   const warmOnly = useAppStore((s) => !s.profileReady && s.warmView !== null)
@@ -537,13 +537,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const filterShow = useThreadFilterStore((s) => s.show)
   const filterProjectId = useThreadFilterStore((s) => s.projectId)
   const filterBotId = useThreadFilterStore((s) => s.botId)
+  const filterComputerId = useThreadFilterStore((s) => s.computerId)
   const hiddenProjectIds = useThreadFilterStore((s) => s.hiddenProjects)
   const filter = useMemo<ThreadFilter>(
-    () => ({ query: filterQuery, show: filterShow, projectId: filterProjectId, botId: filterBotId, archived: filterArchived }),
-    [filterQuery, filterShow, filterProjectId, filterBotId, filterArchived]
+    () => ({ query: filterQuery, show: filterShow, projectId: filterProjectId, botId: filterBotId, computerId: filterComputerId, archived: filterArchived }),
+    [filterQuery, filterShow, filterProjectId, filterBotId, filterComputerId, filterArchived]
   )
   const filtering = filterNarrows(filter)
   const bots = useBotsStore((s) => s.bots)
+  const hasRemoteProjects = projects.some((project) => project.node)
+  const hasRemoteThreads = threads.some((thread) => thread.node)
+  const { byNode: computers, devices } = useComputers(
+    hasRemoteProjects || hasRemoteThreads || (filterComputerId !== null && filterComputerId !== LOCAL_COMPUTER_ID)
+  )
+  const hasOtherComputers = hasRemoteProjects || hasRemoteThreads || Object.keys(computers).length > 0
   // What is typed also finds the threads whose messages hold it.
   const messageMatches = useThreadMessageMatches(filterQuery)
   const inFilter = useMemo(() => {
@@ -553,10 +560,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       groupOf: (projectId: string) => groupOf.get(projectId) ?? projectId,
       projectName: (projectId: string) => projectById.get(projectId)?.name,
       botName: (botId: string) => botById.get(botId)?.name,
+      computerName: hasOtherComputers
+        ? (node: string | undefined) => (node ? (computers[node]?.name ?? UNKNOWN_COMPUTER_NAME) : 'This computer')
+        : undefined,
       messageMatches
     }
     return (thread: Thread) => threadInFilter(thread, filter, context)
-  }, [filter, projects, bots, groupOf, messageMatches])
+  }, [filter, projects, bots, groupOf, computers, hasOtherComputers, messageMatches])
 
   // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread one of
   // the owner's bots keeps out of the sidebar (`Thread.hidden`, how a bot's threads start) is listed in its chat instead,
@@ -642,8 +652,23 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const lastUsed = lastUsedBy(threads, (thread) => thread.startedByBot?.botId)
     return bots.map((bot) => ({ id: bot.id, name: bot.name, look: bot.look, lastUsed: lastUsed.get(bot.id) }))
   }, [threads, bots])
-  const hasRemoteProjects = projects.some((project) => project.node)
-  const { byNode: computers, devices } = useComputers(hasRemoteProjects || archivedThreads.some((thread) => thread.node))
+  const computerOptions = useMemo((): ComputerOption[] => {
+    const nodes = new Set<string>()
+    for (const thread of listedThreads) if (thread.node && !agentThreadIds.has(thread.id)) nodes.add(thread.node)
+    for (const project of projects) if (project.node) nodes.add(project.node)
+    for (const node of Object.keys(computers)) nodes.add(node)
+    if (filterComputerId && filterComputerId !== LOCAL_COMPUTER_ID) nodes.add(filterComputerId)
+    if (nodes.size === 0 && filterComputerId === null) return []
+    const lastUsed = lastUsedBy(threads, (thread) => thread.node ?? LOCAL_COMPUTER_ID)
+    return [
+      { id: LOCAL_COMPUTER_ID, name: 'This computer', local: true, lastUsed: lastUsed.get(LOCAL_COMPUTER_ID) },
+      ...[...nodes].map((node): ComputerOption => ({
+        id: node,
+        name: computers[node]?.name ?? UNKNOWN_COMPUTER_NAME,
+        lastUsed: lastUsed.get(node)
+      }))
+    ]
+  }, [listedThreads, agentThreadIds, projects, computers, filterComputerId, threads])
   const nameOfComputer = (node: string): string => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME
   const localArchivedCount = archivedThreads.filter((thread) => !thread.node).length
   // With projects of several computers, a project's tooltip names this one too.
@@ -798,7 +823,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const projectThreadsOf = (groupId: string) => treeThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
   // The filter leaves out the projects unticked in its menu and, while it narrows to some threads, the projects with none
   // of them; those it keeps show open.
-  const treeNarrowed = filtering && filter.show !== 'all'
+  const treeNarrowed = filter.show === 'bots' || filter.botId !== null || filter.projectId !== null || filter.computerId !== null || filter.archived || queryWords(filter.query).length > 0
   const hiddenProjectSet = new Set(hiddenProjectIds)
   const shownGroups = projectGroups.filter((group) => !hiddenProjectSet.has(group.id) &&
     (filter.projectId === null || group.id === filter.projectId) &&
@@ -1756,7 +1781,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       </div>
 
       {contentView !== 'chats' && (
-        <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} onSwapView={() => void setSidebarView(contentView === 'projects' ? 'threads' : 'projects')} />
+        <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} computers={computerOptions} onSwapView={() => void setSidebarView(contentView === 'projects' ? 'threads' : 'projects')} />
       )}
 
       <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-fill={footerHidden || undefined} data-more-below={moreBelow || undefined}>

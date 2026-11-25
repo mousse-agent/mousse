@@ -3,7 +3,8 @@ import type { ThreadFilter, ThreadShow } from '../lib/threadFilter'
 
 /**
  * The sidebar's thread filter (`lib/threadFilter.ts`) and the projects unticked in the Projects tab. Show and the unticked
- * projects are kept per profile on this computer; what is typed, the bot, the project and Archived last the session.
+ * projects are kept per profile on this computer; what is typed, the bot, the project, the computer and Archived last the
+ * session.
  */
 interface ThreadFilterState extends ThreadFilter {
   /** Project groups the Projects tab leaves out. */
@@ -15,6 +16,7 @@ interface ThreadFilterState extends ThreadFilter {
   setShow(show: ThreadShow): void
   setProject(projectId: string | null): void
   setBot(botId: string | null): void
+  setComputer(computerId: string | null): void
   setArchived(archived: boolean): void
   setProjectHidden(projectId: string, hidden: boolean): void
   clearHiddenProjects(): void
@@ -22,7 +24,7 @@ interface ThreadFilterState extends ThreadFilter {
   showBot(botId: string): void
 }
 
-const DEFAULTS: ThreadFilter = { query: '', show: 'mine', projectId: null, botId: null, archived: false }
+const DEFAULTS: ThreadFilter = { query: '', show: 'mine', projectId: null, botId: null, computerId: null, archived: false }
 const SHOWS: readonly ThreadShow[] = ['mine', 'bots', 'all']
 
 const storageKey = (profileId: string) => `mousse-profile-${profileId}-thread-filter`
@@ -65,12 +67,13 @@ export const useThreadFilterStore = create<ThreadFilterState>((set, get) => {
     setShow: (show) => saving({ show }),
     setProject: (projectId) => set({ projectId }),
     setBot: (botId) => set({ botId }),
+    setComputer: (computerId) => set({ computerId }),
     setArchived: (archived) => set({ archived }),
     setProjectHidden: (projectId, hidden) => {
       const rest = get().hiddenProjects.filter((id) => id !== projectId)
       saving({ hiddenProjects: hidden ? [...rest, projectId] : rest })
     },
     clearHiddenProjects: () => saving({ hiddenProjects: [] }),
-    showBot: (botId) => set({ botId, query: '', projectId: null, archived: false })
+    showBot: (botId) => set({ botId, query: '', projectId: null, computerId: null, archived: false })
   }
 })
