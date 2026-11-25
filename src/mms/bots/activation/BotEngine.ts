@@ -119,7 +119,9 @@ import { createBotAuthority, type BotFileReadState } from '../authority/botAutho
 import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
-import { chipCallOf } from '../activity/BotActivitySink'
+import { BOT_ACTIVITY_SAME_CALL_MS, chipCallOf } from '../activity/BotActivitySink'
+import { stableStringify } from '../../run/json'
+import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
 import { botFilesFolder, botManifestDigest, compileBotThread, subagentManifest, type BotPermissions, type CompileInput } from '../grants/compile'
 import { shortModelName } from '../../../shared/modelNames'
 import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
@@ -3153,6 +3155,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       contexts: definition.context.map((thread) => ({ key: thread.key, title: thread.title })),
       dispatchId: dispatch.clientRequestId,
       mcpTools: this.offeredMcp(compiled.permissions.mcp),
+      // Pi counts every tool call through its budget, and its first model request (counted too) comes before any.
+      countsAppCalls: () => !runtimeCountsRequests,
       permissionsNow: (now) => {
         const recompiled = compileWith(this.effectiveManifest(row, definition.permissions, now.manifest), now.digest)
         return recompiled.ok ? recompiled.permissions : undefined
@@ -3862,6 +3866,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
      * grant that changed while the turn ran refuses every call.
      */
     permissionsNow?(grant: { digest: string; manifest: BotManifest }): BotPermissions | undefined
+    /**
+     * Whether the turn's runtime leaves its Mousse app and MCP tool calls uncounted (it has no budget of its own, as Pi
+     * has): each allowed call is then counted here, once (`recordObservedToolCall`). Absent: nothing is counted here.
+     */
+    countsAppCalls?(): boolean
   }): BotAuthority {
     const { row, controller } = input
     const switchedAtStart = new Map(this.permissionSwitches.get(row.botId))
@@ -3985,6 +3994,26 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return this.store.workWait(row.id)?.status === 'waiting'
         ? 'This work is waiting. End your turn now; it carries on here when the time or event comes.' : QUESTION_END_TURN_TEXT
     }
+    // One app or MCP call is checked at several points (locked Claude: PreToolUse, canUseTool, then the registry or the
+    // relay), so the same tool with the same arguments within `BOT_ACTIVITY_SAME_CALL_MS` is that same call, as chips
+    // read it. Built-ins are counted by their runtime's own gate (Claude's PreToolUse), never here.
+    const countedCalls = new Map<string, number>()
+    const countCall = (call: NormalisedCall): void => {
+      if ((call.kind !== 'app' && call.kind !== 'mcp') || !input.countsAppCalls?.()) return
+      try {
+        const name = call.kind === 'mcp' ? `mcp\u0000${call.server}\u0000${call.tool}` : `app\u0000${call.tool}`
+        const key = `${name}\u0000${stableStringify(withoutTransportFields(call.args))}`
+        const at = this.monotonic()
+        const first = countedCalls.get(key)
+        if (first !== undefined && at - first < BOT_ACTIVITY_SAME_CALL_MS) return
+        if (countedCalls.size >= 256) for (const [old, when] of countedCalls) if (at - when >= BOT_ACTIVITY_SAME_CALL_MS) countedCalls.delete(old)
+        countedCalls.set(key, at)
+        this.store.recordObservedToolCall(row.id)
+      } catch (error) {
+        // A measurement: it never fails the call it counts.
+        console.warn('a bot\'s tool call could not be counted', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const stop = endTurn()
@@ -3992,6 +4021,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const decided = base.check(call)
       if (decided.ok) {
         observe(call)
+        countCall(call)
         return decided
       }
       if (subagent) return 'refused' in decided || !ESCALATABLE.has(decided.wall.kind) ? decided : { ok: false, refused: { text: BOT_SUBAGENT_LACKS_TEXT, askId: '' } }

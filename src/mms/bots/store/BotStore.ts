@@ -1726,6 +1726,14 @@ export class BotStore {
     })
   }
 
+  /**
+   * One Mousse app or MCP tool call a runtime that counts none itself made (Claude Code, Codex, Antigravity), added to
+   * the activation's tool calls. A measurement only: it checks no limit and never refuses.
+   */
+  recordObservedToolCall(activationId: string): void {
+    this.run('UPDATE bot_counters SET tool_calls = tool_calls + 1 WHERE activation_id = ?', activationId)
+  }
+
   // -- Turn usage (v12): what each main turn cost and carried ----------------------------------
 
   /** A main dispatch began: its row, before any usage is reported. A second start of the same dispatch changes nothing. */
