@@ -2773,13 +2773,30 @@ export class ManagedSession {
       if (!content) break
       under ??= await this.attachedFramesAt(tab, mapped)
       const open = under.filter((entry) => !entered.has(entry.frame.sessionId))
-      const next = open.find((entry) => entry.frame.frameId === content) ?? open.find((entry) => entry.frame.parentFrameId === at.frameId)
+      // The frame the `<iframe>` shows, by id. Only a frame of no known process here is matched by its parent
+      // instead: an `<iframe>` of this frame's own process (an overlay of the same site) is acted on, never seen through.
+      let next = open.find((entry) => entry.frame.frameId === content)
+      if (!next && !(await this.inProcessFrameIds(at.sessionId, signal)).has(content)) next = open.find((entry) => entry.frame.parentFrameId === at.frameId)
       if (!next) break
       entered.add(next.frame.sessionId)
       at = { sessionId: next.frame.sessionId, frameId: next.frame.frameId, point: { x: mapped.x - next.bounds.x, y: mapped.y - next.bounds.y } }
       backendNodeId = await this.nodeAtPoint(at.sessionId, at.point, signal)
     }
     return { ...at, backendNodeId }
+  }
+
+  /** The frames a session's own process holds (its frame tree lists no frame of another process). */
+  private async inProcessFrameIds(sessionId: string, signal: AbortSignal | undefined): Promise<Set<string>> {
+    const ids = new Set<string>()
+    try {
+      const tree = await this.requireChrome().cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId, signal })
+      const visit = (node: FrameTreeNode | undefined) => {
+        if (node?.frame?.id) ids.add(node.frame.id)
+        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) visit(child)
+      }
+      visit(tree.frameTree)
+    } catch { /* none known: the parent match stands */ }
+    return ids
   }
 
   /** The frame an `<iframe>` (or `<frame>`) element shows, or undefined for any other element. */
