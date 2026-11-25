@@ -2030,7 +2030,9 @@ export class NetEngineService implements EngineDirectoryPort {
     // Its relays, and what each pairing's relays need (Phase 3); a helper without them says so once.
     if (this.helper === helper) this.rereadRelays()
     if (this.helper === helper) await this.keepShownReach(helper).catch(() => undefined)
-    if (this.helper === helper && helper.info.managed_tunnel === true &&
+    // A helper that takes a managed tunnel lists `managed-tunnel`; `managed_tunnel` in its hello says its local
+    // origin runs now (false when the port could not bind).
+    if (this.helper === helper && helper.has('managed-tunnel') && helper.info.managed_tunnel === true &&
         typeof helper.info.ws_port === 'number' && helper.info.ws_port > 0 && helper.info.ws_port <= 65535) {
       void this.cloudflare.useOrigin({
         port: helper.info.ws_port,

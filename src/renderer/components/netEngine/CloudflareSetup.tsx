@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import type { NetEngineCloudflare } from '../../../shared/netEngine/local'
+import type { NetEngineCloudflare, NetEngineWayReadiness } from '../../../shared/netEngine/local'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { SettingsRow } from '../settings/SettingsRow'
 import { ChoiceRow } from './pairingParts'
+import { wayReason } from './ways'
 
 const STATE_TEXT: Record<NetEngineCloudflare['state'], string> = {
   off: 'Disconnected',
@@ -22,11 +23,14 @@ const ACTION_STYLE = { gap: 'var(--space-8)', marginTop: 'var(--space-8)' }
  */
 export function CloudflareSetup({
   connection,
+  readiness,
   onMake,
   onOwnTunnel
 }: {
   connection: NetEngineCloudflare | undefined
-  /** The tunnel runs: make a code for it. */
+  /** Whether the helper reports the tunnel way ready, asked of it once the tunnel runs. */
+  readiness: boolean
+  /** The tunnel runs and the helper carries it: make a code for it. */
   onMake: () => void
   /** Use my own tunnel: Reach this computer takes its address. */
   onOwnTunnel: () => void
@@ -41,8 +45,24 @@ export function CloudflareSetup({
     opened.current = loginUrl
     void window.mousse.providers?.openLoginUrl?.(loginUrl)
   }, [loginUrl])
+  // Once the tunnel runs, the helper says whether a code for the tunnel way would carry it.
+  const running = connection?.state === 'connected'
+  const [tunnelWay, setTunnelWay] = useState<NetEngineWayReadiness>()
+  useEffect(() => {
+    setTunnelWay(undefined)
+    if (!running || !readiness) return
+    let live = true
+    void call<{ ways: NetEngineWayReadiness[] }>('netEngine.routes.available', {}).then((answer) => {
+      if (live && answer) setTunnelWay(answer.value.ways.find((item) => item.way === 'tunnel'))
+    })
+    return () => {
+      live = false
+    }
+  }, [running, readiness, connection?.hostname, call])
   if (!connection) return <p role="status" className="settings-muted">Waiting for networking…</p>
   const { state, hostname, message, canForget } = connection
+  const notCarried = readiness && tunnelWay && tunnelWay.state !== 'ready' ? tunnelWay : undefined
+  const canMake = state === 'connected' && (!readiness || tunnelWay?.state === 'ready')
   const canConnect = state === 'off' || state === 'failed'
   if (confirmForget && canConnect && canForget) {
     return (
@@ -94,10 +114,17 @@ export function CloudflareSetup({
       ) : (
         <>
           {state === 'connected' ? (
-            <p role="status">
-              <span className="engine-ready-dot" aria-hidden="true" />
-              {hostname ? `${hostname} is running` : STATE_TEXT.connected}
-            </p>
+            notCarried ? (
+              <p role="status" className="settings-muted">
+                {hostname ? `${hostname} · ` : ''}
+                {wayReason('tunnel', notCarried.reason)}
+              </p>
+            ) : (
+              <p role="status">
+                <span className="engine-ready-dot" aria-hidden="true" />
+                {hostname ? `${hostname} is running` : STATE_TEXT.connected}
+              </p>
+            )
           ) : (
             (state !== 'off' || hostname) && (
               <p role="status" className="settings-muted">
@@ -114,6 +141,7 @@ export function CloudflareSetup({
             canForget={canForget}
             busy={busy}
             call={call}
+            canMake={canMake}
             onForget={() => setConfirmForget(true)}
             onMake={onMake}
           />
@@ -131,6 +159,7 @@ function SetupActions({
   canForget,
   busy,
   call,
+  canMake,
   onForget,
   onMake
 }: {
@@ -140,6 +169,8 @@ function SetupActions({
   canForget?: boolean
   busy: boolean
   call: ReturnType<typeof useDaemonCall>['call']
+  /** The helper carries the running tunnel in a code. */
+  canMake: boolean
   onForget: () => void
   onMake: () => void
 }) {
@@ -157,7 +188,7 @@ function SetupActions({
         </button>
       )}
       {state === 'connected' ? (
-        <button type="button" className="settings-btn ui-btn-primary" onClick={onMake}>
+        <button type="button" className="settings-btn ui-btn-primary" disabled={!canMake} onClick={onMake}>
           Make code
         </button>
       ) : canConnect ? (

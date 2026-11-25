@@ -61,8 +61,8 @@ export function LetDeviceInDialog({
   const pickWay = hasFeatures(status, 'invite-way')
   const [step, setStep] = useState<Step>(() => initial ?? (picker ? { kind: 'pick' } : { kind: 'code' }))
   // The tunnel's setup is a step here when this computer can run Cloudflare Tunnel itself.
-  const setUp = (way: NetEngineWay) =>
-    way === 'tunnel' && engine?.cloudflare ? setStep({ kind: 'tunnel' }) : onSetUp(way)
+  const managedTunnel = hasFeatures(status, 'managed-tunnel') && !!engine?.cloudflare
+  const setUp = (way: NetEngineWay) => (way === 'tunnel' && managedTunnel ? setStep({ kind: 'tunnel' }) : onSetUp(way))
   // A device asked to come in (or was let in): the dialog shows only that.
   const [answering, setAnswering] = useState(false)
   const { busy, error, setError, call } = useDaemonCall()
@@ -100,6 +100,7 @@ export function LetDeviceInDialog({
           <>
             <CloudflareSetup
               connection={engine?.cloudflare}
+              readiness={hasFeatures(status, 'route-readiness')}
               onMake={() => setStep({ kind: 'code', ...(pickWay ? { way: 'tunnel' as const } : {}) })}
               onOwnTunnel={() => onSetUp('tunnel')}
             />

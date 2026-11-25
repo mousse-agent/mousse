@@ -288,7 +288,8 @@ export const ENGINE_FEATURES = [
   'join-probe',
   'grant-revoke-local',
   'grant-roles',
-  'grant-add-connected'
+  'grant-add-connected',
+  'managed-tunnel'
 ] as const
 export type EngineFeature = (typeof ENGINE_FEATURES)[number]
 

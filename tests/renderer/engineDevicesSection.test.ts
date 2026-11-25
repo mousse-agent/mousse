@@ -756,20 +756,16 @@ describe('routes (1b §1.3, §1.5)', () => {
   })
 
   it('sets up Cloudflare Tunnel from its way in Let a device in, and makes a code for it only once it runs', async () => {
-    const tunnelWays = {
-      ways: [
-        { way: 'lan', state: 'ready', routes: ['tcp://192.168.1.20:47100'] },
-        { way: 'tunnel', state: 'unavailable', reason: 'not_configured', routes: [] }
-      ]
-    }
+    const lan = { way: 'lan', state: 'ready', routes: ['tcp://192.168.1.20:47100'] }
+    let tunnel: Record<string, unknown> = { way: 'tunnel', state: 'unavailable', reason: 'not_configured', routes: [] }
     const d = daemon(
       {
-        features: ['route-readiness', 'invite-way'],
+        features: ['route-readiness', 'invite-way', 'managed-tunnel'],
         reach: { lan: true, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
         sendLink: true,
         cloudflare: { state: 'off' }
       },
-      { 'netEngine.routes.available': () => tunnelWays }
+      { 'netEngine.routes.available': () => ({ ways: [lan, tunnel] }) }
     )
     await mount()
     await click(button(/Let a device in/))
@@ -794,6 +790,8 @@ describe('routes (1b §1.3, §1.5)', () => {
     }
     expect(d.called('netEngine.invite')).toEqual([])
 
+    // The tunnel is published: the helper reports the tunnel way ready.
+    tunnel = { way: 'tunnel', state: 'ready', routes: ['wss://mousse.example.net/mousse-net/1'] }
     await d.change({ cloudflare: { state: 'connected', hostname: 'mousse.example.net' } })
     expect(document.body.textContent).toContain('mousse.example.net is running')
     await click(button('Make code'))
@@ -805,10 +803,31 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect(d.called('netEngine.invite').at(-1)).toMatchObject({ kind: 'link', way: 'tunnel' })
   })
 
+  it('makes no code for a running tunnel the helper does not report ready, and says why', async () => {
+    const d = daemon(
+      {
+        features: ['route-readiness', 'invite-way', 'managed-tunnel'],
+        reach: { lan: true, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+        cloudflare: { state: 'connected', hostname: 'mousse.example.net' }
+      },
+      {
+        'netEngine.routes.available': () => ({
+          ways: [{ way: 'tunnel', state: 'unavailable', reason: 'origin_unavailable', routes: [] }]
+        })
+      }
+    )
+    await mount()
+    await click(button(/Let a device in/))
+    await click(radio('Cloudflare Tunnel')!.querySelector<HTMLButtonElement>('button')!)
+    expect(document.body.textContent).toContain('mousse.example.net · Tunnel isn’t answering')
+    expect(button('Make code')!.disabled).toBe(true)
+    expect(d.called('netEngine.invite')).toEqual([])
+  })
+
   it('sends a person with their own tunnel to Reach this computer for its address', async () => {
     const d = daemon(
       {
-        features: ['route-readiness', 'invite-way'],
+        features: ['route-readiness', 'invite-way', 'managed-tunnel'],
         reach: { lan: true, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
         cloudflare: { state: 'off' }
       },
