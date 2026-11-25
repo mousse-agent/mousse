@@ -633,11 +633,16 @@ html.platform-darwin .titlebar-left {
     max-width: 12ch;
   }
 
-  /* Tabs cut their names shorter before the strip has to scroll, down to an icon and its close button, so the add
-     button stays in view. */
+  /* Tabs cut their names shorter before the strip has to scroll, so the add button stays in view; each keeps its
+     icon and a letter or two. Only the selected tab (or one reached from the keyboard) keeps a close button, so the
+     others' names get its room; middle-click still closes any tab. */
   .main-view-tab {
     flex-shrink: 1;
-    min-width: 56px;
+    min-width: 52px;
+  }
+
+  .main-view-tab.active {
+    min-width: 76px;
   }
 
   .main-view-tab-select {
@@ -647,6 +652,10 @@ html.platform-darwin .titlebar-left {
 
   .main-view-tab-close {
     flex-shrink: 0;
+  }
+
+  .main-view-tab:not(.active):not(:focus-within) .main-view-tab-close {
+    display: none;
   }
 }
 
