@@ -484,6 +484,14 @@ export interface HarnessDriver {
    * its tap offers (`brew info`), not the npm one, since `brew upgrade` can only reach that.
    */
   readonly brewName?: string
+  /**
+   * The npm package (owner npm, pnpm or bun) or Homebrew formula (owner brew, named as `brew info`
+   * takes it) an executable came from, read from its path, for a CLI published under more than one
+   * (OpenCode: `@opencode/cli` and the older `opencode-ai`; `opencode` in homebrew-core and in
+   * OpenCode's tap). Such a copy is compared with, and updated within, that package; when this
+   * returns undefined, Mousse cannot tell which, so it compares nothing and offers no command.
+   */
+  packageOf?(path: string, owner: InstallOwner): string | undefined
   /** The driver can run several instances (Add dialog); others have only their built-in one. */
   readonly multiInstance: boolean
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */
@@ -655,8 +663,16 @@ export interface HarnessDriver {
    */
   readPolicyFacts?(config: InstanceConfig, instanceId: string): Promise<void>
   create(context: DriverContext): DriverRuntime
-  /** The command that updates a binary installed by `owner`, when there is one. */
-  updateCommand?(owner: InstallOwner): string | undefined
+  /**
+   * The command that updates a binary installed by `owner`, when there is one. `pkg`: the package
+   * or formula the copy came from (`packageOf`), for a driver that reads it.
+   */
+  updateCommand?(owner: InstallOwner, pkg?: string): string | undefined
+}
+
+/** The owners whose copies come from a package or formula (`HarnessDriver.packageOf`). */
+export function isPackageOwner(owner: InstallOwner | undefined): boolean {
+  return owner === 'npm' || owner === 'pnpm' || owner === 'bun' || owner === 'brew'
 }
 
 /** The private-home rule of an entry with `config` (see `HarnessDriver.privateHomeFor`). */

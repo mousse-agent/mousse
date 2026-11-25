@@ -1,3 +1,4 @@
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HarnessCaps, RuntimeFacts } from '../../../shared/harness/types'
 import type { InstallOwner } from '../../../shared/harness/status'
@@ -31,22 +32,127 @@ export const OPENCODE_AGENT_ID = 'opencode'
 /** Set on every process of a managed copy: OpenCode must not replace files Mousse checks against its receipt. */
 export const OPENCODE_MANAGED_ENV: Readonly<Record<string, string>> = Object.freeze({ OPENCODE_DISABLE_AUTOUPDATE: '1' })
 
-/** OpenCode's npm package (`npm i -g @opencode/cli`). */
+/** OpenCode's npm package since 2.0 (`npm i -g @opencode/cli`). */
 export const OPENCODE_NPM_PACKAGE = '@opencode/cli'
+/** OpenCode's earlier npm package, still published as the 1.x line: its copies update within it. */
+export const OPENCODE_LEGACY_NPM_PACKAGE = 'opencode-ai'
 
-/** The command that updates an OpenCode its owner installed, when Mousse knows one. */
-export function opencodeUpdateCommand(owner: InstallOwner): string | undefined {
+/**
+ * OpenCode's Homebrew formulae: `opencode` in homebrew-core (2.x), and in OpenCode's tap
+ * `anomalyco/tap/opencode` (the 1.x line) and `anomalyco/tap/opencode-v2` (2.x).
+ */
+const BREW_FORMULAE: ReadonlySet<string> = new Set(['opencode', 'opencode-v2'])
+const OPENCODE_TAP = 'anomalyco/tap'
+
+/**
+ * Each package's folder in a `/`-separated, lower-case path: the package itself, or one of its
+ * per-platform builds (`@opencode/cli-linux-x64`, `opencode-darwin-arm64`) its launcher runs.
+ */
+const PACKAGE_FOLDERS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\/node_modules\/@opencode\/cli(?:-[a-z0-9-]+)?\//, OPENCODE_NPM_PACKAGE],
+  [/\/node_modules\/(?:opencode-ai|opencode-(?:linux|darwin|windows)(?:-[a-z0-9-]+)?)\//, OPENCODE_LEGACY_NPM_PACKAGE]
+]
+
+/** The one OpenCode package a path or a launcher script names; undefined for none, or both. */
+function packageNamedIn(text: string): string | undefined {
+  const normalized = text.replace(/\\/g, '/').toLowerCase()
+  const named = PACKAGE_FOLDERS.filter(([folder]) => folder.test(normalized))
+  return named.length === 1 ? named[0]![1] : undefined
+}
+
+/** A launcher script's text; a file larger than a script (the executable itself) is not read. */
+function readLauncher(path: string): string | undefined {
+  try {
+    if (statSync(path).size > 64 * 1024) return undefined
+    const bytes = readFileSync(path)
+    // Bun's `.bunx` names its target in UTF-16.
+    return bytes.includes(0) ? bytes.toString('utf16le') : bytes.toString('utf8')
+  } catch {
+    return undefined
+  }
+}
+
+function realPath(path: string): string | undefined {
+  try {
+    return realpathSync(path)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Which OpenCode package an npm, pnpm or bun copy came from. The executable's real path names it
+ * (`lib/node_modules/opencode-ai/bin/opencode`, bun's `install/global/node_modules/...`); where PATH
+ * holds a launcher instead (npm's `opencode.cmd` on Windows, pnpm's scripts, bun's `opencode.bunx`
+ * beside its `.exe` on Windows), the launcher's text names it. Undefined when nothing does.
+ */
+export function opencodeNpmPackageOf(
+  path: string,
+  io: { realpath?: (path: string) => string | undefined; read?: (path: string) => string | undefined } = {}
+): string | undefined {
+  const target = (io.realpath ?? realPath)(path)
+  for (const candidate of target ? [target, path] : [path]) {
+    const named = packageNamedIn(candidate)
+    if (named) return named
+  }
+  const read = io.read ?? readLauncher
+  const launchers = /\.exe$/i.test(path) ? [path.replace(/\.exe$/i, '.bunx')] : [path]
+  for (const launcher of launchers) {
+    const text = read(launcher)
+    const named = text ? packageNamedIn(text) : undefined
+    if (named) return named
+  }
+  return undefined
+}
+
+/**
+ * Which Homebrew formula a Homebrew copy came from, named as `brew info` and `brew upgrade` take it.
+ * The keg it links to names the formula (`Cellar/opencode-v2/2.4.1/bin/opencode`); its install
+ * record names the tap, since homebrew-core and OpenCode's tap both have an `opencode` (2.x and
+ * 1.x). Undefined when the formula is not OpenCode's, or which `opencode` it is cannot be read.
+ */
+export function opencodeBrewFormulaOf(
+  path: string,
+  io: { realpath?: (path: string) => string | undefined; read?: (path: string) => string | undefined } = {}
+): string | undefined {
+  const target = ((io.realpath ?? realPath)(path) ?? path).replace(/\\/g, '/')
+  const keg = /^(.*\/cellar\/([^/]+)\/[^/]+)\//i.exec(target)
+  const name = keg?.[2]?.toLowerCase()
+  if (!keg || !name || !BREW_FORMULAE.has(name)) return undefined
+  let tap: unknown
+  try {
+    tap = (JSON.parse((io.read ?? readLauncher)(`${keg[1]}/INSTALL_RECEIPT.json`) ?? 'null') as { source?: { tap?: unknown } } | null)?.source?.tap
+  } catch {
+    tap = undefined
+  }
+  if (typeof tap === 'string' && tap) return tap === 'homebrew/core' ? name : `${tap}/${name}`
+  // Only OpenCode's tap has `opencode-v2`.
+  return name === 'opencode-v2' ? `${OPENCODE_TAP}/${name}` : undefined
+}
+
+/** The npm package or Homebrew formula an OpenCode copy came from (`HarnessDriver.packageOf`). */
+export function opencodePackageOf(path: string, owner: InstallOwner): string | undefined {
+  return owner === 'brew' ? opencodeBrewFormulaOf(path) : opencodeNpmPackageOf(path)
+}
+
+/**
+ * The command that updates an OpenCode its owner installed, when Mousse knows one. A package
+ * manager's copy updates within the package or formula it came from (`pkg`): none for an npm, pnpm
+ * or bun copy when that is unknown; OpenCode's own upgrade for a Homebrew one.
+ */
+export function opencodeUpdateCommand(owner: InstallOwner, pkg?: string): string | undefined {
   switch (owner) {
-    // OpenCode's own upgrade finds how it was installed, Homebrew included (core or a tap).
     case 'standalone':
-    case 'brew':
       return 'opencode upgrade'
+    case 'brew':
+      // OpenCode's own upgrade finds how it was installed, Homebrew included.
+      return pkg ? `brew upgrade ${pkg}` : 'opencode upgrade'
     case 'npm':
-      return `npm install -g ${OPENCODE_NPM_PACKAGE}@latest`
+      return pkg ? `npm install -g ${pkg}@latest` : undefined
     case 'pnpm':
-      return `pnpm add -g ${OPENCODE_NPM_PACKAGE}@latest`
+      return pkg ? `pnpm add -g ${pkg}@latest` : undefined
     case 'bun':
-      return `bun add -g ${OPENCODE_NPM_PACKAGE}@latest`
+      return pkg ? `bun add -g ${pkg}@latest` : undefined
     default:
       return undefined
   }
@@ -72,6 +178,8 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
     binaryNames: cliNames('opencode'),
     ...compatibilityFields('opencode'),
     latestVersion: { kind: 'npm', package: OPENCODE_NPM_PACKAGE },
+    // npm and Homebrew each have two OpenCodes: a copy follows the one it came from.
+    packageOf: opencodePackageOf,
     // One sign-in per computer (OpenCode's XDG folders): a second entry would share it.
     multiInstance: false,
     privateHome: false,

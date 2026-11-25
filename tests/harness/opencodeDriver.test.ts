@@ -19,11 +19,11 @@ import { DIST_DIR } from '../../src/mms/harness/agents/receipt'
 import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { installOwner, type DriverContext, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
-import { OPENCODE_AGENT_ID, opencodeDriver } from '../../src/mms/harness/drivers/opencode'
+import { OPENCODE_AGENT_ID, opencodeBrewFormulaOf, opencodeDriver, opencodeNpmPackageOf } from '../../src/mms/harness/drivers/opencode'
 import { findOnPath, instanceEnv, opencodeStandalonePaths, type InstanceEnv } from '../../src/mms/harness/env'
-import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
+import { latestSourceFor, type HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
-import { LATEST_TTL_MS, LatestVersionCache } from '../../src/mms/harness/latest'
+import { LATEST_TTL_MS, LatestVersionCache, type LatestVersionSource } from '../../src/mms/harness/latest'
 import { probeVersion, updateAffordance } from '../../src/mms/harness/status'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { LoginSession } from '../../src/mms/providers/LoginSession'
@@ -182,21 +182,126 @@ describe('finding the user’s opencode', () => {
   })
 })
 
-describe('the update command of the user’s own opencode', () => {
-  // The owner is read from where the executable is (`installOwnerOf`).
-  const ROWS: Array<[InstallOwner, string | undefined]> = [
-    ['standalone', 'opencode upgrade'],
-    // OpenCode's own upgrade finds Homebrew, whichever formula or tap installed it.
-    ['brew', 'opencode upgrade'],
-    ['npm', 'npm install -g @opencode/cli@latest'],
-    ['pnpm', 'pnpm add -g @opencode/cli@latest'],
-    ['bun', 'bun add -g @opencode/cli@latest'],
-    ['winget', undefined],
-    ['unknown', undefined]
+describe('which OpenCode package an npm, pnpm or bun copy came from', () => {
+  // OpenCode is on npm twice: `@opencode/cli` (2.x) and the older `opencode-ai`, still published as
+  // the 1.x line. A copy is compared with, and updated within, the package it came from.
+  /** Recorded from npm 11.19.0 on Windows: `npm install -g opencode-ai@1.19.6` (or `@opencode/cli@2.4.1`) writes this `opencode.cmd`. */
+  const npmCmd = (folder: string) =>
+    `@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\${folder}\\bin\\opencode.exe"   %*\r\n`
+  /** Hand-authored after pnpm's launcher script (`$basedir/global/5/node_modules/<package>/...`); pnpm was not run. */
+  const pnpmSh = (folder: string) =>
+    `#!/bin/sh\nbasedir=$(dirname "$0")\nexport NODE_PATH="$basedir/global/5/.pnpm/node_modules"\nexec "$basedir/global/5/node_modules/${folder}/bin/opencode.exe" "$@"\n`
+
+  // [what, the path on PATH, where it really is (a link's target), its launcher's text, the package]
+  const ROWS: Array<[string, string, string | undefined, string | undefined, string | undefined]> = [
+    ['npm on macOS/Linux, linked into lib/node_modules', '/usr/local/bin/opencode', '/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe', undefined, 'opencode-ai'],
+    ['npm on macOS/Linux, the 2.x package', '/usr/local/bin/opencode', '/usr/local/lib/node_modules/@opencode/cli/bin/opencode.exe', undefined, '@opencode/cli'],
+    ['a link to the 1.x per-platform build', '/usr/local/bin/opencode', '/usr/local/lib/node_modules/opencode-darwin-arm64/bin/opencode', undefined, 'opencode-ai'],
+    ['a link to the 2.x per-platform build', '/usr/local/bin/opencode', '/usr/local/lib/node_modules/@opencode/cli-linux-x64-musl/bin/opencode', undefined, '@opencode/cli'],
+    ['bun on macOS/Linux', '/home/u/.bun/bin/opencode', '/home/u/.bun/install/global/node_modules/opencode-ai/bin/opencode.exe', undefined, 'opencode-ai'],
+    ['pnpm’s store layout', '/home/u/.local/share/pnpm/opencode', '/home/u/.local/share/pnpm/global/5/.pnpm/@opencode+cli@2.4.1/node_modules/@opencode/cli/bin/opencode.exe', undefined, '@opencode/cli'],
+    ['npm on Windows (its launcher names the package)', 'C:\\Users\\u\\AppData\\Roaming\\npm\\opencode.cmd', undefined, npmCmd('opencode-ai'), 'opencode-ai'],
+    ['npm on Windows, the 2.x package', 'C:\\Users\\u\\AppData\\Roaming\\npm\\opencode.cmd', undefined, npmCmd('@opencode\\cli'), '@opencode/cli'],
+    ['pnpm’s launcher script', '/home/u/.local/share/pnpm/opencode', undefined, pnpmSh('opencode-ai'), 'opencode-ai'],
+    ['a Windows path that itself names the package', 'C:\\Users\\U\\AppData\\Roaming\\npm\\node_modules\\@opencode\\cli\\bin\\opencode.exe', undefined, undefined, '@opencode/cli'],
+    ['a launcher that names neither', '/usr/local/bin/opencode', undefined, '#!/bin/sh\nexec /opt/other/opencode "$@"\n', undefined],
+    ['a launcher that names both', '/usr/local/bin/opencode', undefined, `${pnpmSh('opencode-ai')}${pnpmSh('@opencode/cli')}`, undefined],
+    ['a package of a similar name', '/usr/local/bin/opencode', '/usr/local/lib/node_modules/opencode-ai-plugin/bin/opencode', undefined, undefined],
+    ['nothing readable', '/usr/local/bin/opencode', undefined, undefined, undefined]
   ]
 
-  it.each(ROWS)('a newer version for an %s copy offers %s', (owner, command) => {
-    const update = updateAffordance(opencodeDriver(), { path: '/x/opencode', source: 'path', owner, version: '2.4.0' }, { state: 'untested' }, '2.4.1')
+  it.each(ROWS)('%s', (_what, path, target, launcher, expected) => {
+    const read = (file: string) => (file === path ? launcher : undefined)
+    expect(opencodeNpmPackageOf(path, { realpath: () => target, read })).toBe(expected)
+  })
+
+  it('reads the launchers on disk: npm’s `.cmd`, and bun’s UTF-16 `.bunx` beside its `.exe` on Windows', () => {
+    const dir = tempDir('mousse-opencode-launchers-')
+    writeFileSync(join(dir, 'opencode.cmd'), npmCmd('opencode-ai'))
+    expect(opencodeNpmPackageOf(join(dir, 'opencode.cmd'))).toBe('opencode-ai')
+    // Hand-authored after bun's `.bunx` (its target, relative, in UTF-16); bun was not run.
+    writeFileSync(join(dir, 'opencode.exe'), Buffer.alloc(128 * 1024))
+    writeFileSync(join(dir, 'opencode.bunx'), Buffer.from('..\\install\\global\\node_modules\\@opencode\\cli\\bin\\opencode.exe"', 'utf16le'))
+    expect(opencodeNpmPackageOf(join(dir, 'opencode.exe'))).toBe('@opencode/cli')
+  })
+
+  it('a copy installed from `opencode-ai` is compared with `opencode-ai` and updated with it, never with `@opencode/cli`', async () => {
+    // npm's global layout on Windows: the launcher on PATH, the package beside it. On Windows the
+    // launcher resolves to the program it runs (`resolveWindowsShim`), whose path names the package;
+    // elsewhere the launcher's text does.
+    const prefix = join(tempDir('mousse-opencode-npm-'), 'npm')
+    mkdirSync(join(prefix, 'node_modules', 'opencode-ai', 'bin'), { recursive: true })
+    writeFileSync(join(prefix, 'node_modules', 'opencode-ai', 'bin', 'opencode.exe'), 'MZ not a real program', { mode: 0o755 })
+    writeFileSync(join(prefix, 'opencode.cmd'), npmCmd('opencode-ai'), { mode: 0o755 })
+    const { driver, env } = userSetup()
+    const probe = await probeVersion({ driver, env, override: join(prefix, 'opencode.cmd'), timeoutMs: 10_000 })
+    expect(probe.binary).toMatchObject({ owner: 'npm', package: 'opencode-ai' })
+    expect(latestSourceFor(driver, probe.binary)).toEqual({ kind: 'npm', package: 'opencode-ai' })
+    const update = updateAffordance(driver, { ...probe.binary!, version: '1.19.0' }, { state: 'untested' }, '1.19.6')
+    expect(update).toMatchObject({ kind: 'advisory', command: 'npm install -g opencode-ai@latest', latestVersion: '1.19.6' })
+  })
+})
+
+describe('which Homebrew formula a Homebrew copy came from', () => {
+  // homebrew-core's `opencode` is 2.x; OpenCode's tap has `opencode` (1.x) and `opencode-v2` (2.x).
+  /** The `source` part of a keg's `INSTALL_RECEIPT.json`, as Homebrew writes it. */
+  const receipt = (tap: string) => JSON.stringify({ homebrew_version: '4.6.0', source: { tap, spec: 'stable' } })
+  // [what, where the link on PATH leads, the keg's install record, the formula]
+  const ROWS: Array<[string, string | undefined, string | undefined, string | undefined]> = [
+    ['homebrew-core', '/opt/homebrew/Cellar/opencode/2.4.0/bin/opencode', receipt('homebrew/core'), 'opencode'],
+    ['OpenCode’s tap, the 1.x line', '/opt/homebrew/Cellar/opencode/1.19.6/bin/opencode', receipt('anomalyco/tap'), 'anomalyco/tap/opencode'],
+    ['OpenCode’s tap, 2.x', '/usr/local/Cellar/opencode-v2/2.4.1/bin/opencode', receipt('anomalyco/tap'), 'anomalyco/tap/opencode-v2'],
+    ['`opencode-v2` without an install record', '/home/linuxbrew/.linuxbrew/Cellar/opencode-v2/2.4.1/bin/opencode', undefined, 'anomalyco/tap/opencode-v2'],
+    ['`opencode` without an install record (core or tap?)', '/opt/homebrew/Cellar/opencode/2.4.0/bin/opencode', undefined, undefined],
+    ['an unreadable install record', '/opt/homebrew/Cellar/opencode/2.4.0/bin/opencode', '{not json', undefined],
+    ['another formula', '/opt/homebrew/Cellar/sst/3.0.0/bin/opencode', receipt('homebrew/core'), undefined],
+    ['a link that leads nowhere in a keg', undefined, undefined, undefined]
+  ]
+
+  it.each(ROWS)('%s', (_what, target, record, expected) => {
+    const kegOf = (path: string) => path.split('/bin/')[0]
+    const read = (file: string) => (target && file === `${kegOf(target)}/INSTALL_RECEIPT.json` ? record : undefined)
+    expect(opencodeBrewFormulaOf('/opt/homebrew/bin/opencode', { realpath: () => target, read })).toBe(expected)
+  })
+
+  it('a copy from OpenCode’s tap is compared with that formula and upgraded with it, never with homebrew-core’s', async () => {
+    const keg = join(tempDir('mousse-opencode-brew-'), 'Cellar', 'opencode', '1.19.6')
+    const program = fakeOpencode(join(keg, 'bin'))
+    writeFileSync(join(keg, 'INSTALL_RECEIPT.json'), receipt('anomalyco/tap'))
+    const { driver, env } = userSetup()
+    const probe = await probeVersion({ driver, env, override: program, timeoutMs: 10_000 })
+    expect(probe.binary).toMatchObject({ owner: 'brew', package: 'anomalyco/tap/opencode' })
+    expect(latestSourceFor(driver, probe.binary)).toEqual({ kind: 'brew', name: 'anomalyco/tap/opencode' })
+    const update = updateAffordance(driver, { ...probe.binary!, version: '1.19.0' }, { state: 'untested' }, '1.19.6')
+    expect(update).toMatchObject({ kind: 'advisory', command: 'brew upgrade anomalyco/tap/opencode', latestVersion: '1.19.6' })
+  })
+})
+
+describe('the update of the user’s own opencode', () => {
+  // The owner is read from where the executable is (`installOwnerOf`); a package manager's copy's
+  // package or formula from its path (`opencodePackageOf`).
+  // [owner, its package or formula, where its newest version is read, the command offered]
+  const ROWS: Array<[InstallOwner, string | undefined, LatestVersionSource | undefined, string | undefined]> = [
+    ['standalone', undefined, { kind: 'npm', package: '@opencode/cli' }, 'opencode upgrade'],
+    // Homebrew's formula the copy came from, which `brew upgrade` reaches.
+    ['brew', 'opencode', { kind: 'brew', name: 'opencode' }, 'brew upgrade opencode'],
+    ['brew', 'anomalyco/tap/opencode', { kind: 'brew', name: 'anomalyco/tap/opencode' }, 'brew upgrade anomalyco/tap/opencode'],
+    // Which `opencode` is unknown: nothing to compare with; OpenCode's own upgrade finds Homebrew.
+    ['brew', undefined, undefined, 'opencode upgrade'],
+    ['npm', '@opencode/cli', { kind: 'npm', package: '@opencode/cli' }, 'npm install -g @opencode/cli@latest'],
+    ['npm', 'opencode-ai', { kind: 'npm', package: 'opencode-ai' }, 'npm install -g opencode-ai@latest'],
+    ['pnpm', 'opencode-ai', { kind: 'npm', package: 'opencode-ai' }, 'pnpm add -g opencode-ai@latest'],
+    ['bun', '@opencode/cli', { kind: 'npm', package: '@opencode/cli' }, 'bun add -g @opencode/cli@latest'],
+    // Which package is unknown: nothing to compare with, nothing to run.
+    ['npm', undefined, undefined, undefined],
+    ['winget', undefined, { kind: 'npm', package: '@opencode/cli' }, undefined],
+    ['unknown', undefined, { kind: 'npm', package: '@opencode/cli' }, undefined]
+  ]
+
+  it.each(ROWS)('an %s copy of %s is compared with %o and offers %s', (owner, pkg, source, command) => {
+    const binary = { path: '/x/bin/opencode', source: 'path' as const, owner, version: '2.4.0', ...(pkg ? { package: pkg } : {}) }
+    expect(latestSourceFor(opencodeDriver(), binary)).toEqual(source)
+    const update = updateAffordance(opencodeDriver(), binary, { state: 'untested' }, '2.4.1')
     if (command) expect(update).toMatchObject({ kind: 'advisory', command, latestVersion: '2.4.1' })
     else expect(update).toEqual({ kind: 'notice', latestVersion: '2.4.1' })
   })

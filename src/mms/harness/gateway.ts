@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
+import { isPackageOwner, privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -623,14 +623,20 @@ const SHELL_PATH_WAIT_MS = 3_000
 const LATEST_CHECK_INTERVAL_MS = 60 * 60_000
 
 /**
- * Where the newest version of an instance's CLI is read: Homebrew's own tap for a copy Homebrew
- * installed (the version `brew upgrade` reaches), else the driver's source.
+ * Where the newest version of an instance's CLI is read: for a driver published under several
+ * names, the package or formula the copy came from (none when that is unknown); else Homebrew's
+ * own tap for a copy Homebrew installed (the version `brew upgrade` reaches); else the driver's source.
  */
-export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
-  if (binary?.owner === 'brew' && driver.brewName) {
-    const brew = binary.path ? join(dirname(binary.path), 'brew') : undefined
-    return { kind: 'brew', name: driver.brewName, ...(brew && existsSync(brew) ? { brew } : {}) }
+export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName' | 'packageOf'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
+  const brewSource = (name: string): LatestVersionSource => {
+    const brew = binary?.path ? join(dirname(binary.path), 'brew') : undefined
+    return { kind: 'brew', name, ...(brew && existsSync(brew) ? { brew } : {}) }
   }
+  if (driver.packageOf && isPackageOwner(binary?.owner)) {
+    if (!binary?.package) return undefined
+    return binary.owner === 'brew' ? brewSource(binary.package) : { kind: 'npm', package: binary.package }
+  }
+  if (binary?.owner === 'brew' && driver.brewName) return brewSource(driver.brewName)
   return driver.latestVersion
 }
 

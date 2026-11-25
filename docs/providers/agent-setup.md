@@ -99,11 +99,16 @@ folder (`$OPENCODE_INSTALL_DIR`, `$XDG_BIN_DIR`, `~/bin`, `~/.opencode/bin`).
   own arguments and variables after, and with `OPENCODE_DISABLE_AUTOUPDATE=1`, so it never replaces
   its own files. An executable set on the entry runs instead, even when the managed copy's files
   changed. The user's own `opencode` runs as the user set it up.
-- **Updates.** The user's own `opencode` is compared with `@opencode/cli` on npm and offers its owner's
-  command: `opencode upgrade` for the installer's or Homebrew's copy (OpenCode's own upgrade finds
-  how it was installed), or the `npm`, `pnpm` or `bun` global install. A managed copy follows the
-  ACP registry instead: Update installs the registry's newer release in one click, as Reinstall
-  does; a newer npm release the registry does not list yet offers nothing.
+- **Updates.** The user's own `opencode` is compared with where its owner updates it from, and
+  offers the owner's command. The installer's copy: `@opencode/cli` on npm, `opencode upgrade`.
+  Homebrew's copy: the formula its keg and install record name (`brew info`), `brew upgrade` of it;
+  homebrew-core's `opencode` is 2.x, OpenCode's tap has `anomalyco/tap/opencode` (1.x) and
+  `anomalyco/tap/opencode-v2`. An `npm`, `pnpm` or `bun` copy: the package its path or launcher
+  script names, `@opencode/cli` or the older `opencode-ai` (still published as the 1.x line), and a
+  global install of that same package. When Mousse cannot tell which package or formula, nothing is
+  compared, and only Homebrew's copy offers a command (`opencode upgrade`). A managed copy follows
+  the ACP registry instead: Update installs the registry's newer release in one click, as
+  Reinstall does; a newer npm release the registry does not list yet offers nothing.
 - **More ACP agents…** no longer lists `opencode` or `opencode-v2` (the registry's legacy alias of
   the same release). Entries added from the registry
   before keep working as registry agents.

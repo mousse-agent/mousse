@@ -11,7 +11,7 @@ import { statSync } from 'node:fs'
 import type { BinaryFingerprint } from '../../shared/harness/types'
 import { parseCliVersion } from './cliConfig'
 import { knownProblemOf } from './compatibility'
-import { compareVersions, installOwnerOf, updateNeedsElevation, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig, type ManagedInstall } from './driver'
+import { compareVersions, installOwnerOf, isPackageOwner, updateNeedsElevation, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig, type ManagedInstall } from './driver'
 import { resolveBinary, type InstanceEnv } from './env'
 import { runHarness } from './spawn'
 
@@ -83,7 +83,7 @@ export function updateAffordance(
   const latestVersion = newer && latest ? { latestVersion: latest, ...untested } : {}
   const owner = binary.owner ?? 'unknown'
   if (owner === 'managed' && driver.canInstall) return { kind: 'one_click', owner, ...latestVersion }
-  const command = driver.updateCommand?.(owner)
+  const command = driver.updateCommand?.(owner, binary.package)
   if (command) return { kind: 'advisory', command, ...latestVersion, ...(binary.needsElevation ? { manual: true } : {}) }
   // The version is worth showing; without a proven owner there is nothing to run or click.
   return newer && latest ? { kind: 'notice', latestVersion: latest, ...untested } : undefined
@@ -142,7 +142,7 @@ export interface VersionProbe {
  * script (`scripts/check-agent-versions.mjs`) runs it on its own, and `probeInstance` runs it first.
  */
 export async function probeVersion(input: {
-  driver: Pick<HarnessDriver, 'kind' | 'label' | 'binaryNames' | 'canInstall' | 'testedVersions' | 'knownBroken' | 'versionArgs'>
+  driver: Pick<HarnessDriver, 'kind' | 'label' | 'binaryNames' | 'canInstall' | 'testedVersions' | 'knownBroken' | 'versionArgs' | 'packageOf'>
   env: InstanceEnv
   /** The explicit executable, when one is set. */
   override?: string
@@ -198,7 +198,14 @@ export async function probeVersion(input: {
   }
 
   const owner = installOwnerOf(resolved.launch.path, resolved.source)
-  const binary: InstanceBinary = { path: resolved.launch.path, source: resolved.source, owner, ...(updateNeedsElevation(resolved.launch.path, owner) ? { needsElevation: true } : {}) }
+  const pkg = isPackageOwner(owner) ? driver.packageOf?.(resolved.launch.path, owner) : undefined
+  const binary: InstanceBinary = {
+    path: resolved.launch.path,
+    source: resolved.source,
+    owner,
+    ...(pkg ? { package: pkg } : {}),
+    ...(updateNeedsElevation(resolved.launch.path, owner) ? { needsElevation: true } : {})
+  }
   const fingerprint = fingerprintOf(resolved.launch.path)
   const fromReceipt = resolved.source === 'managed' && managed?.receiptHash ? { receiptHash: managed.receiptHash } : {}
   let runs: ProbeResult['runs'] = { state: 'yes' }
