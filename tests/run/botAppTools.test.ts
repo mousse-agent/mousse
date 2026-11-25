@@ -7,7 +7,8 @@ import { describe, expect, it } from 'vitest'
 import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
 import type { BotModelChange, BotToolHost } from '../../src/mms/bots/seams'
 import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
-import { botTools, USE_MODEL_REFUSED, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
+import { botTools, USE_MODEL_REFUSED, workNoteAnswer, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
+import { SILENT_REPLY } from '../../src/shared/bots/personal/wakes'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotLane, BotModelSlots, BotSchedule } from '../../src/shared/bots/personal/definition'
@@ -332,6 +333,33 @@ describe('the bot speaks of its work as its own', () => {
     expect(late.value.note).toContain('offer to do it again')
     expect(late.value).not.toHaveProperty('reaches')
     expect(bots.activity.drain('d1')).toEqual([])
+  })
+
+  it('a note passed on from a turn the owner did not start: no promise to the owner, and silence unless they need to know now', async () => {
+    const asked: string[] = []
+    const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now', fromOwner: (_botId, from) => { asked.push(from); return false } } })
+    const noted = await bots.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })
+    // Asked about the turn the tool runs in.
+    expect(asked).toEqual(['a1'])
+    expect(noted.value).toMatchObject({ result: 'noted', reaches: 'now' })
+    expect(noted.value.note).toContain('"SSD search"')
+    expect(noted.value.note).toContain(SILENT_REPLY)
+    expect(noted.value.note).toMatch(/don't tell them they did/)
+    expect(noted.value.note).not.toContain('I\'ll')
+    // Wherever the work takes it in, the answer is the same.
+    for (const reach of ['after_compaction', 'step_end', 'start'] as const) {
+      const answer = workNoteAnswer(reach, 'Prices changed since you started.', 'SSD search', { fromOwner: false })
+      expect(answer).toContain(SILENT_REPLY)
+      expect(answer).not.toContain('I\'ll')
+    }
+
+    // The owner's own turn: the bot still says, as itself, what it does from now on.
+    for (const fromOwner of [() => true, undefined]) {
+      const owner = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now', ...(fromOwner ? { fromOwner } : {}) } })
+      const answer = (await owner.call('work_note', { workId: 'w1', note: 'Use the open tab.' })).value.note
+      expect(answer).toContain('I\'ll … from here on')
+      expect(answer).not.toContain(SILENT_REPLY)
+    }
   })
 
   it('stopping a job: the chip names it, as "started" does', async () => {

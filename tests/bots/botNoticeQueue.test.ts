@@ -263,4 +263,41 @@ describe('the related-jobs line', () => {
     await threadEnds('t3', 'Fixed C.')
     expect(prompt(noticeOf(followUp).id)).toContain('Nothing else for that request is still going.')
   })
+
+  it('names the bot\'s own work for the same request while it has not ended, never work for another request', async () => {
+    f.host.noticeSettleMs = 0
+    const related = (id: string) => prompt(id).split('\n').find((line) => /^(Still going|Nothing else)/.test(line))
+    // Another request's work, still running throughout.
+    await f.bots.service.chatSend({ botId, text: 'Watch the build', clientRequestId: 'm0' })
+    const other = running()[0]!
+    const otherTurn = await start(f, other.id)
+    await f.bots.tools.work.start(botId, other.id, { title: 'Build watch', brief: 'Watch the build.', key: 'm0:build' })
+    await finish(f, otherTurn.payload, 'completed', { text: 'Watching it.' })
+    // This request: two threads, and work of the bot's own beside them.
+    await f.bots.service.chatSend({ botId, text: 'Fix pages A and B in Web and compare prices', clientRequestId: 'm1' })
+    const turn = running()[0]!
+    const { payload } = await start(f, turn.id)
+    const jobIds = ['Page A', 'Page B'].map((title, index) => {
+      threads.set(`t${index + 1}`, { status: 'running', title })
+      return f.bots.openJob(botId, turn.id, { threadId: `t${index + 1}`, title, sent: title }).jobId
+    })
+    const { workId } = await f.bots.tools.work.start(botId, turn.id, { title: 'Compare prices', brief: 'Compare prices.', key: 'm1:prices' })
+    await finish(f, payload, 'completed', { text: 'On all three.' })
+
+    await threadEnds('t1', 'Fixed A.')
+    const first = noticeOf(jobIds[0]!).id
+    expect(related(first)).toMatch(/^Still going for the same request: /)
+    expect(related(first)).toContain('"Page B"')
+    expect(related(first)).toContain('"Compare prices"')
+    expect(related(first)).not.toContain('Build watch')
+    const notice = await start(f, first)
+    await finish(f, notice.payload, 'completed', { text: '[SILENT]' })
+
+    // The work ends: it no longer goes on for the request.
+    const work = await start(f, workId)
+    await finish(f, work.payload, 'completed', { text: 'Prices compared.' })
+    expect(f.store.activation(workId)!.status).toBe('done')
+    await threadEnds('t2', 'Fixed B.')
+    expect(related(noticeOf(jobIds[1]!).id)).toBe('Nothing else for that request is still going.')
+  })
 })
