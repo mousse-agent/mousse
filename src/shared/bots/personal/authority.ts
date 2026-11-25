@@ -242,6 +242,11 @@ export interface BotAuthority {
    */
   threadsReadOnly?: 'not_owner'
   /**
+   * The tools this turn holds that what started it may not call, each with what the bot is told (`BOT_TURN_KINDS`): a
+   * chat turn is offered the same tools whatever started it, and a cell that says no is refused here, at the call.
+   */
+  turnRefusals?: ReadonlyMap<string, string>
+  /**
    * The turn is the main turn of work its owner asked for in its chat (a work run that the owner's own chat turn
    * started): never a schedule, a reminder's work, a run started by hand or work another bot's message led to. Only such
    * a turn may ask its owner to set up computer use (`computer_use_request`).

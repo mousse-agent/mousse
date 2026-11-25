@@ -6,6 +6,7 @@ import { dataFrame } from '../../../shared/bots/personal/dataFrames'
 import { pageChangePath, writePageChange, removePageChange } from '../pageChangeFiles'
 import { PageChecks, pageSetting, type PageSetting } from '../pageChecks'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
+import { BOT_RELAY_OWNER_ONLY_TEXT, BOT_TURN_KINDS, turnRefusals, turnRights, type BotTurnRights } from './turnKinds'
 import { fastNotice, noticeClass, unattendedChatTurn, type NoticeClass } from './unattended'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
@@ -422,6 +423,8 @@ export const BOT_MCP_UNAVAILABLE_TEXT = 'Your owner has no MCP servers set up in
 export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
 /** What Allow on an MCP ask whose server has not listed its tools yet answers (the card's Allow is off meanwhile). */
 const MCP_ASK_LOADING_TEXT = 'Its tools are still loading: Allow turns on once they are listed.'
+/** `ask_owner` or `work_wait` from a scheduled run whose schedule the owner removed while it ran (`scheduleGone`). */
+const SCHEDULE_GONE_TEXT = "Your owner removed this schedule while you ran, so nothing waits on this run: it can't ask or wait. End it with your report."
 
 /** An MCP ask that lists no tools: its server has not answered, and Allow would grant nothing the owner has seen. */
 function waitsForTools(permission: BotAskRequest): boolean {
@@ -1810,7 +1813,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const parked = this.store.laneActivations(botId, 'run', ['blocked']).find(row => same(row) && workWaits(row))
       const previous = parked ?? this.store.laneActivations(botId, 'run', ['running', 'waiting_grant']).find(same)
       // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
-      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id)?.card_json != null ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
+      // A run parked on a time or an event carries on by itself: it waits for nothing of the owner's.
+      if (previous) { skip = parked && workWaitRule(parked) === WORK_WAIT_RULES.waiting ? 'previous_run_waiting' : previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id)?.card_json != null ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
       const inserted = this.store.insertActivationOnce({
         id,
         botId,
@@ -3006,6 +3010,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Work time has no limit: each turn gets the same window, and one that reaches it goes on in a fresh turn.
     const remainingMs = BOT_TURN_WINDOW_MS
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
+    const rights = turnRightsOf(row)
     const compileWith = (manifest: BotManifest, digest: string) => compileBotThread({
       grant: manifest,
       digest,
@@ -3026,7 +3031,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // (the chat without its minutes-long watch). Mousse's look: in both lanes. The owner's scheduled jobs, secrets and
       // quick actions (`owner`): in both lanes, making and changing jobs only where it may act on threads. None of them
       // needs a grant. Its task list.
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: row.lane === 'chat', threads: 'all', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row), catalogue: this.catalogueOf(selection.instanceId) }
+      // A run's main turn holds what its start allows (`BOT_TURN_KINDS`): reminders and background commands (detached),
+      // asking, waiting and messaging other bots, each as its row says.
+      botTools: { workWaiting: row.lane === 'run' && rights.workWait, escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: row.lane === 'chat' || rights.watchStart, timers: row.lane === 'run' && rights.remind, threads: 'all', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run' && rights.subagents, questions: row.lane === 'chat' || rights.asksOwner, cards: true, bots: row.lane === 'chat' || rights.botSend, catalogue: this.catalogueOf(selection.instanceId) }
     })
     const compiled = compileWith(effective, grant.digest)
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -4019,6 +4026,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(input.mcpTools?.length ? { mcpTools: input.mcpTools } : {}),
       // Why a start, message or Stop of the owner's threads is refused in this turn, in its own words.
       ...(readOnly ? { threadsReadOnly: readOnly } : {}),
+      // What the turn holds but its start may not call (`BOT_TURN_KINDS`): a chat turn is offered every chat tool
+      // whatever started it, so the start's cells are refused at the call.
+      ...(input.role === 'activation' && turnRefusalsOf(row, base.appTools).size ? { turnRefusals: turnRefusalsOf(row, base.appTools) } : {}),
       // Whether the turn still holds an app tool now, asking nobody and showing no chip (a wait that ended after Remove).
       stillHolds: (tool) => {
         const decided = base.check({ kind: 'app', tool, args: {} })
@@ -4102,7 +4112,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (input.role === 'activation' && input.contexts.length)
       authority.consult = (request) => this.consult({ row, mainN: input.mainN, controller }, request)
     // A run's main turn may split its job among subagents: never the chat, a consult or a subagent (one level).
-    if (input.role === 'activation' && row.lane === 'run')
+    if (input.role === 'activation' && row.lane === 'run' && turnRightsOf(row).subagents)
       authority.subagents = this.subagentHandle({ row, mainN: input.mainN, controller })
     return authority
   }
@@ -4434,6 +4444,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Outside a turn (before it started) no reply follows: the card is posted now.
     if (raised.kind === 'wall' && !this.live.has(activationId)) this.announceWall(raised.escalation)
     return raised.kind === 'wall' ? { kind: 'escalated', permission: this.chat.card(raised.escalation).title } : { kind: 'ended' }
+  }
+
+  /**
+   * A scheduled run whose schedule is gone (the owner removed it while the run went on), unless the run ended its own
+   * schedule (`completed`). It may not park on a question or a wait: a removed schedule's parked run is cancelled
+   * (`cancelRemovedScheduleRun`), so no answer or wait could carry it on.
+   */
+  private scheduleGone(row: BotActivationRow): boolean {
+    if (row.trigger.kind !== 'schedule' || row.trigger.completed) return false
+    return this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId)) || Boolean(this.host.schedules && !this.host.schedules.get(row.botId, row.trigger.scheduleId))
   }
 
   private removedExecutingSchedule(row: BotActivationRow): boolean {
@@ -6005,7 +6025,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
-      const durableWork = current.trigger.kind === 'work' || current.trigger.kind === 'schedule' && Boolean(this.actions.forWork(current.id))
+      // A scheduled run reads what it waited for as work does once it parked: a held call, a wait or a question.
+      const durableWork = current.trigger.kind === 'work' || current.trigger.kind === 'schedule' && Boolean(this.actions.forWork(current.id) || this.store.workWait(current.id) || this.store.activationQuestions(current.id).some((question) => question.lane === 'run'))
       const readAtStart = durableWork && Boolean(this.store.workWait(current.id) || this.actions.forWork(current.id))
       const answers = durableWork ? this.store.unreadWorkAnswers(current.id) : input.answers ?? []
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`): the chat's
@@ -6050,7 +6071,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // reading updates: a failed previous turn is not a permanent ending once this path accepts it.
       // This and the dispatch insert commit together, or both roll back if prompt assembly fails.
       if (!this.store.moveActivation(row.id, [current.status], 'running', { endReason: null })) return { kind: 'none' }
-      const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
+      const waits = durableWork ? this.store.unreadWorkWaits(current.id) : []
       const actions = durableWork ? this.store.unreadWorkActions(current.id) : []
       const refusals = this.workRefusalUpdates(current.id)
       const actionCaused = current.endReason === 'approval_answered' ? actions.at(-1) : undefined
@@ -8646,8 +8667,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * the turn's reply when the turn ends (`postReply`); nothing waits on it, and it grants nothing. A turn that asked for a
    * permission first (`escalate`) asks it once the owner answered that: a tap at a wall would count as Not now. At most
    * `MAX_QUESTIONS_PER_CHAT_TURN` per chat turn, `MAX_OPEN_QUESTIONS_PER_BOT` open and `MAX_NEW_QUESTIONS_PER_DAY` a day;
-   * over a cap the bot decides for itself. Work the owner asked for asks too, and waits for the answer (`askFromWork`);
-   * scheduled runs, consults and subagents are never offered it.
+   * over a cap the bot decides for itself. Work and a scheduled run ask too, and wait for the answer (`askFromWork`);
+   * a run started by hand, a turn whose start no build names, consults and subagents never may (`BOT_TURN_KINDS`).
    */
   askOwner(botId: string, activationId: string, given: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string } {
     const row = this.store.activation(activationId)
@@ -8657,6 +8678,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const card = given.card ? checkedCard(this.filesFolder(botId), given.card) : undefined
     if (card && 'problem' in card) return { asked: false, text: `card: ${card.problem}` }
     const spec: BotQuestionSpec = { ...given, ...(card ? { card } : {}) }
+    // A run whose schedule the owner removed while it ran would park on a question nobody's answer could carry on.
+    if (this.scheduleGone(row)) return { asked: false, text: SCHEDULE_GONE_TEXT }
     if (row.lane === 'run') return this.askFromWork(row, spec, follow)
     // A chat turn's question never waits (the turn ends, and the answer is the owner's next message): `wait` is work's.
     delete spec.wait
@@ -8799,20 +8822,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * `question_answer` (issue #1123): a chat turn passes on to work an answer the owner gave in plain words in the chat
-   * ("go with the second flat"). Only a chat turn the owner's own message started (`ownerChatTurn`), and only for a
+   * ("go with the second flat"). Only a chat turn the owner's own message or tapped answer started (`relayAnswer` in
+   * `BOT_TURN_KINDS`: the tap posts the owner's row, which the answer keeps), and only for a
    * question work of this bot waits on. The answer keeps the owner's message it came from (`answer_message`), so Forget
    * reaches it, and the bubble reads "Answered in chat".
    */
   relayAnswer(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string } {
     const row = this.store.activation(activationId)
-    if (!row || row.botId !== botId || !ownerChatTurn(row)) return { ok: false, text: 'Only a chat turn your owner\'s own message started can pass on their answer.' }
+    if (!row || row.botId !== botId || !turnRightsOf(row).relayAnswer) return { ok: false, text: BOT_RELAY_OWNER_ONLY_TEXT }
     const text = answer.replace(/\s+/g, ' ').trim()
     if (!text) return { ok: false, text: 'question_answer needs the owner\'s answer, in their words.' }
     const question = this.store.question(questionId)
     const work = question ? this.store.activation(question.activationId) : undefined
     if (!question || question.botId !== botId || question.lane !== 'run' || !work) return { ok: false, text: 'No work of yours waits on that question. See your situation for the questions your work waits on.' }
     const from = this.ownerMessageOf(activationId)
-    if (!from) return { ok: false, text: 'Only a chat turn your owner\'s own message started can pass on their answer.' }
+    if (!from) return { ok: false, text: BOT_RELAY_OWNER_ONLY_TEXT }
     // The owner forgot what they wrote in this turn: nothing of it is passed on, and the question stays open.
     if (this.ownerMessageForgotten(activationId)) return { ok: false, text: QUESTION_ANSWER_FORGOTTEN_TEXT }
     const answered = this.recorded(row, () => this.answerWorkInTx(questionId, { text, by: 'chat' }, from))
@@ -8854,6 +8878,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel; slot?: string }): Promise<BotWorkStarted> {
     const brief = input.brief.trim()
     if (!brief) throw new BotEngineError('invalid_params', 'work_start needs a brief.')
+    // Only a turn whose start may hand out work (`BOT_TURN_KINDS`): the chat, never a run or a start no build names.
+    const setting = this.store.activation(from)
+    if (!setting || setting.botId !== botId || !turnRightsOf(setting).workStart) throw new BotEngineError('invalid_params', "You can't hand out work from here. Do it yourself, or say in your reply what should be done.")
     const title = input.title.replace(/\s+/g, ' ').trim().slice(0, MAX_WORK_TITLE_CHARS) || summarise(brief)
     // A custom slot the owner set up for jobs like this one: it needs no words of the owner's, since the owner made it
     // for this. One the bot doesn't have starts nothing, and the bot is told which it has.
@@ -9042,6 +9069,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const text = input.text.trim().slice(0, MAX_REMINDER_TEXT_CHARS)
     if (!text) throw new BotEngineError('invalid_params', 'A reminder needs its text.')
     const work = input.work?.brief.trim() ? { title: (input.work.title.trim() || summarise(input.work.brief)).slice(0, MAX_WORK_TITLE_CHARS), brief: input.work.brief.trim() } : null
+    // The turn that sets it, by its start (`BOT_TURN_KINDS`). A `from` that names no activation is no turn's (as before).
+    const setting = this.store.activation(from)
+    const rights = setting && setting.botId === botId ? turnRightsOf(setting) : undefined
+    if (setting && !rights?.remind) throw new BotEngineError('invalid_params', "You can't set a reminder from here. Say in your reply what you would be reminded of.")
+    // A reminder's work is work handed out: only where the turn may start work (never a run: it does the job itself).
+    if (work && rights && !rights.workStart) throw new BotEngineError('invalid_params', 'A run hands out no work, so its reminder carries no work: set it without work, and say in your report what should happen then.')
     const replyTo = this.ownerMessageOf(from) ?? null
     const reminderId = `rem_${randomUUID()}`
     const dueAt = new Date(Math.max(due, this.now())).toISOString()
@@ -9067,7 +9100,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (workWait) {
       if (setting?.lane === 'chat') throw new BotEngineError('invalid_params', 'Use wake here; work_wait is only for work.')
       if (setting?.trigger.kind === 'manual') throw new BotEngineError('invalid_params', 'A run started by hand ends with its report. Start work from chat to wait for a time or event.')
-      if (setting?.trigger.kind !== 'work') throw new BotEngineError('invalid_params', 'A scheduled run ends with its report and where it left off; its next run carries on.')
+      // Work and a scheduled run park (`BOT_TURN_KINDS`); a schedule's later occurrences are skipped while it waits.
+      if (!setting || !turnRightsOf(setting).workWait) throw new BotEngineError('invalid_params', "This run can't wait. End it with your report.")
+      if (this.scheduleGone(setting)) throw new BotEngineError('invalid_params', SCHEDULE_GONE_TEXT)
       if (setting.status !== 'running') throw new BotEngineError('invalid_params', 'Only running work can wait.')
       if (this.store.workWait(from)?.status === 'waiting') throw new BotEngineError('invalid_params', 'This work already has a wait. End your turn; it carries on by itself.')
       if (!input.event && Date.parse(input.dueAt ?? '') < this.now() + 5 * 60_000) throw new BotEngineError('invalid_params', 'Wait at least 5 minutes; pick a later time.')
@@ -9110,10 +9145,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * last wait): set from a chat turn, or from work with `workWait`. Throws, in words for the bot, when not. The chain is
    * only counted, never capped: loops are caught by `refuseWakeLoop`.
    */
-  private wakeAllowance(botId: string, from: string, workWait = false): number {
+  private wakeAllowance(botId: string, from: string, workWait = false, watcher = false): number {
     const setting = this.store.activation(from)
-    if (!setting || setting.botId !== botId || (setting.lane !== 'chat' && !workWait)) throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
-    return workWait ? (this.store.workWait(from)?.chain ?? this.unownedChainOf(setting)) + 1 : this.wakeChainOf(setting) + 1
+    if (!setting || setting.botId !== botId || (setting.lane !== 'chat' && !workWait && !watcher)) throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
+    // A watcher a run started counts on from the chat turn that handed the run its work (`unownedChainOf`).
+    return workWait ? (this.store.workWait(from)?.chain ?? this.unownedChainOf(setting)) + 1 : this.unownedChainOf(setting) + 1
   }
 
   /**
@@ -9138,13 +9174,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Pi bot's commands run), while the bot holds "run commands" here. It ends when it exits, prints a line that matches
    * `match`, or reaches its time limit (default an hour, at most six), and then the bot wakes in its chat with what
    * happened: it is a wake on a `watcher` event, so loop detection holds (`refuseWakeLoop`). Any chat turn may start one,
-   * whatever started it. There is no count of how many run at once. Its card shows on the turn's reply.
+   * whatever started it, and any run's main turn (`BOT_TURN_KINDS`'s `watchStart`), detached: it returns at once, the run
+   * goes on and ends as usual, and the wake comes in the chat, never to the run. There is no count of how many run at once.
+   * Its card shows on the turn's reply.
    */
   startWatcher(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string } {
     this.entry(botId)
     const setting = this.store.activation(from)
-    if (!setting || setting.botId !== botId || setting.lane !== 'chat')
-      throw new BotEngineError('invalid_params', "You can't start a background command from here. Only your chat turns can do that. Hand the job to work, which runs commands in the sandbox.")
+    if (!setting || setting.botId !== botId || !turnRightsOf(setting).watchStart)
+      throw new BotEngineError('invalid_params', "You can't start a background command from here. Say in your reply what you would run.")
     const command = input.command.trim()
     if (!command) throw new BotEngineError('invalid_params', 'watch_start needs a command.')
     if (command.length > MAX_WATCHER_COMMAND_CHARS) throw new BotEngineError('invalid_params', `Keep the command to ${MAX_WATCHER_COMMAND_CHARS} characters.`)
@@ -9158,7 +9196,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > MAX_WATCHER_MINUTES) throw new BotEngineError('invalid_params', `minutes is its time limit: 1 to ${MAX_WATCHER_MINUTES}.`)
     if (this.store.registry(botId)?.pausedReason) throw new BotEngineError('bot_paused', 'You are paused, so nothing runs in the background.')
     if (!this.holdsCommands(botId)) throw new BotEngineError('permission_required', 'Background commands need "run commands". Ask for it with escalate (the tool shell), then start it again.')
-    const chain = this.wakeAllowance(botId, from)
+    // The turn itself must hold it too: a run whose thread is narrowed to no commands starts none in the background.
+    if (!this.turnHoldsCommands(setting)) throw new BotEngineError('permission_required', "This turn doesn't run commands, so it can't start a background command. Say in your reply what you would run.")
+    // From a run it is detached: its end wakes the chat (a wake on a `watcher` event), never the run that started it.
+    const chain = this.wakeAllowance(botId, from, false, true)
     const title = (input.title?.trim() || summarise(command)).slice(0, MAX_WORK_TITLE_CHARS)
     const event: BotWakeEvent = { kind: 'watcher', title, command, ...(match ? { match } : {}), minutes }
     this.refuseWakeLoop(botId, brief, event)
@@ -9234,6 +9275,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return manifest.tools.includes('shell')
   }
 
+  /**
+   * Whether the turn `row` holds "run commands" now: what its revision holds inside the active grant (with its "Allow this
+   * time" overlays, less what is switched off), narrowed by its thread (`main.narrow`), as its turn is compiled. The chat
+   * is offered no command tool itself (`frontDeskManifest`), so this reads the permission before that, not the tools.
+   * `watch_start` checks it besides `holdsCommands`: a command started outlives the turn, so it also needs the bot-wide one.
+   */
+  private turnHoldsCommands(row: BotActivationRow): boolean {
+    const grant = this.store.activeGrant(row.botId)
+    const definition = this.host.definitions.revision(row.botId, row.revision)
+    if (!grant || !definition) return false
+    return narrowManifest(this.effectiveManifest(row, definition.permissions, grant.manifest), definition.main.narrow).tools.includes('shell')
+  }
+
   /** Background commands of bots that no longer hold "run commands" stop (a Remove, a switch). */
   private stopUnheldWatchers(): void {
     for (const botId of new Set(this.watchers.list().map((view) => view.botId))) {
@@ -9302,7 +9356,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * `bot_send`: the turn `from` (a chat turn, or work the owner asked for) sends another of the owner's bots a message.
+   * `bot_send`: the turn `from` (a chat turn, work or a scheduled run: `BOT_TURN_KINDS`'s `botSend`) sends another of the owner's bots a message.
    * It is posted in that bot's chat, labelled as the sender's, in the transaction that queues the chat turn that reads
    * it. Refused, in words for the sender: no such bot, a name two bots share, a paused bot or one that can't run now,
    * the same message to the same bot again since the sender's owner last wrote (a loop), or a sender that has had
@@ -9311,7 +9365,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async sendBotMessage(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }> {
     const row = this.store.activation(from)
-    if (!row || row.botId !== botId || !asksOwner(row)) throw new BotEngineError('invalid_params', 'Only your chat, and work your owner asked for, message their other bots. Say in your report what you would have told it.')
+    if (!row || row.botId !== botId || !turnRightsOf(row).botSend) throw new BotEngineError('invalid_params', "Only your chat, your work and your scheduled runs message your owner's other bots. Say in your report what you would have told it.")
     if (row.status !== 'running') throw new BotEngineError('invalid_params', 'This turn has ended; nothing was sent.')
     const message = input.message.trim()
     if (!message) throw new BotEngineError('invalid_params', 'bot_send needs a message.')
@@ -10713,12 +10767,12 @@ export function askAgainLine(question: string): string {
 }
 
 /**
- * Whether the activation may ask its owner a question (`ask_owner`, issue #1123): a chat turn, and work the owner asked
- * for (trigger `work`: `work_start` and a reminder's work), which waits for the answer. Never a scheduled run or a run
- * started by hand, which nobody waits on, nor a consult or a subagent (they compile their own tools).
+ * Whether the activation may ask its owner a question (`ask_owner`, issue #1123): a chat turn, work and a scheduled run
+ * (`BOT_TURN_KINDS`), which wait for the answer. Never a run started by hand, which nobody waits on, a turn whose start
+ * no build names, nor a consult or a subagent (they compile their own tools).
  */
 export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance'>>): boolean {
-  return row.lane === 'chat' || (row.lane === 'run' && provenanceOf(row) === 'work')
+  return turnRightsOf(row).asksOwner
 }
 
 /**
@@ -10727,6 +10781,16 @@ export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'> & Part
  */
 function provenanceOf(row: Pick<BotActivationRow, 'lane'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance' | 'trigger'>>): BotActivationProvenance {
   return row.provenance ?? deriveBotProvenance({ lane: row.lane, idempotencyKey: row.idempotencyKey ?? '', ...(row.trigger ? { trigger: row.trigger } : {}) })
+}
+
+/** What the activation may do, by what started it: its row of `BOT_TURN_KINDS`. */
+export function turnRightsOf(row: Pick<BotActivationRow, 'lane'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance' | 'trigger'>>): BotTurnRights {
+  return turnRights(row.lane, provenanceOf(row))
+}
+
+/** The tools `row`'s turn holds (`held`) that its start may not call, with what the bot is told (`turnRefusals`). */
+function turnRefusalsOf(row: Pick<BotActivationRow, 'lane'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance' | 'trigger'>>, held: ReadonlySet<string>): Map<string, string> {
+  return turnRefusals(turnRightsOf(row), held)
 }
 
 /** The activation as the turn-kind predicates read it: a row, or its lane and key (and its provenance when stored). */
@@ -10738,28 +10802,28 @@ type ActivationStart = Pick<BotActivationRow, 'lane' | 'idempotencyKey'> & Parti
  * Nor is a turn an answer the owner tapped started (`answer:`): the label is the bot's words, not theirs.
  */
 export function ownerChatTurn(row: ActivationStart): boolean {
-  return row.lane === 'chat' && provenanceOf(row) === 'owner_message'
+  return turnRightsOf(row).ownerWords
 }
 
 /** Owner facts, standing notes and Forget need an owner's message or tapped answer.
  * Unknown starts keep a run's memory rights until explicitly allowed here.
  */
 export function memoryLaneOf(row: ActivationStart): BotLane {
-  const provenance = provenanceOf(row)
-  return row.lane === 'chat' && (provenance === 'owner_message' || provenance === 'owner_tap') ? 'chat' : 'run'
+  return turnRightsOf(row).memoryLane
 }
 
 /**
  * Whether `row` is work its owner asked for in the chat (`BotAuthority.ownerRequested`): a work run the bot's own chat
  * turn started, that turn one its owner's message or tapped answer started, and not one another bot's message led to.
- * A schedule, a reminder's work (its `from` is the reminder's id), a run started by hand, or an activation that can't
- * be read is not.
+ * A schedule, a reminder's work (its `from` is the reminder's id), a run started by hand, a run whose stored start
+ * reads as `unknown`, or an activation that can't be read is not.
  */
 export function ownerRequestedWork(
-  row: Pick<BotActivationRow, 'botId' | 'lane' | 'trigger'>,
+  row: Pick<BotActivationRow, 'botId' | 'lane' | 'trigger'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance'>>,
   activation: (id: string) => Pick<BotActivationRow, 'botId' | 'lane' | 'idempotencyKey' | 'trigger'> | undefined
 ): boolean {
-  if (row.lane !== 'run' || row.trigger.kind !== 'work') return false
+  // Work, by the turn-kind table: a run whose stored start this build doesn't know reads as `unknown` and asks nobody.
+  if (turnRightsOf(row) !== BOT_TURN_KINDS.work || row.trigger.kind !== 'work') return false
   let from: Pick<BotActivationRow, 'botId' | 'lane' | 'idempotencyKey' | 'trigger'> | undefined
   try {
     from = activation(row.trigger.from)
@@ -10774,12 +10838,10 @@ export function ownerRequestedWork(
  * The chat turns no message of the owner's started that may still act on the owner's threads (#1359): the bot's first
  * message (`create:`), a wake the bot set, or a watch it started (`wake:`), the default answer of a question the owner
  * left (`question:`), a notice that a thread the bot handed work to finished or waits for a person (`job:`), and a
- * message a thread the bot started sent it while it works (`threadmsg:`).
+ * message a thread the bot started sent it while it works (`threadmsg:`). Their rights are `BOT_TURN_KINDS`'s; the keys
+ * here only name a retry's original (`chatToRetry`).
  */
 const ACTING_CHAT_KEYS = ['create:', 'wake:', 'question:', 'job:', THREAD_MESSAGE_KEY_PREFIX] as const
-
-/** The provenances of `ACTING_CHAT_KEYS`, also when Resume retried the turn. */
-const ACTING_CHAT_PROVENANCES: ReadonlySet<BotActivationProvenance> = new Set(['first_message', 'wake', 'question', 'job', 'threadmsg'])
 
 /** The start of a chat turn Resume retried after a usage limit (`chatToRetry`). */
 const RESUME_KEY_PREFIX = 'resume:'
@@ -10798,12 +10860,12 @@ function actingChatStartOf(key: string): string | undefined {
 
 /**
  * Whether the activation may start, message, stop, archive or hide the owner's threads ("use your threads"): a chat
- * turn its owner's message or tapped answer started (`chat:`, `answer:`), the bot's first message, a wake, a question's
- * default answer or a thread's notice (`ACTING_CHAT_KEYS`, also when Resume retried it), and every run (work, a
- * reminder's work, a schedule). Not another bot's message (`botmsg:`).
+ * turn its owner's message or tapped answer started, the bot's first message, a wake, a question's default answer or a
+ * thread's notice (also when Resume retried it), and every run (work, a reminder's work, a schedule, a run by hand). Not
+ * another bot's message, a held call's result or a start no build names (`BOT_TURN_KINDS`).
  */
 export function threadsActOf(row: ActivationStart): boolean {
-  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && ACTING_CHAT_PROVENANCES.has(provenanceOf(row)))
+  return turnRightsOf(row).threadsAct
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */

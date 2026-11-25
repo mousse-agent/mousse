@@ -16,6 +16,7 @@ import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
 import { WAKE_LINE_PREFIX, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import { BOT_JOB_ENDED, THREAD_MESSAGE_KEY_PREFIX, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
+import { runProvenance } from '../activation/turnKinds'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
 /**
@@ -857,10 +858,7 @@ const OWNER_PROVENANCES: ReadonlySet<BotActivationProvenance> = new Set(['owner_
  * `create:` key (`resume:create:<id>` is not one); this does not change that.
  */
 export function deriveBotProvenance(input: { lane: BotLane; idempotencyKey: string; trigger?: { kind: string } }): BotActivationProvenance {
-  if (input.lane === 'run') {
-    const kind = input.trigger?.kind
-    return kind === 'work' || kind === 'schedule' || kind === 'manual' ? kind : 'unknown'
-  }
+  if (input.lane === 'run') return runProvenance(input.trigger?.kind)
   if (input.lane !== 'chat') return 'unknown'
   let key = input.idempotencyKey
   let hadResumePrefix = false

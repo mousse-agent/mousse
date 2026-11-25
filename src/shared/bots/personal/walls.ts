@@ -69,7 +69,10 @@ export function botTurnOffers(bot: Pick<BotAuthority, 'appTools'> | undefined, n
  * Why a bot may not run the Mousse app tool `name` with `args` (its wall in plain words), or
  * undefined when its grant holds the call. The registry checks this on every call of a bot turn.
  */
-export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | 'escalate'> & Partial<Pick<BotAuthority, 'appTools' | 'threadsReadOnly' | 'allSkills'>>, name: string, args: Record<string, unknown>): string | undefined {
+export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | 'escalate'> & Partial<Pick<BotAuthority, 'appTools' | 'threadsReadOnly' | 'allSkills' | 'turnRefusals'>>, name: string, args: Record<string, unknown>): string | undefined {
+  // What started the turn decides some tools (a turn whose start no build names only reads): said in its own words.
+  const byStart = bot.turnRefusals?.get(name)
+  if (byStart) return byStart
   // Starting, messaging and stopping threads belong to a turn the owner started or asked for: a turn that holds the
   // owner's threads to read only (a chat turn no message of the owner's started) is told why, and nothing is
   // asked. A turn of a bot without the permission falls through to the check below, which asks for it.

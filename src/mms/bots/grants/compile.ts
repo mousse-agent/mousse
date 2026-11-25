@@ -111,7 +111,7 @@ export interface CompileInput {
     /** Only the main turn of a scheduled run ends its own schedule. Never grantable. */
     scheduled?: boolean
     frontDesk?: boolean
-    /** A chat turn may start an unsandboxed background command. */
+    /** The turn may start an unsandboxed background command: any chat turn, and a run's main turn with `timers`. */
     watcherStart?: boolean
     /**
      * What "use your threads" gives this turn, when the grant holds it: `read` (list, search, read, wait: work, a
@@ -147,8 +147,13 @@ export interface CompileInput {
      * (`work_models`). Never the chat, a consult or a subagent.
      */
     subagents?: boolean
-    /** Only work (including a reminder's work) may park on time or events. */
+    /** Work (including a reminder's work) and a scheduled run may park on time or events (`BOT_TURN_KINDS`). */
     workWaiting?: boolean
+    /**
+     * A run's main turn sets reminders (`remind`) and, with `watcherStart`, starts background commands (`watch_start`),
+     * detached: the run never waits for them. The chat has them as its front desk.
+     */
+    timers?: boolean
     /**
      * A main turn's tool catalogue (`BotPermissions.catalogue`): `tool_catalogue` on every runtime, and `use_tool` where
      * the runtime has no tool search of its own (Codex, Pi). Never a consult or a subagent.
@@ -163,15 +168,16 @@ export interface CompileInput {
      */
     subagent?: true
     /**
-     * `ask_owner` (`BOT_QUESTION_TOOL`): a question with answers to tap; it grants nothing. A chat turn and work the owner
-     * asked for; a front desk (a chat turn) also gets `question_answer`, to pass on to work an answer given in the chat.
+     * `ask_owner` (`BOT_QUESTION_TOOL`): a question with answers to tap; it grants nothing. Every chat turn, work and a
+     * scheduled run (`BOT_TURN_KINDS`); a front desk (a chat turn) also gets `question_answer`, to pass on to work an
+     * answer given in the chat.
      */
     questions?: boolean
     /** `show_card` (`BOT_CARD_TOOL`): small fixed cards on the turn's next message; they grant nothing. Main turns only. */
     cards?: boolean
     /**
-     * `bot_list` and `bot_send` (`BOT_MESSAGE_TOOLS`): messages to the owner's other bots; they grant nothing. A chat turn
-     * and work the owner asked for.
+     * `bot_list` and `bot_send` (`BOT_MESSAGE_TOOLS`): messages to the owner's other bots; they grant nothing. Every chat
+     * turn, work and a scheduled run (`BOT_TURN_KINDS`).
      */
     bots?: boolean
   }
@@ -284,6 +290,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     // instead of starting another: it only reads.
     BOT_RUNNING_TOOL,
     ...(own?.frontDesk ? BOT_WORK_TOOLS.filter((tool) => tool !== 'watch_start' || own.watcherStart === true) : []),
+    ...(!own?.frontDesk && own?.timers ? ['remind', ...(own.watcherStart ? ['watch_start'] : [])] : []),
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),
     ...(own?.questions ? [BOT_QUESTION_TOOL, ...(own.frontDesk ? [BOT_QUESTION_ANSWER_TOOL] : [])] : []),

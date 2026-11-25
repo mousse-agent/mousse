@@ -124,10 +124,25 @@ it('Forget cancels the work timer with the original request', async () => {
   f.bots.afterForget()
   expect(f.store.activation(workId)?.status).toBe('failed')
 })
-it('scheduled runs must leave their place for the next run', async () => {
-  const { workId } = await work()
-  f.store.run('UPDATE bot_activations SET trigger_json = ?, provenance = NULL WHERE id = ?', JSON.stringify({ kind: 'schedule', scheduleId: 'schedule', input: 'Check', occurrenceAt: f.store.now() }), workId)
-  await expect(wait(workId)).rejects.toThrow('next run carries on')
+it('a scheduled run waits as work does (#1360): no slot held, its next occurrence skipped, and it carries on in its thread when due', async () => {
+  const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Check the release.' }, 'owner')
+  const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Check the release.', occurrenceAt: new Date(f.clock.now).toISOString() })
+  if (scheduled.kind !== 'started') throw new Error(scheduled.kind)
+  await flush()
+  const turn = await start(f, scheduled.activationId)
+  expect(turn.prepared.policy.tools!.allow).toContain('work_wait')
+  const set = await wait(scheduled.activationId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'blocked', endReason: 'waiting' })
+  expect(f.bots.isIdle(botId)).toBe(true)
+  expect(f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Check the release.', occurrenceAt: new Date(f.clock.now + 60_000).toISOString() })).toEqual({ kind: 'skipped', reason: 'previous_run_waiting' })
+  f.clock.now += 2 * 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  expect(f.store.reminder(set.wakeId)?.status).toBe('delivered')
+  expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'running', threadId: turn.payload.threadId })
+  await start(f, scheduled.activationId, 2)
+  expect(JSON.stringify(f.store.dispatch(scheduled.activationId, 2)!.prompt)).toContain('Check again with the evidence already read.')
 })
 
 // A wait can become due before the provider gives up its turn, or while a gate holds it.
@@ -195,7 +210,7 @@ it.each(['plain', 'note'] as const)('always explains a completed wait alongside 
   expect(prompt).toContain('Check again with the evidence already read.')
   if (extra === 'note') expect(prompt).toContain('Also check the changelog.')
 })
-it('offers work_wait only to work, including work from reminders', async () => {
+it('offers work_wait to work and scheduled runs, never the chat or a run started by hand', async () => {
   const { workId, turn } = await work()
   expect(turn.prepared.policy.tools!.allow).toContain('work_wait')
   const chat = f.store.laneActivations(botId, 'chat', ['done'])[0]!
@@ -203,12 +218,10 @@ it('offers work_wait only to work, including work from reminders', async () => {
   await f.bots.service.chatSend({ botId, text: 'Hello again', clientRequestId: 'eligibility' })
   const chatTurn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
   expect((await start(f, chatTurn.id)).prepared.policy.tools!.allow).not.toContain('work_wait')
-  for (const kind of ['manual', 'schedule'] as const) {
-    const other = await f.bots.tools.work.start(botId, chatTurn.id, { title: kind, brief: 'Check', key: kind })
-    f.store.run('UPDATE bot_activations SET trigger_json = ?, provenance = NULL WHERE id = ?', JSON.stringify({ kind, input: 'Check', ...(kind === 'schedule' ? { scheduleId: 's', occurrenceAt: f.store.now() } : {}) }), other.workId)
-    expect((await start(f, other.workId)).prepared.policy.tools!.allow).not.toContain('work_wait')
-    await expect(wait(other.workId)).rejects.toThrow(kind === 'schedule' ? 'next run' : 'run started by hand')
-  }
+  const other = await f.bots.tools.work.start(botId, chatTurn.id, { title: 'manual', brief: 'Check', key: 'manual' })
+  f.store.run('UPDATE bot_activations SET trigger_json = ?, provenance = NULL WHERE id = ?', JSON.stringify({ kind: 'manual', input: 'Check' }), other.workId)
+  expect((await start(f, other.workId)).prepared.policy.tools!.allow).not.toContain('work_wait')
+  await expect(wait(other.workId)).rejects.toThrow('run started by hand')
 })
 it.each(['note', 'answer'] as const)('an owner %s resets the work wait chain', async input => {
   const { workId, turn, chat } = await work()

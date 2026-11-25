@@ -108,6 +108,8 @@ export function jobEffectiveMay(job: ScheduledJob, threadMode: PermissionMode): 
  */
 function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts: BotAutomationFacts, computer: AutomationItem['computer']): AutomationItem {
   const runs = facts.runs.map(run => {
+    const parked = parkedBotRun(run, job.botSkip?.reason === 'bot_waiting_for_owner')
+    if (parked) return parked
     const held = run.status === 'blocked' && ['approval', 'approval_answered', 'approval_withdrawn', 'approval_expired'].includes(run.endReason ?? '')
     if (!held) return botRun(run)
     return { ...botRun({ ...run, status: 'running' }), detail: run.endReason === 'approval_withdrawn' ? 'Carrying on after the request was withdrawn' : run.endReason === 'approval_expired' ? 'Carrying on after the request expired' : run.endReason === 'approval_answered' ? 'Carrying on with your answer' : job.botSkip?.reason === 'bot_waiting_for_owner'
@@ -308,6 +310,21 @@ function askItem(ask: AgentJobAsk, sources: AutomationIndexSources, computer: Au
     link: { kind: 'ask', askId: ask.id, threadId: ask.threadId },
     computer
   }
+}
+
+/**
+ * A scheduled run parked on a question or a wait (#1360), as work parks: not stopped at a missing permission. A question
+ * waits for the owner's answer, as a held call does; a wait for a time or an event carries on by itself. Undefined for
+ * any other run.
+ */
+function parkedBotRun(run: BotAutomationFacts['runs'][number], laterSkipped: boolean): AutomationRun | undefined {
+  if (run.status !== 'blocked') return undefined
+  const base = { at: run.at, ...(run.threadId ? { threadId: run.threadId } : {}) }
+  if (run.endReason === 'question') return { ...base, state: 'running', detail: laterSkipped ? 'Later runs skipped: the bot is waiting for your answer' : 'Waiting for your answer' }
+  if (run.endReason === 'question_answered') return { ...base, state: 'running', detail: 'Carrying on with your answer' }
+  if (run.endReason === 'waiting') return { ...base, state: 'waiting', detail: 'Until its time or event' }
+  if (run.endReason === 'wait_ready') return { ...base, state: 'running', detail: 'Carrying on' }
+  return undefined
 }
 
 /** A bot activation in the Run contract. */

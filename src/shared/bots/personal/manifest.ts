@@ -118,8 +118,8 @@ export const BOT_REPORT_BUG_TOOL = 'report_bug'
 
 /**
  * Messages to the owner's other bots (`bot_list`, `bot_send`, `botMessages.ts`): the message is information to the bot
- * that gets it and gives it no permission, so like memory the tools are always on and never grantable. A chat turn and
- * work the owner asked for get them; a scheduled run, a consult and a subagent never do.
+ * that gets it and gives it no permission, so like memory the tools are always on and never grantable. A chat turn, work
+ * and a scheduled run get them (`BOT_TURN_KINDS`); a run started by hand, a consult and a subagent never do.
  */
 export const BOT_MESSAGE_TOOLS: readonly string[] = [BOT_LIST_TOOL, BOT_SEND_TOOL]
 

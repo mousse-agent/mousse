@@ -6,7 +6,7 @@
  * What each case covers:
  * - who a bot sees: the owner's other bots, never itself or a deleted one; a paused one is marked
  * - a message: the row in the receiving chat, the turn it starts and what that turn is told; the sender's chip
- * - who may send: a chat turn, work the owner asked for; never a scheduled run
+ * - who may send: a chat turn, work, a scheduled run (#1360); never a run started by hand
  * - refusals: an unknown name, itself, a paused bot, an empty or too long message; nothing is posted
  * - loops: no count in a row or a day; the same message to the same bot again before the owner writes is refused; the
  *   chain of turns without the owner is still counted (through chat, work and wakes)
@@ -136,14 +136,23 @@ describe('who may send', () => {
     expect((await messageTurn(alpha)).activation.trigger).toMatchObject({ fromBot: { name: 'Plusy', chain: 1 } })
   })
 
-  it('a scheduled run is not offered them, and a send from it is refused', async () => {
+  it('a scheduled run sends one, as work does (#1360)', async () => {
     const scheduled = f.bots.runScheduledOccurrence({ botId: plusy, scheduleId: 'sched-1', prompt: 'Check the site.', occurrenceAt: new Date(f.clock.now).toISOString() })
     if (scheduled.kind !== 'started') throw new Error(scheduled.kind)
     await flush()
     const run = await start(f, scheduled.activationId)
+    expect(run.prepared.authority.appTools.has('bot_send')).toBe(true)
+    expect((await tool('bot_send', run.prepared, run.payload.threadId, { bot: 'Alpha', message: 'The nightly check found the login page down.' })).isError).toBeFalsy()
+    expect(messageRows(alpha)).toHaveLength(1)
+  })
+
+  it('a run started by hand is not offered them, and a send from it is refused', async () => {
+    const manual = await f.bots.activate({ botId: plusy, input: 'Check the site.', clientRequestId: 'by-hand' })
+    await flush()
+    const run = await start(f, manual.id)
     expect(run.prepared.authority.appTools.has('bot_send')).toBe(false)
     expect(run.prepared.authority.appTools.has('bot_list')).toBe(false)
-    await expect(send(plusy, scheduled.activationId, 'Alpha')).rejects.toThrow(/Only your chat, and work your owner asked for/)
+    await expect(send(plusy, manual.id, 'Alpha')).rejects.toThrow(/Only your chat, your work and your scheduled runs/)
     expect(messageRows(alpha)).toEqual([])
     expect(messageTurns(alpha)).toEqual([])
   })
