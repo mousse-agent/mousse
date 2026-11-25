@@ -120,7 +120,7 @@ const click = async (target: HTMLElement | null | undefined) => {
   await act(async () => target!.click())
   await flush()
 }
-/** A device's row menu in Can use this computer, where Remove on all my hosts sits. */
+/** A device's row menu in Can use this computer; for a pairing both ways, Remove on all my hosts sits there. */
 const canUseActions = (name: string) =>
   document.querySelector<HTMLButtonElement>(`[data-device-side="in"] [aria-label="Actions for ${name}"]`)
 const menuItem = (label: string) =>
