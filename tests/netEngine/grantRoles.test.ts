@@ -41,6 +41,13 @@ function computer(fabric: Fabric, name: string): Promise<Computer> {
 
 const roleOn = async (host: Computer, caller: Computer) => (await grantOf(host, caller)).role
 
+/** The role `caller`'s helper records it holds at `host` (its peer record, which "Remove on all my hosts" reads). */
+async function recordedAt(caller: Computer, host: Computer): Promise<string | undefined> {
+  const answer = await caller.engine.request('peers.list')
+  const found = (answer.peers as Array<Record<string, unknown>>).find((one) => one.identity === host.endpoint)
+  return typeof found?.role === 'string' ? found.role : undefined
+}
+
 const device = (on: Computer, node: NodeId) => on.mms.netEngine.status().devices.find((row) => row.node === node)
 
 /** `host`'s window changes `node`'s level, as the level picker does. */
@@ -157,6 +164,47 @@ describe("a grant's role follows the device's level", () => {
     await eventually(async () => expect(await roleOn(host, caller)).toBe('owner'))
   }, 120_000)
 
+  it('the device records the role its host says, after the reconnect each level change causes', async () => {
+    const host = await computer(fabric, 'told-host'),
+      caller = await computer(fabric, 'told-caller')
+    const node = await pairAt(host, caller, 'view')
+    const hostOnCaller = rowFor(caller, host)!.localId
+    expect(await recordedAt(caller, host)).toBe('view')
+
+    // Promoted: the host's edit cuts the device's connection, and the hello of the next one says `owner`.
+    await setLevel(host, node, 'full')
+    await eventually(async () => {
+      await fabric.connect(caller, hostOnCaller)
+      expect(await recordedAt(caller, host)).toBe('owner')
+    }, 30_000)
+    // Narrowed: the next hello says `view`.
+    await setLevel(host, node, 'view')
+    await eventually(async () => {
+      await fabric.connect(caller, hostOnCaller)
+      expect(await recordedAt(caller, host)).toBe('view')
+    }, 30_000)
+  }, 120_000)
+
+  it.skipIf(REAL_HELPER)('a host whose hello says no role leaves the recorded role as it is', async () => {
+    const host = await computer(fabric, 'quiet-host'),
+      caller = await computer(fabric, 'quiet-caller')
+    const node = await pairAt(host, caller, 'view')
+    const hostOnCaller = rowFor(caller, host)!.localId
+    fabric.network.streamRoles = false
+    try {
+      await setLevel(host, node, 'full')
+      await eventually(async () => {
+        await fabric.connect(caller, hostOnCaller)
+        expect(await roleOn(host, caller)).toBe('owner')
+      }, 30_000)
+      // Its hello answered over the new connection, without a role.
+      expect(caller.mms.netEngine.online(hostOnCaller)).toBe(true)
+      expect(await recordedAt(caller, host)).toBe('view')
+    } finally {
+      fabric.network.streamRoles = true
+    }
+  }, 120_000)
+
   it('Send link fixes the role of the level picked with the link', async () => {
     const host = await computer(fabric, 'link-host'),
       caller = await computer(fabric, 'link-caller')
@@ -193,7 +241,8 @@ describe("a grant's role follows the device's level", () => {
 /**
  * Remove on all my hosts, with the real helper: a host sends its device list only to an owner and applies only an
  * owner's signed removal. A View and chat device gets no list; a Full control device gets one and its removal
- * applies; once narrowed, its removal is refused.
+ * applies. Each device learns its role from the host's hello after the reconnect an edit causes: narrowed, it no
+ * longer lists the host; made Full control, it does.
  */
 describe.runIf(REAL_HELPER)('removals follow the role', () => {
   const fabric = new Fabric()
@@ -254,13 +303,33 @@ describe.runIf(REAL_HELPER)('removals follow the role', () => {
         return item!.result
       }, 60_000)
 
-    // Narrowed, the admin's removal (planned from the list it had) is refused, and the phone stays.
+    // Narrowed: after the reconnect the edit causes, the admin no longer lists the host, its own helper signs no
+    // removal for it, and the phone stays.
     await setLevel(host, adminOnHost, 'view')
-    expect(await result(await confirm(phone, phoneGrant))).toBe('refused')
+    await eventually(async () => {
+      await fabric.connect(admin, hostOnAdmin)
+      expect(await planned(admin, phone)).toBeUndefined()
+    }, 30_000)
+    await expect(confirm(phone, phoneGrant)).rejects.toThrow(/did not make this device an owner/)
     expect((await grantOf(host, phone)).grant).toBe(phoneGrant)
 
-    // Full control again: its removal of the viewer applies and the viewer's grant is gone.
+    // The viewer made Full control: after its reconnect it lists the host. (The host's first list on that
+    // connection arrives before the hello that says `owner`, so the grant is named from the host's next list.)
+    const viewerOnHost = rowFor(host, viewer)!.localId
+    await setLevel(host, viewerOnHost, 'full')
+    await eventually(async () => {
+      await fabric.connect(viewer, hostOnViewer)
+      expect(await planned(viewer, phone)).toBeDefined()
+    }, 30_000)
+
+    // Full control again: the edit changes the host's list, which now names the phone's grant to the viewer too.
     await setLevel(host, adminOnHost, 'full')
+    await eventually(async () => {
+      await fabric.connect(admin, hostOnAdmin)
+      expect(await planned(admin, viewer)).toBeDefined()
+    }, 30_000)
+    await eventually(async () => expect((await planned(viewer, phone))?.grant).toBe(phoneGrant), 30_000)
+    // Its removal of the viewer applies and the viewer's grant is gone.
     expect(await result(await confirm(viewer, viewerGrant))).toBe('applied')
     await expect(grantOf(host, viewer)).rejects.toThrow(/holds no grant/)
   }, 240_000)

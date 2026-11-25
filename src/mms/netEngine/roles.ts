@@ -61,6 +61,8 @@ export class EngineRoles {
   /** Devices whose role does not follow their level yet, with the helper's reason. */
   private readonly failed = new Map<NodeId, string>()
   private readonly retries = new Map<NodeId, ReturnType<typeof setTimeout>>()
+  /** The role each device's computer said this one holds there, being recorded. */
+  private readonly records = new Map<NodeId, Promise<void>>()
   private stopped = false
 
   constructor(private readonly port: EngineRolesPort) {}
@@ -91,10 +93,43 @@ export class EngineRoles {
     )
   }
 
+  /**
+   * The other computer's hello said this computer's role there (§8.4): the helper's record of it follows, so
+   * "Remove on all my hosts" lists that computer only while this one is an owner there. Display and convenience
+   * only: that computer enforces from its own grant. One record at a time per device; a failure waits for the next
+   * connection's hello.
+   */
+  recordThere(node: NodeId, role: string): Promise<void> {
+    const before = this.records.get(node) ?? Promise.resolve()
+    const run = before.then(() => this.record(node, role)).catch(() => undefined)
+    this.records.set(node, run)
+    void run.finally(() => {
+      if (this.records.get(node) === run) this.records.delete(node)
+    })
+    return run
+  }
+
   stop(): void {
     this.stopped = true
     for (const timer of this.retries.values()) clearTimeout(timer)
     this.retries.clear()
+  }
+
+  private async record(node: NodeId, role: string): Promise<void> {
+    const helper = this.port.helper()
+    const row = this.port.peers.serving(node)
+    if (this.stopped || !helper || !row) return
+    const listed = await helper.request('peers.list')
+    const peer = (Array.isArray(listed.peers) ? listed.peers : []).find(
+      (item: Record<string, unknown>) => item?.identity === row.endpoint
+    )
+    // Not a computer this one uses, or recorded already.
+    if (!peer || peer.role === role) return
+    await helper.request('peer.add', {
+      identity: row.endpoint,
+      name: typeof peer.name === 'string' ? peer.name : row.name,
+      role
+    })
   }
 
   private async apply(node: NodeId): Promise<boolean> {

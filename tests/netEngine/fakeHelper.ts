@@ -140,12 +140,16 @@ export class FakeNetwork {
   readonly storeFailing = new Map<string, number>()
   /** For each identity, the identities it may dial (its peers). */
   private readonly peers = new Map<string, Set<string>>()
+  /** The role each peer record says its helper holds at that peer, by `"<from> <to>"`. */
+  private readonly peerRoles = new Map<string, string>()
   /** Open invitations by ticket, with their host. */
   readonly invitations = new Map<string, { host: string; invitation: string; routes: string[]; role?: string }>()
   /** Each grant's role and revision (§8), by grant number; absent: `owner` at revision 1. */
   readonly roles = new Map<string, { role: string; revision: number }>()
   /** By helper identity: this many more `grant.set_role` saves fail (`store_failed`) before one goes through. */
   readonly setRoleFailing = new Map<string, number>()
+  /** Whether a stream the dialler opens is handed to the app with its grant's role (§8.4); false plays older ones. */
+  streamRoles = true
   private nextGrant = 1
   private readonly conns = new Set<Conn>()
   private next = 1
@@ -282,7 +286,8 @@ export class FakeNetwork {
     const given = grant ?? this.nextGrant++
     held.set(caller, given)
     if (role && role !== 'owner') this.roles.set(String(given), { role, revision: 1 })
-    this.peer(caller, host)
+    // As `PAIRED`: the caller records the role it was given, and keeps it until its app says another.
+    this.peer(caller, host, role ?? 'owner')
     return { grant: given, already: false }
   }
 
@@ -404,16 +409,23 @@ export class FakeNetwork {
   }
 
   forget(from: string, to: string): boolean {
+    this.peerRoles.delete(`${from} ${to}`)
     return !!this.peers.get(from)?.delete(to)
   }
 
-  /** `from` knows `to` as a peer (it may dial it); answers whether it did already. */
-  peer(from: string, to: string): boolean {
+  /** `from` knows `to` as a peer (it may dial it), with `role` recorded when given; answers whether it did already. */
+  peer(from: string, to: string, role?: string): boolean {
     let known = this.peers.get(from)
     if (!known) this.peers.set(from, (known = new Set()))
     const already = known.has(to)
     known.add(to)
+    if (role !== undefined) this.peerRoles.set(`${from} ${to}`, role)
     return already
+  }
+
+  /** The role `from`'s peer record says it holds at `to` (`peers.list`). */
+  peerRole(from: string, to: string): string {
+    return this.peerRoles.get(`${from} ${to}`) ?? 'owner'
   }
 
   /** @internal */
@@ -527,7 +539,16 @@ export class FakeNetwork {
       to.incoming(theirs, conn.id[to.identity]!, label, cls, { grant, role: this.roleOf(grant).role })
       return mine
     }
-    to.incoming(theirs, conn.id[to.identity]!, label, cls)
+    // The dialler calls: served under the grant the dialled side holds for it, named with its role (unless the
+    // network plays helpers that do not name it).
+    const grant = this.grants.get(to.identity)?.get(from.identity)
+    to.incoming(
+      theirs,
+      conn.id[to.identity]!,
+      label,
+      cls,
+      grant === undefined || !this.streamRoles ? undefined : { grant, role: this.roleOf(grant).role }
+    )
     return mine
   }
 
@@ -1454,7 +1475,7 @@ export class FakeHelper {
               .map((identity) => ({
                 identity,
                 name: '',
-                role: 'owner',
+                role: this.network.peerRole(this.identity, identity),
                 // With relays (Phase 3): what this helper keeps about the peer's relays.
                 ...(this.relays ? { relay: this.relays.peers.get(identity) ?? null } : {})
               }))
@@ -1620,6 +1641,8 @@ export class FakeHelper {
         }
         case 'peer.add': {
           const routes = ((message.routes as unknown[] | undefined) ?? []).map(String)
+          // As the helper: the record takes the role given, `owner` when none is.
+          const role = typeof message.role === 'string' ? message.role : 'owner'
           if (this.network.minor >= 1) {
             // As a 1.1 helper: every route is kept; only the automatic ones are dialled without approval.
             if (routes.some((route) => !parseRoute(route)))
@@ -1627,14 +1650,14 @@ export class FakeHelper {
             const known = this.network.knownFor(this.identity, String(message.identity))
             for (const route of routes) if (!known.hints.includes(route)) known.hints.push(route)
             this.peerAdds.push(routes)
-            return reply({ already: this.network.peer(this.identity, String(message.identity)) })
+            return reply({ already: this.network.peer(this.identity, String(message.identity), role) })
           }
           // As the helper: the whole list is refused for one address outside a private range.
           const bad = routes.find((route) => !fakePrivate(route))
           if (bad)
             return reply({ error: 'bad_route', reason: `${bad} is not a private-range address` })
           this.peerAdds.push(routes)
-          return reply({ already: this.network.peer(this.identity, String(message.identity)) })
+          return reply({ already: this.network.peer(this.identity, String(message.identity), role) })
         }
         case 'peer.forget': {
           // As the helper: the host's completion records go with it, and their pending marks settle, so no replay

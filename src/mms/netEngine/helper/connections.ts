@@ -5,6 +5,7 @@ import { parseRelayDestination } from '../../../shared/netEngine/routes'
 import { engineLimits } from '../limits'
 import {
   ENGINE_LABELS,
+  GRANT_ROLE,
   type EngineConnection,
   type EngineRoute,
   type EngineLabel,
@@ -45,7 +46,8 @@ class HelperStream implements EngineStream {
     readonly label: EngineLabel,
     readonly cls: StreamClass,
     private readonly channel: AppChannel,
-    private readonly gone: () => void
+    private readonly gone: () => void,
+    readonly role?: string
   ) {}
 
   /** The sink the channel delivers this stream's bytes to. */
@@ -221,14 +223,14 @@ export class HelperConnection implements EngineConnection {
     return stream
   }
 
-  /** A stream the other side opened (`stream.incoming`), accepted. */
-  incoming(handle: number, label: EngineLabel, cls: StreamClass): void {
+  /** A stream the other side opened (`stream.incoming`), accepted, with the role of the grant it is served under. */
+  incoming(handle: number, label: EngineLabel, cls: StreamClass, role?: string): void {
     if (!this.open_ || this.live >= engineLimits().appStreamsPerConnection) {
       this.channel.reset(handle, 'refused')
       return
     }
     this.live += 1
-    const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream))
+    const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream), role)
     this.streams.add(stream)
     this.channel.bind(handle, cls, stream.sink)
     stream.bound(handle)
@@ -686,6 +688,7 @@ export class EngineHelper {
         label = event.label
       if (typeof handle !== 'number') return
       const cls = event.class === 'bulk' ? 'bulk' : 'interactive'
+      const role = typeof event.role === 'string' && GRANT_ROLE.test(event.role) ? event.role : undefined
       // Only the engine's labels (the helper resets the rest too).
       if (!connection || typeof label !== 'string' || !(ENGINE_LABELS as readonly string[]).includes(label)) {
         this.channel.reset(handle, 'refused')
@@ -708,10 +711,10 @@ export class EngineHelper {
           this.channel.reset(handle, 'refused')
           return
         }
-        served.incoming(handle, label as EngineLabel, cls)
+        served.incoming(handle, label as EngineLabel, cls, role)
         return
       }
-      connection.incoming(handle, label as EngineLabel, cls)
+      connection.incoming(handle, label as EngineLabel, cls, role)
       // The dialler opened a stream (so its HELLO came): this computer may call it back on the same connection, when
       // it uses that one.
       const conn = event.conn as number

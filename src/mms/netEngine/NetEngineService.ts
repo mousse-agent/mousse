@@ -1637,6 +1637,8 @@ export class NetEngineService implements EngineDirectoryPort {
             peers.advance(node, ['ssh_granted'], { state: 'connected' })
           this.changed()
         },
+        // The other computer said this computer's role there: the helper's record of it follows (§8.4).
+        onRoleThere: (node, role) => void roles.recordThere(node, role),
         // The helper keeps a newer outbound path (renewed, or dialled while one was up) waiting until told.
         onPathInUse: (connection) => {
           // The access exchange follows the client to the path it uses now.
