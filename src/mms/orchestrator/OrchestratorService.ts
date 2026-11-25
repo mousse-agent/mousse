@@ -9866,6 +9866,8 @@ export class OrchestratorService extends EventEmitter {
             tool: call.name,
             argsDigest: toolArgsDigest(call.arguments),
             now: now(),
+            // Some tools only read with some arguments (`browser_tabs` listing): the call's own arguments decide.
+            args: call.arguments,
             ...(options?.idempotent !== undefined ? { idempotent: options.idempotent } : {})
           }).invocationId
         } catch (error) {

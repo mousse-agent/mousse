@@ -267,6 +267,10 @@ export class BrowserSessionManager {
       ...(input.persistent === undefined ? {} : { persistent: input.persistent }),
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
       ...(execution.runId === undefined ? {} : { runId: execution.runId }),
+      ...(target.backend === 'electron-attached' ? { turn: stepTurn(execution) } : {}),
+      // A run a person did not start (no tree grant: an editor try-run, an app-started workflow) keeps to its thread's
+      // own in-app tabs for the whole session, never the tabs kept in every thread.
+      ...(target.backend === 'electron-attached' && !execution.browserGrant ? { ownTabsOnly: true } : {}),
       threadId: execution.threadId
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
@@ -292,6 +296,12 @@ export class BrowserSessionManager {
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId })
+    // A session that already ended (its tab went to another thread) is closed: closing it again says so.
+    const ended = this.sessions.get(sessionId)
+    if (ended && ended.record.lifecycle === 'closed' && ended.owner.threadId === context.execution.threadId &&
+        (!ended.owner.runId || ended.owner.runId === context.execution.runId) && !keptFrom(ended, context.keeper)) {
+      return { session: { ...ended.record } }
+    }
     const entry = this.requireOwned(sessionId, context)
     // A worker that no longer knows the session (it restarted or crashed) has nothing left to close.
     try { await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context)) }
@@ -306,9 +316,12 @@ export class BrowserSessionManager {
     const operation = input.operation ?? 'list'
     // Listing tabs only reads (`browser.read`); opening, switching and closing one acts.
     this.authorize(context, 'browser_tabs', 'browser.session', operation === 'list' ? 'read' : 'external', { sessionId, ...input })
-    this.requireOwned(sessionId, context)
+    const entry = this.requireOwned(sessionId, context)
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
-    const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], { sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}) }, this.signal(context))
+    const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], {
+      sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}),
+      ...(entry.record.backend === 'electron-attached' ? { turn: stepTurn(context.execution) } : {})
+    }, this.signal(context))
     const payload = result as { tabs?: BrowserTab[]; id?: unknown; title?: unknown; url?: unknown; navigation?: BrowserNavigation }
     const opened = operation === 'new' && typeof payload.id === 'string'
       ? { tab: { id: payload.id, title: typeof payload.title === 'string' ? payload.title : '', url: typeof payload.url === 'string' ? payload.url : '' }, ...(payload.navigation ? { navigation: payload.navigation } : {}) }
@@ -339,12 +352,13 @@ export class BrowserSessionManager {
 
   async act(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; controlLeaseId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_act', 'browser.action', 'external', input)
-    this.requireOwned(input.sessionId, context)
+    const entry = this.requireOwned(input.sessionId, context)
     const requestId = `${context.execution.runId ?? context.execution.threadId}_${randomUUID()}`
     const result = await this.call(context.execution.profileId, 'act', {
       requestId, sessionId: input.sessionId, tabId: input.tabId, generation: input.generation,
       observationId: input.observationId, controlLeaseId: input.controlLeaseId, action: input.action,
-      timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
+      timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {}),
+      ...(entry.record.backend === 'electron-attached' ? { turn: stepTurn(context.execution) } : {})
     }, this.signal(context))
     return { action: await this.actionResult(context, input.sessionId, result as BrowserActionResult) }
   }
@@ -511,6 +525,25 @@ export class BrowserSessionManager {
   assertHumanHandoffOwned(context: BrowserToolContext, request: { sessionId: string; reason: string; operation?: string }): void {
     this.authorize(context, 'browser_request_human', 'browser.task', 'external', request)
     this.requireOwned(request.sessionId, context)
+  }
+
+  /** The thread a session belongs to (trusted host lookup). */
+  threadOf(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.record.threadId
+  }
+
+  /**
+   * Its window already ended the session (an in-app tab moved to another thread): the record closes here too, with no
+   * call to the window. The agent then opens a new session, in a tab of its own thread.
+   */
+  markEnded(sessionId: string): void {
+    const entry = this.sessions.get(sessionId)
+    if (!entry || entry.record.lifecycle === 'closed') return
+    const updatedAt = new Date().toISOString()
+    entry.record = { ...entry.record, lifecycle: 'closed', updatedAt,
+      ...(entry.record.humanHandoff ? { humanHandoff: { ...entry.record.humanHandoff, state: 'closed', updatedAt } } : {}) }
+    this.observations.delete(sessionId)
+    this.persist()
   }
 
   async closeAll(backend?: BrowserSessionRecord['backend']): Promise<void> {
@@ -703,6 +736,14 @@ export function readSessionStates(profileRoot: string, profileId: string, staleB
 /** The worker answered `session_closed`: it has no such session, so there is nothing to close there. */
 function isUnknownSession(error: unknown): boolean {
   return error instanceof BrowserAutomationError && error.code === 'session_closed'
+}
+
+/**
+ * The turn an in-app step belongs to: the in-app browser stops an agent from waiting on a tab the person uses twice in
+ * one turn (`USER_CONFLICT_REPEAT_MESSAGE`).
+ */
+function stepTurn(execution: ExecutionContext): string {
+  return `${execution.runId ?? execution.threadId}/${execution.turnId}`.slice(0, 400)
 }
 
 function isIdentifier(value: string): boolean {

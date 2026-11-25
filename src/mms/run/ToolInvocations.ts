@@ -20,6 +20,8 @@ export class ToolInvocations {
     argsDigest: string
     now: string
     mcpAnnotations?: { readOnlyHint?: boolean }
+    /** The call's arguments: some tools only read with some of them (`browser_tabs` listing tabs). */
+    args?: unknown
     /**
      * The call's idempotency when its gate knows it from the tool's class (PR 6 §3: a bot gate
      * writes built-ins by their neutral class); absent, the name decides as before.
@@ -33,7 +35,7 @@ export class ToolInvocations {
         runId: input.runId,
         attemptId: input.attemptId,
         tool: input.tool,
-        idempotent: input.idempotent ?? isIdempotentTool(input.tool, input.mcpAnnotations),
+        idempotent: input.idempotent ?? isIdempotentTool(input.tool, input.mcpAnnotations, input.args),
         status: 'started',
         argsDigest: input.argsDigest,
         startedAt: input.now,

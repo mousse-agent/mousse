@@ -162,6 +162,33 @@ export function wrapElectronWebContents(contents: WebContents): GuestWebContents
         } catch { /* already gone */ }
       }
     },
+    onUserInput(listener) {
+      // Keys before the page sees them; clicks, wheels and touches as they are sent to it. Never a script in the page.
+      const onKey = (_event: unknown, input: { type?: string }) => { if (input?.type === 'keyDown' || input?.type === 'rawKeyDown') listener('key') }
+      const onInput = (_event: unknown, input: { type?: string }) => {
+        const type = input?.type
+        if (type === 'mouseDown' || type === 'touchStart') listener('pointer')
+        else if (type === 'mouseWheel' || type === 'gestureScrollBegin') listener('wheel')
+      }
+      contents.on('before-input-event', onKey)
+      contents.on('input-event', onInput)
+      return () => {
+        try {
+          contents.off('before-input-event', onKey)
+          contents.off('input-event', onInput)
+        } catch { /* already gone */ }
+      }
+    },
+    onUserNavigation(listener) {
+      // A navigation a frame started is the page's own (a redirect, or a link the person's click already counted).
+      const onStart = (details: { isMainFrame?: boolean; isSameDocument?: boolean; initiator?: unknown }) => {
+        if (details?.isMainFrame && !details.isSameDocument && !details.initiator) listener()
+      }
+      contents.on('did-start-navigation', onStart as never)
+      return () => {
+        try { contents.off('did-start-navigation', onStart as never) } catch { /* already gone */ }
+      }
+    },
     executeJavaScript<T = unknown>(code: string): Promise<T> {
       return contents.executeJavaScript(code) as Promise<T>
     }

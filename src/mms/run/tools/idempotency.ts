@@ -16,7 +16,6 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'browser_find',
   'browser_extract',
   'browser_screenshot',
-  'browser_tabs',
   'list_tasks',
   'list_subagents',
   'list_delegations',
@@ -46,6 +45,8 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'edit_file',
   'browser_act',
   'browser_open',
+  // Opening, switching or closing a tab acts; only listing them reads (`isIdempotentTool` with its arguments).
+  'browser_tabs',
   'create_task',
   'update_task',
   'create_subagent',
@@ -67,14 +68,20 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * True for registered read-only tools. Everything else, including MCP tools, is non-idempotent
- * unless the MCP server annotates the tool with `readOnlyHint: true`.
+ * True for registered read-only tools, and for a call that only reads (`browser_tabs` listing tabs, when its
+ * arguments are known). Everything else, including MCP tools, is non-idempotent unless the MCP server annotates the
+ * tool with `readOnlyHint: true`.
  */
 export function isIdempotentTool(
   name: string,
-  mcpAnnotations?: { readOnlyHint?: boolean }
+  mcpAnnotations?: { readOnlyHint?: boolean },
+  args?: unknown
 ): boolean {
   if (IDEMPOTENT_TOOLS.has(name)) return true
+  if (name === 'browser_tabs') {
+    const operation = args && typeof args === 'object' ? (args as { operation?: unknown }).operation : 'new'
+    return operation === undefined || operation === 'list'
+  }
   if (NON_IDEMPOTENT_TOOLS.has(name)) return false
   return mcpAnnotations?.readOnlyHint === true
 }

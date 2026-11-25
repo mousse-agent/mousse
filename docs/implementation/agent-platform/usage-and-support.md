@@ -58,7 +58,7 @@ Skill/MCP installations, enablement, and MCP authentication belong to the curren
 
 Open a tab in Mousse's Browser panel, select the intended thread, and choose **Use with agent**. Enable the browser tools in integration settings for the main agent or the published Agent being used. GUI automation controls that existing Electron tab, retaining its page, cookies, and identity.
 
-Use **Take control** to interact manually and **Resume agent** to return control. An agent's human-handoff request appears with its reason. Releasing automation leaves the human tab available. The selected tab must belong to the same profile/thread and authenticated GUI connection; an absent or stale selection reports a setup error.
+A thread's agent needs no permission for its own tabs. A tab is yours whenever you use it: the agent locks it only while one of its steps changes the page, and clicking, scrolling or typing in the page (or in the toolbar) stops that step and makes the agent wait. The toolbar shows who is using the tab. An agent's human-handoff request appears with its reason; **Resume agent** in the toolbar hands the tab back. Releasing automation leaves the human tab available. The selected tab must belong to the same profile/thread and authenticated GUI connection; an absent or stale selection reports a setup error.
 
 CLI and background automation use managed Chrome for Testing. Install it explicitly from the Browser panel's managed setup section or the CLI:
 

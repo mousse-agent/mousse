@@ -21,7 +21,8 @@ let access: BrowserAccessState
 let emit: (state: InAppBrowserState) => void
 
 beforeEach(() => {
-  access = { allowed: true, pending: [] }
+  // Group-chat consent is off: a thread agent's tab never waits on it.
+  access = { allowed: false, pending: [] }
   emit = () => {}
   ;(window as unknown as { mousse: unknown }).mousse = {
     platformRequest: { request: vi.fn(async () => access) },

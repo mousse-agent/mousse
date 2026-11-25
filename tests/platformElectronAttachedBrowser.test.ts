@@ -183,7 +183,7 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     expect(opened.session.backend).toBe('electron-attached')
   })
 
-  it('returns unsupported for tabs.new/close and fail-closed policy by default', async () => {
+  it('returns unsupported for tabs.new/close without the window’s tabs, and fail-closed policy by default', async () => {
     const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
     registerPair(registry)
     const closedPolicy = new ElectronAttachedBrowserBackend({
@@ -412,7 +412,7 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     expect(foreign.debugger.attached).toBe(false)
   })
 
-  it('revokes leases and reports unknown effect when external navigation interrupts raw input', async () => {
+  it('fences stale steps and reports unknown effect when external navigation interrupts raw input', async () => {
     const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
     const pair = registerPair(registry)
     const journal = memoryJournal()
@@ -441,11 +441,15 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     const response = await action
     expect(response.ok).toBe(true)
     expect((response.result as BrowserActionResult).outcome).toBe('unknown-effect')
-    const control = await backend.call(req('control.release', {
-      sessionId: opened.session.id,
-      controlLeaseId: opened.session.controlLeaseId
+    // The new document is a new generation: a step made for the old page is refused. The control lease is unchanged
+    // (only a change of control replaces it), so the agent's next step from a fresh observation works.
+    const stale = await backend.call(req('act', {
+      requestId: 'after-navigation', sessionId: opened.session.id, tabId: opened.observation.tabId,
+      generation: opened.session.generation, observationId: opened.observation.observationId,
+      controlLeaseId: opened.session.controlLeaseId,
+      action: { type: 'click', target: { kind: 'ref', ref: opened.observation.elements.find((element) => element.name === 'Save')!.ref } }
     }))
-    expect(control.ok).toBe(false)
+    expect(stale.error?.code).toBe('stale_generation')
     expect(journal.records).toContainEqual(expect.objectContaining({
       requestId: 'navigate-during-input', phase: 'outcome', outcome: 'unknown-effect'
     }))

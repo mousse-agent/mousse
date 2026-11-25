@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { isRepeatClick } from '../lib/repeatClick'
 import {
   ArrowLeft,
   ArrowRight,
   BrowserTab,
-  Bot,
   Check,
   Clean,
   Code2,
@@ -14,12 +12,11 @@ import {
   MoreVertical,
   Plus,
   RefreshCw,
-  Smartphone,
-  User
+  Smartphone
 } from '../lib/icons'
 import { isTurnActivePhase, type BrowserElementAttachment, type BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
-import type { InAppBrowserState } from '../../shared/browser/inApp'
+import type { InAppBrowserActivity, InAppBrowserState } from '../../shared/browser/inApp'
 import type { BrowserAgentCursor } from '../../shared/browser/agentCursor'
 import { AgentCursor } from './browser/AgentCursor'
 import { ThreadBrowserLayer, ThreadBrowserRow } from './browser/ThreadBrowserView'
@@ -29,20 +26,27 @@ import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { NO_LOADED_BROWSER_TABS, nextLoadedBrowserTabs, type LoadedBrowserTabs } from '../lib/loadedBrowserTabs'
 import {
-  BrowserAccessControl,
-  BrowserAccessPanel,
+  BrowserActivityIndicator,
   BrowserDeviceToolbar,
   BrowserNotice,
   BrowserStartPage,
   ClearCookiesDialog,
   DEVICE_PRESETS,
-  browserAgentState,
+  browserTabActivity,
   type BrowserNoticeState
 } from './browser/BrowserToolbarParts'
 import { BrowserLoadErrorPage } from './browser/BrowserLoadErrorPage'
 import { isPageLoadRejection, isShownLoadFailure, type BrowserLoadFailure } from './browser/browserLoadError'
 
 const BLANK_URL = 'about:blank'
+
+/** The person used a tab outside its page (toolbar, address bar, picker, the agent's shield): main keeps it theirs. */
+function reportBrowserActivity(activity: InAppBrowserActivity): void {
+  const pending = window.mousse?.inAppBrowser?.reportActivity?.(activity)
+  // A tab not registered yet has no agent to give way.
+  void pending?.catch(() => {})
+}
+
 /** How long a success notice stays under the toolbar. Errors stay until dismissed or replaced. */
 const DONE_NOTICE_MS = 4000
 function browserErrorMessage(error: unknown): string {
@@ -243,7 +247,10 @@ interface BrowserWebviewProps {
   tab: BrowserTabState
   profileId: string
   active: boolean
-  agentControlled: boolean
+  /** An agent session drives this tab: its page keeps drawing while hidden, for the agent's screenshots. */
+  agentBound: boolean
+  /** One of the agent's steps is changing the page now: a shield takes the person's first touch and stops it. */
+  agentBusy: boolean
   /** Where the agent acts in this tab: drawn over the page, never in it. */
   agentCursor?: BrowserAgentCursor
   onReady: (id: string, webview: HTMLWebViewElement | null) => void
@@ -253,7 +260,7 @@ interface BrowserWebviewProps {
   onMedia: (id: string, playing: boolean) => void
 }
 
-function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, onReady, onState, onNavState, onMedia }: BrowserWebviewProps) {
+function BrowserWebview({ tab, profileId, active, agentBound, agentBusy, agentCursor, onReady, onState, onNavState, onMedia }: BrowserWebviewProps) {
   const ref = useRef<HTMLWebViewElement>(null)
   // src is the mount URL. Observed URLs (including redirects) must never be
   // written back to src: doing so starts a second, competing guest navigation.
@@ -382,32 +389,41 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
     // A failure that repeats replaces this page's; nothing else to report.
     void pending?.catch(() => {})
   }
-  useEffect(() => { if (agentControlled) ref.current?.blur() }, [agentControlled])
+  const takeOver = () => reportBrowserActivity({ localTabId: tab.id, kind: 'input' })
   return (
     <KeepMounted active={active} preserveLayout
       className={`browser-viewport${active ? ' active' : ''}${blank || failed ? ' browser-viewport-blank' : ''}`}
       style={tab.deviceToolbarOpen && preset?.width ? { width: preset.width } : undefined}
     >
       {blank && <BrowserStartPage />}
-      {failed && <div style={{ display: 'contents' }} inert={agentControlled}><BrowserLoadErrorPage failure={failure} loading={pageLoading} onReload={reloadFailed} /></div>}
+      {failed && <BrowserLoadErrorPage failure={failure} loading={pageLoading} onReload={reloadFailed} />}
       <webview
         ref={ref}
         data-browser-tab-id={tab.id}
-        inert={agentControlled}
         className={`browser-webview${blank || failed ? ' browser-webview-hidden' : ''}`}
         src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
-        data-agent-controlled={agentControlled ? '' : undefined}
+        data-agent-controlled={agentBound ? '' : undefined}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
-      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control in the browser menu to interact" />}
+      {/* The person's first click, wheel or key stops the agent's step (main gives the tab back to them); the next reaches the page. */}
+      {agentBusy && (
+        <div
+          className="browser-agent-shield"
+          tabIndex={-1}
+          aria-label="Agent is acting in this tab. Click the page to take over"
+          onPointerDown={(event) => { event.currentTarget.focus(); takeOver() }}
+          onWheel={takeOver}
+          onKeyDown={takeOver}
+        />
+      )}
       {!blank && <AgentCursor cursor={agentCursor} zoom={tab.zoomFactor || 1} />}
     </KeepMounted>
   )
 }
 
-/** Makes an agent's tab its thread's current tab, and opens the browser when that thread is on screen. */
+/** Makes an agent's tab its thread's current tab, and opens the browser when that thread is on screen (once a session). */
 function showAgentTab(threadId: string, tabId: string) {
   const store = useAppStore.getState()
   if (!store.browserTabs.some((tab) => tab.id === tabId)) return
@@ -434,6 +450,10 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [mediaTabs, setMediaTabs] = useState<ReadonlySet<string>>(() => new Set())
   const registrations = useRef(new Map<string, Promise<unknown>>())
   const editingAddress = useRef(false)
+  /** The tab the address bar holds while it has focus: the one unpinned on blur, whatever tab is active by then. */
+  const addressPin = useRef<string | null>(null)
+  /** The address bar has focus: whichever tab is shown is the person's while it does. */
+  const addressFocused = useRef(false)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const key = activeThreadId ?? '__standalone__'
@@ -448,8 +468,14 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [menuOpen, setMenuOpen] = useState(false)
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
-  const [access, setAccess] = useState<BrowserAccessState>({ allowed: false, pending: [] })
-  const accessRevision = useRef(0)
+  // Tabs thread agents wait for: their first tab in this window (`browser.access.status`).
+  const [tabRequests, setTabRequests] = useState<NonNullable<BrowserAccessState['tabRequests']>>([])
+  // Tabs an agent opened (`browser_tabs` new), by local tab id: their registration answers main's request.
+  const openRequests = useRef(new Map<string, string>())
+  /** Tabs the window opened because an agent asked for one: the only tabs agents may close. */
+  const agentOpenedTabs = useRef(new Set<string>())
+  // The thread each registered tab was last reported to main as belonging to.
+  const reportedOwners = useRef(new Map<string, string | null>())
   const provisionedRequests = useRef(new Set<string>())
   const agentTabByThread = useRef(new Map<string, { tabId: string; sessionId?: string }>())
   const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
@@ -459,25 +485,19 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [confirmClearCookies, setConfirmClearCookies] = useState(false)
   const setBrowserError = useCallback((error: unknown) => setNotice({ kind: 'error', text: browserErrorMessage(error) }), [])
   const activeControl = activeTab ? controlByTab[activeTab.id] : undefined
-  const agentControlled = activeControl?.owner === 'agent'
-  const agentState = browserAgentState(access.allowed, activeControl?.owner)
-  const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
-  const manualActive = active && !agentControlled
-  const pendingAccess = access.allowed ? undefined : access.pending[0]
-  // Turning agent access on from the toolbar asks first in the same bar as an agent's request, which pauses a theme,
-  // so no theme can turn a click elsewhere into a grant. Turning it off needs no question.
-  const [confirmingAccess, setConfirmingAccess] = useState(false)
-  // A change made elsewhere (another window, an agent's request answered) ends the question asked here.
-  useEffect(() => { setConfirmingAccess(false) }, [access.allowed])
-  const askingAccess = Boolean(pendingAccess) || (confirmingAccess && !access.allowed)
+  const activity = browserTabActivity(activeControl)
+  const picker = useRef<{ webview: HTMLWebViewElement; tabId: string } | null>(null)
   useEffect(() => {
     let disposed = false
     let timer: ReturnType<typeof setTimeout>
     const refresh = async () => {
-      const revision = accessRevision.current
       try {
         const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
-        if (!disposed && revision === accessRevision.current) setAccess(state)
+        if (!disposed) setTabRequests((previous) => {
+          const next = state.tabRequests ?? []
+          const same = previous.length === next.length && previous.every((request, index) => request.requestId === next[index]?.requestId)
+          return same ? previous : next
+        })
       } catch { /* Reconnect on the next poll. */ }
       if (!disposed) timer = setTimeout(() => void refresh(), 750)
     }
@@ -485,8 +505,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     return () => { disposed = true; clearTimeout(timer) }
   }, [profileId])
   useEffect(() => {
-    if (!access.allowed) return
-    const pending = access.tabRequests ?? []
+    const pending = tabRequests
     const liveIds = new Set(pending.map((request) => request.requestId))
     for (const id of provisionedRequests.current) {
       if (!liveIds.has(id)) provisionedRequests.current.delete(id)
@@ -497,27 +516,46 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       const store = useAppStore.getState()
       // The tab belongs to the requesting thread. Hidden guests still load, so the
       // trusted host registers it on dom-ready and wakes the waiting tool call.
-      store.addBrowserTab(request.threadId)
+      agentOpenedTabs.current.add(store.addBrowserTab(request.threadId))
       if (store.activeThreadId === request.threadId) store.openSurfaceKind('browser')
     }
-  }, [access.allowed, access.tabRequests])
-  useEffect(() => {
-    if (!pendingAccess) return
+  }, [tabRequests])
+  // An agent's own new tab (`browser_tabs` new) and its closing one. A tab opened while the person uses another stays
+  // in the background, so it never takes the page from under them.
+  useEffect(() => window.mousse?.inAppBrowser?.onTabCommand?.((command) => {
     const store = useAppStore.getState()
-    store.openSurfaceKind('browser')
-  }, [pendingAccess?.requestId])
+    if (command.kind === 'close') {
+      if (store.browserTabs.some((tab) => tab.id === command.localTabId)) store.closeBrowserTab(command.localTabId)
+      return
+    }
+    const previous = store.browserActiveTabByThread[command.threadId]
+    const tabId = store.addBrowserTab(command.threadId)
+    openRequests.current.set(tabId, command.requestId)
+    agentOpenedTabs.current.add(tabId)
+    if (!command.activate && previous && previous !== tabId) store.setActiveBrowserTab(command.threadId, previous)
+  }), [])
+  // Main offers a tab only to its thread's agent: a tab moved to another thread, or kept in every thread, says so.
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (!reportedOwners.current.has(tab.id) || reportedOwners.current.get(tab.id) === tab.ownerThreadId) continue
+      reportedOwners.current.set(tab.id, tab.ownerThreadId)
+      const pending = window.mousse?.inAppBrowser?.setTabOwner?.({ localTabId: tab.id, threadId: tab.ownerThreadId })
+      void pending?.catch(() => { /* A tab unloaded meanwhile registers with its owner again. */ })
+    }
+  }, [tabs])
   useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
     if (state.profileId !== profileId) return
     setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
     const { threadId } = state
-    if (!threadId) return
+    // Who is using a tab (`activity`) arrives for tabs no agent session holds too: only a session's states show its tab.
+    if (!threadId || !state.sessionId) return
     const known = agentTabByThread.current.get(threadId)
     if (state.owner === 'disconnected') {
       if (known?.tabId === state.uiTabId) agentTabByThread.current.delete(threadId)
       return
     }
-    // Show the tab once per agent session; later navigations and handoffs keep the user's view.
-    if (known?.tabId === state.uiTabId && known.sessionId === state.sessionId) return
+    // Show the tab once per agent session; its later tabs, navigations and handoffs keep the user's view.
+    if (known?.sessionId === state.sessionId) return
     agentTabByThread.current.set(threadId, { tabId: state.uiTabId, sessionId: state.sessionId })
     if (state.owner === 'agent') showAgentTab(threadId, state.uiTabId)
   }), [profileId])
@@ -545,16 +583,31 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     editingAddress.current = false
   }, [activeTab?.id, active])
 
+  const unpinAddress = useCallback(() => {
+    const held = addressPin.current
+    addressPin.current = null
+    if (held) reportBrowserActivity({ localTabId: held, kind: 'unpin', pin: 'address' })
+  }, [])
+  // Another tab shown while the address bar has focus: the bar now holds that tab, and lets the one it held go.
+  useEffect(() => {
+    if (addressFocused.current && active && activeTab) {
+      addressPin.current = activeTab.id
+      reportBrowserActivity({ localTabId: activeTab.id, kind: 'pin', pin: 'address' })
+    }
+    return unpinAddress
+  }, [unpinAddress, activeTab?.id, activeThreadId, active])
+
   const cancelPicker = useCallback(() => {
     const current = picker.current
     picker.current = null
     if (current) {
       const pending = withWebview(current.webview, (wv) => wv.executeJavaScript('window.__mousseCancelElementPicker?.()', true), undefined)
       void pending?.catch(() => { /* Guest navigation/destruction already cancels selection. */ })
+      reportBrowserActivity({ localTabId: current.tabId, kind: 'unpin', pin: 'picker' })
     }
     setPicking(false)
   }, [])
-  useEffect(() => cancelPicker, [cancelPicker, activeTab?.id, activeThreadId, manualActive])
+  useEffect(() => cancelPicker, [cancelPicker, activeTab?.id, activeThreadId, active])
 
   useEffect(() => {
     if (activeTab && requestedActiveId !== activeTab.id) {
@@ -595,10 +648,14 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       if (!registrations.current.has(id)) {
         // A thread's own tab is offered only to that thread's agent, so it never drives a tab hidden from its thread.
         const threadId = useAppStore.getState().browserTabs.find((tab) => tab.id === id)?.ownerThreadId
+        const openRequestId = openRequests.current.get(id)
+        openRequests.current.delete(id)
         const registration = window.mousse.inAppBrowser.registerTab({
-          localTabId: id, webContentsId: webview.getWebContentsId(), ...(threadId ? { threadId } : {})
+          localTabId: id, webContentsId: webview.getWebContentsId(), ...(threadId ? { threadId } : {}), ...(openRequestId ? { openRequestId } : {}),
+          ...(agentOpenedTabs.current.has(id) ? { agentOpened: true } : {})
         })
         registrations.current.set(id, registration)
+        reportedOwners.current.set(id, threadId ?? null)
         void registration.catch((error) => {
           // A tab that unloaded meanwhile has nothing to report.
           if (registrations.current.get(id) !== registration) return
@@ -612,6 +669,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       // An unloaded tab's page is gone with its registration; the page it loads when shown again registers anew.
       webviews.current.delete(id)
       registrations.current.delete(id)
+      reportedOwners.current.delete(id)
     }
   }, [setBrowserError])
   const handleMedia = useCallback((id: string, playing: boolean) => {
@@ -685,15 +743,17 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
 
   const chooseElement = async () => {
     const webview = getActiveWebview()
-    if (!manualActive || !webview || !activeTab || activeTab.url === BLANK_URL) return
+    if (!active || !webview || !activeTab || activeTab.url === BLANK_URL) return
     if (picker.current) {
       cancelPicker()
       return
     }
     if (!isWebviewGuestReady(webview)) return
-    const selection = { webview }
+    const selection = { webview, tabId: activeTab.id }
     picker.current = selection
     setPicking(true)
+    // Picking is using the tab: an agent's step there gives way until the pick ends.
+    reportBrowserActivity({ localTabId: selection.tabId, kind: 'pin', pin: 'picker' })
     try {
       const result = await withWebview(
         webview,
@@ -707,6 +767,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       if (picker.current === selection) {
         picker.current = null
         setPicking(false)
+        reportBrowserActivity({ localTabId: selection.tabId, kind: 'unpin', pin: 'picker' })
       }
     }
   }
@@ -716,36 +777,25 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     updateTab(activeTab.id, { zoomFactor: Math.min(2, Math.max(0.5, activeTab.zoomFactor + delta)) })
   }
 
-  const browserControl = async (operation: 'take' | 'resume') => {
-    if (!activeTab || !activeThreadId || browserBusy) return
+  /** Hands a tab the agent gave the person (`browser_request_human`) back to the agent. */
+  const resumeAgent = async () => {
+    if (!activeTab || browserBusy) return
     const tabId = activeTab.id
     const api = window.mousse?.inAppBrowser
     setBrowserBusy(true); setNotice(null)
     try {
       if (!api) throw new Error('In-app browser automation is unavailable')
-      if (operation === 'take') await api.takeControl(tabId)
-      else await api.resumeAgent(tabId)
+      await api.resumeAgent(tabId)
     } catch (error) { setBrowserError(error) }
     finally { setBrowserBusy(false) }
   }
-
-  const changeAccess = async (allowed: boolean, requestId?: string) => {
-    accessRevision.current += 1
-    setBrowserBusy(true)
-    setNotice(null)
-    try {
-      const state = await window.mousse.platformRequest.request<BrowserAccessState>(requestId ? 'browser.access.respond' : 'browser.access.set', { profileId, allowed, ...(requestId ? { requestId } : {}) })
-      setAccess(state)
-    } catch (error) {
-      setNotice({
-        kind: 'error',
-        text: requestId ? 'Couldn’t answer the access request' : allowed ? 'Couldn’t turn on agent access' : 'Couldn’t turn off agent access',
-        detail: browserErrorMessage(error)
-      })
-      // Revocation may have succeeded even if its response was interrupted.
-      try { setAccess(await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })) } catch { /* Keep the original error. */ }
-    }
-    finally { accessRevision.current += 1; setBrowserBusy(false) }
+  const reportToolbarInput = () => { if (activeTab) reportBrowserActivity({ localTabId: activeTab.id, kind: 'input' }) }
+  const pinAddress = (pinned: boolean) => {
+    addressFocused.current = pinned
+    unpinAddress()
+    if (!pinned || !activeTab) return
+    addressPin.current = activeTab.id
+    reportBrowserActivity({ localTabId: activeTab.id, kind: 'pin', pin: 'address' })
   }
 
   const clearBrowserData = async (what: 'cookies' | 'cache') => {
@@ -774,13 +824,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       {!hasVisibleTabs && noticeView}
       {hasVisibleTabs ? (
         <>
-          <div className="browser-toolbar">
-            <div style={{ display: 'contents' }} inert={agentControlled}>
+          {/* Using the toolbar is using the tab: an agent's step there gives way. */}
+          <div className="browser-toolbar" onPointerDownCapture={reportToolbarInput} onKeyDownCapture={reportToolbarInput}>
             <button type="button" className="browser-toolbar-btn" disabled={!canGoBack} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goBack(), undefined)} aria-label="Back"><ArrowLeft size={16} /></button>
             <button type="button" className="browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
             <button type="button" className="browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
             <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
-              <input className="browser-url-input" aria-label="Browser address" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
+              <input className="browser-url-input" aria-label="Browser address" value={inputUrl} onFocus={() => { editingAddress.current = true; pinAddress(true) }} onBlur={() => { editingAddress.current = false; pinAddress(false) }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
             </form>
             <button
               type="button"
@@ -792,8 +842,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             >
               <Crosshair size={16} />
             </button>
-            </div>
-            <BrowserAccessControl state={agentState} allowed={access.allowed} busy={browserBusy} onChange={(allowed) => { if (allowed) setConfirmingAccess(true); else { setConfirmingAccess(false); void changeAccess(false) } }} />
+            <BrowserActivityIndicator activity={activity} busy={browserBusy} onResume={() => void resumeAgent()} />
             <div className="browser-menu-wrap">
               <button
                 ref={menuButtonRef}
@@ -814,13 +863,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     onPointerDown={() => setMenuOpen(false)}
                   />
                   <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu" aria-label="Browser menu">
-                    {(agentControlled || activeControl?.owner === 'human') && <>
-                      <button type="button" role="menuitem" disabled={browserBusy || (!agentControlled && !access.allowed)} onClick={() => { setMenuOpen(false); void browserControl(agentControlled ? 'take' : 'resume') }}>
-                        <span className="browser-menu-label">{agentControlled ? <User size={14} /> : <Bot size={14} />}{agentControlled ? 'Take control' : 'Resume agent'}</span>
-                      </button>
-                      <div className="browser-menu-separator" />
-                    </>}
-                    <div className="browser-menu-actions" style={{ display: 'contents' }} inert={agentControlled}>
                     <button type="button" role="menuitem" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><RefreshCw size={14} />Hard reload</span>
                     </button>
@@ -841,7 +883,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void clearBrowserData('cache') }}>
                       <span className="browser-menu-label"><Clean size={14} />Clear cache</span>
                     </button>
-                    </div>
                   </div>
                 </FloatingPortal>
               )}
@@ -872,7 +913,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             tab={tab}
             profileId={profileId}
             active={tab.id === activeTab?.id}
-            agentControlled={controlByTab[tab.id]?.owner === 'agent'}
+            agentBound={controlByTab[tab.id]?.owner === 'agent'}
+            agentBusy={controlByTab[tab.id]?.owner !== 'disconnected' && controlByTab[tab.id]?.activity === 'agent-busy'}
             agentCursor={cursorByTab[tab.id]}
             onReady={registerWebview}
             onState={handleWebviewState}
@@ -881,13 +923,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
           />
         ))}
       </KeepMounted>
-      <BrowserAccessPanel
-        open={askingAccess}
-        agentAsking={Boolean(pendingAccess)}
-        busy={browserBusy}
-        onAllow={(event) => { if (isRepeatClick(event)) return; setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}
-        onDeny={() => { setConfirmingAccess(false); if (pendingAccess) void changeAccess(false, pendingAccess.requestId) }}
-      />
       </KeepMounted>
       </KeepMountedStack>
       {activeThreadId && <ThreadBrowserLayer threadId={activeThreadId} />}

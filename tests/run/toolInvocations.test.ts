@@ -15,7 +15,7 @@ describe('isIdempotentTool', () => {
   it('classifies the SPEC §12.6 lists', () => {
     for (const name of ['read_file', 'list_dir', 'ls', 'git_status', 'git_diff', 'web_search',
       'web_fetch', 'browser_observe', 'browser_find', 'browser_extract', 'browser_screenshot',
-      'browser_tabs', 'list_tasks', 'list_subagents', 'list_delegations', 'integrate_delegation', 'integrate_subagent'])
+      'list_tasks', 'list_subagents', 'list_delegations', 'integrate_delegation', 'integrate_subagent'])
       expect(isIdempotentTool(name), name).toBe(true)
     for (const name of ['bash', 'run_command', 'write_file', 'edit_file', 'browser_act',
       'browser_open', 'create_task', 'update_task', 'create_subagent', 'create_subagents',
@@ -31,6 +31,17 @@ describe('isIdempotentTool', () => {
     expect(isIdempotentTool('mcp__github__get_issue', { readOnlyHint: true })).toBe(true)
     // A registered side-effecting tool cannot be relabelled by an annotation.
     expect(isIdempotentTool('bash', { readOnlyHint: true })).toBe(false)
+  })
+
+  it.each([
+    [{ operation: 'list' }, true],
+    [{}, true],
+    [{ operation: 'new', url: 'https://example.test/' }, false],
+    [{ operation: 'switch', tabId: 'tab_1' }, false],
+    [{ operation: 'close', tabId: 'tab_1' }, false],
+    [undefined, false]
+  ])('browser_tabs with %j is idempotent: %s (only listing reads)', (args, idempotent) => {
+    expect(isIdempotentTool('browser_tabs', undefined, args)).toBe(idempotent)
   })
 
   it('a bot\'s consult and escalate are idempotent: their effects are other rows, or bots.db only', () => {
@@ -58,6 +69,15 @@ describe('ToolInvocations', () => {
     const attempt = store.createAttempt({ runId: run.runId, reason: 'initial' })
     return { store, tools: new ToolInvocations(store), run, attempt }
   }
+
+  it('leaves a browser_tabs call that opens a tab unknown after a crash, and one that only lists tabs not', () => {
+    const { tools, run, attempt } = open()
+    const start = (invocationId: string, args: unknown) => tools.start({ invocationId, runId: run.runId, attemptId: attempt.attemptId, tool: 'browser_tabs', argsDigest: 'sha256:' + invocationId, now: NOW, args })
+    expect(start('list', { operation: 'list' }).idempotent).toBe(true)
+    expect(start('new', { operation: 'new', url: 'https://example.test/' }).idempotent).toBe(false)
+    // A crash now: only the new tab makes the run uncertain on restart.
+    expect(tools.listStartedNonIdempotentForRuns([run.runId]).map((row) => row.invocationId)).toEqual(['new'])
+  })
 
   it('records started, committed and failed with tool.status events on the run thread', () => {
     const { store, tools, run, attempt } = open()

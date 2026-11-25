@@ -101,7 +101,6 @@ describe.skipIf(!chrome.ok)('a bot\'s browser answers only through its own view 
     await expect(gui('browser.view.watch', { threadId: HOME, viewId: 'view-1', watchId: 'watch-1', width: 480, fps: 5 })).resolves.toMatchObject({ browser: { open: false } })
     // Every general method that names its session is refused in plain words: from its home thread, or another.
     const params: Record<string, Record<string, unknown>> = {
-      'browser.sessions.takeControl': { sessionId },
       'browser.sessions.resume': { sessionId },
       'browser.artifacts.read': { sessionId, artifactId: 'artifact-1' }
     }
@@ -184,8 +183,8 @@ describe.skipIf(!chrome.ok)('a bot\'s browser answers only through its own view 
     const opened = await browser.dispatch(threadContext(THREAD), 'browser_open', { url: `${origin}/form.html` })
     expect(opened.ok).toBe(true)
     const sessionId = opened.ok ? opened.value.session!.id : ''
-    // The general Take control and Resume are the in-app tab's: a second way to hold this one is refused.
-    for (const method of ['browser.sessions.takeControl', 'browser.sessions.resume'])
+    // The general Resume is the in-app tab's: a second way to hold this one is refused.
+    for (const method of ['browser.sessions.resume'])
       await expect(gui(method, { threadId: THREAD, sessionId }), method).rejects.toMatchObject({ code: 'policy_denied', message: expect.stringMatching(/Browser panel/) })
     expect(browser.sessions.trustedSessionScope({ profileId, threadId: THREAD, sessionId }).record.lifecycle).not.toBe('human-controlled')
     // Its view takes it over, and gives it back.
