@@ -71,17 +71,6 @@
       "expiresAt": "2026-11-25T05:10:55.080Z"
     },
     {
-      "task": "fast-automatic-title-naming",
-      "session": "Animatrix-b7fc61",
-      "machine": "Animatrix",
-      "branch": "fast-automatic-title-naming",
-      "paths": [
-        "src/mms/orchestrator"
-      ],
-      "claimedAt": "2026-11-25T02:26:34.799Z",
-      "expiresAt": "2026-11-25T05:09:43.797Z"
-    },
-    {
       "task": "issue-1830-grant-roles",
       "session": "Avarnics-Mac-mini.local-c3024a",
       "machine": "Avarnics-Mac-mini.local",
