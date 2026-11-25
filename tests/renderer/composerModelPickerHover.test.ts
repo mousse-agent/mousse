@@ -25,7 +25,8 @@ const catalog = (): LlmProviderOption[] => [{
     { id: 'claude-fable-5', label: 'Claude Fable 5', efforts },
     { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', efforts },
     { id: 'claude-fable-5-2', label: 'Claude Fable 5.2', efforts },
-    { id: 'claude-fable-5-dd-weiver-otua-xedoc', label: 'Codex Auto Review', efforts }
+    { id: 'claude-fable-5-dd-weiver-otua-xedoc', label: 'Codex Auto Review', efforts },
+    { id: 'claude-fable-5-dd-los-2.6-tpg', label: 'GPT 6.2 Sol', efforts }
   ]
 } as unknown as LlmProviderOption]
 const settings = (): MousseSettings => ({
@@ -39,9 +40,6 @@ const thread = (model: string, effort?: string): Thread => ({
   id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0,
   modelOverride: { llmProvider: 'claude-subscription', model, ...(effort ? { effort } : {}) }
 }) as unknown as Thread
-
-// Where the reasoning column sits beside the list; jsdom has no layout.
-const COLUMN = { left: 300, right: 456, top: 40, bottom: 240 }
 
 let root: Root
 let host: HTMLElement
@@ -107,11 +105,6 @@ async function clickLevel(name: string): Promise<void> {
 
 beforeEach(async () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
-  const rect = Element.prototype.getBoundingClientRect
-  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
-    if (this.classList.contains('model-picker-run')) return { ...COLUMN, x: COLUMN.left, y: COLUMN.top, width: COLUMN.right - COLUMN.left, height: COLUMN.bottom - COLUMN.top, toJSON: () => ({}) } as DOMRect
-    return rect.call(this)
-  })
   under = null
   setModel = vi.fn(async (_id: string, override: { model: string; effort?: string }) => thread(override.model, override.effort))
   stubBridge()
@@ -121,7 +114,7 @@ beforeEach(async () => {
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   useAppStore.setState({
     profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false, settingsOpen: false,
-    activeThreadId: 'thread-a', threads: [thread('claude-fable-5-1', 'high')],
+    activeThreadId: 'thread-a', threads: [thread('claude-fable-5-dd-los-2.6-tpg', 'high')],
     messages: [{ id: 'm-1', role: 'user', content: 'First message', timestamp: now }]
   })
   const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
@@ -138,39 +131,30 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-/** Rests on Opus, then drifts down and right across the rows under it, lingering on each as a slow hand does. */
-async function driftFromOpusTowardsTheLevels(names: string[]): Promise<void> {
-  await pointTo(row('Opus 5.5'), 100, 60)
-  await wait(150)
-  expect(columnFor()).toBe('Reasoning for Opus 5.5')
-  for (const [step, name] of names.entries()) {
-    await pointTo(row(name), 140 + step * 40, 90 + step * 30)
-    await wait(150)
+/** Moves the pointer down and right from Opus 5.5 across the rows under it, resting on each, then onto the levels. */
+async function driftFromOpusToTheLevels(): Promise<void> {
+  for (const [step, name] of ['Opus 5.5', 'Fable 5', 'Fable 5.1', 'Fable 5.2', 'Codex Auto Review'].entries()) {
+    await pointTo(row(name), 100 + step * 40, 60 + step * 30)
+    await wait(300)
   }
+  await pointTo(column(), 320, 190)
 }
 
-it('a level picked after crossing other models on the way to it is the level of the model the pointer left', async () => {
-  await driftFromOpusTowardsTheLevels(['Fable 5', 'Fable 5.1', 'Fable 5.2', 'Codex Auto Review'])
-  await pointTo(column(), 320, 190)
-  expect(columnFor()).toBe('Reasoning for Opus 5.5')
+// The reported case: on GPT 6.2 Sol at High, the pointer crossed Opus 5.5 and the rows under it on the way to
+// Extra high, and the thread was saved as Codex Auto Review at Extra high.
+it('hovering other models on the way to a level leaves the column on the selected model, and the level applies to it', async () => {
+  expect(columnFor()).toBe('Reasoning for GPT 6.2 Sol')
+  await driftFromOpusToTheLevels()
+  expect(columnFor()).toBe('Reasoning for GPT 6.2 Sol')
 
   await clickLevel('Extra high')
-  expect(saved()).toEqual([{ model: 'opus', effort: 'xhigh' }])
-  expect(host.querySelector('.composer-model-btn')?.getAttribute('aria-label')).toBe('Model: Opus 5.5 Extra high')
+  expect(saved()).toEqual([{ model: 'claude-fable-5-dd-los-2.6-tpg', effort: 'xhigh' }])
+  expect(host.querySelector('.composer-model-btn')?.getAttribute('aria-label')).toBe('Model: GPT 6.2 Sol Extra high')
 })
 
-it('the column follows the pointer down the list when it is not heading for the levels', async () => {
-  await pointTo(row('Opus 5.5'), 100, 60)
-  await wait(150)
-  await pointTo(row('Fable 5'), 100, 90)
-  await pointTo(row('Fable 5.2'), 100, 150)
-  await wait(150)
-  expect(columnFor()).toBe('Reasoning for Fable 5.2')
-})
-
-it('a model the pointer stops on, on the way to the levels, shows its levels once it rests', async () => {
-  await driftFromOpusTowardsTheLevels(['Fable 5', 'Fable 5.2'])
-  expect(columnFor()).toBe('Reasoning for Opus 5.5')
-  await wait(300)
-  expect(columnFor()).toBe('Reasoning for Fable 5.2')
+it('clicking Opus 5.5 selects Opus 5.5 at Medium, its listing naming no default level', async () => {
+  await act(async () => { row('Opus 5.5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click() })
+  await settle(3)
+  expect(saved()).toEqual([{ model: 'opus', effort: 'medium' }])
+  expect(host.querySelector('.composer-model-btn')?.getAttribute('aria-label')).toBe('Model: Opus 5.5 Medium')
 })
