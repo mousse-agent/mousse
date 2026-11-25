@@ -61,6 +61,18 @@
       "expiresAt": "2026-11-25T05:35:26.312Z"
     },
     {
+      "task": "empty-chat-terminal-no-workspace",
+      "session": "Animatrix-d00f96",
+      "machine": "Animatrix",
+      "branch": "empty-chat-terminal-no-workspace",
+      "paths": [
+        "src/mms/protocol/handlers.ts",
+        "src/renderer/components/ProjectTerminalPanel.tsx"
+      ],
+      "claimedAt": "2026-11-25T19:05:05.726Z",
+      "expiresAt": "2026-11-25T21:05:05.726Z"
+    },
+    {
       "task": "fix-windows-update-install-path",
       "session": "Animatrix-ccfd0b",
       "machine": "Animatrix",
