@@ -269,3 +269,65 @@ describe('the ceiling a navigation waits for its page', () => {
     expect(record).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('a connection the site dropped before answering is tried once more', () => {
+  /** The site's page opens: its document is ready and loaded as the command answers. */
+  const opens = (cdp: NavigationTransport) => async () => {
+    cdp.lifecycle('DOMContentLoaded')
+    cdp.lifecycle('load')
+    return { frameId: 'main', loaderId: 'new' }
+  }
+
+  it.each(['net::ERR_CONNECTION_CLOSED', 'net::ERR_CONNECTION_RESET'])('%s, and the page opens on the second try', async (errorText) => {
+    vi.useFakeTimers()
+    const cdp = new NavigationTransport()
+    cdp.navigate.mockResolvedValueOnce({ frameId: 'main', loaderId: 'dropped', errorText }).mockImplementationOnce(opens(cdp))
+    const waiting = navigateTab(cdp, 'tab', 'https://fixture.test', quick)
+    await vi.advanceTimersByTimeAsync(250)
+    await expect(waiting).resolves.toEqual({ url: 'https://fixture.test/', state: 'ready' })
+    expect(cdp.navigate).toHaveBeenCalledTimes(2)
+    expect(cdp.listeners()).toBe(0)
+  })
+
+  it.each([
+    ['refused', 'net::ERR_CONNECTION_REFUSED', {}],
+    ['a name that does not resolve', 'net::ERR_NAME_NOT_RESOLVED', {}],
+    ['a TLS failure', 'net::ERR_SSL_PROTOCOL_ERROR', {}],
+    ['a dropped connection with retries off', 'net::ERR_CONNECTION_CLOSED', { retryTransient: false }],
+    ['a dropped connection with too little of the ceiling left', 'net::ERR_CONNECTION_CLOSED', { ceilingMs: 700 }]
+  ])('is not retried: %s', async (_case, errorText, options) => {
+    vi.useFakeTimers()
+    const cdp = new NavigationTransport()
+    cdp.navigate.mockResolvedValue({ frameId: 'main', loaderId: 'x', errorText })
+    const failing = navigateTab(cdp, 'tab', 'https://fixture.test', { ...quick, ...options }).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await failing).toMatchObject({ code: 'site_unreachable', problem: { code: errorText } })
+    expect(cdp.navigate).toHaveBeenCalledTimes(1)
+  })
+
+  it('is tried only once: a second drop fails', async () => {
+    vi.useFakeTimers()
+    const cdp = new NavigationTransport()
+    cdp.navigate.mockResolvedValue({ frameId: 'main', loaderId: 'x', errorText: 'net::ERR_CONNECTION_RESET' })
+    const failing = navigateTab(cdp, 'tab', 'https://fixture.test', quick).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await failing).toMatchObject({ code: 'site_unreachable', problem: { code: 'net::ERR_CONNECTION_RESET' } })
+    expect(cdp.navigate).toHaveBeenCalledTimes(2)
+  })
+
+  it('a cancel during the wait before the retry answers "cancelled" and never retries', async () => {
+    vi.useFakeTimers()
+    const cdp = new NavigationTransport()
+    const abort = new AbortController()
+    cdp.navigate.mockResolvedValue({ frameId: 'main', loaderId: 'x', errorText: 'net::ERR_CONNECTION_CLOSED' })
+    const failing = navigateTab(cdp, 'tab', 'https://fixture.test', { ...quick, signal: abort.signal }).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(cdp.navigate).toHaveBeenCalledTimes(1)
+    abort.abort()
+    expect(await failing).toMatchObject({ code: 'cancelled' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(cdp.navigate).toHaveBeenCalledTimes(1)
+    expect(cdp.listeners()).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
