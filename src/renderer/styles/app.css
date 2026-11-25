@@ -617,34 +617,49 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
-/* A browser tab names its page (its title, else its host), cut short with an ellipsis, even where other tabs show
-   only their icons. */
+/* A browser tab names its page (its title, else its host), cut short with an ellipsis. */
 .main-view-tab.is-browser .main-view-tab-label {
   max-width: 22ch;
 }
 
+/* A narrow panel (the side pane opens at 440px) keeps every tab's name, cut short; only a terminal's folder goes. */
 @container main-area (max-width: 520px) {
-  .main-view-tab-label,
   .main-view-tab-detail {
     display: none;
   }
 
+  .main-view-tab-label,
   .main-view-tab.is-browser .main-view-tab-label {
-    display: block;
     max-width: 12ch;
   }
 
+  /* Tabs cut their names shorter before the strip has to scroll, so the add button stays in view; each keeps its
+     icon and a letter or two. Only the selected tab (or one reached from the keyboard) keeps a close button, so the
+     others' names get its room; middle-click still closes any tab. */
   .main-view-tab {
-    gap: 0;
-    padding: 6px 9px;
+    flex-shrink: 1;
+    min-width: 52px;
+  }
+
+  .main-view-tab.active {
+    min-width: 76px;
+  }
+
+  .main-view-tab-select {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .main-view-tab-close {
+    flex-shrink: 0;
+  }
+
+  .main-view-tab:not(.active):not(:focus-within) .main-view-tab-close {
+    display: none;
   }
 }
 
 @container main-area (max-width: 360px) {
-  .main-view-tab {
-    padding: 6px 7px;
-  }
-
   .main-view-tabs {
     gap: 1px;
   }
