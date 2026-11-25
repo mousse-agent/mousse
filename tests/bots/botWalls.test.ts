@@ -295,6 +295,32 @@ describe('walls', () => {
       const later = await running('Another job', 'r2', 'run')
       expect(later.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
     })
+
+    /** The owner publishes and approves `tools` as the bot's permissions. */
+    function approveTools(tools: string[]) {
+      const entry = bots.get('site-editor')
+      const saved = bots.save({ ...entry.draft, permissions: manifest({ tools: tools as never }) }, entry.draftHash)
+      bots.publish('site-editor', saved.draftHash)
+      bots.approve('site-editor', botManifestDigest(bots.get('site-editor').published!.permissions))
+    }
+
+    it('may be asked again after a grant change in the same millisecond as the Not now', async () => {
+      await deniedThreads()
+      clock -= 1000
+      approveTools(['read', 'edit', 'write'])
+      const later = await running('Another job', 'r2', 'run')
+      expect(later.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
+    })
+
+    it('is a repeat again once the grant is changed back to the one it was refused under', async () => {
+      const held = [...bots.get('site-editor').published!.permissions.tools]
+      await deniedThreads()
+      approveTools(['read', 'edit', 'write'])
+      clock += 1000
+      approveTools(held)
+      const later = await running('Another job', 'r2', 'run')
+      expect(later.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Again.' })).toBe(BOT_ASK_DUPLICATE_TEXT)
+    })
   })
 
   it('an unanswered ask never expires: the chat waits, and the answer still continues it days later', async () => {

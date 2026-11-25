@@ -1112,12 +1112,17 @@ const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
   prompt.workDelivery?.answers.length || prompt.workDelivery?.question || prompt.workDelivery?.questions?.length
 )
 
-/** Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. */
-const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question' | 'questions'): string => `
-  EXISTS (SELECT 1 FROM bot_dispatches carried, json_each(carried.prompt_json, '$.workDelivery.${member}') item
-    WHERE carried.activation_id = ${table}.activation_id AND item.value = ${table}.id)
-  AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') item
-    WHERE d.activation_id = ${table}.activation_id AND item.value = ${table}.id AND ${WORK_TOLD})`
+/**
+ * Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. A row carried under
+ * any of `members` and confirmed under none of them is unconfirmed: a question an older build carried as its single
+ * `question` and a newer one confirmed in `questions` was told once.
+ */
+const unconfirmedDelivery = (table: string, ...members: Array<'notes' | 'answers' | 'question' | 'questions'>): string => {
+  const items = (dispatch: string) => members.map((member) => `SELECT value FROM json_each(${dispatch}.prompt_json, '$.workDelivery.${member}')`).join(' UNION ALL ')
+  return `
+  EXISTS (SELECT 1 FROM bot_dispatches carried WHERE carried.activation_id = ${table}.activation_id AND ${table}.id IN (${items('carried')}))
+  AND NOT EXISTS (SELECT 1 FROM bot_dispatches d WHERE d.activation_id = ${table}.activation_id AND ${table}.id IN (${items('d')}) AND ${WORK_TOLD})`
+}
 
 type Row = Record<string, unknown>
 
@@ -1957,12 +1962,16 @@ export class BotStore {
 
   /**
    * Compare-and-set from `open`: false when it was already answered, expired or cancelled. A Not now keeps where the
-   * owner had last written then (`ownerWroteSinceDenial`), so a repeat of the ask is told apart from one they wrote about.
+   * owner had last written then and the grant it was said under (`denialOf`), so a repeat of the ask is told apart from
+   * one they wrote about, or one under another grant.
    */
   answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string): boolean {
     const moved = this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
     const botId = moved && status === 'denied' ? this.get('SELECT bot_id FROM bot_escalations WHERE id = ?', id)?.bot_id : undefined
-    if (typeof botId === 'string') this.run('INSERT OR REPLACE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `ask-denied:${id}`, String(this.ownerLastWroteSeq(botId)))
+    if (typeof botId === 'string') {
+      const denial = { seq: this.ownerLastWroteSeq(botId), grant: this.activeGrant(botId)?.digest ?? '' }
+      this.run('INSERT OR REPLACE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `ask-denied:${id}`, JSON.stringify(denial))
+    }
     return moved
   }
 
@@ -2342,9 +2351,14 @@ export class BotStore {
       JSON.stringify(answer), messageId, this.now(), id, ...from) > 0
   }
 
-  /** The owner wrote something else: the bot's open, shown chat questions (but `except`) are moved on; the ones moved. */
-  moveOnQuestions(botId: string, byMessage: string, except?: string): BotQuestionRow[] {
-    const open = this.openChatQuestions(botId).filter((question) => question.id !== except)
+  /**
+   * The owner wrote something else: the bot's open, shown chat questions are moved on; the ones moved. Not `answering`,
+   * nor the questions the same turn asked with it (one batch, shown together): answering one leaves the others open, with
+   * their follow-ups and defaults.
+   */
+  moveOnQuestions(botId: string, byMessage: string, answering?: Pick<BotQuestionRow, 'id' | 'activationId' | 'dispatchN'>): BotQuestionRow[] {
+    const open = this.openChatQuestions(botId).filter((question) => !answering ||
+      (question.id !== answering.id && !(question.activationId === answering.activationId && question.dispatchN === answering.dispatchN)))
     const at = this.now()
     return open.filter((question) => this.run("UPDATE bot_questions SET status = 'moved_on', answer_message = ?, answered_at = ?, next_at = NULL WHERE id = ? AND status = 'open'", byMessage, at, question.id) > 0)
   }
@@ -2533,7 +2547,7 @@ export class BotStore {
    */
   unreadWorkQuestions(activationId: string): BotQuestionRow[] {
     return this.all(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
-      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question')}) OR (${unconfirmedDelivery('bot_questions', 'questions')}))
+      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question', 'questions')}))
       ORDER BY created_at, rowid`, activationId).map(questionOf)
   }
   /** Notes in a started prompt may have reached the model even without confirmed output. */
@@ -2576,9 +2590,25 @@ export class BotStore {
    */
   ownerWroteSinceDenial(ask: Pick<BotEscalationRow, 'id' | 'botId' | 'answeredAt'>): boolean {
     const last = this.ownerLastWroteSeq(ask.botId)
-    const kept = this.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', ask.botId, `ask-denied:${ask.id}`)?.value
-    if (kept !== undefined && kept !== null) return last > Number(kept)
+    const kept = this.denialOf(ask)
+    if (kept) return last > kept.seq
     return Boolean(ask.answeredAt && this.get("SELECT 1 FROM bot_messages WHERE bot_id = ? AND author = 'owner' AND seq = ? AND at > ?", ask.botId, last, ask.answeredAt))
+  }
+
+  /**
+   * What a Not now to `ask` kept (`answerEscalation`): the `seq` of the owner's newest row then, and the digest of the
+   * grant it was said under (absent: kept by a build that wrote only the `seq`). Undefined when it kept nothing.
+   */
+  denialOf(ask: Pick<BotEscalationRow, 'id' | 'botId'>): { seq: number; grant?: string } | undefined {
+    const value = this.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', ask.botId, `ask-denied:${ask.id}`)?.value
+    if (typeof value !== 'string') return undefined
+    try {
+      const kept = JSON.parse(value) as unknown
+      if (typeof kept === 'number') return { seq: kept }
+      if (kept && typeof kept === 'object' && typeof (kept as { seq?: unknown }).seq === 'number')
+        return { seq: (kept as { seq: number }).seq, ...(typeof (kept as { grant?: unknown }).grant === 'string' ? { grant: (kept as { grant: string }).grant } : {}) }
+    } catch { /* unreadable: kept nothing */ }
+    return undefined
   }
 
   /** How many messages from other bots reached bot `botId`'s chat after row `afterSeq` (the ping-pong guard). */

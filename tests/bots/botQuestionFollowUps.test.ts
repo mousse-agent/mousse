@@ -116,6 +116,27 @@ async function restart(advance = 0) {
 }
 
 describe('a nudge', () => {
+  it("of a question asked with others still comes after the owner taps one of them, and so does its sibling's default", async () => {
+    const turn = await chat('Plan the viewings.', 'c-batch')
+    const asked = JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, { questions: [
+      { question: 'Which day?', yesNo: true },
+      { question: 'Which flat?', choices: ['Flat A', 'Flat B'], ifNoAnswer: 'default', default: 'Flat A', after: 30 },
+      { question: 'Book the movers?', yesNo: true }
+    ] })).text) as { questionIds: string[] }
+    await finish(f, turn.payload, 'completed', { text: 'A few things first.' })
+    const [day, flat, movers] = asked.questionIds as [string, string, string]
+    const shown = Date.parse(chatOf(f, botId).find((message) => message.question?.questionId === movers)!.at)
+    await tap(day, 'Yes')
+    await flush()
+    const answering = f.store.laneActivations(botId, 'chat', ['running'])[0]
+    if (answering) await finish(f, (await start(f, answering.id)).payload, 'completed', { text: 'Noted.' })
+    expect([f.store.question(flat)?.status, f.store.question(movers)?.status]).toEqual(['open', 'open'])
+    await reach(shown + 30 * MIN)
+    expect(f.store.question(flat)?.status).toBe('defaulted')
+    await reach(shown + HOUR)
+    expect(nudgesOf(movers)).toHaveLength(1)
+  })
+
   it('comes at its time as a fixed line under the question, with its buttons and no model call; a second a day later, never a third', async () => {
     const { bubble, questionId } = await chatAsks(FLATS)
     const shown = Date.parse(bubble.at)

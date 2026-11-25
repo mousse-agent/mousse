@@ -19,7 +19,7 @@ import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { BOT_AUTOMATIONS_SWITCH, BOT_FULL_TRUST_PERMISSION } from '../../src/shared/bots/personal/manifest'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
-import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 const command: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: 'ls' } }
 const read: NormalisedCall = { kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: 'notes.md' } }
@@ -83,6 +83,23 @@ describe('Allow everything', () => {
     expect(run.prepared.authority.appTools.has('browser_open')).toBe(true)
   })
 
+  it("Remove can't bring back what the owner switched off: it is refused while Allow everything is on", async () => {
+    const asking = await start(f, await activate('ask'))
+    asking.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })
+    await finish(f, asking.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    const shell = f.bots.service.get(botId).permissions.find((item) => /run commands/i.test(item.title))!
+    f.bots.setPermission(botId, shell.id, false)
+    f.bots.setFullTrust(botId, true)
+    expect(() => f.bots.service.revokePermission(botId, shell.id)).toThrow(expect.objectContaining({ code: 'permission_full_trust' }))
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === shell.id)).toMatchObject({ enabled: false })
+    expect((await start(f, await activate('run'))).prepared.authority.check(command)).toMatchObject({ ok: false })
+    // With Allow everything off, Remove removes it.
+    f.bots.setFullTrust(botId, false)
+    f.bots.service.revokePermission(botId, shell.id)
+    expect(f.bots.service.get(botId).permissions.some((item) => item.id === shell.id)).toBe(false)
+  })
+
   it('never gets past what each kind of turn may do', async () => {
     f.bots.setFullTrust(botId, true)
     // A run started by hand asks nobody, waits for nothing and messages no bot (BOT_TURN_KINDS).
@@ -133,6 +150,16 @@ describe('approving a new grant', () => {
     expect(turn.prepared.authority.check(command)).toEqual({ ok: true })
   })
 
+  it('one with Allow everything that leaves out a tool it gives is wider, not narrower: work goes on with the tool', async () => {
+    approve((held) => ({ ...held, tools: [...held.tools, 'shell'] }))
+    const id = await activate('w1')
+    const { digest } = approve((held) => ({ ...held, fullTrust: true, tools: held.tools.filter((tool) => tool !== 'shell') }))
+    await flush()
+    expect(f.store.activation(id)).toMatchObject({ grantDigest: digest })
+    expect(f.store.activation(id)!.status).not.toBe('cancelled')
+    expect((await start(f, id)).prepared.authority.check(command)).toEqual({ ok: true })
+  })
+
   it.each([
     ['a lower spend limit', (held: BotManifest): BotManifest => ({ ...held, budget: { maxUsd: 2 } })],
     ['a capability removed', (held: BotManifest): BotManifest => ({ ...held, tools: held.tools.filter((tool) => tool !== 'edit'), budget: { maxUsd: 5 } })]
@@ -146,5 +173,26 @@ describe('approving a new grant', () => {
     expect(f.store.activation(waiting)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
     expect(f.store.activation(running.payload.activationId)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
     expect(running.prepared.authority.check(read)).toMatchObject({ ok: false })
+  })
+
+  it('a narrower one ends a chat turn that waits at a card: the card is withdrawn and the chat slot is free', async () => {
+    approve(withLimits({ maxUsd: 5 }))
+    await f.bots.service.chatSend({ botId, text: 'sort my threads', clientRequestId: 'wall' })
+    const turn = await start(f, f.store.activationByKey('chat:wall')!.id)
+    turn.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To read your threads.' })
+    await finish(f, turn.payload, 'completed', { text: 'I need your threads first.' })
+    const id = turn.payload.activationId
+    expect(f.store.activation(id)).toMatchObject({ status: 'waiting_grant' })
+    const [ask] = f.store.openAsks(botId)
+    expect(ask).toBeDefined()
+    approve(withLimits({ maxUsd: 2 }))
+    await flush()
+    expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
+    expect(f.store.escalation(ask!.id)!.status).toBe('withdrawn')
+    expect(chatOf(f, botId).some((message) => message.kind === 'notice' && message.text === 'I stopped there: my permissions changed.')).toBe(true)
+    // Its slot is free: the owner's next message runs at once.
+    await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
+    await flush()
+    expect(f.store.activationByKey('chat:next')!.status).toBe('running')
   })
 })

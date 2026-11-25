@@ -1471,29 +1471,31 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Ends the bot's queued and running activations, and its work that waits to go on, made under any grant but `keep`:
-   * each is cancelled with `reason`, and a running one's dispatch is stopped (its authority refuses every call from now
-   * on, since it checks the grant on each one). Waiting work's own asks are withdrawn, so no card can bring it back,
-   * and its chat says why it stopped.
+   * Ends the bot's queued and running activations, its turns that wait at a permission card (`waiting_grant`), and its
+   * work that waits to go on, made under any grant but `keep`: each is cancelled with `reason`, and a running one's
+   * dispatch is stopped (its authority refuses every call from now on, since it checks the grant on each one). The asks
+   * of what waited are withdrawn, so no card can bring it back and its chat slot is free, and its chat says why it stopped.
    */
   private endUnderGrant(botId: string, reason: string, keep?: string): void {
+    const waited = (row: BotActivationRow) => row.status === 'waiting_grant' || row.status === 'blocked'
     const ended = this.store.db.transaction(() => {
-      const rows = this.store.activationsIn(botId, ['queued', 'running', 'blocked']).filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)))
+      const rows = this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked']).filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)))
       return rows.filter((row) => {
         if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: reason })) return false
-        if (row.status === 'blocked') this.store.withdrawActivationAsks(row.id)
+        if (waited(row)) this.store.withdrawActivationAsks(row.id)
         return true
       })
     })
     for (const row of ended) {
       if (row.status === 'running') void this.stopRun(row)
-      else if (row.status === 'blocked') {
-        // Waiting work had posted what it had, with its card: the card now says it is no longer needed, and a line why.
+      else if (waited(row)) {
+        // What waited had posted what it had, with its card: the card now says it is no longer needed, and a line why.
         for (const ask of this.store.escalations({ activationId: row.id, status: 'withdrawn' })) this.republishAsk(ask.id)
         const after = this.store.activation(row.id) ?? { ...row, status: 'cancelled' as const }
         this.recorded(after, () => this.chat.post({
-          id: `bm_${row.id}_ended`, botId, author: 'bot', kind: 'notice', text: `I stopped "${this.workTitle(row)}": my permissions changed.`,
-          ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}), activationId: row.id, lane: 'run'
+          id: `bm_${row.id}_ended`, botId, author: 'bot', kind: 'notice',
+          text: row.lane === 'chat' ? 'I stopped there: my permissions changed.' : `I stopped "${this.workTitle(row)}": my permissions changed.`,
+          ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}), activationId: row.id, lane: row.lane
         }))
         this.afterEnd(after)
       } else this.cleanup({ ...row, status: 'cancelled' })
@@ -4838,9 +4840,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * Whether asking for `permission` now repeats an ask the owner said Not now to (issue #1363): there is no open ask for
-   * it, the bot's newest answered ask for it was denied after the owner last wrote, and the grant is the one it was
-   * denied under. Asks are counted nowhere: a repeat is refused until the owner writes or the grant changes. A limit is
-   * not a repeat (a run that ran out of room ends by itself).
+   * it, the bot's newest answered ask for it was denied after the owner last wrote, and the grant in place is the one it
+   * was denied under (by digest; a Not now an older build kept without it compares the grant's approval time). Asks are
+   * counted nowhere: a repeat is refused until the owner writes or the grant changes. A limit is not a repeat (a run that
+   * ran out of room ends by itself).
    */
   private repeatedAsk(botId: string, permission: BotAskRequest): boolean {
     if ('budget' in permission) return false
@@ -4849,7 +4852,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const denied = this.store.lastAnsweredAsk(botId, fingerprint)
     if (denied?.status !== 'denied' || !denied.answeredAt) return false
     const grant = this.store.activeGrant(botId)
-    if (grant && grant.approvedAt > denied.answeredAt) return false
+    const kept = this.store.denialOf(denied)
+    if (kept?.grant !== undefined ? kept.grant !== (grant?.digest ?? '') : grant !== undefined && grant.approvedAt > denied.answeredAt) return false
     return !this.store.ownerWroteSinceDenial(denied)
   }
 

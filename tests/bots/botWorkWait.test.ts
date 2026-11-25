@@ -569,6 +569,25 @@ it.each(['question', 'wall'] as const)('uses the master opening when an owner %s
   expect(f.store.dispatch(workId, 3)?.prompt.text).toBe(golden.prompts[key])
 })
 
+it('N2 tells an answer once when an older build carried it as its single question and a newer one confirmed it', async () => {
+  const { workId, turn } = await work()
+  f.bots.askOwner(botId, workId, [{ spec: { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] } }])
+  const questionId = f.store.workQuestion(workId)!.id
+  await finish(f, turn.payload)
+  await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'old-field' })
+  await flush()
+  const next = await start(f, workId, 2)
+  await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+  // The dispatch that carried it and never confirmed is an older build's: its single `question`, no `questions`.
+  f.store.run("UPDATE bot_dispatches SET prompt_json = json_remove(json_set(prompt_json, '$.workDelivery.question', ?), '$.workDelivery.questions') WHERE activation_id = ? AND n = 2", questionId, workId)
+  await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+  await flush()
+  const retry = f.store.lastMainDispatch(workId)!
+  expect(retry.prompt.workDelivery?.questions).toContain(questionId)
+  ;((await start(f, workId, retry.n)).prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkQuestions(workId)).toEqual([])
+})
+
 it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note and answer after %s until output confirms them', async failure => {
   const { workId, turn, chat } = await work()
   f.bots.askOwner(botId, workId, [{ spec: { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] } }])

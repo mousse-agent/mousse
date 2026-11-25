@@ -555,9 +555,11 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   if (!granted) return describeManifest(wanted)
   const lines: BotPermissionLine[] = []
   if (wanted.fullTrust === true && granted.fullTrust !== true) lines.push(FULL_TRUST_LINE)
-  const tools = new Set(granted.tools)
+  // What the grant gives, not what it lists: with "Allow everything", a tool it leaves out is still given.
+  const given = withFullTrust(granted)
+  const tools = new Set(given.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
-  const appTools = new Set(granted.appTools)
+  const appTools = new Set(given.appTools)
   for (const tool of wanted.appTools) if (!appTools.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
