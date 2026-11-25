@@ -382,6 +382,8 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
     input,
     output,
     ...(subagentTool ? { subagentTool } : {}),
+    // A bot's use_tool says which tool it ran even when its arguments were cut to fit (`cuaPresentation`).
+    ...(genericItem?.useToolTarget ? { useToolTarget: genericItem.useToolTarget } : {}),
     // When the call started: its row shows the time on hover.
     ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
   }

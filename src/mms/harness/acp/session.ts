@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
-import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
+import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ActivityPatch, type ProviderToolEvent } from '../../../shared/agentActivity'
 import { recordSubagentCall, subagentToolName, toolResultText } from '../../../shared/subagentTools'
-import { extractComputerUseRequestOutcome, isComputerUseRequestCall } from '../../../shared/computerUse'
+import { classifyCuaCall, guardedInput, guardedOutput, guardedTitle, isGuardedCall, mousseToolOfName, USE_TOOL, useToolTargetOf } from '../../../shared/cuaActivity'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -62,6 +62,30 @@ function commandActivity(rawInput: unknown, title: string | undefined) {
     kind: 'command' as const,
     command: (raw || title || 'command').slice(0, 1000)
   }
+}
+
+/** The tool a bot's `use_tool` call runs, read from its arguments; undefined for any other call or before they arrive. */
+function acpUseToolTarget(name: string | undefined, rawInput: unknown): string | undefined {
+  return mousseToolOfName(name) === USE_TOOL ? useToolTargetOf(rawInput) : undefined
+}
+
+/**
+ * A computer use call's event, held to what a transcript keeps (`src/shared/cuaActivity.ts`): a title Mousse writes,
+ * and the allowlisted arguments and, once it `ended`, its bounded outcome. Undefined for any other call. A `use_tool`
+ * whose arguments have not said which tool it runs keeps only the title.
+ */
+function acpCuaFields(
+  name: string | undefined,
+  rawInput: unknown,
+  useToolTarget: string | undefined,
+  ended?: { output?: string; failed: boolean }
+): { title: string; activity?: ActivityPatch } | undefined {
+  const call = classifyCuaCall(name, { input: rawInput, useToolTarget })
+  if (!isGuardedCall(call)) return undefined
+  const input = rawInput !== undefined ? guardedInput(call, rawInput) : undefined
+  const output = ended ? guardedOutput(call, ended.output, ended.failed) : undefined
+  const activity: ActivityPatch = { ...(input ? { input } : {}), ...(output !== undefined ? { output } : {}) }
+  return { title: guardedTitle(call, input), ...(Object.keys(activity).length ? { activity } : {}) }
 }
 
 function isDaemonCommand(rawInput: unknown): boolean {
@@ -1487,6 +1511,8 @@ export class AcpSessions {
       title: string
       name?: string
       rawInput?: unknown
+      /** A bot's use_tool call: the tool its arguments name, once they are in. */
+      useToolTarget?: string
       startedAt: number
       isDaemon: boolean
       isInvokeSubagent: boolean
@@ -1621,32 +1647,57 @@ export class AcpSessions {
             ? commandActivity(event.rawInput, event.title)
             : undefined
         const record = subagentToolName(event.name) ? (recordSubagentCall(event.name, event.rawInput, {}) ?? undefined) : undefined
-        const title = subagent && activity?.kind === 'subagent' ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
+        // A start with a title only names a Mousse tool by it (`computer_use_request (mousse MCP Server)`): kept as that
+        // title, a form `mousseServerToolOf` reads, never made into another name.
+        const name = event.name ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
+        // A computer use call (or a bot's use_tool, until its arguments say which tool it runs) never keeps the agent's
+        // own title: it may quote what the call types.
+        const useToolTarget = acpUseToolTarget(name, event.rawInput)
+        const cua = acpCuaFields(name, event.rawInput, useToolTarget)
+        const title = cua ? cua.title : subagent && activity?.kind === 'subagent' ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
         const description = subagent && activity?.kind === 'subagent'
           ? activity.description
           : isCommand && activity?.kind === 'command'
             ? activity.command
             : title
-        // A start with a title only names a Mousse tool by it (`computer_use_request (mousse MCP Server)`): kept as that
-        // title, a form `mousseServerToolOf` reads, never made into another name.
-        const name = event.name ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
         openTools.set(event.toolCallId, {
           title,
           name,
           rawInput: event.rawInput,
+          ...(useToolTarget ? { useToolTarget } : {}),
           startedAt: Date.now(),
           isDaemon: isCommand && isDaemonCommand(event.rawInput),
           isInvokeSubagent,
           description
         })
+        const startActivity = cua ? cua.activity : activity
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
+        input.onTool?.({
+          phase: 'start',
+          callId: event.toolCallId,
+          title,
+          toolName: name,
+          ...(useToolTarget ? { useToolTarget } : {}),
+          ...(startActivity ? { activity: startActivity } : {}),
+          ...(record ? { record } : {})
+        })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed') {
         const tracked = openTools.get(event.toolCallId)!
         if (event.rawInput !== undefined && tracked.rawInput === undefined) tracked.rawInput = event.rawInput
-        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}) })
+        // Arguments that arrive late say which tool a use_tool runs, and what a computer use call keeps of them.
+        tracked.useToolTarget ??= acpUseToolTarget(tracked.name, tracked.rawInput)
+        const cua = acpCuaFields(tracked.name, tracked.rawInput, tracked.useToolTarget)
+        if (cua) tracked.title = cua.title
+        input.onTool?.({
+          phase: 'update',
+          callId: event.toolCallId,
+          title: tracked.title,
+          ...(tracked.name ? { toolName: tracked.name } : {}),
+          ...(tracked.useToolTarget ? { useToolTarget: tracked.useToolTarget } : {}),
+          ...(cua?.activity ? { activity: cua.activity } : {})
+        })
       }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
         const tracked = openTools.get(event.toolCallId)
@@ -1685,18 +1736,20 @@ export class AcpSessions {
           const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
             ? { output: outputText }
             : undefined
-          // computer_use_request (directly or through a bot's use_tool) keeps only its outcome line, nothing else it said.
-          const setupOutcome = !record && served?.server === 'mousse' && event.status === 'completed' && isComputerUseRequestCall(toolName, rawInput)
-            ? extractComputerUseRequestOutcome(outputText)
-            : undefined
+          // A computer use call (directly or through a bot's use_tool) keeps only its allowlisted arguments and a bounded
+          // outcome: computer_use_request's outcome line, a fixed label for a failure, never the text it returned.
+          const cuaName = toolName ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
+          const useToolTarget = tracked?.useToolTarget ?? acpUseToolTarget(cuaName, rawInput)
+          const cua = record ? undefined : acpCuaFields(cuaName, rawInput, useToolTarget, { output: outputText, failed: event.status === 'failed' })
           input.onTool?.({
             phase: 'complete',
             callId: event.toolCallId,
-            title: event.title ?? tracked?.title ?? `${label} tool`,
-            ...(toolName ? { toolName } : {}),
+            title: cua ? cua.title : (event.title ?? tracked?.title ?? `${label} tool`),
+            ...(cuaName ? { toolName: cuaName } : {}),
+            ...(useToolTarget ? { useToolTarget } : {}),
             status: isBackgroundLaunch ? 'background' : event.status,
             ...(record ? { record } : {}),
-            ...(followUpOutput ? { activity: followUpOutput } : setupOutcome ? { activity: { output: setupOutcome } } : {})
+            ...(cua ? (cua.activity ? { activity: cua.activity } : {}) : followUpOutput ? { activity: followUpOutput } : {})
           })
         }
       }
@@ -2107,7 +2160,14 @@ export class AcpSessions {
             ;(active.backgroundTasks ??= new Map()).set(callId, { callId, kind: 'command', description: tracked.description, startedAt: tracked.startedAt })
           }
         } else {
-          input.onTool?.({ phase: 'complete', callId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}), status: 'unfinished' })
+          input.onTool?.({
+            phase: 'complete',
+            callId,
+            title: tracked.title,
+            ...(tracked.name ? { toolName: tracked.name } : {}),
+            ...(tracked.useToolTarget ? { useToolTarget: tracked.useToolTarget } : {}),
+            status: 'unfinished'
+          })
         }
       }
       if (quirks.backgroundWork && !input.bot) {

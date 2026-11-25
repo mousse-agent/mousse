@@ -4,7 +4,17 @@
  * here reads "Running <its name> in Mousse".
  */
 
+import {
+  classifyCuaCall,
+  cuaCallWords,
+  guardedInput,
+  isGuardedCall,
+  sanitizeCuaInput,
+  sanitizeCuaOutput,
+} from "../../../../../shared/cuaActivity";
+
 const MOUSSE_TOOL_PREFIX = "tool-mcp__mousse__";
+const CUSTOM_TOOL_PREFIX = "tool-mcp__custom__";
 
 /** The Mousse tool a part's type names (`tool-mcp__mousse__thread_create` is `thread_create`), else null. */
 export function mousseToolOf(partType: string | undefined): string | null {
@@ -141,6 +151,8 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   list_tasks: ["list", "tasks in Mousse"],
   update_task: ["update", "a task in Mousse"],
   list_computers: ["list", "computers in Mousse"],
+  computer_tools: ["list", "computer tools"],
+  computer_use: ["use", "the computer"],
   computer_use_request: ["request", "computer use setup"],
   list_models: ["list", "models in Mousse"],
   // Asking the person
@@ -196,4 +208,73 @@ export function mousseToolLabels(tool: string): MousseToolLabels {
   const [verb, rest] = own;
   const [ing, past] = VERBS[verb]!;
   return { running: capitalize(`${ing} ${rest}`), done: capitalize(`${past} ${rest}`), failed: `Couldn't ${verb} ${rest}` };
+}
+
+/**
+ * The Mousse tool a part names however its runtime spelled the call: `tool-mcp__mousse__<tool>`, or on a row with no
+ * server (`tool-mcp__custom__…`) a bare name (Pi), `mousse_<tool>` (`mousse.<tool>`) or `<tool>_mousse_mcp_server_`
+ * (an ACP title `<tool> (mousse MCP Server)`). Null for anything else.
+ */
+function mousseToolOfAnyPart(partType: string | undefined): string | null {
+  const own = mousseToolOf(partType);
+  if (own) return own;
+  if (!partType?.startsWith(CUSTOM_TOOL_PREFIX)) return null;
+  const slug = partType.slice(CUSTOM_TOOL_PREFIX.length).replace(/^mousse_+/, "").replace(/_mousse_mcp_server_$/, "");
+  return /^[a-z][a-z0-9_]*$/.test(slug) ? slug : null;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+/** A row whose arguments were cut to fit when saved (`capRecord`): only a preview of the raw text is left. */
+function isCutInput(input: unknown): boolean {
+  const args = record(input);
+  return args?.truncated === true && "preview" in args;
+}
+
+/** The result text of a part: the text itself, or the `text` an interrupted or older row wraps it in. */
+function outputText(output: unknown): string | undefined {
+  if (typeof output === "string") return output;
+  const text = record(output)?.text;
+  return typeof text === "string" ? text : undefined;
+}
+
+/** What a computer use row shows: its words, one detail, and its arguments and result held to the allowlist. */
+export type CuaPresentation = {
+  labels: MousseToolLabels;
+  detail?: string;
+  /** The arguments as the row may show them, unwrapped from a bot's `use_tool`. */
+  input?: Record<string, unknown>;
+  output?: string;
+};
+
+const PENDING_LABELS: MousseToolLabels = { running: "Using a tool", done: "Used a tool", failed: "Couldn't use a tool" };
+
+/**
+ * A computer use call's row (`computer_tools`, `computer_use`, `computer_use_request`, directly or through a bot's
+ * `use_tool`), held again to `src/shared/cuaActivity.ts` so a row saved before that existed shows nothing it would not
+ * keep now. A `use_tool` whose tool is not known (`useToolTarget`, or its arguments) shows nothing of its arguments or
+ * result, nor does a row whose arguments were cut to fit. The words follow one rule, not a table of the driver's tools:
+ * the driver tool's name in words and one detail ("Mouse click", "(420, 180)"); a row that recorded no action says
+ * only that it used the computer. Null for any other part.
+ */
+export function cuaPresentation(part: { type?: string; input?: unknown; output?: unknown; state?: string; useToolTarget?: unknown }): CuaPresentation | null {
+  const tool = mousseToolOfAnyPart(part.type);
+  if (!tool) return null;
+  const call = classifyCuaCall(tool, { input: part.input, useToolTarget: part.useToolTarget });
+  if (!isGuardedCall(call)) return null;
+  if (call.kind === "use_tool_pending") return { labels: PENDING_LABELS };
+  if (isCutInput(part.input)) return { labels: mousseToolLabels(call.tool) };
+  // A bot's use_tool shows the call it made, unwrapped.
+  const inner = call.kind === "use_tool_cua" ? sanitizeCuaInput(call.tool, record(part.input)?.arguments) : guardedInput(call, part.input);
+  const output = sanitizeCuaOutput(call.tool, outputText(part.output), part.state === "output-error");
+  const { action, detail } = cuaCallWords(call.tool, inner);
+  const labels = action ? { running: action, done: action, failed: `${action} failed` } : mousseToolLabels(call.tool);
+  return {
+    labels,
+    ...(detail ? { detail } : {}),
+    ...(inner && Object.keys(inner).length ? { input: inner } : {}),
+    ...(output ? { output } : {}),
+  };
 }

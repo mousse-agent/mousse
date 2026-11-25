@@ -718,6 +718,8 @@ interface OpenCall {
   callId: string
   title: string
   toolName?: string
+  /** A bot's `use_tool` call: the tool it runs, so its closing event says it too. */
+  useToolTarget?: string
   /** The turn's plan: it has no completion of its own. */
   plan?: boolean
   /** The helper thread a `subagent` row stands for. */
@@ -1013,7 +1015,13 @@ class TurnRun {
 
   /** A call opens on the timeline; `call` is what closing it later needs. */
   private openCall(event: ProviderToolEvent, extra: Pick<OpenCall, 'plan' | 'helper'> = {}): void {
-    this.openTools.set(event.callId, { callId: event.callId, title: event.title, ...(event.toolName ? { toolName: event.toolName } : {}), ...extra })
+    this.openTools.set(event.callId, {
+      callId: event.callId,
+      title: event.title,
+      ...(event.toolName ? { toolName: event.toolName } : {}),
+      ...(event.useToolTarget ? { useToolTarget: event.useToolTarget } : {}),
+      ...extra
+    })
     this.input.onTool?.(event)
   }
 

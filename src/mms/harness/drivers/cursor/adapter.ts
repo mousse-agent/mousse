@@ -1,7 +1,7 @@
 import type { CursorChatInput, CursorChatResult } from '../../cursor/session'
 import type { ProviderRef } from '../../../run/types'
 import type { AdapterHost, ModelInfo, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../adapter'
-import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptRuntime'
+import { createRuntimeToolMapper, promptStreams } from '../../../run/transcript/promptRuntime'
 
 /**
  * Cursor runs its own agent loop and tools in the project workspace (weak containment) through
@@ -63,6 +63,8 @@ export class CursorAdapter implements ProviderAdapter {
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     const streams = promptStreams(sink)
+    // One per turn: it follows each call by its id, so a computer use call's row stays held on every event.
+    const toolRows = createRuntimeToolMapper({ aborted: () => input.signal.aborted })
     const progress = (): void => {
       sink.progress()
       ctl.heartbeat()
@@ -124,7 +126,7 @@ export class CursorAdapter implements ProviderAdapter {
           streams.thinking.break()
           streams.text.break()
         }
-        sink.tool(runtimeToolEvent(event))
+        sink.tool(toolRows(event))
       },
       // The ref names the agent once there is one, so stop and terminate find its run.
       onSession: (agentId) => sink.providerRef({ ...providerRef, sessionId: agentId })

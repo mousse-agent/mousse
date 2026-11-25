@@ -13,6 +13,7 @@ import {
   type ProviderToolEvent
 } from '../../../../shared/agentActivity'
 import { recordSubagentCall, toolResultText } from '../../../../shared/subagentTools'
+import { classifyCuaCall, guardedInput, guardedOutput, isGuardedCall, mousseToolOfName, USE_TOOL, useToolTargetOf } from '../../../../shared/cuaActivity'
 import type { ThreadItem } from './protocol'
 
 /**
@@ -216,12 +217,19 @@ export function codexToolEvent(item: ThreadItem, phase: 'start' | 'complete'): P
       const kept = recordSubagentCall(toolName, raw.arguments, phase === 'start' ? {} : { text: resultText, isError: failed })
       const title = `${server}.${tool}`
       if (kept) return { phase, callId, title, toolName, record: kept }
-      const input = capRecord(record(raw.arguments))
+      // A computer use call (or a bot's use_tool of one) keeps only what its allowlist lets through.
+      const args = record(raw.arguments)
+      const useToolTarget = mousseToolOfName(toolName) === USE_TOOL ? useToolTargetOf(args) : undefined
+      const call = classifyCuaCall(toolName, { input: args, useToolTarget })
+      const guarded = isGuardedCall(call)
+      const input = guarded ? guardedInput(call, args) : capRecord(args)
+      const text = resultText ?? str(error?.message)
+      const output = guarded ? guardedOutput(call, text, failed) : text
       const activity: ActivityPatch =
         phase === 'start'
           ? { kind: 'generic', server, ...(input ? { input } : {}) }
-          : ({ kind: 'generic', server, ...((resultText ?? str(error?.message)) ? { output: resultText ?? str(error?.message) } : {}), ...outcome(raw.status, failed) } as ActivityPatch)
-      return { phase, callId, title, toolName, activity }
+          : ({ kind: 'generic', server, ...(output ? { output } : {}), ...outcome(raw.status, failed) } as ActivityPatch)
+      return { phase, callId, title, toolName, activity, ...(useToolTarget ? { useToolTarget } : {}) }
     }
     case 'dynamicToolCall': {
       const tool = str(raw.tool) ?? 'tool'
@@ -396,12 +404,13 @@ function closing(how: ActivityInterruptedBy | 'done' | 'failed'): ActivityPatch 
 }
 
 /** The completion for a call still open when the turn ended. */
-export function closeEvent(call: { callId: string; title: string; toolName?: string }, how: ActivityInterruptedBy | 'done'): ProviderToolEvent {
+export function closeEvent(call: { callId: string; title: string; toolName?: string; useToolTarget?: string }, how: ActivityInterruptedBy | 'done'): ProviderToolEvent {
   return {
     phase: 'complete',
     callId: call.callId,
     title: call.title,
     ...(call.toolName ? { toolName: call.toolName } : {}),
+    ...(call.useToolTarget ? { useToolTarget: call.useToolTarget } : {}),
     activity: closing(how)
   }
 }
