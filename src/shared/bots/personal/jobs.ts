@@ -76,7 +76,7 @@ export const BOT_NOTICE_ASKS = 3
 export const BOT_NOTICE_ASK_CHARS = 1_000
 
 /** Most characters of a report's body a bot is given: a thread's final answer in its notice, or its own work's report in the chat pack. */
-export const BOT_REPORT_MAX_CHARS = 2_000
+export const BOT_REPORT_MAX_CHARS = 4_000
 /** Most characters of a job's request and result lines. */
 export const BOT_JOB_LINE_CHARS = 200
 /** Most ledger lines a chat epoch's first pack lists, newest first. */
@@ -211,8 +211,8 @@ export function jobNoticeLabel(job: Pick<BotJob, 'title' | 'state'>): string {
 
 /** The key of the chat turn a thread's message to the bot starts (`message_parent`): `threadmsg:<thread id>:<request>`. */
 export const THREAD_MESSAGE_KEY_PREFIX = 'threadmsg:'
-/** Most characters of one message a thread sends its parent (`message_parent`). */
-export const PARENT_MESSAGE_MAX_CHARS = BOT_REPORT_MAX_CHARS
+/** Most characters of one message a thread sends its parent (`message_parent`): what it must know now, not a report. */
+export const PARENT_MESSAGE_MAX_CHARS = 2_000
 
 /**
  * The text the chat turn a thread's message starts begins with (`message_parent`, sent while the thread works): who sent

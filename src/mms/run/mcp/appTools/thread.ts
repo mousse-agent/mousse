@@ -22,7 +22,7 @@ import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
 import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
 import { archivedAtOf } from '../../../../shared/archivedAt'
 import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
-import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
+import { cutEnd, messageRows, nextAfterIndexOf, textOffsetProblem, type MessageRow } from './messageRows'
 import { lastCompletedAt, modelOf, pullRequestOf, recentTurns, RECENT_ANSWER_CHARS, RECENT_PROMPT_CHARS, RECENT_REMOTE_LOOKBACK, RECENT_REMOTE_MESSAGES, RECENT_STEP_CHARS, RECENT_TURNS_DEFAULT, RECENT_TURNS_MAX, SUMMARY_NEXT, type ViewRow } from './threadViews'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
@@ -455,15 +455,17 @@ function boundedEvent(event: ThreadEvent): ThreadEvent {
 function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageRow>, afterIndex: number): Record<string, unknown> {
   const { taken: messages, capped } = fitPage(rows, envelope)
   const truncated = messages.some((message) => 'truncated' in message)
+  // Rows keep their transcript index and empty system rows are left out (`messageRows`): the next page starts after the last row.
+  const nextAfterIndex = nextAfterIndexOf(messages, afterIndex, typeof envelope.total === 'number' ? envelope.total : undefined)
   return {
     ...envelope,
     messages,
-    nextAfterIndex: afterIndex + messages.length,
+    nextAfterIndex,
     ...(capped ? { capped: true } : {}),
     ...(capped || truncated
       ? {
           hint: [
-            capped ? `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterIndex ${afterIndex + messages.length}.` : '',
+            capped ? `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterIndex ${nextAfterIndex}.` : '',
             truncated ? 'A message marked truncated continues: pass its index as afterIndex and its nextTextOffset as textOffset.' : ''
           ].filter(Boolean).join(' ')
         }
