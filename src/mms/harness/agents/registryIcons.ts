@@ -8,7 +8,7 @@
  */
 import { lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { join, relative, isAbsolute } from 'node:path'
-import { atomicWriteFileSync } from '../../data/AtomicFs'
+import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
 
 /** A registry icon is a few KiB; anything larger is not an icon. */
 export const ICON_MAX_BYTES = 32 * 1024
@@ -228,15 +228,87 @@ export function svgDataUrl(svg: string): string {
   return `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`
 }
 
+/** How an agent's last icon fetch ended: stored, refused by `sanitizeRegistrySvg`, or not fetched. */
+export type IconOutcome = 'stored' | 'rejected' | 'failed'
+
+/** An agent's last icon fetch, and the registry entry it was for (`registryIconSource`). */
+export interface IconAttempt {
+  outcome: IconOutcome
+  source: string
+}
+
+/** The file next to the icons that remembers each agent's last fetch, across restarts and profiles. */
+export const ICON_ATTEMPTS_FILE = 'attempts.json'
+const ATTEMPTS_MAX_BYTES = 256 * 1024
+const OUTCOMES: ReadonlySet<string> = new Set<IconOutcome>(['stored', 'rejected', 'failed'])
+
+/**
+ * What an icon fetch is about: the agent's registry version and icon URL. A fetch is tried again
+ * for the same agent only when this changes (or, for a failed one, when the user browses the list).
+ */
+export function registryIconSource(agent: { version: string; icon?: string }): string {
+  return `${agent.version} ${agent.icon ?? ''}`
+}
+
 /**
  * The icon cache directory, `<installationHome>/agents/icons`: one `<agentId>.svg` per agent,
- * written atomically, never read through a symbolic link or from outside the directory.
+ * written atomically, never read through a symbolic link or from outside the directory, and
+ * `attempts.json`, the outcome of each agent's last fetch.
  */
 export class RegistryIconCache {
   /** Decoded icons by agent id, with the file's modification time they were read at. */
   private readonly memory = new Map<string, { mtimeMs: number; view: IconView | undefined }>()
+  /** `attempts.json` as last read or written. */
+  private saved?: { mtimeMs: number; byAgent: ReadonlyMap<string, IconAttempt> }
+  /** Outcomes this run could not write (a read-only folder): they win over the file, so nothing is fetched twice. */
+  private readonly unsaved = new Map<string, IconAttempt>()
 
   constructor(readonly dir: string) {}
+
+  /** The last icon fetch of an agent, by any Mousse profile on this computer. */
+  attempt(agentId: string): IconAttempt | undefined {
+    return this.unsaved.get(agentId) ?? this.loadAttempts().get(agentId)
+  }
+
+  /** Remembers how an agent's icon fetch ended, on disk when it can. */
+  record(agentId: string, attempt: IconAttempt): void {
+    if (!this.pathOf(agentId)) return
+    this.unsaved.set(agentId, attempt)
+    const byAgent = new Map([...this.loadAttempts(), ...this.unsaved])
+    try {
+      mkdirSync(this.dir, { recursive: true })
+      if (!this.dirIsReal()) return
+      const path = join(this.dir, ICON_ATTEMPTS_FILE)
+      atomicWriteJsonSync(path, { attempts: Object.fromEntries(byAgent) })
+      this.saved = { mtimeMs: lstatSync(path).mtimeMs, byAgent }
+      this.unsaved.clear()
+    } catch {
+      // Not written: `unsaved` keeps it for this run.
+    }
+  }
+
+  /** `attempts.json`, read again only when it changed; an unreadable file counts as empty. */
+  private loadAttempts(): ReadonlyMap<string, IconAttempt> {
+    const path = join(this.dir, ICON_ATTEMPTS_FILE)
+    try {
+      const stat = lstatSync(path)
+      if (!stat.isFile() || stat.size > ATTEMPTS_MAX_BYTES || !this.inside(path)) return new Map()
+      if (this.saved?.mtimeMs === stat.mtimeMs) return this.saved.byAgent
+      const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
+      const byAgent = new Map<string, IconAttempt>()
+      const entries = raw && typeof raw === 'object' ? (raw as { attempts?: unknown }).attempts : undefined
+      if (entries && typeof entries === 'object')
+        for (const [agentId, value] of Object.entries(entries)) {
+          const { outcome, source } = (value ?? {}) as Partial<IconAttempt>
+          if (this.pathOf(agentId) && typeof outcome === 'string' && OUTCOMES.has(outcome) && typeof source === 'string' && source.length <= 4_096)
+            byAgent.set(agentId, { outcome, source })
+        }
+      this.saved = { mtimeMs: stat.mtimeMs, byAgent }
+      return byAgent
+    } catch {
+      return new Map()
+    }
+  }
 
   /** The cache file of an agent, or undefined for an id that could not be a file name. */
   pathOf(agentId: string): string | undefined {
@@ -244,18 +316,6 @@ export class RegistryIconCache {
     const path = join(this.dir, `${agentId}.svg`)
     const rel = relative(this.dir, path)
     return rel && !rel.startsWith('..') && !isAbsolute(rel) && !/[\\/]/.test(rel) ? path : undefined
-  }
-
-  /** When the cached icon was written, or undefined when there is none. */
-  writtenAt(agentId: string): number | undefined {
-    const path = this.pathOf(agentId)
-    if (!path) return undefined
-    try {
-      const stat = lstatSync(path)
-      return stat.isFile() ? stat.mtimeMs : undefined
-    } catch {
-      return undefined
-    }
   }
 
   /** The cached icon, read from disk (and checked again) only when the file changed. */

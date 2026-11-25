@@ -67,8 +67,8 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     label: 'ACP agent registry',
     kind: 'contacted',
     hosts: ['cdn.agentclientprotocol.com'],
-    when: 'When you browse or install agents in Add provider → More ACP agents, or install OpenCode; once for an added ACP agent whose icon Mousse has not cached; and at most every six hours while Mousse’s own OpenCode is installed, to learn its newest release.',
-    sends: 'requests for the registry list and its agent icons.',
+    when: "When you browse or install agents in Add provider → More ACP agents, or open an added registry agent's settings: the registry list (downloaded again after five minutes) and the icons Mousse has not cached of the agents listed. An icon that failed is tried once more after each new download of the list; one Mousse refused, only when the agent's version or icon changes. When you install OpenCode, and at most every six hours while Mousse’s own OpenCode is installed, to learn its newest release: the registry list only. At any other time: only the icon of an added agent that has none cached, once for each version of it in the last downloaded list, and never the list itself.",
+    sends: 'requests for the registry list and agent icons.',
     sources: ['src/mms/harness/agents/registry.ts', 'src/mms/harness/drivers/opencode.ts']
   },
   {

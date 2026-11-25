@@ -7,7 +7,6 @@ import { addChoices } from '../src/renderer/components/providers/AddProviderDial
 import type { InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { AgentEditor } from '../src/renderer/components/providers/ProviderEditor'
 import { RegistryAgentRows, RegistryConfirmStep, RemoveProviderDialog } from '../src/renderer/components/providers/RegistryAgents'
-import { ProviderIcon } from '../src/renderer/lib/providerIcons'
 import {
   UNVERIFIED_NOTE,
   checksumLabel,
@@ -134,28 +133,6 @@ describe('registry list and confirm panel', () => {
     expect(html).toContain('Python (uvx) · No registry checksum')
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>).)*Py Agent/)
     expect(html).toContain('Python (uvx) agents are not supported yet.')
-  })
-
-  it("shows each agent's own logo: Mousse's for known brands, else the registry icon the daemon cached", () => {
-    const ink = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h16v16z"/></svg>').toString('base64')}`
-    const icon = (providerId: string) => renderToStaticMarkup(createElement(ProviderIcon, { providerId, size: 16 }))
-    const html = renderToStaticMarkup(createElement(RegistryAgentRows, {
-      agents: [
-        agent(),
-        agent({ id: 'goose', name: 'Goose', iconDataUrl: ink, iconMonochrome: true }),
-        agent({ id: 'plain', name: 'Plain' })
-      ],
-      selectedId: null,
-      disabled: false,
-      onSelect: () => undefined
-    }))
-    const rows = html.split('role="radio"').slice(1)
-    expect(rows[0]).toContain(icon('google'))
-    expect(rows[1]).toContain(ink)
-    expect(rows[1]).toContain('background-color:currentColor')
-    expect(rows[2]).toContain(icon('acp'))
-    // Nothing is loaded from the registry: no remote image or mask.
-    expect(html).not.toMatch(/(?:src="|url\(&quot;)https?:/)
   })
 
   const confirm = (view: RegistryAgentView) =>

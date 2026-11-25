@@ -31,29 +31,40 @@ import {
 type UsedBy = Extract<RemoveInstallResult, { removed: false }>['usedBy']
 
 const SEARCH_DEBOUNCE_MS = 250
+/** While icons are still arriving, the list asks again this often, at most `ICON_ROUNDS` times. */
+const ICON_RECHECK_MS = 800
+const ICON_ROUNDS = 12
 
-/** The registry's agents for `query`, debounced; a failed load keeps its error until retried. */
+/**
+ * The registry's agents for `query`, debounced; a failed load keeps its error until retried. The
+ * search answers with the icons already cached; while some are still on their way, it is asked
+ * again until they arrive, and every icon found is registered so the agent shows it everywhere.
+ */
 function useRegistrySearch(query: string) {
   const [agents, setAgents] = useState<RegistryAgentView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     let cancelled = false
-    const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout>
+    const search = (round: number) => {
       window.mousse.providers.registry.search(query.trim()).then(
         (found) => {
           if (cancelled) return
           registerProviderIcons(found)
           setAgents(found)
           setError(null)
+          if (round < ICON_ROUNDS && found.some((agent) => agent.iconPending)) timer = setTimeout(() => search(round + 1), ICON_RECHECK_MS)
         },
         (failure: unknown) => {
-          if (cancelled) return
+          // A later round that fails keeps the list already shown.
+          if (cancelled || round > 0) return
           setAgents(null)
           setError(errorText(failure))
         }
       )
-    }, SEARCH_DEBOUNCE_MS)
+    }
+    timer = setTimeout(() => search(0), SEARCH_DEBOUNCE_MS)
     return () => {
       cancelled = true
       clearTimeout(timer)

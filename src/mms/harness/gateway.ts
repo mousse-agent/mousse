@@ -501,7 +501,10 @@ export interface HarnessRegistry {
   search(query: string): Promise<RegistryAgentView[]>
   /** A registry agent's cached icon, read from disk only. */
   icon?(agentId: string): { iconDataUrl: string; iconMonochrome: boolean } | undefined
-  /** Fetches a registry agent's icon into the cache when missing or old; true when one was stored. */
+  /**
+   * Fetches a registry agent's icon when the cached list names one never fetched for this version
+   * of the agent; never downloads the list. True when one was stored.
+   */
   cacheIcon?(agentId: string): Promise<boolean>
 }
 
@@ -2927,7 +2930,8 @@ export class Harness implements HarnessGateway {
 
   /**
    * A registry agent's cached icon. When there is none yet (just added, or added before Mousse
-   * cached icons), it is fetched in the background and the snapshots go out again once it is stored.
+   * cached icons), it is fetched once in the background and the snapshots go out again once it is
+   * stored; a failed or refused icon is not fetched again from here (`AcpRegistry.cacheIcon`).
    */
   private registryIconOf(record: InstanceRecord): { iconDataUrl?: string; iconMonochrome?: boolean } {
     const source = record.config.source

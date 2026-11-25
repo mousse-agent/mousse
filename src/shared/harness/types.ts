@@ -563,6 +563,8 @@ export interface RegistryAgentView {
   iconDataUrl?: string
   /** The icon is one ink, drawn in the text colour (a mask); otherwise it is drawn as an image. */
   iconMonochrome?: boolean
+  /** The icon is being fetched: a search a moment later returns it. */
+  iconPending?: boolean
 }
 
 /** `instances.removeInstall`: deleted, or still used by other entries (`force` deletes anyway). */

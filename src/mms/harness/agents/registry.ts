@@ -10,7 +10,7 @@ import { RESERVED_AGENT_IDS, reservedAgentMessage, type RegistryAgentView, type 
 export { RESERVED_AGENT_IDS, reservedAgentMessage }
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { HOME_VARIABLES, isInheritedCredential } from '../env'
-import { ICON_MAX_BYTES, RegistryIconCache, registryIconUrl, sanitizeRegistrySvg, type IconView } from './registryIcons'
+import { ICON_MAX_BYTES, RegistryIconCache, registryIconSource, registryIconUrl, sanitizeRegistrySvg, type IconOutcome, type IconView } from './registryIcons'
 
 export const REGISTRY_URL = 'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json'
 export const REGISTRY_MAX_BYTES = 1024 * 1024
@@ -18,16 +18,11 @@ export const REGISTRY_TIMEOUT_MS = 30_000
 export const REGISTRY_MAX_AGENTS = 512
 /** The registry's host: the only place agent icons are fetched from. */
 export const REGISTRY_HOST = new URL(REGISTRY_URL).host
-/** One icon fetch; an icon that does not arrive in time is tried again on a later search. */
+/** One icon fetch's deadline. */
 export const ICON_TIMEOUT_MS = 8_000
 /** Icon fetches at once, so a first search does not open dozens of connections. */
 export const ICON_CONCURRENCY = 4
-/** How long a search waits for missing icons before it answers without them. */
-export const ICON_SEARCH_WAIT_MS = 2_500
-/** A cached icon is fetched again after a week (the registry may change it). */
-export const ICON_MAX_AGE_MS = 7 * 24 * 60 * 60_000
-/** A failed icon fetch is not retried for ten minutes. */
-export const ICON_RETRY_MS = 10 * 60_000
+const ICON_TOO_LARGE = 'The icon is larger than Mousse accepts.'
 
 const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
@@ -407,8 +402,7 @@ export interface RegistryOptions {
   maxAgeMs?: number
   /** `<installationHome>/agents/icons`; by default next to `cachePath`. */
   iconsDir?: string
-  /** Test seams: how long a search waits for icons, and one icon fetch's deadline. */
-  iconSearchWaitMs?: number
+  /** Test seam: one icon fetch's deadline. */
   iconTimeoutMs?: number
 }
 
@@ -423,10 +417,11 @@ export class AcpRegistry {
   private disk?: { mtimeMs: number; agents: RegistryAgent[] }
   private readonly host: string
   private readonly icons: RegistryIconCache
-  /** Icon fetches under way, by agent id, so one agent's icon is fetched once at a time. */
+  /** Icon fetches queued or under way, by agent id, so one agent's icon is fetched once at a time. */
   private readonly iconFetches = new Map<string, Promise<boolean>>()
-  /** When an agent's icon last failed to fetch. */
-  private readonly iconFailures = new Map<string, number>()
+  private readonly iconsQueued = new Set<string>()
+  /** Agents whose icon was fetched since the list was last downloaded: a search retries a failure once per download. */
+  private readonly iconsTried = new Set<string>()
 
   constructor(private readonly options: RegistryOptions) {
     this.host = new URL(options.url ?? REGISTRY_URL).host
@@ -460,22 +455,21 @@ export class AcpRegistry {
   }
 
   /**
-   * Matching agents with their icons. Icons not cached yet are fetched (a few at a time) for up to
-   * `ICON_SEARCH_WAIT_MS`; the rest keep loading and show on a later search.
+   * Matching agents with the icons already cached. Missing ones are fetched in the background (a
+   * few at a time) and marked `iconPending`; the next search returns them. The search never waits
+   * for an icon.
    */
   async search(query: string, signal?: AbortSignal): Promise<RegistryAgentView[]> {
     const agents = await this.agents(signal)
     const views = searchAgents(agents, query)
     const shown = new Set(views.map((view) => view.id))
-    const missing = agents.filter((agent) => shown.has(agent.id) && this.wantsIcon(agent))
-    if (missing.length) {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const wait = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, this.options.iconSearchWaitMs ?? ICON_SEARCH_WAIT_MS)
-      })
-      await Promise.race([this.fetchIcons(missing), wait]).finally(() => clearTimeout(timer))
-    }
-    return views.map((view) => ({ ...view, ...this.icon(view.id) }))
+    const missing = agents.filter((agent) => shown.has(agent.id) && this.wantsIcon(agent, true))
+    if (missing.length) void this.fetchIcons(missing)
+    return views.map((view) => {
+      const icon = this.icon(view.id)
+      if (icon) return { ...view, ...icon }
+      return this.iconsQueued.has(view.id) || this.iconFetches.has(view.id) ? { ...view, iconPending: true } : view
+    })
   }
 
   /** An agent's cached icon, from disk only (snapshots ask on every build). */
@@ -484,65 +478,75 @@ export class AcpRegistry {
   }
 
   /**
-   * Fetches an agent's icon into the cache when it is missing or old. True when a new icon was
-   * stored; false when none was needed, the agent has none, or the fetch failed.
+   * For a snapshot of an added agent: fetches its icon when the cached registry list names one
+   * that was never fetched for this version of the agent. Never downloads the list, and never
+   * tries again an icon that failed or was refused for the same version; a search does that. True
+   * when a new icon was stored.
    */
   async cacheIcon(agentId: string): Promise<boolean> {
-    // Snapshots ask often: offline, the registry is not asked again on every one.
-    if (this.iconFailedRecently(agentId)) return false
-    const agent = this.cached().find((entry) => entry.id === agentId) ?? (await this.agent(agentId).catch(() => undefined))
-    if (!agent) {
-      this.iconFailures.set(agentId, this.options.now?.() ?? Date.now())
-      return false
-    }
-    return this.wantsIcon(agent) ? this.fetchIcon(agent) : false
+    const agent = this.cached().find((entry) => entry.id === agentId)
+    return agent && this.wantsIcon(agent, false) ? this.fetchIcon(agent) : false
   }
 
-  private iconFailedRecently(agentId: string): boolean {
-    const failed = this.iconFailures.get(agentId)
-    return failed !== undefined && (this.options.now?.() ?? Date.now()) - failed < ICON_RETRY_MS
-  }
-
-  /** The agent lists an icon, the cache has none (or an old one), and no recent fetch failed. */
-  private wantsIcon(agent: RegistryAgent): boolean {
-    if (!agent.icon || !this.icons.pathOf(agent.id) || this.iconFailedRecently(agent.id)) return false
-    // The file's time is the real clock's.
-    const written = this.icons.writtenAt(agent.id)
-    return written === undefined || Date.now() - written > ICON_MAX_AGE_MS
+  /**
+   * Whether to fetch an agent's icon: it lists one, and no fetch for its current registry version
+   * and icon URL is remembered, or the stored icon is gone. A failed fetch is tried again only by a
+   * search (`userAsked`), once after each download of the list; a refused icon waits for a new
+   * version or icon URL.
+   */
+  private wantsIcon(agent: RegistryAgent, userAsked: boolean): boolean {
+    if (!agent.icon || !this.icons.pathOf(agent.id) || this.iconsQueued.has(agent.id) || this.iconFetches.has(agent.id)) return false
+    const last = this.icons.attempt(agent.id)
+    if (!last || last.source !== registryIconSource(agent)) return true
+    if (last.outcome === 'stored') return !this.icons.read(agent.id)
+    return last.outcome === 'failed' && userAsked && !this.iconsTried.has(agent.id)
   }
 
   /** Fetches `agents`' icons, `ICON_CONCURRENCY` at a time; one failure costs only its icon. */
   private async fetchIcons(agents: readonly RegistryAgent[]): Promise<void> {
+    for (const agent of agents) this.iconsQueued.add(agent.id)
     const queue = [...agents]
     const worker = async () => {
-      for (let agent = queue.shift(); agent; agent = queue.shift()) await this.fetchIcon(agent)
+      for (let agent = queue.shift(); agent; agent = queue.shift()) {
+        this.iconsQueued.delete(agent.id)
+        await this.fetchIcon(agent)
+      }
     }
     await Promise.all(Array.from({ length: Math.min(ICON_CONCURRENCY, queue.length) }, worker))
   }
 
-  /** One icon: from the registry host only, no redirects, at most `ICON_MAX_BYTES`, cleaned before it is stored. */
+  /**
+   * One icon: from the registry host only, no redirects, at most `ICON_MAX_BYTES`, cleaned before
+   * it is stored. How it ended is remembered for this version of the agent.
+   */
   private fetchIcon(agent: RegistryAgent): Promise<boolean> {
     const running = this.iconFetches.get(agent.id)
     if (running) return running
     const url = agent.icon
+    if (!url) return Promise.resolve(false)
+    this.iconsTried.add(agent.id)
     const fetched = (async () => {
+      let outcome: IconOutcome = 'failed'
       try {
-        if (!url || new URL(url).host !== this.host) return false
+        // `decodeRegistry` keeps only icons on the registry host; checked again before the request.
+        if (new URL(url).host !== this.host) return false
         const fetchFile = this.options.fetch ?? fetch
         const response = await fetchFile(url, { signal: AbortSignal.timeout(this.options.iconTimeoutMs ?? ICON_TIMEOUT_MS), redirect: 'error' })
-        if (!response.ok) throw new Error(`The icon answered ${response.status}.`)
-        const icon = sanitizeRegistrySvg(await readCappedBytes(response, ICON_MAX_BYTES, 'The icon is larger than Mousse accepts.'))
-        if (!icon) throw new Error('The icon is not a plain SVG.')
-        const stored = this.icons.write(agent.id, icon)
-        if (stored) this.iconFailures.delete(agent.id)
-        return stored
-      } catch {
-        this.iconFailures.set(agent.id, this.options.now?.() ?? Date.now())
+        if (!response.ok) return false
+        const icon = sanitizeRegistrySvg(await readCappedBytes(response, ICON_MAX_BYTES, ICON_TOO_LARGE))
+        if (!icon) {
+          outcome = 'rejected'
+          return false
+        }
+        if (this.icons.write(agent.id, icon)) outcome = 'stored'
+        return outcome === 'stored'
+      } catch (error) {
+        if (error instanceof Error && error.message === ICON_TOO_LARGE) outcome = 'rejected'
         return false
       } finally {
-        this.iconFetches.delete(agent.id)
+        this.icons.record(agent.id, { outcome, source: registryIconSource(agent) })
       }
-    })()
+    })().finally(() => this.iconFetches.delete(agent.id))
     this.iconFetches.set(agent.id, fetched)
     return fetched
   }
@@ -558,6 +562,8 @@ export class AcpRegistry {
       mkdirSync(dirname(this.options.cachePath), { recursive: true })
       atomicWriteJsonSync(this.options.cachePath, raw)
       this.memory = { agents, atMs: this.options.now?.() ?? Date.now() }
+      // A new download of the list: a search may try a failed icon once more.
+      this.iconsTried.clear()
       return agents
     } catch (error) {
       signal?.throwIfAborted()
