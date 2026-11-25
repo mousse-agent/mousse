@@ -44,36 +44,6 @@ export interface ModelPickTarget {
   selected: boolean
 }
 
-/** How long the pointer rests on a model before its run settings show, so crossing rows on the way to them changes nothing. */
-const RUN_SETTINGS_HOVER_MS = 90
-/**
- * While the pointer heads for the run settings, how long it must stay still on a row before that row's
- * settings show. A slow diagonal from a model to one of its lower levels rests on each row it crosses
- * for longer than `RUN_SETTINGS_HOVER_MS`.
- */
-const RUN_SETTINGS_AIM_MS = 250
-
-type PointerPoint = { x: number; y: number }
-
-/**
- * Whether the pointer, moving from `from` to `at`, heads for `column`: `at` lies in the triangle between
- * `from` and the column's near edge (menu aim). Rows crossed on that way are passed over, not chosen.
- */
-function headsForColumn(from: PointerPoint, at: PointerPoint, column: { left: number; right: number; top: number; bottom: number }): boolean {
-  if (column.right <= column.left || column.bottom <= column.top) return false
-  const toRight = from.x <= column.left
-  if (!toRight && from.x < column.right) return false
-  if (toRight ? at.x <= from.x : at.x >= from.x) return false
-  const edge = toRight ? column.left : column.right
-  const top = { x: edge, y: column.top }
-  const bottom = { x: edge, y: column.bottom }
-  const side = (p: PointerPoint, a: PointerPoint, b: PointerPoint) => (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y)
-  const d1 = side(at, from, top)
-  const d2 = side(at, top, bottom)
-  const d3 = side(at, bottom, from)
-  return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))
-}
-
 /** The tallest the picker gets; the model list scrolls inside it. */
 const PICKER_MAX_HEIGHT = 400
 
@@ -105,13 +75,15 @@ interface ModelFamilyMenuProps {
   /** The picker is fading out after closing: it takes no input and gives up the keyboard. */
   closing?: boolean
   /**
-   * Run settings for the highlighted model (the composer's). The picker is then one fixed box: nothing
-   * inside it (hover, search, rail, the footer's menus) changes its size. `render` draws the column
-   * beside the list for the highlighted model (none when a search finds nothing), or returns null when
-   * none of `all` (every model the picker lists) has any; `footer` draws the bar under the whole
-   * picker, and stays (empty for the highlighted model) while any of `all` has something to show in it; `pick` turns the id the menu would select for a model into the one it selects. `rows` is how
-   * many rows the column keeps room for (the most any of `all` needs), so hovering a model with fewer
-   * never shrinks the picker; the column's own content never sizes it.
+   * Run settings for the selected model (the composer's). The picker is then one fixed box: nothing
+   * inside it (search, rail, the footer's menus) changes its size. `render` draws the column beside the
+   * list for the selected model (none when the list does not have it), or returns null when none of `all`
+   * (every model the picker lists) has any; `footer` draws the bar under the whole picker, and stays
+   * (empty for the selected model) while any of `all` has something to show in it; `pick` turns the id
+   * the menu would select for a model into the one it selects. `rows` is how many rows the column keeps
+   * room for (the most any of `all` needs); the column's own content never sizes it. Hovering or arrowing
+   * to another model never changes what the column and footer show: a level or speed there is always the
+   * selected model's.
    */
   runSettings?: {
     pick: (target: ModelPickTarget) => string
@@ -379,22 +351,7 @@ function ProfileModelFamilyMenu({
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)
   const hideTimerRef = useRef<number | null>(null)
-  const hoverTimerRef = useRef<number | null>(null)
   const runRef = useRef<HTMLDivElement>(null)
-  // The pointer's last few positions over the list, to tell crossing rows on the way to the run settings from resting on one.
-  const pointerTrailRef = useRef<PointerPoint[]>([])
-  const notePointer = (event: React.MouseEvent) => {
-    const trail = pointerTrailRef.current
-    const last = trail[trail.length - 1]
-    if (last && last.x === event.clientX && last.y === event.clientY) return
-    trail.push({ x: event.clientX, y: event.clientY })
-    if (trail.length > 4) trail.shift()
-  }
-  const headsForRunSettings = () => {
-    const trail = pointerTrailRef.current
-    const column = runRef.current?.getBoundingClientRect()
-    return Boolean(column && trail.length >= 2 && headsForColumn(trail[0]!, trail[trail.length - 1]!, column))
-  }
   const idPrefix = useId()
   const listId = `${idPrefix}-models`
   const portaled = Boolean(anchorRef)
@@ -579,19 +536,12 @@ function ProfileModelFamilyMenu({
     [allEntries, runSettings, targetOf]
   )
   const highlightedEntry = filteredEntries[highlightIndex]
-  const highlightedTarget = runSettings && highlightedEntry ? targetOf(highlightedEntry) : undefined
-  const runColumn = runSettings ? runSettings.render(highlightedTarget, allTargets) : null
+  const selectedEntry = runSettings ? allEntries.find((entry) => isEntrySelected(entry)) : undefined
+  const selectedTarget = selectedEntry ? targetOf(selectedEntry) : undefined
+  const runColumn = runSettings ? runSettings.render(selectedTarget, allTargets) : null
   const runRows = runSettings?.rows ? runSettings.rows(allTargets) : 0
-  const runFooter = runSettings?.footer ? runSettings.footer(highlightedTarget, allTargets) : null
+  const runFooter = runSettings?.footer ? runSettings.footer(selectedTarget, allTargets) : null
   const footerRef = useRef<HTMLDivElement>(null)
-
-  const clearHoverTimer = () => {
-    if (hoverTimerRef.current !== null) {
-      window.clearTimeout(hoverTimerRef.current)
-      hoverTimerRef.current = null
-    }
-  }
-  useEffect(() => clearHoverTimer, [])
 
   /** Moves focus from the list into the run settings, on their chosen item. */
   const enterRunSettings = (event: React.KeyboardEvent | KeyboardEvent) => {
@@ -644,7 +594,7 @@ function ProfileModelFamilyMenu({
         return
       }
       if (event.key === 'ArrowRight') {
-        // From the end of the search text, Right moves into the highlighted model's run settings.
+        // From the end of the search text, Right moves into the selected model's run settings.
         const input = searchInputRef.current
         if (input && event.target === input && (input.selectionStart ?? 0) >= input.value.length) enterRunSettings(event)
         return
@@ -760,35 +710,10 @@ function ProfileModelFamilyMenu({
           isHighlighted ? ' highlighted' : ''
         }${selected ? ' selected' : ''}`}
         onMouseEnter={(event) => {
-          const row = event.currentTarget
-          clearHoverTimer()
-          if (!runSettings) {
-            setHighlightIndex(index)
-            openVariantPanel(row)
-            return
-          }
-          notePointer(event)
-          // Shows the row's settings once the pointer rests on it. While it moves on towards the run
-          // settings, the row is only being crossed: the settings shown stay those of the model it left.
-          const rest = (delay: number, seen?: PointerPoint) => {
-            hoverTimerRef.current = window.setTimeout(() => {
-              hoverTimerRef.current = null
-              const trail = pointerTrailRef.current
-              const at = trail[trail.length - 1]
-              if (at && headsForRunSettings() && (!seen || at.x !== seen.x || at.y !== seen.y)) {
-                rest(RUN_SETTINGS_AIM_MS, at)
-                return
-              }
-              setHighlightIndex(index)
-              openVariantPanel(row)
-            }, delay)
-          }
-          rest(RUN_SETTINGS_HOVER_MS)
+          setHighlightIndex(index)
+          openVariantPanel(event.currentTarget)
         }}
-        onMouseLeave={() => {
-          clearHoverTimer()
-          scheduleHide()
-        }}
+        onMouseLeave={scheduleHide}
       >
         <button
           type="button"
@@ -920,7 +845,6 @@ function ProfileModelFamilyMenu({
               role="listbox"
               aria-label="Select model"
               onScroll={handleMenuScroll}
-              onMouseMove={notePointer}
             >
               {filteredEntries.length === 0 && matchingUnavailable.length === 0 ? (
                 <div className="model-picker-empty">
@@ -962,7 +886,6 @@ function ProfileModelFamilyMenu({
               ref={runRef}
               className="model-picker-run scrollbar-ultra-thin"
               style={{ '--model-picker-run-rows': runRows } as React.CSSProperties}
-              onMouseEnter={clearHoverTimer}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return
                 // Left goes back to the list; Down past the last level goes on to the footer.
@@ -987,7 +910,6 @@ function ProfileModelFamilyMenu({
           <div
             ref={footerRef}
             className="model-picker-footer"
-            onMouseEnter={clearHoverTimer}
             onKeyDown={(event) => {
               // Up from the footer goes back to the levels (inside the permission menu it moves between modes).
               if (event.key === 'ArrowUp' && !event.defaultPrevented && !(event.target as HTMLElement).closest('[role="menu"]')) enterRunSettings(event)

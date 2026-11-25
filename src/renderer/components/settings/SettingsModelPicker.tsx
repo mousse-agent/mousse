@@ -133,7 +133,6 @@ export function SettingsModelPicker({
           contentRef={menuRef}
           runSettings={modelPickerRunSettings({
             providers,
-            selection,
             onSelect: choose,
             onClose: close,
             ...(clear ? {
