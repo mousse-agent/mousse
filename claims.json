@@ -127,6 +127,26 @@
       ],
       "claimedAt": "2026-11-25T02:26:08.022Z",
       "expiresAt": "2026-11-25T04:31:01.002Z"
+    },
+    {
+      "task": "perf-subagent-ui-lag",
+      "session": "agibook-c6f95e",
+      "machine": "agibook",
+      "branch": "perf-subagent-ui-lag",
+      "paths": [
+        "src/main/ipc/registerGuiIpc.ts",
+        "src/main/mms/protocolEventBridge.ts",
+        "src/main/notifications/threadNotificationTarget.ts",
+        "src/renderer/stores/appStore.ts",
+        "src/renderer/components/OrchestratorChat.tsx",
+        "src/renderer/components/ChatComposer.tsx",
+        "src/renderer/components/ThreadsSidebar.tsx",
+        "src/renderer/components/ThreadRowStatus.tsx",
+        "src/renderer/components/SubagentParentBar.tsx",
+        "src/renderer/components/SubagentComposerBanner.tsx"
+      ],
+      "claimedAt": "2026-11-25T05:39:43.980Z",
+      "expiresAt": "2026-11-25T07:39:43.980Z"
     }
   ]
 }
