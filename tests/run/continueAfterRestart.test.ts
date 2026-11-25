@@ -94,6 +94,31 @@ describe('continue after restart (SPEC §16.4)', () => {
     // Which runs a continuation may name is decided in RunEngine (runEngine.test.ts) and mapped to a code by the protocol (runProtocolValidation.test.ts).
   })
 
+  // The line a continuation opens with names a restart only when the daemon's stop cut the continued run off. A bot's
+  // work going on after a permission wall or its owner's answer, or any other continued run, had no restart.
+  it.each([
+    ['a permission wall', 'interrupted', { interruptedBy: 'bot_wall' }, 'Continuing run 1.'],
+    ['a person\'s Stop', 'interrupted', { interruptedBy: 'user' }, 'Continuing run 1.'],
+    ['a finished run', 'completed', undefined, 'Continuing run 1.'],
+    ['the daemon\'s stop', 'interrupted', { interruptedBy: 'daemon_restart' }, 'Continuing run 1 after a restart.'],
+    ['a restart with a tool in flight', 'uncertain', { uncertainReason: 'non_idempotent_tool_in_flight' }, 'Continuing run 1 after a restart.']
+  ] as const)('a run ended by %s (%s, %o) continues with "%s"', async (_cause, status, outcome, note) => {
+    const pi = piAdapter((input) => `ok: ${input.prompt}`)
+    const d = phase6Daemon(setupHome(), [pi])
+    daemons.push(d)
+    const thread = d.store.createThread('Continued')
+    d.orch.setThreadModelOverride(thread.id, PI)
+    const sent = await d.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'first', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    d.engine.markStarting(sent.runId)
+    d.engine.markRunning(sent.runId)
+    d.engine.markTerminal(sent.runId, status, outcome && { ...outcome })
+
+    await d.orch.send('Go on.', false, { threadId: thread.id, clientRequestId: `continue:${sent.runId}`, continuationOfRunId: sent.runId, acknowledgeUncertain: true })
+    expect(d.orch.getMessages(thread.id).filter((message) => message.role === 'system' && String(message.content).startsWith('Continuing run')).map((message) => message.content))
+      .toEqual([note])
+  })
+
   it('a profile stop during a turn records a restart, not a Stop, and the next boot notes it', async () => {
     const dir = setupHome()
     let started = false

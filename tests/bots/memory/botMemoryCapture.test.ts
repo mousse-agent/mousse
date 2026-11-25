@@ -130,6 +130,58 @@ describe('syncThread', () => {
   })
 })
 
+describe('a chat reply is journaled once', () => {
+  // A chat reply reaches the journal twice over: its chat row (`bm:<id>`) and capture's copy of the home thread's
+  // assistant message. Either may be written first; the chat row stands for both. Inputs: the order of the two writes,
+  // a chat row with cards after its words, a status line the turn said between steps (never posted), a reply whose
+  // chat row was never written, and the same words in another activation.
+  const home = { botId: 'ada', threadId: 'home', lane: 'chat' as const, activationId: 'act-1' }
+  const replies = (fx: MemoryFixture) => fx.store.journal('ada').filter((row) => row.kind === 'bot_msg').map((row) => [row.sourceKey, row.text])
+
+  it('captured first: writing its chat row removes the copy, from the journal, the history count and search', () => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    t.data.set('home', [assistant('s1', 'Checking your calendar first.', 1), assistant('a1', 'Your week is planned.', 2)])
+    journal.syncNow(home)
+    expect(replies(fx)).toEqual([['home:s1', 'Checking your calendar first.'], ['home:a1', 'Your week is planned.']])
+    const seq = fx.message({ botId: 'ada', id: 'r1', author: 'bot', text: 'Your week is planned.', activationId: 'act-1' })
+    // The status line was never posted: its copy stays.
+    expect(replies(fx)).toEqual([['home:s1', 'Checking your calendar first.'], ['bm:r1', 'Your week is planned.']])
+    expect(fx.store.messageHistory('ada').count).toBe(2)
+    expect(fx.store.search('ada', { query: 'planned', kinds: ['chat'] }).map((hit) => hit.ref)).toEqual([`j${seq}`])
+    // A later pass over the thread does not copy it again.
+    t.data.set('home', [assistant('s1', 'Checking your calendar first.', 1), user('x', 'other', 2), assistant('a1', 'Your week is planned.', 2)])
+    journal.syncNow(home)
+    expect(replies(fx).filter(([, text]) => text === 'Your week is planned.')).toEqual([['bm:r1', 'Your week is planned.']])
+  })
+
+  it.each([
+    ['its words', 'Here is the summary.'],
+    ['its words and the cards it carries', 'Here is the summary.\n\n[file] summary.md']
+  ])('chat row first, holding %s: capture writes no copy', (_shape, posted) => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    fx.message({ botId: 'ada', id: 'r1', author: 'bot', text: posted, activationId: 'act-1' })
+    t.data.set('home', [assistant('a1', 'Here is the summary.', 1)])
+    journal.syncNow(home)
+    expect(replies(fx)).toEqual([['bm:r1', posted]])
+    expect(fx.store.messageHistory('ada').count).toBe(1)
+  })
+
+  it('keeps a captured reply with no chat row, and the same words posted in another activation', () => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    fx.message({ botId: 'ada', id: 'r0', author: 'bot', text: 'Done.', activationId: 'act-0' })
+    t.data.set('home', [assistant('s1', 'Looking now.', 1), assistant('a1', 'Done.', 2)])
+    journal.syncNow(home)
+    expect(replies(fx)).toEqual([['bm:r0', 'Done.'], ['home:s1', 'Looking now.'], ['home:a1', 'Done.']])
+    // A chat row whose words only begin like the copy's is another reply.
+    fx.message({ botId: 'ada', id: 'r1', author: 'bot', text: 'Looking now. Found it.', activationId: 'act-1' })
+    expect(replies(fx).map(([key]) => key)).toEqual(['bm:r0', 'home:s1', 'home:a1', 'bm:r1'])
+    expect(fx.store.messageHistory('ada').count).toBe(4)
+  })
+})
+
 describe('crash catch-up', () => {
   it('after a kill mid-dispatch, catchUp copies every bot thread past its cursor and finishes partial rows once', async () => {
     const fx = memoryFixture()
