@@ -192,12 +192,17 @@ describe('workers that are slow or die', () => {
     const heal = (role: string) => rmSync(join(out, `crash-${role}`))
     const client = new ThreadDbClient({ script, idleWorkerStopMs: 60_000, crashBackoff: { firstMs: 200, maxMs: 800 } })
     const runs = client.workerCrashRuns.bind(client)
+    // Waits until the role may start again. A timer can fire a millisecond before Date.now() reaches the end of the
+    // backoff, so check again rather than trusting one sleep.
+    const waitOut = async (role: 'index' | 'read') => {
+      while ((runs()[role]?.restartInMs ?? 0) > 0) await wait(runs()[role]!.restartInMs + 1)
+    }
     try {
       // Index: the first crash starts again at once, then each wait doubles up to the cap.
       crash('index')
       const delays: number[] = []
       for (let i = 0; i < 5; i++) {
-        await wait(runs().index?.restartInMs ?? 0)
+        await waitOut('index')
         await expect(client.callIndex('info' as never)).rejects.toThrow(/stopped \(5\)/)
         delays.push(runs().index!.delayMs)
       }
@@ -232,10 +237,10 @@ describe('workers that are slow or die', () => {
       // A worker that answers again ends the run: the next crash starts again at once.
       heal('index')
       heal('read')
-      await wait(runs().index?.restartInMs ?? 0)
+      await waitOut('index')
       expect(await client.callIndex('info' as never)).toMatch(/^info:/)
       expect(runs().index).toBeUndefined()
-      await wait(runs().read?.restartInMs ?? 0)
+      await waitOut('read')
       expect(await client.call('info' as never)).toMatch(/^info:/)
       expect(runs()).toEqual({})
       await expect(client.callIndex('die' as never)).rejects.toThrow(/stopped \(3\)/)
