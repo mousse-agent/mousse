@@ -100,18 +100,6 @@
       "expiresAt": "2026-11-25T04:21:03.217Z"
     },
     {
-      "task": "model-picker-click-picks-default",
-      "session": "agibook-42de49",
-      "machine": "agibook",
-      "branch": "model-picker-click-picks-default",
-      "paths": [
-        "src/renderer/components/ModelFamilyMenu.tsx",
-        "src/renderer/components/ComposerEffortPicker.tsx"
-      ],
-      "claimedAt": "2026-11-25T05:08:37.652Z",
-      "expiresAt": "2026-11-25T07:08:37.652Z"
-    },
-    {
       "task": "opencode-provider",
       "session": "Animatrix-504a69",
       "machine": "Animatrix",
