@@ -2,21 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "acp-agent-logos",
-      "session": "Animatrix-cafae8",
-      "machine": "Animatrix",
-      "branch": "acp-agent-logos",
-      "paths": [
-        "src/mms/harness/agents/registryIcons.ts",
-        "src/mms/harness/agents/registry.ts",
-        "src/renderer/lib/providerIcons.tsx",
-        "src/renderer/components/providers/RegistryAgents.tsx",
-        "src/shared/privacy/outbound.ts"
-      ],
-      "claimedAt": "2026-11-25T02:39:48.204Z",
-      "expiresAt": "2026-11-25T04:39:48.204Z"
-    },
-    {
       "task": "bot-asks-and-questions",
       "session": "Animatrix-949070",
       "machine": "Animatrix",
