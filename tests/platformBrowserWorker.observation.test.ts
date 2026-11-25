@@ -5,6 +5,7 @@ import { imagePointToViewport } from '../src/shared/browser/geometry'
 import type { BrowserActionResult, BrowserElement, BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
 import { pngDimensions } from '../src/browser-worker/observation/png'
 import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startCrossOriginFixtureSite, startFixtureSite, workerRequest } from './fixtures/browser/harness'
+import { decodePng } from './fixtures/browser/pngPixels'
 
 const chrome = await ensureManagedChrome()
 
@@ -110,6 +111,34 @@ describe.skipIf(!chrome.ok)('observation pipeline', () => {
     await broker.close()
     void MANAGED_BROWSER_ROOT
   }, 120_000)
+
+  it('a screenshot of a scrolled page shows what the viewport shows, whole or clipped', async () => {
+    const { broker, roots } = await createInProcessBroker()
+    // The page scrolls itself to 700: red above the fold, green below it, a blue mark at (40, 30) of the viewport.
+    const opened = await broker.call(workerRequest('profile_scrolled', 'session.open', { url: `${origin}/scrolled.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const pixels = async (clip?: { x: number; y: number; width: number; height: number }) => {
+      const shot = await broker.call(workerRequest('profile_scrolled', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true, ...(clip ? { clip } : {}) }))
+      expect(shot.ok, JSON.stringify(shot.error)).toBe(true)
+      const observation = shot.result as BrowserObservation
+      expect(observation.viewport.scrollY).toBeCloseTo(700, 0)
+      const image = observation.screenshot!
+      const decoded = decodePng(readFileSync(join(roots.artifactRoot, 'profile_scrolled', payload.session.id, `${image.artifactId}.png`)))
+      expect({ width: decoded.width, height: decoded.height }).toEqual({ width: image.pixelWidth, height: image.pixelHeight })
+      /** The colour at a viewport CSS point of this picture. */
+      return (x: number, y: number) => decoded.rgb((x - (image.cropOriginCss?.x ?? 0)) * image.cssToImageScaleX, (y - (image.cropOriginCss?.y ?? 0)) * image.cssToImageScaleY)
+    }
+    const isGreen = ([r, g, b]: number[]) => g > 200 && r < 60 && b < 60
+    const isBlue = ([r, g, b]: number[]) => b > 200 && r < 60 && g < 60
+    const whole = await pixels()
+    expect(whole(400, 360)).toSatisfy(isGreen)
+    expect(whole(400, 10)).toSatisfy(isGreen)
+    expect(whole(100, 70)).toSatisfy(isBlue)
+    const clipped = await pixels({ x: 40, y: 30, width: 120, height: 80 })
+    expect(clipped(100, 70)).toSatisfy(isBlue)
+    await broker.close()
+  }, 120_000)
 })
 
 describe.skipIf(!chrome.ok)('find and extract stay bounded and untrusted', () => {
@@ -199,6 +228,47 @@ describe.skipIf(!chrome.ok)('cross-origin frames and open shadow observation', (
     const stale = await broker.call(workerRequest('profile_oopif', 'act', actParams({ ...payload.session, generation: afterNavigation.generation }, afterNavigation, { type: 'click', target: { kind: 'ref', ref: frameInput!.ref } }, 'stale_frame_ref')))
     expect(stale.ok).toBe(false)
     expect(['stale_observation', 'stale_ref', 'worker_disconnected']).toContain(stale.error?.code)
+    await broker.close()
+    await site.close()
+  }, 120_000)
+
+  it('reads a visible form frame from another site behind hidden helper frames from the same site, and narrows to it by ref', async () => {
+    const site = await startCrossOriginFixtureSite()
+    const { broker } = await createInProcessBroker({ chromeExtraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] })
+    // A display:none helper and a 0x0 helper from the form's own site come before the visible form frame (at 320, 160).
+    const opened = await broker.call(workerRequest('profile_helper', 'session.open', { url: `${site.parentOrigin}/frame-helper-parent.html` }))
+    expect(opened.ok, opened.error?.message).toBe(true)
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const observation = payload.observation
+    const email = observation.elements.find((element) => element.role === 'textbox' && element.name === 'Work email')
+    expect(email, observation.elements.map((element) => `${element.role}:${element.name}`).join(' | ')).toBeTruthy()
+    expect(email!.bounds!.x).toBeGreaterThanOrEqual(320)
+    expect(email!.bounds!.y).toBeGreaterThanOrEqual(160)
+    expect(observation.elements.some((element) => element.role === 'button' && element.name === 'Sign up')).toBe(true)
+    expect(observation.elements.some((element) => element.name === 'Helper ping')).toBe(false)
+    expect(observation.warnings).toContain('oopif-attached')
+    const found = await broker.call(workerRequest('profile_helper', 'find', { sessionId: payload.session.id, tabId: observation.tabId, role: 'textbox', name: 'work email' }))
+    expect(found.ok, JSON.stringify(found.error)).toBe(true)
+    const matches = (found.result as { elements: BrowserElement[] }).elements
+    expect(matches).toHaveLength(1)
+    expect(matches[0].frameRef).not.toBe(named(observation, 'Parent only').frameRef)
+
+    const frame = observation.elements.find((element) => element.name === 'Signing form')
+    expect(frame, observation.elements.map((element) => `${element.role}:${element.name}`).join(' | ')).toBeTruthy()
+    const scoped = await broker.call(workerRequest('profile_helper', 'observe', { sessionId: payload.session.id, tabId: observation.tabId, observationId: observation.observationId, ref: frame!.ref }))
+    expect(scoped.ok, JSON.stringify(scoped.error)).toBe(true)
+    const scopedNames = (scoped.result as BrowserObservation).elements.map((element) => element.name)
+    expect(scopedNames).toEqual(expect.arrayContaining(['Work email', 'Sign up']))
+    expect(scopedNames).not.toContain('Parent only')
+    expect(scopedNames).not.toContain('Checkout')
+    const extracted = await broker.call(workerRequest('profile_helper', 'extract', { sessionId: payload.session.id, tabId: observation.tabId, observationId: observation.observationId, ref: frame!.ref }))
+    expect(extracted.ok, JSON.stringify(extracted.error)).toBe(true)
+    const text = (extracted.result as { text: string }).text
+    expect(text).toContain('Sign up')
+    expect(text).not.toContain('Parent only')
+    const unknown = await broker.call(workerRequest('profile_helper', 'observe', { sessionId: payload.session.id, tabId: observation.tabId, ref: 'el_00000000-0000-4000-8000-000000000000' }))
+    expect(unknown.ok).toBe(false)
+    expect(unknown.error?.code).toBe('stale_ref')
     await broker.close()
     await site.close()
   }, 120_000)
