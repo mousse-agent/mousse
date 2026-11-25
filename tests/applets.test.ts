@@ -7,9 +7,15 @@ import {
   APPLET_SOURCE_LIMIT,
   APPLET_STATE_LIMIT,
   extractAppletParts,
+  appendStagedApplets,
+  modelFacingReplyText,
+  redactAppletFences,
+  redactAppletTail,
   validateAppletSubmission
 } from '../src/shared/applets'
 import { AppletStore, exportAppletHtml } from '../src/mms/applets/AppletStore'
+import { DefinitionTurnRecord } from '../src/mms/agentDefinitions/definitionTurnRecord'
+import { stripActionBlocks } from '../src/mms/orchestrator/actions'
 import {
   publishAppletPresentation,
   recoverAppletPresentation
@@ -110,6 +116,10 @@ describe('applets sized to the viewport', () => {
     )
     // Loading, recovering and exporting an applet already published still accept it.
     expect(validateAppletSubmission(submission).css).toBe(submission.css)
+  })
+  it('quotes a long selector shortened, as the reason goes back to the model', () => {
+    const selector = '.chart_' + 'x'.repeat(5_000) + ' body'
+    expect(() => validateAppletSubmission({ ...source, css: `${selector}{height:100%}` }, { publishing: true })).toThrow(/"\.chart_x{52}…" in css/)
   })
   it.each(accepted)('accepts %s', (_name, change) => {
     expect(() => validateAppletSubmission({ ...source, ...change }, { publishing: true })).not.toThrow()
@@ -308,5 +318,121 @@ describe('publication crash recovery', () => {
     writeFileSync(path, JSON.stringify(index))
     expect(store.recoverPublication(firstInput)?.revisionId).toBe(first.revisionId)
     expect(store.list('one')[0].revisionId).toBe(updated.revisionId)
+  })
+})
+
+describe('applet source kept from a model', () => {
+  const CANARY = 'CANARY_SOURCE'
+  const LS = String.fromCharCode(0x2028)
+  const withCanary = { ...source, js: `window.x = "${CANARY}"` }
+  const body = JSON.stringify(withCanary)
+  // Each is a reply publication refuses or reads in a way of its own; none may pass the source on.
+  const replies: Array<[string, string]> = [
+    ['a valid fence', 'Here:\n' + fence(withCanary) + 'Done.'],
+    ['a fence after a code block an earlier row left open', '```js\nlet a = 1\nHere:\n' + fence(withCanary) + 'Done.'],
+    ['a fourth fence', fence(source).repeat(3) + fence(withCanary)],
+    ['a fence over the size limit', fence({ ...withCanary, css: 'x'.repeat(APPLET_SOURCE_LIMIT) })],
+    ['invalid JSON', '```mousse-applet\n{"title": "Broken", "js": "' + CANARY + '"\n```\n'],
+    ['a fence that never closes', 'Here:\n```mousse-applet\n' + body],
+    ['a fence opening after a line separator', 'Here:' + LS + '```mousse-applet\n' + body + '\n```\nDone.'],
+    ['a fence opening after a lone carriage return', 'Here:\r```mousse-applet\n' + body + '\n```\nDone.'],
+    ['an indented fence in another case', '   ~~~~ Mousse-Applet\n' + body + '\n~~~~\nDone.'],
+    ['CRLF line ends', 'Here:\r\n```mousse-applet\r\n' + body + '\r\n```\r\nDone.'],
+    ['a fence opening inside another one, closing after it', '~~~mousse-applet\n{"title": "Outer"}\n```mousse-applet\n' + body + '\n~~~\n"' + CANARY + '"\n```\nDone.'],
+    ['a fence opening mid-line, as a stopped run joins rows', 'Checking. ~~~mousse-applet\n' + body + '\n~~~\nDone.'],
+    ['a body whose string holds a line separator and backticks', '```mousse-applet\n{"html": "<pre>' + LS + '```' + LS + '</pre>", "js": "' + CANARY + '"}\n```\nDone.'],
+    ['a fence publication ends early, at a line separator', '~~~mousse-applet\n{"js":\n~~~' + LS + CANARY + '\n~~~\nDone.'],
+    ['a failed publication as the reply shows it', 'Here:\n```mousse-applet\n' + JSON.stringify(withCanary, null, 2) + '\n```\n\nApplet unavailable: publication failed.']
+  ]
+
+  it.each(replies)('cuts the source of %s, naming the applet', (_name, reply) => {
+    const redacted = redactAppletFences(reply)
+    expect(redacted).not.toContain(CANARY)
+    expect(redacted).toMatch(/\[Applet[:\]]/)
+    expect(redactAppletFences(redacted)).toBe(redacted)
+    expect(modelFacingReplyText({ role: 'assistant', content: reply })).toBe(redacted)
+  })
+
+  it('cuts no more than the fence, and names a valid applet by its title', () => {
+    expect(redactAppletFences('Here:\n' + fence(withCanary) + 'Done.')).toBe('Here:\n[Applet: Calculator]\nDone.')
+    expect(redactAppletFences('Here:\n```mousse-applet\n' + body)).toBe('Here:\n[Applet: Calculator]')
+    expect(redactAppletFences('```mousse-applet\nnot json\n```')).toBe('[Applet]')
+    expect(redactAppletFences('Checking. ~~~mousse-applet\n' + body + '\n~~~\nDone.')).toBe('Checking. [Applet: Calculator]\nDone.')
+    expect(redactAppletFences('A mousse-applet fence:\n```js\nx\n```')).toBe('A mousse-applet fence:\n```js\nx\n```')
+    // Only a top-level title names it: a stopped body's data is not a title.
+    expect(redactAppletFences('```mousse-applet\n{"data":{"title":"Dataset heading"},"js":"')).toBe('[Applet]')
+  })
+
+  it('reads a stored reply from the text the model wrote, naming each published applet on the fence that published it', () => {
+    const { store } = fixture()
+    // The first fence names the second's title but fails (schema version 2): only the second publishes.
+    const content = 'Here:\n' + fence({ ...source, schemaVersion: 2 }) + '\n' + fence(withCanary) + 'Done.'
+    const presentationParts = publishAppletPresentation(store, { threadId: 'one', messageId: 'm', turnId: 't', content })
+    const [published] = store.list('one')
+    const named = modelFacingReplyText({ role: 'assistant', content, presentationParts })
+    expect(named).toBe(`Here:\n[Applet: Calculator]\n\n[Applet: Calculator (appletId ${published!.appletId}, revision ${published!.revisionId})]\nDone.`)
+    // Parts of the same shape for another applet are not this reply's: the reference follows the text.
+    const stale = presentationParts!.map((part) => (part.type === 'applet' ? { ...part, reference: { ...part.reference, title: 'Budget' } } : part))
+    expect(modelFacingReplyText({ role: 'assistant', content, presentationParts: stale })).toMatch(/^Here:\n\[Applet: Calculator\]\n\n\[Applet: Calculator\]\nDone\.\n\n\[Applet: Budget \(appletId /)
+    // Parts that do not match the text as publication read it put no reference on a fence: they follow the text.
+    expect(modelFacingReplyText({ role: 'assistant', content, presentationParts: [{ type: 'applet', reference: published! }] })).toBe(
+      `Here:\n[Applet: Calculator]\n\n[Applet: Calculator]\nDone.\n\n[Applet: Calculator (appletId ${published!.appletId}, revision ${published!.revisionId})]`
+    )
+  })
+
+  it('names a published applet inside an outer fence publication did not read, and cuts the outer one to its end', () => {
+    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Calculator', description: 'd' }
+    const content = ' ~~~mousse-applet\n' + fence(source) + CANARY + '\n~~~\nDone.'
+    const at = new Map([[content.indexOf('```'), reference]])
+    expect(redactAppletFences(content, { at })).toBe(' [Applet]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\nDone.')
+    expect(redactAppletFences('Done.', { after: [reference] })).toBe('Done.\n\n[Applet: Calculator (appletId applet_a, revision rev_a)]')
+  })
+
+  it('names a published applet the same when its result is redacted again', () => {
+    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Demo ~~~mousse-applet', description: 'd' }
+    const once = redactAppletFences(fence({ ...source, title: reference.title }) + 'Done.', { at: new Map([[0, reference]]) })
+    // The title is an opening too, inside the fence: the cut runs to the end, which only hides more.
+    expect(once).toContain('[Applet: Demo ~~mousse-applet (appletId applet_a, revision rev_a)]')
+    expect(redactAppletFences(once)).toBe(once)
+  })
+
+  it.each([
+    ['after the text', 'Done.', 'Done.F'],
+    ['after closing a code block the reply leaves open', 'Here:\n```js\nx', 'Here:\n```js\nx\n```F'],
+    ['after an applet fence the reply leaves open, which stays open', 'Here:\n~~~mousse-applet\n{', 'Here:\n~~~mousse-applet\n{F'],
+    ['after a closed block that mentions an applet fence', '```js\n// ~~~mousse-applet\n```\nDone.', '```js\n// ~~~mousse-applet\n```\nDone.F']
+  ])('puts staged applets %s', (_name, reply, staged) => {
+    expect(appendStagedApplets(reply, 'F')).toBe(staged)
+  })
+  it('returns the text from a point, read as part of the whole', () => {
+    const turn = 'Draft:\n~~~mousse-applet\n{"js":"' + CANARY + '"}\n~~~\nDone.'
+    expect(redactAppletFences(turn, {}, turn.indexOf('{'))).toBe('[Applet]\nDone.')
+    expect(redactAppletFences(turn, {}, turn.indexOf('Done.'))).toBe('Done.')
+  })
+
+  it('reads a last row with the rows before it as they streamed, so no row closes a fence early', () => {
+    // A definition's rows, a tool call between each: the indented middle row closes nothing, trimmed or not.
+    const record = new DefinitionTurnRecord()
+    const rows = ['Draft:\n~~~mousse-applet\n', '   ~~~', '{"js":"' + CANARY + '"}\n~~~']
+    rows.forEach((row, at) => {
+      record.text({ phase: 'start', content: row, contentIndex: 0 })
+      if (at < rows.length - 1) record.tool({ phase: 'start', callId: `c${at}`, kind: 'mcp_tool_call', title: 'Read', summary: '', details: [] })
+    })
+    expect(redactAppletTail(record.allText(), record.finalText())).toBe('[Applet]')
+    expect(redactAppletTail('Draft:\n', 'Done.')).toBe('Done.')
+    // A last row that is the end of the rows as it is keeps its white space.
+    expect(redactAppletTail('Here:\n    return 1\n', '    return 1\n')).toBe('    return 1\n')
+  })
+
+  it('leaves an action block inside an applet fence, so the fence is still cut whole', () => {
+    const reply = '~~~mousse-applet\n~~~```mousse-actions\n{"type":"message","content":"ok"}\n```\n{"js":"' + CANARY + '"}\n~~~'
+    expect(stripActionBlocks(reply)).toBe(reply)
+    expect(redactAppletFences(stripActionBlocks(reply))).toBe('[Applet]')
+  })
+  it('scans a long run of tildes once', () => {
+    expect(redactAppletFences('mousse-applet\n' + '~'.repeat(1_000_000) + 'x')).toHaveLength(1_000_015)
+  })
+  it('passes a person\'s pasted fence on as written', () => {
+    expect(modelFacingReplyText({ role: 'user', content: fence(withCanary) })).toContain(CANARY)
   })
 })

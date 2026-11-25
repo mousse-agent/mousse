@@ -15,7 +15,8 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appendStagedApplets, modelFacingReplyText, publishedApplets, redactAppletFences, redactAppletTail, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { existsSync, mkdirSync } from 'node:fs'
@@ -1738,8 +1739,11 @@ export class OrchestratorService extends EventEmitter {
     const markTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }, resultText?: string): void => {
       if (terminal) return
       terminal = true
-      const mask = resultText ? this.secretMaskerFor?.(threadId) : undefined
-      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && resultText ? mask(resultText) : resultText }))
+      // As a turn's result: each applet fence a line naming it (`redactAppletFences`), never its source, read with the
+      // rows before it when it is the turn's last row.
+      const named = resultText ? redactAppletTail(record.allText(), resultText) : resultText
+      const mask = named ? this.secretMaskerFor?.(threadId) : undefined
+      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && named ? mask(named) : named }))
       this.harness.runSettled?.(runId)
     }
     try {
@@ -4808,7 +4812,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
+    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; onReadApplet?: AppToolTurn['onReadApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
     // The relay's listing and the running note read nothing the skills change: they are read side by side with them.
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
@@ -4844,6 +4848,7 @@ export class OrchestratorService extends EventEmitter {
     const turn = this.appToolTurns.update(registered.runId, {
       ...(browser ? { browser } : {}),
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
+      ...(input.onReadApplet ? { onReadApplet: input.onReadApplet } : {}),
       // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
       ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
       // A bot lists and loads every skill unless its owner switched skills off (then none), else only those it was granted;
@@ -8285,7 +8290,8 @@ export class OrchestratorService extends EventEmitter {
       }
       // A message a restart cut off before its turn started, after the thread had moved on: no model ever had it.
       if (message.hidden || message.kind || message.notSent || (message.role !== 'user' && message.role !== 'assistant')) continue
-      const text = message.content.trim()
+      // A published applet goes over as one line, not its source: the handoff's budget is for the conversation.
+      const text = modelFacingReplyText(message).trim()
       if (!text) continue
       items.push({
         runOrdinal: ordinal,
@@ -12837,8 +12843,62 @@ export class OrchestratorService extends EventEmitter {
     this.persist()
   }
 
+  /**
+   * The applet revisions a thread's replies show, oldest first: completed replies only, as the window loads them
+   * (`applets.get`), and not those a fork inherited, whose bundles are in its parent's folder.
+   */
+  private shownAppletReferences(messages: readonly ChatMessage[]): AppletReference[] {
+    return messages
+      .filter(message => !message.hidden && message.role === 'assistant' && !message.incomplete && !message.streaming && !message.inherited)
+      .flatMap(message => message.presentationParts ?? [])
+      .flatMap(part => part.type === 'applet' ? [part.reference] : [])
+  }
+
+  /**
+   * What a `publish_applet` call stages. A revision is checked against the applet's current revision now, so a stale one
+   * is refused to the model instead of failing when the response completes; one with `edits` becomes the full source
+   * of that revision with the edits applied. One revision of an applet per response: a second would be stale by then.
+   * Only a revision the thread shows is revised: one an Undo hid is neither named nor built on, so its source stays hidden.
+   */
+  private stageableApplet(threadId: string, messages: readonly ChatMessage[], value: unknown, staged: readonly AppletSubmission[]): AppletSubmission {
+    const store = this.appletStore
+    const args = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+    if (store && args && typeof args.appletId === 'string') {
+      const appletId = args.appletId
+      if (staged.some(source => source.appletId === appletId)) throw new AppletValidationError('This response already revises that applet. Put every change to it in one publish_applet call.')
+      const head = store.head(threadId, appletId)
+      const shown = this.shownAppletReferences(messages).filter(reference => reference.appletId === appletId)
+      if (!head || !shown.length) throw new AppletValidationError(`No applet ${appletId} is shown in this conversation.`)
+      if (!shown.some(reference => reference.revisionId === head.revisionId))
+        throw new AppletValidationError(`Applet ${appletId}'s newest revision is not shown in this conversation, so it cannot be revised. Publish a new applet instead.`)
+      if (args.expectedRevision !== head.revisionId) throw new AppletValidationError(`Applet ${appletId} is at revision ${head.revisionId}, not ${String(args.expectedRevision)}. Revise that revision.`)
+      if (args.edits !== undefined)
+        return validateAppletSubmission(appletRevisionFromEdits(args, store.load(threadId, appletId, head.revisionId).source), { publishing: true })
+    } else if (args?.edits !== undefined) {
+      throw new AppletValidationError('edits revise a published applet: give its appletId and expectedRevision.')
+    }
+    return validateAppletSubmission(value, { publishing: true })
+  }
+
+  /** `read_applet`: a page of a revision this thread shows, by default the newest one it shows. */
+  private readShownApplet(threadId: string, messages: readonly ChatMessage[], args: Record<string, unknown>): Record<string, unknown> {
+    const store = this.appletStore
+    if (!store) throw new Error('Applets are off.')
+    const { appletId, revisionId } = args
+    if (typeof appletId !== 'string' || !appletId) throw new AppletValidationError('appletId must name an applet.')
+    if (revisionId !== undefined && typeof revisionId !== 'string') throw new AppletValidationError('revisionId must be text.')
+    const shown = this.shownAppletReferences(messages).filter(reference => reference.appletId === appletId)
+    const reference = revisionId === undefined ? shown.at(-1) : shown.find(candidate => candidate.revisionId === revisionId)
+    if (!reference)
+      throw new AppletValidationError(revisionId === undefined
+        ? `No applet ${appletId} is shown in this conversation. An applet published in this response can be read once the response completes.`
+        : `Revision ${revisionId} of applet ${appletId} is not shown in this conversation.`)
+    const bundle = store.load(threadId, appletId, reference.revisionId)
+    return { appletId, revisionId: reference.revisionId, title: bundle.title, ...readAppletSource(bundle.source, args) }
+  }
+
   private appletCatalogue(): string {
-    const references = this.messages.filter(message => !message.hidden).flatMap(message => message.presentationParts ?? []).filter(part => part.type === 'applet').map(part => part.reference)
+    const references = this.shownAppletReferences(this.messages)
     return references.length ? '\nExisting applets in this conversation (use appletId and expectedRevision to revise; latest visible revision per applet):\n' + JSON.stringify([...new Map(references.map(ref => [ref.appletId, ref])).values()].slice(-20)) : ''
   }
 
@@ -15355,9 +15415,11 @@ export class OrchestratorService extends EventEmitter {
     const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string; usageLimitKind?: string }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
-      // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages.
-      const mask = resultText ? this.secretMaskerFor?.(session.threadId) : undefined
-      const kept = mask && resultText ? mask(resultText) : resultText
+      // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages,
+      // with each applet as a line, also one a stopped turn streamed whole but never published.
+      const named = resultText ? redactAppletFences(resultText) : resultText
+      const mask = named ? this.secretMaskerFor?.(session.threadId) : undefined
+      const kept = mask && named ? mask(named) : named
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText: kept }))
       // The run's count record goes with it: no later attempt starts from fresh counts.
       this.harness.runSettled?.(engineRunId ?? turnId)
@@ -16155,10 +16217,14 @@ export class OrchestratorService extends EventEmitter {
       }, { dropLate: true })
       const onPublishApplet = this.appletStore ? (value: unknown) => {
         if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
-        stagedApplets.push(validateAppletSubmission(value, { publishing: true }))
+        stagedApplets.push(this.stageableApplet(session.threadId, session.messages, value, stagedApplets))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet,
+      // A bot's applets are in its activations' threads, which its turns have no list of: reading is for threads.
+      const onReadApplet = this.appletStore && !opts?.bot
+        ? (args: Record<string, unknown>) => this.readShownApplet(session.threadId, session.messages, args)
+        : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet, onReadApplet,
         // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
         userContent: opts?.agent ? '' : userContent,
         instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}), ...(opts?.bot?.preamble ? { botPreamble: opts.bot.preamble } : {}) }) : undefined
@@ -16166,6 +16232,7 @@ export class OrchestratorService extends EventEmitter {
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
+          onReadApplet,
           browser: browserExecution,
           delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode) : undefined,
           toolAccess: session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace)
@@ -16447,6 +16514,9 @@ export class OrchestratorService extends EventEmitter {
       // one, else the last closed one) holds the rest and is marked incomplete.
       const replies = this.transcript.closedReplies()
       const last = this.transcript.openAssistantContent() === undefined ? replies.at(-1) : undefined
+      // The result is read with the turn's rows before it, when it is only the open row: a fence an earlier row opened is cut.
+      // The rows are joined as they streamed, nothing trimmed or put between them, so no line closes a fence that did not.
+      const turnRows = [...replies.map((reply) => reply.content), this.transcript.openAssistantContent() ?? ''].join('')
       const unshown = unshownReplyText(partial, (last ? replies.slice(0, -1) : replies).map((reply) => stripActionBlocks(reply.content)))
       if (last && (!unshown || stripActionBlocks(last.content).trim() === unshown.trim())) {
         this.updateStreamingAssistantMessage(last.id, last.content, false, undefined, true)
@@ -16476,7 +16546,8 @@ export class OrchestratorService extends EventEmitter {
       const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
       const response: OrchestratorResponse = { message: stoppedReplyText(opts?.bot ? unshown : partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
-      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
+      const stoppedResult = partial && redactAppletTail(turnRows, partial)
+      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, stoppedResult)
       try {
         // A turn cut off by the service stopping saves where it ended and nothing more: it does not wait for its
         // repository or run Git while the service exits. The next turn's recovery takes its snapshot.
@@ -16497,19 +16568,29 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // Applets published by tool join the turn's last reply as fences, so they publish with it.
-    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+    // U+2028 and U+2029 in a string are escaped: publication would read a line start after one, where three backticks
+    // in the source would end the fence early.
+    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source).replace(/\p{Zl}|\p{Zp}/gu, (c) => '\\u' + c.charCodeAt(0).toString(16)) + '\n```').join('')
     // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
     const replyOnlyText = stripActionBlocks(assistantText)
-    const displayText = replyOnlyText + appletFences
     // A tool call ends a reply row, so a turn's notes before its calls already have rows of their
     // own: the row that ends the turn (the open one, else the last closed one) holds the rest.
     const shownReplies = this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content))
     const earlierReplies = this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
-    const finalText = unshownReplyText(displayText, earlierReplies)
     // The streamed row never held the applet fences, so it is matched on the reply text alone.
     const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
+    // The fences end that last row, judged on the row alone (an earlier row is a reply of its own; `appendStagedApplets`).
+    const split = replyOnlyText.endsWith(finalReplyText)
+    const earlierText = split ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
+    const lastReply = split ? finalReplyText : replyOnlyText
+    const displayText = earlierText + appendStagedApplets(lastReply, appletFences)
+    // The run's result (what a parent or `thread_wait` reads) is the turn's text with its applet fences cut, each named by
+    // title until the reply publishes it, then by its reference line (below). The staged fences follow all the model
+    // wrote, so they never end one of its fences early.
+    let resultText = redactAppletFences(displayText)
+    const finalText = unshownReplyText(displayText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
     // again, comes next. "Done." would read as if the turn had finished with nothing to say.
@@ -16551,6 +16632,14 @@ export class OrchestratorService extends EventEmitter {
         finalMessage.presentationParts = publishAppletPresentation(this.appletStore, { threadId: session.threadId, messageId: finalMessage.id, turnId, content: finalMessage.content })
         this.persist(true)
         this.emitMessageUpdated(finalMessage)
+        // The text the model wrote again, with the last row's published applets named by their reference lines.
+        // Each published applet is named on the fence that published it, found as publication read the stored reply.
+        if (finalMessage.presentationParts) {
+          const published = publishedApplets(finalMessage.content, finalMessage.presentationParts, displayText.length - finalMessage.content.length)
+          // A stored reply that is not the end of the turn's text places nothing: its references follow the text.
+          const placed = displayText.endsWith(finalMessage.content)
+          resultText = redactAppletFences(displayText, placed ? published : { after: [...(published.at?.values() ?? []), ...(published.after ?? [])] })
+        }
       }
     }
 
@@ -16637,7 +16726,7 @@ export class OrchestratorService extends EventEmitter {
     }
     if (executionFailed) {
       this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })
-      markRunTerminal('failed', { error: 'LLM error' }, displayText)
+      markRunTerminal('failed', { error: 'LLM error' }, resultText)
     } else {
       // The answer is complete: windows show the turn finished now. Its checkpoint may wait minutes for the repository's
       // lease behind another thread's. The run stays `finalizing` until the checkpoint is recorded: the thread's next
@@ -16667,7 +16756,7 @@ export class OrchestratorService extends EventEmitter {
       throw error
     }
     this.persist(true)
-    if (!executionFailed) markRunTerminal('completed', undefined, displayText || 'Done.')
+    if (!executionFailed) markRunTerminal('completed', undefined, resultText || 'Done.')
     if (!executionFailed && endAction && turnStartSha && checkpointCwd && !snapshotFolder && !session.sharedWorkspace && !session.primaryCheckout && session.workspace) {
       this.recordTurnHandoff(session, { runId: turnId, workspace: session.workspace })
     }

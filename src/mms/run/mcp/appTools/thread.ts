@@ -1,4 +1,5 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import { modelFacingReplyText } from '../../../../shared/applets'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import { isLocalOnlyThread, isNativeHelperThread, isSideChatThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, Thread, ThreadNativeHelper, UserQuestionAnswers } from '../../../../shared/types'
@@ -470,9 +471,12 @@ function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageR
   }
 }
 
-/** A thread's messages here as the short views read them. */
-function rowsOf(all: ReadonlyArray<{ role: string; content?: unknown; timestamp?: unknown }>): ViewRow[] {
-  return all.map((message, index) => ({ index, role: message.role, text: typeof message.content === 'string' ? message.content : '', timestamp: message.timestamp }))
+/** A thread's messages here as the short views read them. Each text is read when a view first asks for it, not for every message. */
+function rowsOf(all: ReadonlyArray<{ role: string; content?: unknown; presentationParts?: unknown; timestamp?: unknown }>): ViewRow[] {
+  return all.map((message, index) => {
+    let text: string | undefined
+    return { index, role: message.role, timestamp: message.timestamp, get text() { return (text ??= modelFacingReplyText(message)) } }
+  })
 }
 
 /** The views of `thread_read` an agent may ask for. */
@@ -1705,14 +1709,19 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const all = host.threadMessages(threadId)
     if (view === 'summary') {
       const { status, activeRunId, waitingOnSubagents, ...about } = localSummary(meta, all.length)
-      const lastReply = [...all].reverse().find((message) => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim())
+      // From the newest back, so only the replies up to the last one with text are read.
+      let lastReply: string | undefined
+      for (let at = all.length - 1; at >= 0 && !lastReply; at -= 1) {
+        const text = all[at]!.role === 'assistant' ? modelFacingReplyText(all[at]!) : ''
+        if (text.trim()) lastReply = text
+      }
       return botData(`Thread «${title}»`, {
         threadId,
         link: threadLink(threadId),
         ...about,
         status: waitingOnSubagents ? 'waiting on subagents' : status === 'awaiting_input' ? 'waiting for your owner' : status === 'active' ? 'working' : 'idle',
         ...(activeRunId ? { activeRunId } : {}),
-        ...(lastReply ? { lastReply: oneLine(lastReply.content as string) } : {}),
+        ...(lastReply ? { lastReply: oneLine(lastReply) } : {}),
         ...(meta.createdByThreadId === undefined ? {} : { startedByYou: meta.createdByThreadId === callerThreadId }),
         ...(meta.lineage ? { lineage: { parentThreadId: meta.lineage.parentThreadId } } : {}),
         hint: `${SUMMARY_NEXT} Its run events (runs, tool calls, why a run failed) are view "events".`

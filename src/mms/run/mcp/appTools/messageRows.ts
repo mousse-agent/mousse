@@ -5,6 +5,8 @@
  * on one computer or two and only what the tool returns crosses.
  */
 
+import { modelFacingReplyText } from '../../../../shared/applets'
+
 /** Where a cut of `text` at `end` falls, moved back one so it never splits a surrogate pair. */
 export function cutEnd(text: string, end: number): number {
   if (end >= text.length) return text.length
@@ -17,6 +19,8 @@ export interface TranscriptMessage {
   role: string
   timestamp?: unknown
   content?: unknown
+  /** A reply's published applets, which read as one line each instead of their source (`modelFacingReplyText`). */
+  presentationParts?: unknown
 }
 
 export interface MessageRow {
@@ -31,7 +35,7 @@ export interface MessageRow {
   nextTextOffset?: number
 }
 
-const textOf = (message: TranscriptMessage | undefined): string => (message && typeof message.content === 'string' ? message.content : '')
+const textOf = (message: TranscriptMessage | undefined): string => (message ? modelFacingReplyText(message) : '')
 
 /** Why `textOffset` cannot be read in the message at `afterIndex`, or undefined when it can. */
 export function textOffsetProblem(all: readonly TranscriptMessage[], afterIndex: number, textOffset: number): string | undefined {

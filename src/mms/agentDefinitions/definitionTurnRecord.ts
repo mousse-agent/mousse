@@ -14,6 +14,8 @@ export class DefinitionTurnRecord {
   /** Text of the assistant message being streamed, by content index. */
   private open = new Map<number, string>()
   private last = ''
+  /** Each row's text as it streamed, untrimmed. */
+  private readonly streamed: string[] = []
   private cost = 0
 
   text(event: StreamingLlmTextEvent): void {
@@ -40,6 +42,14 @@ export class DefinitionTurnRecord {
     return this.joined() || this.last
   }
 
+  /**
+   * All the text the turn streamed, row after row as it streamed (nothing trimmed or put between rows, so no line
+   * closes a fence that did not), so a fence a row opened is read with the rows after it.
+   */
+  allText(): string {
+    return this.streamed.join('') + this.joined()
+  }
+
   /** The turn's history: the user message, assistant text and tools in order, ending with `text`. */
   history(user: string, text: string): AgentExecutionHistoryEntry[] {
     this.open = new Map()
@@ -58,6 +68,7 @@ export class DefinitionTurnRecord {
   }
 
   private flush(): void {
+    this.streamed.push(this.joined())
     const text = this.joined().trim()
     this.open = new Map()
     if (!text) return
