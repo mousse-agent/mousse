@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { Project } from '../../../shared/types'
 import type { BotLook } from '../../../shared/bots/personal/look'
-import { Archive, ArrowLeftRight, Bot, Check, ChevronRight, EyeOff, Folder, X } from '../../lib/icons'
+import { Archive, ArrowLeftRight, Bot, Check, ChevronRight, EyeOff, Folder, Laptop, Server, X } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { focusInitialMenuItem, menuItems, nextMenuIndex, useMenuKeyboard } from '../../hooks/useMenuKeyboard'
 import { filterSuggestions, orderOptions, SHOW_LABELS, type FilterOption, type FilterSuggestion, type ThreadShow } from '../../lib/threadFilter'
@@ -19,6 +19,11 @@ export interface ProjectOption extends FilterOption {
 
 export interface BotOption extends FilterOption {
   look: BotLook
+}
+
+export interface ComputerOption extends FilterOption {
+  /** True for this computer; false/absent for another of the user's computers. */
+  local?: boolean
 }
 
 /** Three lines, shorter each: the filter button's glyph. */
@@ -43,20 +48,27 @@ export function BotMark({ option }: { option: BotOption }) {
   return <span className="thread-filter-mark thread-filter-face"><BotFace look={option.look} state="idle" size={16} view="head" still /></span>
 }
 
+export function ComputerMark({ option, size = 14 }: { option: ComputerOption; size?: number }) {
+  const Icon = option.local ? Laptop : Server
+  return <span className="thread-filter-mark"><Icon size={size} strokeWidth={1.8} aria-hidden="true" /></span>
+}
+
 const SHOWS: readonly ThreadShow[] = ['mine', 'bots', 'all']
+const EMPTY_COMPUTERS: readonly ComputerOption[] = []
 
 /**
  * The Threads sidebar's filter row, under its tabs: a "Search threads…" field and a filter button, with the active
  * filters as chips below them (`lib/threadFilter.ts`, `threadFilterStore`).
  *
- * - Typing narrows the list by title, project and bot, and suggests the matching projects and bots above it; picking
- *   one (click, or Enter on the highlighted one) makes it a filter.
- * - The button opens a short menu: Show, "Project ›" and "Bot ›" (each a small searchable list beside it), and Archived.
- *   In the Projects tab the menu lists the projects instead, ticked; unticking one leaves it out of the tree.
+ * - Typing narrows the list by title, project, bot and computer, and suggests matching projects, bots and computers
+ *   above it; picking one (click, or Enter on the highlighted one) makes it a filter.
+ * - The button opens a short menu: Show, "Project ›", "Bot ›" and (when other computers exist) "Computer ›" (each a
+ *   small searchable list beside it), and Archived. In the Projects tab the menu lists the projects instead, ticked;
+ *   unticking one leaves it out of the tree.
  *
  * The swap button after it switches the Threads tab between the Projects tree and the list of cards (`onSwapView`).
  */
-export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'projects' | 'threads'; projects: readonly ProjectOption[]; bots: readonly BotOption[]; onSwapView?: () => void }) {
+export function ThreadFilterBar({ view, projects, bots, computers = EMPTY_COMPUTERS, onSwapView }: { view: 'projects' | 'threads'; projects: readonly ProjectOption[]; bots: readonly BotOption[]; computers?: readonly ComputerOption[]; onSwapView?: () => void }) {
   const filter = useThreadFilterStore()
   const fieldId = useId()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -70,14 +82,16 @@ export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'p
     if (needBots && !useBotsStore.getState().loaded) void useBotsStore.getState().refresh()
   }, [needBots])
 
-  const suggestions = useMemo(() => filterSuggestions(filter.query, filter, projects, bots), [filter, projects, bots])
+  const suggestions = useMemo(() => filterSuggestions(filter.query, filter, projects, bots, computers), [filter, projects, bots, computers])
   useEffect(() => setActive(0), [filter.query])
   const projectOption = projects.find((option) => option.id === filter.projectId)
   const botOption = bots.find((option) => option.id === filter.botId)
+  const computerOption = computers.find((option) => option.id === filter.computerId)
 
   const pick = (suggestion: FilterSuggestion) => {
     if (suggestion.kind === 'project') filter.setProject(suggestion.id)
-    else filter.setBot(suggestion.id)
+    else if (suggestion.kind === 'bot') filter.setBot(suggestion.id)
+    else filter.setComputer(suggestion.id)
     filter.setQuery('')
     fieldRef.current?.focus()
   }
@@ -107,6 +121,10 @@ export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'p
       key: 'project', icon: projectOption ? <ProjectMark option={projectOption} size={13} /> : <Folder size={13} aria-hidden="true" />,
       label: projectOption?.name ?? 'Project', title: 'Project', clear: () => filter.setProject(null)
     }] : []),
+    ...(filter.computerId !== null ? [{
+      key: 'computer', icon: computerOption ? <ComputerMark option={computerOption} size={13} /> : <Server size={13} aria-hidden="true" />,
+      label: computerOption?.name ?? 'Computer', title: 'Computer', clear: () => filter.setComputer(null)
+    }] : []),
     ...(filter.show !== 'mine' && filter.botId === null ? [{
       key: 'show', icon: <Bot size={13} aria-hidden="true" />, label: filter.show === 'all' ? 'All threads' : SHOW_LABELS[filter.show], title: 'Show', clear: () => filter.setShow('mine')
     }] : []),
@@ -115,7 +133,7 @@ export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'p
       key: 'hidden', icon: <EyeOff size={13} aria-hidden="true" />, label: `${hiddenCount} hidden`, title: 'Hidden projects', clear: filter.clearHiddenProjects
     }] : [])
   ]
-  const menuSet = filter.show !== 'mine' || filter.archived || filter.projectId !== null || filter.botId !== null || hiddenCount > 0
+  const menuSet = filter.show !== 'mine' || filter.archived || filter.projectId !== null || filter.botId !== null || filter.computerId !== null || hiddenCount > 0
 
   return (
     <div className="thread-filter">
@@ -168,6 +186,7 @@ export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'p
           {suggestions.map((suggestion, index) => {
             const project = suggestion.kind === 'project' ? projects.find((option) => option.id === suggestion.id) : undefined
             const bot = suggestion.kind === 'bot' ? bots.find((option) => option.id === suggestion.id) : undefined
+            const computer = suggestion.kind === 'computer' ? computers.find((option) => option.id === suggestion.id) : undefined
             return (
               <div
                 key={`${suggestion.kind}:${suggestion.id}`}
@@ -179,8 +198,8 @@ export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'p
                 onMouseEnter={() => setActive(index)}
                 onClick={() => pick(suggestion)}
               >
-                {project ? <ProjectMark option={project} /> : bot ? <BotMark option={bot} /> : null}
-                <span className="thread-filter-suggestion-kind">{suggestion.kind === 'project' ? 'Project:' : 'Bot:'}</span>
+                {project ? <ProjectMark option={project} /> : bot ? <BotMark option={bot} /> : computer ? <ComputerMark option={computer} /> : null}
+                <span className="thread-filter-suggestion-kind">{suggestion.kind === 'project' ? 'Project:' : suggestion.kind === 'bot' ? 'Bot:' : 'Computer:'}</span>
                 <span className="thread-filter-suggestion-name">{suggestion.name}</span>
                 {index === active && <span className="thread-filter-suggestion-enter" aria-hidden="true">↵</span>}
               </div>
@@ -209,8 +228,10 @@ export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'p
           anchorRef={buttonRef}
           projects={projects}
           bots={bots}
+          computers={computers}
           projectOption={projectOption}
           botOption={botOption}
+          computerOption={computerOption}
           onClose={(refocus) => {
             setMenuOpen(false)
             if (refocus) buttonRef.current?.focus()
@@ -221,19 +242,23 @@ export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'p
   )
 }
 
-function FilterMenu({ view, anchorRef, projects, bots, projectOption, botOption, onClose }: {
+type SubKind = 'project' | 'bot' | 'computer'
+
+function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption, botOption, computerOption, onClose }: {
   view: 'projects' | 'threads'
   anchorRef: React.RefObject<HTMLButtonElement | null>
   projects: readonly ProjectOption[]
   bots: readonly BotOption[]
+  computers: readonly ComputerOption[]
   projectOption?: ProjectOption
   botOption?: BotOption
+  computerOption?: ComputerOption
   onClose(refocus: boolean): void
 }) {
   const filter = useThreadFilterStore()
   const menuRef = useRef<HTMLDivElement>(null)
-  const [sub, setSub] = useState<'project' | 'bot' | null>(null)
-  const style = useFloatingPosition({ open: true, anchorRef, contentRef: menuRef, placement: 'below-end', gap: 6, deps: [view, projects.length] })
+  const [sub, setSub] = useState<SubKind | null>(null)
+  const style = useFloatingPosition({ open: true, anchorRef, contentRef: menuRef, placement: 'below-end', gap: 6, deps: [view, projects.length, computers.length > 0] })
   const onMenuKeyDown = useMenuKeyboard(menuRef, () => onClose(true))
 
   // The menu is placed (and made visible) by useFloatingPosition after it mounts; a hidden item cannot take focus, so wait a frame.
@@ -256,45 +281,81 @@ function FilterMenu({ view, anchorRef, projects, bots, projectOption, botOption,
     setSub(null)
     menuRef.current?.querySelector<HTMLElement>('[aria-expanded="true"][data-sub]')?.focus()
   }
-  const subTrigger = (kind: 'project' | 'bot', label: string, value: string) => (
-    <div className="threads-context-submenu-anchor" role="none">
-      <button
-        type="button"
-        role="menuitem"
-        data-sub={kind}
-        className="threads-context-menu-item thread-filter-menu-item"
-        aria-haspopup="menu"
-        aria-expanded={sub === kind}
-        onClick={() => setSub(sub === kind ? null : kind)}
-        onKeyDown={(event) => {
-          if (event.key === 'ArrowRight') {
-            event.preventDefault()
-            setSub(kind)
-          } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') setSub(null)
-        }}
-      >
-        <span className="thread-filter-check" aria-hidden="true" />
-        <span>{label}</span>
-        <span className="thread-filter-menu-value">{value}</span>
-        <ChevronRight className="threads-context-submenu-chevron" aria-hidden="true" />
-      </button>
-      {sub === kind && (
-        <FilterSubList
-          label={label}
-          anyLabel={kind === 'project' ? 'All projects' : 'Any bot'}
-          options={kind === 'project' ? projects : bots}
-          selected={kind === 'project' ? filter.projectId : filter.botId}
-          mark={(option) => (kind === 'project' ? <ProjectMark option={option as ProjectOption} /> : <BotMark option={option as BotOption} />)}
-          onPick={(id) => {
-            if (kind === 'project') filter.setProject(id)
-            else filter.setBot(id)
-            onClose(true)
+  const subConfig: Record<SubKind, {
+    anyLabel: string
+    searchLabel: string
+    options: readonly FilterOption[]
+    selected: string | null
+    mark(option: FilterOption): ReactNode
+    pick(id: string | null): void
+  }> = {
+    project: {
+      anyLabel: 'All projects',
+      searchLabel: 'Search projects',
+      options: projects,
+      selected: filter.projectId,
+      mark: (option) => <ProjectMark option={option as ProjectOption} />,
+      pick: (id) => filter.setProject(id)
+    },
+    bot: {
+      anyLabel: 'Any bot',
+      searchLabel: 'Search bots',
+      options: bots,
+      selected: filter.botId,
+      mark: (option) => <BotMark option={option as BotOption} />,
+      pick: (id) => filter.setBot(id)
+    },
+    computer: {
+      anyLabel: 'All computers',
+      searchLabel: 'Search computers',
+      options: computers,
+      selected: filter.computerId,
+      mark: (option) => <ComputerMark option={option as ComputerOption} />,
+      pick: (id) => filter.setComputer(id)
+    }
+  }
+  const subTrigger = (kind: SubKind, label: string, value: string) => {
+    const config = subConfig[kind]
+    return (
+      <div className="threads-context-submenu-anchor" role="none">
+        <button
+          type="button"
+          role="menuitem"
+          data-sub={kind}
+          className="threads-context-menu-item thread-filter-menu-item"
+          aria-haspopup="menu"
+          aria-expanded={sub === kind}
+          onClick={() => setSub(sub === kind ? null : kind)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowRight') {
+              event.preventDefault()
+              setSub(kind)
+            } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') setSub(null)
           }}
-          onBack={closeSub}
-        />
-      )}
-    </div>
-  )
+        >
+          <span className="thread-filter-check" aria-hidden="true" />
+          <span>{label}</span>
+          <span className="thread-filter-menu-value">{value}</span>
+          <ChevronRight className="threads-context-submenu-chevron" aria-hidden="true" />
+        </button>
+        {sub === kind && (
+          <FilterSubList
+            label={label}
+            anyLabel={config.anyLabel}
+            searchLabel={config.searchLabel}
+            options={config.options}
+            selected={config.selected}
+            mark={config.mark}
+            onPick={(id) => {
+              config.pick(id)
+              onClose(true)
+            }}
+            onBack={closeSub}
+          />
+        )}
+      </div>
+    )
+  }
 
   return (
     <FloatingPortal>
@@ -353,6 +414,7 @@ function FilterMenu({ view, anchorRef, projects, bots, projectOption, botOption,
           </>
         ) : subTrigger('project', 'Project', projectOption?.name ?? 'All')}
         {subTrigger('bot', 'Bot', botOption?.name ?? 'Any')}
+        {computers.length > 0 && subTrigger('computer', 'Computer', computerOption?.name ?? 'All')}
         <div className="threads-context-menu-separator thread-filter-menu-separator" role="separator" />
         <button
           type="button"
@@ -370,12 +432,13 @@ function FilterMenu({ view, anchorRef, projects, bots, projectOption, botOption,
 }
 
 /**
- * "Project ›" and "Bot ›": a search line, then "Recent" (the few used last) and the rest by name; it scrolls. Arrows
- * move from the search line into the list and back; Escape or the left arrow go back to the menu.
+ * "Project ›", "Bot ›" and "Computer ›": a search line, then "Recent" (the few used last) and the rest by name; it
+ * scrolls. Arrows move from the search line into the list and back; Escape or the left arrow go back to the menu.
  */
-function FilterSubList({ label, anyLabel, options, selected, mark, onPick, onBack }: {
+function FilterSubList({ label, anyLabel, searchLabel, options, selected, mark, onPick, onBack }: {
   label: string
   anyLabel: string
+  searchLabel: string
   options: readonly FilterOption[]
   selected: string | null
   mark(option: FilterOption): ReactNode
@@ -453,8 +516,8 @@ function FilterSubList({ label, anyLabel, options, selected, mark, onPick, onBac
         ref={inputRef}
         className="thread-filter-sublist-search"
         type="text"
-        placeholder={`Search ${label === 'Project' ? 'projects' : 'bots'}…`}
-        aria-label={`Search ${label === 'Project' ? 'projects' : 'bots'}`}
+        placeholder={`${searchLabel}…`}
+        aria-label={searchLabel}
         spellCheck={false}
         autoComplete="off"
         value={search}
