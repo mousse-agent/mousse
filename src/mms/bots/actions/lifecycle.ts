@@ -2,7 +2,8 @@ import type { BotStoreTx } from '../store/BotStore'
 
 /** Per open database: existing held rows settle even when new holds are disabled. */
 export interface HeldCallLifecycle {
-  endWork(id: string): void
+  /** The activation `id` ended as `to`: a chat turn's held calls outlive it when it ends done. */
+  endWork(id: string, to: 'done' | 'failed' | 'cancelled'): void
   grantChanged(botId: string): void
   forgetMessage(botId: string, messageId: string): void
 }

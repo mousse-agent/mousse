@@ -5,6 +5,8 @@ import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode
 import { notice, quoted } from '../../../shared/mousseContext'
 /** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
 export const APPROVED_SEND_WINDOW_MS = 10 * 60_000
+/** Longest a chat turn's approved call may run once sent: no turn waits on it, so this timer ends it. */
+export const BOT_CHAT_ACTION_MS = 60_000
 import { registerHeldCalls } from './lifecycle'
 import { randomUUID } from 'node:crypto'
 import type { MousseSettings } from '../../../shared/settings'
@@ -148,7 +150,7 @@ function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasH
   return { args, hasHiddenValues: hiddenValues.length > 0, hiddenValues }
 }
 export interface ActionRow {
-  id: string; call_key: string; bot_id: string; activation_id: string; status: string
+  id: string; call_key: string; bot_id: string; activation_id: string; lane?: 'chat' | 'run'; status: string
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
   answered_device: string | null; answered_at: string | null; ran_at: string | null; args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
 }
@@ -208,6 +210,11 @@ interface Host {
   ownerAnswered(row: BotActivationRow): void
   held(): void
   forgottenRequest(row: BotActivationRow): void
+  /**
+   * A chat turn's held call reached `done`, `failed` or `uncertain`: its result goes to the owner's chat once, as a turn
+   * of its own, written in the same `bots.db` transaction as the status (`action_result`).
+   */
+  resulted?(action: ActionRow): void
   execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<BotMcpCallOutcome>
 }
 const pending = new Set(['open', 'approved', 'running'])
@@ -219,11 +226,13 @@ export class BotActions {
   private readonly answering = new Set<string>()
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
-      endWork: id => this.withdrawWork(id),
+      endWork: (id, to) => this.withdrawWork(id, to),
       grantChanged: botId => this.withdrawChanged(botId),
       forgetMessage: (botId, messageId) => {
+        // A chat turn's held call goes with the owner's message that turn answered, as work's goes with its request.
         const ids = host.store.all(`SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
-          WHERE a.bot_id = ? AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?)`, botId, messageId, messageId)
+          WHERE a.bot_id = ? AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?
+            OR (a.lane = 'chat' AND EXISTS (SELECT 1 FROM bot_messages m WHERE m.id = ? AND m.bot_id = a.bot_id AND m.activation_id = a.activation_id AND m.author = 'owner')))`, botId, messageId, messageId, messageId)
         for (const action of ids) {
           const pending = ['open', 'approved'].includes(String(action.status))
           if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' }, 'bot_action_owner_removed')
@@ -258,8 +267,12 @@ export class BotActions {
       place_json = NULL, bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
     '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
   }
-  withdrawWork(id: string): void {
-    for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved')", id))
+  /**
+   * The activation `id` ended: its unstarted held calls are withdrawn. A chat turn's outlive it when it ends done (the
+   * card stays for the owner, and the chat's slot is free); a failed or cancelled chat turn takes them with it.
+   */
+  withdrawWork(id: string, to?: 'done' | 'failed' | 'cancelled'): void {
+    for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved') AND NOT (lane = 'chat' AND ? = 'done')", id, to ?? null))
       this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' }, 'bot_action_work_ended')
   }
   /** Rollback retires all unstarted calls together; an already dispatched call finishes. */
@@ -272,9 +285,10 @@ export class BotActions {
       }
     })
   }
+  /** The bot was paused: an approved call is not sent, and a chat turn's open card is retired (no turn waits on it). */
   withdrawPaused(botId: string): void {
-    for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND status = 'approved'", botId)) {
-      if (this.transition(String(action.id), 'approved', 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }, 'bot_action_owner_paused'))
+    for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND (status = 'approved' OR (lane = 'chat' AND status = 'open'))", botId)) {
+      if (this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This bot was paused, so nothing was sent. Carry on without it when resumed.' }, 'bot_action_owner_paused'))
         this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
     }
   }
@@ -383,12 +397,13 @@ export class BotActions {
       if (introduced) this.host.post(row, `bm_asks_first_${row.botId}`, `${this.host.name(row.botId)} asks you before using tools that may send or change things. Tools that say they only read don't ask.`)
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, place_json, bot_note, card_json, status, message_id, expires_at, created_at, answered_at, answered_device)
-        VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, null, alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), actionTitle: readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
+        VALUES(?, ?, ?, ?, ?, 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, callKey, row.botId, row.id, row.lane, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, null, alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), actionTitle: readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
       // expires_at is retained for older settled rows; open rows have no deadline.
       '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? exception : null)
       if (alone) return
-      this.host.park(row)
+      // Work waits for the answer; a chat turn ends at once and frees the chat (the card outlives it).
+      if (row.lane !== 'chat') this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
     })
     if (alone) return this.runApproved(id).then(() => JSON.parse(this.get(id)?.result_json ?? '{"text":"Nothing was sent.","isError":true}'))
@@ -422,6 +437,8 @@ export class BotActions {
         const row = this.host.store.activation(action.activation_id)
         if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', result?.notSentInTime ? result.text : to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
+        // A chat turn's call that was sent: its result reaches the owner once, in a turn of its own.
+        if (action.lane === 'chat' && ['done', 'failed', 'uncertain'].includes(to)) this.host.resulted?.(action)
         if (action.card_json !== null) this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
       }
       return moved

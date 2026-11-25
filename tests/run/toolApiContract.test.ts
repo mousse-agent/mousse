@@ -1,7 +1,7 @@
 /**
  * The tool API contract of the thread and bot tool APIs (docs: Thread API & Bot API unification). PR 1a recorded the
- * default branch's behaviour; PR 1b-i (#1360) changed the cells marked Δ below, the rows of `BOT_TURN_KINDS`. Any other
- * change to a row is a decision the change names, never an accident.
+ * default branch's behaviour; PR 1b-i (#1360) changed the cells marked Δ below, the rows of `BOT_TURN_KINDS`, and PR
+ * 1b-iii (#1361) those marked Δ #1361. Any other change to a row is a decision the change names, never an accident.
  *
  * What started a bot's turn (its provenance) decides what the turn may do. Every start the engine writes is a row:
  * the owner's message and its continuation, a tapped answer, the bot's first message (also when Resume retried it), a
@@ -46,7 +46,9 @@ describe('what started a turn, and the rules that read it', () => {
     ['threadmsg:t1', 'chat', manual, 'threadmsg', false, 'run', undefined, true],
     ['botmsg:b1:m1', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
     ['resume:act1', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
-    ['action:a1', 'chat', manual, 'action_result', false, 'run', 'not_owner', true],
+    // Δ #1361: a held call's result is a turn of its own, which acts as far as the turn that held the call did.
+    ['action:a1', 'chat', manual, 'action_result', false, 'run', undefined, true],
+    ['action:a2', 'chat', { ...manual, threadsReadOnly: 'not_owner' }, 'action_result', false, 'run', 'not_owner', true],
     // Δ #1360: a start no build names asks nobody.
     ['future:start', 'chat', manual, 'unknown', false, 'run', 'not_owner', false],
     // No build writes these (the owner's retries are `chat:resume:`, `answer:resume:`): behind a `resume:`, never the owner's.
@@ -107,7 +109,7 @@ const CALLS: Array<[string, string, Record<string, unknown>]> = [
 const HELD = ['bot_schedule_add', 'remind', 'watch_start', 'ask_owner', 'question_answer', 'question_withdraw', 'bot_list', 'bot_send', 'work_wait', 'work_start', 'subagent_start'] as const
 
 type Start = 'chat:msg' | 'chat:after:msg' | 'answer:q' | 'create:bot' | 'resume:create:bot' | 'wake:w1' | 'resume:wake:w1' | 'question:q:default' | 'job:j1'
-  | 'resume:resume:job:j1' | 'threadmsg:t1' | 'botmsg:b1:m1' | 'resume:act1' | 'future:start' | 'work' | 'schedule' | 'manual'
+  | 'resume:resume:job:j1' | 'threadmsg:t1' | 'botmsg:b1:m1' | 'resume:act1' | 'action:a1' | 'future:start' | 'work' | 'schedule' | 'manual'
   | StoredStart | 'sched stored as owner_voice'
 
 /**
@@ -190,6 +192,8 @@ const EXPECTED: Record<Start, Observed> = {
   'threadmsg:t1': chatTurn('threadmsg', 'run', null),
   'botmsg:b1:m1': chatTurn('botmsg', 'run', 'not_owner'),
   'resume:act1': chatTurn('botmsg', 'run', 'not_owner'),
+  // Δ #1361: a held call's result (master: held as another bot's message is, reading the owner's threads only).
+  'action:a1': chatTurn('action_result', 'run', null),
   'future:start': chatTurn('unknown', 'run', 'not_owner'),
   'future:start as owner_message': chatTurn('owner_message', 'chat', null),
   'chat:other as botmsg': chatTurn('botmsg', 'run', 'not_owner'),
@@ -317,7 +321,7 @@ describe('the turn-kind matrix through registered dispatch', () => {
   }
 
   const STARTS: Start[] = ['chat:msg', 'chat:after:msg', 'answer:q', 'create:bot', 'resume:create:bot', 'wake:w1', 'resume:wake:w1', 'question:q:default', 'job:j1',
-    'resume:resume:job:j1', 'threadmsg:t1', 'botmsg:b1:m1', 'resume:act1', 'future:start', 'future:start as owner_message', 'chat:other as botmsg', 'work', 'schedule', 'manual', 'sched stored as owner_voice']
+    'resume:resume:job:j1', 'threadmsg:t1', 'botmsg:b1:m1', 'resume:act1', 'action:a1', 'future:start', 'future:start as owner_message', 'chat:other as botmsg', 'work', 'schedule', 'manual', 'sched stored as owner_voice']
   it.each(STARTS)('%s', async (which) => {
     expect(await observe(which)).toEqual(EXPECTED[which])
   })

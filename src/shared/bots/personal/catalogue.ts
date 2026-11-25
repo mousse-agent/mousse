@@ -118,7 +118,7 @@ const QUICK_ACTIONS_GUIDANCE = 'create_quick_action adds a button to your owner\
 
 const AUTOMATION_GUIDANCE = 'When the owner asks you, from Automations, to set up an automation that another agent runs, write it as a draft with automation_draft_save. Ask one question at a time with automation_ask. Never turn a draft on: the owner does. automation_list, automation_update and automation_pause read and change their automations.'
 
-const MCP_GUIDANCE = "mcp_servers lists your owner's MCP servers and which ones you can use. You use their tools without asking; one your owner switched off stays off, and asking won't help. The tools you hold now are below. In the chat each call is a quick one, with 15 seconds: a job of several calls goes to work_start, and so does a tool that asks your owner first. When a call says it can't be told whether it went through, never send it again: tell your owner."
+const MCP_GUIDANCE = "mcp_servers lists your owner's MCP servers and which ones you can use. You use their tools without asking; one your owner switched off stays off, and asking won't help. The tools you hold now are below. In the chat each call is a quick one, with 15 seconds: a job of several calls goes to work_start. A call that asks your owner first is held for them: end your turn, and its result comes back to this chat. When a call says it can't be told whether it went through, never send it again: tell your owner."
 
 const SKILLS_GUIDANCE = 'list_skills lists your owner\'s skills; load_skill loads one, with its instructions, when a job fits it.'
 
