@@ -118,4 +118,13 @@ export class NotificationThreadIndex {
     if (!threads || !thread || !isSubagentThread(thread)) return threadId
     return nearestVisibleAncestor(threadId, [...threads.values()])
   }
+
+  /**
+   * True when `threadId` is a known regular or subagent thread of `profileId` (never a side chat or an unlisted bot
+   * home thread). Windows that are not viewing it do not consume its live transcript stream.
+   */
+  isUnwatchedTranscriptThread(profileId: string, threadId: string): boolean {
+    const thread = this.byProfile.get(profileId)?.get(threadId)
+    return Boolean(thread && !isSideChatThread(thread))
+  }
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { stopThreadNow } from '../lib/stopThread'
 import type { UIMessage } from 'ai'
 import { expiryPresetMs } from '../../shared/threadExpiry'
@@ -267,20 +268,23 @@ export function OrchestratorChat() {
   const activeThread = useAppStore((s) =>
     s.threads.find((thread) => thread.id === s.activeThreadId)
   )
-  const threads = useAppStore((s) => s.threads)
   // If the open thread is a subagent listed under any parent in Nest (local by id, or remote by ref), recognise it
   // immediately on click — even before threads:updated or its first turn-state lands.
-  const subagentsByParent = useAppStore((s) => s.subagentsByParent)
-  const ownSubagent = useMemo(
-    () => findSubagentEntry(subagentsByParent, activeThreadId),
-    [subagentsByParent, activeThreadId]
+  // Select only the entry for the open thread (never the whole `subagentsByParent` map) so updates to other
+  // parents' subagents do not re-render an unrelated chat.
+  const ownSubagent = useAppStore(
+    useShallow((s) => findSubagentEntry(s.subagentsByParent, s.activeThreadId))
   )
   const ownSubagentParentId = activeThread?.lineage?.parentThreadId ?? ownSubagent?.parentThreadId ?? null
   useSubagents(ownSubagentParentId && messages.length === 0 ? ownSubagentParentId : null)
   const isSubagent = Boolean((activeThread && isSubagentThread(activeThread)) || ownSubagent)
   // The profile default.
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
-  const permissionCeiling = permissionCeilingOf(activeThread, threads, defaultPermissionMode)
+  // Derive the ceiling inside the selector so unrelated threads' touches or updates do not re-render this chat.
+  const permissionCeiling = useAppStore((s) => {
+    const active = s.threads.find((thread) => thread.id === s.activeThreadId)
+    return permissionCeilingOf(active, s.threads, defaultPermissionMode)
+  })
   const projects = useAppStore((s) => s.projects)
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)

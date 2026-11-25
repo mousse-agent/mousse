@@ -59,12 +59,15 @@ export function bridgeProtocolEvent(
   event: ProtocolEvent,
   broadcast: BroadcastFn,
   presentation: PresentationState,
-  activitySnapshot?: Record<string, string>
+  activitySnapshot?: Record<string, string>,
+  shouldForwardBackgroundTranscript?: (threadId: string) => boolean
 ): boolean {
   const activeId = presentation.getActiveThreadId()
   const threadId = event.threadId
   const isSelected =
     threadId != null && (threadId === activeId || (threadId === '__unbound__' && activeId == null))
+  const forwardTranscript =
+    threadId != null && (isSelected || !shouldForwardBackgroundTranscript || shouldForwardBackgroundTranscript(threadId))
 
   switch (event.type) {
     case 'stats.lineEdits.updated': {
@@ -110,14 +113,14 @@ export function bridgeProtocolEvent(
     }
     case 'thread.message': {
       const message = (event.data as { message?: unknown } | null)?.message
-      if (threadId != null) {
+      if (forwardTranscript) {
         broadcast('orchestrator:thread-message', { threadId, message })
       }
       return true
     }
     case 'thread.message-updated': {
       const message = (event.data as { message?: unknown } | null)?.message
-      if (threadId != null) {
+      if (forwardTranscript) {
         broadcast('orchestrator:thread-message-updated', { threadId, message })
       }
       return true
@@ -125,7 +128,8 @@ export function bridgeProtocolEvent(
     case 'thread.messages': {
       const snapshot = event.data as { messages?: unknown; replace?: boolean } | null
       const messages = snapshot?.messages
-      if (threadId != null) {
+      // Background replacements (undo) still reach the renderer so it can retire cached transcripts.
+      if (threadId != null && (forwardTranscript || snapshot?.replace === true)) {
         broadcast('orchestrator:thread-messages', { threadId, messages, ...(snapshot?.replace === true ? { replace: true } : {}) })
       }
       return true

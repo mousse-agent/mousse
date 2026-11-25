@@ -1,15 +1,16 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { MessageList } from "./message-list";
 import { useComposerFold } from "./composer-fold";
 import { Suggestions, type SuggestionItem } from "./input/suggestions";
 import { cn } from "./utils/cn";
 import { errorTitle } from "../../adapters/mousseToUI";
+import { countRender } from "./render-counts";
 import type { AgentChatProps } from "./types";
 import type { QuestionAnswer } from "./question/question-prompt";
 
-export function AgentChat({
+export const AgentChat = memo(function AgentChat({
   messages,
   onSend,
   status,
@@ -36,6 +37,7 @@ export function AgentChat({
   style,
 }: AgentChatProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  countRender("AgentChat");
   const [draft, setDraft] = useState("");
   const composerFold = useComposerFold();
 
@@ -180,7 +182,7 @@ export function AgentChat({
       {!isCenteredEmptyState ? inputBarNode : null}
     </div>
   );
-}
+});
 
 function resolveSuggestions(suggestions: AgentChatProps["suggestions"]) {
   if (Array.isArray(suggestions)) {

@@ -776,7 +776,45 @@ export function sanitizeSavedWorkspace<T extends { mainView: MainView; openedSur
   } as T
 }
 
+const DRAFT_PERSIST_THROTTLE_MS = 300
+let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
+let draftSaveState: AppState | null = null
+let lastDraftSaveAt = 0
+
+function flushPersonalWorkspaceSave(): void {
+  if (draftSaveTimer !== null) {
+    clearTimeout(draftSaveTimer)
+    draftSaveTimer = null
+  }
+  const pending = draftSaveState
+  draftSaveState = null
+  if (pending) {
+    savePersonalWorkspace(pending)
+    lastDraftSaveAt = Date.now()
+  }
+}
+
+function scheduleDraftWorkspaceSave(state: AppState): void {
+  const now = Date.now()
+  // Leading + trailing throttle: the first edit after idle persists immediately (preserving drafts on abrupt
+  // exit), while rapid typing batches into one write per window instead of blocking every keystroke.
+  if (draftSaveTimer === null && now - lastDraftSaveAt >= DRAFT_PERSIST_THROTTLE_MS) {
+    savePersonalWorkspace(state)
+    lastDraftSaveAt = now
+    return
+  }
+  draftSaveState = state
+  if (draftSaveTimer !== null) return
+  const wait = Math.max(0, DRAFT_PERSIST_THROTTLE_MS - (now - lastDraftSaveAt))
+  draftSaveTimer = setTimeout(flushPersonalWorkspaceSave, wait)
+}
+
 function savePersonalWorkspace(state: AppState): void {
+  if (draftSaveTimer !== null) {
+    clearTimeout(draftSaveTimer)
+    draftSaveTimer = null
+  }
+  draftSaveState = null
   if (typeof window === 'undefined') return
   try {
     // Open edits are saved without their images, which could be too large for this storage.
@@ -953,7 +991,9 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setBackgroundWork: (work) => {
     set((s) => {
       const empty = work.items.length === 0 && !work.providerWork
-      if (empty && !s.backgroundWorkByThread[work.threadId]) return s
+      const held = s.backgroundWorkByThread[work.threadId]
+      if (empty && !held) return s
+      if (!empty && held && samePlainData(held, work)) return s
       const next = { ...s.backgroundWorkByThread }
       if (empty) delete next[work.threadId]
       else next[work.threadId] = work
@@ -963,12 +1003,18 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setSubagents: (parentThreadId, subagents) => {
     const live = subagents.filter((row) => !row.removed)
     const removed = subagents.filter((row) => row.removed)
-    set((s) => ({
-      subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: live },
-      ...(removed.length > 0 || s.removedSubagentsByParent[parentThreadId]
-        ? { removedSubagentsByParent: { ...s.removedSubagentsByParent, [parentThreadId]: removed } }
-        : {})
-    }))
+    set((s) => {
+      const heldLive = s.subagentsByParent[parentThreadId]
+      const heldRemoved = s.removedSubagentsByParent[parentThreadId]
+      const liveUnchanged = heldLive !== undefined && samePlainData(heldLive, live)
+      const wantRemoved = removed.length > 0 || heldRemoved !== undefined
+      const removedUnchanged = !wantRemoved || (heldRemoved !== undefined && samePlainData(heldRemoved, removed))
+      if (liveUnchanged && removedUnchanged) return s
+      return {
+        ...(!liveUnchanged ? { subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: live } } : {}),
+        ...(!removedUnchanged ? { removedSubagentsByParent: { ...s.removedSubagentsByParent, [parentThreadId]: removed } } : {})
+      }
+    })
   },
   turnStates: {},
   stopRequests: {},
@@ -1642,14 +1688,45 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   })
 }))
 
-// Persist active workspace changes immediately, including before a normal app exit.
-// The bootstrap profile is only a placeholder; never write it before daemon binding.
+// Persist active workspace changes, debouncing only keystroke edits to `composerDrafts` so typing
+// never blocks the main thread with a synchronous JSON.stringify + localStorage.setItem per key.
+// Clearing a draft (e.g. on send), profile switches, other workspace edits, and window close/hide flush immediately.
 useAppStore.subscribe((state, previous) => {
   if (!profileActivated) return
-  if (state.profileId !== previous.profileId || personalWorkspaceKeys.some((key) => state[key] !== previous[key])) {
+  if (state.profileId !== previous.profileId) {
     savePersonalWorkspace(state)
+    return
   }
+  let otherChanged = false
+  for (const key of personalWorkspaceKeys) {
+    if (key !== 'composerDrafts' && state[key] !== previous[key]) {
+      otherChanged = true
+      break
+    }
+  }
+  if (otherChanged) {
+    savePersonalWorkspace(state)
+    return
+  }
+  if (state.composerDrafts === previous.composerDrafts) return
+  const cleared = Object.keys(previous.composerDrafts).some(
+    (key) => !(key in state.composerDrafts) || (previous.composerDrafts[key] && !state.composerDrafts[key])
+  )
+  if (cleared) {
+    savePersonalWorkspace(state)
+    lastDraftSaveAt = 0
+  } else scheduleDraftWorkspaceSave(state)
 })
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', flushPersonalWorkspaceSave)
+  window.addEventListener('pagehide', flushPersonalWorkspaceSave)
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) flushPersonalWorkspaceSave()
+    })
+  }
+}
 
 /**
  * This computer's threads that left the thread list (deleted for good). A list that becomes empty, one of
