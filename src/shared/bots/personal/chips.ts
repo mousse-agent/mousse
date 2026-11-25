@@ -99,7 +99,17 @@ function folderName(tool: string, path: string, ctx: BotChipContext): string | u
   return parts(folder).pop() ?? folder
 }
 
-function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classified {
+/**
+ * Claude Code saves a tool's large output to `<its home>/projects/<folder>/<session>/tool-results/<name>.txt` and reads
+ * it back: its own plumbing, not files the bot works on, so it shows no chip.
+ */
+function isToolResultSpill(path: string): boolean {
+  const segments = parts(path)
+  const at = segments.lastIndexOf('tool-results')
+  return at >= 3 && at >= segments.length - 2 && segments[at - 3] === 'projects'
+}
+
+function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classified | null {
   const writes = WRITE_TOOLS.has(tool)
   const path = pathOf(input)
   // No path or a relative one: the working folder, which is the scratch folder.
@@ -109,6 +119,7 @@ function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classi
     if (writes) return { kind: 'save', icon: 'edit', live: 'saving a file', ...(parts(path).length > parts(ctx.filesFolder!).length ? { detail: parts(path).pop() } : {}) }
     return { kind: 'read', icon: 'read', live: 'reading files', detail: 'saved files' }
   }
+  if (isToolResultSpill(path)) return null
   const detail = folderName(tool, path, ctx)
   return writes
     ? { kind: 'change', icon: 'edit', live: 'changing files', ...(detail ? { detail } : {}) }
@@ -421,7 +432,14 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'computer': return chip('used the computer')
     case 'read': return chip('read files', listed(details))
     case 'change': return chip('changed files', listed(details))
-    case 'save': return chip(n === 1 ? 'saved a file' : `saved ${n} files`, listed(details))
+    case 'save': {
+      // A file written, then edited, is one file saved.
+      const files = new Set(all.map((call, index) => {
+        const path = pathOf(call.input)
+        return path ? trimSeparators(path).replace(/[\\/]+/g, '/') : `#${index}`
+      })).size
+      return chip(files === 1 ? 'saved a file' : `saved ${files} files`, listed(details))
+    }
     case 'draft': return chip('worked on a draft')
     case 'lookback': return chip('looked back', n === 1 ? details[0] : String(n))
     case 'consult': return chip('looked into', listed(details))
