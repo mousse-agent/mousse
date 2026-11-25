@@ -23,7 +23,7 @@ import {
 } from '../../../../src/mms/net/store/remoteLists'
 import { DomainRpcError } from '../../../../src/mms/protocol/domainRegistry'
 import { listedThreadsFor, projectEventFor } from '../../../../src/mms/protocol/threadVisibility'
-import { newId, type NodeId } from '../../../../src/shared/net'
+import { NetError, newId, type NodeId } from '../../../../src/shared/net'
 import { qualifyId } from '../../../../src/shared/threadRef'
 import type { Project, Thread } from '../../../../src/shared/types'
 
@@ -112,7 +112,8 @@ function harness(
       }
     ),
     threads: vi.fn(async () => ({ threads: [] })),
-    projects: vi.fn(async () => ({ projects: [] }))
+    projects: vi.fn(async () => ({ projects: [] })),
+    dropCopy: vi.fn(async () => true)
   }
   const client = {
     openStream: vi.fn(async () => ({ descriptor: {}, head: { epoch: 1, seq: 0 } })),
@@ -621,6 +622,114 @@ describe('notifications', () => {
       value: snapshot([row], { status: { t: { state: 'completed' } } })
     })
     expect(quiet(h, 't').map((event) => event.data.state)).toEqual(['processing', 'completed'])
+  })
+})
+
+describe('lists that cannot be read while the session with the computer is open', () => {
+  // How reading the lists fails, whether the session is open, and what follows: the rows stay as they were unless the
+  // computer is out of reach, and a copy on disk that cannot be read is dropped to read the lists fresh.
+  const cases: Array<{
+    name: string
+    fail: (h: ReturnType<typeof harness>) => Promise<void>
+    session: 'open' | 'closed'
+    offline: boolean
+    dropped: boolean
+    error: string
+  }> = [
+    {
+      name: 'the stream ends on a timeout',
+      fail: async (h) => h.attachments.get(h.node)!.error('deadline_exceeded' as never),
+      session: 'open',
+      offline: false,
+      dropped: false,
+      error: 'deadline_exceeded'
+    },
+    {
+      name: 'the stream ends on a copy that holds another stream',
+      fail: async (h) => h.attachments.get(h.node)!.error('conflict' as never),
+      session: 'open',
+      offline: false,
+      dropped: true,
+      error: 'conflict'
+    },
+    {
+      name: 'the stream ends with the session gone',
+      fail: async (h) => h.attachments.get(h.node)!.error('peer_offline' as never),
+      session: 'closed',
+      offline: true,
+      dropped: false,
+      error: 'peer_offline'
+    },
+    ...(
+      [
+        [new NetError('conflict'), false, true],
+        [new NetError('snapshot_required'), false, true],
+        [new DomainRpcError('deadline_exceeded', 'slow'), false, false],
+        [new DomainRpcError('computer_offline', 'gone'), true, false]
+      ] as const
+    ).map(([error, offline, dropped]) => ({
+      name: `opening it again fails with ${error.code}`,
+      fail: async (h: ReturnType<typeof harness>) => {
+        h.attachments.get(h.node)!.error('cancelled' as never)
+        h.hub.attach.mockRejectedValueOnce(error)
+        h.now.at += 10 * 60_000
+        await h.lists.reconcile()
+      },
+      session: 'open' as const,
+      offline,
+      dropped,
+      error: error.code
+    }))
+  ]
+  it.each(cases)('$name (session $session)', async ({ fail, session, offline, dropped, error }) => {
+    const h = harness()
+    await h.feed(
+      snapshot([{ id: 'a', updatedAt: iso(1) }], {
+        projects: [{ id: 'p', name: 'P', path: '/p', order: 0 }]
+      })
+    )
+    if (session === 'closed') h.online.delete(h.node)
+    await fail(h)
+    expect(h.lists.threads().map((row) => row.offline)).toEqual([offline || undefined])
+    expect(h.lists.projects().map((row) => row.offline)).toEqual([offline || undefined])
+    expect(h.hub.dropCopy).toHaveBeenCalledTimes(dropped ? 1 : 0)
+    expect(h.lists.lastError(h.node)).toBe(error)
+  })
+
+  it('drops the copy once per run of failures, reads fresh at once, and says the failure once', async () => {
+    const h = harness()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    cleanups.push(() => warn.mockRestore())
+    await h.feed(snapshot([{ id: 'a', updatedAt: iso(1) }]))
+    h.attachments.get(h.node)!.error('cancelled' as never)
+    h.hub.attach.mockRejectedValueOnce(new NetError('conflict'))
+    h.now.at += 10 * 60_000
+    await h.lists.reconcile()
+    expect(h.hub.dropCopy).toHaveBeenCalledTimes(1)
+    expect(h.hub.dropCopy.mock.calls[0]![0]).toEqual({ nodeId: h.node, entityId: 'mousse:lists' })
+    // Read fresh at the next look, with no wait; it fails the same way, and the copy is not dropped again.
+    h.hub.attach.mockRejectedValueOnce(new NetError('conflict'))
+    await h.lists.reconcile()
+    expect(h.hub.attach).toHaveBeenCalledTimes(3)
+    expect(h.hub.dropCopy).toHaveBeenCalledTimes(1)
+    // Then it waits before trying again.
+    await h.lists.reconcile()
+    expect(h.hub.attach).toHaveBeenCalledTimes(3)
+    const said = (code: string) =>
+      warn.mock.calls.filter(
+        ([message, details]) =>
+          message === '[lists] cannot read the lists of a computer' &&
+          (details as { node?: string; code?: string }).node === h.node &&
+          (details as { code?: string }).code === code
+      ).length
+    expect([said('cancelled'), said('conflict')]).toEqual([1, 1])
+    // It works again: the error is gone, and a later failure may drop the copy again.
+    h.now.at += 10 * 60_000
+    await h.feed(snapshot([{ id: 'a', updatedAt: iso(2) }]))
+    expect(h.lists.lastError(h.node)).toBeUndefined()
+    expect(h.lists.threads().map((row) => row.offline)).toEqual([undefined])
+    h.attachments.get(h.node)!.error('conflict' as never)
+    await vi.waitFor(() => expect(h.hub.dropCopy).toHaveBeenCalledTimes(2))
   })
 })
 

@@ -353,6 +353,77 @@ describe("a copy of another computer's lists", () => {
   })
 })
 
+describe('a copy that begins part-way through a snapshot', () => {
+  it('passes over the cut-off snapshot when it is read whole, and shows the next one', async () => {
+    const f = await computers()
+    const first = f.snapshot(f.lists(1)),
+      second = f.snapshot(f.lists(2))
+    // The copy lost the start of the first snapshot, and the second is still arriving: it is read from its oldest
+    // record, which belongs to a snapshot it cannot show.
+    f.receive([...first, ...second.slice(0, -1)])
+    f.db.database.prepare('DELETE FROM net_records WHERE epoch=1 AND seq=1').run()
+    const { shown, handle } = await f.attach()
+    expect(shown).toEqual([])
+    await f.live(second.slice(-1))
+    expect(shown).toEqual([f.lists(2)])
+    handle.close()
+  })
+
+  it('says a copy whose snapshot does not read as needing a fresh one, so the copy can be dropped', async () => {
+    const f = await computers()
+    f.receive(f.snapshot(f.lists(1)))
+    // Its chunk went missing from the disk: the copy, not the other computer, is at fault.
+    f.db.database.prepare('DELETE FROM net_records WHERE epoch=1 AND seq=2').run()
+    await expect(f.attach()).rejects.toMatchObject({ code: 'snapshot_required' })
+  })
+})
+
+describe("dropping a copy of another computer's lists", () => {
+  it('drops everything stored for it, a step at a time, so a stream offered anew attaches fresh', async () => {
+    const f = await computers()
+    const records: StoredRecord[] = []
+    for (let n = 1; n <= 300; n++) records.push(...f.snapshot(f.lists(n)))
+    f.receive(records)
+    const first = await f.attach()
+    expect(first.shown).toEqual([f.lists(300)])
+    first.handle.close()
+    // The other computer made its lists stream anew: the copy holds another stream under the same id.
+    const offered: StreamDescriptor = { ...f.descriptor, createdAt: 2 }
+    const options = {
+      room: 'lists' as const,
+      open: async () => ({ descriptor: offered, head: { epoch: 1, seq: 0 } })
+    }
+    const ref = { nodeId: f.writer as NodeId, entityId: LISTS }
+    await expect(f.hub.attach(ref, () => {}, undefined, options)).rejects.toMatchObject({
+      code: 'conflict'
+    })
+    const transactions = vi.spyOn(f.db, 'transaction')
+
+    expect(await f.hub.dropCopy(ref, options)).toBe(true)
+    // Records go in steps no larger than one drop step: 900 records, at most 200 a step.
+    expect(transactions.mock.calls.length).toBeGreaterThanOrEqual(5)
+    const count = (sql: string) =>
+      Number(Object.values(f.db.database.prepare(sql).get(f.descriptor.id)!)[0])
+    expect([
+      count('SELECT count(*) FROM net_streams WHERE id=?'),
+      count('SELECT count(*) FROM net_generations WHERE stream=?'),
+      count('SELECT count(*) FROM net_event_ids WHERE stream=?')
+    ]).toEqual([0, 0, 0])
+    expect(f.db.database.prepare('SELECT count(*) AS n FROM net_records').get()!.n).toBe(0)
+    expect(f.db.database.prepare('SELECT count(*) AS n FROM net_bridge_hub_threads').get()!.n).toBe(
+      0
+    )
+
+    // Attached again, it reads the stream as offered now.
+    const fresh = await f.hub.attach(ref, () => {}, undefined, options)
+    expect(f.store.getStream(f.descriptor.id)).toEqual(offered)
+    fresh.close()
+    expect(
+      await f.hub.dropCopy({ nodeId: newId('node') as NodeId, entityId: LISTS }, options)
+    ).toBe(false)
+  })
+})
+
 describe('a stream this computer writes', () => {
   it('loses only the records of epochs before its current one', async () => {
     const f = await computers({ own: true })

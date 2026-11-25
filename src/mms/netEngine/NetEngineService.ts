@@ -1420,6 +1420,7 @@ export class NetEngineService implements EngineDirectoryPort {
           ? deviceRelay(this.relayView, row.endpoint, now, this.dismissed(), engineLimits().relayOffersShown)
           : undefined
         const other = started.access.other(row)
+        const listsError = this.options.bridge()?.lists.lastError(node)
         return {
           node,
           name: row.name,
@@ -1438,6 +1439,7 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(stuck ? { stuck: true } : {}),
           ...(unreachable ? { unreachable } : {}),
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
+          ...(listsError ? { listsError } : {}),
           ...(started.roles.pending(node) ? { accessPending: true } : {}),
           ...(started.pairing.sshParked(node) ? { sshParked: started.pairing.sshParked(node) } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),

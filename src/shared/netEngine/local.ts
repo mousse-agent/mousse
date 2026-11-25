@@ -136,6 +136,8 @@ export interface NetEngineDevice {
   unreachable?: 'in' | 'out'
   /** Its last connection attempt failed on a certificate outside its validity window (either clock may be wrong). */
   certificateWindow?: boolean
+  /** Why its threads and projects cannot be read now (an error code such as `conflict`), while they cannot. */
+  listsError?: string
   /**
    * Its access here changed, but networking has not applied it yet (the helper refused the grant's new role): it may
    * still list and remove this computer's devices. Tried again on its own.

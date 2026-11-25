@@ -8,6 +8,7 @@ import {
   openSync,
   realpathSync,
   renameSync,
+  statfsSync,
   writeSync
 } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -20,6 +21,24 @@ import { canonicalJson } from '../sync/codec'
 import { syncDirectory } from './directorySync'
 
 export type StoreFault = (point: string) => void
+
+/**
+ * The most a database may hold in use for its one-time rewrite (`rewriteToReclaim`): the rewrite holds the
+ * connection while it copies that much, so it runs once a tidy has made the database small, not before.
+ */
+export const REWRITE_MAX_IN_USE_BYTES = 128 * 1024 * 1024
+/** Free pages below this many are left for SQLite to reuse: giving them back is not worth a write. */
+export const RECLAIM_MIN_FREE_PAGES = 256
+
+/** How the database file uses its pages, from `rewriteToReclaim`. */
+export interface Reclaimable {
+  /** `already`: free pages are given back as they come; `rewritten`: set to do so now; `deferred`: not yet. */
+  outcome: 'already' | 'rewritten' | 'deferred'
+  /** Why a rewrite waits: too much is in use, the disk has no room for the copy it writes, or a reader holds the file. */
+  reason?: 'in_use' | 'disk_space' | 'busy'
+  inUseBytes: number
+  freeBytes: number
+}
 export interface DatabaseOptions {
   profileDir: string
   clock?: Clock
@@ -89,8 +108,10 @@ export class NetDatabase {
     this.database = new DatabaseSync(this.path)
     try {
       chmodSync(this.path, 0o600)
+      // A new database gives back the pages it frees (`reclaim`); this takes effect only before its first table, and
+      // an older one is set to it once by a rewrite (`rewriteToReclaim`).
       this.database.exec(
-        'PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;'
+        'PRAGMA auto_vacuum=INCREMENTAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;'
       )
       const integrity = this.database.prepare('PRAGMA quick_check').all()
       if (integrity.length !== 1 || Object.values(integrity[0])[0] !== 'ok')
@@ -273,6 +294,93 @@ export class NetDatabase {
   }
   checkpoint(point: string): void {
     this.fault?.(point)
+  }
+  /**
+   * Gives up to `pages` free pages back to the file system, so what a tidy freed stops taking disk space. A step at a
+   * time: the caller pauses between steps. Nothing while fewer than `RECLAIM_MIN_FREE_PAGES` are free, or in a database
+   * not set to give pages back (see `rewriteToReclaim`). Returns how many pages went.
+   */
+  reclaim(pages: number): number {
+    integer(pages, 1)
+    this.assertCompactable()
+    if (this.pragma('auto_vacuum') !== 2) return 0
+    const before = this.pragma('freelist_count')
+    if (before < RECLAIM_MIN_FREE_PAGES) return 0
+    this.compacting(() => this.database.exec(`PRAGMA incremental_vacuum(${pages})`))
+    return Math.max(0, before - this.pragma('freelist_count'))
+  }
+  /**
+   * Once, sets a database made before `reclaim` to give back the pages it frees, by rewriting it (`VACUUM`), which also
+   * gives back every page free now. The rewrite needs room for what is in use, not for the file: it builds the new
+   * content in memory (never in the system temp folder, which may be on a fuller disk), writes it to the write-ahead
+   * log next to the database, then folds the log back in, which only shrinks the file. So it runs only while what is
+   * in use is at most `REWRITE_MAX_IN_USE_BYTES` and the database's disk has room for twice that; otherwise it is
+   * `deferred`, and a later tidy tries again. A rewrite that fails (a full disk included) is rolled back: the database
+   * stays as it was, and writes go on.
+   */
+  rewriteToReclaim(): Reclaimable {
+    this.assertCompactable()
+    const size = this.pragma('page_size'),
+      free = this.pragma('freelist_count'),
+      inUseBytes = (this.pragma('page_count') - free) * size,
+      freeBytes = free * size
+    if (this.pragma('auto_vacuum') === 2) return { outcome: 'already', inUseBytes, freeBytes }
+    if (inUseBytes > REWRITE_MAX_IN_USE_BYTES)
+      return { outcome: 'deferred', reason: 'in_use', inUseBytes, freeBytes }
+    const disk = statfsSync(this.directory)
+    if (Number(disk.bavail) * Number(disk.bsize) < 2 * inUseBytes + 64 * 1024 * 1024)
+      return { outcome: 'deferred', reason: 'disk_space', inUseBytes, freeBytes }
+    // A reader of a copy holds the file open; the rewrite is then tried at a later tidy rather than waited for.
+    this.database.exec('PRAGMA busy_timeout=0')
+    try {
+      this.compacting(() => {
+        this.database.exec('PRAGMA auto_vacuum=INCREMENTAL; PRAGMA temp_store=MEMORY')
+        this.database.exec('VACUUM')
+      })
+    } catch (error) {
+      if (((error as { errcode?: number })?.errcode ?? 0) % 256 === 5)
+        return { outcome: 'deferred', reason: 'busy', inUseBytes, freeBytes }
+      throw error
+    } finally {
+      // The rewrite went through the write-ahead log: fold it back, and let the log shrink, unless a reader holds it.
+      try {
+        this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      } catch {
+        /* The next checkpoint does it. */
+      }
+      this.database.exec('PRAGMA busy_timeout=5000; PRAGMA temp_store=DEFAULT')
+    }
+    return {
+      outcome: this.pragma('auto_vacuum') === 2 ? 'rewritten' : 'deferred',
+      inUseBytes,
+      freeBytes
+    }
+  }
+  private pragma(name: 'auto_vacuum' | 'freelist_count' | 'page_count' | 'page_size'): number {
+    return Number(Object.values(this.database.prepare(`PRAGMA ${name}`).get()!)[0])
+  }
+  private assertCompactable(): void {
+    if (this.closed) fail('internal', 'Net database is closed.')
+    if (this.depth) fail('internal', 'Net storage cannot be compacted during a transaction.')
+    if (this.writeFault) fail(this.writeFault, 'Net writes are suspended until recovery.')
+  }
+  /**
+   * Runs a step that only moves pages. One that fails leaves the data as it was, so it does not suspend writes the way
+   * a failed transaction does (a full disk here is not a full disk for a write): only corruption is fenced.
+   */
+  private compacting(work: () => void): void {
+    try {
+      work()
+    } catch (error) {
+      const code = (error as { errcode?: number })?.errcode,
+        primary = code === undefined ? undefined : code & 255
+      if (primary === 11 || primary === 26) {
+        this.fenceCorruption()
+        throw new NetError('storage_corrupt', undefined, { cause: error })
+      }
+      if (primary === 13) throw new NetError('storage_full', undefined, { cause: error })
+      throw error
+    }
   }
   close(): void {
     if (this.closed) return
