@@ -110,6 +110,7 @@ export class CursorAdapter implements ProviderAdapter {
         progress()
         streams.text.update(content)
       },
+      onTextSeparator: (atOffset, sep) => streams.text.markSyntheticSeparator(atOffset, sep),
       onThinking: (content) => {
         progress()
         streams.thinking.update(content)

@@ -22,6 +22,7 @@ import { BACKGROUND_SUMMARY } from '../../src/shared/agentActivity'
 import { GENERIC_ACP_CAPS } from '../../src/mms/harness/acp/presets/generic'
 import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
 import { holdControl } from '../support/steerHoldControl'
+import { transcriptSink } from '../support/transcriptSink'
 
 const sessionsUnderTest: AcpSessions[] = []
 const tempDirs: string[] = []
@@ -1678,5 +1679,115 @@ describe('ACP sessions', () => {
       const bgEnd = toolEvents.find((e) => e.callId === 'bg-cmd' && e.phase === 'complete')
       expect(bgEnd?.activity).toMatchObject({ status: 'done', summary: BACKGROUND_SUMMARY })
     })
+  })
+})
+
+/**
+ * What the agent wrote reaches the saved rows exactly: an empty chunk does not split a thought, a blank line or
+ * indentation the agent wrote after a tool call stays, and the blank line Mousse puts between a steer's prompts is
+ * the only thing a continuation row drops.
+ */
+describe('ACP rows keep the agent\'s words', () => {
+  const gate = () => {
+    let open!: () => void
+    const opened = new Promise<void>((resolve) => { open = resolve })
+    return { opened, open }
+  }
+  const thought = (text: string) => ({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } })
+  const toolCall = (id: string) => ({ sessionUpdate: 'tool_call', toolCallId: id, title: 'npm test', kind: 'execute', status: 'in_progress' })
+  const toolDone = (id: string) => ({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed' })
+
+  /** A turn through the real session core and the ACP adapter, its events saved as the thread saves them. */
+  function savedTurn(agent: ReturnType<typeof scriptedAgent>) {
+    const { sessions, questions } = core(agent.connect)
+    const hold = holdControl(GENERIC_ACP_CAPS, { questions: { pending: () => questions.listPendingForThread('t').length > 0 } })
+    const transcript = transcriptSink()
+    const adapter = new AcpAdapter(() => ({ chat: (input) => sessions.chat(input), commitConversation: () => {}, configured: () => true }), { driver: 'acp', label: 'Fake agent', capabilities: GENERIC_ACP_CAPS })
+    const input = { threadId: 't', instanceId: 'acp:fake', llmProvider: '', model: 'default', mode: 'agent', prompt: 'work', cwd: process.cwd(), signal: new AbortController().signal } as unknown as TurnInput
+    const result = adapter.startTurn(input, hold.wrap(transcript.sink), hold.ctl, { context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as AdapterHost)
+    return { hold, result, rows: transcript.rows }
+  }
+
+  it('an empty message chunk in the middle of a thought leaves it one row', async () => {
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update(thought('Check the fil'))
+        await ctx.notify('')
+        await ctx.update(thought('e.'))
+        await ctx.notify('Done.')
+        return 'end_turn'
+      }
+    })
+    const turn = savedTurn(agent)
+    await turn.result
+    expect(turn.rows()).toEqual([{ kind: 'thinking', content: 'Check the file.' }, { kind: 'text', content: 'Done.' }])
+  })
+
+  it('a blank line and indentation the agent wrote after a tool call stay on the thought and the note after it', async () => {
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update(thought('Plan'))
+        await ctx.update(toolCall('call-1'))
+        await ctx.update(toolDone('call-1'))
+        await ctx.update(thought('\n\n    next'))
+        await ctx.notify('old')
+        await ctx.update(toolCall('call-2'))
+        await ctx.update(toolDone('call-2'))
+        await ctx.notify('\n\n    next')
+        await ctx.update(toolCall('call-3'))
+        await ctx.update(toolDone('call-3'))
+        await ctx.notify('Done.')
+        return 'end_turn'
+      }
+    })
+    const turn = savedTurn(agent)
+    expect((await turn.result).text).toBe('old\n\n    nextDone.')
+    expect(turn.rows()).toEqual([
+      { kind: 'thinking', content: 'Plan' },
+      { kind: 'tool', content: 'npm test' },
+      { kind: 'thinking', content: '\n\n    next' },
+      { kind: 'text', content: 'old' },
+      { kind: 'tool', content: 'npm test' },
+      { kind: 'text', content: '\n\n    next' },
+      { kind: 'tool', content: 'npm test' },
+      { kind: 'text', content: 'Done.' }
+    ])
+  })
+
+  // A person's steer with its drain token (`drainSteerEntry`) cuts the prompt; the next prompt carries it, and Mousse
+  // puts a blank line into the reply's text between the two prompts' words.
+  it.each([
+    ['while the reply row is still open', false],
+    ['after a tool call, with a lone space written after it', true]
+  ])('a steer %s: the continuation row is the agent\'s words exactly', async (_name, afterTool) => {
+    const steerable = gate()
+    const agent = scriptedAgent({
+      prompt: async (text, ctx) => {
+        if (text !== 'work') {
+          await ctx.notify('    next')
+          return 'end_turn'
+        }
+        await ctx.notify('old')
+        if (afterTool) {
+          await ctx.update(toolCall('call-1'))
+          await ctx.update(toolDone('call-1'))
+          await ctx.notify(' ')
+        }
+        steerable.open()
+        await ctx.cancelled
+        return 'cancelled'
+      }
+    })
+    const turn = savedTurn(agent)
+    await steerable.opened
+    turn.hold.steer('Use pnpm')
+    const result = await turn.result
+    expect(result.text).toBe(afterTool ? 'old \n\n    next' : 'old\n\n    next')
+    expect(turn.hold.log.filter(([event]) => event === 'accepted').map(([, detail]) => detail)).toEqual(['Use pnpm@drain-1'])
+    expect(turn.rows()).toEqual([
+      { kind: 'text', content: 'old' },
+      ...(afterTool ? [{ kind: 'tool', content: 'npm test' }] : []),
+      { kind: 'text', content: '    next' }
+    ])
   })
 })

@@ -220,6 +220,20 @@ describe('the line under Working', () => {
     expect(reasoningRow('Now the clock.')).not.toBeNull()
   })
 
+  it('3. a thought whose new paragraph has only begun keeps its last full one as the live line; finished or opened, it reads as written', () => {
+    const content = 'Check the file.\n\ne.'
+    render([ask(), reply('t1', thought('input-available', content))], 'streaming', { phase: 'thinking' })
+    expect(headline()).toBe('Check the file.')
+    // The finished thought's row is titled with its newest paragraph as the model wrote it.
+    render([ask(), reply('t1', { ...thought('output-available', content), toolCallId: 'th1' }), reply('a1', text('Done.'))], 'streaming', { phase: 'streaming' })
+    const row = reasoningRow('e.')
+    act(() => { row.click() })
+    const opened = row.parentElement!.textContent!
+    const first = opened.indexOf('Check the file.')
+    expect(first).toBeGreaterThan(-1)
+    expect(opened.slice(first + 'Check the file.'.length)).toContain('e.')
+  })
+
   it('3. a thought being written does not shimmer: only its icon turns (no paint every frame)', () => {
     render([ask(), reply('t1', thought('input-available', '**Reading**\n\nThe output says'))], 'streaming', { phase: 'thinking' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()

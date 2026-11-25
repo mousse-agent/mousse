@@ -538,7 +538,17 @@ class PiTurn {
   /** The reply so far: every ended step's text, then the current message's. */
   replyText(): string {
     const current = [...this.text.entries()].sort(([a], [b]) => a - b).map(([, text]) => text).join('')
-    return [...this.texts, current].filter((text) => text.trim()).join('\n\n')
+    const parts = [...this.texts, current].filter((text) => text.trim())
+    // The blank line between two steps' texts is the join's, not the model's: a reply row that opens there drops it.
+    let offset = 0
+    for (const [index, part] of parts.entries()) {
+      if (index) {
+        this.reply.markSyntheticSeparator(offset, '\n\n')
+        offset += 2
+      }
+      offset += part.length
+    }
+    return parts.join('\n\n')
   }
 
   /** Wakes every wait on the turn's state (`PiRpcEngine.until`). */

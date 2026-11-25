@@ -508,6 +508,8 @@ export interface AcpChatInput {
   /** The bot's authority (`AdapterHost.bot`): it answers the turn's permission and file requests (`botApprovals.ts`). */
   botAuthority?: Pick<BotAuthority, 'check'>
   onText: (text: string) => void
+  /** Mousse put `sep` into the cumulative text at `atOffset` (between prompts' replies): not the agent's words. */
+  onTextSeparator?: (atOffset: number, sep: string) => void
   /** The agent's thoughts so far this turn (`agent_thought_chunk`), cumulative like `onText`. */
   onThinking?: (text: string) => void
   drainSteer?: () => string | undefined
@@ -1473,6 +1475,12 @@ export class AcpSessions {
     input.signal?.addEventListener('abort', abort, { once: true })
     let text = ''
     let thinking = ''
+    // The blank line Mousse puts between prompts' replies is its own, not the agent's: a row it opens drops it.
+    const appendTextSeparator = (): void => {
+      if (!text) return
+      input.onTextSeparator?.(text.length, '\n\n')
+      text += '\n\n'
+    }
     let turnUsage: AcpTurnUsage | undefined
     interface TrackedTool {
       title: string
@@ -1584,8 +1592,10 @@ export class AcpSessions {
       if (event.sessionUpdate === 'agent_message_chunk' && textContent?.type === 'text') {
         const chunk = textContent.text ?? ''
         if (chunk) for (const sub of launchedSubagents.values()) sub.sawTextInStep = true
-        text += chunk
-        input.onText(text)
+        if (chunk.length > 0) {
+          text += chunk
+          input.onText(text)
+        }
       }
       if (event.sessionUpdate === 'usage_update') {
         for (const sub of launchedSubagents.values()) {
@@ -1928,7 +1938,7 @@ export class AcpSessions {
           adopted = taken.reply
           active.prompting ??= adopted.then(() => undefined, () => undefined)
           input.onProviderTurn?.()
-          if (text) text += '\n\n'
+          appendTextSeparator()
           watchSilence()
         } else {
           prompting = false
@@ -1944,7 +1954,7 @@ export class AcpSessions {
             blocks = [steers.map((entry) => entry.text).join('\n')]
             commandTurn = false
             attachments = steerImageBlocks(steers)
-            if (text) text += '\n\n'
+            appendTextSeparator()
           } else {
             runPromptLoop = false
           }
@@ -2020,7 +2030,7 @@ export class AcpSessions {
           active.prompting ??= adopted.then(() => undefined, () => undefined)
           completion?.dispose()
           input.onProviderTurn?.()
-          if (text) text += '\n\n'
+          appendTextSeparator()
           watchSilence()
           continue
         }
@@ -2065,7 +2075,7 @@ export class AcpSessions {
           blocks = [botRefusalFollowUp(refusals)]
           commandTurn = false
           attachments = []
-          if (text) text += '\n\n'
+          appendTextSeparator()
           continue
         }
         const steers = pendingSteers.splice(0)
@@ -2073,7 +2083,7 @@ export class AcpSessions {
         blocks = [steers.map((entry) => entry.text).join('\n')]
         commandTurn = false
         attachments = steerImageBlocks(steers)
-        if (text) text += '\n\n'
+        appendTextSeparator()
       }
       for (const sub of launchedSubagents.values()) {
         if (sub.sawTextInStep) {

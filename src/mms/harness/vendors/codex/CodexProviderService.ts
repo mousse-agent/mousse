@@ -557,6 +557,10 @@ export type CodexChatInput = {
   bot?: Pick<BotAuthority, 'check'> & Partial<Pick<BotAuthority, 'tools' | 'workspace' | 'appTools'>>
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  /** The run put `sep` into the cumulative text at `atOffset` (between two messages): not the model's words. */
+  onTextSeparator?: (atOffset: number, sep: string) => void
+  /** As `onTextSeparator`, for the cumulative thinking (between two reasoning summaries). */
+  onThinkingSeparator?: (atOffset: number, sep: string) => void
   onTool?: (event: CodexToolEvent) => void
   /**
    * Every `item/started` and `item/completed` notification of a tool item, as the server sent it
@@ -737,7 +741,8 @@ class TurnRun {
   private readonly order: string[] = []
   private readonly parts = new Map<string, string>()
   private thinking = ''
-  private lastReasoningItem: string | undefined
+  /** The reasoning summary part (`itemId:summaryIndex`) the last summary delta belonged to. */
+  private lastReasoningKey: string | undefined
   private readonly items = new Map<string, ThreadItem>()
   /** Calls open on the timeline, by the call id the timeline knows: what closing one needs. */
   private readonly openTools = new Map<string, OpenCall>()
@@ -846,6 +851,21 @@ class TurnRun {
 
   get text(): string {
     return this.order.map((id) => this.parts.get(id) ?? '').filter(Boolean).join('\n\n')
+  }
+
+  /** Reports the text so far, after the blank lines `text` puts between messages (they are the run's, not the model's). */
+  private publishText(): void {
+    let offset = 0
+    for (const id of this.order) {
+      const part = this.parts.get(id) ?? ''
+      if (!part) continue
+      if (offset) {
+        this.input.onTextSeparator?.(offset, '\n\n')
+        offset += 2
+      }
+      offset += part.length
+    }
+    this.input.onText(this.text)
   }
 
   /** Waits for the next `turn/completed` of this thread. */
@@ -971,7 +991,7 @@ class TurnRun {
     const id = `mousse-note-${this.order.length}`
     this.order.push(id)
     this.parts.set(id, note)
-    this.input.onText(this.text)
+    this.publishText()
   }
 
   /**
@@ -1173,16 +1193,24 @@ class TurnRun {
     if (this.muted) return
     const delta = notificationParams(notification, 'item/agentMessage/delta')
     if (delta) {
+      // An empty delta adds nothing to show.
+      if (!delta.delta) return
       if (!this.parts.has(delta.itemId)) this.order.push(delta.itemId)
       this.parts.set(delta.itemId, (this.parts.get(delta.itemId) ?? '') + delta.delta)
-      this.input.onText(this.text)
+      this.publishText()
       return
     }
     // Reasoning summaries only: raw reasoning text, when a model streams it too, would repeat them.
     const reasoning = notificationParams(notification, 'item/reasoning/summaryTextDelta')
     if (reasoning) {
-      if (this.lastReasoningItem !== reasoning.itemId && this.thinking) this.thinking += '\n\n'
-      this.lastReasoningItem = reasoning.itemId
+      if (!reasoning.delta) return
+      // Each reasoning item, and each summary part of one, is a paragraph of its own.
+      const key = `${reasoning.itemId}:${reasoning.summaryIndex ?? 0}`
+      if (this.lastReasoningKey !== key && this.thinking && !this.thinking.endsWith('\n\n')) {
+        this.input.onThinkingSeparator?.(this.thinking.length, '\n\n')
+        this.thinking += '\n\n'
+      }
+      this.lastReasoningKey = key
       this.thinking += reasoning.delta
       this.input.onThinking?.(this.thinking)
       return
@@ -1223,7 +1251,7 @@ class TurnRun {
         if (!this.parts.has(item.id)) this.order.push(item.id)
         if (this.parts.get(item.id) !== text) {
           this.parts.set(item.id, text)
-          this.input.onText(this.text)
+          this.publishText()
         }
       }
       const settled = codexToolEvent(item, 'complete')

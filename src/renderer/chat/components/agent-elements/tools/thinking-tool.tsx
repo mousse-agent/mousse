@@ -35,8 +35,8 @@ export function ThinkingCollapsed({
   useToolComplete(state === "animating", step.duration, onComplete);
 
   // One still line: the thought's headline, the same line the live row and a group show.
-  const heading = thoughtHeadline(step.thoughtContent);
   const isAnimating = state === "animating";
+  const heading = thoughtHeadline(step.thoughtContent, { live: isAnimating });
   // In an opened live row the thought being written shows open, so it can be read in full as it grows.
   const inLiveRun = useContext(LiveRunBodyContext);
   const startsOpen = defaultOpen ?? (inLiveRun && isAnimating);

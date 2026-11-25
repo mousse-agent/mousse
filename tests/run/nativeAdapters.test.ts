@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import type { Message } from '@earendil-works/pi-ai'
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it, vi } from 'vitest'
 import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import { CursorAdapter, type CursorTurnClient } from '../../src/mms/harness/drivers/cursor/adapter'
@@ -15,6 +16,9 @@ import {
   type ClaudeSubscriptionClient
 } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { CodexAdapter, type CodexClient } from '../../src/mms/harness/drivers/codex/adapter'
+import { ClaudeMetricsCollector } from '../../src/mms/harness/vendors/claude/metrics'
+import { TurnFrames } from '../../src/mms/harness/vendors/claude/turnFrames'
+import { transcriptSink } from '../support/transcriptSink'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 
 const user = (text: string): Message => ({ role: 'user', content: text, timestamp: 0 })
@@ -175,6 +179,9 @@ describe('ClaudeSubscriptionAdapter', () => {
       chat.onSteer?.('steer text')
       chat.onTool?.({ phase: 'start', callId: 'tool-1', title: 'Read', toolName: 'Read' })
       // The runtime's thinking and text are cumulative; what follows the call is a thought and a reply row of its own.
+      // The blank lines between blocks are the frames' own (`TurnFrames`), and say so.
+      chat.onThinkingSeparator?.('Considering'.length, '\n\n')
+      chat.onTextSeparator?.('Reading the file.'.length, '\n\n')
       chat.onThinking?.('Considering\n\nRead the file next')
       chat.onText('Reading the file.\n\nHello')
       chat.onLineEdits?.(3)
@@ -280,6 +287,46 @@ describe('ClaudeSubscriptionAdapter', () => {
       nativeMessages: [],
       providerRef: { provider: 'claude-subscription', instanceId: 'claude-subscription', model: 'sonnet' }
     })
+  })
+
+  it('saves Claude\'s blocks as written: an empty thinking block or delta splits nothing, and only the frames\' blank lines go', async () => {
+    const client = claudeClient(async (chat) => {
+      // Claude Code's stream events through the real frame reader, as the service runs them (hand-authored events).
+      const frames = new TurnFrames(chat, new ClaudeMetricsCollector())
+      const stream = (event: Record<string, unknown>) => frames.observe({ type: 'stream_event', parent_tool_use_id: null, session_id: 's1', event } as unknown as SDKMessage)
+      const block = (type: string, extra: Record<string, unknown> = {}) => stream({ type: 'content_block_start', index: 0, content_block: { type, ...extra } })
+      const thinking = (value: string) => stream({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: value } })
+      const text = (value: string) => stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: value } })
+      stream({ type: 'message_start', message: { id: 'm1' } })
+      block('thinking', { thinking: '' })
+      thinking('First')
+      // A thinking block whose text is omitted: an empty delta, and no paragraph of its own.
+      block('thinking', { thinking: '' })
+      thinking('')
+      block('thinking', { thinking: '' })
+      thinking('Second')
+      block('text', { text: '' })
+      // An empty text delta does not end the thought; the first words do.
+      text('')
+      expect(frames.text).toBe('')
+      text('Note')
+      block('tool_use', { id: 'read', name: 'Read', input: {} })
+      block('thinking', { thinking: '' })
+      thinking('Third')
+      block('text', { text: '' })
+      text('    indented')
+      return frames.text
+    })
+    const transcript = transcriptSink()
+    const result = await new ClaudeSubscriptionAdapter(() => client).startTurn(input(), transcript.sink, control(), host())
+    expect(result.text).toBe('Note\n\n    indented')
+    expect(transcript.rows()).toEqual([
+      { kind: 'thinking', content: 'First\n\nSecond' },
+      { kind: 'text', content: 'Note' },
+      { kind: 'tool', content: 'Read' },
+      { kind: 'thinking', content: 'Third' },
+      { kind: 'text', content: '    indented' }
+    ])
   })
 
   it('retries a context overflow once with the recovered history, only before progress', async () => {

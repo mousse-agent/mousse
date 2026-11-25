@@ -314,6 +314,10 @@ export type ClaudeSubscriptionChatInput = {
   continuationId?: string
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  /** A separator of the frames' own in the cumulative text (`TurnFrameSink.onTextSeparator`). */
+  onTextSeparator?: (atOffset: number, sep: string) => void
+  /** A separator of the frames' own in the cumulative thinking (`TurnFrameSink.onThinkingSeparator`). */
+  onThinkingSeparator?: (atOffset: number, sep: string) => void
   /** What Claude is doing while it shows nothing (`TurnFrameSink.onStatus`). */
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */
@@ -4171,7 +4175,11 @@ export class ClaudeSubscriptionProviderService {
           success = false
           resumedWithSteer = true
           steerUnanswered = false
-          if (frames.text) frames.text += '\n\n'
+          // The blank line before the steered reply is Mousse's own: the row that opens after the steer drops it.
+          if (frames.text) {
+            input.onTextSeparator?.(frames.text.length, '\n\n')
+            frames.text += '\n\n'
+          }
         }
       }
       input.signal?.throwIfAborted()
