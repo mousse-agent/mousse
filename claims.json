@@ -34,26 +34,16 @@
     },
     {
       "task": "bots-typed-provenance-and-contract",
-      "session": "LAPTOP-HIEROJK7-016dce",
-      "machine": "LAPTOP-HIEROJK7",
+      "session": "Animatrix-949070",
+      "machine": "Animatrix",
       "branch": "bots-typed-provenance-and-contract",
       "paths": [
-        "src/mms/bots/activation/BotEngine.ts",
         "src/mms/bots/store/BotStore.ts",
-        "src/mms/contractVersions.ts",
-        "tests/bots/botCards.test.ts",
-        "tests/bots/botDue.test.ts",
-        "tests/bots/botMemoryTidy.test.ts",
-        "tests/bots/botReminderSnooze.test.ts",
-        "tests/bots/botScheduleDone.test.ts",
-        "tests/bots/botWorkWait.test.ts",
-        "tests/bots/secretFetchEngine.test.ts",
-        "tests/contractVersions.test.ts",
-        "tests/bots/botStoreV14Migration.test.ts",
+        "src/mms/bots/activation/BotEngine.ts",
         "tests/run/toolApiContract.test.ts"
       ],
-      "claimedAt": "2026-11-24T14:33:58.137Z",
-      "expiresAt": "2026-11-24T17:13:10.735Z"
+      "claimedAt": "2026-11-25T02:21:52.392Z",
+      "expiresAt": "2026-11-25T04:21:52.392Z"
     },
     {
       "task": "computer-use-awareness-setup-card",
