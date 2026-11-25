@@ -300,8 +300,9 @@ export function PermissionChip({ control }: { control: PermissionControl }) {
 /**
  * The model picker's run settings (`ModelFamilyMenu`'s `runSettings`), so one menu chooses the model, its
  * reasoning level and its speed: the selected model's levels beside the list and its speeds under it.
- * Clicking another model selects it at its starting level (`atStartingLevel`); a level or speed always
- * applies to the selected model. `footerEnd` sits at the right of the footer (the composer's permission mode).
+ * Clicking another model selects it at its starting level (`atStartingLevel`) and leaves the picker open for its
+ * level; a level or speed always applies to the selected model and closes the picker, as does a click on a model
+ * with neither. `footerEnd` sits at the right of the footer (the composer's permission mode).
  */
 export function modelPickerRunSettings({ providers, onSelect, onClose, footerEnd }: {
   providers: readonly LlmProviderOption[]
@@ -316,6 +317,10 @@ export function modelPickerRunSettings({ providers, onSelect, onClose, footerEnd
   }
   return {
     pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
+    picked: (target: ModelPickTarget) => {
+      const resolved = resolveTarget(target)
+      if (!hasReasoningLevels(resolved) && !getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models)) onClose()
+    },
     // Beside the list: the selected model's reasoning levels, whenever any model the picker lists has
     // levels, so the column stays in place while you search or switch providers.
     render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {

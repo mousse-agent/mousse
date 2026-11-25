@@ -26,7 +26,8 @@ const catalog = (): LlmProviderOption[] => [{
     { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', efforts },
     { id: 'claude-fable-5-2', label: 'Claude Fable 5.2', efforts },
     { id: 'claude-fable-5-dd-weiver-otua-xedoc', label: 'Codex Auto Review', efforts },
-    { id: 'claude-fable-5-dd-los-2.6-tpg', label: 'GPT 6.2 Sol', efforts }
+    { id: 'claude-fable-5-dd-los-2.6-tpg', label: 'GPT 6.2 Sol', efforts },
+    { id: 'plain', label: 'Plain 1' }
   ]
 } as unknown as LlmProviderOption]
 const settings = (): MousseSettings => ({
@@ -79,6 +80,8 @@ const row = (name: string) =>
   [...document.querySelectorAll<HTMLElement>('.model-picker-row')].find((entry) => entry.querySelector('.model-picker-row-title')!.textContent === name)!
 const column = () => document.querySelector<HTMLElement>('.model-picker-run')!
 const columnFor = () => document.querySelector('.model-picker-run [role="menu"]')?.getAttribute('aria-label')
+/** Whether the model picker is open, as the model button tells screen readers (a closed one fades out a moment). */
+const pickerOpen = () => host.querySelector('.composer-model-btn')!.getAttribute('aria-expanded') === 'true'
 const saved = () => setModel.mock.calls.map(([, override]) => ({ model: override.model, effort: override.effort }))
 
 let under: Element | null = null
@@ -150,11 +153,29 @@ it('hovering other models on the way to a level leaves the column on the selecte
   await clickLevel('Extra high')
   expect(saved()).toEqual([{ model: 'claude-fable-5-dd-los-2.6-tpg', effort: 'xhigh' }])
   expect(host.querySelector('.composer-model-btn')?.getAttribute('aria-label')).toBe('Model: GPT 6.2 Sol Extra high')
+  expect(pickerOpen()).toBe(false)
 })
 
-it('clicking Opus 5.5 selects Opus 5.5 at Medium, its listing naming no default level', async () => {
-  await act(async () => { row('Opus 5.5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click() })
+async function clickModel(name: string): Promise<void> {
+  await act(async () => { row(name).querySelector<HTMLButtonElement>('.model-picker-row-main')!.click() })
   await settle(3)
+}
+
+it('clicking Opus 5.5 selects it at Medium, its listing naming no default level, and leaves the picker open on its levels', async () => {
+  await clickModel('Opus 5.5')
   expect(saved()).toEqual([{ model: 'opus', effort: 'medium' }])
   expect(host.querySelector('.composer-model-btn')?.getAttribute('aria-label')).toBe('Model: Opus 5.5 Medium')
+  expect(pickerOpen()).toBe(true)
+  expect(columnFor()).toBe('Reasoning for Opus 5.5')
+
+  await clickLevel('High')
+  expect(saved()).toEqual([{ model: 'opus', effort: 'medium' }, { model: 'opus', effort: 'high' }])
+  expect(host.querySelector('.composer-model-btn')?.getAttribute('aria-label')).toBe('Model: Opus 5.5 High')
+  expect(pickerOpen()).toBe(false)
+})
+
+it('clicking a model with no levels or speeds selects it and closes the picker, as nothing is left to choose', async () => {
+  await clickModel('Plain 1')
+  expect(saved()).toEqual([{ model: 'plain', effort: undefined }])
+  expect(pickerOpen()).toBe(false)
 })

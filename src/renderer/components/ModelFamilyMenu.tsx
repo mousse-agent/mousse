@@ -83,10 +83,12 @@ interface ModelFamilyMenuProps {
    * the menu would select for a model into the one it selects. `rows` is how many rows the column keeps
    * room for (the most any of `all` needs); the column's own content never sizes it. Hovering or arrowing
    * to another model never changes what the column and footer show: a level or speed there is always the
-   * selected model's.
+   * selected model's. With run settings a model click leaves the picker open for its level; `picked` runs
+   * after it (it closes the picker when the model has nothing left to choose).
    */
   runSettings?: {
     pick: (target: ModelPickTarget) => string
+    picked?: (target: ModelPickTarget) => void
     render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
     rows?: (all: ModelPickTarget[]) => number
     footer?: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
@@ -526,7 +528,9 @@ function ProfileModelFamilyMenu({
   const selectEntry = useCallback(
     (entry: FlatModelEntry) => {
       const target = targetOf(entry)
-      if (target) onSelect(entry.providerId, runSettings ? runSettings.pick(target) : target.modelId, entry.instanceId)
+      if (!target) return
+      onSelect(entry.providerId, runSettings ? runSettings.pick(target) : target.modelId, entry.instanceId)
+      runSettings?.picked?.(target)
     },
     [onSelect, runSettings, targetOf]
   )

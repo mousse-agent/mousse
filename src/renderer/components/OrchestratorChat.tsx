@@ -1937,8 +1937,8 @@ export function OrchestratorChat() {
     }
   }
 
+  // The picker stays open on a model click; a level or speed in it closes it (`modelPickerRunSettings`).
   const handleModelSelect = async (providerId: string, modelId: string) => {
-    setModelMenuOpen(false)
     // A read of the shown model that began before this pick must not put the previous model back.
     selectionRequestRef.current += 1
     const instance = selectionFor(providerId)
