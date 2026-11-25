@@ -89,6 +89,18 @@
       "expiresAt": "2026-11-24T17:11:07.150Z"
     },
     {
+      "task": "issue-1830-grant-roles",
+      "session": "Avarnics-Mac-mini.local-c3024a",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "issue-1830-grant-roles",
+      "paths": [
+        "src/mms/netEngine",
+        "src/shared/net/accessPresets.ts"
+      ],
+      "claimedAt": "2026-11-25T02:21:03.217Z",
+      "expiresAt": "2026-11-25T04:21:03.217Z"
+    },
+    {
       "task": "opencode-provider",
       "session": "LAPTOP-HIEROJK7-365028",
       "machine": "LAPTOP-HIEROJK7",
