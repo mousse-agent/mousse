@@ -399,6 +399,13 @@ export interface DriverRuntime {
    */
   pinned?(): { version: string }
   /**
+   * The newest version Mousse's own install would update to (a registry agent's current release),
+   * when that is not the driver's `latestVersion`: a managed copy's update follows it instead.
+   */
+  managedLatestVersion?(): string | undefined
+  /** Looks `managedLatestVersion` up again when it is due; true when it changed. */
+  refreshManagedLatest?(): Promise<boolean>
+  /**
    * Checks every installed file against its install record (Recheck, Add, after install); a
    * mismatch shows through `managed().broken`.
    */
@@ -477,6 +484,14 @@ export interface HarnessDriver {
    * its tap offers (`brew info`), not the npm one, since `brew upgrade` can only reach that.
    */
   readonly brewName?: string
+  /**
+   * The npm package (owner npm, pnpm or bun) or Homebrew formula (owner brew, named as `brew info`
+   * takes it) an executable came from, read from its path, for a CLI published under more than one
+   * (OpenCode: `@opencode/cli` and the older `opencode-ai`; `opencode` in homebrew-core and in
+   * OpenCode's tap). Such a copy is compared with, and updated within, that package; when this
+   * returns undefined, Mousse cannot tell which, so it compares nothing and offers no command.
+   */
+  packageOf?(path: string, owner: InstallOwner): string | undefined
   /** The driver can run several instances (Add dialog); others have only their built-in one. */
   readonly multiInstance: boolean
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */
@@ -554,6 +569,12 @@ export interface HarnessDriver {
    * executable runs: a sign-out revokes it, and only a sign-in in Mousse restores it.
    */
   readonly ownsSignIn?: boolean
+  /**
+   * The agent signs in once per computer, whatever executable runs (OpenCode's XDG folders): Mousse
+   * never owns the sign-in, not even of its own managed copy. A sign-out in Mousse leaves it alone,
+   * and signing in again only clears Mousse's flag.
+   */
+  readonly sharedSignIn?: boolean
   /**
    * The fixed id an added entry gets from its add input (`pi`: `pi:<provider>`), or a thrown
    * `unsupported` for an input it cannot add. With it, ids are unique per entry, not per driver
@@ -642,8 +663,16 @@ export interface HarnessDriver {
    */
   readPolicyFacts?(config: InstanceConfig, instanceId: string): Promise<void>
   create(context: DriverContext): DriverRuntime
-  /** The command that updates a binary installed by `owner`, when there is one. */
-  updateCommand?(owner: InstallOwner): string | undefined
+  /**
+   * The command that updates a binary installed by `owner`, when there is one. `pkg`: the package
+   * or formula the copy came from (`packageOf`), for a driver that reads it.
+   */
+  updateCommand?(owner: InstallOwner, pkg?: string): string | undefined
+}
+
+/** The owners whose copies come from a package or formula (`HarnessDriver.packageOf`). */
+export function isPackageOwner(owner: InstallOwner | undefined): boolean {
+  return owner === 'npm' || owner === 'pnpm' || owner === 'bun' || owner === 'brew'
 }
 
 /** The private-home rule of an entry with `config` (see `HarnessDriver.privateHomeFor`). */
@@ -695,7 +724,7 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (normalized.includes('/.bun/')) return 'bun'
   if (normalized.includes('/node_modules/') || normalized.includes('/npm/') || normalized.endsWith('.cmd')) return 'npm'
   if (normalized.includes('/winget/')) return 'winget'
-  if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/')) return 'standalone'
+  if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/') || normalized.includes('/.opencode/bin/')) return 'standalone'
   return 'unknown'
 }
 

@@ -76,9 +76,11 @@ export interface AcpRuntimeHooks {
   driver?: HarnessDriverKind
   /**
    * The program the preset runs when the entry has no command of its own (an override, a managed
-   * copy or the one on PATH); `track` marks a process running from a managed copy.
+   * copy or the one on PATH); `track` marks a process running from a managed copy. `launch`, when
+   * given, replaces the preset's arguments and variables (a managed copy starts as its install record
+   * says, `resolved.args` included).
    */
-  program?(purpose: AcpPurpose): { resolved: CliLaunch; track?: () => () => void } | undefined
+  program?(purpose: AcpPurpose): { resolved: CliLaunch; launch?: AcpLaunch; track?: () => () => void } | undefined
   /** The variables of a process, last (the instance's secrets win). */
   env?(env: NodeJS.ProcessEnv, purpose: AcpPurpose): NodeJS.ProcessEnv
   /**
@@ -188,7 +190,13 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
   }
 }
 
-export function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean, hooks: AcpRuntimeHooks = {}): DriverRuntime {
+/** The ACP runtime, and what a driver built on it may also do. */
+export interface AcpRuntime extends DriverRuntime {
+  /** Closes every agent process and session; the runtime stays usable (a new turn starts a new one). */
+  closeSessions(): void
+}
+
+export function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean, hooks: AcpRuntimeHooks = {}): AcpRuntime {
   const statePath = join(context.stateDir, 'acp.json')
   let state: AcpState = {}
   try {
@@ -221,7 +229,10 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   const bindingHash = (methodId: string) => createHash('sha256')
     .update(JSON.stringify(source?.kind === 'registry'
       ? [source.agentId, source.version, source.distribution, source.receiptHash, context.config.args, sortedEnv(context.config.env), methodId]
-      : [source?.command, source?.args, sortedEnv(source?.env), methodId]))
+      : !source && hooks.program
+        // A preset that finds its own program: the entry's arguments and variables are its launch.
+        ? [hooks.driver, context.config.args, sortedEnv(context.config.env), methodId]
+        : [source?.command, source?.args, sortedEnv(source?.env), methodId]))
     .digest('hex')
 
   /** The instance's variables over its environment (on Windows a user `PATH` replaces `Path`). */
@@ -237,7 +248,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     if (!source && hooks.program) {
       const program = hooks.program(purpose)
       if (!program) throw new Error(`${label} is not installed. Install it, or set its executable in Settings → Providers.`)
-      const launch = preset.launch({ config: context.config, source: { kind: 'local', command: program.resolved.path, args: [], env: {} }, purpose })
+      const launch = program.launch ?? preset.launch({ config: context.config, source: { kind: 'local', command: program.resolved.path, args: [], env: {} }, purpose })
       return { resolved: program.resolved, launch, ...(program.track ? { track: program.track } : {}) }
     }
     if (!source) throw new Error(`${label} has no command. Set one in its settings.`)
@@ -577,11 +588,13 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     release: () => agents.release(context.instanceId, registrySource)
   } : {}
 
-  const runtime: DriverRuntime = {
+  const runtime: AcpRuntime = {
     adapter,
     ...registryRuntime,
+    closeSessions: () => sessions.closeAll(),
     configured: () => {
-      if (!source || state.signedOut) return false
+      // A preset with a program of its own (`hooks.program`) needs no command: `launchOf` finds it.
+      if ((!source && !hooks.program) || state.signedOut) return false
       if (registrySource && (!installedNow() || managed()?.broken)) return false
       try {
         launchOf('turn')

@@ -1,6 +1,6 @@
 import { accessSync, constants } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, posix, resolve } from 'node:path'
+import { isAbsolute, join, posix, resolve, win32 } from 'node:path'
 import type { BinarySource, CredentialKind } from '../../shared/harness/status'
 import type { HarnessDriverKind } from '../../shared/harness/types'
 import { cliLaunch, withUserEnv, type CliLaunch } from './cliConfig'
@@ -141,6 +141,29 @@ export function agyStandalonePaths(base: NodeJS.ProcessEnv = process.env, platfo
   if (platform !== 'win32') return []
   const localAppData = Object.entries(base).find(([key]) => key.toUpperCase() === 'LOCALAPPDATA')?.[1]
   return localAppData && isAbsolute(localAppData) ? [join(localAppData, 'agy', 'bin')] : []
+}
+
+/**
+ * Where OpenCode's installer puts `opencode`, even before PATH is updated here: `~/.opencode/bin`,
+ * and the folders earlier installers honoured (`$OPENCODE_INSTALL_DIR`, `$XDG_BIN_DIR`, `~/bin`).
+ * Only absolute folders, each once (Windows folder names ignore case), searched after PATH.
+ */
+export function opencodeStandalonePaths(base: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string[] {
+  const path = platform === 'win32' ? win32 : posix
+  const variable = (name: string) => Object.entries(base).find(([key]) => key.toUpperCase() === name)?.[1]?.trim()
+  const home = (platform === 'win32' ? variable('USERPROFILE') : variable('HOME')) || homedir()
+  const candidates = [variable('OPENCODE_INSTALL_DIR'), variable('XDG_BIN_DIR'), path.join(home, 'bin'), path.join(home, '.opencode', 'bin')]
+  const paths: string[] = []
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    if (!candidate || !path.isAbsolute(candidate)) continue
+    const folder = path.resolve(candidate)
+    const key = platform === 'win32' ? folder.toLowerCase() : folder
+    if (seen.has(key)) continue
+    seen.add(key)
+    paths.push(folder)
+  }
+  return paths
 }
 
 /**
@@ -329,7 +352,7 @@ export function instanceEnv(input: {
   if (own) env = withUserEnv(env, { ...own })
   // Standalone installs are found after PATH, wherever the instance's home is.
   const extraSearch = input.driver === 'grok' ? [grokStandaloneBin(base)] : input.driver === 'codex' ? codexStandalonePaths(base)
-    : input.driver === 'antigravity' ? agyStandalonePaths(base) : []
+    : input.driver === 'antigravity' ? agyStandalonePaths(base) : input.driver === 'opencode' ? opencodeStandalonePaths(base) : []
   return {
     instanceId: input.instanceId,
     driver: input.driver,

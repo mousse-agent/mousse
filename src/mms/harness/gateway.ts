@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
+import { isPackageOwner, privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -632,14 +632,20 @@ const SHELL_PATH_WAIT_MS = 3_000
 const LATEST_CHECK_INTERVAL_MS = 60 * 60_000
 
 /**
- * Where the newest version of an instance's CLI is read: Homebrew's own tap for a copy Homebrew
- * installed (the version `brew upgrade` reaches), else the driver's source.
+ * Where the newest version of an instance's CLI is read: for a driver published under several
+ * names, the package or formula the copy came from (none when that is unknown); else Homebrew's
+ * own tap for a copy Homebrew installed (the version `brew upgrade` reaches); else the driver's source.
  */
-export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
-  if (binary?.owner === 'brew' && driver.brewName) {
-    const brew = binary.path ? join(dirname(binary.path), 'brew') : undefined
-    return { kind: 'brew', name: driver.brewName, ...(brew && existsSync(brew) ? { brew } : {}) }
+export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName' | 'packageOf'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
+  const brewSource = (name: string): LatestVersionSource => {
+    const brew = binary?.path ? join(dirname(binary.path), 'brew') : undefined
+    return { kind: 'brew', name, ...(brew && existsSync(brew) ? { brew } : {}) }
   }
+  if (driver.packageOf && isPackageOwner(binary?.owner)) {
+    if (!binary?.package) return undefined
+    return binary.owner === 'brew' ? brewSource(binary.package) : { kind: 'npm', package: binary.package }
+  }
+  if (binary?.owner === 'brew' && driver.brewName) return brewSource(driver.brewName)
   return driver.latestVersion
 }
 
@@ -2750,7 +2756,12 @@ export class Harness implements HarnessGateway {
   private updateFor(record: InstanceRecord): UpdateAffordance | undefined {
     const good = this.probes.get(record.instanceId)?.lastGood
     if (!good) return undefined
-    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(latestSourceFor(record.driver, good.binary))
+    const latest = record.runtime.pinned
+      ? record.runtime.pinned().version
+      // Mousse's own copy updates to what its install source publishes, not the package's newest.
+      : good.binary?.owner === 'managed' && record.runtime.managedLatestVersion
+        ? record.runtime.managedLatestVersion()
+        : this.latest.get(latestSourceFor(record.driver, good.binary))
     return updateAffordance(record.driver, good.binary, good.compatibility, latest)
   }
 
@@ -2766,7 +2777,22 @@ export class Harness implements HarnessGateway {
     for (const instanceId of instanceIds) {
       const entry = entries[instanceId]
       const driver = entry?.enabled ? this.drivers.get(entry.driver) : undefined
-      const source = driver ? latestSourceFor(driver, this.probes.get(instanceId)?.lastGood?.binary) : undefined
+      const binary = this.probes.get(instanceId)?.lastGood?.binary
+      const record = driver ? this.recordOrUndefined(instanceId) : undefined
+      const runtime = record?.runtime
+      // Before the first check, Mousse's own install runs when there is one and no executable is set.
+      const runsManaged = binary ? binary.owner === 'managed' : Boolean(runtime?.managed?.()) && !record?.config.binaryPath
+      if (driver && runsManaged && runtime?.managedLatestVersion) {
+        // A managed copy's newest version is its install source's, never the package registry's.
+        const key = `managed:${driver.kind}`
+        if (!runtime.refreshManagedLatest || packages.has(key)) continue
+        packages.add(key)
+        void runtime.refreshManagedLatest().then((changed) => {
+          if (changed && !this.stopped) this.changed(instanceId)
+        }, () => undefined)
+        continue
+      }
+      const source = driver ? latestSourceFor(driver, binary) : undefined
       const key = source?.kind === 'npm' ? source.package : source?.kind === 'brew' ? `brew:${source.name}` : undefined
       if (!source || !key || packages.has(key)) continue
       packages.add(key)
@@ -2866,6 +2892,8 @@ export class Harness implements HarnessGateway {
    */
   private ownsSignIn(record: InstanceRecord): boolean {
     if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
+    // One sign-in per computer: Mousse's own copy uses the user's sign-in too.
+    if (record.driver.sharedSignIn) return false
     if (record.env.home) return true
     return Boolean(record.runtime.managed?.()) && !record.config.binaryPath
   }

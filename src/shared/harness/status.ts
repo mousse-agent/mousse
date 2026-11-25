@@ -25,6 +25,11 @@ export interface InstanceBinary {
   version?: string
   source: BinarySource
   owner?: InstallOwner
+  /**
+   * The npm package or Homebrew formula its owner installed it from, for a CLI published under more
+   * than one (`HarnessDriver.packageOf`); absent when the driver has one or Mousse cannot tell.
+   */
+  package?: string
   /** Updating it needs rights this user lacks (a root-owned npm prefix); Mousse never runs sudo. */
   needsElevation?: boolean
 }

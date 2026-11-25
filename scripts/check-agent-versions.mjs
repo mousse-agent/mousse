@@ -34,12 +34,14 @@ import { checkAgentVersions, formatAgentVersions } from './src/mms/harness/versi
 import { claudeCodeDriver } from './src/mms/harness/drivers/claudeCode'
 import { codexDriver } from './src/mms/harness/drivers/codex'
 import { grokDriver } from './src/mms/harness/drivers/grok'
+import { opencodeDriver } from './src/mms/harness/drivers/opencode'
 
 /** The drivers' static descriptors only: no runtime is created. */
 const DRIVERS = [
   { key: 'claude', driver: claudeCodeDriver() },
   { key: 'codex', driver: codexDriver({ builtIn: () => { throw new Error('not used') } }) },
-  { key: 'grok', driver: grokDriver() }
+  { key: 'grok', driver: grokDriver() },
+  { key: 'opencode', driver: opencodeDriver() }
 ]
 
 export async function run(options) {

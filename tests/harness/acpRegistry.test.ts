@@ -117,8 +117,9 @@ describe('the ACP registry', () => {
   it('leaves agents with their own Mousse entry out of search, best match first', () => {
     const agents = decodeRegistry(frozen)
     const all = searchAgents(agents, '', platformKeys('linux', 'x64')).map((agent) => agent.id)
-    for (const covered of ['grok-build', 'cursor', 'antigravity-acp', 'claude-acp', 'codex-acp']) expect(all).not.toContain(covered)
-    expect(searchAgents(agents, 'open', platformKeys('linux', 'x64')).map((agent) => agent.id).slice(0, 2)).toEqual(expect.arrayContaining(['opencode']))
+    for (const covered of ['grok-build', 'cursor', 'antigravity-acp', 'claude-acp', 'codex-acp', 'opencode', 'opencode-v2']) expect(all).not.toContain(covered)
+    expect(searchAgents(agents, 'opencode', platformKeys('linux', 'x64'))).toEqual([])
+    expect(searchAgents(agents, 'gemini', platformKeys('linux', 'x64')).map((agent) => agent.id)[0]).toBe('gemini')
     expect(searchAgents(agents, 'zzzz-nothing')).toEqual([])
   })
 

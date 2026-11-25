@@ -39,7 +39,7 @@ const TOOL_GROUP_FOLDS: Array<{ id: MousseBuiltInToolGroupId; anchor?: string }>
 
 /** How the providers page names each runtime that can reach the MCP relay. */
 const RELAY_RUNTIME_LABELS: Record<McpRelayRuntime, string> = {
-  claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor', acp: 'ACP agents', antigravity: 'Antigravity', grok: 'Grok'
+  claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor', acp: 'ACP agents', antigravity: 'Antigravity', grok: 'Grok', opencode: 'OpenCode'
 }
 
 /**

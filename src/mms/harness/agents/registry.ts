@@ -80,6 +80,10 @@ export interface RegistryAgent {
 export const COVERED_AGENT_IDS: Readonly<Record<string, string>> = {
   'grok-build': 'grok',
   cursor: 'cursor',
+  // OpenCode's registry entry is what Mousse installs for its OpenCode entry (`opencodeDriver`).
+  opencode: 'opencode',
+  // The registry's legacy alias of the same release.
+  'opencode-v2': 'opencode',
   'antigravity-acp': 'antigravity',
   'claude-acp': 'claude',
   'codex-acp': 'codex'
