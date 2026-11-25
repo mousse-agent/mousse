@@ -12,7 +12,7 @@ import { createAllowHttpPolicy, createFilesystemArtifactPort } from '../src/mms/
 import { isProcessAlive } from '../src/browser-worker/lifecycle/process'
 import { journalPath, processRecordPath } from '../src/browser-worker/lifecycle/paths'
 import { productBuild, sharedBuild } from './support/build'
-import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startFixtureSite, workerRequest } from './fixtures/browser/harness'
+import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startCrossOriginFixtureSite, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
 
@@ -21,6 +21,17 @@ function named(observation: BrowserObservation, name: string, role?: string): Br
   const match = role ? matches.find((element) => element.role === role) ?? matches[0] : matches[0]
   if (!match) throw new Error(`missing ${name}: ${observation.elements.map((el) => `${el.role}:${el.name}`).join(' | ')}`)
   return match
+}
+
+/** A screenshot pixel for a viewport CSS point of an observation's picture. */
+function imagePointOf(observation: BrowserObservation, css: { x: number; y: number }): { x: number; y: number } {
+  const image = observation.screenshot!
+  return { x: (css.x - (image.cropOriginCss?.x ?? 0)) * image.cssToImageScaleX, y: (css.y - (image.cropOriginCss?.y ?? 0)) * image.cssToImageScaleY }
+}
+
+/** The middle of an element's box, in viewport CSS pixels. */
+function middleOf(element: BrowserElement): { x: number; y: number } {
+  return { x: element.bounds!.x + element.bounds!.width / 2, y: element.bounds!.y + element.bounds!.height / 2 }
 }
 
 function actParams(session: BrowserSessionRecord, observation: BrowserObservation, action: Record<string, unknown>, requestId: string) {
@@ -223,6 +234,50 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     await broker.close()
   }, 120_000)
 
+  it('scrolls at an image point on plain background, and refuses a scroll that moves nothing', async () => {
+    const { broker } = await createInProcessBroker()
+    // Scrolled to 700 on load; nothing but the page's background right of x=800.
+    const opened = await broker.call(workerRequest('profile_point_scroll', 'session.open', { url: `${origin}/scrolled.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const scrollY = async () => ((await broker.call(workerRequest('profile_point_scroll', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))).result as BrowserObservation).viewport.scrollY
+    const observed = await broker.call(workerRequest('profile_point_scroll', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true }))
+    expect(observed.ok, JSON.stringify(observed.error)).toBe(true)
+    const observation = observed.result as BrowserObservation
+    const background = { x: observation.viewport.cssWidth - 40, y: 360 }
+    expect(background.x).toBeGreaterThan(800)
+    const before = observation.viewport.scrollY
+    const scrolled = await broker.call(workerRequest('profile_point_scroll', 'act', actParams(payload.session, observation, { type: 'scroll', target: { kind: 'image-point', point: imagePointOf(observation, background) }, deltaX: 0, deltaY: 400 }, 'point_scroll')))
+    expect(scrolled.ok, JSON.stringify(scrolled.error)).toBe(true)
+    await expect.poll(scrollY, { timeout: 5_000 }).toBeGreaterThan(before)
+    const still = await broker.call(workerRequest('profile_point_scroll', 'act', actParams(payload.session, (scrolled.result as BrowserActionResult).observation!, { type: 'scroll', deltaX: 0, deltaY: 0 }, 'zero_scroll')))
+    expect(still.ok).toBe(false)
+    expect(still.error?.code).toBe('invalid_action')
+    await broker.close()
+  }, 120_000)
+
+  it('refuses an image point on an observation that has no screenshot, and says so', async () => {
+    const { broker } = await createInProcessBroker()
+    const opened = await broker.call(workerRequest('profile_point_noshot', 'session.open', { url: `${origin}/coordinate.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const click = { type: 'click', target: { kind: 'image-point', point: { x: 200, y: 150 } } }
+    const plain = await broker.call(workerRequest('profile_point_noshot', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: false }))
+    expect(plain.ok, JSON.stringify(plain.error)).toBe(true)
+    const refused = await broker.call(workerRequest('profile_point_noshot', 'act', actParams(payload.session, plain.result as BrowserObservation, click, 'point_no_screenshot')))
+    expect(refused.ok).toBe(false)
+    expect(refused.error?.code).toBe('stale_observation')
+    expect(refused.error?.message).toMatch(/no screenshot/i)
+    // An action's own observation carries no screenshot either: after a reload, the same answer.
+    const reloaded = await broker.call(workerRequest('profile_point_noshot', 'act', actParams(payload.session, plain.result as BrowserObservation, { type: 'reload' }, 'reload_before_point')))
+    expect(reloaded.ok, JSON.stringify(reloaded.error)).toBe(true)
+    const afterReload = await broker.call(workerRequest('profile_point_noshot', 'act', actParams(payload.session, (reloaded.result as BrowserActionResult).observation!, click, 'point_after_reload')))
+    expect(afterReload.ok).toBe(false)
+    expect(afterReload.error?.code).toBe('stale_observation')
+    expect(afterReload.error?.message).toMatch(/no screenshot/i)
+    await broker.close()
+  }, 120_000)
+
   it('uploads only a broker-resolved staged artifact and reports selected names', async () => {
     const stage = await mkdtemp(join(tmpdir(), 'mousse-browser-stage-'))
     const staged = join(stage, 'note.txt')
@@ -290,6 +345,38 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     expect(existsSync(quarantine) ? await readdir(quarantine) : []).toHaveLength(0)
     await broker.close()
   }, 180_000)
+})
+
+describe.skipIf(!chrome.ok)('image points in a frame from another site', () => {
+  it('fills and clicks at image points near the top of a frame taller than the viewport', async () => {
+    const site = await startCrossOriginFixtureSite()
+    const { broker } = await createInProcessBroker({ chromeExtraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] })
+    try {
+      const opened = await broker.call(workerRequest('profile_tall_frame', 'session.open', { url: `${site.parentOrigin}/frame-tall-parent.html` }))
+      expect(opened.ok, opened.error?.message).toBe(true)
+      const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+      const withScreenshot = async () => {
+        const observed = await broker.call(workerRequest('profile_tall_frame', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true }))
+        expect(observed.ok, JSON.stringify(observed.error)).toBe(true)
+        return observed.result as BrowserObservation
+      }
+      let observation = await withScreenshot()
+      // The frame's middle is below the viewport: the image point, not the middle, is where it is hit.
+      const frame = observation.elements.find((element) => element.name === 'Tall form')
+      expect(frame, observation.elements.map((element) => `${element.role}:${element.name}`).join(' | ')).toBeTruthy()
+      expect(middleOf(frame!).y).toBeGreaterThan(observation.viewport.cssHeight)
+      const input = named(observation, 'Applicant name', 'textbox')
+      const filled = await broker.call(workerRequest('profile_tall_frame', 'act', actParams(payload.session, observation, { type: 'fill', target: { kind: 'image-point', point: imagePointOf(observation, middleOf(input)) }, text: 'tall-value' }, 'tall_fill')))
+      expect(filled.ok, JSON.stringify(filled.error)).toBe(true)
+      observation = await withScreenshot()
+      const save = named(observation, 'Save applicant', 'button')
+      const clicked = await broker.call(workerRequest('profile_tall_frame', 'act', actParams(payload.session, observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, middleOf(save)) } }, 'tall_click')))
+      expect(clicked.ok, JSON.stringify(clicked.error)).toBe(true)
+      expect(JSON.stringify((clicked.result as BrowserActionResult).observation)).toContain('applicant-saved:tall-value')
+    } finally {
+      try { await broker.close() } finally { await site.close() }
+    }
+  }, 120_000)
 })
 
 describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
