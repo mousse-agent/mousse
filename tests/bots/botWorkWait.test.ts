@@ -125,7 +125,8 @@ it('Forget cancels the work timer with the original request', async () => {
   expect(f.store.activation(workId)?.status).toBe('failed')
 })
 it('a scheduled run waits as work does (#1360): no slot held, its next occurrence skipped, and it carries on in its thread when due', async () => {
-  const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Check the release.', occurrenceAt: new Date(f.clock.now).toISOString() })
+  const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Check the release.' }, 'owner')
+  const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Check the release.', occurrenceAt: new Date(f.clock.now).toISOString() })
   if (scheduled.kind !== 'started') throw new Error(scheduled.kind)
   await flush()
   const turn = await start(f, scheduled.activationId)
@@ -134,7 +135,7 @@ it('a scheduled run waits as work does (#1360): no slot held, its next occurrenc
   await finish(f, turn.payload, 'completed', { text: '' })
   expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'blocked', endReason: 'waiting' })
   expect(f.bots.isIdle(botId)).toBe(true)
-  expect(f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Check the release.', occurrenceAt: new Date(f.clock.now + 60_000).toISOString() })).toMatchObject({ kind: 'skipped' })
+  expect(f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Check the release.', occurrenceAt: new Date(f.clock.now + 60_000).toISOString() })).toEqual({ kind: 'skipped', reason: 'previous_run_waiting' })
   f.clock.now += 2 * 60 * 60_000
   await f.bots.deliverDueReminders()
   await flush()

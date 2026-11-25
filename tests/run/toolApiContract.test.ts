@@ -95,17 +95,18 @@ const CALLS: Array<[string, string, Record<string, unknown>]> = [
   // `wait: false`: work that asks goes on, so the calls after it still run in the same turn.
   ['ask_owner', 'ask_owner', { question: 'Which flat?', choices: ['The first', 'The second'], wait: false }],
   ['question_answer', 'question_answer', { questionId: 'q-missing', answer: 'The second' }],
+  ['bot_list', 'bot_list', {}],
   ['bot_send', 'bot_send', { bot: 'Beta', message: 'The login page returns a 500.' }],
   ['work_start', 'work_start', { title: 'Research', brief: 'Look up flats near the station.' }],
   ['subagent_start', 'subagent_start', { title: 'Look', brief: 'List the folder.' }],
   // Last: work that waits is parked, which ends what its turn may do.
   ['work_wait', 'work_wait', { why: 'Check again.', inMinutes: 30 }]
 ]
-const HELD = ['bot_schedule_add', 'remind', 'watch_start', 'ask_owner', 'question_answer', 'bot_send', 'work_wait', 'work_start', 'subagent_start'] as const
+const HELD = ['bot_schedule_add', 'remind', 'watch_start', 'ask_owner', 'question_answer', 'bot_list', 'bot_send', 'work_wait', 'work_start', 'subagent_start'] as const
 
 type Start = 'chat:msg' | 'chat:after:msg' | 'answer:q' | 'create:bot' | 'resume:create:bot' | 'wake:w1' | 'resume:wake:w1' | 'question:q:default' | 'job:j1'
   | 'resume:resume:job:j1' | 'threadmsg:t1' | 'botmsg:b1:m1' | 'resume:act1' | 'future:start' | 'work' | 'schedule' | 'manual'
-  | StoredStart
+  | StoredStart | 'sched stored as owner_voice'
 
 /**
  * A chat start whose row stores a provenance its key does not give (a writer naming it, `insertActivation`'s `start`):
@@ -125,7 +126,10 @@ interface Observed {
   held: string[]
   /** The turn may start subagents (`BotAuthority.subagents`, what `subagent_start` checks first). */
   subagents: boolean
-  /** Each call: `ok`, or the refusal's code. `question_answer` also says when only the owner's message or tap may pass one on. */
+  /**
+   * Each call: `ok`, or the refusal's code. `question_answer` also says ` (owner only)` when it was refused because only
+   * the owner's message or tap may pass one on, so the code and the rule are both pinned.
+   */
   calls: Record<string, string>
 }
 
@@ -133,10 +137,12 @@ interface Observed {
  * A chat turn: every start holds the same tools (#1360: the tool list never changes with the start); what it may do is
  * refused at the call. `say` (a schedule's fixed line) needs the owner's message or tap (`memoryLane`). `question_answer`
  * needs the owner's own message or (Δ #1360) tapped answer; past that rule, the made-up question is not found
- * (`refused:failed`). Δ #1360: a start no build names (`unknown`) only reads and answers: its reminders, background
- * commands, questions, messages to bots and work are refused at the call (`turnRefusals`).
+ * (`refused:failed`). Δ #1360: the owner-only refusal is the registry's `not_granted`, as every other turn-kind
+ * refusal is (master: the handler's `failed`, same words). Δ #1360: a start no build names (`unknown`) only reads and
+ * answers: its reminders, background commands, questions, messages to bots and work are refused at the call
+ * (`turnRefusals`); listing the other bots is reading, so it stays.
  */
-const CHAT_HELD = ['ask_owner', 'bot_schedule_add', 'bot_send', 'question_answer', 'remind', 'watch_start', 'work_start']
+const CHAT_HELD = ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'question_answer', 'remind', 'watch_start', 'work_start']
 function chatTurn(provenance: BotActivationProvenance, memoryLane: BotLane, threadsReadOnly: 'not_owner' | null): Observed {
   const owner = provenance === 'owner_message' || provenance === 'owner_tap'
   const acts = provenance === 'unknown' ? 'refused:not_granted' : 'ok'
@@ -145,23 +151,24 @@ function chatTurn(provenance: BotActivationProvenance, memoryLane: BotLane, thre
     calls: {
       thread_change: threadsReadOnly ? 'refused:not_granted' : 'ok',
       say: memoryLane === 'chat' ? 'ok' : 'refused:failed', remind: acts, watch_start: acts, ask_owner: acts,
-      question_answer: owner ? 'refused:failed' : 'refused:owner_message_only', bot_send: acts, work_start: acts, subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
+      question_answer: owner ? 'refused:failed' : 'refused:not_granted (owner only)', bot_list: 'ok', bot_send: acts, work_start: acts, subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
     }
   }
 }
 /**
  * A run: it hands out no work and changes no schedule. Δ #1360: every run sets reminders and starts background commands
- * (detached: the chat wakes when one ends); a scheduled run asks its owner, waits and messages other bots, as work does.
+ * (detached: the chat wakes when one ends); a scheduled run asks its owner, waits, lists and messages other bots
+ * (`bot_list` too), as work does.
  */
 function runTurn(provenance: 'work' | 'schedule' | 'manual'): Observed {
   const asks = provenance !== 'manual'
   return {
     provenance, memoryLane: 'run', threadsReadOnly: null,
-    held: asks ? ['ask_owner', 'bot_schedule_add', 'bot_send', 'remind', 'subagent_start', 'watch_start', 'work_wait'] : ['bot_schedule_add', 'remind', 'subagent_start', 'watch_start'], subagents: true,
+    held: asks ? ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'remind', 'subagent_start', 'watch_start', 'work_wait'] : ['bot_schedule_add', 'remind', 'subagent_start', 'watch_start'], subagents: true,
     calls: {
       thread_change: 'ok',
       say: 'refused:failed', remind: 'ok', watch_start: 'ok', ask_owner: asks ? 'ok' : 'refused:unavailable', question_answer: 'refused:unavailable',
-      bot_send: asks ? 'ok' : 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'ok', work_wait: asks ? 'ok' : 'refused:not_granted'
+      bot_list: asks ? 'ok' : 'refused:unavailable', bot_send: asks ? 'ok' : 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'ok', work_wait: asks ? 'ok' : 'refused:not_granted'
     }
   }
 }
@@ -186,7 +193,17 @@ const EXPECTED: Record<Start, Observed> = {
   'chat:other as botmsg': chatTurn('botmsg', 'run', 'not_owner'),
   work: runTurn('work'),
   schedule: runTurn('schedule'),
-  manual: runTurn('manual')
+  manual: runTurn('manual'),
+  // A scheduled run whose row stores a provenance only a newer build writes reads as `unknown` (#1841): none of a
+  // scheduled run's rights, though its key and trigger name a schedule. Δ #1360: an unknown run also only reads the
+  // owner's threads and starts no subagents (master: every run acted on threads and split its job).
+  'sched stored as owner_voice': {
+    provenance: 'unknown', memoryLane: 'run', threadsReadOnly: 'not_owner', held: ['bot_schedule_add'], subagents: false,
+    calls: {
+      thread_change: 'refused:not_granted', say: 'refused:failed', remind: 'refused:not_granted', watch_start: 'refused:not_granted', ask_owner: 'refused:unavailable',
+      question_answer: 'refused:unavailable', bot_list: 'refused:unavailable', bot_send: 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
+    }
+  }
 }
 
 describe('the turn-kind matrix through registered dispatch', () => {
@@ -228,6 +245,11 @@ describe('the turn-kind matrix through registered dispatch', () => {
       f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check the news.' }, 'owner')
       f.clock.now += 5 * 60_000
       return (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+    }
+    if (which === 'sched stored as owner_voice') {
+      const id = await begin('schedule')
+      f.store.run("UPDATE bot_activations SET provenance = 'owner_voice' WHERE id = ?", id)
+      return id
     }
     if (which === 'manual') return (await f.bots.activate({ botId, input: 'Do the job.', clientRequestId: 'by-hand' })).id
     if (which in STORED_STARTS) {
@@ -273,7 +295,7 @@ describe('the turn-kind matrix through registered dispatch', () => {
       for (const [label, name, args] of CALLS) {
         const outcome = await call(name, { ...args, clientRequestId: `${label}-1` })
         const refusal = refusalOf(outcome)
-        calls[label] = !refusal ? (outcome.isError ? 'error' : 'ok') : label === 'question_answer' && /can pass on their answer/.test(refusal.message) ? 'refused:owner_message_only' : `refused:${refusal.code}`
+        calls[label] = !refusal ? (outcome.isError ? 'error' : 'ok') : `refused:${refusal.code}${label === 'question_answer' && /can pass on their answer/.test(refusal.message) ? ' (owner only)' : ''}`
       }
     } finally {
       spawn.mockRestore()
@@ -293,7 +315,7 @@ describe('the turn-kind matrix through registered dispatch', () => {
   }
 
   const STARTS: Start[] = ['chat:msg', 'chat:after:msg', 'answer:q', 'create:bot', 'resume:create:bot', 'wake:w1', 'resume:wake:w1', 'question:q:default', 'job:j1',
-    'resume:resume:job:j1', 'threadmsg:t1', 'botmsg:b1:m1', 'resume:act1', 'future:start', 'future:start as owner_message', 'chat:other as botmsg', 'work', 'schedule', 'manual']
+    'resume:resume:job:j1', 'threadmsg:t1', 'botmsg:b1:m1', 'resume:act1', 'future:start', 'future:start as owner_message', 'chat:other as botmsg', 'work', 'schedule', 'manual', 'sched stored as owner_voice']
   it.each(STARTS)('%s', async (which) => {
     expect(await observe(which)).toEqual(EXPECTED[which])
   })

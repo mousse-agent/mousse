@@ -31,6 +31,7 @@ require('fs').writeFileSync(pidFile, String(process.pid))
 if (mode === 'exit') { console.log('compiling'); console.error('warning: slow disk'); console.log('done'); process.exit(3) }
 if (mode === 'long') { console.log('FATAL: config file missing'); for (let i = 1; i <= 400; i++) console.log('step ' + i + ' of 400'); process.exit(2) }
 if (mode === 'match') { console.log('step 1'); setTimeout(() => console.log('build passed in 12s'), 50) }
+if (mode === 'gate') setInterval(() => { if (require('fs').existsSync(pidFile + '.go')) { console.log('built'); process.exit(0) } }, 25)
 setInterval(() => {}, 1000)
 `)
 })
@@ -210,22 +211,60 @@ describe('who may start one', () => {
     expect(f.store.waitingReminders(botId)).toEqual([])
   })
 
-  it('work starts one detached (#1360): the run ends with its report, and the chat wakes when the command ends', async () => {
+  it('work starts one detached (#1360): the run ends with its report, the chat runs while the command does, and the chat wakes when it ends', async () => {
     await allowCommands()
     const turn = await chat('Research and watch', 'm1')
     const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Look it up.', key: 'k1' })
     await finish(f, turn.payload, 'completed', { text: 'On it.' })
     const work = await start(f, workId)
+    // A command that runs until the test lets it end.
     const pidFile = join(dir, `work-${Date.now()}.pid`)
-    const { watcherId } = f.bots.tools.watchers!.start(botId, workId, { command: command('exit', pidFile), brief: 'Tell them how the build went.', title: 'Nightly build' })
+    const { watcherId } = f.bots.tools.watchers!.start(botId, workId, { command: command('gate', pidFile), brief: 'Tell them how the build went.', title: 'Nightly build' })
     await finish(f, work.payload, 'completed', { text: 'I started the build.' })
-    // The run never waits for it: it ended with its report, while the command may still run.
+    const pid = await pidOf(pidFile)
+    // The run never waits for it: it ended with its report, while the command still runs.
     expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
-    expect(await woken(watcherId)).toContain('exited with code 3')
-    // Its end wakes the chat, never the run.
+    expect(alive(pid)).toBe(true)
+    // Nor does the command hold the chat: the owner's next message is answered while it runs.
+    const next = await chat('Anything else?', 'm2')
+    expect(next.activation.idempotencyKey).toBe('chat:m2')
+    await finish(f, next.payload, 'completed', { text: 'Not yet.' })
+    expect(f.store.activation(next.activation.id)).toMatchObject({ status: 'done' })
+    expect(alive(pid)).toBe(true)
+    expect(f.store.reminder(watcherId)?.fired).toBeNull()
+    // It ends: its end wakes the chat, never the run.
+    writeFileSync(`${pidFile}.go`, '')
+    expect(await woken(watcherId)).toContain('exited with code 0')
     expect(wakeTurn(watcherId)!.lane).toBe('chat')
     expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
     expect(f.store.dispatches(workId).filter((dispatch) => dispatch.kind === 'start' || dispatch.kind === 'continue')).toHaveLength(1)
+  })
+
+  // A bot holding "run commands" whose main thread is narrowed: its run holds only what the narrow keeps, so a narrow
+  // without commands starts no background command either, though the bot-wide grant holds it.
+  it.each([
+    ['narrowed to reading', ['read'], false],
+    ['narrowed to reading and commands', ['read', 'shell'], true]
+  ])('a run %s: may start one only when its turn holds commands', async (_name, tools, starts) => {
+    await allowCommands()
+    const definitions = f.host.definitions
+    const current = definitions.revision(botId, f.store.registry(botId)!.revision!)!
+    f.store.setPublished(botId, definitions.publishRevision({ ...current, main: { ...current.main, narrow: { tools } } }).revision!)
+    const turn = await chat('Research and watch', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Look it up.', key: 'k1' })
+    await finish(f, turn.payload, 'completed', { text: 'On it.' })
+    const work = await start(f, workId)
+    expect(work.prepared.authority.appTools.has('watch_start')).toBe(true)
+    const spawn = vi.spyOn(BotWatchers.prototype, 'start').mockImplementation(() => {})
+    try {
+      const call = () => f.bots.tools.watchers!.start(botId, workId, { command: 'make test', brief: 'Report results.' })
+      if (starts) expect(call()).toMatchObject({ watcherId: expect.any(String) })
+      else expect(call).toThrow("This turn doesn't run commands")
+      expect(spawn).toHaveBeenCalledTimes(starts ? 1 : 0)
+      expect(f.store.waitingReminders(botId)).toHaveLength(starts ? 1 : 0)
+    } finally {
+      spawn.mockRestore()
+    }
   })
 
   it('no count of how many run at once', async () => {

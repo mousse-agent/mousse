@@ -517,7 +517,8 @@ describe('restarts', () => {
 
 describe('a scheduled run that asks (#1360)', () => {
   it('waits for the answer holding no slot, skips its next occurrence meanwhile, and a tap carries it on in its own thread', async () => {
-    const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Check new listings.', occurrenceAt: new Date(f.clock.now).toISOString() })
+    const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Check new listings.' }, 'owner')
+    const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Check new listings.', occurrenceAt: new Date(f.clock.now).toISOString() })
     if (scheduled.kind !== 'started') throw new Error(scheduled.kind)
     await flush()
     const run = await start(f, scheduled.activationId)
@@ -528,11 +529,31 @@ describe('a scheduled run that asks (#1360)', () => {
     const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === scheduled.activationId)!
     // While it waits, the schedule's next occurrence is skipped, not stacked.
     f.clock.now += 60 * 60_000
-    expect(f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Check new listings.', occurrenceAt: new Date(f.clock.now).toISOString() })).toMatchObject({ kind: 'skipped' })
+    expect(f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Check new listings.', occurrenceAt: new Date(f.clock.now).toISOString() })).toEqual({ kind: 'skipped', reason: 'bot_waiting_for_owner' })
     await tap(bubble.question!.questionId, 'Flat B')
     await flush()
     expect(f.store.activation(scheduled.activationId)).toMatchObject({ status: 'running', threadId: run.payload.threadId })
     expect(mainDispatches(scheduled.activationId).at(-1)!.prompt.text).toContain('Flat B')
+  })
+
+  // Its parked run would be cancelled with the schedule (`cancelRemovedScheduleRun`), so a question or a wait set after
+  // the owner removed the schedule could never carry it on: both are refused, and the run ends with its report.
+  it('removed while it runs: it may not ask or wait, nothing is left open, and it ends with its report', async () => {
+    const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Check new listings.' }, 'owner')
+    const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Check new listings.', occurrenceAt: new Date(f.clock.now).toISOString() })
+    if (scheduled.kind !== 'started') throw new Error(scheduled.kind)
+    await flush()
+    const run = await start(f, scheduled.activationId)
+    expect(f.bots.removeSchedule(botId, scheduleId)).toBe(true)
+    expect(f.store.activation(scheduled.activationId)?.status).toBe('running')
+    const asked = await tool('ask_owner', run.prepared, run.payload.threadId, FLATS)
+    expect(asked.text).toContain('removed this schedule')
+    await expect(f.bots.tools.wakes!.wait!(botId, scheduled.activationId, { brief: 'Check again.', dueAt: new Date(f.clock.now + 60 * 60_000).toISOString() })).rejects.toThrow('removed this schedule')
+    expect(f.store.countQuestions(botId, {})).toBe(0)
+    expect(f.store.workWait(scheduled.activationId)).toBeUndefined()
+    await endTurn(run)
+    expect(f.store.activation(scheduled.activationId)?.status).toBe('done')
+    expect(chatOf(f, botId).filter((message) => message.question)).toEqual([])
   })
 
   it('a run started by hand is not offered it, and is told to ask in its report', async () => {

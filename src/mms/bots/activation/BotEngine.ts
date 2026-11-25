@@ -423,6 +423,8 @@ export const BOT_MCP_UNAVAILABLE_TEXT = 'Your owner has no MCP servers set up in
 export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
 /** What Allow on an MCP ask whose server has not listed its tools yet answers (the card's Allow is off meanwhile). */
 const MCP_ASK_LOADING_TEXT = 'Its tools are still loading: Allow turns on once they are listed.'
+/** `ask_owner` or `work_wait` from a scheduled run whose schedule the owner removed while it ran (`scheduleGone`). */
+const SCHEDULE_GONE_TEXT = "Your owner removed this schedule while you ran, so nothing waits on this run: it can't ask or wait. End it with your report."
 
 /** An MCP ask that lists no tools: its server has not answered, and Allow would grant nothing the owner has seen. */
 function waitsForTools(permission: BotAskRequest): boolean {
@@ -1811,7 +1813,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const parked = this.store.laneActivations(botId, 'run', ['blocked']).find(row => same(row) && workWaits(row))
       const previous = parked ?? this.store.laneActivations(botId, 'run', ['running', 'waiting_grant']).find(same)
       // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
-      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id)?.card_json != null ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
+      // A run parked on a time or an event carries on by itself: it waits for nothing of the owner's.
+      if (previous) { skip = parked && workWaitRule(parked) === WORK_WAIT_RULES.waiting ? 'previous_run_waiting' : previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id)?.card_json != null ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
       const inserted = this.store.insertActivationOnce({
         id,
         botId,
@@ -4439,6 +4442,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Outside a turn (before it started) no reply follows: the card is posted now.
     if (raised.kind === 'wall' && !this.live.has(activationId)) this.announceWall(raised.escalation)
     return raised.kind === 'wall' ? { kind: 'escalated', permission: this.chat.card(raised.escalation).title } : { kind: 'ended' }
+  }
+
+  /**
+   * A scheduled run whose schedule is gone (the owner removed it while the run went on), unless the run ended its own
+   * schedule (`completed`). It may not park on a question or a wait: a removed schedule's parked run is cancelled
+   * (`cancelRemovedScheduleRun`), so no answer or wait could carry it on.
+   */
+  private scheduleGone(row: BotActivationRow): boolean {
+    if (row.trigger.kind !== 'schedule' || row.trigger.completed) return false
+    return this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId)) || Boolean(this.host.schedules && !this.host.schedules.get(row.botId, row.trigger.scheduleId))
   }
 
   private removedExecutingSchedule(row: BotActivationRow): boolean {
@@ -8663,6 +8676,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const card = given.card ? checkedCard(this.filesFolder(botId), given.card) : undefined
     if (card && 'problem' in card) return { asked: false, text: `card: ${card.problem}` }
     const spec: BotQuestionSpec = { ...given, ...(card ? { card } : {}) }
+    // A run whose schedule the owner removed while it ran would park on a question nobody's answer could carry on.
+    if (this.scheduleGone(row)) return { asked: false, text: SCHEDULE_GONE_TEXT }
     if (row.lane === 'run') return this.askFromWork(row, spec, follow)
     // A chat turn's question never waits (the turn ends, and the answer is the owner's next message): `wait` is work's.
     delete spec.wait
@@ -9085,6 +9100,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (setting?.trigger.kind === 'manual') throw new BotEngineError('invalid_params', 'A run started by hand ends with its report. Start work from chat to wait for a time or event.')
       // Work and a scheduled run park (`BOT_TURN_KINDS`); a schedule's later occurrences are skipped while it waits.
       if (!setting || !turnRightsOf(setting).workWait) throw new BotEngineError('invalid_params', "This run can't wait. End it with your report.")
+      if (this.scheduleGone(setting)) throw new BotEngineError('invalid_params', SCHEDULE_GONE_TEXT)
       if (setting.status !== 'running') throw new BotEngineError('invalid_params', 'Only running work can wait.')
       if (this.store.workWait(from)?.status === 'waiting') throw new BotEngineError('invalid_params', 'This work already has a wait. End your turn; it carries on by itself.')
       if (!input.event && Date.parse(input.dueAt ?? '') < this.now() + 5 * 60_000) throw new BotEngineError('invalid_params', 'Wait at least 5 minutes; pick a later time.')
@@ -9178,6 +9194,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > MAX_WATCHER_MINUTES) throw new BotEngineError('invalid_params', `minutes is its time limit: 1 to ${MAX_WATCHER_MINUTES}.`)
     if (this.store.registry(botId)?.pausedReason) throw new BotEngineError('bot_paused', 'You are paused, so nothing runs in the background.')
     if (!this.holdsCommands(botId)) throw new BotEngineError('permission_required', 'Background commands need "run commands". Ask for it with escalate (the tool shell), then start it again.')
+    // The turn itself must hold it too: a run whose thread is narrowed to no commands starts none in the background.
+    if (!this.turnHoldsCommands(setting)) throw new BotEngineError('permission_required', "This turn doesn't run commands, so it can't start a background command. Say in your reply what you would run.")
     // From a run it is detached: its end wakes the chat (a wake on a `watcher` event), never the run that started it.
     const chain = this.wakeAllowance(botId, from, false, true)
     const title = (input.title?.trim() || summarise(command)).slice(0, MAX_WORK_TITLE_CHARS)
@@ -9253,6 +9271,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (permission) manifest = withoutPermission(manifest, permission)
     }
     return manifest.tools.includes('shell')
+  }
+
+  /**
+   * Whether the turn `row` holds "run commands" now: what its revision holds inside the active grant (with its "Allow this
+   * time" overlays, less what is switched off), narrowed by its thread (`main.narrow`), as its turn is compiled. The chat
+   * is offered no command tool itself (`frontDeskManifest`), so this reads the permission before that, not the tools.
+   * `watch_start` checks it besides `holdsCommands`: a command started outlives the turn, so it also needs the bot-wide one.
+   */
+  private turnHoldsCommands(row: BotActivationRow): boolean {
+    const grant = this.store.activeGrant(row.botId)
+    const definition = this.host.definitions.revision(row.botId, row.revision)
+    if (!grant || !definition) return false
+    return narrowManifest(this.effectiveManifest(row, definition.permissions, grant.manifest), definition.main.narrow).tools.includes('shell')
   }
 
   /** Background commands of bots that no longer hold "run commands" stop (a Remove, a switch). */

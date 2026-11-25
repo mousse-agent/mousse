@@ -454,6 +454,29 @@ it.each([false, true])('C11 an answered run never asks for another answer, previ
   expect(item.active).toMatchObject({ state: 'running', detail: 'Carrying on with your answer' })
 })
 
+// A scheduled run parked as work parks (#1360): a question waits for the owner, a wait carries on by itself; only a
+// run stopped at a wall reads as a missing permission.
+it.each([
+  ['question', false, { state: 'running', detail: 'Waiting for your answer' }],
+  ['question', true, { state: 'running', detail: 'Later runs skipped: the bot is waiting for your answer' }],
+  ['question_answered', false, { state: 'running', detail: 'Carrying on with your answer' }],
+  ['waiting', false, { state: 'waiting', detail: 'Until its time or event' }],
+  ['wait_ready', false, { state: 'running', detail: 'Carrying on' }]
+] as const)('C11 a scheduled run parked on %s (later runs skipped: %s) shows as live', (endReason, skipped, active) => {
+  const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [{ id: 'parked', status: 'blocked', endReason, at: PAST }] }
+  const scheduled = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' }, ...(skipped ? { botSkip: { at: PAST, reason: 'bot_waiting_for_owner' as const } } : {}) })
+  const item = buildAutomationIndex(sources({ jobs: [scheduled], bots: { b: pip } })).items[0]!
+  expect(item.active).toMatchObject(active)
+  expect(item.last).toBeUndefined()
+})
+
+it('C11 a run stopped at a wall reads as a missing permission', () => {
+  const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [{ id: 'wall', status: 'blocked', endReason: 'escalation_expired', at: PAST }] }
+  const scheduled = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+  const item = buildAutomationIndex(sources({ jobs: [scheduled], bots: { b: pip } })).items[0]!
+  expect(item.last).toMatchObject({ state: 'incomplete', detail: 'Stopped at a missing permission' })
+})
+
 it.each(['withdrawn', 'expired'])('C6 a request that was %s does not claim an owner answer', status => {
   const pip: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, runs: [{ id: 'held', status: 'blocked', endReason: `approval_${status}`, at: PAST }] }
   const scheduled = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
