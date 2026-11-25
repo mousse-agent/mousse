@@ -2,6 +2,18 @@
   "version": 1,
   "claims": [
     {
+      "task": "agent-messages-show-sender",
+      "session": "Avarnics-Mac-mini.local-6a8770",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "agent-messages-show-sender",
+      "paths": [
+        "src/renderer/chat/components/agent-elements/user-message.tsx",
+        "src/mms/orchestrator/OrchestratorService.ts"
+      ],
+      "claimedAt": "2026-11-25T18:34:18.437Z",
+      "expiresAt": "2026-11-25T20:34:18.437Z"
+    },
+    {
       "task": "bot-asks-and-questions",
       "session": "Animatrix-949070",
       "machine": "Animatrix",
