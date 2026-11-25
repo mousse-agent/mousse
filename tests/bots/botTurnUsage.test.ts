@@ -3,7 +3,8 @@
  * `bots.db` (`bot_turn_usage`), and About shows one line of it. The rows: what started the turn, its model and context,
  * its usage summed over the runtime's reports, the prompt it last sent, the gap since the bot's previous request, the
  * Mousse tools it was offered, and the plan's usage windows. The last hop (the orchestrator's turn sink feeding
- * `PreparedBotTurn.usage`/`metrics`) is covered at the end, through the real sink.
+ * `PreparedBotTurn.usage`/`metrics`, and the runtime's budget charging `PreparedBotTurn.runtimeCounters`) is covered at
+ * the end, through the real sink.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -143,16 +144,22 @@ it('the real turn sink hands a bot turn its runtime\'s usage and measurements', 
     const adapter = piAdapter(() => 'Done.')
     const original = adapter.startTurn.bind(adapter)
     adapter.startTurn = async (input, sink, ctl, host) => {
-      sink.usage({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0 })
+      // As Pi's engine does before each model request: its budget charges the turn's counts.
+      host.budget?.request()
+      sink.usage({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0, costUsd: 0.002 })
       sink.providerMetrics({ totalResponseTimeMs: 10, context: { input: 120, cacheRead: 3400, cacheWrite: 0, contextWindow: 128_000 } })
       return original(input, sink, ctl, host)
     }
     orch.setHarness(testHarness({ drivers: [{ ...adapterDriver(adapter), botAuthority: () => true }], profileHome: home }))
+    // The runtime's budget charges `runtimeCounters`, so the engine knows the runtime counted its own request; an image
+    // tool charges `authority.counters`.
+    const runtimeCounters = { charge: vi.fn(() => ({ ok: true as const, count: 1 })) }
+    const counters = { charge: vi.fn(() => ({ ok: true as const, count: 1 })) }
     const bot = {
-      activationId: 'chat', dispatchN: 1, prompt: 'Hi', usage, metrics,
+      activationId: 'chat', dispatchN: 1, prompt: 'Hi', usage, metrics, runtimeCounters,
       selection: { instanceId: 'openai', model: 'gpt-replay' },
       policy: { approvals: 'grants', approve: 'host', tools: { allow: [] }, authority: { kind: 'bot', digest: 'd' } },
-      authority: { time: { signal: new AbortController().signal }, appTools: new Set<string>(), check: () => ({ ok: true }) },
+      authority: { time: { signal: new AbortController().signal }, appTools: new Set<string>(), check: () => ({ ok: true }), counters },
       scratch: home, skills: [], history: 'none'
     }
     const engine = new RunEngine({ store: new RunStore(db) })
@@ -160,7 +167,9 @@ it('the real turn sink hands a bot turn its runtime\'s usage and measurements', 
     const sent = await engine.sendWithStart({ kind: 'send', threadId: thread.id, clientRequestId: 'usage', source: 'bot' }, runId => ({ kind: 'bot', runId, threadId: thread.id, activationId: 'chat', dispatchN: 1 }))
     if (sent.status !== 'accepted') throw new Error('run refused')
     await (orch as any).runTurnOnSession(orch.getOrCreateSession(thread.id), { content: 'Hi', mode: 'agent' }, false, true, { bot, runId: sent.runId, source: 'bot' })
-    expect(usage).toHaveBeenCalledWith({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0 })
+    expect(usage).toHaveBeenCalledWith({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0, costUsd: 0.002 })
+    expect(runtimeCounters.charge).toHaveBeenCalledWith('request', undefined)
+    expect(counters.charge).not.toHaveBeenCalled()
     expect(metrics).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({ cacheRead: 3400, contextWindow: 128_000 }) }))
   } finally {
     await new Promise(resolve => setImmediate(resolve))
