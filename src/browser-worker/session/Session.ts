@@ -14,6 +14,7 @@ import {
   type BrowserMouseButton,
   type BrowserObservation,
   type BrowserPageDialog,
+  type BrowserPoint,
   type BrowserPictureHits,
   type BrowserPictureSpot,
   type BrowserSessionRecord,
@@ -99,6 +100,11 @@ function frameUrlKey(value: string): string {
 
 function boundsOverlap(a: FrameBounds, b: FrameBounds): boolean {
   return a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y
+}
+
+/** A target that is only a viewport point (a wheel at a spot): no element stands behind it. */
+function pointTarget(cdpSessionId: string, point: { x: number; y: number }): ActionableTarget {
+  return { cdpSessionId, backendNodeId: 0, objectId: '', point, bounds: { x: point.x, y: point.y, width: 0, height: 0 }, disabled: false, hidden: false, readOnly: false, tag: '', type: '', secret: false }
 }
 
 function originOf(value: string): string | undefined {
@@ -1359,6 +1365,8 @@ export class ManagedSession {
     if (request.generation !== this.generation) fail('stale_generation', 'Action generation is stale')
     if (request.controlLeaseId !== this.controlLeaseId) fail('human_controlled', 'Control lease was replaced')
     if (this.inFlight) fail('not_actionable', 'Another action is already in flight for this session')
+    // A wheel that moves nothing would be reported as done while nothing happened.
+    if (request.action.type === 'scroll' && request.action.deltaX === 0 && request.action.deltaY === 0) fail('invalid_action', 'Scroll needs a non-zero deltaX or deltaY')
     const tab = this.requireTab(request.tabId)
     await this.toFront(tab)
     // A person took the browser over while its tab came forward: the action never ran.
@@ -2731,18 +2739,39 @@ export class ManagedSession {
     if (action.type === 'drag') return { from: await this.resolveOneTarget(request, tab, action.from), to: await this.resolveOneTarget(request, tab, action.to) }
     const target = 'target' in action ? action.target : undefined
     if (!target) return undefined
+    // A wheel goes to a point, whatever lies there: no element is looked up or made ready for it.
+    if (action.type === 'scroll' && target.kind === 'image-point') return pointTarget(tab.cdpSessionId, this.imagePointInViewport(request, tab, target.point))
     return this.resolveOneTarget(request, tab, target)
+  }
+
+  /** Where a point on an observation's screenshot is in the tab's viewport now; refused when that geometry is gone. */
+  private imagePointInViewport(request: BrowserActionRequest, tab: TabState, point: BrowserPoint): BrowserPoint {
+    const observation = this.observations.get(request.observationId)
+    if (!observation || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId || observation.sizeSeq !== this.sizeSeq) fail('stale_observation', 'Image point geometry is stale')
+    if (!observation.screenshot) fail('stale_observation', 'Observation has no screenshot; take a screenshot before using image-point targeting')
+    return mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, point)
+  }
+
+  /** The element at a viewport point of one frame; a point on nothing is not actionable, not a protocol error. */
+  private async nodeAtPoint(sessionId: string, point: { x: number; y: number }, signal: AbortSignal | undefined): Promise<number> {
+    let located: { backendNodeId?: number }
+    try {
+      located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: point.x, y: point.y, includeUserAgentShadowDOM: false }, { sessionId, signal })
+    } catch (error) {
+      // Only the page's answer ("No node found at given location") is the point's fault; a closed pipe or a cancel is not.
+      if (!(error && typeof error === 'object' && 'cdpCode' in error)) throw error
+      fail('not_actionable', 'No actionable DOM target exists at the image point')
+    }
+    if (!located.backendNodeId) fail('not_actionable', 'No actionable DOM target exists at the image point')
+    return located.backendNodeId
   }
 
   private async resolveOneTarget(request: BrowserActionRequest, tab: TabState, target: BrowserTarget): Promise<ActionableTarget> {
     if (target.kind === 'image-point') {
-      const observation = this.observations.get(request.observationId)
-      if (!observation || !observation.screenshot || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId || observation.sizeSeq !== this.sizeSeq) fail('stale_observation', 'Image point geometry is stale')
-      const mapped = mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, target.point)
-      const located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: mapped.x, y: mapped.y, includeUserAgentShadowDOM: false }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
-      if (!located.backendNodeId) fail('not_actionable', 'No DOM target exists at the image point')
+      const mapped = this.imagePointInViewport(request, tab, target.point)
+      const backendNodeId = await this.nodeAtPoint(tab.cdpSessionId, mapped, this.inFlight?.abort.signal)
       const prepared = await prepareActionableTarget(this.requireChrome().cdp, tab.cdpSessionId, {
-        backendNodeId: located.backendNodeId, frameRef: 'frame_' + tab.frameId, cdpSessionId: tab.cdpSessionId, frameId: tab.frameId, fingerprint: 'image-point'
+        backendNodeId, frameRef: 'frame_' + tab.frameId, cdpSessionId: tab.cdpSessionId, frameId: tab.frameId, fingerprint: 'image-point'
       }, this.inFlight?.abort.signal)
       const hit = await this.requireChrome().cdp.send<{ result?: { value?: { ok?: boolean } } }>('Runtime.callFunctionOn', {
         objectId: prepared.objectId,
