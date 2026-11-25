@@ -138,6 +138,7 @@ import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionServi
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
+import { readActions } from '../actions/actionsFile'
 import { releaseSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 import { inThreadSnapshotScopeAsync, snapshotsOffReason } from '../workspace/SnapshotWorkspace'
 import { RedoService } from '../actions/RedoService'
@@ -1404,6 +1405,24 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
     clearCleanupMarker(ctx.mms.threads.lifecycleStore, threadId)
   }
   if ((await manager.verify()).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
+}
+
+/** A checkout switch the thread's workspace no longer allows; the window makes a new thread for the send instead. */
+function worktreeLocked(): DomainRpcError {
+  return new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
+}
+
+/**
+ * Whether the thread's workspace keeps it from switching between a worktree and its project folder: a worktree of its
+ * own, or a project-folder record of a thread that ran there (messages or recorded actions) or has a terminal open in
+ * it. A project-folder record an empty chat got from a branch switch or a file write, or from a terminal now closed
+ * that recorded nothing, holds nothing and is dropped by the switch (`dropUnusedProjectFolder`).
+ */
+function checkoutLocked(ctx: HandlerContext, threadId: string, directory: string, workspace: ThreadWorkspaceMetadata | undefined): boolean {
+  if (!workspace || workspace.prepared || (workspace.lifecycle !== 'ready' && workspace.lifecycle !== 'provisioning')) return false
+  if (!isProjectFolderWorkspace(workspace)) return true
+  if (readLeaseOwner(getExecutionLeasePath(directory))?.source === 'task-terminal') return true
+  return ctx.mms.orchestrator.getMessages(threadId).length > 0 || readActions(directory).length > 0
 }
 
 /** A worktree a retirement or rebuild left without its `.git`, or unfinished, that its reconstruction manifest can bring back. */
@@ -2794,10 +2813,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const directory = ctx.mms.threads.getThreadDir(threadId)
       const thread = await setDraftCheckout(directory, { enabled, picked: pickedCheckout }, async ({ enabled, picked }, latest) => {
         await settledPreparation(directory)
+        // Refused at once, without waiting for the lease a terminal open in the thread holds: the window then makes a
+        // new thread for the send.
+        const shown = ctx.mms.threads.getThread(threadId)
+        if (shown && shown.worktreeEnabled !== enabled && checkoutLocked(ctx, threadId, directory, new ThreadWorkspaceManager(directory).load())) {
+          if (!latest()) return shown
+          throw worktreeLocked()
+        }
         const lease = await waitAcquireExecutionLease(directory, { source: 'draft-checkout-choice' })
         try {
           const manager = new ThreadWorkspaceManager(directory)
-          const workspace = manager.load()
+          let workspace = manager.load()
           const current = ctx.mms.threads.getThread(threadId)!
           if (!latest()) return current
           if (workspace && !workspace.prepared && current.worktreeEnabled === enabled) {
@@ -2805,7 +2831,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             return current
           }
           if (workspace && !workspace.prepared && (workspace.lifecycle === 'ready' || workspace.lifecycle === 'provisioning')) {
-            throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
+            // A project-folder record of a thread that never ran (a terminal, branch switch or file write on the empty
+            // chat made it) holds nothing: it is dropped and the switch goes ahead.
+            if (checkoutLocked(ctx, threadId, directory, workspace) || !await manager.dropUnusedProjectFolder(threadId, lease)) throw worktreeLocked()
+            workspace = manager.load()
           }
           if (enabled && workspace?.prepared) await manager.separateRenamedPreparation(lease)
           if (!latest()) return ctx.mms.threads.getThread(threadId)!

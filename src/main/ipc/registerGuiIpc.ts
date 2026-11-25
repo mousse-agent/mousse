@@ -2698,13 +2698,19 @@ export function registerGuiIpc(
     }
   })
   registerHandler('threads:setWorktreeEnabled', async (_e, threadId: string, enabled: boolean, picked?: boolean) => {
-    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
-      'threads.setWorktreeEnabled',
-      // Another computer does not remember this computer's picks, and its row takes no `picked`.
-      { threadId, enabled, ...(picked === true && !isQualifiedId(threadId) ? { picked: true } : {}) }
-    )
-    broadcastIfRouted([threadId], res)
-    return res.thread
+    try {
+      const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
+        'threads.setWorktreeEnabled',
+        // Another computer does not remember this computer's picks, and its row takes no `picked`.
+        { threadId, enabled, ...(picked === true && !isQualifiedId(threadId) ? { picked: true } : {}) }
+      )
+      broadcastIfRouted([threadId], res)
+      return res.thread
+    } catch (error) {
+      // Answered, not thrown, so the window gets the code: a send then makes a new thread for the checkout it shows.
+      if (error instanceof MmsProtocolError && error.code === 'worktree_locked') return { ok: false, code: error.code, message: error.message }
+      throw error
+    }
   })
   /**
    * Gives a new chat's thread the model and then the permission mode its composer showed, each only while the thread's
