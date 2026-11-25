@@ -210,15 +210,15 @@ export function appletReferenceLine(applet: { title: string; appletId?: string; 
     : `[Applet: ${applet.title}]`
 }
 /**
- * A stored reply as a model reads it: each published applet is one reference line, not its source. The stored text
- * keeps its fences, which recovery and a bot's chat match on. A reply with no published applet is its text unchanged,
- * so an applet that failed to publish keeps its source for the model to fix.
+ * A stored reply as a model reads it: each published applet is one reference line, not its source, and a valid applet
+ * that never published (`appletFencesAsLines`) one line naming it. The stored text keeps its fences, which recovery and
+ * a bot's chat match on. A fence that is not a valid applet stays, for the model to fix.
  */
 export function modelFacingReplyText(message: { content?: unknown; presentationParts?: unknown }): string {
   const parts = Array.isArray(message.presentationParts) ? (message.presentationParts as AppletPresentationPart[]) : undefined
   if (parts?.some((part) => part?.type === 'applet'))
-    return parts.map((part, at) => (part.type === 'applet' ? appletReferenceLine(part.reference) + lineEnd(parts, at) : part.text)).join('')
-  return typeof message.content === 'string' ? message.content : ''
+    return appletFencesAsLines(parts.map((part, at) => (part.type === 'applet' ? appletReferenceLine(part.reference) + lineEnd(parts, at) : part.text)).join(''))
+  return appletFencesAsLines(typeof message.content === 'string' ? message.content : '')
 }
 /** A fence ends its line, so the line standing for it does too, unless it ends the text. */
 const lineEnd = (parts: readonly unknown[], at: number): string => (at < parts.length - 1 ? '\n' : '')
@@ -227,6 +227,7 @@ const lineEnd = (parts: readonly unknown[], at: number): string => (at < parts.l
  * name but not its source (a run's result before or without publication). A fence that is not a valid applet stays.
  */
 export function appletFencesAsLines(text: string): string {
+  if (!text.includes('mousse-applet')) return text
   const parts = extractAppletParts(text, true)
   if (!parts.some((part) => part.type === 'submission')) return text
   return parts

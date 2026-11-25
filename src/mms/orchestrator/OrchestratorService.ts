@@ -15169,9 +15169,11 @@ export class OrchestratorService extends EventEmitter {
     const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string; usageLimitKind?: string }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
-      // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages.
-      const mask = resultText ? this.secretMaskerFor?.(session.threadId) : undefined
-      const kept = mask && resultText ? mask(resultText) : resultText
+      // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages,
+      // with each applet as a line, also one a stopped turn streamed whole but never published.
+      const named = resultText ? appletFencesAsLines(resultText) : resultText
+      const mask = named ? this.secretMaskerFor?.(session.threadId) : undefined
+      const kept = mask && named ? mask(named) : named
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText: kept }))
       // The run's count record goes with it: no later attempt starts from fresh counts.
       this.harness.runSettled?.(engineRunId ?? turnId)

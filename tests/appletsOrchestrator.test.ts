@@ -84,6 +84,12 @@ it('publishes completed native fences in order and reloads source after daemon r
 })
 it('keeps interrupted native responses inert even when the complete fence was streamed', async () => {
   const { main, thread } = await fixture()
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
   vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
     input.onText(fence(source))
     expect(main.orchestrator.abortActiveTurn(thread.id)).toBe(true)
@@ -98,6 +104,8 @@ it('keeps interrupted native responses inert even when the complete fence was st
     messages.every((message) => !message.presentationParts?.some((part) => part.type === 'applet'))
   ).toBe(true)
   expect(main.applets.list(thread.id)).toEqual([])
+  // What a parent or `thread_wait` reads of the stopped run names the applet, not its source.
+  expect(results.at(-1)).toBe('[Applet: Calculator]')
 })
 it('keeps malformed applets as inert source without failing the completed turn', async () => {
   const { main, thread } = await fixture()
@@ -260,6 +268,38 @@ it('gives a parent the line, not the source, of an applet the model wrote as a f
   await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
   const ref = reference(main, thread.id)
   expect(results.at(-1)).toBe(`Before\n[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]\nAfter`)
+})
+
+it('names an applet that failed to publish to other models, without its source', async () => {
+  let transcriptOf: HandoffTranscriptSource | null = null
+  const install = HandoffService.prototype.setTranscriptSource
+  vi.spyOn(HandoffService.prototype, 'setTranscriptSource').mockImplementation(function (this: HandoffService, source) {
+    transcriptOf = source
+    return install.call(this, source)
+  })
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  // A valid applet that revises one this thread never published: publication fails when the reply completes.
+  const stale = { ...source, appletId: 'applet_missing', expectedRevision: 'rev_missing' }
+  main.orchestrator.setHarness(testHarness({ adapters: [piAdapter(() => 'Before\n' + fence(stale) + '\nAfter')], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  expect(main.applets.list(thread.id)).toEqual([])
+  const reply = main.threads.loadThreadData(thread.id).messages.find((message) => message.role === 'assistant')!
+  expect(reply.content).toContain(JSON.stringify(source.js))
+  expect(results.at(-1)).toBe('Before\n[Applet: Calculator]\nAfter')
+  const handedOver = transcriptOf!(thread.id).find((item) => item.role === 'assistant')
+  expect(handedOver?.text).toBe('Before\n[Applet: Calculator]\nAfter')
+  const page = await request(main, 'thread.messages', { threadId: thread.id, index: 0 }) as { messages: Array<{ role: string; content: string }> }
+  const read = page.messages.find((message) => message.role === 'assistant')
+  expect(read?.content).toContain('[Applet: Calculator]')
+  expect(read?.content).not.toContain(source.html)
 })
 
 it('keeps one reply row when a tool-published applet follows a reply that already closed', async () => {

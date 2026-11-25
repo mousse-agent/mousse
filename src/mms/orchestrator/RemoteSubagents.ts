@@ -1,4 +1,4 @@
-import { appletFencesAsLines, modelFacingReplyText } from '../../shared/applets'
+import { modelFacingReplyText } from '../../shared/applets'
 import { ROUTED_AGENT_KEY, ROUTED_DEADLINE_KEY, ROUTED_DEADLINE_SINCE, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { qualifyId } from '../../shared/threadRef'
 import type { ThreadRunsOn } from '../../shared/types'
@@ -88,7 +88,7 @@ function terminalStatus(status: RunStatus): RunTerminalStatus {
 
 /**
  * The final message of a far run: the last assistant message after the run's own user message, with each applet it
- * published as one line (`modelFacingReplyText`), as a local run's result has it.
+ * published, or failed to publish, as one line (`modelFacingReplyText`), as a local run's result has it.
  */
 export function finalAssistantText(messages: unknown, userMessageId: string | null | undefined): string | undefined {
   if (!Array.isArray(messages)) return undefined
@@ -96,8 +96,7 @@ export function finalAssistantText(messages: unknown, userMessageId: string | nu
   for (let at = messages.length - 1; at > from; at -= 1) {
     const message: unknown = messages[at]
     if (!isRecord(message) || message.role !== 'assistant') continue
-    // An applet that failed to publish stays a fence in its reply: it is named too, never passed on as source.
-    const text = appletFencesAsLines(modelFacingReplyText(message))
+    const text = modelFacingReplyText(message)
     if (text.trim()) return text
   }
   return undefined

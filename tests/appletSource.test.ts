@@ -3,7 +3,7 @@
  * an agent never needs the source in its context. The tools' path through a turn is in tests/run/appToolApplets.test.ts.
  */
 import { describe, expect, it } from 'vitest'
-import { APPLET_READ_MAX_CHARS, applyAppletEdits, appletRevisionFromEdits, readAppletSource } from '../src/mms/applets/appletSource'
+import { APPLET_READ_MAX_BYTES, APPLET_READ_MAX_CHARS, APPLET_SEARCH_MAX_CHARS, applyAppletEdits, appletRevisionFromEdits, readAppletSource } from '../src/mms/applets/appletSource'
 import type { AppletSubmission } from '../src/shared/applets'
 
 const base: AppletSubmission = {
@@ -85,10 +85,35 @@ describe('readAppletSource', () => {
     expect(found.matches.reduce((chars, match) => chars + match.text.length, 0)).toBeLessThanOrEqual(APPLET_READ_MAX_CHARS)
   })
 
+  it('keeps the matches of wide characters within a page in bytes', () => {
+    const wide = { ...base, js: Array.from({ length: 20 }, (_, i) => '界'.repeat(4_000) + `needle${i}`).join('\n') }
+    const found = readAppletSource(wide, { part: 'js', search: 'needle' }) as { matches: Array<{ text: string }>; totalMatches: number; truncated?: boolean }
+    expect(found.matches.reduce((bytes, match) => bytes + Buffer.byteLength(match.text), 0)).toBeLessThanOrEqual(APPLET_READ_MAX_BYTES)
+    expect(found).toMatchObject({ totalMatches: 20, truncated: true })
+  })
+
   it('never returns more than the most a page may hold', () => {
     const big = { ...base, js: 'x'.repeat(APPLET_READ_MAX_CHARS * 2) }
     expect((readAppletSource(big, { part: 'js', limit: APPLET_READ_MAX_CHARS }).text as string).length).toBe(APPLET_READ_MAX_CHARS)
     expect(() => readAppletSource(big, { part: 'js', limit: APPLET_READ_MAX_CHARS + 1 })).toThrow(/limit must be between 1 and/)
+  })
+
+  it('pages wide characters by bytes too, never splitting one, and the pages join back into the part', () => {
+    const wide = { ...base, js: '界'.repeat(APPLET_READ_MAX_CHARS) + '😀😀' }
+    let offset = 0
+    let joined = ''
+    for (;;) {
+      const page = readAppletSource(wide, { part: 'js', offset, limit: APPLET_READ_MAX_CHARS }) as { text: string; nextOffset?: number }
+      expect(Buffer.byteLength(page.text)).toBeLessThanOrEqual(APPLET_READ_MAX_BYTES)
+      joined += page.text
+      if (page.nextOffset === undefined) break
+      offset = page.nextOffset
+    }
+    expect(joined).toBe(wide.js)
+    // A page of one character holds the whole emoji, and the next page starts after it.
+    const emoji = { ...base, js: '😀b' }
+    expect(readAppletSource(emoji, { part: 'js', limit: 1 })).toMatchObject({ text: '😀', nextOffset: 2 })
+    expect(readAppletSource(emoji, { part: 'js', offset: 2, limit: 1 })).toMatchObject({ text: 'b' })
   })
 
   it.each([
@@ -96,7 +121,8 @@ describe('readAppletSource', () => {
     ['an offset past the end', { part: 'js', offset: 6 }, /offset 6 is past the end of js, which has 6 characters/],
     ['a negative offset', { part: 'js', offset: -1 }, /offset must be a whole number/],
     ['a search with no part', { search: 'teal' }, /Name a part/],
-    ['an empty search', { part: 'css', search: '' }, /search must be non-empty/]
+    ['an empty search', { part: 'css', search: '' }, /search must be non-empty/],
+    ['a search longer than an edit needs', { part: 'css', search: 'x'.repeat(APPLET_SEARCH_MAX_CHARS + 1) }, /search must be at most/]
   ])('refuses %s', (_name, args, reason) => {
     expect(() => readAppletSource(base, args)).toThrow(reason)
   })

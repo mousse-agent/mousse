@@ -37,7 +37,7 @@ export const PUBLISH_APPLET_TOOL: Tool = {
 export const READ_APPLET_TOOL: Tool = {
   name: 'read_applet',
   description:
-    'Read a published applet\'s stored source, to revise it with publish_applet edits. Without part: the sizes of its parts. With part: up to limit characters from offset (default 16384, at most 65536), or with search the lines that contain that text. Reads the latest revision this conversation shows, or an earlier one it shows by revisionId.',
+    'Read a published applet\'s stored source, to revise it with publish_applet edits. Without part: the sizes of its parts. With part: up to limit characters from offset (default 16384, at most 65536, and at most 64 KiB), with nextOffset for the next page, or with search the lines that contain that text. Reads the latest revision this conversation shows, or an earlier one it shows by revisionId.',
   parameters: Type.Object({
     appletId: Type.String(),
     revisionId: Type.Optional(Type.String()),

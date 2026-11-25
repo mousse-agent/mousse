@@ -11,12 +11,39 @@ export type AppletPart = (typeof APPLET_PARTS)[number]
 /** Characters `read_applet` returns by default, and at most. */
 export const APPLET_READ_DEFAULT_CHARS = 16 * 1024
 export const APPLET_READ_MAX_CHARS = 64 * 1024
+/** UTF-8 bytes of source one read returns at most, so a page of wide characters (CJK, emoji) is no larger than one of ASCII. */
+export const APPLET_READ_MAX_BYTES = 64 * 1024
 const SEARCH_MAX_MATCHES = 20
 const SEARCH_CONTEXT_LINES = 2
-/** At most this much text per match, so all the matches together stay within a page (`APPLET_READ_MAX_CHARS`). */
+/** At most this much text per match; all the matches together stay within `APPLET_READ_MAX_BYTES`. */
 const SEARCH_EXCERPT_CHARS = 3 * 1024
+/** The longest text a search looks for: enough to find an edit's old_str, and the result repeats it. */
+export const APPLET_SEARCH_MAX_CHARS = 1024
 
 const isPart = (value: unknown): value is AppletPart => (APPLET_PARTS as readonly unknown[]).includes(value)
+
+const isPairAt = (text: string, at: number): boolean =>
+  at + 1 < text.length && (text.charCodeAt(at) & 0xfc00) === 0xd800 && (text.charCodeAt(at + 1) & 0xfc00) === 0xdc00
+
+/**
+ * Where a page from `start` ends: at most `chars` characters and `bytes` UTF-8 bytes, never inside a surrogate pair,
+ * and never empty (a pair at `start` is returned whole even when `chars` is 1).
+ */
+function pageEnd(text: string, start: number, chars: number, bytes: number): number {
+  const last = Math.min(text.length, start + chars)
+  let end = start
+  let used = 0
+  while (end < text.length) {
+    const pair = isPairAt(text, end)
+    const code = text.charCodeAt(end)
+    const size = pair ? 4 : code < 0x80 ? 1 : code < 0x800 ? 2 : 3
+    const next = end + (pair ? 2 : 1)
+    if (end > start && (next > last || used + size > bytes)) break
+    used += size
+    end = next
+  }
+  return end
+}
 
 /** How many times `needle` occurs in `text`, counting no further than two. */
 function occurrences(text: string, needle: string): number {
@@ -76,7 +103,7 @@ const lineCount = (text: string): number => (text ? text.split('\n').length : 0)
 /**
  * One bounded read of a revision's source. With no part: the parts' sizes, to choose what to read. With `search`: the
  * lines of the part that contain it, with line numbers and a little context, to copy an edit's old_str without reading
- * the whole part. Otherwise: `limit` characters from `offset`, with where the next page starts.
+ * the whole part. Otherwise: `limit` characters from `offset` (and at most `APPLET_READ_MAX_BYTES`), with where the next page starts.
  */
 export function readAppletSource(
   source: AppletSubmission,
@@ -95,21 +122,32 @@ export function readAppletSource(
   const text = args.part === 'data' ? (source.data === undefined ? '' : JSON.stringify(source.data, null, 2)) : source[args.part]
   if (args.search !== undefined) {
     if (typeof args.search !== 'string' || !args.search) throw new AppletValidationError('search must be non-empty text.')
+    if (args.search.length > APPLET_SEARCH_MAX_CHARS) throw new AppletValidationError(`search must be at most ${APPLET_SEARCH_MAX_CHARS} characters.`)
     const lines = text.split('\n')
     const matches: Array<{ line: number; column?: number; text: string }> = []
     let total = 0
+    let bytes = 0
+    let full = false
     for (let index = 0; index < lines.length; index += 1) {
       const column = lines[index]!.indexOf(args.search)
       if (column < 0) continue
       total += 1
-      if (matches.length >= SEARCH_MAX_MATCHES) continue
+      if (full || matches.length >= SEARCH_MAX_MATCHES) continue
       const from = Math.max(0, index - SEARCH_CONTEXT_LINES)
       const to = Math.min(lines.length, index + SEARCH_CONTEXT_LINES + 1)
       const context = lines.slice(from, to).join('\n')
       // A minified part can be one long line: a long excerpt is cut around the match, so the match is always in it.
       const hit = lines.slice(from, index).reduce((at, line) => at + line.length + 1, 0) + column
       const start = context.length <= SEARCH_EXCERPT_CHARS ? 0 : Math.max(0, Math.min(hit - SEARCH_EXCERPT_CHARS / 2, context.length - SEARCH_EXCERPT_CHARS))
-      matches.push({ line: index + 1, ...(start ? { column: column + 1 } : {}), text: context.slice(start, start + SEARCH_EXCERPT_CHARS) })
+      const excerpt = context.slice(start, start + SEARCH_EXCERPT_CHARS)
+      // Wide characters make an excerpt up to three times its length in bytes: the matches stop at one page's bytes.
+      const size = Buffer.byteLength(excerpt, 'utf8')
+      if (bytes + size > APPLET_READ_MAX_BYTES) {
+        full = true
+        continue
+      }
+      bytes += size
+      matches.push({ line: index + 1, ...(start ? { column: column + 1 } : {}), text: excerpt })
     }
     return { part: args.part, search: args.search, matches, totalMatches: total, ...(total > matches.length ? { truncated: true } : {}) }
   }
@@ -119,12 +157,7 @@ export function readAppletSource(
   if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > APPLET_READ_MAX_CHARS)
     throw new AppletValidationError(`limit must be between 1 and ${APPLET_READ_MAX_CHARS} characters.`)
   if ((offset as number) > 0 && (offset as number) >= text.length) throw new AppletValidationError(`offset ${offset} is past the end of ${args.part}, which has ${text.length} characters.`)
-  let end = Math.min(text.length, (offset as number) + (limit as number))
-  // Never split a surrogate pair.
-  if (end < text.length) {
-    const code = text.charCodeAt(end - 1)
-    if (end > (offset as number) + 1 && code >= 0xd800 && code <= 0xdbff) end -= 1
-  }
+  const end = pageEnd(text, offset as number, limit as number, APPLET_READ_MAX_BYTES)
   return {
     part: args.part,
     offset,
