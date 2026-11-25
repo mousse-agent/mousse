@@ -176,15 +176,14 @@
   font-weight: 600;
 }
 
-/* The computer a project of another computer is on, beside its name in the sidebar. */
+/* The computer a project of another computer is on, before its New thread in the sidebar. */
 .threads-sidebar-project-computer {
   flex: 0 1 auto;
-  max-width: 45%;
   font-size: 11px;
   font-weight: 400;
 }
 
-/* A project this computer has too, also held by another computer: its icon beside the name. */
+/* A project this computer has too, also held by another computer: its icon before New thread. */
 .threads-sidebar-project-also {
   flex: 0 0 auto;
   margin-left: 4px;
