@@ -467,11 +467,13 @@ export class EngineHelper {
 
   /**
    * Whether the helper implements `feature` (its 1.2 `hello` lists it). A new field or operation is sent only then:
-   * an older helper ignores a field it does not know and would answer as if it had not been sent.
+   * an older helper ignores a field it does not know and would answer as if it had not been sent. `grant-roles` is
+   * read from any helper that lists it (a 1.0 or 1.1 helper lists nothing): without it every grant is `owner`, so
+   * the app lets a device in below Full control only when it is listed.
    */
   has(feature: EngineFeature): boolean {
     const features = this.info.features
-    return this.speaks(2) && Array.isArray(features) && features.includes(feature)
+    return (this.speaks(2) || feature === 'grant-roles') && Array.isArray(features) && features.includes(feature)
   }
 
   /** What the helper implements beyond 1.1, as its `hello` listed it. */

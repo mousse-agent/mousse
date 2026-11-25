@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { Channel } from '../../src/mms/netEngine/session/transport'
 import { newId, type NodeId } from '../../src/shared/net'
 import { accessPreset } from '../../src/shared/net/accessPresets'
-import { Fabric, REAL_HELPER, approveAll, eventually, rowFor, type Computer } from './checks/harness'
+import { Fabric, REAL_HELPER, approveAll, codeOf, eventually, rowFor, type Computer } from './checks/harness'
 
 const limits = vi.hoisted(() => {
   const set = {
@@ -15,7 +15,8 @@ const limits = vi.hoisted(() => {
     MOUSSE_NET_ENGINE_ACCESS_ASK_GAP_MS: '600',
     MOUSSE_NET_ENGINE_ACCESS_PROMPT_GAP_MS: '600',
     MOUSSE_NET_ENGINE_ACCESS_SEEN_MS: '4000',
-    MOUSSE_NET_ENGINE_ACCESS_SEEN_IDS: '8'
+    MOUSSE_NET_ENGINE_ACCESS_SEEN_IDS: '8',
+    MOUSSE_NET_ENGINE_ROLE_RETRY_MS: '400'
   }
   Object.assign(process.env, set)
   return { askMs: 2500, gapMs: 600, seenMs: 4000, seenIds: 8 }
@@ -354,6 +355,32 @@ describe('asking for the other direction of a one-way pairing', () => {
       expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true)
     })
     expect(await accessThere(owner, callerOnOwner)).toMatchObject({ work: false })
+  }, 60_000)
+
+  it.skipIf(REAL_HELPER)('is done only once a grant the other computer held here already takes the level picked', async () => {
+    const owner = await computer(fabric, 'held-owner'),
+      caller = await computer(fabric, 'held-caller')
+    const { ownerOnCaller } = await oneWay(fabric, owner, caller)
+    await eventually(() => expect(device(caller, ownerOnCaller)?.other).toEqual({ offer: 'let' }))
+    // An earlier Allow whose row write was lost: the owner holds a Full control grant here, which the helper answers
+    // as it is.
+    fabric.network.heldAlready(caller.endpoint, owner.endpoint)
+    const roleHere = () => fabric.network.grantsAt(caller.endpoint).find((one) => one.caller === owner.endpoint)?.role
+    // Moving its role fails once: Let says so, and the row shows the level is not applied yet.
+    fabric.network.setRoleFailing.set(caller.endpoint, 1)
+    const error = await caller
+      .dispatch('netEngine.access.let', { node: ownerOnCaller, access: accessPreset('view').fields }, true)
+      .catch((caught: unknown) => caught)
+    expect(codeOf(error)).toBe('role_pending')
+    expect(device(caller, ownerOnCaller)?.accessPending).toBe(true)
+    expect(roleHere()).toBe('owner')
+    // Tried again until it is applied.
+    await eventually(() => {
+      expect(roleHere()).toBe('view')
+      expect(device(caller, ownerOnCaller)?.accessPending).toBeUndefined()
+    }, 10_000)
+    expect(policyOf(caller, ownerOnCaller)).toMatchObject(accessPreset('view').fields)
+    expect(rowFor(caller, owner)?.grant).not.toBe('')
   }, 60_000)
 
   it('saves the level before the grant and writes the row after a stop in between', async () => {

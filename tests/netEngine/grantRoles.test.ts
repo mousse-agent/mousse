@@ -6,6 +6,7 @@
  */
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { NodeId } from '../../src/shared/net'
+import { roleForLevel, type EngineLevel } from '../../src/mms/netEngine/roles'
 import { accessPreset, type AccessPresetId } from '../../src/shared/net/accessPresets'
 import { Fabric, REAL_HELPER, codeOf, connectedBothWays, eventually, rowFor, type Computer } from './checks/harness'
 
@@ -76,11 +77,69 @@ async function pairAt(host: Computer, caller: Computer, level: AccessPresetId): 
   return connectedBothWays(host, caller)
 }
 
-/** `host`'s level table, written directly, as a stop between saving a level and moving the role leaves it. */
+interface Internals {
+  rt: { policy: { set(node: NodeId, change: object): unknown; get(node: NodeId): EngineLevel } }
+  roles: { stop(): void }
+}
+const internals = (on: Computer) => (on.mms.netEngine as unknown as { started: Internals }).started
+
+/** `host`'s level table, written directly, as an older build that made every grant `owner` left it. */
 function writeLevel(host: Computer, node: NodeId, level: AccessPresetId): void {
-  const started = (host.mms.netEngine as unknown as { started: { rt: { policy: { set(node: NodeId, change: object): void } } } })
-    .started
-  started.rt.policy.set(node, accessPreset(level).fields)
+  internals(host).rt.policy.set(node, accessPreset(level).fields)
+}
+
+const WIDTH: Record<string, number> = { view: 1, work: 2, owner: 3 }
+
+/** The grant `caller` holds on `host` is no wider than the role `host`'s saved level for it needs. */
+async function neverWider(host: Computer, caller: Computer, node: NodeId): Promise<void> {
+  const held = await roleOn(host, caller)
+  const level = roleForLevel(internals(host).rt.policy.get(node))
+  expect(WIDTH[held], `${held} held under a level that needs ${level}`).toBeLessThanOrEqual(WIDTH[level]!)
+}
+
+/**
+ * `host`'s window changes `node`'s level to `level`, and the app stops after `writes` of the change's two writes
+ * (the role edit at the helper, the saved level): nothing after that is written, as when it stops there.
+ */
+async function changeStoppingAfter(host: Computer, node: NodeId, level: AccessPresetId, writes: number): Promise<void> {
+  const started = internals(host)
+  const helper = host.mms.netEngine.currentHelper()!
+  const request = helper.request.bind(helper)
+  const policy = started.rt.policy
+  const save = policy.set.bind(policy)
+  let wrote = 0
+  const write = <T>(work: () => T): T => {
+    if (wrote++ < writes) return work()
+    started.roles.stop()
+    throw new Error('stopped')
+  }
+  helper.request = ((op: string, ...rest: unknown[]) =>
+    op === 'grant.set_role'
+      ? write(() => (request as (...args: unknown[]) => unknown)(op, ...rest))
+      : (request as (...args: unknown[]) => unknown)(op, ...rest)) as typeof helper.request
+  policy.set = (target, change) => write(() => save(target, change))
+  try {
+    await setLevel(host, node, level).catch(() => undefined)
+  } finally {
+    helper.request = request
+    policy.set = save
+  }
+}
+
+const HOST = 'roles-b.test'
+
+/** `a` adds `b` over SSH through its window, as Settings does (`b` answers at `HOST`). */
+async function addOverSsh(a: Computer, b: Computer): Promise<void> {
+  const resolved = await a.dispatch('netEngine.ssh.resolve', { target: `me@${HOST}` }, true)
+  const probe = await a.dispatch('netEngine.ssh.probe', { routeId: resolved.routeId, host: HOST }, true)
+  await a.dispatch('netEngine.ssh.trust', { routeId: resolved.routeId, sha256: probe.sha256, host: HOST }, true)
+  await a.dispatch('netEngine.ssh.profiles', { routeId: resolved.routeId, host: HOST, user: 'me' }, true)
+  const selector = b.mms.sshRemote()!.selectorOf(b.mms.netEngine.profileDir)
+  await a.dispatch(
+    'netEngine.ssh.connect',
+    { routeId: resolved.routeId, target: `me@${HOST}`, host: HOST, user: 'me', selector },
+    true
+  )
 }
 
 describe("a grant's role follows the device's level", () => {
@@ -148,20 +207,157 @@ describe("a grant's role follows the device's level", () => {
     }, 30_000)
   }, 120_000)
 
-  it('each start moves a role left behind by its level', async () => {
+  it('a stop at any point of a change leaves the grant no wider than the saved level; the next start makes it follow', async () => {
     const host = await computer(fabric, 'start-host'),
       caller = await computer(fabric, 'start-caller')
     const node = await pairAt(host, caller, 'full')
-    expect(await roleOn(host, caller)).toBe('owner')
-    // The level was saved and the app stopped before the role moved (or an older build made every grant `owner`).
+    for (const [from, to] of [
+      ['full', 'view'],
+      ['view', 'full'],
+      ['work', 'view']
+    ] as const)
+      for (const writes of [0, 1]) {
+        await setLevel(host, node, from)
+        expect(await roleOn(host, caller)).toBe(roleForLevel(accessPreset(from).fields))
+        await changeStoppingAfter(host, node, to, writes)
+        await neverWider(host, caller, node)
+        // The start pass runs straight after the helper's hello, before the service reads as running.
+        await fabric.restartEngine(host)
+        expect(await roleOn(host, caller)).toBe(roleForLevel(internals(host).rt.policy.get(node)))
+      }
+  }, 180_000)
+
+  it('each start moves a role an older build left wider than its level, and keeps trying while that fails', async () => {
+    const host = await computer(fabric, 'old-build-host'),
+      caller = await computer(fabric, 'old-build-caller')
+    const node = await pairAt(host, caller, 'full')
+    // An older build made every grant `owner`, whatever the level.
     writeLevel(host, node, 'view')
-    expect(await roleOn(host, caller)).toBe('owner')
     await fabric.restartEngine(host)
-    await eventually(async () => expect(await roleOn(host, caller)).toBe('view'))
+    expect(await roleOn(host, caller)).toBe('view')
     // And back, after a helper restart alone.
     writeLevel(host, node, 'full')
     await fabric.restartHelper(host)
     await eventually(async () => expect(await roleOn(host, caller)).toBe('owner'))
+    if (REAL_HELPER) return
+    // The start's edit fails: the row shows it, and it is tried again until it is applied.
+    writeLevel(host, node, 'view')
+    fabric.network.setRoleFailing.set(host.endpoint, 1)
+    await fabric.restartEngine(host)
+    expect(await roleOn(host, caller)).toBe('owner')
+    expect(device(host, node)?.accessPending).toBe(true)
+    await eventually(async () => {
+      expect(await roleOn(host, caller)).toBe('view')
+      expect(device(host, node)?.accessPending).toBeUndefined()
+    }, 10_000)
+  }, 120_000)
+
+  it('every narrowing ends what this computer serves the device before the edit, Work to View too', async () => {
+    const host = await computer(fabric, 'serve-host'),
+      caller = await computer(fabric, 'serve-caller')
+    const node = await pairAt(host, caller, 'work')
+    const stop = vi.spyOn(host.mms.netEngine as unknown as { stopServing(node: NodeId): void }, 'stopServing')
+    const helper = host.mms.netEngine.currentHelper()!
+    const request = helper.request.bind(helper)
+    /** How many times serving had stopped when each role edit was sent. */
+    const stoppedAtEdit: number[] = []
+    helper.request = ((op: string, ...rest: unknown[]) => {
+      if (op === 'grant.set_role') stoppedAtEdit.push(stop.mock.calls.length)
+      return (request as (...args: unknown[]) => unknown)(op, ...rest)
+    }) as typeof helper.request
+    try {
+      await setLevel(host, node, 'view')
+      expect(stop.mock.calls).toEqual([[node]])
+      expect(stoppedAtEdit).toEqual([1])
+      // A widening ends nothing.
+      await setLevel(host, node, 'work')
+      expect(stop).toHaveBeenCalledTimes(1)
+      expect(stoppedAtEdit).toEqual([1, 1])
+      // Blocking Full control narrows too.
+      await setLevel(host, node, 'full')
+      expect(stoppedAtEdit).toEqual([1, 1, 1])
+      await host.dispatch('bridge.policy', { node, blocked: true }, true)
+      expect(stop).toHaveBeenCalledTimes(2)
+      expect(stoppedAtEdit).toEqual([1, 1, 1, 2])
+    } finally {
+      helper.request = request
+      stop.mockRestore()
+    }
+  }, 120_000)
+
+  it.skipIf(REAL_HELPER)('joining back is done only once a grant the host held here already takes its level', async () => {
+    const host = await computer(fabric, 'back-host'),
+      caller = await computer(fabric, 'back-caller')
+    // An earlier join's grant, its row lost: the helper answers it as it is, `owner`.
+    fabric.network.heldAlready(caller.endpoint, host.endpoint)
+    const roleThere = () => fabric.network.grantsAt(caller.endpoint).find((one) => one.caller === host.endpoint)?.role
+    fabric.network.setRoleFailing.set(caller.endpoint, 1)
+    let doneAsOwner = false,
+      shownPending = false
+    const watch = setInterval(() => {
+      const row = rowFor(caller, host)
+      if (row?.state === 'connected' && roleThere() === 'owner') doneAsOwner = true
+      if (row && device(caller, row.localId)?.accessPending) shownPending = true
+    }, 2)
+    try {
+      await pairAt(host, caller, 'view')
+      await eventually(() => expect(rowFor(caller, host)?.state).toBe('connected'), 30_000)
+    } finally {
+      clearInterval(watch)
+    }
+    // The level the joiner gave the host (Work on threads, by default), never `owner` while it was done.
+    expect(roleThere()).toBe('work')
+    expect(doneAsOwner).toBe(false)
+    expect(shownPending).toBe(true)
+  }, 120_000)
+
+  it.skipIf(REAL_HELPER)('with no helper running, a change of level is saved and shown not applied until one takes it', async () => {
+    const host = await computer(fabric, 'down-host'),
+      caller = await computer(fabric, 'down-caller')
+    const node = await pairAt(host, caller, 'full')
+    const roleHere = () => fabric.network.grantsAt(host.endpoint).find((one) => one.caller === caller.endpoint)?.role
+    const launch = host.mms.netEngine.launcher!
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    host.mms.netEngine.launcher = async () => {
+      await held
+      return launch()
+    }
+    host.kill()
+    await eventually(() => expect(host.mms.netEngine.currentHelper()).toBeUndefined())
+    const error = await setLevel(host, node, 'view').catch((caught: unknown) => caught)
+    expect(codeOf(error)).toBe('role_pending')
+    expect(internals(host).rt.policy.get(node)).toMatchObject(accessPreset('view').fields)
+    expect(device(host, node)?.accessPending).toBe(true)
+    expect(roleHere()).toBe('owner')
+    host.mms.netEngine.launcher = launch
+    release()
+    await eventually(() => {
+      expect(roleHere()).toBe('view')
+      expect(device(host, node)?.accessPending).toBeUndefined()
+    })
+    host.engine = host.mms.netEngine.currentHelper()!
+  }, 120_000)
+
+  it.skipIf(REAL_HELPER)('a computer added over SSH starts at Full control, and a later change moves its role', async () => {
+    const b = await computer(fabric, 'ssh-b'),
+      a = await computer(fabric, 'ssh-a')
+    await fabric.sshServer(HOST, b)
+    await addOverSsh(a, b)
+    const node = await eventually(() => {
+      const row = rowFor(b, a)
+      expect(row?.state).toBe('connected')
+      return row!.localId
+    }, 30_000)
+    expect(rowFor(b, a)?.source).toBe('ssh')
+    expect(roleForLevel(internals(b).rt.policy.get(node))).toBe('owner')
+    expect(await roleOn(b, a)).toBe('owner')
+    await setLevel(b, node, 'view')
+    expect(await roleOn(b, a)).toBe('view')
+    await setLevel(b, node, 'full')
+    expect(await roleOn(b, a)).toBe('owner')
+    await b.dispatch('bridge.policy', { node, blocked: true }, true)
+    expect(await roleOn(b, a)).not.toBe('owner')
   }, 120_000)
 
   it('the device records the role its host says, after the reconnect each level change causes', async () => {
@@ -235,6 +431,48 @@ describe("a grant's role follows the device's level", () => {
       expect(await roleOn(host, caller)).toBe('view')
       expect(device(host, node)?.accessPending).toBeUndefined()
     }, 10_000)
+  }, 120_000)
+})
+
+/** A helper without roles makes every grant `owner`: right only for Full control. */
+describe.skipIf(REAL_HELPER)('a helper that cannot take roles', () => {
+  const fabric = new Fabric()
+  fabric.network.minor = 2
+  fabric.network.features = ALL_FEATURES.filter((one) => one !== 'grant-roles')
+  afterAll(() => fabric.close(), 60_000)
+
+  it('lets a device in at Full control only; a change below that is saved but not reported applied', async () => {
+    const host = await computer(fabric, 'plain-host'),
+      caller = await computer(fabric, 'plain-caller')
+    const invite = await host.dispatch('netEngine.invite', {}, true)
+    const joining = caller.dispatch('netEngine.join', { ticket: invite.uri, back: false }, true)
+    const approval = await eventually(() => {
+      const first = host.mms.netEngine.status().approvals[0]
+      expect(first).toBeDefined()
+      return first!
+    })
+    const allow = (level: AccessPresetId) =>
+      host.dispatch('netEngine.approve', { request: approval.request, yes: true, access: accessPreset(level).fields }, true)
+    // Allow below Full control is refused, and nothing is granted.
+    expect(codeOf(await allow('work').catch((caught: unknown) => caught))).toBe('role_unsupported')
+    expect(fabric.network.holds(host.endpoint, caller.endpoint)).toBe(false)
+    await allow('full')
+    await joining
+    const node = await eventually(() => {
+      const row = rowFor(host, caller)
+      expect(row?.state).toBe('connected')
+      return row!.localId
+    })
+    expect(device(host, node)?.accessPending).toBeUndefined()
+    // A change below Full control: saved, said not applied, and shown on the row.
+    const error = await setLevel(host, node, 'work').catch((caught: unknown) => caught)
+    expect(codeOf(error)).toBe('role_unsupported')
+    expect((error as Error).message).toBe('Saved, but networking needs an update to apply it.')
+    expect(internals(host).rt.policy.get(node)).toMatchObject(accessPreset('work').fields)
+    expect(device(host, node)?.accessPending).toBe(true)
+    // Full control again is applied: it is what the grant holds.
+    await setLevel(host, node, 'full')
+    expect(device(host, node)?.accessPending).toBeUndefined()
   }, 120_000)
 })
 

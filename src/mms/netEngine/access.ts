@@ -7,6 +7,7 @@ import { helperCode } from './helper/appChannel'
 import type { EngineHelper } from './helper/connections'
 import { engineLimits } from './limits'
 import type { PairingStep } from './pairing'
+import { OWNER_ROLE, roleForLevel } from './roles'
 import type { EngineSessions } from './sessions'
 import type { EngineMessage } from './session/frame'
 import {
@@ -28,8 +29,8 @@ export interface EngineAccessPort {
   applyAccess(node: NodeId, access: AccessPresetFields): void
   /** The role of a grant made now for `node`, at its level here (§8). */
   grantRole(node: NodeId): string
-  /** The row took a grant: its role follows the row's level. */
-  followRole(node: NodeId): void
+  /** The row took a grant: its role follows the row's level. True once it does; false while it is pending. */
+  followRole(node: NodeId): Promise<boolean>
   /** This computer may use `node` now: its call back on the other computer's connection is attached. */
   dial(node: NodeId): Promise<void>
   /**
@@ -508,11 +509,16 @@ export class EngineAccess {
     const helper = this.port.helper()
     if (!helper?.has('grant-add-connected'))
       throw new NetError('bad_request', 'Update networking to do this.', { details: { reason: 'not_supported' } })
+    // A helper without roles makes every grant `owner`: it lets a device in at Full control only.
+    if (!helper.has('grant-roles') && roleForLevel(access) !== OWNER_ROLE)
+      throw new NetError('bad_request', 'Update networking to let it in below Full control.', {
+        details: { reason: 'role_unsupported' }
+      })
     const conn = Number(sessions.client(node).connection.id)
     if (!Number.isSafeInteger(conn)) throw new NetError('peer_offline', 'Not connected right now.')
     this.port.applyAccess(node, access)
-    // The grant takes the role of the level just saved; a helper without roles makes every grant `owner`.
-    const role = helper.has('grant-roles') ? this.port.grantRole(node) : 'owner'
+    // The grant takes the role of the level just saved.
+    const role = helper.has('grant-roles') ? this.port.grantRole(node) : OWNER_ROLE
     const fields = { conn, name: grantName(row.name, `Computer ${row.endpoint.slice(0, 8)}`), role }
     let answer: Record<string, unknown>
     try {
@@ -538,8 +544,12 @@ export class EngineAccess {
     this.port.checkpoint('let-in')
     const grant = String(answer.grant)
     peers.advance(node, ['connected'], { grant, ways: null })
-    // A grant the peer held here already (an earlier Allow whose row write was lost) keeps its role until now.
-    this.port.followRole(node)
     this.port.changed()
+    // A grant the peer held here already (an earlier Allow whose row write was lost) comes back with its own role:
+    // Allow is done only once that role follows the level picked.
+    if (!(await this.port.followRole(node)))
+      throw new NetError('peer_offline', "Let in, but networking hasn't applied its access yet. Retrying.", {
+        details: { reason: 'role_pending' }
+      })
   }
 }

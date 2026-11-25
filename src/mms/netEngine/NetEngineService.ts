@@ -25,7 +25,7 @@ import {
   type NetEngineStatus,
   type NetEngineWayReadiness
 } from '../../shared/netEngine/local'
-import type { AccessPresetFields } from '../../shared/net/accessPresets'
+import { accessPreset, type AccessPresetFields } from '../../shared/net/accessPresets'
 import {
   ownerRoute,
   parseRelayDestination,
@@ -73,7 +73,7 @@ import { EnginePlus } from './plus'
 import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
 import { EngineAccess } from './access'
-import { DEFAULT_LEVEL, EngineRoles, roleForLevel } from './roles'
+import { DEFAULT_LEVEL, EngineRoles, levelAfter, roleForLevel, ROLES_UNSUPPORTED } from './roles'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
@@ -964,6 +964,9 @@ export class NetEngineService implements EngineDirectoryPort {
           ssh: { requestId: request.requestId, issuedAt: request.issuedAt },
           pairedAt: Date.now()
         })
+        // A computer that added this one over SSH starts at Full control (its grant is `owner`); a later change of
+        // its level moves its role like any other row's. Saved before the grant, so the role is never the wider.
+        started.rt.policy.set(row.localId, accessPreset('full').fields)
         this.helper?.claim(request.joiner)
         this.changed()
         return row.localId
@@ -1699,7 +1702,7 @@ export class NetEngineService implements EngineDirectoryPort {
           })
       },
       grantRole,
-      followRole: (node) => void roles.follow(node),
+      followRole: (node) => roles.follow(node),
       changed: () => this.changed(),
       crashAt: (step) => !!this.pairingCrash?.(step),
       sshRequest: (receipt) => this.sshHost?.requests.get(receipt)?.state,
@@ -1737,7 +1740,7 @@ export class NetEngineService implements EngineDirectoryPort {
         rt.policy.set(node, fields)
       },
       grantRole: (node) => grantRole(node),
-      followRole: (node) => void roles.follow(node),
+      followRole: (node) => roles.follow(node),
       // Over the other computer's own connection: this computer holds no address of it.
       dial: async (node) => {
         const row = peers.serving(node)
@@ -1979,18 +1982,27 @@ export class NetEngineService implements EngineDirectoryPort {
 
   /**
    * `bridge.policy` for an engine pairing: what it may do here, kept in the same table as v1 devices'. The level is
-   * saved first and is the truth; the grant's role then follows it (a narrowing stops serving the device first). A
-   * role the helper did not take is an error here and stays on the row until it is applied.
+   * the truth and the grant's role follows it, ordered so a stop in between can only leave the role narrower
+   * (`EngineRoles.change`). A role not applied (no helper, one without roles, an edit that failed) is an error here
+   * and stays on the row until it is applied.
    */
   async setPolicy(node: NodeId, change: NodePolicyChange): Promise<{ policy: BridgeNodePolicy }> {
     const started = this.require()
     if (!started.peers.serving(node)) throw new NetError('bad_request', 'Unknown device.')
-    const policy = policyView(started.rt.policy.set(node, change))
-    if (!(await started.roles.follow(node)))
-      throw new NetError('peer_offline', "Saved, but networking hasn't applied it yet. Retrying.", {
-        details: { reason: 'role_pending' }
-      })
-    return { policy }
+    let saved: NodePolicy | undefined
+    const next = levelAfter(started.rt.policy.get(node), change)
+    const applied = await started.roles.change(node, next, () => {
+      saved = started.rt.policy.set(node, change)
+    })
+    if (!applied)
+      throw started.roles.reason(node) === ROLES_UNSUPPORTED
+        ? new NetError('peer_offline', 'Saved, but networking needs an update to apply it.', {
+            details: { reason: 'role_unsupported' }
+          })
+        : new NetError('peer_offline', "Saved, but networking hasn't applied it yet. Retrying.", {
+            details: { reason: 'role_pending' }
+          })
+    return { policy: policyView(saved!) }
   }
 
   /** Saves a pairing (the end of the ceremony in later slices; tests pair directly). */
@@ -2048,6 +2060,10 @@ export class NetEngineService implements EngineDirectoryPort {
     })
     const told = this.selfName()
     await helper.hello()
+    // Straight after the hello, before the helper reads as running: every grant's role follows its device's level
+    // (a role an older build made `owner` under a lower level, or a write that failed). One not applied stays
+    // pending on its row and is tried again until it is.
+    if (this.helper === helper) await started.roles.followAll().catch(() => undefined)
     this.plus.attach(helper)
     this.toldName = told
     this.changed()
@@ -2057,9 +2073,6 @@ export class NetEngineService implements EngineDirectoryPort {
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) {
       if (engineControl('route-leak')) await this.openLeak(helper)
-      // Every grant's role follows its device's level: a stop between a level change and its role, or a grant an
-      // older build made `owner` under a lower level, is repaired now.
-      void started.roles.followAll().catch(() => undefined)
       void started.pairing.recover().catch(() => undefined)
       this.recoverSsh()
     }
@@ -2102,7 +2115,7 @@ export class NetEngineService implements EngineDirectoryPort {
   }
 
   /**
-   * Before its grant loses `owner` (§8.3): what this computer runs for the device ends (its calls, subscriptions,
+   * Before its grant narrows (§8.3): what this computer runs for the device ends (its calls, subscriptions,
    * private streams and terminals), as at a revocation. Its connections stay: the helper's role edit closes them,
    * and the device connects again under the new role.
    */

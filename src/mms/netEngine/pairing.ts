@@ -15,6 +15,7 @@ import type { EngineCaller } from '../net/contracts'
 import { helperCode } from './helper/appChannel'
 import type { EngineHelper } from './helper/connections'
 import { engineControl, engineLimits } from './limits'
+import { OWNER_ROLE } from './roles'
 import { approvedHints, pairbackRoutes, privateRoute, splitPairback } from './routes'
 import type { EngineSessions } from './sessions'
 import {
@@ -71,8 +72,8 @@ export interface PairingPort {
    * known yet takes the default level).
    */
   grantRole?(node: NodeId | undefined, access?: AccessPresetFields): string
-  /** A row took a grant: its role follows the row's level (`EngineRoles.follow`). */
-  followRole?(node: NodeId): void
+  /** A row took a grant: its role follows the row's level (`EngineRoles.follow`). True once it does. */
+  followRole?(node: NodeId): Promise<boolean>
   changed(): void
   /** A test stops this computer at `step` when this answers true. */
   crashAt?(step: PairingStep): boolean
@@ -256,7 +257,9 @@ export class EnginePairing {
       })
     // The role is fixed in the invitation (§8.1): for a link, at the level picked with it, since it has no Allow; in
     // person, at the default level until the Allow names its own.
-    const role = this.roleOf(undefined, kind === 'link' ? access : undefined)
+    // A helper without roles makes an in-person invitation without one: its Allow refuses a level below Full control.
+    const role =
+      kind === 'link' || this.helper().has('grant-roles') ? this.roleOf(undefined, kind === 'link' ? access : undefined) : undefined
     const wayFields = { ...(way ? { way } : {}), ...(role ? { role } : {}) }
     const ways = (answer: Record<string, unknown>): { ways?: NetEngineWay[] } => {
       const listed = Array.isArray(answer.ways) ? answer.ways.filter(isNetEngineWay) : []
@@ -317,6 +320,9 @@ export class EnginePairing {
     if (approval && yes) this.approvedNames.set(approval.invitation, approval.name)
     const known =
       approval?.identity && yes ? this.port.peers.byEndpoint(approval.identity) : undefined
+    // The grant takes the role of the level picked (a computer known here keeps its own, unless Allow named one);
+    // read before the level is saved, so a helper that cannot take it refuses with nothing changed.
+    const role = yes ? this.roleOf(known?.localId, access) : undefined
     if (approval && yes && access && this.port.applyAccess) {
       const node = known?.localId ?? this.port.peers.pendingAccess(approval.invitation)
       try {
@@ -330,8 +336,6 @@ export class EnginePairing {
         throw error
       }
     }
-    // The grant takes the role of the level just saved (a computer known here keeps its own, unless Allow named one).
-    const role = yes ? this.roleOf(known?.localId, access) : undefined
     try {
       await this.helper().request('approval.answer', { request, yes, ...(role ? { role } : {}) })
     } finally {
@@ -490,13 +494,18 @@ export class EnginePairing {
         this.alive()
         // A removal that started meanwhile waits for this step, then revokes the grant: nothing is written here.
         if (!peers.advance(node, ['joined'], { grant, state: 'granted' })) return
-        // A grant the host held here already keeps its own role: it follows the row's level now.
-        this.port.followRole?.(node)
         this.port.changed()
         continue
       }
       if (row.state === 'granted') {
         this.at('granted')
+        // A grant the host held here already comes back with its own role: the ceremony goes on only once that role
+        // follows the row's level (pending on the row until then, and this step is tried again).
+        if (this.port.followRole && !(await this.port.followRole(node)))
+          throw new NetError('peer_offline', "Networking hasn't applied its access yet.", {
+            details: { reason: 'role_pending' }
+          })
+        this.alive()
         await this.waitOnline(node, engineLimits().pairbackDeadlineMs, () => this.dial(row))
         this.alive()
         // Its LAN routes, and only the ticked ones of the rest (§1.3).
@@ -841,7 +850,7 @@ export class EnginePairing {
         reserved ? invitation : undefined
       )
       this.helper().claim(identity)
-      this.port.followRole?.(added.localId)
+      void this.port.followRole?.(added.localId)
       this.port.changed()
     } else this.owe(identity, grant, name, invitation)
     if (shown) {
@@ -879,7 +888,7 @@ export class EnginePairing {
           : {},
         reserved ? receipt : undefined
       )
-      if (letIn) this.port.followRole?.(existing.localId)
+      if (letIn) void this.port.followRole?.(existing.localId)
       return
     }
     // The row takes the id reserved with the owner's level in the same write: a stop before it leaves the
@@ -898,13 +907,22 @@ export class EnginePairing {
       receipt
     )
     this.helper().claim(identity)
-    this.port.followRole?.(row.localId)
+    void this.port.followRole?.(row.localId)
     this.port.changed()
   }
 
-  /** The role a grant made now takes, when the helper takes roles (`grant-roles`); undefined otherwise. */
+  /**
+   * The role a grant made now takes, when the helper takes roles (`grant-roles`). A helper without them makes every
+   * grant `owner`: it lets a device in at Full control only, and below that this refuses.
+   */
   private roleOf(node: NodeId | undefined, access?: AccessPresetFields): string | undefined {
-    return this.helper().has('grant-roles') ? this.port.grantRole?.(node, access) : undefined
+    const role = this.port.grantRole?.(node, access)
+    if (this.helper().has('grant-roles')) return role
+    if (role !== undefined && role !== OWNER_ROLE)
+      throw new NetError('bad_request', 'Update networking to let it in below Full control.', {
+        details: { reason: 'role_unsupported' }
+      })
+    return undefined
   }
 
   /**

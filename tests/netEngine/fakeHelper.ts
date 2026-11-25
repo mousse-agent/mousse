@@ -175,9 +175,10 @@ export class FakeNetwork {
   minor = 0
   /**
    * What its helpers list in a 1.2 `hello` (`minor` 2): only then do they answer `routes.available`, `join.check`,
-   * `join.probe`, `grant.revoke_local` and `invite.create {way}`, each under its feature.
+   * `join.probe`, `grant.revoke_local` and `invite.create {way}`, each under its feature. `grant-roles` is listed and
+   * answered at any minor, as the helper this app ships with takes roles; a test of a helper without roles drops it.
    */
-  features: string[] = []
+  features: string[] = ['grant-roles']
   /** Each identity's `routes.available` answer; unset: LAN ready with its routes, the other ways off. */
   readonly ways = new Map<string, Array<Record<string, unknown>>>()
   /** How long a `join.probe` takes before it answers (a cancel answers it at once). */
@@ -309,6 +310,18 @@ export class FakeNetwork {
     held.set(peer, given)
     if (role && role !== 'owner') this.roles.set(String(given), { role, revision: 1 })
     return { grant: given, already: false }
+  }
+
+  /**
+   * `caller` holds an `owner` grant at `host` already, written with no peer record (an Allow whose row write was
+   * lost, or an older build's grant); answers it.
+   */
+  heldAlready(host: string, caller: string): number {
+    let held = this.grants.get(host)
+    if (!held) this.grants.set(host, (held = new Map()))
+    const given = this.nextGrant++
+    held.set(caller, given)
+    return given
   }
 
   /** Whether `caller` holds a live grant at `host`. */
@@ -697,7 +710,7 @@ export class FakeHelper {
   private readonly probes = new Map<string, () => void>()
   /** It speaks 1.2 and lists `feature` in its hello. */
   private lists(feature: string): boolean {
-    return this.network.minor >= 2 && this.network.features.includes(feature)
+    return (this.network.minor >= 2 || feature === 'grant-roles') && this.network.features.includes(feature)
   }
   /** What the app said in `hello`. */
   hello?: { name?: string; profile?: string }
@@ -1239,7 +1252,11 @@ export class FakeHelper {
                   ...(reach.tunnels.length ? { ws_port: (port ?? 47000) + 1 } : {})
                 }
               : {}),
-            ...(minor >= 2 ? { features: [...this.network.features] } : {})
+            ...(minor >= 2
+              ? { features: [...this.network.features] }
+              : this.lists('grant-roles')
+                ? { features: ['grant-roles'] }
+                : {})
           })
         }
         case 'routes.available': {
