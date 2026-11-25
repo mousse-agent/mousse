@@ -25,7 +25,7 @@ import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
-import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
+import type { BotBrowserHost, PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import { QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_END_TURN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, QUESTIONS_ENOUGH_TEXT, questionGoneText } from '../../src/shared/bots/personal/questions'
@@ -585,5 +585,25 @@ describe('where it is never offered', () => {
     expect(consult.authority.appTools.has('ask_owner')).toBe(false)
     expect(consult.authority.appTools.has('question_answer')).toBe(false)
     void asked.catch(() => undefined)
+  })
+})
+
+describe("the bot's browser", () => {
+  it('is let go of for its owner while the work waits on its question, and as usual once the work ends', async () => {
+    const ended: Array<Parameters<BotBrowserHost['activationEnded']>[0]> = []
+    f.host.browser = { turn: () => undefined, activationEnded: (input) => { ended.push(input) } }
+    const { workId, work, questionId } = await workThatAsks()
+    await endTurn(work)
+    // It waits for its owner, who may check the page or take it over: the browser stays open longer.
+    expect(ended.filter((input) => input.activationId === workId)).toEqual([{ botId, activationId: workId, waitingForOwner: true }])
+    await tap(questionId, 'Flat B')
+    await flush()
+    const resumed = await start(f, workId, mainDispatches(workId).at(-1)!.n)
+    await finish(f, resumed.payload, 'completed', { text: 'I booked a viewing of Flat B for Saturday.' })
+    expect(f.store.activation(workId)?.status).toBe('done')
+    // Done: no owner to wait for, so the ordinary wait.
+    const last = ended.filter((input) => input.activationId === workId).at(-1)
+    expect(last).toMatchObject({ botId, activationId: workId })
+    expect(last!.waitingForOwner).toBeFalsy()
   })
 })
