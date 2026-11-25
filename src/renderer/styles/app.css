@@ -633,17 +633,24 @@ html.platform-darwin .titlebar-left {
     max-width: 12ch;
   }
 
+  /* Tabs cut their names shorter before the strip has to scroll, down to an icon and its close button, so the add
+     button stays in view. */
   .main-view-tab {
-    gap: 0;
-    padding: 6px 9px;
+    flex-shrink: 1;
+    min-width: 56px;
+  }
+
+  .main-view-tab-select {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .main-view-tab-close {
+    flex-shrink: 0;
   }
 }
 
 @container main-area (max-width: 360px) {
-  .main-view-tab {
-    padding: 6px 7px;
-  }
-
   .main-view-tabs {
     gap: 1px;
   }
