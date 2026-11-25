@@ -5,6 +5,7 @@ import {
   type ComputerUseSetupRequestView,
   type ComputerUseStatus
 } from '../../shared/computerUse'
+import type { MousseSettingsUpdate } from '../../shared/settings'
 import type { ChatMessage } from '../../shared/types'
 import { isQualifiedId } from '../../shared/threadRef'
 import { X } from '../lib/icons'
@@ -56,7 +57,9 @@ function useSetupClient(): SetupClient | null {
       dismiss: async (threadId, requestId) => { await transport.request('computerUse.setupRequest.dismiss', { threadId, requestId }) },
       status: (refresh) => transport.request<ComputerUseStatus>('computerUse.status', refresh ? { refresh: true } : {}),
       install: () => transport.request<ComputerUseStatus>('computerUse.install', {}),
-      enable: async () => { await window.mousse.settings.set({ agentAccess: { computerUse: true } }) }
+      // Only the switch: the service merges a partial agentAccess (validators.ts, SettingsStore's deepMerge), so another
+      // window's change to the rest of it is never written back from a copy read earlier.
+      enable: async () => { await window.mousse.settings.set({ agentAccess: { computerUse: true } } as MousseSettingsUpdate) }
     }
   }, [])
 }
