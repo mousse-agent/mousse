@@ -6,7 +6,7 @@ import { dataFrame } from '../../../shared/bots/personal/dataFrames'
 import { pageChangePath, writePageChange, removePageChange } from '../pageChangeFiles'
 import { PageChecks, pageSetting, type PageSetting } from '../pageChecks'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
-import { BOT_RELAY_OWNER_ONLY_TEXT, turnRefusals, turnRights, type BotTurnRights } from './turnKinds'
+import { BOT_RELAY_OWNER_ONLY_TEXT, BOT_TURN_KINDS, turnRefusals, turnRights, type BotTurnRights } from './turnKinds'
 import { fastNotice, noticeClass, unattendedChatTurn, type NoticeClass } from './unattended'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
@@ -10815,14 +10815,15 @@ export function memoryLaneOf(row: ActivationStart): BotLane {
 /**
  * Whether `row` is work its owner asked for in the chat (`BotAuthority.ownerRequested`): a work run the bot's own chat
  * turn started, that turn one its owner's message or tapped answer started, and not one another bot's message led to.
- * A schedule, a reminder's work (its `from` is the reminder's id), a run started by hand, or an activation that can't
- * be read is not.
+ * A schedule, a reminder's work (its `from` is the reminder's id), a run started by hand, a run whose stored start
+ * reads as `unknown`, or an activation that can't be read is not.
  */
 export function ownerRequestedWork(
-  row: Pick<BotActivationRow, 'botId' | 'lane' | 'trigger'>,
+  row: Pick<BotActivationRow, 'botId' | 'lane' | 'trigger'> & Partial<Pick<BotActivationRow, 'idempotencyKey' | 'provenance'>>,
   activation: (id: string) => Pick<BotActivationRow, 'botId' | 'lane' | 'idempotencyKey' | 'trigger'> | undefined
 ): boolean {
-  if (row.lane !== 'run' || row.trigger.kind !== 'work') return false
+  // Work, by the turn-kind table: a run whose stored start this build doesn't know reads as `unknown` and asks nobody.
+  if (turnRightsOf(row) !== BOT_TURN_KINDS.work || row.trigger.kind !== 'work') return false
   let from: Pick<BotActivationRow, 'botId' | 'lane' | 'idempotencyKey' | 'trigger'> | undefined
   try {
     from = activation(row.trigger.from)
