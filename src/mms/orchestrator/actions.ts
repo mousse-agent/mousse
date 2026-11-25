@@ -1,6 +1,7 @@
 import type { ChatMode, OrchestratorAction } from '../../shared/types'
 import { allowsOrchestrationActions, filterActionsForMode } from '../../shared/chatMode'
 import { modeRegistry as defaultModeRegistry } from '../modes/ModeRegistry'
+import { appletFenceSpans } from '../../shared/applets'
 
 /**
  * Orchestration actions in an assistant reply: the ```mousse-actions fences the orchestrator
@@ -37,10 +38,18 @@ export function stripActionBlocks(response: string): string {
   const blocks = extractMousseActionBlocks(response)
   if (blocks.length === 0) return response.trim()
 
+  // A block that overlaps an applet fence stays: taking it out could take the fence's opening, or leave a line that
+  // closes the fence early, and the rest of the applet's source would read as text.
+  const applets = appletFenceSpans(response)
   let result = ''
   let cursor = 0
   for (const block of blocks) {
     result += response.slice(cursor, block.start)
+    if (applets.some((applet) => block.start < applet.end && block.end > applet.start)) {
+      result += response.slice(block.start, block.end)
+      cursor = block.end
+      continue
+    }
     try {
       const parsed = JSON.parse(block.json)
       if (!hasActionPayload(parsed)) {

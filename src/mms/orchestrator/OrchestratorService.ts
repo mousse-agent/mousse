@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, appendStagedApplets, appletReferenceLine, modelFacingReplyText, publishedApplets, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appendStagedApplets, appletReferenceLine, modelFacingReplyText, publishedApplets, redactAppletFences, redactAppletTail, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -1741,8 +1741,7 @@ export class OrchestratorService extends EventEmitter {
       terminal = true
       // As a turn's result: each applet fence a line naming it (`redactAppletFences`), never its source, read with the
       // rows before it when it is the turn's last row.
-      const whole = record.allText()
-      const named = resultText ? redactAppletFences(whole.endsWith(resultText) ? whole : resultText, [], whole.endsWith(resultText) ? whole.length - resultText.length : 0) : resultText
+      const named = resultText ? redactAppletTail(record.allText(), resultText) : resultText
       const mask = named ? this.secretMaskerFor?.(threadId) : undefined
       this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && named ? mask(named) : named }))
       this.harness.runSettled?.(runId)
@@ -16516,7 +16515,8 @@ export class OrchestratorService extends EventEmitter {
       const replies = this.transcript.closedReplies()
       const last = this.transcript.openAssistantContent() === undefined ? replies.at(-1) : undefined
       // The result is read with the turn's rows before it, when it is only the open row: a fence an earlier row opened is cut.
-      const turnRows = [...replies.map((reply) => stripActionBlocks(reply.content)), stripActionBlocks(this.transcript.openAssistantContent() ?? '')].filter(Boolean).join('\n')
+      // The rows are joined as they streamed, nothing trimmed or put between them, so no line closes a fence that did not.
+      const turnRows = [...replies.map((reply) => reply.content), this.transcript.openAssistantContent() ?? ''].join('')
       const unshown = unshownReplyText(partial, (last ? replies.slice(0, -1) : replies).map((reply) => stripActionBlocks(reply.content)))
       if (last && (!unshown || stripActionBlocks(last.content).trim() === unshown.trim())) {
         this.updateStreamingAssistantMessage(last.id, last.content, false, undefined, true)
@@ -16546,7 +16546,7 @@ export class OrchestratorService extends EventEmitter {
       const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
       const response: OrchestratorResponse = { message: stoppedReplyText(opts?.bot ? unshown : partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
-      const stoppedResult = partial && turnRows.endsWith(partial) ? redactAppletFences(turnRows, [], turnRows.length - partial.length) : partial
+      const stoppedResult = partial && redactAppletTail(turnRows, partial)
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, stoppedResult)
       try {
         // A turn cut off by the service stopping saves where it ended and nothing more: it does not wait for its
@@ -16635,9 +16635,13 @@ export class OrchestratorService extends EventEmitter {
         // The text the model wrote again, with the last row's published applets named by their reference lines.
         if (finalMessage.presentationParts) {
           const published = publishedApplets(finalMessage.presentationParts)
-          // A staged applet that failed to publish is still named, by title.
-          const unpublished = stagedApplets.filter((source) => !published.some((reference) => reference.title === source.title))
-          resultText = [redactAppletFences(replyOnlyText, published), ...unpublished.map((source) => appletReferenceLine({ title: source.title }))].filter(Boolean).join('\n\n')
+          // The staged fences come last, so their publications are the last references: from the end, each staged applet
+          // the next reference names published, and any other is named by title. The rest are the model's own fences.
+          let modelOwn = published.length
+          const staged = [...stagedApplets].reverse().map((source) =>
+            modelOwn > 0 && published[modelOwn - 1]!.title.trim() === source.title.trim() ? appletReferenceLine(published[--modelOwn]!) : appletReferenceLine({ title: source.title })
+          ).reverse()
+          resultText = [redactAppletFences(replyOnlyText, published.slice(0, modelOwn)), ...staged].filter(Boolean).join('\n\n')
         }
       }
     }

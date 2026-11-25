@@ -10,9 +10,12 @@ import {
   appendStagedApplets,
   modelFacingReplyText,
   redactAppletFences,
+  redactAppletTail,
   validateAppletSubmission
 } from '../src/shared/applets'
 import { AppletStore, exportAppletHtml } from '../src/mms/applets/AppletStore'
+import { DefinitionTurnRecord } from '../src/mms/agentDefinitions/definitionTurnRecord'
+import { stripActionBlocks } from '../src/mms/orchestrator/actions'
 import {
   publishAppletPresentation,
   recoverAppletPresentation
@@ -398,6 +401,28 @@ describe('applet source kept from a model', () => {
     expect(redactAppletFences(turn, [], turn.indexOf('Done.'))).toBe('Done.')
   })
 
+  it('reads a last row with the rows before it as they streamed, so no row closes a fence early', () => {
+    // A definition's rows, a tool call between each: the indented middle row closes nothing, trimmed or not.
+    const record = new DefinitionTurnRecord()
+    const rows = ['Draft:\n~~~mousse-applet\n', '   ~~~', '{"js":"' + CANARY + '"}\n~~~']
+    rows.forEach((row, at) => {
+      record.text({ phase: 'start', content: row, contentIndex: 0 })
+      if (at < rows.length - 1) record.tool({ phase: 'start', callId: `c${at}`, kind: 'mcp_tool_call', title: 'Read', summary: '', details: [] })
+    })
+    expect(redactAppletTail(record.allText(), record.finalText())).toBe('[Applet]')
+    expect(redactAppletTail('Draft:\n', 'Done.')).toBe('Done.')
+  })
+
+  it('names a published applet on the fence that has all its parts, not an earlier one with its title', () => {
+    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Calculator', description: 'd' }
+    expect(redactAppletFences(fence({ title: 'Calculator' }) + fence(source), [reference])).toBe('[Applet: Calculator]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\n')
+  })
+
+  it('leaves an action block inside an applet fence, so the fence is still cut whole', () => {
+    const reply = '~~~mousse-applet\n~~~```mousse-actions\n{"type":"message","content":"ok"}\n```\n{"js":"' + CANARY + '"}\n~~~'
+    expect(stripActionBlocks(reply)).toBe(reply)
+    expect(redactAppletFences(stripActionBlocks(reply))).toBe('[Applet]')
+  })
   it('scans a long run of tildes once', () => {
     expect(redactAppletFences('mousse-applet\n' + '~'.repeat(1_000_000) + 'x')).toHaveLength(1_000_015)
   })

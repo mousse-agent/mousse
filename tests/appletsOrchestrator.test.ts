@@ -107,6 +107,29 @@ it('keeps interrupted native responses inert even when the complete fence was st
   // What a parent or `thread_wait` reads of the stopped run names the applet, not its source.
   expect(results.at(-1)).toBe('[Applet: Calculator]')
 })
+it('names a staged applet the cap refused, also when one of the reply\'s own applets has its title', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const own = ['Calculator', 'Table', 'Map'].map((title) => fence({ ...source, title })).join('\n')
+  const adapter = piAdapter(() => own + '\nDone.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!({ ...source, js: 'window.staged = true' })
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  expect(main.applets.list(thread.id)).toHaveLength(3)
+  expect(results.at(-1)).toMatch(/^\[Applet: Calculator \(appletId [^)]+\)\]\n\[Applet: Table \(appletId [^)]+\)\]\n\[Applet: Map \(appletId [^)]+\)\]\nDone\.\n\n\[Applet: Calculator\]$/)
+})
+
 it('cuts a fence an earlier row opened from what a stopped run hands back', async () => {
   const { main, thread } = await fixture()
   main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
