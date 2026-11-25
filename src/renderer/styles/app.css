@@ -617,20 +617,19 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
-/* A browser tab names its page (its title, else its host), cut short with an ellipsis, even where other tabs show
-   only their icons. */
+/* A browser tab names its page (its title, else its host), cut short with an ellipsis. */
 .main-view-tab.is-browser .main-view-tab-label {
   max-width: 22ch;
 }
 
+/* A narrow panel (the side pane opens at 440px) keeps every tab's name, cut short; only a terminal's folder goes. */
 @container main-area (max-width: 520px) {
-  .main-view-tab-label,
   .main-view-tab-detail {
     display: none;
   }
 
+  .main-view-tab-label,
   .main-view-tab.is-browser .main-view-tab-label {
-    display: block;
     max-width: 12ch;
   }
 
