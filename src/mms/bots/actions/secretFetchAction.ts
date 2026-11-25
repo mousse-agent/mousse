@@ -9,6 +9,8 @@ import {
 export interface SecretFetchActionInput {
   botId: string
   activationId: string
+  /** The activation's lane: a read from the chat is the chat's. Absent: `run`. */
+  lane?: 'chat' | 'run'
   callKey: string
   secret: string
   service: string
@@ -64,11 +66,12 @@ export async function secretFetchAction(
     const id = randomUUID(),
       args = mask(JSON.stringify(historyArgs))
     store.run(
-      `INSERT INTO bot_actions(id,call_key,bot_id,activation_id,lane,kind,target_json,args_json,args_digest,binding_json,status,created_at,answered_at) VALUES(?,?,?,?,'run','secret_fetch',?,?,?,?,'approved',?,?)`,
+      `INSERT INTO bot_actions(id,call_key,bot_id,activation_id,lane,kind,target_json,args_json,args_digest,binding_json,status,created_at,answered_at) VALUES(?,?,?,?,?,'secret_fetch',?,?,?,?,'approved',?,?)`,
       id,
       callKey,
       botId,
       activationId,
+      input.lane ?? 'run',
       mask(JSON.stringify({ service: input.service })),
       args,
       createHash('sha256').update(args).digest('hex'),

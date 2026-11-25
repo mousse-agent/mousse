@@ -70,9 +70,10 @@ describe('every phase states what the owner allows now', () => {
     expect(line(text, 'Search the web')).toMatch(/: yes$/)
     expect(line(text, 'Run commands')).toMatch(/: no$/)
     expect(line(text, 'Use the browser')).toMatch(/: no$/)
-    // The front desk is told its work has the web, though the chat is not offered it.
+    // The chat is told what its work has, and makes a quick web call itself with Mousse's web tools, never the runtime's.
     expect(text).toContain('hand jobs that need them to work_start')
-    expect(first.prepared.policy.tools!.allow).not.toContain('web_fetch')
+    expect(first.prepared.authority.appTools.has('web_fetch')).toBe(true)
+    expect(first.prepared.authority.tools.has('web_fetch')).toBe(false)
 
     const started = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Vacuums', brief: 'Compare vacuums.', key: 'k1' })
     await finish(f, first.payload, 'completed', { text: 'On it.' })
@@ -174,7 +175,7 @@ describe('the stated permissions match the tools a run is given', () => {
     // The servers it holds tools of, by name; the chat is told they are its work's.
     const chat = botAllowedText({ shell: false, browser: false, threads: false, web: true, automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
     expect(chat).toContain("- Your owner's MCP servers: GitHub, Notes")
-    expect(chat).toContain('In the chat, the web, the browser, commands and MCP tools are for your work: hand jobs that need them to work_start.')
+    expect(chat).toContain('In the chat, the browser, commands and apps on this computer are for your work: hand jobs that need them to work_start. The web and MCP tools you may use here for a quick call.')
   })
 
   it('a locked Claude Code turn with no sandbox is told commands are allowed but not available, and is offered no Bash', async () => {
@@ -287,8 +288,8 @@ it('keeps service-read guidance out of subagents and consults where the tool is 
   }
 })
 
-it('keeps service-read catalogue guidance specific to work even when the chat reads it', () => {
+it('says in the catalogue where a bound key is read: in the chat for a quick read, or in work', () => {
   expect(botCatalogueGroup('secrets')!.guidance).toContain(
-    "use secret_fetch with the key's name in your work"
+    "use secret_fetch with the key's name, in the chat for a quick read or in your work"
   )
 })

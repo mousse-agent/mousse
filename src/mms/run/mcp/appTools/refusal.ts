@@ -41,6 +41,16 @@ export const REFUSAL_CODES = [
   'unknown_tool',
   /** The call was cancelled before it ran. */
   'cancelled',
+  /**
+   * A bot's chat may not finish this call itself: it ran out of the chat's time for quick calls and was stopped cleanly
+   * (a call known to only read). `fix` names the tool that does it instead (`work_start`).
+   */
+  'work_required',
+  /**
+   * The call may have done something and it can't be told whether it did: it was sent, and its time ran out before it
+   * answered. Never repeat it blindly; `fix` names where to check or carry on (`work_start` for a bot's chat).
+   */
+  'uncertain',
   /** The tool ran and failed, or refused for a reason no other code names. */
   'failed'
 ] as const
@@ -83,6 +93,8 @@ const DEFAULT_RETRY: Readonly<Record<RefusalCode, RefusalRetry>> = {
   invalid_arguments: 'after_change',
   unknown_tool: 'after_change',
   cancelled: 'later',
+  work_required: 'never',
+  uncertain: 'never',
   failed: 'after_change'
 }
 

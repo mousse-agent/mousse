@@ -1,13 +1,13 @@
 import { getDefaultSettings } from '../../src/shared/settings'
 /**
  * A bot uses its owner's MCP tools (docs/bots.md, "Use your MCP tools"): every server set up now is its work's without
- * asking, a chat turn and a consult have none, and nothing is asked for one; About switches MCP off as a whole or one
+ * asking, the chat too (as quick calls), a consult has none, and nothing is asked for one; About switches MCP off as a whole or one
  * server at a time, which refuses a running turn's next call and leaves the server out of later turns; a server or tool
  * that is not here is refused with no card; a server removed from Mousse stops at once.
  * The engine runs over a real `bots.db`; the owner's servers are a real `BotMcp` over a fake catalogue and connection.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BOT_ASK_HELD_NEXT_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_HELD_NEXT_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
@@ -102,7 +102,7 @@ function approveOld(mcp: BotManifest['mcp']): string {
 }
 
 describe('every server set up now, without asking', () => {
-  it('work is offered every server\'s tools with nothing granted; a chat turn none; asking makes no card', async () => {
+  it('work is offered every server\'s tools with nothing granted; and the chat too, within its budgets; asking makes no card', async () => {
     expect(f.store.activeGrant(botId)!.manifest.mcp).toEqual([])
     const work = await run('r1')
     expect(offered(work.prepared)).toEqual(['GitHub__create_issue', 'GitHub__list_issues', 'Notes__read_note'])
@@ -111,12 +111,12 @@ describe('every server set up now, without asking', () => {
     expect(work.prepared.authority.escalate!({ permission: { mcp: { server: 'GitHub' } } as never, reason: 'x' })).toMatch(/^The owner already allowed this/)
     expect(work.prepared.instructions).toContain("- Your owner's MCP servers: GitHub, Notes")
     await finish(f, work.payload, 'completed', { text: 'Done.' })
-    // The chat is offered none of them: it hands the job to work.
+    // The chat is offered them too, for a quick call within its budgets.
     const talk = await chat('What are my open issues?', 'm1')
-    expect(talk.prepared.authority.mcpTools).toBeUndefined()
-    expect(talk.prepared.authority.mcp.size).toBe(0)
-    expect(talk.prepared.authority.check({ kind: 'mcp', server: 'srv-github', tool: 'list_issues', args: {} })).toEqual({ ok: false, refused: { text: BOT_WORK_HAS_TEXT, askId: '' } })
-    expect(talk.prepared.authority.escalate!({ permission: { mcp: { server: 'GitHub' } } as never, reason: 'Again.' })).toBe(BOT_WORK_HAS_TEXT)
+    expect(offered(talk.prepared)).toEqual(['GitHub__create_issue', 'GitHub__list_issues', 'Notes__read_note'])
+    expect(talk.prepared.authority.quickCalls).toBeDefined()
+    expect(talk.prepared.authority.check({ kind: 'mcp', server: 'srv-github', tool: 'list_issues', args: {} })).toEqual({ ok: true })
+    expect(talk.prepared.authority.escalate!({ permission: { mcp: { server: 'GitHub' } } as never, reason: 'Again.' })).toMatch(/^The owner already allowed this/)
     expect(talk.prepared.instructions).toContain("- Your owner's MCP servers: GitHub, Notes")
     expect(cards()).toEqual([])
     expect(f.store.openAsks(botId)).toEqual([])

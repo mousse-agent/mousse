@@ -78,7 +78,8 @@ export class RelayHandler {
   list(credential: CredentialRecord): RelayListedTool[] {
     if (!credential.relay || this.host.readOnlyThread?.(credential.threadId)) return []
     const bot = this.host.botOf?.(credential)
-    if (bot) return (bot.mcpTools ?? []).map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
+    // A bot's chat on a runtime with `use_tool` reaches them through its catalogue: its listed tools never change with them.
+    if (bot) return bot.lane === 'chat' && bot.catalogue === 'use_tool' ? [] : (bot.mcpTools ?? []).map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
     return this.host.catalog
       .listing(this.host.projectPathFor(credential.threadId))
       .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))

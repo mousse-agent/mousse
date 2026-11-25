@@ -52,17 +52,21 @@ function entry(groupId: unknown, ctx: ToolCallContext, registry: () => ToolRegis
     lines.push('', `Your owner allows "use the computer", but computer use isn't set up on this computer yet (Settings → Computer use on, with Cua Driver installed), so computer_tools and computer_use aren't yours on this turn. ${request ? 'Call computer_use_request once with why you need it: your owner gets a setup card, and the tools are yours from your next turn. Don\'t wait for it.' : 'Say in your report that computer use needs setting up on this computer.'}`)
     if (!request) return lines.join('\n')
   }
-  if (!held.length) {
+  // The owner's MCP tools this turn holds: a chat reaches them only here, so its listed tools never change with them.
+  const mcp = group.id === 'mcp' ? bot?.mcpTools ?? [] : []
+  if (!held.length && !mcp.length) {
     lines.push('', 'None of these tools are yours on this turn. Where the group needs a permission, ask for it with escalate; otherwise this kind of turn does not use them.')
     return lines.join('\n')
   }
   if (bot?.catalogue === 'use_tool') {
     lines.push('', `Call these with ${BOT_USE_TOOL}: {"tool": "<name>", "arguments": {...}}. Each runs exactly as if you called it directly.`)
     for (const tool of held) lines.push('', `## ${tool.name}`, tool.description, `Arguments: ${JSON.stringify(tool.inputSchema)}`)
+    // An MCP tool by the name `use_tool` runs it under (`ToolRegistry.dispatch`), its server's words framed as such.
+    for (const tool of mcp) lines.push('', `## ${tool.providerName}`, tool.description, `Arguments: ${JSON.stringify(tool.inputSchema)}`)
   } else {
     // Claude Code: every tool is listed, loaded on demand by its own tool search.
-    const names = held.map((tool) => `mcp__mousse__${tool.name}`)
-    lines.push('', `Load them with ToolSearch ("select:${names.join(',')}"), then call them by name: ${held.map((tool) => tool.name).join(', ')}.`)
+    const names = [...held.map((tool) => `mcp__mousse__${tool.name}`), ...mcp.map((tool) => `mcp__mousse-relay__${tool.name}`)]
+    lines.push('', `Load them with ToolSearch ("select:${names.join(',')}"), then call them by name: ${[...held, ...mcp].map((tool) => tool.name).join(', ')}.`)
   }
   if (missing.length) lines.push('', `Not yours on this turn: ${missing.join(', ')}.`)
   return lines.join('\n')

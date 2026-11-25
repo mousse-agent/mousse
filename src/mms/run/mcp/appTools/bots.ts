@@ -192,7 +192,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_start',
-    description: 'Start work that takes more than a moment, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. You do it beside this chat, and when you finish, your report reaches the owner by itself, as a reply to their message. A quick lookup can start beside a long job: each piece of work runs at once. While you work on it you see your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
+    description: 'Start work that takes more than a moment, so you stay free to talk: the browser, running commands, research, writing a document, several steps, or a call that ran out of time here. You do it beside this chat, and when you finish, your report reaches the owner by itself, as a reply to their message. A quick lookup can start beside a long job: each piece of work runs at once. While you work on it you see your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
       brief: Type.String({ description: 'The whole task, standing on its own.' }),

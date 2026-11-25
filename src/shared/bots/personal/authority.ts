@@ -2,7 +2,7 @@ import type { CounterScope } from '../../harness/counters'
 import type { SpendScope } from '../../harness/spend'
 import type { NeutralTool } from '../../harness/tools'
 import type { PermissionMode } from '../../permissionMode'
-import type { BotModelPick, BotWorkModelName } from './definition'
+import type { BotLane, BotModelPick, BotWorkModelName } from './definition'
 
 /**
  * The contracts of a personal bot's authority (PR 6 §2 and §4). A bot activation's runs are held to
@@ -133,6 +133,28 @@ export interface BotFileReadResult {
 }
 
 /**
+ * The foreground calls of a bot's chat turn that may take a while: the web, a bound service's read and the owner's MCP
+ * tools (docs/bots.md, "Quick calls in the chat"). Each runs under a hard deadline of its own and within the turn's
+ * total; its output is bounded, and a result that comes after its deadline is dropped. A call known to only read is
+ * stopped at its deadline, or as soon as the owner writes, and says to hand the job to work. Any other call is never
+ * stopped by the owner's message: it ends by itself within its deadline, and when the deadline cuts it after it was
+ * sent, it is `uncertain`, never retried blindly.
+ */
+export interface BotQuickCalls {
+  run<T extends { text: string; isError?: boolean }>(input: {
+    /** The tool's name, for what the bot is told. */
+    tool: string
+    /** Known to only read: `web_search`, `web_fetch`, `secret_fetch`, an MCP tool `mcpReadOnly` says is. */
+    readOnly: boolean
+    /** The call's own stop (an explicit Stop, the turn's end). */
+    signal: AbortSignal
+    call(signal: AbortSignal): Promise<T>
+  }): Promise<T | { text: string; isError: true; callState?: 'uncertain' }>
+  /** An MCP tool is known to only read: its server says so (`readOnlyHint: true`) and its stored level is not asks first. */
+  mcpReadOnly(tool: BotMcpTool): boolean
+}
+
+/**
  * A bot activation's authority over one turn, registered with the turn's app tools (never in the
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
  */
@@ -154,6 +176,10 @@ export interface BotAuthority {
 
   activationId: string
   role: BotThreadRole
+  /** The activation's lane: `chat` for the bot's chat (its consults included), `run` for its work and scheduled runs. */
+  lane?: BotLane
+  /** A chat turn's own: its foreground calls that may take a while run within its budgets. Absent: no such limits. */
+  quickCalls?: BotQuickCalls
   /**
    * Set on a chat turn of the bot's own (lane, turn kind and compiled grant digest, as one key): its runtime may run it on a
    * process kept warm between the chat's turns, reused only while this key and every launch input stay the same. Every call
@@ -170,8 +196,9 @@ export interface BotAuthority {
   /** Granted MCP tools, as `<server id>::<tool name>`. */
   mcp: ReadonlySet<`${string}::${string}`>
   /**
-   * The granted MCP tools this turn is offered, on servers set up now (none in a chat turn: they are work's). Read when
-   * the turn starts; every call is checked again against `mcp` and the server as it is then.
+   * The granted MCP tools this turn is offered, on servers set up now. Read when the turn starts; every call is checked
+   * again against `mcp` and the server as it is then. A chat turn on a runtime with `use_tool` is not listed them: it
+   * reaches them through its catalogue (`tool_catalogue`, `use_tool`).
    */
   mcpTools?: readonly BotMcpTool[]
   /** Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. */

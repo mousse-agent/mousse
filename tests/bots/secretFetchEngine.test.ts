@@ -5,7 +5,7 @@ import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySi
 import { botFixture, createBot, start, type BotFixture } from './botFixture'
 let f: BotFixture
 afterEach(() => f?.close())
-it('supplies the ledger only for work, and service reads never become held calls', async () => {
+it("supplies the ledger to work and the chat's own turns, and service reads never become held calls", async () => {
   f = botFixture()
   f.host.instructions = botInstructions
   const activity = createBotActivitySink({ emit: () => {} })
@@ -13,7 +13,7 @@ it('supplies the ledger only for work, and service reads never become held calls
   const { botId } = await createBot(f, { name: 'Reader', reply: 'Hello.' })
   await f.bots.service.chatSend({ botId, text: 'Read models', clientRequestId: 'chat' })
   const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
-  expect((await start(f, chat.id)).prepared.authority.secretFetch).toBeUndefined()
+  expect((await start(f, chat.id)).prepared.authority.secretFetch).toBeTypeOf('function')
   // A durable work activation, as the chat's work tool creates it.
   const work = await f.bots.tools.work.start(botId, chat.id, {
     title: 'Models',
@@ -76,12 +76,6 @@ it('withholds the service ledger from a subagent of work', async () => {
   await parent.prepared.authority.subagents!.start({ title: 'Look', brief: 'Read models' })
   const dispatch = f.store.dispatches(workId).find((row) => row.kind === 'subagent')!
   expect((await start(f, workId, dispatch.n)).prepared.authority.secretFetch).toBeUndefined()
-})
-it('checks the run lane independently of the work trigger', async () => {
-  const { workId } = await newWork()
-  // Pin the lane guard even for an inconsistent persisted row; a work trigger alone grants nothing.
-  f.store.run("UPDATE bot_activations SET lane = 'chat', provenance = NULL WHERE id = ?", workId)
-  expect((await start(f, workId)).prepared.authority.secretFetch).toBeUndefined()
 })
 it('supplies the ledger and its instruction to a scheduled run', async () => {
   f = botFixture()

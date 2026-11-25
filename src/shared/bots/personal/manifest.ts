@@ -53,10 +53,18 @@ export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagen
 export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser', 'computer', 'threads']
 
 /**
- * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
- * commands, using the computer), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
+ * What a chat turn never does itself, though the grant may hold it, with the browser (docs/bots.md, "Quick calls in the
+ * chat"): running commands keeps the runtime's own sandbox and time in work, and the browser and the computer never
+ * collide with work that uses them, so the chat hands them to work and stays free to talk. Work runs with the whole grant.
+ * The chat calls the web, a bound service and the owner's MCP tools itself, within its budgets (`BotQuickCalls`).
  */
-export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch', 'computer']
+export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'computer']
+
+/**
+ * The runtime's own web (Claude Code's WebSearch and WebFetch): never in a chat turn, whose web is Mousse's `web_search`
+ * and `web_fetch` alone, which keep to the chat's deadlines.
+ */
+export const BOT_CHAT_NATIVE_OFF: readonly string[] = ['web_search', 'web_fetch']
 
 /**
  * The bot's listing of its owner's MCP servers (`mcp_servers`): each server set up for the whole profile, by name and a

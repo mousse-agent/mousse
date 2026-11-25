@@ -1,4 +1,5 @@
 import { secretFetchAction } from '../actions/secretFetchAction'
+import { ChatQuickCalls, type ChatQuickCallsOptions } from './chatQuickCalls'
 import { BotAlone } from '../actions/BotAlone'
 import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
 import { BOT_ASKS_FIRST_INSTRUCTIONS, BOT_ASKS_FIRST_CHAT_INSTRUCTIONS, BOT_ASKS_FIRST_SCHEDULE_INSTRUCTIONS } from '../instructions'
@@ -58,7 +59,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_DROPPED_PERMISSIONS, BOT_IMAGE_TOOL, BOT_MCP_SERVER_SWITCH, BOT_MCP_SWITCH, BOT_SKILLS_SWITCH, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, isBotDefaultSwitch, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -187,6 +188,8 @@ export class BotEngineError extends Error {
 }
 
 export interface BotEngineHost {
+  /** The chat's quick-call budgets (`BOT_CHAT_CALL_MS`, `BOT_CHAT_TOOL_MS`) when not the defaults: tests only. */
+  chatCallLimits?: Pick<ChatQuickCallsOptions, 'callMs' | 'turnMs'>
   profileHome: string
   settings?: Pick<SettingsStore, 'get' | 'set'>
   settingsChanged?(settings: ReturnType<SettingsStore['get']>): void
@@ -394,7 +397,12 @@ export const BOT_ASK_DUPLICATE_TEXT = "duplicate_ask: Your owner said not now to
 /** What an ask in a new bot's first message is answered with: nothing has been asked of it yet. */
 export const BOT_ASK_NOT_YET_TEXT = "Don't ask for permissions yet: the owner hasn't asked for anything that needs one. Your files folder, memory and the web already work. Ask when they want something that needs more."
 
-/** What a chat turn's ask for something its work already holds is answered with (commands, the web, the browser). */
+/**
+ * What a chat turn's call of the runtime's own web is answered with when the grant holds the web: its web is Mousse's
+ * `web_search` and `web_fetch`, which keep to the chat's deadlines (`frontDeskManifest`).
+ */
+export const BOT_CHAT_WEB_TEXT = "The owner already allowed the web. Here use Mousse's web_search and web_fetch for it; a job of several steps goes to work_start."
+/** What a chat turn's ask for something its work already holds is answered with (commands, the computer, the browser). */
 export const BOT_WORK_HAS_TEXT = 'Your work already has this; the chat does not use it. Hand the job to work_start and tell the owner you are on it.'
 /**
  * What a run's call or `escalate` is answered with when the owner allowed the permission after its turn started: the
@@ -827,6 +835,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly lateTexts = new Map<string, string>()
   /** Chat turns whose main dispatch (`n`) read the owner's messages as a steer while it answered, by activation. */
   private readonly steeredChats = new Map<string, number>()
+  /** Each chat activation's quick calls (`quickCallsOf`), for the main dispatch `n` that holds them. */
+  private readonly quickCalls = new Map<string, { n: number; calls: ChatQuickCalls }>()
   /** Turns whose main dispatch (`n`) a steer cut with no words after it (`TurnResult.steerUnanswered`), by activation. */
   private readonly cutReplies = new Map<string, number>()
   /** The owner's message that answered a wall while its turn was still ending: the continuation's input. */
@@ -2953,6 +2963,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
   private afterEnd(row: BotActivationRow): void {
     this.steeredChats.delete(row.id)
+    this.quickCalls.delete(row.id)
     this.cutReplies.delete(row.id)
     this.host.progress?.finishProgress(row.botId, row.id, false)
     this.clearInternetCheck(row.id)
@@ -3038,8 +3049,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const selection = current?.selection
     // Work of a bot whose MCP is on (every bot's is, unless its owner switched it off) reads the owner's servers first
     // when the listing is cold, old or changed (bounded, at most `BOT_MCP_WARM_MS`; a warm one returns at once), so it is
-    // offered their tools. A chat turn is offered none (they are its work's): it never waits for them, and a cold listing
-    // is read beside it. The two reads are independent, so they run side by side.
+    // offered their tools. A chat turn never waits for them: it is offered the tools of the listing it finds, and a cold
+    // listing is read beside it. The two reads are independent, so they run side by side.
     const mcpOn = this.host.mcp && current && !this.defaultsOff(current.botId).mcp ? this.host.mcp : undefined
     if (mcpOn && current?.lane === 'chat') void mcpOn.warm()
     const mcp = current?.lane === 'chat' ? undefined : mcpOn
@@ -4022,6 +4033,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!now || !grantHolds(now, asked)) return undefined
       const workOnly = row.lane === 'chat' && frontDeskLacks(asked)
       if (workOnly && input.role === 'activation') return BOT_WORK_HAS_TEXT
+      if (row.lane === 'chat' && input.role === 'activation' && 'tool' in asked && BOT_CHAT_NATIVE_OFF.includes(botGrantTool(asked.tool))) return BOT_CHAT_WEB_TEXT
       if (grantHolds(input.startedWith, asked) || this.withheld(row, asked)) return BOT_ASK_HELD_UNAVAILABLE_TEXT
       if (!workOnly) this.refused(row.id, asked)
       if (input.role === 'context') return BOT_ASK_HELD_CONSULT_TEXT
@@ -4081,7 +4093,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
       ...base,
-      ...(input.role === 'activation' && row.lane === 'run' && (row.trigger.kind === 'work' || row.trigger.kind === 'schedule') ? {
+      // A bound service's read: work, a scheduled run, and the chat's own turns (a quick call, within the chat's budgets).
+      ...(input.role === 'activation' && (row.lane === 'chat' || row.trigger.kind === 'work' || row.trigger.kind === 'schedule') ? {
         secretFetch: (
           request: Parameters<NonNullable<BotAuthority['secretFetch']>>[0],
           run: Parameters<NonNullable<BotAuthority['secretFetch']>>[1]
@@ -4089,6 +4102,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           ...request,
           botId: row.botId,
           activationId: row.id,
+          lane: row.lane,
           callKey: JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, request.callKey]),
           now: this.now()
         }, refuseWithoutCounting => {
@@ -4131,6 +4145,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
       } : {}),
       ...(input.mcpTools?.length ? { mcpTools: input.mcpTools } : {}),
+      lane: row.lane,
+      // The chat's own turn: its web, service reads and MCP calls keep to its budgets (`ChatQuickCalls`).
+      ...(row.lane === 'chat' && input.role === 'activation' ? { quickCalls: this.quickCallsOf(row) } : {}),
       // Why a start, message or Stop of the owner's threads is refused in this turn, in its own words.
       ...(readOnly ? { threadsReadOnly: readOnly } : {}),
       // What the turn holds but its start may not call (`BOT_TURN_KINDS`): a chat turn is offered every chat tool
@@ -8753,7 +8770,33 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The owner's message joins chat turn `activationId` (inside the transaction that wrote it): a note it reads next. */
   joinChatTurnInTx(botId: string, activationId: string, messageId: string, input: string): void {
     this.store.addWorkNote(activationId, botId, input, messageId)
-    this.store.db.afterCommit(() => this.changed({ botId, activationId }))
+    this.store.db.afterCommit(() => {
+      // The owner wrote: the turn's calls known to only read stop now, so it reads their message at its next step.
+      this.quickCalls.get(activationId)?.calls.steered()
+      this.changed({ botId, activationId })
+    })
+  }
+
+  /**
+   * The chat turn's quick calls (`ChatQuickCalls`), one for each main dispatch of the activation: a new dispatch (a
+   * continuation after an ask, a reload) starts with the whole budget again, as a new turn.
+   */
+  private quickCallsOf(row: BotActivationRow): ChatQuickCalls {
+    const n = this.live.get(row.id)?.n ?? 0
+    const kept = this.quickCalls.get(row.id)
+    if (kept && kept.n === n) return kept.calls
+    const calls = new ChatQuickCalls({
+      ...(this.host.chatCallLimits ?? {}),
+      mcpReadOnly: (tool) => {
+        if (tool.readOnlyHint !== true) return false
+        // Only a level the owner's answer stored: a tool held to asks first is never taken as one that only reads.
+        const grant = this.store.activeGrant(row.botId)
+        const pair = grant && this.heldPair(row.botId, grant.manifest, tool.server, tool.tool)
+        return pair?.level !== 'asks_first'
+      }
+    })
+    this.quickCalls.set(row.id, { n, calls })
+    return calls
   }
 
   /**
@@ -10923,10 +10966,9 @@ function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
 
 /**
  * Whether `asked` is something a chat turn is never offered, which its work has (`frontDeskManifest`): commands, the
- * web, the browser, the owner's MCP tools.
+ * computer and the browser.
  */
 function frontDeskLacks(asked: BotAskRequest): boolean {
-  if ('mcp' in asked) return true
   if (!('tool' in asked) || typeof asked.tool !== 'string') return false
   const tool = botGrantTool(asked.tool)
   return BOT_WORK_ONLY_TOOLS.includes(tool) || tool === BOT_BROWSER_PERMISSION
