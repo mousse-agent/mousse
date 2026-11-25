@@ -32,6 +32,23 @@
       "expiresAt": "2026-11-24T16:16:32.764Z"
     },
     {
+      "task": "bot-asks-and-questions",
+      "session": "Animatrix-949070",
+      "machine": "Animatrix",
+      "branch": "bot-asks-and-questions",
+      "paths": [
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/shared/bots/personal/questions.ts",
+        "src/shared/bots/personal/escalation.ts",
+        "src/shared/bots/personal/manifest.ts",
+        "src/mms/bots/store/BotStore.ts",
+        "docs/bots.md",
+        "src/renderer/components/bots"
+      ],
+      "claimedAt": "2026-11-25T03:38:14.615Z",
+      "expiresAt": "2026-11-25T05:38:14.615Z"
+    },
+    {
       "task": "bot-turn-kind-matrix",
       "session": "Animatrix-949070",
       "machine": "Animatrix",
