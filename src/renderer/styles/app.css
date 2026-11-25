@@ -941,6 +941,30 @@ html.platform-darwin .titlebar-left {
   font-size: 12.5px;
 }
 
+/* A file the turn deleted, or that is gone from its path now: its name struck through, the row quieter. */
+.turn-edits-file[data-gone] {
+  color: var(--text-secondary);
+}
+
+.turn-edits-file[data-gone] .turn-edits-file-name {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.turn-edits-file[data-gone] .turn-edits-file-icon,
+.turn-edits-file[data-gone] .turn-edits-stat {
+  opacity: 0.6;
+}
+
+/* An empty mark under a turn whose calls named no file: its time on screen reads the turn's recorded changes. Out of
+   the flow, so it adds no gap. */
+.turn-edits-probe {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
 .placeholder-view {
   flex: 1;
   display: flex;
