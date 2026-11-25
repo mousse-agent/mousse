@@ -4179,7 +4179,7 @@ html[data-theme='high-contrast'] {
 
 .browser-activity-icon { flex-shrink: 0; }
 .browser-activity-agent-busy .browser-activity-icon { color: var(--accent); }
-.browser-activity-agent-waiting .browser-activity-icon { opacity: 0.6; animation: browser-activity-pulse 1.6s ease-in-out infinite; }
+.browser-activity-agent-waiting .browser-activity-icon { opacity: 0.6; animation: browser-activity-pulse 1.6s steps(12, jump-none) infinite; }
 @keyframes browser-activity-pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) {
   .browser-activity-agent-waiting .browser-activity-icon { animation: none; }

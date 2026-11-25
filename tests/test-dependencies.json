@@ -54,6 +54,7 @@
         "tests/*Css*.test.ts",
         "tests/*css*.test.ts",
         "tests/harness/boundary.test.ts",
+        "tests/harness/registryIcons.test.ts",
         "tests/chatLayoutStyles.test.ts",
         "tests/chatMarkdown.test.ts",
         "tests/chatThemeTokens.test.ts",
