@@ -2203,7 +2203,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * `blocks` joined, each request's job notices followed by one line on its other jobs that still go
-   * (`relatedJobsLine`): the bot's open jobs with the same root request (`jobRoot`), less those this batch tells of. A
+   * (`relatedJobsLine`): the bot's open jobs and its work that has not ended (`work_start` runs) with the same root
+   * request (`jobRoot`), less the jobs this batch tells of. A
    * follow-up job no turn handed off has no request to name, and no line.
    */
   private withRelatedJobs(botId: string, blocks: ReadonlyArray<{ row: BotActivationRow; text: string }>): string {
@@ -2216,12 +2217,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const [index, job] of told) if (job.activationId) roots.set(index, this.jobRoot(job.activationId, memo))
     const toldIds = new Set([...told.values()].map((job) => job.id))
     const open = this.store.openJobsOf(botId).filter((job) => job.activationId && !toldIds.has(job.id))
+    // The bot's own work that has not ended goes on for its request too (a `work_start` run beside the chat).
+    const work = this.store.laneActivations(botId, 'run', NOT_ENDED)
+      .flatMap((row) => row.trigger.kind === 'work' && row.trigger.title.trim() ? [{ id: row.id, title: row.trigger.title.trim() }] : [])
     const last = new Map<string, number>()
     for (const [index, root] of roots) last.set(root, index)
     return blocks.map((block, index) => {
       const root = roots.get(index)
       if (root === undefined || last.get(root) !== index) return block.text
-      return `${block.text}\n${relatedJobsLine(open.filter((job) => this.jobRoot(job.activationId, memo) === root).map((job) => job.title))}`
+      const titles = [
+        ...open.filter((job) => this.jobRoot(job.activationId, memo) === root).map((job) => job.title),
+        ...work.filter((run) => this.jobRoot(run.id, memo) === root).map((run) => run.title)
+      ]
+      return `${block.text}\n${relatedJobsLine(titles)}`
     }).join('\n\n')
   }
 
