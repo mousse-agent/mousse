@@ -83,6 +83,21 @@
       ],
       "claimedAt": "2026-11-25T02:21:03.217Z",
       "expiresAt": "2026-11-25T04:21:03.217Z"
+    },
+    {
+      "task": "lists-attach-retention",
+      "session": "Avarnics-Mac-mini.local-28e6be",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "lists-attach-retention",
+      "paths": [
+        "src/mms/bridge/routed/mergedLists.ts",
+        "src/mms/bridge/hub/service.ts",
+        "src/mms/net/store/streams.ts",
+        "src/mms/net/store/database.ts",
+        "src/mms/bridge/BridgeProfileService.ts"
+      ],
+      "claimedAt": "2026-11-25T18:09:20.891Z",
+      "expiresAt": "2026-11-25T20:09:20.891Z"
     }
   ]
 }
