@@ -78,6 +78,8 @@ interface SetupOptions {
   agents?: AgentInstalls
   registry?: Pick<Registry, 'agent' | 'cached'>
   connect?: (context: DriverContext, request: AcpLaunchRequest) => AcpConnection
+  /** The clock of the registry's update check. */
+  now?: () => number
   /** Reuse another setup's folders (its HOME and the entry's state). */
   root?: string
 }
@@ -99,6 +101,7 @@ function userSetup(options: SetupOptions = {}) {
     ...(options.agents ? { agents: options.agents } : {}),
     ...(options.registry ? { registry: options.registry } : {}),
     ...(options.connect ? { connect: options.connect } : {}),
+    ...(options.now ? { now: options.now } : {}),
     pty: { available: () => false }
   })
   const stateDir = join(root, 'state')
@@ -495,6 +498,29 @@ describe('a managed OpenCode', () => {
     await runtime.install!(() => {})
     expect(runtime.managed!()).toMatchObject({ version: '2.4.2' })
     expect(existsSync(old)).toBe(false)
+  })
+
+  it('reports a newer registry release only when the version changed, and waits as long after a failed lookup', async () => {
+    // The wait itself and a real change are observed through Settings → Providers below.
+    const shared = installation(entry('2.4.1'))
+    const clock = { now: 1_000_000 }
+    const { runtime } = userSetup({ agents: shared.agents, registry: shared.registry, now: () => clock.now })
+    expect(await runtime.refreshManagedLatest!()).toBe(false)
+    expect(shared.registry.asked).toBe(1)
+
+    const answer = shared.registry.agent
+    shared.registry.agent = async () => {
+      shared.registry.asked += 1
+      throw new Error('offline')
+    }
+    clock.now += LATEST_TTL_MS
+    expect(await runtime.refreshManagedLatest!()).toBe(false)
+    expect(shared.registry.asked).toBe(2)
+    shared.registry.agent = answer
+    shared.registry.current = entry('2.4.2')
+    clock.now += LATEST_TTL_MS - 1_000
+    expect(await runtime.refreshManagedLatest!()).toBe(false)
+    expect(shared.registry.asked).toBe(2)
   })
 
   it('removeInstall deletes the files, after which the user’s own opencode runs; release drops the entry’s reference', async () => {
