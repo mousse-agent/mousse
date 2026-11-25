@@ -360,7 +360,7 @@ describe('bot methods on a real bot', () => {
     await f.bots.service.chatSend({ botId, text: 'Find me a flat', clientRequestId: 'q-1' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const { payload } = await start(f, activation.id)
-    expect(f.bots.tools.questions!.ask(botId, activation.id, { question: 'Which flat?', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true }).asked).toBe(true)
+    expect(f.bots.tools.questions!.ask(botId, activation.id, [{ spec: { question: 'Which flat?', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true } }]).asked).toBe(true)
     await finish(f, payload, 'completed', { text: 'Two to pick from.' })
     const bubble = chatOf(f, botId).find((message) => message.question)!
     const questionId = bubble.question!.questionId
