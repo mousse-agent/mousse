@@ -213,18 +213,20 @@ export function appletReferenceLine(applet: { title: string; appletId?: string; 
     ? `[Applet: ${title} (appletId ${applet.appletId}, revision ${applet.revisionId})]`
     : `[Applet: ${title}]`
 }
+/** The applets a reply's stored parts show as published, in order. */
+export function publishedApplets(parts: unknown): AppletReference[] {
+  if (!Array.isArray(parts)) return []
+  return (parts as AppletPresentationPart[]).flatMap((part) => (part?.type === 'applet' && part.reference ? [part.reference] : []))
+}
 /**
- * A stored reply as a model reads it: each published applet is one reference line, not its source, and every other
- * applet fence one line naming it (`redactAppletFences`, over the whole reply, so a fence a part leaves open is cut
- * as in the text the model wrote). The stored text keeps its fences, which recovery and a bot's chat match on.
+ * A stored reply as a model reads it: the text the model wrote with every applet fence cut (`redactAppletFences`),
+ * each published applet named by its reference line. The stored text keeps its fences, which recovery and a bot's chat
+ * match on. The stored parts are not read as text: publication adds to them, which could end a cut early.
  */
 export function modelFacingReplyText(message: { role?: unknown; content?: unknown; presentationParts?: unknown }): string {
+  const content = typeof message.content === 'string' ? message.content : ''
   // A person's message never publishes an applet: a fence pasted there is what they wrote, kept for the model to read.
-  if (message.role === 'user') return typeof message.content === 'string' ? message.content : ''
-  const parts = Array.isArray(message.presentationParts) ? (message.presentationParts as AppletPresentationPart[]) : undefined
-  if (parts?.some((part) => part?.type === 'applet'))
-    return redactAppletFences(parts.map((part, at) => (part.type === 'applet' ? appletReferenceLine(part.reference) + (at < parts.length - 1 ? '\n' : '') : part.text)).join(''))
-  return redactAppletFences(typeof message.content === 'string' ? message.content : '')
+  return message.role === 'user' ? content : redactAppletFences(content, publishedApplets(message.presentationParts))
 }
 /**
  * Where the code block `text` leaves open starts, as `extractAppletParts` reads blocks, or -1. Fences added to a
@@ -247,9 +249,10 @@ export function openCodeBlockStart(text: string): number {
 }
 /**
  * Where an applet fence may open, read more widely than publication reads one: anywhere on a line (a stopped run's
- * rows can join without a line break), any case, any spacing.
+ * rows can join without a line break), any case, any spacing. It is tried only where a run of backticks or tildes
+ * starts, and the run is taken whole, so a long run is scanned once.
  */
-const APPLET_OPENING = /(`{3,}|~{3,})[^\S\r\n]*mousse-applet(?![\w-])/gi
+const APPLET_OPENING = /(?:(?<!`)(`{3,})(?!`)|(?<!~)(~{3,})(?!~))[^\S\r\n]*mousse-applet(?![\w-])/gi
 /** The fences in one cut whose bodies are read for a title; the rest are named `[Applet]`. */
 const TITLED_FENCES = 10
 
@@ -269,10 +272,13 @@ function fenceTitle(body: string): string | undefined {
  * `thread_read`. It fails closed, unlike publication, which refuses what it cannot read: it ignores other code blocks
  * (an applet inside one is still cut), counts, sizes and validity. A fence ends at the first line, after a line
  * break, of its marker at least as long (publication also ends one after U+2028, U+2029 or `\r`, never later), or at
- * the end of the text; a fence opening inside a cut extends it to its own end.
+ * the end of the text; a fence opening inside a cut extends it to its own end. `published` are the applets the text
+ * published, in order: a cut fence with the next one's title is named by its reference line, and any left unnamed
+ * follow the text.
  */
-export function redactAppletFences(text: string): string {
-  if (!/mousse-applet/i.test(text)) return text
+export function redactAppletFences(text: string, published: readonly AppletReference[] = []): string {
+  const references = published.map(appletReferenceLine)
+  if (!/mousse-applet/i.test(text)) return references.length ? [text, ...references].join('\n') : text
   const opening = new RegExp(APPLET_OPENING.source, APPLET_OPENING.flags)
   // The first closing line at or after a position, by marker, so a cut with many fences scans the text once per marker.
   const closings = new Map<string, { from: number; close: RegExpExecArray | null }>()
@@ -287,6 +293,7 @@ export function redactAppletFences(text: string): string {
   }
   let out = ''
   let cursor = 0
+  let used = 0
   let next = opening.exec(text)
   while (next) {
     out += text.slice(cursor, next.index)
@@ -295,15 +302,22 @@ export function redactAppletFences(text: string): string {
     do {
       const lineEnd = text.indexOf('\n', next.index + next[0].length)
       const bodyStart = lineEnd === -1 ? text.length : lineEnd + 1
-      const close = closingAfter(next[1]!, bodyStart)
+      const marker = next[1] ?? next[2]!
+      const close = closingAfter(marker, bodyStart)
       titles.push(titles.length < TITLED_FENCES ? fenceTitle(text.slice(bodyStart, close ? close.index : text.length)) : undefined)
       end = Math.max(end, close ? close.index + close[0].length : text.length)
       opening.lastIndex = next.index + next[0].length
       next = end < text.length ? opening.exec(text) : null
     } while (next && next.index < end)
+    const lines = titles.map((title) => {
+      if (title === undefined) return '[Applet]'
+      if (used < published.length && published[used]!.title.trim().slice(0, 200) === title) return references[used++]!
+      return appletReferenceLine({ title })
+    })
     // A cut that took its closing line's break gives the naming lines one.
-    out += titles.map((title) => (title === undefined ? '[Applet]' : appletReferenceLine({ title }))).join('\n') + (text[end - 1] === '\n' ? '\n' : '')
+    out += lines.join('\n') + (text[end - 1] === '\n' ? '\n' : '')
     cursor = end
   }
-  return out + text.slice(cursor)
+  out += text.slice(cursor)
+  return used < references.length ? [out, ...references.slice(used)].join('\n') : out
 }

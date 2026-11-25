@@ -568,7 +568,7 @@ describe('a remote subagent\'s result', () => {
     const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Costs', description: '' }
     const messages = [
       { id: 'u1', role: 'user', content: 'Chart it' },
-      { id: 'a1', role: 'assistant', content: 'Here.\n\n```mousse-applet\n{"html":"<h1>big</h1>"}\n```', presentationParts: [{ type: 'text', text: 'Here.\n\n' }, { type: 'applet', reference }] }
+      { id: 'a1', role: 'assistant', content: 'Here.\n\n```mousse-applet\n{"title":"Costs","html":"<h1>big</h1>"}\n```', presentationParts: [{ type: 'text', text: 'Here.\n\n' }, { type: 'applet', reference }] }
     ]
     expect(finalAssistantText(messages, 'u1')).toBe('Here.\n\n[Applet: Costs (appletId applet_a, revision rev_a)]')
   })

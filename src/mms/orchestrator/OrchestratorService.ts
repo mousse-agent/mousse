@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, modelFacingReplyText, openCodeBlockStart, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, modelFacingReplyText, openCodeBlockStart, publishedApplets, redactAppletFences, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -1739,8 +1739,10 @@ export class OrchestratorService extends EventEmitter {
     const markTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }, resultText?: string): void => {
       if (terminal) return
       terminal = true
-      const mask = resultText ? this.secretMaskerFor?.(threadId) : undefined
-      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && resultText ? mask(resultText) : resultText }))
+      // As a turn's result: each applet fence a line naming it (`redactAppletFences`), never its source.
+      const named = resultText ? redactAppletFences(resultText) : resultText
+      const mask = named ? this.secretMaskerFor?.(threadId) : undefined
+      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && named ? mask(named) : named }))
       this.harness.runSettled?.(runId)
     }
     try {
@@ -16627,9 +16629,8 @@ export class OrchestratorService extends EventEmitter {
         finalMessage.presentationParts = publishAppletPresentation(this.appletStore, { threadId: session.threadId, messageId: finalMessage.id, turnId, content: finalMessage.content })
         this.persist(true)
         this.emitMessageUpdated(finalMessage)
-        // The last row's applets as published (or not): the turn's earlier rows, then that row with its references.
-        if (finalMessage.presentationParts && displayText.endsWith(finalMessage.content))
-          resultText = redactAppletFences(displayText.slice(0, displayText.length - finalMessage.content.length)) + modelFacingReplyText(finalMessage)
+        // The turn's text again, with the last row's published applets named by their reference lines.
+        if (finalMessage.presentationParts) resultText = redactAppletFences(displayText, publishedApplets(finalMessage.presentationParts))
       }
     }
 

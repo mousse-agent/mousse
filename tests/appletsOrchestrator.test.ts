@@ -329,6 +329,40 @@ it('publishes a tool-staged applet on a last row that follows a row left with an
   expect(results.at(-1)).not.toContain(source.js)
 })
 
+it('cuts a fence a row opened and the last row went on with, also after a tool-staged applet publishes', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const first = 'Draft:\n~~~mousse-applet\n'
+  const last = '{"js":"ROW_CANARY"}\n~~~\nDone.'
+  const adapter = piAdapter(() => last)
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: first, contentIndex: 0 })
+    sink.text({ phase: 'complete', content: first, contentIndex: 0 })
+    sink.tool({ phase: 'start', callId: 'publish', kind: 'mcp_tool_call', title: 'publish_applet', summary: '', details: [] })
+    host.tools.onPublishApplet!(source)
+    sink.tool({ phase: 'complete', callId: 'publish', kind: 'mcp_tool_result', title: 'publish_applet', summary: '', details: [] })
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: last, contentIndex: 0 })
+    const result = await startTurn(input, sink, ctl, host)
+    return { ...result, text: first + result.text }
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+  expect(results.at(-1)).not.toContain('ROW_CANARY')
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
 it('names an applet on an earlier reply row, also after a row that left a code block open', async () => {
   const { main, thread } = await fixture()
   main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })

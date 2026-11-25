@@ -337,6 +337,7 @@ describe('applet source kept from a model', () => {
     ['a fence opening inside another one, closing after it', '~~~mousse-applet\n{"title": "Outer"}\n```mousse-applet\n' + body + '\n~~~\n"' + CANARY + '"\n```\nDone.'],
     ['a fence opening mid-line, as a stopped run joins rows', 'Checking. ~~~mousse-applet\n' + body + '\n~~~\nDone.'],
     ['a body whose string holds a line separator and backticks', '```mousse-applet\n{"html": "<pre>' + LS + '```' + LS + '</pre>", "js": "' + CANARY + '"}\n```\nDone.'],
+    ['a fence publication ends early, at a line separator', '~~~mousse-applet\n{"js":\n~~~' + LS + CANARY + '\n~~~\nDone.'],
     ['a failed publication as the reply shows it', 'Here:\n```mousse-applet\n' + JSON.stringify(withCanary, null, 2) + '\n```\n\nApplet unavailable: publication failed.']
   ]
 
@@ -358,32 +359,25 @@ describe('applet source kept from a model', () => {
     expect(redactAppletFences('```mousse-applet\n{"data":{"title":"Dataset heading"},"js":"')).toBe('[Applet]')
   })
 
-  it('reads a stored reply whole, and keeps a reference line to one line', () => {
-    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Totals' + LS + '```js', description: 'd' }
-    const named = modelFacingReplyText({
-      role: 'assistant',
-      content: 'unused',
-      presentationParts: [
-        { type: 'text', text: 'Here:\n' },
-        { type: 'applet', reference },
-        { type: 'text', text: '\n```mousse-applet\n' + body + '\n```\n\nApplet unavailable: publication failed.' }
-      ]
-    })
-    expect(named).not.toContain(CANARY)
-    expect(named).toBe('Here:\n[Applet: Totals ```js (appletId applet_a, revision rev_a)]\n\n[Applet: Calculator]\n\nApplet unavailable: publication failed.')
+  it('reads a stored reply from the text the model wrote, naming published applets by their reference lines', () => {
+    const totals = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Totals' + LS + '```js', description: 'd' }
+    // The stored parts are not read: publication's added text could end a cut early.
+    const content = 'Here:\n' + fence({ ...source, title: totals.title }) + '\n' + fence(withCanary) + 'Done.'
+    const named = modelFacingReplyText({ role: 'assistant', content, presentationParts: [{ type: 'text', text: CANARY }, { type: 'applet', reference: totals }] })
+    expect(named).toBe('Here:\n[Applet: Totals ```js (appletId applet_a, revision rev_a)]\n\n[Applet: Calculator]\nDone.')
   })
 
-  it('cuts a published applet\'s outer fence that publication did not read, to its end', () => {
+  it('names a published applet inside an outer fence publication did not read, and cuts the outer one to its end', () => {
     const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Calculator', description: 'd' }
-    const named = modelFacingReplyText({
-      role: 'assistant',
-      content: 'unused',
-      presentationParts: [{ type: 'text', text: ' ~~~mousse-applet\n' }, { type: 'applet', reference }, { type: 'text', text: '\n' + CANARY + '\n~~~\nDone.' }]
-    })
-    expect(named).not.toContain(CANARY)
-    expect(named).toContain('Done.')
+    const content = ' ~~~mousse-applet\n' + fence(source) + CANARY + '\n~~~\nDone.'
+    expect(redactAppletFences(content, [reference])).toBe(' [Applet]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\nDone.')
+    // A published applet the text does not name by its title still reaches the model, after the text.
+    expect(redactAppletFences('Done.', [reference])).toBe('Done.\n[Applet: Calculator (appletId applet_a, revision rev_a)]')
   })
 
+  it('scans a long run of tildes once', () => {
+    expect(redactAppletFences('mousse-applet\n' + '~'.repeat(1_000_000) + 'x')).toHaveLength(1_000_015)
+  })
   it('passes a person\'s pasted fence on as written', () => {
     expect(modelFacingReplyText({ role: 'user', content: fence(withCanary) })).toContain(CANARY)
   })
