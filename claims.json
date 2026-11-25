@@ -62,22 +62,6 @@
       "expiresAt": "2026-11-25T17:27:21.463Z"
     },
     {
-      "task": "fix-worktree-locked-first-send",
-      "session": "Animatrix-0eeb3c",
-      "machine": "Animatrix",
-      "branch": "fix-worktree-locked-first-send",
-      "paths": [
-        "src/mms/protocol/handlers.ts",
-        "src/mms/workspace/ThreadWorkspaceManager.ts",
-        "src/renderer/lib/createComposerThread.ts",
-        "src/renderer/lib/composerThreadActions.ts",
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/preload/index.ts"
-      ],
-      "claimedAt": "2026-11-25T17:45:39.537Z",
-      "expiresAt": "2026-11-25T19:45:39.537Z"
-    },
-    {
       "task": "fix/browser-automation-bugs",
       "session": "agibook-664429",
       "machine": "agibook",
