@@ -44,9 +44,6 @@ export interface ModelPickTarget {
   selected: boolean
 }
 
-/** How long the pointer rests on a model before its run settings show, so crossing rows on the way to them changes nothing. */
-const RUN_SETTINGS_HOVER_MS = 90
-
 /** The tallest the picker gets; the model list scrolls inside it. */
 const PICKER_MAX_HEIGHT = 400
 
@@ -78,16 +75,20 @@ interface ModelFamilyMenuProps {
   /** The picker is fading out after closing: it takes no input and gives up the keyboard. */
   closing?: boolean
   /**
-   * Run settings for the highlighted model (the composer's). The picker is then one fixed box: nothing
-   * inside it (hover, search, rail, the footer's menus) changes its size. `render` draws the column
-   * beside the list for the highlighted model (none when a search finds nothing), or returns null when
-   * none of `all` (every model the picker lists) has any; `footer` draws the bar under the whole
-   * picker, and stays (empty for the highlighted model) while any of `all` has something to show in it; `pick` turns the id the menu would select for a model into the one it selects. `rows` is how
-   * many rows the column keeps room for (the most any of `all` needs), so hovering a model with fewer
-   * never shrinks the picker; the column's own content never sizes it.
+   * Run settings for the selected model (the composer's). The picker is then one fixed box: nothing
+   * inside it (search, rail, the footer's menus) changes its size. `render` draws the column beside the
+   * list for the selected model (none when the list does not have it), or returns null when none of `all`
+   * (every model the picker lists) has any; `footer` draws the bar under the whole picker, and stays
+   * (empty for the selected model) while any of `all` has something to show in it; `pick` turns the id
+   * the menu would select for a model into the one it selects. `rows` is how many rows the column keeps
+   * room for (the most any of `all` needs); the column's own content never sizes it. Hovering or arrowing
+   * to another model never changes what the column and footer show: a level or speed there is always the
+   * selected model's. With run settings a model click leaves the picker open for its level; `picked` runs
+   * after it (it closes the picker when the model has nothing left to choose).
    */
   runSettings?: {
     pick: (target: ModelPickTarget) => string
+    picked?: (target: ModelPickTarget) => void
     render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
     rows?: (all: ModelPickTarget[]) => number
     footer?: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
@@ -352,7 +353,6 @@ function ProfileModelFamilyMenu({
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)
   const hideTimerRef = useRef<number | null>(null)
-  const hoverTimerRef = useRef<number | null>(null)
   const runRef = useRef<HTMLDivElement>(null)
   const idPrefix = useId()
   const listId = `${idPrefix}-models`
@@ -528,7 +528,9 @@ function ProfileModelFamilyMenu({
   const selectEntry = useCallback(
     (entry: FlatModelEntry) => {
       const target = targetOf(entry)
-      if (target) onSelect(entry.providerId, runSettings ? runSettings.pick(target) : target.modelId, entry.instanceId)
+      if (!target) return
+      onSelect(entry.providerId, runSettings ? runSettings.pick(target) : target.modelId, entry.instanceId)
+      runSettings?.picked?.(target)
     },
     [onSelect, runSettings, targetOf]
   )
@@ -538,19 +540,12 @@ function ProfileModelFamilyMenu({
     [allEntries, runSettings, targetOf]
   )
   const highlightedEntry = filteredEntries[highlightIndex]
-  const highlightedTarget = runSettings && highlightedEntry ? targetOf(highlightedEntry) : undefined
-  const runColumn = runSettings ? runSettings.render(highlightedTarget, allTargets) : null
+  const selectedEntry = runSettings ? allEntries.find((entry) => isEntrySelected(entry)) : undefined
+  const selectedTarget = selectedEntry ? targetOf(selectedEntry) : undefined
+  const runColumn = runSettings ? runSettings.render(selectedTarget, allTargets) : null
   const runRows = runSettings?.rows ? runSettings.rows(allTargets) : 0
-  const runFooter = runSettings?.footer ? runSettings.footer(highlightedTarget, allTargets) : null
+  const runFooter = runSettings?.footer ? runSettings.footer(selectedTarget, allTargets) : null
   const footerRef = useRef<HTMLDivElement>(null)
-
-  const clearHoverTimer = () => {
-    if (hoverTimerRef.current !== null) {
-      window.clearTimeout(hoverTimerRef.current)
-      hoverTimerRef.current = null
-    }
-  }
-  useEffect(() => clearHoverTimer, [])
 
   /** Moves focus from the list into the run settings, on their chosen item. */
   const enterRunSettings = (event: React.KeyboardEvent | KeyboardEvent) => {
@@ -603,7 +598,7 @@ function ProfileModelFamilyMenu({
         return
       }
       if (event.key === 'ArrowRight') {
-        // From the end of the search text, Right moves into the highlighted model's run settings.
+        // From the end of the search text, Right moves into the selected model's run settings.
         const input = searchInputRef.current
         if (input && event.target === input && (input.selectionStart ?? 0) >= input.value.length) enterRunSettings(event)
         return
@@ -653,8 +648,27 @@ function ProfileModelFamilyMenu({
     syncPanelPosition()
   }
 
-  if (providers.length === 0 && !unavailableProviders?.length) {
+  const empty = providers.length === 0 && !unavailableProviders?.length
+  if (empty && !runFooter) {
     return <>{emptyState}</>
+  }
+  // No models but a footer action (a settings picker's "First line only"): the footer alone, in the same anchored shell,
+  // so it sits at the picker and an outside click closes it.
+  if (empty) {
+    const emptyShell = (
+      <div
+        className={`composer-model-picker-shell model-picker-shell${portaled ? ' composer-model-picker-shell-floating' : ''}${closing ? ' is-closing' : ''}`}
+        aria-hidden={closing || undefined}
+        ref={setShellNode}
+        style={portaled ? floatingStyle : undefined}
+      >
+        <div className="model-picker-panel has-footer">
+          {emptyState ? <div className="model-picker-empty">{emptyState}</div> : null}
+          <div ref={footerRef} className="model-picker-footer">{runFooter}</div>
+        </div>
+      </div>
+    )
+    return portaled ? <FloatingPortal>{emptyShell}</FloatingPortal> : emptyShell
   }
   const unavailableQuery = searchQuery.trim().toLowerCase()
   const matchingUnavailable = favoritesShown && !searching
@@ -700,23 +714,10 @@ function ProfileModelFamilyMenu({
           isHighlighted ? ' highlighted' : ''
         }${selected ? ' selected' : ''}`}
         onMouseEnter={(event) => {
-          const row = event.currentTarget
-          clearHoverTimer()
-          if (!runSettings) {
-            setHighlightIndex(index)
-            openVariantPanel(row)
-            return
-          }
-          hoverTimerRef.current = window.setTimeout(() => {
-            hoverTimerRef.current = null
-            setHighlightIndex(index)
-            openVariantPanel(row)
-          }, RUN_SETTINGS_HOVER_MS)
+          setHighlightIndex(index)
+          openVariantPanel(event.currentTarget)
         }}
-        onMouseLeave={() => {
-          clearHoverTimer()
-          scheduleHide()
-        }}
+        onMouseLeave={scheduleHide}
       >
         <button
           type="button"
@@ -889,7 +890,6 @@ function ProfileModelFamilyMenu({
               ref={runRef}
               className="model-picker-run scrollbar-ultra-thin"
               style={{ '--model-picker-run-rows': runRows } as React.CSSProperties}
-              onMouseEnter={clearHoverTimer}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return
                 // Left goes back to the list; Down past the last level goes on to the footer.
@@ -914,7 +914,6 @@ function ProfileModelFamilyMenu({
           <div
             ref={footerRef}
             className="model-picker-footer"
-            onMouseEnter={clearHoverTimer}
             onKeyDown={(event) => {
               // Up from the footer goes back to the levels (inside the permission menu it moves between modes).
               if (event.key === 'ArrowUp' && !event.defaultPrevented && !(event.target as HTMLElement).closest('[role="menu"]')) enterRunSettings(event)

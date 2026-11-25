@@ -27,13 +27,14 @@ file; every other test uses made-up models, so adding a real model never touches
 }
 ```
 
-### Top level (all required)
+### Top level
 
-| Field | Rule |
-|---|---|
-| `format` | Whole number. This reader knows `1`. |
-| `revision` | Whole number that rises with every change. When downloads arrive, the highest valid copy wins. |
-| `models` | Array. Order carries no meaning: lists are ordered by `released`. |
+| Field | Required? | Rule |
+|---|---|---|
+| `format` | Required | Whole number. This reader knows `1`. |
+| `revision` | Required | Whole number that rises with every change. When downloads arrive, the highest valid copy wins. |
+| `models` | Required | Array. Order carries no meaning: lists are ordered by `released`. |
+| `namingProviders` | Optional | Which connected providers Automatic thread naming tries first, best first (see "Automatic thread naming"). Strings; blanks and repeats are dropped. Absent or empty: the bundled file's list. |
 
 ### Each model
 
@@ -48,12 +49,15 @@ file; every other test uses made-up models, so adding a real model never touches
 | `family` | Optional | For example `opus`. Two models can share a release date, so a family tells them apart. |
 | `older` | Optional | `true` folds the model behind "Show more" on API routes. On the `claude` route it decides which models Claude Code does not list are folded, and folds a listed one once a current model of its `family` runs (see "Older Claude models"). |
 | `efforts` | Optional | Reasoning levels, with the same values as `LlmModelOption.efforts`. Used only when the route reports none for the model; in practice, older Claude Code models. |
-| `tier` | Optional | `frontier`, `standard` or `small`. Bots pick their hidden model by it: Fable and Opus are `frontier`, Sonnet `standard`, Haiku `small`. An unknown value is ignored. |
+| `tier` | Optional | `frontier`, `standard` or `small`. Bots pick their hidden model by it, and Automatic thread naming prefers `small` models: Fable and Opus are `frontier`, Sonnet `standard`, Haiku `small`. An unknown value is ignored. A model with no `tier` gets one from the id patterns in `src/shared/bots/personal/modelTiers.ts`. |
 
 ### Routes
 
 A route key is an existing driver or provider id: `claude` (the Claude Code driver), `anthropic`
-(the Anthropic API provider), `openai`, `codex`. The value is an object:
+(the Anthropic API provider), `openai`, `codex` (the Codex agent), `antigravity` (the Antigravity
+agent). Only `claude` changes what an agent lists; the other routes name and rank models the agent
+lists itself. A Pi provider's model is found by the model's own `id` as well, so its tier and release
+date apply there without a route. The value is an object:
 
 | Field | Required? | Rule |
 |---|---|---|
@@ -79,6 +83,27 @@ The `id` of a route can differ from the model's: Claude Code takes Haiku 4.5 onl
 - A later field that older readers must not ignore ships only on routes gated by `minMousse`. That
   avoids most format changes.
 
+## Automatic thread naming
+
+With no title model chosen (Settings → Agents → Thread titles is Automatic), Mousse names threads and
+their worktree branches with a connected model it picks (`src/mms/orchestrator/TitleModelIndex.ts`).
+It ranks every enabled, signed-in model that can run a single request, from what is already known
+(no check is started to rank them):
+
+1. **Provider**, by the first `namingProviders` entry that matches it: a Pi provider by `pi:<provider
+   id>`, then the driver kind (`claude`, `codex`, `antigravity`, `pi`), then `*`. A provider no entry
+   matches comes last.
+2. **Tier**: `small`, then `standard`, then `frontier`, then unknown.
+3. A subscription before an API key.
+4. A current model before an `older` one, then the newest `released`, then the order the agent lists.
+
+A model at a usage limit is skipped until its reset. A failed request tries the next model, at most
+three in all. The bundled list is `claude`, `codex`, `antigravity`, `pi:anthropic`, `pi:openai`,
+`pi:google`, `pi`, `*`.
+
+`namingProviders` is a routing policy kept in the catalog: once catalog downloads arrive, a
+downloaded copy can change which provider receives naming requests.
+
 ## Reading rules
 
 Every Mousse build reads the file the same way:
@@ -103,8 +128,11 @@ A breaking change becomes `format: 2` in a new file (`models-2.json`); the forma
 published until no supported build reads it.
 
 The bundled-file test checks: the schema, unique ids and unique ids per route, valid dates, known
-route keys, `short` equal to `name` without the brand, and every `minMousse` at or below
-`package.json`'s version.
+route keys, `short` equal to `name` without the brand (Claude's brand only; OpenAI and Google models
+keep their full id as `short`), each family's tier, a `namingProviders` list that ends with `*`, and
+every `minMousse` at or below `package.json`'s version.
+
+To add or retire models, follow `moostack/skills/update-model-catalog/SKILL.md`.
 
 ## Older Claude models
 

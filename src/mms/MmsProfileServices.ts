@@ -86,6 +86,7 @@ import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
 import { BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
+import { UsageLimitTracker } from './models/usageLimits'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
 import { migrateBotSchedules } from './scheduled/botScheduleMigration'
@@ -408,6 +409,8 @@ export class MmsProfileServices {
   readonly personalBots: BotEngine | null
   /** The bots' hidden model choice; also lists the Settings bot model choices (`holdable`). */
   readonly botModels: BotModelChooser
+  /** Usage limits met by any of the profile's requests, shared by bots' model choice and Automatic thread naming. */
+  readonly usageLimits = new UsageLimitTracker()
   /** Each bot's own browser (`bots.browser.*`, the browser tools of a bot with "use the browser"). */
   readonly botBrowsers: BotBrowsers
   /** Which devices reach each bot (About → Devices), in `<profile>/bots/device-access.json`. */
@@ -630,6 +633,9 @@ export class MmsProfileServices {
       this.projects,
       { questions: this.questions, modeRegistry: this.modeRegistry }
     )
+    // The usage limits the profile met, in memory: bots' model choice and Automatic naming skip an entry (or one of
+    // its models) at its limit until the reset, whichever of them met it.
+    this.orchestrator.setUsageLimits(this.usageLimits)
     // New worktree branches of this profile's threads are named by its title model, as Settings → Storage → Branches says.
     this.forgetBranchNamer = registerBranchNamer(homeDir, {
       settings: () => this.settings.get().branches,
@@ -749,7 +755,8 @@ export class MmsProfileServices {
         const chosen = this.settings.get().botModel
         const instanceId = chosen?.instanceId || chosen?.llmProvider
         return instanceId && chosen?.model ? { instanceId, model: chosen.model } : undefined
-      }
+      },
+      usageLimits: this.usageLimits
     })
     this.botModels = botModels
     // Activity chips (§5.8): live as `bots.activity` through the engine, rolled up into each message.
@@ -1466,6 +1473,7 @@ export class MmsProfileServices {
     })
     this.netEngine = new NetEngineService({
       profileDir: this.homeDir,
+      installationHome: shared.installationHome,
       profileId: this.profileId,
       // Nothing is read until a window turns the switch on or reads the status.
       loginStart: loginStartQuestion(shared.installationHome),

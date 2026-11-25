@@ -247,6 +247,12 @@ export interface BotAuthority {
    */
   turnRefusals?: ReadonlyMap<string, string>
   /**
+   * The turn is the main turn of work its owner asked for in its chat (a work run that the owner's own chat turn
+   * started): never a schedule, a reminder's work, a run started by hand or work another bot's message led to. Only such
+   * a turn may ask its owner to set up computer use (`computer_use_request`).
+   */
+  ownerRequested?: boolean
+  /**
    * How the turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search` (Claude Code loads any listed tool
    * itself) or `use_tool` (Codex, Pi: the thread lists the core set and calls the rest through `use_tool`). Absent: none.
    */

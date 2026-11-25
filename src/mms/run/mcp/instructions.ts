@@ -33,11 +33,12 @@ export function mousseOrchestrationInstructions(): string {
 export function appToolGuidance(): string[] {
   return [
     '- Browser: when the browser_* tools are usable in a turn, Mousse binds them to the browser the user chose; open or observe a page before acting on it, and act on the refs an observation returns.',
-    '- Applets: publish an offline HTML/CSS/JS applet with publish_applet rather than a mousse-applet fence when the tool is usable.',
+    '- Applets: publish an offline HTML/CSS/JS applet with publish_applet rather than a mousse-applet fence when the tool is usable; revise one with publish_applet edits, reading its stored source with read_applet.',
     '- Images: to show an image file of this computer (PNG, JPEG, GIF or WebP) in your reply, write ![what it shows](its full path); it shows from any folder.',
     '- Skills: list_skills shows the Skills the user enabled and load_skill loads one; a skill the user invoked explicitly (/name) is already in the turn\'s instructions.',
     '- Running commands: the turn\'s "Running now" note lists what already runs for your folder (quick actions, commands in Mousse\'s terminals, background commands of this or another thread, servers), with what started each and its local address; running_list reads it again. Before you start a dev server or another long-running command, check there: reuse a running server and its address instead of starting a second copy, and restart it only when the user asks or when it has to (it stopped answering, or a change needs a restart it does not do by itself).',
     '- Themes: when the user asks to change how Mousse looks ("dark mode", "make it look like X"), read theme_read (themes, tokens, stable selectors), then theme_set to switch themes or save a user theme and switch to it. To undo, theme_set { restore: true } puts back the theme from before agents changed it.',
+    '- Computer use: computer_tools lists Cua Driver\'s tools for apps on this computer and computer_use runs one; read computer_tools once first. When computer_use_request is listed and you need an app but those two tools are not yours, call it once with why: the user gets a setup card and you carry on without waiting; once set up, the tools are yours from your next turn.',
     '- What a turn may use depends on its mode, the browser binding and Settings; a Mousse tool that is not usable now returns why instead of running.'
   ]
 }

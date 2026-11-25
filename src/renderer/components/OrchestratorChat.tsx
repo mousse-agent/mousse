@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { stopThreadNow } from '../lib/stopThread'
 import type { UIMessage } from 'ai'
 import { expiryPresetMs } from '../../shared/threadExpiry'
@@ -112,6 +113,7 @@ import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
+import { ComputerUseSetupCard } from './ComputerUseSetupCard'
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
@@ -266,20 +268,23 @@ export function OrchestratorChat() {
   const activeThread = useAppStore((s) =>
     s.threads.find((thread) => thread.id === s.activeThreadId)
   )
-  const threads = useAppStore((s) => s.threads)
   // If the open thread is a subagent listed under any parent in Nest (local by id, or remote by ref), recognise it
   // immediately on click — even before threads:updated or its first turn-state lands.
-  const subagentsByParent = useAppStore((s) => s.subagentsByParent)
-  const ownSubagent = useMemo(
-    () => findSubagentEntry(subagentsByParent, activeThreadId),
-    [subagentsByParent, activeThreadId]
+  // Select only the entry for the open thread (never the whole `subagentsByParent` map) so updates to other
+  // parents' subagents do not re-render an unrelated chat.
+  const ownSubagent = useAppStore(
+    useShallow((s) => findSubagentEntry(s.subagentsByParent, s.activeThreadId))
   )
   const ownSubagentParentId = activeThread?.lineage?.parentThreadId ?? ownSubagent?.parentThreadId ?? null
   useSubagents(ownSubagentParentId && messages.length === 0 ? ownSubagentParentId : null)
   const isSubagent = Boolean((activeThread && isSubagentThread(activeThread)) || ownSubagent)
   // The profile default.
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
-  const permissionCeiling = permissionCeilingOf(activeThread, threads, defaultPermissionMode)
+  // Derive the ceiling inside the selector so unrelated threads' touches or updates do not re-render this chat.
+  const permissionCeiling = useAppStore((s) => {
+    const active = s.threads.find((thread) => thread.id === s.activeThreadId)
+    return permissionCeilingOf(active, s.threads, defaultPermissionMode)
+  })
   const projects = useAppStore((s) => s.projects)
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
@@ -1932,8 +1937,8 @@ export function OrchestratorChat() {
     }
   }
 
+  // The picker stays open on a model click; a level or speed in it closes it (`modelPickerRunSettings`).
   const handleModelSelect = async (providerId: string, modelId: string) => {
-    setModelMenuOpen(false)
     // A read of the shown model that began before this pick must not put the previous model back.
     selectionRequestRef.current += 1
     const instance = selectionFor(providerId)
@@ -2226,6 +2231,8 @@ export function OrchestratorChat() {
           </div>
         </div>
 
+        {/* Computer use the agent asked to set up: nothing waits on it, it applies from the agent's next turn. */}
+        <ComputerUseSetupCard threadId={activeThreadId} remoteNode={remoteNode} remoteHostName={remoteComputer?.name} messages={messages} />
         <ComposerNoticeSource notice={queue.error ? { tone: 'error', title: queue.error, onDismiss: queue.clearError } : null} />
         <ComposerNoticeSource notice={queue.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, shortTitle: 'Your edit is in the composer', onDismiss: queue.dismissDraftMoved } : null} />
         <ComposerNoticeSource notice={queue.notice ? { tone: 'info', title: queue.notice, onDismiss: queue.clearNotice } : null} />

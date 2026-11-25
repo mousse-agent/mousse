@@ -71,7 +71,7 @@ describe('a bot\'s model rows', () => {
     pick('Talk', 'Anthropic API')
     expect(onPick).toHaveBeenLastCalledWith(['talk'], { instanceId: 'pi:key', model: 'opus' })
     pick('Work', 'Claude Code')
-    expect(onPick).toHaveBeenLastCalledWith(['light', 'medium', 'hard'], { instanceId: 'claude', model: 'opus' })
+    expect(onPick).toHaveBeenLastCalledWith(['light', 'medium', 'hard'], { instanceId: 'claude', model: 'opus', effort: 'medium' })
   })
 
   it('shows a pick with its level, and its entry beside it while two entries offer models; one not offered now says so', () => {

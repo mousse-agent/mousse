@@ -32,7 +32,8 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, screen, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
-import { readAssetInPieces, readAssetStamp } from './assetPieces'
+import { readAssetInPieces, readAssetStamp, type AssetPiece } from './assetPieces'
+import { attachMediaProtocol, MediaStreamRegistry } from './mediaStream'
 import { browsedRootParams, browseSupport } from './browsedRoot'
 import { daemonGitParams, daemonGitReadParams } from './daemonGitParams'
 import { headsFromOlderService } from './gitHeadsFallback'
@@ -140,6 +141,7 @@ import type {
   CreateScheduledJobInput,
   FileAsset,
   FileEntry,
+  FileMediaSource,
   FileText,
   FileGrepResponse,
   FileSearchResponse,
@@ -930,13 +932,13 @@ export function registerGuiIpc(
     return senderId === null ? orderOfAnswer(answer, guiMms.hello?.instanceId, threadId) : orderOfAnswer(answer, guiMms.instanceForSender?.(senderId), threadId)
   }
 
-  /** Update per-profile live state for a window session before bridging it. */
+  /** Update per-profile live state for a window session before bridging it. Returns true when already broadcast. */
   const routeWindowState = (
     event: ProtocolEvent,
     profileId: string,
     target: (channel: string, data: unknown) => void,
     instance?: string
-  ): void => {
+  ): boolean => {
     const tracker = activityTrackerFor(profileId)
     const order = orderFor(profileId)
     if (event.type === 'activity' || event.type === 'activity.snapshot') {
@@ -951,6 +953,7 @@ export function registerGuiIpc(
         order.noteUpdate('activity', instance, event.sequence)
         target('threads:activity', tracker.getSnapshot())
       }
+      return true
     }
     if (event.type === 'turn.state' || event.type === 'turn.snapshot' || event.type === 'turns.state' || event.type === 'turns.snapshot') {
       const raw = event.data as (TurnState & { state?: TurnState; snapshot?: TurnStateSnapshot; turns?: TurnStateSnapshot }) | null
@@ -969,7 +972,9 @@ export function registerGuiIpc(
       }
       target('turns:state', Object.fromEntries(map))
       if (state && typeof state === 'object' && 'threadId' in state) target('orchestrator:turn-state', state)
+      return true
     }
+    return false
   }
 
   /**
@@ -1213,8 +1218,11 @@ export function registerGuiIpc(
       return
     }
     // The update is about the thread this window shows: its turn is not quiet.
+    const senderPresentation = presentationForSender(senderId)
     quietWatch.touch(senderId, event.threadId)
-    queueMicrotask(() => noteShown(senderId))
+    if (!event.threadId || event.threadId === senderPresentation.getActiveThreadId()) {
+      queueMicrotask(() => noteShown(senderId))
+    }
     const target = (channel: string, data: unknown): void => {
       if (win.isDestroyed()) return
       warmStart?.observe(binding.profileId, channel, data)
@@ -1224,13 +1232,22 @@ export function registerGuiIpc(
     const previousActivity = event.type === 'activity' && event.threadId
       ? tracker.getState(event.threadId)
       : undefined
-    routeWindowState(event, binding.profileId, target, instance)
+    const routedState = routeWindowState(event, binding.profileId, target, instance)
     // A thread that finishes while a focused window shows it was seen as it finished.
     if (event.type === 'activity' || event.type === 'activity.snapshot') reportSeenIfDone(win)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
     if (event.type === 'threads.row') notificationThreads.noteRow(binding.profileId, event.data)
     if (event.type === 'projects.updated') notificationThreads.noteProjects(binding.profileId, event.data)
-    bridgeProtocolEvent(event, target, presentationForSender(senderId))
+    // routeWindowState already broadcast activity and turn state updates; bridging them again would duplicate every IPC.
+    if (!routedState) {
+      bridgeProtocolEvent(
+        event,
+        target,
+        senderPresentation,
+        undefined,
+        (threadId) => !notificationThreads.isUnwatchedTranscriptThread(binding.profileId, threadId)
+      )
+    }
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
       // Working → Waiting is still the same work cycle; only its end notifies. A scheduled occurrence's end is the
@@ -3288,6 +3305,63 @@ export function registerGuiIpc(
       return readAssetStamp((offset, length) =>
         guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
       )
+    }
+  )
+  const mediaStreams = new MediaStreamRegistry()
+  const mediaSenders = new Set<number>()
+  attachMediaProtocol(
+    session.defaultSession,
+    mediaStreams,
+    (senderId) => guiMms.getWindowBindingForSender(senderId)?.profileId
+  )
+  registerHandler(
+    'fs:openMediaUrl',
+    // Streams video files in byte ranges over `mousse-media://` via the daemon's `files.readAsset`,
+    // avoiding whole-file IPC transfers and in-memory Blob buffering.
+    async (event, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false): Promise<FileMediaSource> => {
+      const browsed = await browsedRoot(root)
+      const scope = filesScope(projectId, threadId)
+      const first = await guiMms.request<AssetPiece>('files.readAsset', {
+        ...scope, ...browsed, ...canonicalFileParams(details, threadId),
+        path: filePath, offset: 0, length: 1
+      })
+      if (!first.mimeType.startsWith('video/')) {
+        throw new Error('This file type does not support media streaming')
+      }
+      const sender = event.sender
+      if (!mediaSenders.has(sender.id)) {
+        mediaSenders.add(sender.id)
+        sender.once('destroyed', () => {
+          mediaSenders.delete(sender.id)
+          mediaStreams.releaseForSender(sender.id)
+        })
+        sender.on('did-start-navigation', (_navEvent, _url, isInPlace, isMainFrame) => {
+          if (isMainFrame && !isInPlace) mediaStreams.releaseForSender(sender.id)
+        })
+      }
+      const profileId = guiMms.getWindowBindingForSender(sender.id)?.profileId
+      const { url } = mediaStreams.register({
+        senderId: sender.id,
+        profileId,
+        mimeType: first.mimeType,
+        size: first.size,
+        ...(typeof first.mtimeMs === 'number' ? { mtimeMs: first.mtimeMs } : {}),
+        readPiece: (offset, length) =>
+          guiMms.request<AssetPiece>('files.readAsset', { ...scope, ...browsed, path: filePath, offset, length })
+      })
+      return {
+        url,
+        mimeType: first.mimeType,
+        size: first.size,
+        ...(typeof first.mtimeMs === 'number' ? { mtimeMs: first.mtimeMs } : {}),
+        ...(first.canonicalPath ? { canonicalPath: first.canonicalPath } : {})
+      }
+    }
+  )
+  registerHandler(
+    'fs:releaseMediaUrl',
+    async (event, url: string): Promise<void> => {
+      if (typeof url === 'string') mediaStreams.release(url, event.sender.id)
     }
   )
   registerHandler(

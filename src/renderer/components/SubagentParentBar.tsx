@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { ChevronLeft } from '../lib/icons'
 import { isSubagentThread } from '../../shared/threadLineage'
 import { openThread } from '../lib/openThread'
@@ -47,8 +47,9 @@ export function SubagentParentBar() {
     const active = s.threads.find((thread) => thread.id === s.activeThreadId)
     return active && isSubagentThread(active) ? active : undefined
   })
-  const subagentsByParent = useAppStore((s) => s.subagentsByParent)
-  const fallback = useMemo(() => (child ? undefined : findSubagentEntry(subagentsByParent, activeThreadId)), [child, subagentsByParent, activeThreadId])
+  const fallback = useAppStore(
+    useShallow((s) => (child ? undefined : findSubagentEntry(s.subagentsByParent, s.activeThreadId)))
+  )
   const parentId = child?.lineage?.parentThreadId ?? fallback?.parentThreadId
   const parent = useAppStore((s) => (parentId ? s.threads.find((thread) => thread.id === parentId) : undefined))
   const pathInTitleBar = useThreadPathInTitleBar()

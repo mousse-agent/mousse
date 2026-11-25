@@ -63,10 +63,13 @@ const chatsInitial = useChatsStore.getInitialState()
 const botsInitial = useBotsStore.getInitialState()
 const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find((element) => element.getAttribute('aria-label') === label || element.textContent === label)
 const click = async (element: Element | undefined) => { await act(async () => { (element as HTMLElement).click() }); await act(async () => {}) }
-/** The words of `forbidden` found in the DOM, its attributes included. */
+/**
+ * The words of `forbidden` found in the DOM, its attributes included: each as a whole word, so a short family name
+ * (`sol`, `neon`) is not found inside another word (`absolute`).
+ */
 const found = () => {
   const html = host.innerHTML.toLowerCase()
-  return FORBIDDEN.filter((word) => html.includes(word.toLowerCase()))
+  return FORBIDDEN.filter((word) => new RegExp(`(?<![a-z0-9])${word.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`).test(html))
 }
 
 beforeEach(async () => {

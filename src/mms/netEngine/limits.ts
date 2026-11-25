@@ -176,6 +176,13 @@ export interface EngineLimits {
    * `accessAskGapMs` can send in that time.
    */
   accessSeenIds: number
+  /**
+   * How long after a grant's role could not be made to follow its device's level (`grant.set_role` failed) it is
+   * tried again, while the row says the change is not applied.
+   */
+  roleRetryMs: number
+  /** Most `grant.set_role` tries in one go when the grant changed in between (`revision_conflict`). */
+  roleEditTries: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -247,7 +254,9 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   accessAskGapMs: 30_000,
   accessPromptGapMs: 20_000,
   accessSeenMs: 60 * 60_000,
-  accessSeenIds: 256
+  accessSeenIds: 256,
+  roleRetryMs: 15_000,
+  roleEditTries: 3
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -316,7 +325,9 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   accessAskGapMs: 'MOUSSE_NET_ENGINE_ACCESS_ASK_GAP_MS',
   accessPromptGapMs: 'MOUSSE_NET_ENGINE_ACCESS_PROMPT_GAP_MS',
   accessSeenMs: 'MOUSSE_NET_ENGINE_ACCESS_SEEN_MS',
-  accessSeenIds: 'MOUSSE_NET_ENGINE_ACCESS_SEEN_IDS'
+  accessSeenIds: 'MOUSSE_NET_ENGINE_ACCESS_SEEN_IDS',
+  roleRetryMs: 'MOUSSE_NET_ENGINE_ROLE_RETRY_MS',
+  roleEditTries: 'MOUSSE_NET_ENGINE_ROLE_EDIT_TRIES'
 })
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */

@@ -314,6 +314,15 @@ export interface HarnessGateway {
   llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]>
   /** The same listing from what is known now, without waiting (synchronous readers). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
+  /**
+   * The instances' snapshots from what is known now: no check is started or waited for (synchronous readers such as
+   * Automatic naming's index). An instance never checked has no `checkedAt`.
+   */
+  cachedSnapshots?(scope: ProviderScope): InstanceSnapshot[]
+  /** Whether the instance's driver runs single requests (`oneShot`); false for an unknown instance. */
+  canOneShot?(instanceId: string): boolean
+  /** Whether the instance is on in `scope` (the device setting, narrowed by the project's); false for an unknown instance. */
+  isEnabledInScope?(instanceId: string, scope: ProviderScope): boolean
   /** Stops the instances' runtimes and running operations. */
   stop(): void | Promise<void>
 }
@@ -2366,6 +2375,25 @@ export class Harness implements HarnessGateway {
         return []
       }
     })
+  }
+
+  cachedSnapshots(scope: ProviderScope): InstanceSnapshot[] {
+    return Object.keys(this.instanceMap.list()).flatMap((instanceId) => {
+      try {
+        return [this.snapshot(instanceId, scope)]
+      } catch {
+        return []
+      }
+    })
+  }
+
+  canOneShot(instanceId: string): boolean {
+    return this.oneShotAvailable(instanceId)
+  }
+
+  isEnabledInScope(instanceId: string, scope: ProviderScope): boolean {
+    const entry = this.instanceMap.list()[instanceId]
+    return Boolean(entry) && this.scopes.enabled(instanceId, entry!.enabled, scope).effective
   }
 
   /**

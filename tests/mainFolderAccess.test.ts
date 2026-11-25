@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { readAssetInPieces, readAssetStamp } from '../src/main/ipc/assetPieces'
-import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, saveExceedsRequest } from '../src/shared/fileAssets'
+import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, MAX_ASSET_BYTES, saveExceedsRequest } from '../src/shared/fileAssets'
 
 function sourcesUnder(directory: string): string[] {
   return readdirSync(directory).flatMap((name) => {
@@ -86,5 +86,9 @@ describe('a preview read in pieces', () => {
 
   it('stops when the file shrinks under the read', async () => {
     await expect(readAssetInPieces(async (offset) => (offset === 0 ? piece(Buffer.alloc(4), 10) : piece(Buffer.alloc(0), 10)))).rejects.toThrow(/changed while/)
+  })
+
+  it('refuses to buffer a file larger than the whole-file cap in memory', async () => {
+    await expect(readAssetInPieces(async () => piece(Buffer.alloc(1), MAX_ASSET_BYTES + 1))).rejects.toThrow(/exceeds 100MB limit/)
   })
 })

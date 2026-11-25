@@ -313,3 +313,20 @@
 /* An image fits the panel, or shows at its own size and scrolls; `safe` keeps a large one's left edge reachable. */
 div.files-image-preview.actual-size { place-items: safe center; }
 .files-image-preview.actual-size img { max-width: none; max-height: none; }
+
+/* A video always fits the panel without scrollbars so high-resolution recordings stay inside the viewport. */
+div.files-video-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 16px;
+}
+.files-video-preview video {
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  outline: none;
+}

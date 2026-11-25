@@ -1,8 +1,8 @@
 import type { FileAsset } from '../../shared/types'
-import { FILE_ASSET_PIECE_BYTES } from '../../shared/fileAssets'
+import { FILE_ASSET_PIECE_BYTES, MAX_ASSET_BYTES } from '../../shared/fileAssets'
 
 /** One `files.readAsset` reply: the daemon sends a preview in base64 pieces that fit a message. */
-interface AssetPiece {
+export interface AssetPiece {
   mimeType: string
   /** Bytes in the whole file. */
   size: number
@@ -28,6 +28,9 @@ export async function readAssetInPieces(request: (offset: number, length: number
   let received = 0
   for (;;) {
     const piece = await request(received, FILE_ASSET_PIECE_BYTES)
+    if (piece.size > MAX_ASSET_BYTES) {
+      throw new Error(`Preview exceeds ${MAX_ASSET_BYTES / 1024 / 1024}MB limit`)
+    }
     // One buffer for the whole preview, filled in place (never pooled: it is sent on as it is).
     whole ??= Buffer.alloc(piece.size)
     first ??= piece

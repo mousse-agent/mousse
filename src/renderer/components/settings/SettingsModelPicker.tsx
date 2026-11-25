@@ -52,15 +52,17 @@ export function SettingsModelPicker({
   entry?: string
   disabled?: boolean
   /**
-   * A choice of no model, at the right of the menu's footer ("None" for a bot's Images row): shown highlighted while
-   * nothing is selected, and closes the menu when picked.
+   * A choice of no model, at the right of the menu's footer ("None" for a bot's Images row, "First line only" for
+   * thread titles): shown highlighted while it is the choice (`active`, default: while nothing is selected), and closes
+   * the menu when picked. With no provider listing a model, the menu opens for it only while it is not the choice already.
    */
-  clear?: { label: string; title?: string; onClear(): void }
+  clear?: { label: string; title?: string; active?: boolean; onClear(): void }
 }) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const selected = Boolean(providerId && modelId)
+  const clearActive = clear?.active ?? !selected
   // The menus offer each level of a model as an id of its own.
   const pickerId = pickerModelId({ model: modelId, effort })
   const listing = providers.find((provider) => listingServes(provider, { instanceId, llmProvider: providerId }))
@@ -110,7 +112,7 @@ export function SettingsModelPicker({
         aria-expanded={open}
         aria-label={`${ariaLabel}: ${label}${where ? ` on ${where}` : ''}`}
         title={title ?? (where ? `${label} on ${where}` : label)}
-        disabled={disabled || (providers.length === 0 && !unavailableProviders?.length)}
+        disabled={disabled || (providers.length === 0 && !unavailableProviders?.length && (!clear || clearActive))}
         onClick={() => setOpen((current) => !current)}
       >
         {selected && <ProviderIcon providerId={providerId} size={14} />}
@@ -131,18 +133,15 @@ export function SettingsModelPicker({
           contentRef={menuRef}
           runSettings={modelPickerRunSettings({
             providers,
-            selection,
             onSelect: choose,
             onClose: close,
             ...(clear ? {
-              footerEnd: <button type="button" className={`model-picker-clear${selected ? '' : ' selected'}`} title={clear.title} aria-pressed={!selected}
+              footerEnd: <button type="button" className={`model-picker-clear${clearActive ? ' selected' : ''}`} title={clear.title} aria-pressed={clearActive}
                 onClick={() => { close(); clear.onClear() }}>{clear.label}</button>
             } : {})
           })}
-          onSelect={(nextProviderId, nextModelId, nextInstanceId) => {
-            close()
-            choose(nextProviderId, nextModelId, nextInstanceId)
-          }}
+          // A model click keeps the picker open for its level; a level or speed closes it.
+          onSelect={choose}
         />
       )}
     </div>

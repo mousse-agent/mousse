@@ -164,6 +164,41 @@ describe('a usage limit pauses the run', () => {
     expect(Date.parse(run.outcome!.pause!.until) - Date.now()).toBeGreaterThan(4 * 3_600_000)
   })
 
+  describe('what bots and Automatic naming learn from the pause', () => {
+    /** The entries the shared usage limits hold whole (bots' and Automatic naming's), by reset. */
+    const held = (d: Phase6Daemon): Array<[string, string]> => [...((d.orch as any).usageLimits().limitedInstances() as Map<string, string>)]
+
+    it('a guessed reset keeps the run paused for the estimate, while the entry is skipped for the short cooldown only', async () => {
+      const pi = scripted([{ fail: () => usageLimitError({ provider: 'openai', estimated: true, limitKind: 'five_hour' }) }])
+      const d = boot(newHome(), [pi])
+      const { run } = await paused(d, pi)
+      expect(Date.parse(run.outcome!.pause!.until) - Date.now()).toBeGreaterThan(4 * 3_600_000)
+      const [[, until]] = held(d)
+      expect(Date.parse(until) - Date.now()).toBeGreaterThan(60_000)
+      expect(Date.parse(until) - Date.now()).toBeLessThanOrEqual(2 * 60_000)
+      expect(held(d)).toHaveLength(1)
+    })
+
+    it('a reported reset holds the entry until that reset', async () => {
+      const resetsAt = resetIn(60 * 60_000)
+      const pi = scripted([{ fail: () => limit({ provider: 'openai', resetsAt }) }])
+      const d = boot(newHome(), [pi])
+      const { run } = await paused(d, pi)
+      expect(held(d).map(([, until]) => until)).toEqual([run.outcome!.pause!.until])
+    })
+
+    it("Claude's weekly Opus window pauses the run and leaves the entry's other models to bots and naming", async () => {
+      const claude = claudeAdapter(() => 'unused')
+      const d = boot(newHome(), [claude])
+      const thread = d.store.createThread('Limited')
+      d.orch.setThreadModelOverride(thread.id, CLAUDE)
+      claude.failNext = limit({ provider: 'claude', limitKind: 'seven_day_opus', ms: 60 * 60_000 })
+      const response = await d.orch.send('Do the work', false, { threadId: thread.id, clientRequestId: 'first' })
+      expect(d.engine.getRun(response.runId!)!.status).toBe('paused')
+      expect(held(d)).toEqual([])
+    })
+  })
+
   describe('at the reset time', () => {
     it('continues once, as a new run that opens with the note, and a second timer fire changes nothing', async () => {
       const pi = scripted([{ fail: () => limit() }])

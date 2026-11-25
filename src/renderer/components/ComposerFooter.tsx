@@ -203,9 +203,10 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
     modelButtonRef.current?.focus()
   }
 
-  // The picker's run settings: the highlighted model's level and speed, with the chosen level carried over.
-  // The permission mode has its own chip beside the model button, so the picker's footer holds only the speed.
-  const runSettings = modelPickerRunSettings({ providers, selection, onSelect: onModelSelect, onClose: closePicker })
+  // The picker's run settings: the selected model's level and speed. A model click keeps the picker open for its
+  // level; a level or speed closes it. The permission mode has its own chip beside the model button, so the
+  // picker's footer holds only the speed.
+  const runSettings = modelPickerRunSettings({ providers, onSelect: onModelSelect, onClose: closePicker })
   const emptyModelMenuOpen = !modelReadOnly && modelMenuOpen && providers.length === 0
   const addProviderRef = useRef<HTMLButtonElement>(null)
   const emptyModelMenuStyle = useFloatingPosition({

@@ -374,6 +374,7 @@ export interface TurnResult {
  */
 export interface ToolHost {
   onPublishApplet?: (source: unknown) => unknown
+  onReadApplet?: (args: Record<string, unknown>) => unknown
   delegation?: DelegationToolHost
   /** Daemon-minted episode capability. */
   toolAccess?: AgentToolAccess

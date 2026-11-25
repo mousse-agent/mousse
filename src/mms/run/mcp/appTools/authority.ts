@@ -39,7 +39,7 @@ import { McpToolError, type AppToolTurn, type FamilyRelation, type McpCaller, ty
  */
 export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_status', 'list_subagents', 'list_computers', 'list_models', 'list_tasks',
-  'thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'schedule_list', 'terminal_read',
+  'thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'schedule_list', 'terminal_read', 'read_applet',
   'automation_list', 'list_skills', 'load_skill', 'tool_catalogue', 'mcp_servers', 'theme_read',
   'git_status', 'git_diff',
   'web_search', 'web_fetch', 'browser_observe', 'browser_find', 'browser_wait', 'browser_extract', 'browser_screenshot',

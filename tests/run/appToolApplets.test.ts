@@ -77,6 +77,70 @@ describe('publish_applet from a vendor turn', () => {
     expect(vendor.bridges[1].sessionInstructions).toBe(vendor.bridges[0].sessionInstructions)
   }, 30_000)
 
+  it('a later turn reads a published applet in pages and revises it with edits, without resending its source', async () => {
+    const results: Record<string, ToolCallResult> = {}
+    let shown: { appletId: string; revisionId: string } | undefined
+    const vendor = new VendorAdapter(async ({ input, mcp }) => {
+      if (input.prompt === 'Chart it') {
+        await callTool(mcp!, 'publish_applet', { ...applet('Costs'), data: { rows: 3 }, stateVersion: 2 })
+        return 'Here is the chart.'
+      }
+      const { appletId, revisionId } = shown!
+      if (input.prompt === 'Revise it again') {
+        // The newest revision's reply was undone: neither it nor the one before it can be built on, and its id stays unnamed.
+        results.hiddenHead = await callTool(mcp!, 'publish_applet', { schemaVersion: 1, appletId, expectedRevision: revisionId, edits: [{ part: 'js', old_str: 'void 0', new_str: '' }] })
+        return 'Could not.'
+      }
+      results.sizes = await callTool(mcp!, 'read_applet', { appletId })
+      results.page = await callTool(mcp!, 'read_applet', { appletId, part: 'html', offset: 1, limit: 3 })
+      results.search = await callTool(mcp!, 'read_applet', { appletId, part: 'css', search: 'teal' })
+      results.unknown = await callTool(mcp!, 'read_applet', { appletId: 'applet_missing' })
+      results.missing = await callTool(mcp!, 'publish_applet', { schemaVersion: 1, appletId, expectedRevision: revisionId, edits: [{ part: 'css', old_str: 'navy', new_str: 'red' }] })
+      results.stale = await callTool(mcp!, 'publish_applet', { schemaVersion: 1, appletId, expectedRevision: 'rev_old', edits: [{ part: 'css', old_str: 'teal', new_str: 'red' }] })
+      results.both = await callTool(mcp!, 'publish_applet', { schemaVersion: 1, appletId, expectedRevision: revisionId, html: '<p/>', edits: [{ part: 'css', old_str: 'teal', new_str: 'red' }] })
+      results.edited = await callTool(mcp!, 'publish_applet', {
+        schemaVersion: 1, appletId, expectedRevision: revisionId,
+        edits: [{ part: 'css', old_str: 'teal', new_str: 'crimson' }, { part: 'html', old_str: 'Costs</h1>', new_str: 'Costs</h1><p>2026</p>' }]
+      })
+      results.again = await callTool(mcp!, 'publish_applet', { schemaVersion: 1, appletId, expectedRevision: revisionId, edits: [{ part: 'js', old_str: 'void 0', new_str: '' }] })
+      return 'Made it red.'
+    })
+    d = await vendorDaemon([vendor])
+    const store = new AppletStore(d.home, (threadId) => join(d!.home, 'applet-threads', threadId))
+    d.orch.setAppletStore(store)
+    await d.send('Chart it')
+    const first = d.orch.getMessages(d.thread.id).flatMap((message) => message.presentationParts ?? []).find((part) => part.type === 'applet')
+    if (first?.type !== 'applet') throw new Error('No published applet')
+    shown = first.reference
+    await d.send('Make it red')
+
+    for (const result of Object.values(results)) expect(result.error).toBeUndefined()
+    expect(JSON.parse(results.sizes.text!)).toMatchObject({ revisionId: shown.revisionId, parts: { html: { chars: '<h1>Costs</h1>'.length, lines: 1 } } })
+    expect(JSON.parse(results.page.text!)).toMatchObject({ part: 'html', offset: 1, text: 'h1>', nextOffset: 4 })
+    expect(JSON.parse(results.search.text!)).toMatchObject({ matches: [{ line: 1, text: 'h1 { color: teal; }' }], totalMatches: 1 })
+    expect(refusalOf(results.unknown)?.message).toMatch(/No applet applet_missing is shown/)
+    expect(refusalOf(results.missing)?.message).toMatch(/Edit 1 \(css\): old_str was not found/)
+    expect(refusalOf(results.stale)?.message).toMatch(new RegExp(`is at revision ${shown.revisionId}, not rev_old`))
+    expect(refusalOf(results.both)?.message).toMatch(/Give edits or html, not both/)
+    expect(JSON.parse(results.edited.text!)).toEqual({ queued: true, title: 'Costs' })
+    expect(refusalOf(results.again)?.message).toMatch(/already revises that applet/)
+
+    // The revision is the edited source; what the edits left out (title, data, state version) is the first revision's.
+    const head = store.head(d.thread.id, shown.appletId)!
+    expect(head.revisionId).not.toBe(shown.revisionId)
+    const revised = store.load(d.thread.id, shown.appletId, head.revisionId)
+    expect(revised.previousRevisionId).toBe(shown.revisionId)
+    expect(revised.source).toMatchObject({ title: 'Costs', description: 'Costs chart', html: '<h1>Costs</h1><p>2026</p>', css: 'h1 { color: crimson; }', js: 'void 0', data: { rows: 3 }, stateVersion: 2 })
+
+    // Undo hides the reply that shows the new revision.
+    const undone = d.orch.getMessages(d.thread.id).find((message) => message.presentationParts?.some((part) => part.type === 'applet' && part.reference.revisionId === head.revisionId))!
+    undone.hidden = true
+    await d.send('Revise it again')
+    expect(refusalOf(results.hiddenHead)?.message).toMatch(/newest revision is not shown in this conversation/)
+    expect(refusalOf(results.hiddenHead)?.message).not.toContain(head.revisionId)
+    expect(store.head(d.thread.id, shown.appletId)!.revisionId).toBe(head.revisionId)
+  }, 30_000)
+
   it('without an applet store the call returns "Applets are off for this turn." and nothing is staged', async () => {
     let result: ToolCallResult | undefined
     const vendor = new VendorAdapter(async ({ mcp }) => {

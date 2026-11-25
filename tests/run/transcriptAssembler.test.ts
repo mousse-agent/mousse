@@ -96,6 +96,8 @@ describe('TranscriptAssembler', () => {
     assembler.tool({ kind: 'mcp_tool_call', phase: 'start', callId: 'bash', title: 'Bash', summary: 'Bash', details: [] })
     // A repeated start of the same call, with nothing streamed since, opens no empty row.
     stream.break()
+    // The runtime put the blank line between the two text blocks (Claude's frames do, at a text block's start).
+    stream.markSyntheticSeparator('Checking the tests.'.length)
     stream.update('Checking the tests.\n\nAll pass.')
     stream.complete('Checking the tests.\n\nAll pass.')
     expect(messages.map((message) => message.kind ?? message.content)).toEqual(['Checking the tests.', 'mcp_tool_call', 'All pass.'])
@@ -922,5 +924,103 @@ describe('TranscriptAssembler text coalescing', () => {
     log.length = 0
     assembler.text({ phase: 'start', content: '', contentIndex: 0 })
     expect(log.slice(0, 2)).toEqual(['updated:thinking', 'added:assistant'])
+  })
+})
+
+/**
+ * A runtime's cumulative text as rows: a row keeps the provider's words exactly (leading blank lines, indentation),
+ * drops only a separator the runtime itself put in (`markSyntheticSeparator`), and never opens on whitespace alone.
+ */
+describe('CumulativeStream', () => {
+  function relay() {
+    const events: Array<[string, string]> = []
+    const stream = new CumulativeStream((phase, content) => events.push([phase, content]))
+    /** The text of each row the stream opened, as it last stood. */
+    const rows = () => {
+      const out: string[] = []
+      for (const [phase, content] of events) {
+        if (phase === 'start') out.push('')
+        else if (phase === 'delta' || (phase === 'complete' && content)) out[out.length - 1] = content
+      }
+      return out
+    }
+    return { stream, events, rows }
+  }
+
+  it('opens no row for an empty or whitespace-only update', () => {
+    const { stream, events, rows } = relay()
+    stream.update('')
+    stream.update('   ')
+    stream.update('\n\n')
+    expect(events).toEqual([])
+    stream.break()
+    stream.complete()
+    expect(events).toEqual([])
+    // The first words open it, with the provider's leading whitespace as written.
+    stream.update('\n  Hi')
+    expect(rows()).toEqual(['\n  Hi'])
+  })
+
+  // [case, the updates after a first row "old" and its break, where the runtime marked separators and when, the new row]
+  const rows: Array<[string, { marks?: number[]; markBeforeBreak?: boolean; updates: string[] }, string]> = [
+    ['a provider-authored blank line and indentation after a break, with no mark, stay verbatim', { updates: ['old\n\n    next'] }, '\n\n    next'],
+    ['a separator marked after the break is dropped; the indentation stays', { marks: [3], updates: ['old\n\n    next'] }, '    next'],
+    ['a separator marked while the row was still open (a steer read after the separator) is dropped', { marks: [3], markBeforeBreak: true, updates: ['old\n\n    next'] }, '    next'],
+    ['contiguous separators (a steer, then a follow-up prompt) are all dropped', { marks: [3, 5], updates: ['old\n\n\n\n    next'] }, '    next'],
+    ['blank lines the provider wrote after a separator stay', { marks: [3], updates: ['old\n\n\n\n    indented'] }, '\n\n    indented'],
+    ['a whitespace chunk that opened no row before a separator goes with it', { updates: ['old ', 'old \n\n    next'], marks: [4] }, '    next'],
+    ['a mark where the text holds something else drops nothing', { marks: [3], updates: ['old, then\n\nnext'] }, ', then\n\nnext']
+  ]
+  it.each(rows)('%s', (_name, { marks = [], markBeforeBreak, updates }, expected) => {
+    const { stream, rows: seen } = relay()
+    stream.update('old')
+    if (markBeforeBreak) for (const at of marks) stream.markSyntheticSeparator(at)
+    stream.break()
+    if (!markBeforeBreak) for (const at of marks) stream.markSyntheticSeparator(at)
+    for (const content of updates) stream.update(content)
+    stream.complete(updates.at(-1))
+    expect(seen()).toEqual(['old', expected])
+  })
+
+  it('keeps a separator inside an open row as the paragraph break it is', () => {
+    const { stream, rows } = relay()
+    stream.update('old')
+    stream.markSyntheticSeparator(3)
+    stream.update('old\n\nnew')
+    stream.complete('old\n\nnew')
+    expect(rows()).toEqual(['old\n\nnew'])
+  })
+
+  it('updates an open row with an edited or shorter snapshot (Codex item/completed), and sends nothing for an unchanged one', () => {
+    const { stream, events, rows } = relay()
+    stream.update('Hello wrld')
+    stream.update('Hello world')
+    expect(rows()).toEqual(['Hello world'])
+    const sent = events.length
+    stream.update('Hello world')
+    expect(events).toHaveLength(sent)
+    stream.update('Hello')
+    stream.complete()
+    expect(rows()).toEqual(['Hello'])
+  })
+
+  it('says whether an update adds something visible (what breaks the other stream)', () => {
+    const { stream } = relay()
+    expect(stream.hasContentDelta('')).toBe(false)
+    expect(stream.hasContentDelta('   ')).toBe(false)
+    expect(stream.hasContentDelta('Thinking')).toBe(true)
+    stream.update('Thinking')
+    expect(stream.hasContentDelta('Thinking')).toBe(false)
+    expect(stream.hasContentDelta('Thinking   ')).toBe(false)
+    expect(stream.hasContentDelta('Thinking more')).toBe(true)
+    // A replacement snapshot: changed words count, a changed trailing space does not.
+    expect(stream.hasContentDelta('Thought')).toBe(true)
+    stream.update('Thinking ')
+    expect(stream.hasContentDelta('Thinking')).toBe(false)
+    // After a break, only text past a marked separator counts.
+    stream.break()
+    stream.markSyntheticSeparator('Thinking '.length)
+    expect(stream.hasContentDelta('Thinking \n\n')).toBe(false)
+    expect(stream.hasContentDelta('Thinking \n\nNext')).toBe(true)
   })
 })

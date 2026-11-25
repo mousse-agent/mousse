@@ -12,7 +12,7 @@ import { compareVersions, type LiveProcessHost, type OneShotSpec, type RuntimeUs
 import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
 import { isAuthRequired } from '../../auth'
 import type { AcpConnectionFactory } from '../../connection'
-import { modelOptions } from '../../models'
+import { hasAvailableModelList, mergeModelOptions, modelOptions, thoughtConfigOption } from '../../models'
 import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback, scrubbedAntigravityEnv, type AntigravityRuntimeChoice } from '../antigravity'
 import { keepOption } from '../../permissions'
 import { AcpSessions, type AcpChatInput, type AcpProcess, type SavedAcpSession } from '../../session'
@@ -50,6 +50,8 @@ type ProfileSettings = {
   models?: LlmModelOption[]
   /** ISO time `models` was last listed by the agent. */
   modelsRefreshedAt?: string
+  /** Whether `models` was listed with reasoning-level (`thought_level`) extraction enabled. */
+  modelsEffortsChecked?: boolean
   /** Signed in on the 1.1.1 ACP server (its file-stored Google session). */
   signedIn?: boolean
   /**
@@ -182,9 +184,12 @@ export class AntigravityProviderService {
         },
         models: () => this.settings.models ?? [],
         setModels: (models) => {
+          const changed = JSON.stringify(this.settings.models ?? []) !== JSON.stringify(models)
           this.settings.models = models
           this.settings.modelsRefreshedAt = new Date().toISOString()
+          this.settings.modelsEffortsChecked = true
           this.save()
+          if (changed) this.notifyChanged()
         }
       },
       launchGeneration: () => this.launchGeneration,
@@ -405,12 +410,45 @@ export class AntigravityProviderService {
         newSession = await process.connection.agent.request(methods.agent.session.new, { cwd, mcpServers: [] })
       }
       session.abort.signal.throwIfAborted()
-      if (!this.recordSignIn(modelOptions(newSession))) throw new Error('Google agent did not confirm account model access')
+      const models = await this.listedModels(process, newSession, live)
+      session.abort.signal.throwIfAborted()
+      if (!this.recordSignIn(models)) throw new Error('Google agent did not confirm account model access')
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const cancelled = session.abort.signal.aborted
       return { success: false, sessionId: session.sessionId, error: cancelled ? 'Login cancelled' : error instanceof Error ? error.message : String(error) }
     } finally { ended.abort() }
+  }
+
+  /**
+   * Lists the models of a newly opened session with their reasoning levels. Native `agy` includes
+   * every `<model>-<level>` combination in `models.availableModels`, so `modelOptions` extracts all
+   * models' efforts in zero extra calls. If an agent advertises `thought_level` in `configOptions`
+   * without `models.availableModels`, each remaining model is probed on this throwaway session.
+   */
+  private async listedModels(active: AcpProcess, session: NewSessionResponse, signal?: AbortSignal): Promise<LlmModelOption[]> {
+    let models = modelOptions(session as Pick<NewSessionResponse, 'configOptions'> & Record<string, unknown>)
+    if (!models.length || hasAvailableModelList(session) || !thoughtConfigOption(session)) return models
+    const selector = session.configOptions?.find((option) => option.id === 'model' && option.type === 'select')
+    const currentId = selector && selector.type === 'select' ? selector.currentValue : undefined
+    for (const model of models) {
+      if (signal?.aborted) break
+      if (model.id === currentId) continue
+      try {
+        const response = await active.connection.agent.request(methods.agent.session.setConfigOption, {
+          sessionId: session.sessionId,
+          configId: 'model',
+          value: model.id
+        })
+        const updatedOptions = (response as { configOptions?: unknown } | null)?.configOptions
+        if (Array.isArray(updatedOptions) && updatedOptions.length > 0) {
+          models = mergeModelOptions(models, modelOptions({ configOptions: updatedOptions }), updatedOptions)
+        }
+      } catch {
+        // Keep the model entry without probed efforts if switching to it fails.
+      }
+    }
+    return models
   }
 
   /** A session opened without signing in: the existing sign-in works. Undefined when `agy` asks for one. */
@@ -428,7 +466,7 @@ export class AntigravityProviderService {
     if (!models.length) return false
     this.signInGeneration += 1
     const signedInFlag = this.runtimeKind() === 'native' ? { nativeSignedIn: true } : { signedIn: true }
-    this.settings = { ...this.settings, ...signedInFlag, models, modelsRefreshedAt: new Date().toISOString() }
+    this.settings = { ...this.settings, ...signedInFlag, models, modelsRefreshedAt: new Date().toISOString(), modelsEffortsChecked: true }
     this.save()
     return true
   }
@@ -446,7 +484,7 @@ export class AntigravityProviderService {
       try {
         await this.acp.initialize(active)
         const opened = await this.openSignedIn(active, cwd)
-        if (!opened || !this.recordSignIn(modelOptions(opened))) return false
+        if (!opened || !this.recordSignIn(await this.listedModels(active, opened))) return false
         this.notifyChanged()
         return true
       } catch {
@@ -500,7 +538,7 @@ export class AntigravityProviderService {
     try {
       const text = await this.acp.oneShot({ cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() })
       // `agy` answers a model whose quota is used up with a notice as the reply ("⚠ Individual quota reached. …"): never an answer.
-      if (AGY_QUOTA_NOTICE.test(text)) throw harnessAppError({ code: 'rate_limited', message: `Antigravity's quota for this model is used up: ${text.trim().replace(/^⚠\s*/, '')}` })
+      if (AGY_QUOTA_NOTICE.test(text)) throw harnessAppError({ code: 'rate_limited', scope: 'model', message: `Antigravity's quota for this model is used up: ${text.trim().replace(/^⚠\s*/, '')}` })
       return { text }
     } finally {
       // The ended process may hold the folder a moment longer on Windows: a leftover empty folder is harmless.
@@ -515,10 +553,11 @@ export class AntigravityProviderService {
     try {
       await this.acp.initialize(active)
       const session = await active.connection.agent.request(methods.agent.session.new, { cwd, mcpServers: [] })
-      const models = modelOptions(session)
+      const models = await this.listedModels(active, session)
       if (!models.length) throw new Error('Google agent did not return account models')
       this.settings.models = models
       this.settings.modelsRefreshedAt = new Date().toISOString()
+      this.settings.modelsEffortsChecked = true
       this.save()
       return models
     } catch (error) {
@@ -584,7 +623,13 @@ export class AntigravityProviderService {
 
   /** When the agent last listed the models, kept with them across restarts. */
   modelsRefreshedAt(): string | undefined {
-    return this.settings.models?.length ? this.settings.modelsRefreshedAt : undefined
+    if (!this.settings.models?.length) return undefined
+    // Lists cached before reasoning-level extraction on native `agy` count as stale once so the
+    // scheduled pass refreshes them and populates `efforts` without waiting for a manual refresh.
+    if (this.runtimeKind() === 'native' && !this.settings.modelsEffortsChecked && !this.settings.models.some((model) => model.efforts?.length)) {
+      return undefined
+    }
+    return this.settings.modelsRefreshedAt
   }
 
   /** Signs the agent out. On `agy` that is this computer's `agy` sign-in, which every profile shares. */
@@ -606,6 +651,7 @@ export class AntigravityProviderService {
       this.settings.nativeSignedIn = false
       this.settings.models = []
       delete this.settings.modelsRefreshedAt
+      delete this.settings.modelsEffortsChecked
       this.settings.sessions = {}
       this.save()
       this.notifyChanged()
@@ -711,6 +757,7 @@ export class AntigravityProviderService {
     else this.settings.signedIn = false
     this.settings.models = []
     delete this.settings.modelsRefreshedAt
+    delete this.settings.modelsEffortsChecked
     this.save()
     this.notifyChanged()
   }

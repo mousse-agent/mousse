@@ -16,6 +16,7 @@
 - When asked to build, publish or install a nightly, read and follow `moostack/skills/nightly-build-release/SKILL.md`. It keeps fixing failures until a nightly is published.
 - Before building, restyling or reviewing UI in `src/renderer`, read and follow `moostack/skills/mousse-ui/SKILL.md`.
 - When the user says "fixed" or "fixed it" after a long debugging session, follow `moostack/skills/debug-journal/SKILL.md`.
+- When adding, retiring or re-tiering models in `src/mms/models/models.json`, or changing its `namingProviders`, read and follow `moostack/skills/update-model-catalog/SKILL.md`.
 - To post screenshots or videos on a PR or issue, follow `moostack/skills/gh-attach-images/SKILL.md`. Never commit them to the repository.
 - Only when explicitly asked to end the session, read and follow `moostack/skills/end-session/SKILL.md`. Follow an already selected outcome without asking again. Ordinary task completion, commit/push requests, and casual goodbyes do not trigger session wrap-up.
 - These skills share `docs/team-workflow.md`. Track meaningful work intended for the shared codebase; reuse existing issues/PRs and record material decisions and handoffs. Local PR testing, temporary integrations, and experiments do not create issues, PRs, or pushed checkpoints unless explicitly requested.

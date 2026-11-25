@@ -410,3 +410,155 @@ describe('Antigravity profile admission', () => {
     await expect(resolveBoundServices({ ...args, binding: undefined, method: 'providers.instances.signIn' })).rejects.toMatchObject({ code: 'profile_binding_required' })
   })
 })
+
+describe('Antigravity reasoning level discovery and cache refresh', () => {
+  it('treats pre-fix native model lists without efforts as stale once, then refreshes and notifies on change', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-agy-efforts-'))
+    homes.push(home)
+    const requests: Array<[string, Record<string, unknown>]> = []
+    const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, {
+      connect: () => {
+        const abort = new AbortController()
+        return {
+          child: { exitCode: 0, signalCode: null, kill: vi.fn() },
+          connection: {
+            signal: abort.signal,
+            close: vi.fn(() => abort.abort(new Error('ACP closed'))),
+            agent: {
+              request: vi.fn(async (method: string, params: Record<string, unknown>) => {
+                requests.push([method, params])
+                if (method === methods.agent.initialize) return { protocolVersion: PROTOCOL_VERSION }
+                if (method === methods.agent.session.new) return {
+                  sessionId: 'ses-1',
+                  configOptions: [
+                    {
+                      id: 'model',
+                      category: 'model',
+                      type: 'select',
+                      currentValue: 'gemini-4-neon',
+                      options: [
+                        { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+                        { value: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+                        { value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+                      ]
+                    },
+                    {
+                      id: 'thought_level',
+                      category: 'thought_level',
+                      type: 'select',
+                      currentValue: 'high',
+                      options: [
+                        { value: 'low', name: 'Low' },
+                        { value: 'medium', name: 'Medium' },
+                        { value: 'high', name: 'High' },
+                        { value: 'xhigh', name: 'Extra' }
+                      ]
+                    }
+                  ],
+                  models: {
+                    currentModelId: 'gemini-4-neon-high',
+                    availableModels: [
+                      { modelId: 'gemini-4-neon-low', name: 'Gemini 4 Neon (Low)' },
+                      { modelId: 'gemini-4-neon-medium', name: 'Gemini 4 Neon (Medium)' },
+                      { modelId: 'gemini-4-neon-high', name: 'Gemini 4 Neon (High)' },
+                      { modelId: 'gemini-4-neon-xhigh', name: 'Gemini 4 Neon (XHigh)' },
+                      { modelId: 'claude-opus-5-5-low', name: 'Claude Opus 5.5 (Low)' },
+                      { modelId: 'claude-opus-5-5-medium', name: 'Claude Opus 5.5 (Medium)' },
+                      { modelId: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
+                      { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+                    ]
+                  }
+                }
+                return {}
+              }),
+              notify: vi.fn(async () => undefined)
+            }
+          }
+        } as never
+      }
+    })
+    services.push(service)
+    vi.spyOn(service, 'configured').mockReturnValue(true)
+    vi.spyOn(service as unknown as { runtime: () => unknown }, 'runtime')
+      .mockReturnValue({ kind: 'native', binary: join(home, 'agy'), source: 'user' })
+    // Simulate a pre-fix settings.json cached from native agy without efforts.
+    ;(service as unknown as { settings: unknown }).settings = {
+      nativeSignedIn: true,
+      models: [{ id: 'gemini-4-neon', label: 'Gemini 4 Neon' }],
+      modelsRefreshedAt: '2026-11-25T04:00:00.000Z'
+    }
+    expect(service.modelsRefreshedAt()).toBeUndefined()
+
+    const refreshed = await service.refreshModels(home)
+    expect(refreshed).toEqual([
+      { id: 'gemini-4-neon', label: 'Gemini 4 Neon', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high', thinkingOff: false },
+      { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', thinkingOff: false },
+      { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' }
+    ])
+    // Zero extra setConfigOption calls needed when models.availableModels is present.
+    expect(requests.map(([method]) => method)).toEqual([methods.agent.initialize, methods.agent.session.new])
+    expect(service.modelsRefreshedAt()).toBeDefined()
+  })
+
+  it('probes per-model thought_level options when an agent omits models.availableModels', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-agy-probe-'))
+    homes.push(home)
+    const modelSelect = (currentValue: string) => ({
+      id: 'model',
+      category: 'model',
+      type: 'select',
+      currentValue,
+      options: [
+        { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+        { value: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+        { value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+      ]
+    })
+    const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, {
+      connect: () => {
+        const abort = new AbortController()
+        return {
+          child: { exitCode: 0, signalCode: null, kill: vi.fn() },
+          connection: {
+            signal: abort.signal,
+            close: vi.fn(() => abort.abort(new Error('ACP closed'))),
+            agent: {
+              request: vi.fn(async (method: string, params: Record<string, unknown>) => {
+                if (method === methods.agent.initialize) return { protocolVersion: PROTOCOL_VERSION }
+                if (method === methods.agent.session.new) return {
+                  sessionId: 'ses-probe',
+                  configOptions: [
+                    modelSelect('gemini-4-neon'),
+                    { id: 'thought_level', category: 'thought_level', type: 'select', currentValue: 'high', options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }, { value: 'xhigh', name: 'Extra' }] }
+                  ]
+                }
+                if (method === methods.agent.session.setConfigOption && params.configId === 'model') {
+                  const id = String(params.value)
+                  if (id === 'claude-opus-5-5') {
+                    return {
+                      configOptions: [
+                        modelSelect(id),
+                        { id: 'thought_level', category: 'thought_level', type: 'select', currentValue: 'high', options: [{ value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }] }
+                      ]
+                    }
+                  }
+                  return { configOptions: [modelSelect(id)] }
+                }
+                return {}
+              }),
+              notify: vi.fn(async () => undefined)
+            }
+          }
+        } as never
+      }
+    })
+    services.push(service)
+    vi.spyOn(service, 'configured').mockReturnValue(true)
+    const refreshed = await service.refreshModels(home)
+    expect(refreshed).toEqual([
+      { id: 'gemini-4-neon', label: 'Gemini 4 Neon', efforts: ['low', 'high', 'xhigh'], defaultEffort: 'high', thinkingOff: false },
+      { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', thinkingOff: false },
+      { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' }
+    ])
+  })
+})

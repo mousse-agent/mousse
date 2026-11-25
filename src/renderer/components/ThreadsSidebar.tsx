@@ -379,10 +379,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const plainThreadIds = useMemo(() => plainThreads(listedInStore), [listedInStore])
   const plainRef = useRef(plainThreadIds)
   plainRef.current = plainThreadIds
+  const listedRef = useRef(listedInStore)
+  listedRef.current = listedInStore
   const heldActivity = useRef<ThreadActivitySnapshot | null>(null)
   const storeActivity = useAppStore((s) => {
     const held = heldActivity.current
-    if (held && sameListedActivity(held, s.threadActivity, plainRef.current)) return held
+    if (held && sameListedActivity(held, s.threadActivity, plainRef.current, listedRef.current)) return held
     heldActivity.current = s.threadActivity
     return s.threadActivity
   })

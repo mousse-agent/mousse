@@ -15,7 +15,8 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appendStagedApplets, modelFacingReplyText, publishedApplets, redactAppletFences, redactAppletTail, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { existsSync, mkdirSync } from 'node:fs'
@@ -43,8 +44,10 @@ import {
   settingCompactionPoint,
   type AgentAccessLevel
 } from '../../shared/settings'
-import { parseThreadNaming, threadNamingRequest, type ThreadNaming } from './threadNaming'
-import { branchNamingPrompt, type BranchNameRequest } from '../workspace/branchNaming'
+import { TitleModelCache, type TitleModelSource } from './TitleModelIndex'
+import { extractLimitFromError, shortCooldown, UsageLimitTracker } from '../models/usageLimits'
+import { limitFamilyOf } from '../../shared/bots/personal/modelSlots'
+import type { BranchNameRequest } from '../workspace/branchNaming'
 import { piInstanceId, piProviderIdOf, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { promptCacheGoneCold } from '../../shared/promptCacheCold'
@@ -430,6 +433,8 @@ import {
 import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
 import { ComputerUseDriver } from '../computerUse/ComputerUseDriver'
+import { ComputerUseSetupRequests } from '../computerUse/ComputerUseSetupRequests'
+import { computerNameIfKnown } from '../computerName'
 import { computerUseAllowed } from '../run/mcp/appTools/computer'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
@@ -1034,8 +1039,42 @@ interface ContinuationTurnPayload {
  * that is recorded and not over is waited for as long as it takes; this only checks it again at this interval.
  */
 const CONTINUATION_CALL_WAIT_MS = 10_000
-/** How long a first send's naming answer is kept for its worktree's branch after it came (`startThreadNaming`). */
-const THREAD_NAMING_KEPT_MS = 5 * 60_000
+/** How long Automatic naming may take to title a thread, all its attempts together, before the title from the message stays. */
+const AUTOMATIC_TITLE_DEADLINE_MS = 25_000
+/** The most models Automatic naming asks for one title or branch name before it gives up. */
+const AUTOMATIC_NAMING_ATTEMPTS = 3
+/** The most threads that wait for Automatic's first provider checks to be named once more (`pendingColdStartRefinements`). */
+const MAX_COLD_START_REFINEMENTS = 50
+const DEVICE_SCOPE: ProviderScope = { kind: 'device' }
+
+/** How threads are named now (`OrchestratorService.titleNamingAvailability`). */
+type TitleNamingAvailability = 'off' | 'explicit' | 'automatic_ready' | 'automatic_pending' | 'none'
+
+/** A request on the title model (`OrchestratorService.titleModelText`). */
+interface TitleRequestOptions {
+  task: OneShotTask
+  scope: ProviderScope | undefined
+  sessionKey: string
+  maxChars: number
+  signal?: AbortSignal
+  namingOrigin?: NamingOrigin
+}
+
+/** Rejects once `signal` aborts, with its reason; never settles otherwise. */
+function abortPromise(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const fail = () => reject(signal.reason instanceof Error ? signal.reason : new DOMException('The request was stopped.', 'AbortError'))
+    if (signal.aborted) fail()
+    else signal.addEventListener('abort', fail, { once: true })
+  })
+}
+
+/** A failure Automatic naming does not retry on another model: a stop, a timeout, or a policy that cannot be held. */
+function automaticNamingStops(error: unknown): boolean {
+  if ((error as { name?: unknown } | undefined)?.name === 'AbortError') return true
+  const code = (error as { code?: unknown } | undefined)?.code
+  return code === 'aborted' || code === 'provider_cancelled' || code === 'timeout' || code === 'provider_timeout' || code === 'policy_unenforceable'
+}
 /** How long a turn's start waits for its running list (`runningNoteFor`) before it starts without the note. */
 const RUNNING_NOTE_BUDGET_MS = 2_500
 
@@ -1700,8 +1739,11 @@ export class OrchestratorService extends EventEmitter {
     const markTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }, resultText?: string): void => {
       if (terminal) return
       terminal = true
-      const mask = resultText ? this.secretMaskerFor?.(threadId) : undefined
-      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && resultText ? mask(resultText) : resultText }))
+      // As a turn's result: each applet fence a line naming it (`redactAppletFences`), never its source, read with the
+      // rows before it when it is the turn's last row.
+      const named = resultText ? redactAppletTail(record.allText(), resultText) : resultText
+      const mask = named ? this.secretMaskerFor?.(threadId) : undefined
+      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && named ? mask(named) : named }))
       this.harness.runSettled?.(runId)
     }
     try {
@@ -2136,6 +2178,28 @@ export class OrchestratorService extends EventEmitter {
       }
     })
     return this.computerDriver
+  }
+
+  private computerSetup?: ComputerUseSetupRequests
+
+  /**
+   * The setup cards agents' `computer_use_request` opens in this profile's threads, made on first use. A bot's card
+   * shows in its chat, whichever of its threads asked.
+   */
+  computerUseSetup(): ComputerUseSetupRequests {
+    this.computerSetup ??= new ComputerUseSetupRequests({
+      status: (refresh) => this.computerUse().status(refresh),
+      enabled: () => this.settingsStore.get().agentAccess.computerUse !== false,
+      hostName: () => computerNameIfKnown() ?? 'this computer',
+      targetOf: (threadId) => {
+        try {
+          return this.botThreads?.homeOf?.(threadId) ?? threadId
+        } catch {
+          return threadId
+        }
+      }
+    })
+    return this.computerSetup
   }
 
   /**
@@ -4748,7 +4812,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
+    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; onReadApplet?: AppToolTurn['onReadApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
     // The relay's listing and the running note read nothing the skills change: they are read side by side with them.
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
@@ -4784,6 +4848,7 @@ export class OrchestratorService extends EventEmitter {
     const turn = this.appToolTurns.update(registered.runId, {
       ...(browser ? { browser } : {}),
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
+      ...(input.onReadApplet ? { onReadApplet: input.onReadApplet } : {}),
       // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
       ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
       // A bot lists and loads every skill unless its owner switched skills off (then none), else only those it was granted;
@@ -5032,7 +5097,8 @@ export class OrchestratorService extends EventEmitter {
           known: () => driver.known(),
           allowedFor: (threadId) => this.computerUseFor(threadId),
           listTools: () => driver.listTools(),
-          call: (name, args, signal) => driver.call(name, args, signal)
+          call: (name, args, signal) => driver.call(name, args, signal),
+          requestSetup: (input) => this.computerUseSetup().request(input)
         }
       },
       // Settings → Labs → Profiler, read at every listing and call; the service's profiler is installation-wide.
@@ -8224,7 +8290,8 @@ export class OrchestratorService extends EventEmitter {
       }
       // A message a restart cut off before its turn started, after the thread had moved on: no model ever had it.
       if (message.hidden || message.kind || message.notSent || (message.role !== 'user' && message.role !== 'assistant')) continue
-      const text = message.content.trim()
+      // A published applet goes over as one line, not its source: the handoff's budget is for the conversation.
+      const text = modelFacingReplyText(message).trim()
       if (!text) continue
       items.push({
         runOrdinal: ordinal,
@@ -10531,6 +10598,8 @@ export class OrchestratorService extends EventEmitter {
     this.appToolTurns.forgetThread(threadId)
     this.nativeMirrorThreads?.forget(threadId)
     this.dropContinuationsOf(threadId)
+    // A deleted thread no longer waits to be named once more.
+    this.forgetColdStart(threadId)
     try {
       this.runEngine?.approvals.cancelForThread(threadId, 'thread_deleted')
       // Prompts and answers never outlive the thread they belong to.
@@ -11931,9 +12000,10 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * A title for Regenerate: the first request, up to two later ones and the opening of the first reply,
-   * on the chosen title model; without one, or when it fails or names nothing, the title from the first
-   * message. Empty only when the thread has no message that names anything.
+   * A title for Regenerate: the first request, up to two later ones and the opening of the first reply, on the chosen
+   * title model or Automatic's; with neither (First line only, no connected model, providers not checked yet), or when
+   * the model fails or names nothing, the title from the first message. Empty only when the thread has no message that
+   * names anything.
    */
   async generateThreadTitle(messages: ChatMessage[], threadId?: string): Promise<string> {
     const context = titleContextOf(messages)
@@ -11942,7 +12012,8 @@ export class OrchestratorService extends EventEmitter {
     }
     // Regenerate always names the thread: a message that names nothing ("hello there") is used as written.
     const heuristic = heuristicTitle(context.request) || fitTitle(cleanTitleText(context.request).text)
-    if (!this.hasTitleModel()) return heuristic
+    const availability = this.titleNamingAvailability(threadId ? this.threadScope(threadId) : undefined)
+    if (availability !== 'explicit' && availability !== 'automatic_ready') return heuristic
     try {
       return (await this.generateTitleText(context, threadId, undefined, 'regenerate')) ?? heuristic
     } catch (error) {
@@ -11951,9 +12022,76 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private hasTitleModel(): boolean {
+  /** Whether the person chose a title model (Settings → Agents → Thread titles). Pull request drafts and commit messages use only that one. */
+  private hasExplicitTitleModel(): boolean {
     const titleSettings = this.settingsStore.get().title
     return Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+  }
+
+  /**
+   * How threads in `scope` are named now:
+   * - `explicit`: the title model the person chose.
+   * - `off`: First line only; no model is asked.
+   * - `automatic_ready`: Automatic, with a connected model that can name threads (`TitleModelCache`).
+   * - `automatic_pending`: Automatic, with none ready yet while a provider that might name them was never checked. The
+   *   first checks are started (without waiting): a daemon with no window open may not have read its providers yet.
+   * - `none`: Automatic, with no connected model that can name threads.
+   */
+  private titleNamingAvailability(scope: ProviderScope | undefined): TitleNamingAvailability {
+    if (this.hasExplicitTitleModel()) return 'explicit'
+    if (this.settingsStore.get().title.mode === 'off') return 'off'
+    const where = scope ?? DEVICE_SCOPE
+    const models = this.titleModels()
+    if (models.candidates(where).length) return 'automatic_ready'
+    if (!models.hasPendingProbe(where)) return 'none'
+    this.startTitleProbes(where)
+    return 'automatic_pending'
+  }
+
+  /** Starts the providers' first checks for Automatic naming, one read at a time; their results arrive as snapshots events. */
+  private startTitleProbes(scope: ProviderScope): void {
+    if (this.titleProbes) return
+    const instances = (this.harness as Partial<HarnessGateway> | undefined)?.instances
+    if (!instances?.snapshots) return
+    try {
+      this.titleProbes = instances.snapshots(scope).then(() => undefined, () => undefined).finally(() => { this.titleProbes = undefined })
+    } catch {
+      this.titleProbes = undefined
+    }
+  }
+
+  private titleProbes?: Promise<void>
+  private titleModelCache?: TitleModelCache
+  private titleModelCacheSource?: HarnessGateway
+  private usageLimitStore?: UsageLimitTracker
+
+  /** The profile's usage limits, shared with the bots' model choice (`MmsProfileServices`). */
+  setUsageLimits(tracker: UsageLimitTracker): void {
+    this.usageLimitStore = tracker
+    this.titleModelCache?.detach()
+    this.titleModelCache = undefined
+  }
+
+  private usageLimits(): UsageLimitTracker {
+    return this.usageLimitStore ??= new UsageLimitTracker()
+  }
+
+  private namingCooldownStore?: UsageLimitTracker
+
+  /** Automatic naming's own short waits after too many requests: bots never read them. */
+  private namingCooldowns(): UsageLimitTracker {
+    return this.namingCooldownStore ??= new UsageLimitTracker()
+  }
+
+  /** Automatic naming's ranked models, read from the profile's gateway and rebuilt on its snapshots events. */
+  private titleModels(): TitleModelCache {
+    if (!this.titleModelCache || this.titleModelCacheSource !== this.harness) {
+      this.titleModelCache?.detach()
+      this.titleModelCache = new TitleModelCache({ usageLimits: this.usageLimits(), cooldowns: this.namingCooldowns(), onSnapshotsUpdated: () => this.drainColdStartRefinements() })
+      this.titleModelCacheSource = this.harness
+      this.titleModelCache.attach(this.harness as unknown as TitleModelSource)
+    }
+    return this.titleModelCache
   }
 
   /** A failed request is logged; a refused title model was already reported once (`reportTitleModelRefusal`). */
@@ -11963,13 +12101,12 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Names a chat with the chosen title model (Automatic never reaches here: it names the chat from
-   * its first message). The model sees a small cleaned summary (`buildTitlePrompt`), never code, logs or
-   * tool output, and its answer is fitted to the sidebar (`normalizeTitle`). Null when it names nothing.
-   * The selection is resolved through the gateway like any other: the instance the picker chose (a legacy
-   * record maps to its built-in instance), and exactly that selection runs. A disabled instance, a hidden
-   * model or an instance that cannot run a single request (an agent without one-shots, a Bedrock model) is refused
-   * by its typed error, never swapped for another provider.
+   * Names a chat with the title model: the chosen one, or Automatic's best connected model (`titleModelText`). The model
+   * sees a small cleaned summary (`buildTitlePrompt`), never code, logs or tool output, and its answer is fitted to the
+   * sidebar (`normalizeTitle`). Null when it names nothing. A chosen selection is resolved through the gateway like any
+   * other: the instance the picker chose (a legacy record maps to its built-in instance), and exactly that selection
+   * runs. A disabled instance, a hidden model or an instance that cannot run a single request (an agent without
+   * one-shots, a Bedrock model) is refused by its typed error, never swapped for another provider.
    */
   private async generateTitleText(context: TitleContext, threadId: string | undefined, signal?: AbortSignal, namingOrigin?: NamingOrigin): Promise<string | null> {
     const text = await this.titleModelText(titleSystemPrompt(this.settingsStore.get().title.prompt), buildTitlePrompt(context), {
@@ -11985,41 +12122,37 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The title model's answer when asked to name a thread's worktree branch (`branchNaming`): the same model, scope and
-   * gateway as chat titles. Undefined when no title model is chosen; the branch then keeps its temporary name. `signal`
-   * ends the request when the naming gives up waiting (`BRANCH_NAMING_TIMEOUT_MS`).
-   *
-   * A thread whose first send asked for its title and branch name together (`startThreadNaming`) gets that request's
-   * branch line, waited for, when it was asked for exactly this branch request: the same first message and the same
-   * naming settings. No second request is made then, unless that answer had no branch line; a failed one stays failed.
-   * Any other request (the setup stopped and another message came, the settings changed) drops it and asks on its own.
+   * gateway as chat titles, in a request of its own, apart from the title's. Undefined with no title model (First line
+   * only, no connected model, providers not checked yet); the branch then keeps its temporary name. `signal` ends the
+   * request when the naming gives up waiting (`BRANCH_NAMING_TIMEOUT_MS`).
    */
   async askBranchName(request: BranchNameRequest, signal?: AbortSignal): Promise<string | undefined> {
-    if (!this.hasTitleModel() || signal?.aborted) return undefined
+    if (signal?.aborted) return undefined
+    const scope = this.threadScope(request.threadId)
+    const availability = this.titleNamingAvailability(scope)
+    if (availability !== 'explicit' && availability !== 'automatic_ready') return undefined
     const settings = this.branchNamingSettingsKey()
-    const pending = this.threadNamings?.get(request.threadId)
-    if (pending && (pending.settings !== settings || pending.branch.system !== request.system || pending.branch.prompt !== request.prompt)) {
-      this.threadNamings!.delete(request.threadId)
-    } else if (pending) {
-      const stopped = signal && pending.signal ? AbortSignal.any([signal, pending.signal]) : signal ?? pending.signal
-      if (stopped?.aborted) return undefined
-      let onAbort: (() => void) | undefined
-      const aborted = new Promise<undefined>((resolve) => {
-        onAbort = () => resolve(undefined)
-        stopped?.addEventListener('abort', onAbort, { once: true })
-      })
-      const answer = await Promise.race([pending.answer, aborted])
-      if (onAbort) stopped?.removeEventListener('abort', onAbort)
-      if (stopped?.aborted || this.branchNamingSettingsKey() !== settings) return undefined
-      if (!answer || answer.branch) return answer?.branch
-    }
-    const answer = await this.titleModelText(request.system, request.prompt, {
+    const call = this.titleModelText(request.system, request.prompt, {
       task: 'branch_name',
-      scope: this.threadScope(request.threadId),
+      scope,
       sessionKey: request.threadId,
       maxChars: 100,
       signal,
       namingOrigin: request.namingOrigin
     })
+    // Giving up does not wait for the request: it ends on the signal, and its answer is not used.
+    let answer: string
+    if (signal) {
+      call.catch(() => {})
+      try {
+        answer = await Promise.race([call, abortPromise(signal)])
+      } catch (error) {
+        if (signal.aborted) return undefined
+        throw error
+      }
+    } else {
+      answer = await call
+    }
     return signal?.aborted || this.branchNamingSettingsKey() !== settings ? undefined : answer
   }
 
@@ -12027,53 +12160,18 @@ export class OrchestratorService extends EventEmitter {
     const { branches, title } = this.settingsStore.get()
     return JSON.stringify([normalizeBranchNamingSettings(branches), title])
   }
-  /**
-   * The request each new thread's first send made for its title and branch name together (`threadNaming.ts`), and the
-   * branch request (`branchNamingPrompt`) its answer stands for. Kept for the worktree's branch naming (`askBranchName`)
-   * until `THREAD_NAMING_KEPT_MS` after it answered.
-   */
-  private threadNamings?: Map<string, { answer: Promise<ThreadNaming | undefined>; branch: { system: string; prompt: string }; settings: string; signal?: AbortSignal }>
 
   /**
-   * Asks the title model for the thread's title and branch name in one request. The request starts once the send's own
-   * work has returned to the event loop: the provider reads its launch settings then, not inside the turn's admission.
-   * Rejects when it fails.
+   * One request with no tools on the title model, through the gateway's `oneShot`: chat titles, branch names, pull
+   * request drafts and commit messages. A chosen title model runs exactly as chosen; the gateway resolves it in `scope`,
+   * bounds the wait and never retries, and the caller falls back when it throws. With none chosen, a title or branch
+   * name goes to Automatic's models (`automaticTitleText`).
    */
-  private startThreadNaming(threadId: string, words: string, images: number, signal?: AbortSignal): Promise<ThreadNaming> {
-    const settings = this.settingsStore.get()
-    const branches = normalizeBranchNamingSettings(settings.branches)
-    const { system, prompt } = threadNamingRequest({ request: words, images }, settings.title.prompt, branches)
-    const naming = new Promise<void>((resolve) => setImmediate(resolve))
-      .then(() => {
-        signal?.throwIfAborted()
-        return this.titleModelText(system, prompt, { task: 'title', scope: this.threadScope(threadId), sessionKey: threadId, maxChars: 400, signal, namingOrigin: 'send' })
-      })
-      .then(parseThreadNaming)
-    // The branch request this answer stands for, as `branchNameSource` and `requestBranchName` will write it.
-    const entry = { answer: naming.catch(() => undefined), branch: branchNamingPrompt(withoutSubagentPreamble(words).trim(), branches), settings: this.branchNamingSettingsKey(), signal }
-    const namings = this.threadNamings ??= new Map()
-    const forget = () => {
-      signal?.removeEventListener('abort', forget)
-      if (namings.get(threadId) === entry) namings.delete(threadId)
-    }
-    namings.set(threadId, entry)
-    signal?.addEventListener('abort', forget, { once: true })
-    void entry.answer.then(() => {
-      if (signal?.aborted) return
-      const timer = setTimeout(forget, THREAD_NAMING_KEPT_MS)
-      timer.unref?.()
-    })
-    return naming
-  }
-
-  /**
-   * One request with no tools on the title model the user chose, through the gateway's `oneShot`:
-   * chat titles, pull request drafts and commit messages. The gateway resolves the selection in
-   * `scope`, bounds the wait and never retries; the caller falls back when it throws.
-   */
-  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number; signal?: AbortSignal; namingOrigin?: NamingOrigin }): Promise<string> {
-    // The title prompt is the title's own instruction (`generateTitleText`), not part of the selection.
-    const { prompt: _titlePrompt, ...selection } = this.settingsStore.get().title
+  private async titleModelText(system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
+    // The title prompt is the title's own instruction (`generateTitleText`) and the mode its Automatic switch: neither is part of the selection.
+    const { prompt: _titlePrompt, mode: _mode, ...selection } = this.settingsStore.get().title
+    const explicit = Boolean(selection.llmProvider?.trim() && selection.model?.trim())
+    if (!explicit && (options.task === 'title' || options.task === 'branch_name')) return this.automaticTitleText(system, prompt, options)
     try {
       const { text } = await this.harness.oneShot({
         selection,
@@ -12092,6 +12190,72 @@ export class OrchestratorService extends EventEmitter {
       this.reportTitleModelRefusal(error)
       throw error
     }
+  }
+
+  /**
+   * A title or branch name on Automatic's models, best first (`TitleModelCache`). A failed model gives way to the next
+   * one, at most {@link AUTOMATIC_NAMING_ATTEMPTS} in all: a usage limit marks the model or its entry until the reset
+   * (bots skip it too), a model the entry no longer runs moves to its next model, and any other failure moves to
+   * another entry. A stop, a timeout or a policy refusal ends it at once, with no retry. A title gives up after
+   * {@link AUTOMATIC_TITLE_DEADLINE_MS} in all, whatever each request does; a branch's caller bounds its own wait.
+   */
+  private async automaticTitleText(system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
+    const scope = options.scope ?? DEVICE_SCOPE
+    const deadline = new AbortController()
+    const timer = options.task === 'title' ? setTimeout(() => deadline.abort(new DOMException('The title took too long.', 'TimeoutError')), AUTOMATIC_TITLE_DEADLINE_MS) : undefined
+    timer?.unref?.()
+    const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal
+    const failedInstances = new Set<string>()
+    const tried = new Set<string>()
+    let lastError: unknown
+    try {
+      for (let attempt = 0; attempt < AUTOMATIC_NAMING_ATTEMPTS; attempt++) {
+        if (signal.aborted) break
+        const candidate = this.titleModels().candidates(scope).find((each) => !failedInstances.has(each.instanceId) && !tried.has(`${each.instanceId}\0${each.model}`))
+        if (!candidate) break
+        tried.add(`${candidate.instanceId}\0${candidate.model}`)
+        try {
+          const call = this.harness.oneShot({
+            selection: { instanceId: candidate.instanceId, llmProvider: '', model: candidate.model, ...(candidate.effort ? { effort: candidate.effort } : {}) },
+            ...(options.scope ? { scope: options.scope } : {}),
+            purpose: 'title',
+            system,
+            prompt,
+            maxChars: options.maxChars,
+            sessionKey: options.sessionKey,
+            task: options.task,
+            ...(options.namingOrigin ? { namingOrigin: options.namingOrigin } : {}),
+            signal
+          })
+          // A request still running when the deadline passes is left to end on the signal; its answer is not used.
+          call.catch(() => {})
+          const { text } = await Promise.race([call, abortPromise(signal)])
+          return text
+        } catch (error) {
+          lastError = error
+          if (signal.aborted || automaticNamingStops(error)) break
+          const limit = extractLimitFromError(error)
+          // A plan or quota limit is the profile's (bots skip it too); too many requests just now holds naming alone.
+          const limits = limit?.transient ? this.namingCooldowns() : this.usageLimits()
+          if (limit?.scope === 'model') {
+            limits.markModelLimited(candidate.instanceId, candidate.model, limit.until)
+            continue
+          }
+          if (limit) {
+            limits.markInstanceLimited(candidate.instanceId, limit.until)
+            failedInstances.add(candidate.instanceId)
+            continue
+          }
+          const code = (error as { code?: unknown } | undefined)?.code
+          if (code === 'model_unavailable' || code === 'unsupported') continue
+          failedInstances.add(candidate.instanceId)
+        }
+      }
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException('The request was stopped.', 'AbortError')
+    throw lastError ?? new Error('No connected model can name threads now.')
   }
 
   /**
@@ -12279,10 +12443,11 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Names a thread as its first message's turn is admitted, before its worktree and snapshot are set up and without
-   * holding up the turn, while it still has the default name. Without a title model, the title from the message is
-   * final. With one, the title from the message shows at once as `provisional` (dimmed in the sidebar) and the model's
-   * title replaces it as `auto`, in place. The same request names the thread's worktree branch (`startThreadNaming`),
-   * except for a private thread's, which is asked for its title alone.
+   * holding up the turn, while it still has the default name. With no title model (First line only, or no connected
+   * model), the title from the message is final. Otherwise the title from the message shows at once as `provisional`
+   * (dimmed in the sidebar) and the model's title replaces it as `auto`, in place: a request for the title alone, never
+   * the branch (the worktree asks for that itself once the message is accepted, `nameAcceptedFirstBranch`). While the
+   * providers have not been checked yet, no model is asked now; the pass after the first reply names it.
    * A model that fails or names nothing leaves it provisional until the pass after the first reply.
    */
   private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, restoreSignal?: AbortSignal, namingSignal = restoreSignal): void {
@@ -12295,7 +12460,8 @@ export class OrchestratorService extends EventEmitter {
     }
     restoreSignal?.addEventListener('abort', restore, { once: true })
     const fromMessage = heuristicTitle(userContent)
-    if (!this.hasTitleModel()) {
+    const availability = this.titleNamingAvailability(this.threadScope(threadId))
+    if (availability === 'off' || availability === 'none') {
       // No model will name it later: a message that names nothing ("hello") is used as written.
       const name = fromMessage || fitTitle(cleanTitleText(userContent).text)
       if (name) shown = this.writeThreadTitle(threadId, thread, name, 'final')
@@ -12304,17 +12470,16 @@ export class OrchestratorService extends EventEmitter {
     }
     shown = this.writeThreadTitle(threadId, thread, fromMessage || thread.name, 'provisional')
     if (restoreSignal?.aborted) restore()
-    if (!shown || restoreSignal?.aborted) return
-    // A private thread's branch is never named from its messages: it is asked for its title alone.
-    const naming = thread.localOnly
-      ? new Promise<void>((resolve) => setImmediate(resolve)).then(async () => {
-        namingSignal?.throwIfAborted()
-        return { title: await this.generateTitleText({ request: userContent, images }, threadId, namingSignal, 'send') }
-      })
-      : this.startThreadNaming(threadId, userContent, images, namingSignal)
+    if (!shown || restoreSignal?.aborted || availability === 'automatic_pending') return
+    // The request starts once the send's own work has returned to the event loop: the provider reads its launch
+    // settings then, not inside the turn's admission.
+    const naming = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
+      namingSignal?.throwIfAborted()
+      return this.generateTitleText({ request: userContent, images }, threadId, namingSignal, 'send')
+    })
     void this.queueTitleWork(threadId, async () => {
       try {
-        const { title } = await naming
+        const title = await naming
         if (title && shown && !namingSignal?.aborted) shown = this.writeThreadTitle(threadId, shown, title, 'auto')
       } catch (error) {
         if (namingSignal?.aborted) return
@@ -12355,6 +12520,10 @@ export class OrchestratorService extends EventEmitter {
    * which says what "continue" or a pasted log was about, and the title is final; a model that fails or
    * names nothing keeps the name, also final. A turn that failed or stopped only stops dimming a
    * provisional title (it becomes `auto`), so the next finished reply can still name the thread.
+   *
+   * On Automatic, when the first reply ends before any provider was checked (a daemon that has just started), the title
+   * stops being dimmed (`auto`) and the thread waits for the checks (`pendingColdStartRefinements`): once a model is
+   * ready it is named once more, and once none can be, its title is final as it is.
    */
   private nameThreadAfterTurn(threadId: string, completed: boolean): void {
     if (!this.threadStore || threadId === '__unbound__') return
@@ -12367,18 +12536,98 @@ export class OrchestratorService extends EventEmitter {
         if (thread.titleSource === 'provisional') this.writeThreadTitle(threadId, thread, thread.name, 'auto')
         return
       }
-      const context = titleContextOf(this.getMessages(threadId))
-      let title: string | null = null
-      if (context?.reply && this.hasTitleModel()) {
-        try {
-          title = await this.generateTitleText({ ...context, later: [] }, threadId)
-        } catch (error) {
-          this.warnTitleFailure(threadId, error)
-        }
+      const availability = this.titleNamingAvailability(this.threadScope(threadId))
+      if (availability === 'automatic_pending') {
+        const shown = this.writeThreadTitle(threadId, thread, thread.name, 'auto')
+        if (shown) this.waitForTitleModels(threadId)
+        return
       }
-      // Still the default name: the first message named nothing and neither did the reply. Keep "New Chat".
-      this.writeThreadTitle(threadId, thread, title ?? thread.name, 'final')
+      this.forgetColdStart(threadId)
+      await this.refineTitle(threadId, thread, availability)
     })
+  }
+
+  /**
+   * Names the thread once more from its request and the opening of its first reply, on the title model when there is
+   * one, and makes its title final: the model's title, or the one it has when the model fails or names nothing.
+   */
+  private async refineTitle(threadId: string, thread: Thread, availability: TitleNamingAvailability): Promise<void> {
+    const context = titleContextOf(this.getMessages(threadId))
+    let title: string | null = null
+    if (context?.reply && (availability === 'explicit' || availability === 'automatic_ready')) {
+      try {
+        title = await this.generateTitleText({ ...context, later: [] }, threadId)
+      } catch (error) {
+        this.warnTitleFailure(threadId, error)
+      }
+    }
+    // No model named it and the first message's title rules named nothing ("hello there"): the message as written, as
+    // with no model at all, rather than "New Chat" for good. Without words (attachments only) the name stays.
+    const fallback = isDefaultThreadName(thread.name) && context ? fitTitle(cleanTitleText(context.request).text) || thread.name : thread.name
+    this.writeThreadTitle(threadId, thread, title ?? fallback, 'final')
+  }
+
+  /**
+   * Threads whose first reply ended while Automatic's providers were still being checked, oldest first. Each is named
+   * once more when a check makes a model ready, in its own project's scope. Kept in memory: a restart leaves their titles
+   * as they are (`auto`), and the next finished reply names them.
+   */
+  private pendingColdStartRefinements?: Set<string>
+  private coldStartDrain?: { again: boolean }
+
+  private waitForTitleModels(threadId: string): void {
+    const pending = this.pendingColdStartRefinements ??= new Set()
+    pending.delete(threadId)
+    pending.add(threadId)
+    // The oldest goes first when too many wait: its title stays `auto`, and its next finished reply names it.
+    while (pending.size > MAX_COLD_START_REFINEMENTS) pending.delete(pending.values().next().value!)
+  }
+
+  /** A thread deleted or named for good no longer waits. */
+  private forgetColdStart(threadId: string): void {
+    this.pendingColdStartRefinements?.delete(threadId)
+  }
+
+  /**
+   * Goes through the waiting threads after the providers' snapshots changed, one at a time: a thread whose scope now has
+   * a model (or whose person chose one) is named once more; one with none (First line only, nothing connected) is final
+   * as it is; one whose providers are still being checked keeps waiting. A change while it runs goes through them again.
+   */
+  private drainColdStartRefinements(): void {
+    if (!this.pendingColdStartRefinements?.size) return
+    if (this.coldStartDrain) {
+      this.coldStartDrain.again = true
+      return
+    }
+    const drain: { again: boolean } = { again: true }
+    this.coldStartDrain = drain
+    void (async () => {
+      try {
+        while (drain.again) {
+          drain.again = false
+          for (const threadId of [...(this.pendingColdStartRefinements ?? [])]) {
+            if (!this.pendingColdStartRefinements?.has(threadId)) continue
+            const thread = this.threadStore?.getThread(threadId)
+            if (!thread || thread.titleSource !== 'auto') {
+              this.forgetColdStart(threadId)
+              continue
+            }
+            const availability = this.titleNamingAvailability(this.threadScope(threadId))
+            if (availability === 'automatic_pending') continue
+            this.forgetColdStart(threadId)
+            await this.queueTitleWork(threadId, async () => {
+              const current = this.threadStore?.getThread(threadId)
+              if (!current || current.titleSource !== 'auto') return
+              await this.refineTitle(threadId, current, availability)
+            })
+          }
+        }
+      } catch (error) {
+        console.warn('[titles] waiting threads could not be named', { error: error instanceof Error ? error.message : String(error) })
+      } finally {
+        if (this.coldStartDrain === drain) this.coldStartDrain = undefined
+      }
+    })()
   }
 
   getNativeContext(threadId?: string): NativeLlmContext {
@@ -12594,8 +12843,62 @@ export class OrchestratorService extends EventEmitter {
     this.persist()
   }
 
+  /**
+   * The applet revisions a thread's replies show, oldest first: completed replies only, as the window loads them
+   * (`applets.get`), and not those a fork inherited, whose bundles are in its parent's folder.
+   */
+  private shownAppletReferences(messages: readonly ChatMessage[]): AppletReference[] {
+    return messages
+      .filter(message => !message.hidden && message.role === 'assistant' && !message.incomplete && !message.streaming && !message.inherited)
+      .flatMap(message => message.presentationParts ?? [])
+      .flatMap(part => part.type === 'applet' ? [part.reference] : [])
+  }
+
+  /**
+   * What a `publish_applet` call stages. A revision is checked against the applet's current revision now, so a stale one
+   * is refused to the model instead of failing when the response completes; one with `edits` becomes the full source
+   * of that revision with the edits applied. One revision of an applet per response: a second would be stale by then.
+   * Only a revision the thread shows is revised: one an Undo hid is neither named nor built on, so its source stays hidden.
+   */
+  private stageableApplet(threadId: string, messages: readonly ChatMessage[], value: unknown, staged: readonly AppletSubmission[]): AppletSubmission {
+    const store = this.appletStore
+    const args = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+    if (store && args && typeof args.appletId === 'string') {
+      const appletId = args.appletId
+      if (staged.some(source => source.appletId === appletId)) throw new AppletValidationError('This response already revises that applet. Put every change to it in one publish_applet call.')
+      const head = store.head(threadId, appletId)
+      const shown = this.shownAppletReferences(messages).filter(reference => reference.appletId === appletId)
+      if (!head || !shown.length) throw new AppletValidationError(`No applet ${appletId} is shown in this conversation.`)
+      if (!shown.some(reference => reference.revisionId === head.revisionId))
+        throw new AppletValidationError(`Applet ${appletId}'s newest revision is not shown in this conversation, so it cannot be revised. Publish a new applet instead.`)
+      if (args.expectedRevision !== head.revisionId) throw new AppletValidationError(`Applet ${appletId} is at revision ${head.revisionId}, not ${String(args.expectedRevision)}. Revise that revision.`)
+      if (args.edits !== undefined)
+        return validateAppletSubmission(appletRevisionFromEdits(args, store.load(threadId, appletId, head.revisionId).source), { publishing: true })
+    } else if (args?.edits !== undefined) {
+      throw new AppletValidationError('edits revise a published applet: give its appletId and expectedRevision.')
+    }
+    return validateAppletSubmission(value, { publishing: true })
+  }
+
+  /** `read_applet`: a page of a revision this thread shows, by default the newest one it shows. */
+  private readShownApplet(threadId: string, messages: readonly ChatMessage[], args: Record<string, unknown>): Record<string, unknown> {
+    const store = this.appletStore
+    if (!store) throw new Error('Applets are off.')
+    const { appletId, revisionId } = args
+    if (typeof appletId !== 'string' || !appletId) throw new AppletValidationError('appletId must name an applet.')
+    if (revisionId !== undefined && typeof revisionId !== 'string') throw new AppletValidationError('revisionId must be text.')
+    const shown = this.shownAppletReferences(messages).filter(reference => reference.appletId === appletId)
+    const reference = revisionId === undefined ? shown.at(-1) : shown.find(candidate => candidate.revisionId === revisionId)
+    if (!reference)
+      throw new AppletValidationError(revisionId === undefined
+        ? `No applet ${appletId} is shown in this conversation. An applet published in this response can be read once the response completes.`
+        : `Revision ${revisionId} of applet ${appletId} is not shown in this conversation.`)
+    const bundle = store.load(threadId, appletId, reference.revisionId)
+    return { appletId, revisionId: reference.revisionId, title: bundle.title, ...readAppletSource(bundle.source, args) }
+  }
+
   private appletCatalogue(): string {
-    const references = this.messages.filter(message => !message.hidden).flatMap(message => message.presentationParts ?? []).filter(part => part.type === 'applet').map(part => part.reference)
+    const references = this.shownAppletReferences(this.messages)
     return references.length ? '\nExisting applets in this conversation (use appletId and expectedRevision to revise; latest visible revision per applet):\n' + JSON.stringify([...new Map(references.map(ref => [ref.appletId, ref])).values()].slice(-20)) : ''
   }
 
@@ -15112,9 +15415,11 @@ export class OrchestratorService extends EventEmitter {
     const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string; usageLimitKind?: string }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
-      // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages.
-      const mask = resultText ? this.secretMaskerFor?.(session.threadId) : undefined
-      const kept = mask && resultText ? mask(resultText) : resultText
+      // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages,
+      // with each applet as a line, also one a stopped turn streamed whole but never published.
+      const named = resultText ? redactAppletFences(resultText) : resultText
+      const mask = named ? this.secretMaskerFor?.(session.threadId) : undefined
+      const kept = mask && named ? mask(named) : named
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText: kept }))
       // The run's count record goes with it: no later attempt starts from fresh counts.
       this.harness.runSettled?.(engineRunId ?? turnId)
@@ -15912,10 +16217,14 @@ export class OrchestratorService extends EventEmitter {
       }, { dropLate: true })
       const onPublishApplet = this.appletStore ? (value: unknown) => {
         if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
-        stagedApplets.push(validateAppletSubmission(value, { publishing: true }))
+        stagedApplets.push(this.stageableApplet(session.threadId, session.messages, value, stagedApplets))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet,
+      // A bot's applets are in its activations' threads, which its turns have no list of: reading is for threads.
+      const onReadApplet = this.appletStore && !opts?.bot
+        ? (args: Record<string, unknown>) => this.readShownApplet(session.threadId, session.messages, args)
+        : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet, onReadApplet,
         // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
         userContent: opts?.agent ? '' : userContent,
         instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}), ...(opts?.bot?.preamble ? { botPreamble: opts.bot.preamble } : {}) }) : undefined
@@ -15923,6 +16232,7 @@ export class OrchestratorService extends EventEmitter {
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
+          onReadApplet,
           browser: browserExecution,
           delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode) : undefined,
           toolAccess: session.sharedWorkspace && isReadOnlyShared(session.sharedWorkspace)
@@ -16054,6 +16364,11 @@ export class OrchestratorService extends EventEmitter {
         const limit = opts?.bot || opts?.schedule ? undefined : this.usageLimitDecision(err, engineRunId)
         if (limit?.action === 'pause') usagePause = limit.pause
         else if (limit?.action === 'fail') providerError = { ...providerError, message: limit.message }
+        // The run pauses until `usagePause.until`, as always. Bots and Automatic naming skip the entry meanwhile: until
+        // that reset when the provider reported it, else for a short cooldown (a guessed five hours would keep them off
+        // an entry that may be back soon). A window for one model family (weekly Opus) leaves the entry's other models.
+        if (usagePause?.until && promptCacheInstanceId && !limitFamilyOf(usagePause.limitKind))
+          this.usageLimits().markInstanceLimited(promptCacheInstanceId, usagePause.estimated ? shortCooldown(Date.now()) : usagePause.until)
         // A scheduled occurrence is never paused (its run would outlive the occurrence). It fails, and the run
         // records when the limit resets so the scheduler waits for it instead of taking slots inside the window.
         // A bot turn fails the same way: its engine tries the next model, or pauses the bot until the reset.
@@ -16199,6 +16514,9 @@ export class OrchestratorService extends EventEmitter {
       // one, else the last closed one) holds the rest and is marked incomplete.
       const replies = this.transcript.closedReplies()
       const last = this.transcript.openAssistantContent() === undefined ? replies.at(-1) : undefined
+      // The result is read with the turn's rows before it, when it is only the open row: a fence an earlier row opened is cut.
+      // The rows are joined as they streamed, nothing trimmed or put between them, so no line closes a fence that did not.
+      const turnRows = [...replies.map((reply) => reply.content), this.transcript.openAssistantContent() ?? ''].join('')
       const unshown = unshownReplyText(partial, (last ? replies.slice(0, -1) : replies).map((reply) => stripActionBlocks(reply.content)))
       if (last && (!unshown || stripActionBlocks(last.content).trim() === unshown.trim())) {
         this.updateStreamingAssistantMessage(last.id, last.content, false, undefined, true)
@@ -16228,7 +16546,8 @@ export class OrchestratorService extends EventEmitter {
       const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
       const response: OrchestratorResponse = { message: stoppedReplyText(opts?.bot ? unshown : partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
-      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
+      const stoppedResult = partial && redactAppletTail(turnRows, partial)
+      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, stoppedResult)
       try {
         // A turn cut off by the service stopping saves where it ended and nothing more: it does not wait for its
         // repository or run Git while the service exits. The next turn's recovery takes its snapshot.
@@ -16249,19 +16568,29 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // Applets published by tool join the turn's last reply as fences, so they publish with it.
-    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+    // U+2028 and U+2029 in a string are escaped: publication would read a line start after one, where three backticks
+    // in the source would end the fence early.
+    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source).replace(/\p{Zl}|\p{Zp}/gu, (c) => '\\u' + c.charCodeAt(0).toString(16)) + '\n```').join('')
     // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
     const replyOnlyText = stripActionBlocks(assistantText)
-    const displayText = replyOnlyText + appletFences
     // A tool call ends a reply row, so a turn's notes before its calls already have rows of their
     // own: the row that ends the turn (the open one, else the last closed one) holds the rest.
     const shownReplies = this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content))
     const earlierReplies = this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
-    const finalText = unshownReplyText(displayText, earlierReplies)
     // The streamed row never held the applet fences, so it is matched on the reply text alone.
     const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
+    // The fences end that last row, judged on the row alone (an earlier row is a reply of its own; `appendStagedApplets`).
+    const split = replyOnlyText.endsWith(finalReplyText)
+    const earlierText = split ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
+    const lastReply = split ? finalReplyText : replyOnlyText
+    const displayText = earlierText + appendStagedApplets(lastReply, appletFences)
+    // The run's result (what a parent or `thread_wait` reads) is the turn's text with its applet fences cut, each named by
+    // title until the reply publishes it, then by its reference line (below). The staged fences follow all the model
+    // wrote, so they never end one of its fences early.
+    let resultText = redactAppletFences(displayText)
+    const finalText = unshownReplyText(displayText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
     // again, comes next. "Done." would read as if the turn had finished with nothing to say.
@@ -16303,6 +16632,14 @@ export class OrchestratorService extends EventEmitter {
         finalMessage.presentationParts = publishAppletPresentation(this.appletStore, { threadId: session.threadId, messageId: finalMessage.id, turnId, content: finalMessage.content })
         this.persist(true)
         this.emitMessageUpdated(finalMessage)
+        // The text the model wrote again, with the last row's published applets named by their reference lines.
+        // Each published applet is named on the fence that published it, found as publication read the stored reply.
+        if (finalMessage.presentationParts) {
+          const published = publishedApplets(finalMessage.content, finalMessage.presentationParts, displayText.length - finalMessage.content.length)
+          // A stored reply that is not the end of the turn's text places nothing: its references follow the text.
+          const placed = displayText.endsWith(finalMessage.content)
+          resultText = redactAppletFences(displayText, placed ? published : { after: [...(published.at?.values() ?? []), ...(published.after ?? [])] })
+        }
       }
     }
 
@@ -16389,7 +16726,7 @@ export class OrchestratorService extends EventEmitter {
     }
     if (executionFailed) {
       this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })
-      markRunTerminal('failed', { error: 'LLM error' }, displayText)
+      markRunTerminal('failed', { error: 'LLM error' }, resultText)
     } else {
       // The answer is complete: windows show the turn finished now. Its checkpoint may wait minutes for the repository's
       // lease behind another thread's. The run stays `finalizing` until the checkpoint is recorded: the thread's next
@@ -16419,7 +16756,7 @@ export class OrchestratorService extends EventEmitter {
       throw error
     }
     this.persist(true)
-    if (!executionFailed) markRunTerminal('completed', undefined, displayText || 'Done.')
+    if (!executionFailed) markRunTerminal('completed', undefined, resultText || 'Done.')
     if (!executionFailed && endAction && turnStartSha && checkpointCwd && !snapshotFolder && !session.sharedWorkspace && !session.primaryCheckout && session.workspace) {
       this.recordTurnHandoff(session, { runId: turnId, workspace: session.workspace })
     }
