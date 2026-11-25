@@ -98,6 +98,18 @@
       ],
       "claimedAt": "2026-11-25T18:09:20.891Z",
       "expiresAt": "2026-11-25T20:09:20.891Z"
+    },
+    {
+      "task": "paste-image-names",
+      "session": "Avarnics-Mac-mini.local-43e057",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "paste-image-names",
+      "paths": [
+        "src/renderer/utils/imageAttachments.ts",
+        "src/renderer/components/ChatComposer.tsx"
+      ],
+      "claimedAt": "2026-11-25T18:29:30.139Z",
+      "expiresAt": "2026-11-25T20:29:30.139Z"
     }
   ]
 }
