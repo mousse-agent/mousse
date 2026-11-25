@@ -85,6 +85,21 @@
       "expiresAt": "2026-11-25T21:33:04.096Z"
     },
     {
+      "task": "fix/bot-sandbox-chips-diagnostics",
+      "session": "agibook-c04301",
+      "machine": "agibook",
+      "branch": "fix/bot-sandbox-chips-diagnostics",
+      "paths": [
+        "src/mms/bots/memory/availableHistory.ts",
+        "src/shared/bots/personal/chips.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/bots/memory/capture.ts",
+        "src/mms/bots/memory/BotMemoryStore.ts"
+      ],
+      "claimedAt": "2026-11-25T20:24:21.772Z",
+      "expiresAt": "2026-11-25T22:24:21.772Z"
+    },
+    {
       "task": "fix/bot-tool-bloat-and-telemetry",
       "session": "agibook-dc08ba",
       "machine": "agibook",
