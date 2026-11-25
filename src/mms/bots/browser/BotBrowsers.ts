@@ -26,6 +26,7 @@ import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import { snapshotBrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import { browserToolCapability } from '../../orchestrator/browser/tools'
 import type { BotBrowserHost, BotTurnBrowser } from '../activation/dispatcher'
+import { keepToolImages } from '../chat/toolImages'
 import type { BrowserWindowDisplay } from '../../../shared/browser/window'
 
 /**
@@ -210,7 +211,7 @@ export class BotBrowsers implements BotBrowserHost {
     this.notice = notice
   }
 
-  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined {
+  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal; filesFolder?: string }): BotTurnBrowser | undefined {
     if (!this.options.browser()) return undefined
     const state = this.state(input.botId, input.homeThreadId)
     // Work that let go of the browser while it waited (for room, or a usage limit's reset) opens fresh tabs when it goes on.
@@ -234,7 +235,7 @@ export class BotBrowsers implements BotBrowserHost {
       // The owner's grant is the bot's access: there is no tab-access prompt for its own browser.
       requestAccess: async () => 'already-allowed',
       capabilities: () => state.viewer.record()?.capabilities,
-      readScreenshot: (context, sessionId, artifactId) => this.readScreenshot(state, context, sessionId, artifactId),
+      readScreenshot: (context, sessionId, artifactId) => this.readScreenshot(state, context, sessionId, artifactId, { activationId: input.activationId, filesFolder: input.filesFolder }),
       dispatch: (context, name, args) => this.dispatch(state, input.activationId, input.signal, context, name, args)
     }
     return { binding, runtime }
@@ -573,12 +574,18 @@ export class BotBrowsers implements BotBrowserHost {
     return result.value
   }
 
-  private async readScreenshot(state: BotBrowserState, context: BrowserToolContext, sessionId: string, artifactId: string): Promise<{ data: string; mimeType: 'image/png' }> {
+  /**
+   * A screenshot the bot took. With its files folder it is also kept for its owner (`keepToolImages`): saved under
+   * `images/<date>/` and shown under the bot's next message, and the bot is told so (`note`).
+   */
+  private async readScreenshot(state: BotBrowserState, context: BrowserToolContext, sessionId: string, artifactId: string, owner: { activationId: string; filesFolder?: string }): Promise<{ data: string; mimeType: 'image/png'; note?: string }> {
     if (!context.vision) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Screenshots need a model that can see images' })
     if (sessionId !== state.sessionId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That screenshot is not from your browser' })
     const artifact = await this.service().artifacts.read({ profileId: this.options.profileId, threadId: state.homeThreadId, sessionId }, artifactId, Math.min(context.policy.maxArtifactBytes, 16 * 1024 * 1024))
     if (artifact.ref.mediaType !== 'image/png') throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser screenshot must be PNG' })
-    return { data: Buffer.from(artifact.bytes).toString('base64'), mimeType: 'image/png' }
+    const data = Buffer.from(artifact.bytes).toString('base64')
+    const kept = owner.filesFolder ? keepToolImages({ activationId: owner.activationId, filesFolder: owner.filesFolder, source: 'browser-screenshot', images: [{ data }] }) : undefined
+    return { data, mimeType: 'image/png', ...(kept ? { note: kept } : {}) }
   }
 
   // -- the session

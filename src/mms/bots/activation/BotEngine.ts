@@ -3343,7 +3343,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const homeThreadId = this.store.registry(row.botId)?.homeThreadId
     if (!homeThreadId || !this.host.browser) return undefined
     try {
-      return this.host.browser.turn({ botId: row.botId, activationId: row.id, lane: row.lane, homeThreadId, runId, signal })
+      return this.host.browser.turn({ botId: row.botId, activationId: row.id, lane: row.lane, homeThreadId, runId, signal, filesFolder: this.filesFolder(row.botId) })
     } catch (error) {
       console.warn('the bot browser could not be offered to a turn', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       return undefined

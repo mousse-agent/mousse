@@ -113,8 +113,11 @@ export interface BotTurnBrowser {
 
 /** The engine's view of the bots' browsers (`BotBrowsers`). */
 export interface BotBrowserHost {
-  /** The browser of one dispatch; undefined when the bot's browser can't be offered here. */
-  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined
+  /**
+   * The browser of one dispatch; undefined when the bot's browser can't be offered here. `filesFolder`: the bot's files
+   * folder, where its screenshots are saved for its owner to see.
+   */
+  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal; filesFolder?: string }): BotTurnBrowser | undefined
   /** The activation ended (done, failed or stopped): its tabs close, and an idle browser after them. */
   activationEnded(input: { botId: string; activationId: string }): void
   /** The bot was deleted: its browser closes; `purge` also erases its sign-ins and site data. */
