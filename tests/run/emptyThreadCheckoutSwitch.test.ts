@@ -1,22 +1,23 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FileService } from '../../src/mms/files/FileService'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
-import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../../src/mms/queue/ThreadExecutionLease'
+import { isExecutionLeaseHeld } from '../../src/mms/queue/ThreadExecutionLease'
 import { ThreadRuntimeManager } from '../../src/mms/runtime/ThreadRuntimeManager'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
+import { settledPreparation } from '../../src/mms/workspace/workspacePreparation'
 import { phase6Daemon, PI, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /**
  * Switching an empty chat between its project folder and a worktree, after something already gave it a workspace
- * record. Inputs: the record's kind (project folder, worktree), what happened in it (nothing, a turn), and whether a
- * terminal is open in it (holding the thread's lease). Only a project-folder record of a thread where nothing ran and
- * no terminal is open is dropped; every other switch is refused with `worktree_locked`, at once, so the window makes a
- * new thread for the send.
+ * record or opened a terminal on it. Inputs: the record's kind (none, project folder, worktree), what happened in it
+ * (nothing, a turn), and a terminal open on it. A terminal on a chat where no work started takes no record or lease,
+ * and a project-folder record of such a chat is dropped; every other switch is refused with `worktree_locked`, so the
+ * window makes a new thread for the send.
  */
 describe('switching the checkout of an empty chat that already has a workspace', () => {
   let home: string | undefined
@@ -68,7 +69,8 @@ describe('switching the checkout of an empty chat that already has a workspace',
     const send = (threadId: string) => d.orch.send({ content: 'Read the tracked file', mode: 'agent' }, false, { threadId, clientRequestId: threadId, awaitMode: 'ack' })
     const call = (method: string, params: Record<string, unknown>) => dispatchMethod(ctx, method, params)
     const pins = (threadId: string) => git(repo, 'for-each-ref', '--format=%(refname)', `refs/mousse/threads/${threadId}/`)
-    return { d, git, repo, thread, pi, toggle, send, call, pins }
+    const cwdOf = (ptyId: string) => pty!.runningTerminals().find((terminal) => terminal.ptyId === ptyId)?.cwd
+    return { d, git, repo, thread, pi, toggle, send, call, pins, cwdOf }
   }
 
   it('drops the project-folder record of a chat where nothing ran, and the send runs in a worktree', async () => {
@@ -91,19 +93,41 @@ describe('switching the checkout of an empty chat that already has a workspace',
     expect(chat.manager.load()?.kind).not.toBe('project-folder')
   }, 90_000)
 
-  it('refuses at once while a terminal is open in the project folder, and keeps its record', async () => {
+  it('a terminal on a chat where no work started opens in the project folder and holds nothing; after the first turn a new one opens in the worktree', async () => {
     const w = world()
     const chat = w.thread(false)
-    await chat.manager.ensureProjectFolder(chat.id, 'main', w.repo)
-    // An open terminal holds the thread's lease for as long as it runs.
-    const terminal = tryAcquireExecutionLease(chat.directory, { source: 'task-terminal' })!
-    try {
-      await expect(w.toggle(chat.id, true)).rejects.toMatchObject({ code: 'worktree_locked' })
-    } finally {
-      releaseExecutionLeaseHandle(terminal)
-    }
-    expect(chat.manager.load()?.kind).toBe('project-folder')
-    expect(w.pins(chat.id)).not.toBe('')
+    // The sidebar's new terminal: the shell stays open through the switch and the send.
+    const first = await w.call('pty.create', { threadId: chat.id, agentId: 'main' }) as { ptyId: string }
+    expect(w.cwdOf(first.ptyId)).toBe(resolve(w.repo))
+    expect(chat.manager.load()).toBeUndefined()
+    expect(w.pins(chat.id)).toBe('')
+    expect(isExecutionLeaseHeld(chat.directory)).toBe(false)
+
+    // The checkout is still free: the switch to a worktree happens on this thread.
+    const switched = await w.toggle(chat.id, true) as { thread: { id: string; worktreeEnabled?: boolean } }
+    expect(switched.thread).toMatchObject({ id: chat.id, worktreeEnabled: true })
+
+    await w.send(chat.id)
+    await waitFor(() => !w.d.orch.isTurnActive(chat.id) && w.d.orch.getMessages(chat.id).some((message) => message.role === 'assistant'), 'the first turn to finish', 50_000)
+    const worktree = chat.manager.load()!
+    expect(worktree.kind).not.toBe('project-folder')
+    expect(w.pi.turns[0]?.cwd).toBe(worktree.worktreePath)
+    const second = await w.call('pty.create', { threadId: chat.id, agentId: 'main' }) as { ptyId: string }
+    expect(w.cwdOf(second.ptyId)).toBe(resolve(worktree.worktreePath))
+    // The terminal opened before stays where it started.
+    expect(w.cwdOf(first.ptyId)).toBe(resolve(w.repo))
+  }, 90_000)
+
+  it('a terminal on a new worktree chat opens in the project folder and leaves its prepared worktree unclaimed', async () => {
+    const w = world()
+    const chat = w.thread(true)
+    await w.call('threads.focus', { threadId: chat.id, focused: true })
+    await settledPreparation(chat.directory)
+    expect(chat.manager.load()?.prepared).toBeDefined()
+    const opened = await w.call('pty.create', { threadId: chat.id, agentId: 'main' }) as { ptyId: string }
+    expect(w.cwdOf(opened.ptyId)).toBe(resolve(w.repo))
+    expect(chat.manager.load()?.prepared).toBeDefined()
+    expect(isExecutionLeaseHeld(chat.directory)).toBe(false)
   }, 90_000)
 
   it('refuses after a turn ran in the project folder, and keeps its record', async () => {

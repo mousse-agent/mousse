@@ -116,7 +116,8 @@ describe('with the terminal switch on', () => {
     const { thread, shell, created } = await open()
     // The answer names the thread as windows here do, and the shell is the owner's.
     expect(created.ptys[0]).toMatchObject({ threadId: t.qualified(thread.id), agentId })
-    expect(shell.options.cwd).toContain(thread.id)
+    // A chat where no work started opens its terminal in the project's own folder; its checkout stays free.
+    expect(realpathSync(shell.options.cwd)).toBe(realpathSync(t.owner.projects.getProject(thread.projectId!)!.path))
 
     // No folder, shell, arguments or variables: the owner decides all of them.
     for (const extra of [{ cwd: '..' }, { cwd: '.' }, { command: 'x' }, { env: { A: 'b' } }, { shellArgs: ['-c'] }])
