@@ -661,6 +661,9 @@ export class BotBrowsers implements BotBrowserHost {
   private async closeSession(state: BotBrowserState): Promise<void> {
     const sessionId = state.sessionId
     if (!sessionId) return
+    state.idle?.clear()
+    state.idle = undefined
+    state.idleAt = undefined
     state.viewer.closed()
     state.sessionId = undefined
     for (const activation of state.activations.values()) {
@@ -673,11 +676,14 @@ export class BotBrowsers implements BotBrowserHost {
 
   /**
    * After the last activation, the browser closes once nobody has watched or held it for `delayMs`. A wait already armed
-   * to end later (work handed to its owner) is kept.
+   * (or still ahead from work handed to its owner) to end later is kept.
    */
   private armIdle(state: BotBrowserState, delayMs = this.idleMs): void {
-    const at = this.now() + delayMs
-    if (state.idle && state.idleAt !== undefined && state.idleAt > at) return
+    const now = this.now()
+    const requested = now + delayMs
+    if (state.idle && state.idleAt !== undefined && state.idleAt > requested) return
+    const at = state.idleAt !== undefined && state.idleAt > requested ? state.idleAt : requested
+    const waitMs = Math.max(0, at - now)
     state.idle?.clear()
     state.idleAt = at
     state.idle = this.setTimer(() => {
@@ -689,8 +695,9 @@ export class BotBrowsers implements BotBrowserHost {
         this.armIdle(state, delayMs)
         return
       }
+      state.idleAt = undefined
       void this.closeSession(state).catch((error) => console.warn('a bot browser could not be closed', { botId: state.botId, error: error instanceof Error ? error.message : String(error) }))
-    }, delayMs)
+    }, waitMs)
   }
 
   // -- scopes and records
