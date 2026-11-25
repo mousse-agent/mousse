@@ -154,3 +154,29 @@ it('shows the year for file and history dates outside the current year in the ow
     expect(lines(pack)).toContain('since 3 Oct 2025;')
   }
 })
+it('leaves sandbox stubs and node_modules out so they never crowd out saved files, and still lists a real package.json and an empty note', async () => {
+  const fx = fixture()
+  // What Claude Code's Linux sandbox leaves in the files folder: empty stubs of masked names, newer than anything the
+  // bot saved, more than the twelve listed slots.
+  const empty = (name: string) => {
+    const path = join(fx.folder, name)
+    fs.mkdirSync(dirname(path), { recursive: true })
+    fs.writeFileSync(path, '')
+    fs.utimesSync(path, new Date('2026-11-20T12:00:00Z'), new Date('2026-11-20T12:00:00Z'))
+  }
+  for (const name of ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bunfig.toml', 'deno.json',
+    'pyproject.toml', 'requirements.txt', 'Cargo.toml', 'go.mod', 'Gemfile', 'Makefile', 'Dockerfile', 'compose.yaml', 'plans/pnpm-lock.yaml']) empty(name)
+  // Installed packages, at the root and further down, including the sandbox's `node_modules/.bin`.
+  fx.file('node_modules/.bin/tsc', 21)
+  fx.file('node_modules/left-pad/index.js', 21)
+  fx.file('tools/node_modules/chalk/package.json', 21)
+  // The bot's own files: an older note, a real package.json, and an empty note (not a masked name).
+  fx.file('plans/trip.md', 2)
+  fx.file('app/package.json', 4)
+  empty('notes.md')
+  for (const pack of [await fx.packs.chatPreamble({ botId: 'ada', activationId: 'c' }), await fx.packs.runPreamble({ botId: 'ada', activationId: 'r', input: 'Go' })]) {
+    const entries = lines(pack).split('\n').filter((line) => line.startsWith('- '))
+    expect(entries.map((line) => JSON.parse(line.slice(2, line.lastIndexOf(' · '))))).toEqual(['notes.md', 'app/package.json', 'plans/trip.md'])
+    expect(lines(pack)).not.toMatch(/ more/)
+  }
+})

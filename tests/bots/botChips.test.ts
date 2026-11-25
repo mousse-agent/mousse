@@ -11,6 +11,7 @@ import { chipForCall, rollUpChips, type BotChipCall } from '../../src/shared/bot
 const ctx = { home: '/home/me', filesFolder: '/home/me/.mousse/profiles/p1/bots/files/b1', scratch: '/home/me/.mousse/profiles/p1/bots/scratch/a1' }
 const search = (query: string): BotChipCall => ({ tool: 'web_search', input: { query } })
 const fetch = (url: string): BotChipCall => ({ tool: 'web_fetch', input: { url } })
+const spill = '/home/me/.claude/projects/-home-me--mousse-profiles-p1-bots-scratch-a1/0f6c2d1e-sess/tool-results/mcp-mousse-browser_observe-123.txt'
 
 describe('chipForCall: live chips, worded as attempts', () => {
   it('follows the wording table', () => {
@@ -38,6 +39,16 @@ describe('chipForCall: live chips, worded as attempts', () => {
     expect(chipForCall('read', { path: `${ctx.filesFolder}/a.md` }, ctx)).toMatchObject({ highlight: 'saved files' })
     expect(chipForCall('read', { path: `${ctx.scratch}/a.md` }, ctx)).not.toHaveProperty('highlight')
   })
+  it('shows none for Claude Code reading back a tool output it saved; a bot\'s own tool-results file or folder still shows', () => {
+    // Claude Code's own plumbing: `<its home>/projects/<folder>/<session>/tool-results/<name>.txt`, read or listed.
+    expect(chipForCall('read', { file_path: spill }, ctx)).toBeNull()
+    expect(chipForCall('list', { path: spill.slice(0, spill.lastIndexOf('/')) }, ctx)).toBeNull()
+    expect(chipForCall('read', { file_path: '/home/me/.mousse/profiles/p1/bots/claude/b1/projects/-x/s1/tool-results/toolu_1.txt' }, ctx)).toBeNull()
+    // Folders of that name that are not Claude Code's spills.
+    expect(chipForCall('read', { path: `${ctx.filesFolder}/tool-results/a.txt` }, ctx)).toMatchObject({ text: 'reading files', highlight: 'saved files' })
+    expect(chipForCall('write', { path: `${ctx.filesFolder}/tool-results/a.txt` }, ctx)).toMatchObject({ text: 'saving a file', highlight: 'a.txt' })
+    expect(chipForCall('read', { path: '/home/me/Documents/tool-results/a.txt' }, ctx)).toMatchObject({ text: 'reading files', highlight: 'tool-results' })
+  })
 })
 
 describe('rollUpChips: settled chips', () => {
@@ -58,6 +69,23 @@ describe('rollUpChips: settled chips', () => {
     ], ctx)).toEqual([{ icon: 'read', text: 'read files', highlight: 'Invoices, Notes' }])
     expect(rollUpChips([{ tool: 'write', input: { path: `${ctx.filesFolder}/a.md` } }, { tool: 'write', input: { path: `${ctx.filesFolder}/b.md` } }], ctx))
       .toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a.md, b.md' }])
+  })
+
+  it('a tool output Claude Code read back settles to no chip, beside the files the bot really read', () => {
+    expect(rollUpChips([{ tool: 'read', input: { file_path: spill } }], ctx)).toEqual([])
+    expect(rollUpChips([
+      { tool: 'read', input: { file_path: spill } },
+      { tool: 'read', input: { path: '/home/me/Documents/Invoices/a.pdf' } },
+      { tool: 'read', input: { file_path: spill } }
+    ], ctx)).toEqual([{ icon: 'read', text: 'read files', highlight: 'Invoices' }])
+  })
+
+  it('counts saved files, not saves: a file written then edited is one; two files are two, even with one name', () => {
+    const save = (tool: string, path: string, key = 'path'): BotChipCall => ({ tool, input: { [key]: `${ctx.filesFolder}/${path}` } })
+    expect(rollUpChips([save('write', 'draft.md'), save('edit', 'draft.md', 'file_path'), save('edit', 'draft.md', 'file_path')], ctx))
+      .toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'draft.md' }])
+    expect(rollUpChips([save('write', 'trips/notes.md'), save('write', 'work/notes.md')], ctx)).toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'notes.md' }])
+    expect(rollUpChips([save('write', 'a.md'), save('edit', 'b.md'), save('edit', 'a.md')], ctx)).toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a.md, b.md' }])
   })
 
   it('work\'s subagents settle to one chip with their titles; waiting on them and reading them show none', () => {
@@ -171,6 +199,17 @@ describe('BotActivitySink', () => {
       { icon: 'search', text: 'searching the web', highlight: 'a', live: true },
       { icon: 'think', text: 'working', live: true }
     ])
+    expect(activity.drain('d1')).toEqual([{ icon: 'search', text: 'searched the web', highlight: 'a' }])
+  })
+
+  it('reading back a tool output Claude Code saved shows "working", never "tool-results", and settles to no chip', () => {
+    const { activity, events, advance } = sink()
+    activity.onAllowed(at, { tool: 'web_search', input: { query: 'a' } })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    activity.onAllowed(at, { tool: 'read', input: { file_path: spill } })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    expect(events.at(-1)?.chip).toEqual({ icon: 'think', text: 'working', live: true })
+    expect(JSON.stringify(events)).not.toContain('tool-results')
     expect(activity.drain('d1')).toEqual([{ icon: 'search', text: 'searched the web', highlight: 'a' }])
   })
 
