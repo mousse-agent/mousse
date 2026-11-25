@@ -59,7 +59,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       onMessage: (cb) => { listeners.message.add(cb); return () => listeners.message.delete(cb) },
       onActivity: (cb) => { listeners.activity.add(cb); return () => listeners.activity.delete(cb) },
       // The preload's path for a composer file: a picked or dropped file's own, a temporary copy of a pasted one.
-      attachmentPath: vi.fn(async (file: File) => (file.name.startsWith('paste-') ? `/tmp/mousse-bot-attachments/1/${file.name}` : `/home/me/Desktop/${file.name}`))
+      attachmentPath: vi.fn(async (file: File) => (file.name.startsWith('image-') ? `/tmp/mousse-bot-attachments/1/${file.name}` : `/home/me/Desktop/${file.name}`))
     },
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },

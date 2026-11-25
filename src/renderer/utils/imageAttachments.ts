@@ -33,7 +33,7 @@ export async function fileToImagePayload(file: File): Promise<ImageAttachmentPay
   const mimeMatch = /data:([^;]+)/.exec(header)
   const mimeType = mimeMatch?.[1] || file.type || 'image/png'
   return {
-    name: file.name || `paste-${Date.now()}.png`,
+    name: file.name || 'image.png',
     mimeType,
     data
   }
@@ -48,20 +48,41 @@ export async function filesToImagePayloads(files: File[]): Promise<ImageAttachme
   return payloads
 }
 
+/** What a message already holds, so pasted images are numbered after it: its images, and its attachments' names. */
+export interface HeldAttachments {
+  /** How many images the message holds. */
+  images: number
+  /** Every attachment's name, so a pasted image never takes one already there. */
+  names: readonly string[]
+}
+
+const NUMBERED_IMAGE = /^image-(\d{1,6})\.[a-z0-9]+$/i
+
 /**
- * The files of a paste or drop: every file, not only images. An image or file pasted without a usable name (a
- * screenshot's `image.png`, a `blob`) is named `paste-<time>.<extension>`. Text alone gives none.
+ * The files of a paste or drop: every file, not only images. An image pasted without a usable name (a screenshot's
+ * `image.png`, a `blob`) is named by its place among the message's images, `image-<n>.<extension>`, after the images
+ * `held` and never a number a held name has. Another file pasted without a name is named `paste-<time>.<extension>`.
+ * Text alone gives none.
  */
-export function collectFilesFromDataTransfer(data: DataTransfer | null): File[] {
+export function collectFilesFromDataTransfer(data: DataTransfer | null, held: HeldAttachments = { images: 0, names: [] }): File[] {
   if (!data) return []
-  const files: File[] = []
+  const raw: File[] = []
   for (const item of Array.from(data.items ?? [])) {
     if (item.kind !== 'file') continue
     const file = item.getAsFile()
-    if (file) files.push(normalizePastedFile(file))
+    if (file) raw.push(file)
   }
-  if (files.length === 0) for (const file of Array.from(data.files ?? [])) files.push(normalizePastedFile(file))
-  return files
+  if (raw.length === 0) raw.push(...Array.from(data.files ?? []))
+  let images = held.images
+  let last = Math.max(0, ...held.names.map((name) => Number(NUMBERED_IMAGE.exec(name)?.[1] ?? 0)))
+  return raw.map((file) => {
+    const type = pastedType(file)
+    if (type.startsWith('image/')) images += 1
+    if (!unnamed(file)) return file
+    if (!type.startsWith('image/')) return new File([file], `paste-${Date.now()}.${pasteExtension(type)}`, { type })
+    last = Math.max(images, last + 1)
+    return new File([file], `image-${last}.${pasteExtension(type)}`, { type })
+  })
 }
 
 const PASTE_EXTENSIONS: Record<string, string> = {
@@ -82,11 +103,10 @@ function pasteExtension(type: string): string {
   return PASTE_EXTENSIONS[type] ?? (/^[a-z0-9]{1,8}$/i.test(subtype) ? subtype.toLowerCase() : 'bin')
 }
 
-function normalizePastedFile(file: File): File {
-  if (file.name && file.name !== 'image.png' && file.name !== 'blob') return file
-  const type = file.type || (file.name === 'image.png' ? 'image/png' : '')
-  return new File([file], `paste-${Date.now()}.${pasteExtension(type)}`, { type })
-}
+/** A clipboard's own name for a file it has no name for. */
+const unnamed = (file: File): boolean => !file.name || file.name === 'image.png' || file.name === 'blob'
+
+const pastedType = (file: File): string => file.type || (file.name === 'image.png' ? 'image/png' : '')
 
 export function imagePayloadToDataUrl(image: ImageAttachmentPayload): string {
   return `data:${image.mimeType};base64,${image.data}`
