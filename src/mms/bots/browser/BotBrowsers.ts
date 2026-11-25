@@ -49,6 +49,11 @@ import type { BrowserWindowDisplay } from '../../../shared/browser/window'
  *   general browser methods, another thread's agent, a group chat or a workflow are refused.
  */
 
+/** How long a bot's browser stays open after its last run ends, for the owner to look at what it left. */
+export const BOT_BROWSER_IDLE_MS = 10 * 60_000
+/** How long it stays open when that run's work waits for its owner (a question, an action to approve): to take over or check the page. */
+export const BOT_BROWSER_HANDOFF_IDLE_MS = 30 * 60_000
+
 /** The browser surface `BotBrowsers` uses: the profile's sessions, tool dispatcher and artifacts. */
 export type BotBrowserService = Pick<MmsBrowserService, 'sessions' | 'tools' | 'artifacts' | 'workspaceDataDir'>
 
@@ -58,8 +63,13 @@ export interface BotBrowsersOptions {
   browser(): BotBrowserService | undefined
   /** The bot's home thread, which owns its browser session; undefined for an unknown or deleted bot. */
   homeThread(botId: string): string | undefined
-  /** How long a browser no activation uses stays open while nobody watches (default 2 minutes). */
+  /** How long a browser no activation uses stays open while nobody watches (default `BOT_BROWSER_IDLE_MS`). */
   idleMs?: number
+  /**
+   * The same when the last activation let go of it to wait for its owner (default `BOT_BROWSER_HANDOFF_IDLE_MS`, or three
+   * times a given `idleMs`).
+   */
+  handoffIdleMs?: number
   now?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
   /** How often a first-use install is checked on (default 1 second). */
@@ -116,6 +126,8 @@ interface BotBrowserState {
    */
   followed?: string
   idle?: { clear(): void }
+  /** When `idle` closes the browser: a shorter wait never cuts a longer one short. */
+  idleAt?: number
   /** The owner's views of it: pictures, the followed tab, holds and their input (`WatchedBrowser`). */
   viewer: WatchedBrowser
 }
@@ -190,13 +202,15 @@ export class BotBrowsers implements BotBrowserHost {
   private installing: { percent?: number } | undefined
   private readonly now: () => number
   private readonly idleMs: number
+  private readonly handoffIdleMs: number
   private readonly setTimer: (fn: () => void, ms: number) => { clear(): void }
   private readonly computer: string
   private notice: BotBrowserNotice | undefined
 
   constructor(private readonly options: BotBrowsersOptions) {
     this.now = options.now ?? Date.now
-    this.idleMs = options.idleMs ?? 2 * 60_000
+    this.idleMs = options.idleMs ?? BOT_BROWSER_IDLE_MS
+    this.handoffIdleMs = options.handoffIdleMs ?? (options.idleMs !== undefined ? options.idleMs * 3 : BOT_BROWSER_HANDOFF_IDLE_MS)
     this.setTimer = options.setTimer ?? defaultTimer
     this.computer = options.computerName ?? (hostname().replace(/\.local\.?$/i, '').trim() || 'this computer')
   }
@@ -241,7 +255,7 @@ export class BotBrowsers implements BotBrowserHost {
     return { binding, runtime }
   }
 
-  activationEnded(input: { botId: string; activationId: string }): void {
+  activationEnded(input: { botId: string; activationId: string; waitingForOwner?: boolean }): void {
     const state = this.bots.get(input.botId)
     const activation = state?.activations.get(input.activationId)
     if (!state || !activation || activation.ended) return
@@ -263,8 +277,8 @@ export class BotBrowsers implements BotBrowserHost {
       })()
       return
     }
-    // The last one: the browser stays a while for the owner's view, then closes.
-    this.armIdle(state)
+    // The last one: the browser stays a while for the owner's view, longer when the work waits for them, then closes.
+    this.armIdle(state, input.waitingForOwner ? this.handoffIdleMs : this.idleMs)
   }
 
   async removeBot(botId: string, purge: boolean): Promise<void> {
@@ -400,6 +414,7 @@ export class BotBrowsers implements BotBrowserHost {
   async close(botId: string): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     state.idle?.clear()
+    state.idle = undefined
     await this.closeSession(state)
     return this.view(botId)
   }
@@ -656,20 +671,26 @@ export class BotBrowsers implements BotBrowserHost {
     await this.ownerCall(state, (context) => this.service().sessions.close(context, sessionId))
   }
 
-  /** After the last activation, the browser closes once nobody has watched or held it for a while. */
-  private armIdle(state: BotBrowserState): void {
+  /**
+   * After the last activation, the browser closes once nobody has watched or held it for `delayMs`. A wait already armed
+   * to end later (work handed to its owner) is kept.
+   */
+  private armIdle(state: BotBrowserState, delayMs = this.idleMs): void {
+    const at = this.now() + delayMs
+    if (state.idle && state.idleAt !== undefined && state.idleAt > at) return
     state.idle?.clear()
+    state.idleAt = at
     state.idle = this.setTimer(() => {
       state.idle = undefined
       if ([...state.activations.values()].some((entry) => !entry.ended)) return
       const watched = state.viewer.watched()
       const held = state.viewer.record()?.lifecycle === 'human-controlled'
       if (watched || held) {
-        this.armIdle(state)
+        this.armIdle(state, delayMs)
         return
       }
       void this.closeSession(state).catch((error) => console.warn('a bot browser could not be closed', { botId: state.botId, error: error instanceof Error ? error.message : String(error) }))
-    }, this.idleMs)
+    }, delayMs)
   }
 
   // -- scopes and records

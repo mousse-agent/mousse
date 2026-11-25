@@ -4629,11 +4629,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * Waiting work lets go of the bot's browser, so the browser closes when nothing else uses it; when it goes on, its
-   * next turn opens tabs of its own again.
+   * next turn opens tabs of its own again. Work that waits for its owner's answer (a question, an action to approve)
+   * keeps it open longer, for them to check the page or take it over.
    */
   private letGoOfBrowser(row: BotActivationRow): void {
     try {
-      this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
+      const waitingForOwner = row.endReason === 'question' || row.endReason === 'approval'
+      this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id, ...(waitingForOwner ? { waitingForOwner } : {}) })
     } catch (error) {
       console.warn('the bot browser could not let go of waiting work', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }

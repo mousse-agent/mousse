@@ -118,8 +118,11 @@ export interface BotBrowserHost {
    * folder, where its screenshots are saved for its owner to see.
    */
   turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal; filesFolder?: string }): BotTurnBrowser | undefined
-  /** The activation ended (done, failed or stopped): its tabs close, and an idle browser after them. */
-  activationEnded(input: { botId: string; activationId: string }): void
+  /**
+   * The activation ended (done, failed or stopped) or let go of the browser to wait: its tabs close, and an idle browser
+   * after them; later when `waitingForOwner` (it waits for its owner's answer, who may check or take over the page).
+   */
+  activationEnded(input: { botId: string; activationId: string; waitingForOwner?: boolean }): void
   /** The bot was deleted: its browser closes; `purge` also erases its sign-ins and site data. */
   removeBot?(botId: string, purge: boolean): Promise<void> | void
 }
