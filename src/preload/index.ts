@@ -319,6 +319,12 @@ const api = {
       ipcRenderer.on('secrets:requestsChanged', handler)
       return () => ipcRenderer.removeListener('secrets:requestsChanged', handler)
     },
+    /** A thread's computer use setup card changed; read it with `computerUse.setupRequest.get`. */
+    onComputerUseSetupRequestChanged: (cb: (payload: { threadId: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { threadId: string }) => cb(payload)
+      ipcRenderer.on('computerUse:setupRequestChanged', handler)
+      return () => ipcRenderer.removeListener('computerUse:setupRequestChanged', handler)
+    },
     /** A secret was added, used, removed or expired (Settings → Secrets). */
     onSecretsChanged: (cb: () => void): (() => void) => {
       const handler = () => cb()

@@ -4075,6 +4075,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (chosen?.model && !chosen.name && ctx.mms.harness)
         partial.provider = { ...chosen, name: ctx.mms.harness.modelName(chosen.instanceId || (chosen.llmProvider ?? ''), chosen.model) }
       const settings = ctx.mms.settings.set(partial)
+      // Computer use's switch or chosen driver changed: a Not now on a setup card no longer stands, and open cards update.
+      const access = partial.agentAccess as Record<string, unknown> | undefined
+      if (access && (Object.hasOwn(access, 'computerUse') || Object.hasOwn(access, 'computerDriver'))) ctx.mms.orchestrator.computerUseSetup().settingsChanged()
       // Fan-out so all clients observe the same daemon-owned settings immediately.
       ctx.emitEvent?.('settings.changed', { settings })
       return { settings }

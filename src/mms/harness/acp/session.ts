@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
 import { recordSubagentCall, subagentToolName, toolResultText } from '../../../shared/subagentTools'
+import { extractComputerUseRequestOutcome, isComputerUseRequestCall } from '../../../shared/computerUse'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -1626,9 +1627,12 @@ export class AcpSessions {
           : isCommand && activity?.kind === 'command'
             ? activity.command
             : title
+        // A start with a title only names a Mousse tool by it (`computer_use_request (mousse MCP Server)`): kept as that
+        // title, a form `mousseServerToolOf` reads, never made into another name.
+        const name = event.name ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
         openTools.set(event.toolCallId, {
           title,
-          name: event.name,
+          name,
           rawInput: event.rawInput,
           startedAt: Date.now(),
           isDaemon: isCommand && isDaemonCommand(event.rawInput),
@@ -1636,13 +1640,13 @@ export class AcpSessions {
           description
         })
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
+        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed') {
         const tracked = openTools.get(event.toolCallId)!
         if (event.rawInput !== undefined && tracked.rawInput === undefined) tracked.rawInput = event.rawInput
-        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title })
+        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}) })
       }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
         const tracked = openTools.get(event.toolCallId)
@@ -1681,6 +1685,10 @@ export class AcpSessions {
           const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
             ? { output: outputText }
             : undefined
+          // computer_use_request (directly or through a bot's use_tool) keeps only its outcome line, nothing else it said.
+          const setupOutcome = !record && served?.server === 'mousse' && event.status === 'completed' && isComputerUseRequestCall(toolName, rawInput)
+            ? extractComputerUseRequestOutcome(outputText)
+            : undefined
           input.onTool?.({
             phase: 'complete',
             callId: event.toolCallId,
@@ -1688,7 +1696,7 @@ export class AcpSessions {
             ...(toolName ? { toolName } : {}),
             status: isBackgroundLaunch ? 'background' : event.status,
             ...(record ? { record } : {}),
-            ...(followUpOutput ? { activity: followUpOutput } : {})
+            ...(followUpOutput ? { activity: followUpOutput } : setupOutcome ? { activity: { output: setupOutcome } } : {})
           })
         }
       }
