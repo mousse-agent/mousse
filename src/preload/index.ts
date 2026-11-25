@@ -155,7 +155,7 @@ import type { BotBrowserFrameEvent, BotBrowserView } from '../shared/bots/person
 import type { ThreadBrowserFrameEvent } from '../shared/browser/threadView'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
-import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
+import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState, InAppBrowserTabCommand } from '../shared/browser/inApp'
 import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
 import type { TurnFileParams, TurnFileResult } from '../shared/turnFiles'
 import type {
@@ -784,8 +784,9 @@ const api = {
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
     selectTab: (input) => ipcRenderer.invoke('browser:select-tab', input),
-    takeControl: (localTabId) => ipcRenderer.invoke('browser:take-control', localTabId),
     resumeAgent: (localTabId) => ipcRenderer.invoke('browser:resume-agent', localTabId),
+    reportActivity: (activity) => ipcRenderer.invoke('browser:user-activity', activity),
+    setTabOwner: (input) => ipcRenderer.invoke('browser:tab-owner', input),
     onState: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, state: InAppBrowserState) => listener(state)
       ipcRenderer.on('browser:automation-state', handler)
@@ -795,6 +796,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, cursor: InAppBrowserCursor) => listener(cursor)
       ipcRenderer.on('browser:agent-cursor', handler)
       return () => { ipcRenderer.removeListener('browser:agent-cursor', handler) }
+    },
+    onTabCommand: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, command: InAppBrowserTabCommand) => listener(command)
+      ipcRenderer.on('browser:tab-command', handler)
+      return () => { ipcRenderer.removeListener('browser:tab-command', handler) }
     }
   } satisfies InAppBrowserApi,
   browser: {

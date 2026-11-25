@@ -177,20 +177,13 @@ describe('browser daemon composition', () => {
       .rejects.toMatchObject({ code: 'invalid_action' })
 
     const browser = aliceServices.platform.browser
-    const deniedAttempt = browser.dispatch(context(h.alice.id, thread.id), 'browser_open', {})
-    const pendingAccess = await alice.request<BrowserAccessState>('browser.access.status')
-    expect(pendingAccess.allowed).toBe(false)
-    expect(pendingAccess.pending[0].threadId).toBe(thread.id)
-    expect(executor.calls).toEqual([])
-    await alice.request('browser.access.respond', { requestId: pendingAccess.pending[0].requestId, allowed: false })
-    await expect(deniedAttempt).resolves.toMatchObject({ ok: false, error: { code: 'policy_denied', details: { userResponse: 'deny' } } })
-    await alice.request('browser.access.set', { allowed: true })
     expect(browser.managedBrokerStarted).toBe(false)
     expect(browser.managedDispatchAttempted).toBe(false)
+    // A thread agent asks the person nothing: a thread without a tab waits for the window to open one.
     const missingTabAbort = new AbortController()
     const missingTab = browser.dispatch({ ...context(h.alice.id, otherThread.id), signal: missingTabAbort.signal }, 'browser_open', {})
     await vi.waitFor(() => expect(browser.accessStatus().tabRequests).toEqual([{ requestId: expect.any(String), threadId: otherThread.id }]))
-    expect(browser.accessStatus().pending).toEqual([])
+    expect(await alice.request<BrowserAccessState>('browser.access.status')).toMatchObject({ allowed: false, pending: [] })
     missingTabAbort.abort()
     await expect(missingTab).resolves.toMatchObject({
       ok: false,
@@ -200,7 +193,7 @@ describe('browser daemon composition', () => {
     expect(browser.managedBrokerStarted).toBe(false)
 
     const opened = await browser.dispatch(context(h.alice.id, thread.id), 'browser_open', {})
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, opened.ok ? '' : JSON.stringify(opened)).toBe(true)
     if (!opened.ok) throw new Error('open failed')
     expect(opened.value.session?.backend).toBe('electron-attached')
     expect(executor.calls[0]).toMatchObject({ method: 'session.open', params: { uiTabId: 'window1:tab_live', threadId: thread.id } })
@@ -296,7 +289,6 @@ describe('browser daemon composition', () => {
     const beforeDisconnect = executor.calls.length
     await alice.close()
     await vi.waitFor(() => expect(browser.selectedTarget(thread.id)).toBeUndefined())
-    expect(browser.access.status().allowed).toBe(true)
     await expect(browser.dispatch({ ...context(h.alice.id, thread.id), signal: AbortSignal.timeout(100) }, 'browser_observe', { sessionId, includeScreenshot: true }))
       .resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
     expect(executor.calls.length).toBe(beforeDisconnect)
@@ -326,19 +318,12 @@ describe('browser daemon composition', () => {
     if (!replacementOpen.ok) throw new Error('replacement open failed')
     expect(replacementOpen.value.session!.id).not.toBe(sessionId)
 
+    // The group chats' browser consent is theirs alone: turning it off leaves a thread agent's tab working.
     await reconnected.request('browser.access.set', { allowed: false })
-    expect(browser.access.status().allowed).toBe(false)
-    // Revocation closes admission immediately; remote debugger cleanup is asynchronous.
+    const stillOpen = await browser.dispatch(context(h.alice.id, thread.id), 'browser_observe', { sessionId: replacementOpen.value.session!.id, includeScreenshot: false })
+    expect(stillOpen.ok, stillOpen.ok ? '' : JSON.stringify(stillOpen)).toBe(true)
     expect(reconnectExecutor.calls.some((call) => call.method === 'session.close')).toBe(false)
-    releaseClose!()
-    await vi.waitFor(() => {
-      expect(reconnectExecutor.calls.some((call) => call.method === 'session.close' && call.params.sessionId === replacementOpen.value.session!.id)).toBe(true)
-      expect(browser.selectedTarget(thread.id)).toBeUndefined()
-    })
-    const waitingForRegrant = browser.dispatch(context(h.alice.id, otherThread.id), 'browser_open', {})
-    const regrant = await reconnected.request<BrowserAccessState>('browser.access.status')
-    await reconnected.request('browser.access.respond', { requestId: regrant.pending[0].requestId, allowed: true })
-    expect(await waitingForRegrant).toMatchObject({ ok: true, value: { session: { threadId: otherThread.id } } })
+    expect(browser.selectedTarget(thread.id)).toEqual({ backend: 'electron-attached', uiTabId: 'window1:tab_live' })
 
     await expect(reconnected.request('browser.attachments.acknowledgeClosed', {
       registrationId,
@@ -449,47 +434,35 @@ describe('browser daemon composition', () => {
     await artifacts.dispose()
   })
 
-  it('provisions a tab after permission without reconsent and coalesces concurrent calls', async () => {
+  it('opens a tab for a thread agent without asking the person, coalesces concurrent calls, and times out on its clock', async () => {
     const profileId = '22222222-2222-4222-8222-222222222222'
     const root = makeBrowserCommandTempRoot()
     roots.push(root)
     const artifacts = new BrowserArtifactService({ profileId, profileRoot: root, workerArtifactRoot: join(root, 'browser', 'worker-artifacts') })
+    let clock = 0
     const service = new MmsBrowserService({ profileId, profileRoot: root, workerArtifactRoot: join(root, 'browser', 'worker-artifacts'), artifacts,
-      installationBrowserRoot: join(root, 'browser-binaries'), threadExists: () => true })
+      installationBrowserRoot: join(root, 'browser-binaries'), threadExists: () => true,
+      tabWait: { timeoutMs: 30_000, pollMs: 100, now: () => clock, sleep: () => new Promise<void>((resolve) => setTimeout(resolve, 1)) } })
     const execution = context(profileId, 'thread_1').execution
-    // A blank browser has no automation session to close. Its toggle still works.
-    await service.setAccess(true)
-    await expect(service.setAccess(false)).resolves.toMatchObject({ allowed: false })
-    expect(service.accessStatus().allowed).toBe(false)
-    await service.setAccess(true)
-    let finishCleanup!: () => void
-    const cleanup = vi.spyOn(service.sessions, 'closeAll').mockImplementationOnce(() => new Promise<void>((resolve) => { finishCleanup = resolve }))
-    await expect(service.setAccess(false)).resolves.toMatchObject({ allowed: false })
-    await vi.waitFor(() => expect(finishCleanup).toBeTypeOf('function'))
-    expect(service.accessStatus().allowed).toBe(false)
-    finishCleanup()
-    cleanup.mockRestore()
     const first = service.requestAccess(execution)
-    expect(service.accessStatus().pending).toHaveLength(1)
-    await service.setAccess(true)
     const second = service.requestAccess(execution)
-    await vi.waitFor(() => expect(service.accessStatus().tabRequests).toHaveLength(1))
-    expect(service.accessStatus().pending).toEqual([])
+    await vi.waitFor(() => expect(service.accessStatus().tabRequests).toEqual([{ requestId: expect.any(String), threadId: 'thread_1' }]))
+    // Nobody is asked: the group chats' consent stays off and has nothing pending.
+    expect(service.accessStatus()).toMatchObject({ allowed: false, pending: [] })
     const owner = { connectionId: 'conn_1', profileId, profileEpoch: 1 }
+    // The window answers the request with a tab of the thread that asked.
     const registration = service.registerAttachment({ registrationId: randomUUID(), registrationEpoch: 1,
-      closureToken: randomBytes(32).toString('base64url'), uiTabId: 'new_tab' }, owner)
-    await expect(first).resolves.toBe('allowed')
+      closureToken: randomBytes(32).toString('base64url'), uiTabId: 'new_tab', threadId: 'thread_1' }, owner)
+    await expect(first).resolves.toBe('already-allowed')
     await expect(second).resolves.toBe('already-allowed')
     expect(service.selectedTarget('thread_1')).toEqual({ backend: 'electron-attached', uiTabId: 'new_tab' })
     expect(service.accessStatus().tabRequests).toEqual([])
     service.unregisterAttachment(registration, owner)
     service.revokeConnection(owner.connectionId)
-    expect(service.accessStatus().allowed).toBe(true)
     const waiting = service.requestAccess(execution)
     await vi.waitFor(() => expect(service.accessStatus().tabRequests).toHaveLength(1))
-    const rejected = expect(waiting).rejects.toMatchObject({ code: 'policy_denied', details: { userResponse: 'deny' } })
-    await service.setAccess(false)
-    await rejected
+    clock = 30_000
+    await expect(waiting).rejects.toMatchObject({ code: 'setup_required' })
     expect(service.accessStatus().tabRequests).toEqual([])
     await service.dispose()
     await artifacts.dispose()

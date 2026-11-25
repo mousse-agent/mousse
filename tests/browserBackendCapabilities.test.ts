@@ -46,10 +46,9 @@ describe('host-owned browser backend capability reporting', () => {
     await sessions.closeAll()
   })
 
-  it('limits attached tabs and uploads while keeping managed operations available', () => {
-    for (const operation of ['list', 'switch']) expect(schema('browser_tabs', 'electron-attached')({ sessionId: 'session_1', operation })).toBe(true)
-    for (const operation of ['new', 'close']) {
-      expect(schema('browser_tabs', 'electron-attached')({ sessionId: 'session_1', operation })).toBe(false)
+  it('offers every tab operation in the in-app browser and limits only its uploads', () => {
+    for (const operation of ['list', 'switch', 'new', 'close']) {
+      expect(schema('browser_tabs', 'electron-attached')({ sessionId: 'session_1', operation })).toBe(true)
       expect(schema('browser_tabs', 'managed-chromium')({ sessionId: 'session_1', operation })).toBe(true)
     }
     const upload = { sessionId: 'session_1', tabId: 'tab_1', generation: 1, observationId: 'obs_1', controlLeaseId: 'lease_1', action: { type: 'upload', target: { kind: 'ref', ref: 'el_1' }, artifactIds: ['artifact_1'] } }
@@ -61,7 +60,7 @@ describe('host-owned browser backend capability reporting', () => {
     expect(getBrowserToolDefinitions({ backend: 'electron-attached', vision: false }).map((tool) => tool.name)).not.toContain('browser_screenshot')
     expect(getBrowserToolDefinitions({ backend: 'electron-attached', vision: true }).map((tool) => tool.name)).not.toContain('browser_screenshot')
     expect(getBrowserToolDefinitions({ backend: 'electron-attached', vision: true, screenshots: true }).map((tool) => tool.name)).toContain('browser_screenshot')
-    expect(browserBackendCapabilities('electron-attached', false)).toMatchObject({ screenshots: false, uploads: false, downloads: false, tabs: ['list', 'switch'] })
+    expect(browserBackendCapabilities('electron-attached', false)).toMatchObject({ screenshots: false, uploads: false, downloads: false, tabs: ['list', 'switch', 'new', 'close'] })
   })
 
   it.each(['electron-attached', 'managed-chromium'] as const)('returns host-derived %s capabilities through actual open dispatch', async (backend) => {

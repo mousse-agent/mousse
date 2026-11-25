@@ -480,15 +480,22 @@ export function registerGuiIpc(
     return services.attachedBrowserHost
   }
   registerHandler('browser:register-tab', async (event, raw: unknown) => {
-    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId'])
+    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId', 'openRequestId'])
     return browserHost(event).registerTab(event.sender, input as unknown as Parameters<AttachedBrowserHost['registerTab']>[1])
   })
   registerHandler('browser:select-tab', async (event, raw: unknown) => {
     const input = domainObject(raw, ['localTabId', 'threadId'])
     return browserHost(event).selectTab(event.sender, input.localTabId as string, input.threadId as string)
   })
-  registerHandler('browser:take-control', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'takeControl'))
-  registerHandler('browser:resume-agent', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'resume'))
+  registerHandler('browser:resume-agent', async (event, localTabId: unknown) => browserHost(event).resumeAgent(event.sender, localTabId as string))
+  registerHandler('browser:user-activity', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'kind', 'pin'])
+    browserHost(event).reportActivity(event.sender, input as unknown as Parameters<AttachedBrowserHost['reportActivity']>[1])
+  })
+  registerHandler('browser:tab-owner', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'threadId'])
+    browserHost(event).setTabOwner(event.sender, input.localTabId as string, input.threadId === null ? null : input.threadId as string)
+  })
 
   // Bot names seen in the Bot UI's replies, and the bot rows already announced, for bot notifications.
   const botNotifications = new BotNotificationIndex()

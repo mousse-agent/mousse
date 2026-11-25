@@ -61,7 +61,15 @@ export interface BrowserElement {
   bounds?: BrowserBounds
   states: string[]
 }
-export interface BrowserTab { id: string; title: string; url: string }
+export interface BrowserTab {
+  id: string
+  title: string
+  url: string
+  /** The tab the session acts in now (in-app tabs). */
+  active?: boolean
+  /** The person is using this tab now: an agent leaves it alone (in-app tabs). */
+  userActive?: boolean
+}
 export interface BrowserObservation {
   sessionId: string
   tabId: string

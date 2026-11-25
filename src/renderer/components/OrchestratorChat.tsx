@@ -122,7 +122,6 @@ import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
 import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
-import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { threadReferenceRefusal } from '../lib/threadReference'
@@ -2169,7 +2168,6 @@ export function OrchestratorChat() {
         ref={inputAreaRef}
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
-        {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
         {emptyThread && <EmptyThreadHeading headline={emptyHeadline} animate={newChatAnimations} continued={continuesWarmEmpty} />}
         <ComposerNoticeProvider>
         {sendError && (sendChanges?.line === sendError && activeThreadId

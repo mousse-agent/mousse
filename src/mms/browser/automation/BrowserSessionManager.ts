@@ -267,6 +267,7 @@ export class BrowserSessionManager {
       ...(input.persistent === undefined ? {} : { persistent: input.persistent }),
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
       ...(execution.runId === undefined ? {} : { runId: execution.runId }),
+      ...(target.backend === 'electron-attached' ? { turn: stepTurn(execution) } : {}),
       threadId: execution.threadId
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
@@ -306,9 +307,12 @@ export class BrowserSessionManager {
     const operation = input.operation ?? 'list'
     // Listing tabs only reads (`browser.read`); opening, switching and closing one acts.
     this.authorize(context, 'browser_tabs', 'browser.session', operation === 'list' ? 'read' : 'external', { sessionId, ...input })
-    this.requireOwned(sessionId, context)
+    const entry = this.requireOwned(sessionId, context)
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
-    const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], { sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}) }, this.signal(context))
+    const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], {
+      sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}),
+      ...(entry.record.backend === 'electron-attached' ? { turn: stepTurn(context.execution) } : {})
+    }, this.signal(context))
     const payload = result as { tabs?: BrowserTab[]; id?: unknown; title?: unknown; url?: unknown; navigation?: BrowserNavigation }
     const opened = operation === 'new' && typeof payload.id === 'string'
       ? { tab: { id: payload.id, title: typeof payload.title === 'string' ? payload.title : '', url: typeof payload.url === 'string' ? payload.url : '' }, ...(payload.navigation ? { navigation: payload.navigation } : {}) }
@@ -339,12 +343,13 @@ export class BrowserSessionManager {
 
   async act(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; controlLeaseId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_act', 'browser.action', 'external', input)
-    this.requireOwned(input.sessionId, context)
+    const entry = this.requireOwned(input.sessionId, context)
     const requestId = `${context.execution.runId ?? context.execution.threadId}_${randomUUID()}`
     const result = await this.call(context.execution.profileId, 'act', {
       requestId, sessionId: input.sessionId, tabId: input.tabId, generation: input.generation,
       observationId: input.observationId, controlLeaseId: input.controlLeaseId, action: input.action,
-      timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
+      timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {}),
+      ...(entry.record.backend === 'electron-attached' ? { turn: stepTurn(context.execution) } : {})
     }, this.signal(context))
     return { action: await this.actionResult(context, input.sessionId, result as BrowserActionResult) }
   }
@@ -703,6 +708,14 @@ export function readSessionStates(profileRoot: string, profileId: string, staleB
 /** The worker answered `session_closed`: it has no such session, so there is nothing to close there. */
 function isUnknownSession(error: unknown): boolean {
   return error instanceof BrowserAutomationError && error.code === 'session_closed'
+}
+
+/**
+ * The turn an in-app step belongs to: the in-app browser stops an agent from waiting on a tab the person uses twice in
+ * one turn (`USER_CONFLICT_REPEAT_MESSAGE`).
+ */
+function stepTurn(execution: ExecutionContext): string {
+  return `${execution.runId ?? execution.threadId}/${execution.turnId}`.slice(0, 400)
 }
 
 function isIdentifier(value: string): boolean {

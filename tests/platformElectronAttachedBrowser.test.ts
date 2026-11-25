@@ -183,7 +183,7 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     expect(opened.session.backend).toBe('electron-attached')
   })
 
-  it('returns unsupported for tabs.new/close and fail-closed policy by default', async () => {
+  it('returns unsupported for tabs.new/close without the window’s tabs, and fail-closed policy by default', async () => {
     const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
     registerPair(registry)
     const closedPolicy = new ElectronAttachedBrowserBackend({

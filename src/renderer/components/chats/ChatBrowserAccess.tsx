@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import type { BrowserAccessState } from '../../../shared/browser/access'
 import { useAppStore } from '../../stores/appStore'
 
-/** Explicit, profile-owned browser consent, visible in the requesting thread. */
-export function ChatBrowserAccess({ threadId, profileId: suppliedProfile, requireSelectedThread = false }: { threadId: string; profileId?: string; requireSelectedThread?: boolean }) {
+/**
+ * A group chat's explicit, profile-owned consent to its shared browser, shown in the chat that asks. Thread agents use
+ * the in-app tabs without it.
+ */
+export function ChatBrowserAccess({ threadId, profileId: suppliedProfile }: { threadId: string; profileId?: string }) {
   const selectedProfile = useAppStore((state) => state.profileId)
   const profileId = suppliedProfile ?? selectedProfile
-  return <BrowserPermission key={`${profileId}:${threadId}`} profileId={profileId} threadId={threadId} requireSelectedThread={requireSelectedThread} />
+  return <BrowserPermission key={`${profileId}:${threadId}`} profileId={profileId} threadId={threadId} />
 }
 
-function BrowserPermission({ threadId, profileId, requireSelectedThread }: { threadId: string; profileId: string; requireSelectedThread: boolean }) {
+function BrowserPermission({ threadId, profileId }: { threadId: string; profileId: string }) {
   const [requestId, setRequestId] = useState<string>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -17,12 +20,7 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
   const revision = useRef(0)
   const current = () => {
     const state = useAppStore.getState()
-    return alive.current && state.profileId === profileId && (!requireSelectedThread || state.activeThreadId === threadId)
-  }
-  const openBrowser = () => {
-    if (!requireSelectedThread || !current()) return
-    const state = useAppStore.getState()
-    if (state.mainView !== 'browser' || !state.mainAreaOpen) state.openSurfaceKind('browser')
+    return alive.current && state.profileId === profileId
   }
   useEffect(() => {
     alive.current = true
@@ -37,8 +35,6 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
         const pendingRequest = state.pending?.find((item) => item.threadId === threadId)
         setRequestId(state.allowed ? undefined : pendingRequest?.requestId)
         setError('')
-        // Show the browser while this thread waits for access or for its agent's tab.
-        if ((!state.allowed && pendingRequest) || (state.allowed && state.tabRequests?.some((item) => item.threadId === threadId))) openBrowser()
       } catch (cause) {
         if (current() && expectedRevision === revision.current) setError(String((cause as { message?: string })?.message || cause))
       } finally { pending = false }
@@ -46,7 +42,7 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
     void refresh()
     const timer = setInterval(() => { void refresh() }, 750)
     return () => { alive.current = false; clearInterval(timer) }
-  }, [threadId, profileId, requireSelectedThread])
+  }, [threadId, profileId])
   const answer = async (allowed: boolean) => {
     const id = requestId
     if (!id || busy || !current()) return
@@ -56,7 +52,6 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
       await window.mousse.platformRequest.request('browser.access.respond', { profileId, requestId: id, allowed })
       if (!current()) return
       setRequestId(undefined)
-      if (allowed) openBrowser()
     } catch (cause) {
       if (current()) setError(String((cause as { message?: string })?.message || cause))
     } finally {

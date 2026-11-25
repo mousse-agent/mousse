@@ -108,6 +108,7 @@ export class AttachedBrowserConnectionBackend implements BrowserBackendPort {
       })
       const response = this.mapResult(request, result)
       if (request.method === 'session.open' && response.ok) this.bindOpenedSession(request, response, target.registration)
+      if (request.method === 'tabs.close' && response.ok) this.rebindClosedAnchor(request, response, target.registration)
       return response
     })
   }
@@ -163,6 +164,27 @@ export class AttachedBrowserConnectionBackend implements BrowserBackendPort {
       connectionId: registration.connectionId,
       uiTabId: registration.uiTabId,
       profileEpoch: registration.profileEpoch
+    })
+  }
+
+  /**
+   * A session's first tab closed (`browser_tabs` close): its commands go through the tab its window moved them to. Only
+   * to a live tab of the same window and profile epoch, so a session never moves to another window.
+   */
+  private rebindClosedAnchor(request: BrowserWorkerRequest, response: BrowserWorkerResponse, previous: AttachedRegistrationRecord): void {
+    const result = response.result
+    const uiTabId = isObject(result) ? result.anchorUiTabId : undefined
+    const sessionId = request.params.sessionId
+    if (!isIdentifier(uiTabId) || !isIdentifier(sessionId)) return
+    const next = this.options.getRegistrationByUiTabId(uiTabId)
+    if (!next || next.connectionId !== previous.connectionId || next.profileId !== previous.profileId || next.profileEpoch !== previous.profileEpoch) return
+    this.sessions.set(sessionId, {
+      sessionId,
+      registrationId: next.registrationId,
+      registrationEpoch: next.registrationEpoch,
+      connectionId: next.connectionId,
+      uiTabId: next.uiTabId,
+      profileEpoch: next.profileEpoch
     })
   }
 

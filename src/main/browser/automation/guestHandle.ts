@@ -1,3 +1,5 @@
+import type { UserInputKind } from './tabActivity'
+
 export interface GuestSessionHandle {
   matchesPartition(expected: string): boolean
 }
@@ -35,6 +37,10 @@ export interface GuestWebContentsHandle {
   readonly debugger: GuestDebuggerHandle
   onDestroyed(listener: GuestDestroyedListener): () => void
   onNavigated(listener: GuestNavigatedListener): () => void
+  /** The person's click, wheel or key in the page (the agent's debugger input raises these too). */
+  onUserInput?(listener: (kind: UserInputKind) => void): () => void
+  /** A main-frame navigation no page started: the address bar, back, forward or reload (or the agent's debugger). */
+  onUserNavigation?(listener: () => void): () => void
   /** Trusted embedder routing only; never focuses or shows an OS window. */
   acquireKeyboardFocus(signal: AbortSignal): Promise<GuestKeyboardFocusScope>
   /** Test/fixture inspection only. Production automation never uses this as a model API. */

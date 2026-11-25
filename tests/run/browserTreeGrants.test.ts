@@ -202,6 +202,20 @@ describe('in-app tabs under a grant', () => {
     expect(service.targetFor(execution('child'))).toEqual({ backend: 'electron-attached', uiTabId: 'child_tab' })
   })
 
+  it('a run with no tree grant (an editor try-run, a workflow the app started) never takes a free tab: it waits for its own', async () => {
+    const { service, register } = await browserService()
+    register('free_tab')
+    const tryRun: ExecutionContext = { ...execution('try_run'), browserGrant: undefined }
+    expect(service.targetFor(tryRun)).toBeUndefined()
+    const opening = service.requestAccess(tryRun)
+    await vi.waitFor(() => expect(service.accessStatus().tabRequests.map((request) => request.threadId)).toEqual(['try_run']))
+    register('try_run_tab', 'try_run')
+    await expect(opening).resolves.toBeDefined()
+    expect(service.targetFor(tryRun)).toEqual({ backend: 'electron-attached', uiTabId: 'try_run_tab' })
+    // The free tab is still there for the root of a person's tree.
+    expect(service.targetFor(execution('root'))).toEqual({ backend: 'electron-attached', uiTabId: 'free_tab' })
+  })
+
   it('a reader gets no tab of its own and is told so at once', async () => {
     const { service, register } = await browserService()
     register('free_tab')
