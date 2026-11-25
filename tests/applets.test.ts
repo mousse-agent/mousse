@@ -371,6 +371,9 @@ describe('applet source kept from a model', () => {
     const [published] = store.list('one')
     const named = modelFacingReplyText({ role: 'assistant', content, presentationParts })
     expect(named).toBe(`Here:\n[Applet: Calculator]\n\n[Applet: Calculator (appletId ${published!.appletId}, revision ${published!.revisionId})]\nDone.`)
+    // Parts of the same shape for another applet are not this reply's: the reference follows the text.
+    const stale = presentationParts!.map((part) => (part.type === 'applet' ? { ...part, reference: { ...part.reference, title: 'Budget' } } : part))
+    expect(modelFacingReplyText({ role: 'assistant', content, presentationParts: stale })).toMatch(/^Here:\n\[Applet: Calculator\]\n\n\[Applet: Calculator\]\nDone\.\n\n\[Applet: Budget \(appletId /)
     // Parts that do not match the text as publication read it put no reference on a fence: they follow the text.
     expect(modelFacingReplyText({ role: 'assistant', content, presentationParts: [{ type: 'applet', reference: published! }] })).toBe(
       `Here:\n[Applet: Calculator]\n\n[Applet: Calculator]\nDone.\n\n[Applet: Calculator (appletId ${published!.appletId}, revision ${published!.revisionId})]`

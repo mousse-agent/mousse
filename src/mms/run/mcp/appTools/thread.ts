@@ -471,9 +471,12 @@ function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageR
   }
 }
 
-/** A thread's messages here as the short views read them. */
+/** A thread's messages here as the short views read them. Each text is read when a view first asks for it, not for every message. */
 function rowsOf(all: ReadonlyArray<{ role: string; content?: unknown; presentationParts?: unknown; timestamp?: unknown }>): ViewRow[] {
-  return all.map((message, index) => ({ index, role: message.role, text: modelFacingReplyText(message), timestamp: message.timestamp }))
+  return all.map((message, index) => {
+    let text: string | undefined
+    return { index, role: message.role, timestamp: message.timestamp, get text() { return (text ??= modelFacingReplyText(message)) } }
+  })
 }
 
 /** The views of `thread_read` an agent may ask for. */

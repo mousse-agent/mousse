@@ -236,7 +236,7 @@ export function publishedApplets(content: string, parts: unknown, offset = 0): P
     let start = 0
     const matches = extracted.every((part, index) => {
       const applet = shown[index]?.type === 'applet' ? (shown[index] as { reference: AppletReference }).reference : undefined
-      if (applet && part.type !== 'submission') return false
+      if (applet && (part.type !== 'submission' || part.submission.title !== applet.title)) return false
       if (applet) at.set(offset + start, applet)
       start += part.type === 'text' ? part.text.length : part.source.length
       return true
