@@ -1903,10 +1903,14 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, rowid`, ...params).map(escalationOf)
   }
 
-  /** The bot's newest ask for a fingerprint that the owner answered (allowed or denied), if any. */
-  lastAnsweredAsk(botId: string, fingerprint: string): BotEscalationRow | undefined {
-    const row = this.get("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC LIMIT 1", botId, fingerprint)
-    return row ? escalationOf(row) : undefined
+  /**
+   * The bot's Not nows to a fingerprint since the owner last allowed it, newest first (at most `limit`): the asks the repeat
+   * guard reads.
+   */
+  deniedSinceAllowed(botId: string, fingerprint: string, limit = 50): BotEscalationRow[] {
+    const rows = this.all("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC LIMIT ?", botId, fingerprint, limit).map(escalationOf)
+    const allowed = rows.findIndex((row) => row.status !== 'denied')
+    return allowed < 0 ? rows : rows.slice(0, allowed)
   }
 
   /**
@@ -1962,14 +1966,14 @@ export class BotStore {
 
   /**
    * Compare-and-set from `open`: false when it was already answered, expired or cancelled. A Not now keeps where the
-   * owner had last written then and the grant it was said under (`denialOf`), so a repeat of the ask is told apart from
-   * one they wrote about, or one under another grant.
+   * owner had last written then, the grant it was said under and `given`, the key of what that grant gave (`denialOf`),
+   * so a repeat of the ask is told apart from one they wrote about, or one under a grant that gives something else.
    */
-  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string): boolean {
+  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string, given?: string): boolean {
     const moved = this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
     const botId = moved && status === 'denied' ? this.get('SELECT bot_id FROM bot_escalations WHERE id = ?', id)?.bot_id : undefined
     if (typeof botId === 'string') {
-      const denial = { seq: this.ownerLastWroteSeq(botId), grant: this.activeGrant(botId)?.digest ?? '' }
+      const denial = { seq: this.ownerLastWroteSeq(botId), grant: this.activeGrant(botId)?.digest ?? '', ...(given !== undefined ? { given } : {}) }
       this.run('INSERT OR REPLACE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `ask-denied:${id}`, JSON.stringify(denial))
     }
     return moved
@@ -2596,17 +2600,22 @@ export class BotStore {
   }
 
   /**
-   * What a Not now to `ask` kept (`answerEscalation`): the `seq` of the owner's newest row then, and the digest of the
-   * grant it was said under (absent: kept by a build that wrote only the `seq`). Undefined when it kept nothing.
+   * What a Not now to `ask` kept (`answerEscalation`): the `seq` of the owner's newest row then, the digest of the
+   * grant it was said under (absent: kept by a build that wrote only the `seq`), and the key of what that grant gave
+   * (absent: kept before it was written). Undefined when it kept nothing.
    */
-  denialOf(ask: Pick<BotEscalationRow, 'id' | 'botId'>): { seq: number; grant?: string } | undefined {
+  denialOf(ask: Pick<BotEscalationRow, 'id' | 'botId'>): { seq: number; grant?: string; given?: string } | undefined {
     const value = this.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', ask.botId, `ask-denied:${ask.id}`)?.value
     if (typeof value !== 'string') return undefined
     try {
       const kept = JSON.parse(value) as unknown
       if (typeof kept === 'number') return { seq: kept }
       if (kept && typeof kept === 'object' && typeof (kept as { seq?: unknown }).seq === 'number')
-        return { seq: (kept as { seq: number }).seq, ...(typeof (kept as { grant?: unknown }).grant === 'string' ? { grant: (kept as { grant: string }).grant } : {}) }
+        return {
+          seq: (kept as { seq: number }).seq,
+          ...(typeof (kept as { grant?: unknown }).grant === 'string' ? { grant: (kept as { grant: string }).grant } : {}),
+          ...(typeof (kept as { given?: unknown }).given === 'string' ? { given: (kept as { given: string }).given } : {})
+        }
     } catch { /* unreadable: kept nothing */ }
     return undefined
   }

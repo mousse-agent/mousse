@@ -886,7 +886,7 @@ export class BotChatService {
     if (id.startsWith('alone:')) { this.engine.alone.remove(botId, id); return this.detailOf(botId) }
     const off = this.store.disabledPermissions(botId).find((item) => item.id === id)
     const grant = this.store.activeGrant(botId)
-    const permission = grant ? grantedPermissions(off?.manifest ?? grant.manifest).find((item) => permissionId(item) === id) : undefined
+    const permission = grant ? grantedPermissions(withFullTrust(off?.manifest ?? grant.manifest)).find((item) => permissionId(item) === id) : undefined
     if (!permission) throw new BotEngineError('permission_not_found', 'This bot doesn\'t have that permission.')
     // Allow everything would give it straight back, and forgetting a switch-off would let it: refused, with the way out.
     if (grant!.manifest.fullTrust === true && grantedPermissions(withFullTrust(withoutPermission(grant!.manifest, permission))).some((item) => permissionId(item) === id))

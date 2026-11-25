@@ -24,7 +24,7 @@ import { requestJournalRows } from '../memory/requestFrames'
 import { startTurnMeter } from './turnUsage'
 import { turnTimingBind, turnTimingBotMark } from '../../diagnostics/turnTiming'
 import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
-import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
+import { grantedPermissions, permissionId, restorePermission, switchedOffPermission, withoutPermission } from '../chat/projection'
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
@@ -1337,7 +1337,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       draftHash: entry.draftHash,
       revision: published?.revision ?? null,
       grant: grant ? { digest: grant.digest, approvedAt: grant.approvedAt } : null,
-      needsApproval: published ? addedPermissions(published.permissions, grant?.manifest ?? null) : [],
+      needsApproval: published ? this.addedTo(entry.id, published.permissions, grant?.manifest ?? null) : [],
       openEscalations: this.store.activationsIn(entry.id, ['waiting_grant']).reduce((count, row) => count + this.store.escalations({ activationId: row.id, status: 'open' }).length, 0),
       schedules: this.schedulesOf(entry.id).map((schedule) => ({
         id: schedule.scheduleId,
@@ -1359,7 +1359,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return {
       revision: published.revision!,
       digest: botManifestDigest(published.permissions),
-      added: addedPermissions(published.permissions, grant?.manifest ?? null),
+      added: this.addedTo(botId, published.permissions, grant?.manifest ?? null),
       threads: [published.main, ...published.context].map((thread) => this.checkThread(thread, published.permissions, botId))
     }
   }
@@ -1395,7 +1395,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const refused = [published.main, ...published.context].map((thread) => this.checkThread(thread, withFullTrust(published.permissions), botId)).find((check) => !check.ok)
     if (refused) throw new BotEngineError('policy_unenforceable', refused.reason ?? 'A thread of this bot cannot hold its permissions.', { thread: refused.key })
     const previous = this.store.activeGrant(botId)
-    const widens = previous !== undefined && manifestSubset(previous.manifest, published.permissions)
+    const widens = previous !== undefined && this.holdsWithin(botId, previous.manifest, published.permissions)
     const grant = this.store.db.transaction(() => {
       const approved = this.store.approve(botId, digest, published.permissions)
       if (widens && previous.digest !== approved.digest) {
@@ -1475,11 +1475,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * work that waits to go on, made under any grant but `keep`: each is cancelled with `reason`, and a running one's
    * dispatch is stopped (its authority refuses every call from now on, since it checks the grant on each one). The asks
    * of what waited are withdrawn, so no card can bring it back and its chat slot is free, and its chat says why it stopped.
+   * Every narrowing ends here: `approve` of a narrower grant, and About's Remove and Allow everything off (`narrowGrant`),
+   * whose running turns go on (`runningGoesOn`; each of their calls is checked against the narrower grant).
    */
-  private endUnderGrant(botId: string, reason: string, keep?: string): void {
+  private endUnderGrant(botId: string, reason: string, keep?: string, options: { runningGoesOn?: boolean } = {}): void {
     const waited = (row: BotActivationRow) => row.status === 'waiting_grant' || row.status === 'blocked'
     const ended = this.store.db.transaction(() => {
-      const rows = this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked']).filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)))
+      const rows = this.store.activationsIn(botId, options.runningGoesOn ? ['queued', 'waiting_grant', 'blocked'] : ['queued', 'running', 'waiting_grant', 'blocked']).filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)))
       return rows.filter((row) => {
         if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: reason })) return false
         if (waited(row)) this.store.withdrawActivationAsks(row.id)
@@ -1704,8 +1706,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       throw new BotEngineError('bot_home_trashed', 'This bot\'s thread is in the trash. Restore it, or delete the bot.')
     const grant = this.store.activeGrant(botId)
     // Nothing is ever approved automatically: a revision that asks for more needs the owner first.
-    if (!grant || !manifestSubset(published.permissions, grant.manifest))
-      throw new BotEngineError('bot_approval_required', 'Approve this bot\'s permissions before it runs.', { added: addedPermissions(published.permissions, grant?.manifest ?? null) })
+    if (!grant || !this.holdsWithin(botId, published.permissions, grant.manifest))
+      throw new BotEngineError('bot_approval_required', 'Approve this bot\'s permissions before it runs.', { added: this.addedTo(botId, published.permissions, grant?.manifest ?? null) })
     return { published, grant }
   }
 
@@ -2660,7 +2662,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const grant = this.store.activeGrant(botId)
     if (!grant) return
-    const compiled = this.compileNeutral(definition.main, withFullTrust(intersectManifest(definition.permissions, grant.manifest)), { escalate: true, consult: definition.context.length > 0, memory: true }, botId)
+    const compiled = this.compileNeutral(definition.main, withFullTrust(intersectManifest(definition.permissions, withFullTrust(grant.manifest))), { escalate: true, consult: definition.context.length > 0, memory: true }, botId)
     if (!compiled.ok) return
     const policy: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
     const tried: BotModelPick[] = []
@@ -3060,7 +3062,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!grant || grant.digest !== dispatch.policyDigest || grant.digest !== row.grantDigest)
       return this.block(row, 'bot_grant_revoked', 'The bot\'s permissions were revoked or changed.')
     const definition = this.host.definitions.revision(row.botId, row.revision)
-    if (!definition || !manifestSubset(definition.permissions, grant.manifest))
+    if (!definition || !this.holdsWithin(row.botId, definition.permissions, grant.manifest))
       return this.block(row, 'bot_grant_revoked', 'The bot\'s permissions no longer cover this revision.')
     if (dispatch.kind === 'consult') return this.prepareConsult(row, dispatch, definition, grant, payload)
     if (dispatch.kind === 'subagent') return this.prepareSubagent(row, dispatch, definition, grant, payload)
@@ -3448,7 +3450,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // MCP, skills and the automation tools, which every bot has unless switched off.
       const off: Partial<Record<keyof BotSwitchedOff, true>> = {}
       for (const row of this.store.disabledPermissions(definition.id)) {
-        const permission = grantedPermissions(row.manifest).find((item) => permissionId(item) === row.id)
+        const permission = switchedOffPermission(row)
         const which = permission && namedPowerOf(permission)
         if (which) off[which] = true
       }
@@ -3471,7 +3473,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const own = 'instructions' in thread.agent ? thread.agent.instructions : undefined
     const role = system && words.role.trim() === words.description.trim() ? undefined : words.role.trim()
-    const disabled = this.store.disabledPermissions(definition.id).flatMap((off) => grantedPermissions(off.manifest).filter((item) => permissionId(item) === off.id).map((item) => askText(item).title))
+    const disabled = this.store.disabledPermissions(definition.id).flatMap((off) => { const item = switchedOffPermission(off); return item ? [askText(item).title] : [] })
     const offNote = disabled.length ? `Your owner has switched off for now: ${disabled.join(', ')}. These are not offered and you must not ask for them. Carry on without them.` : undefined
     const asksFirst = botAsksFirst(this.host.settings?.get())
       ? lane === 'chat' ? permissions?.allowed.mcp?.length || permissions?.canAskMcp ? BOT_ASKS_FIRST_CHAT_INSTRUCTIONS : undefined
@@ -3584,15 +3586,53 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * overlay adds back what is switched off.
    */
   private effectiveManifest(row: BotActivationRow, revision: BotManifest, granted: BotManifest): BotManifest {
-    let manifest = intersectManifest(revision, granted)
+    // The revision is held inside what the grant gives, "Allow everything" expanded, as approval compares them
+    // (`holdsWithin`): a revision that names a tool only Allow everything gives still gets it.
+    let manifest = intersectManifest(revision, withFullTrust(granted))
     for (const overlay of this.store.overlays(row.id)) manifest = withPermission(manifest, overlay.permission, overlay.amount ?? undefined)
     // "Allow everything" adds every grantable tool here, before the owner's switches take theirs away again.
-    manifest = this.withDefaults(row.botId, withFullTrust(manifest))
-    for (const off of this.store.disabledPermissions(row.botId)) {
-      const permission = grantedPermissions(off.manifest).find((item) => permissionId(item) === off.id)
+    return this.lessSwitchedOff(row.botId, this.withDefaults(row.botId, withFullTrust(manifest)))
+  }
+
+  /** `manifest` less every permission the owner switched off for the bot in About (a default's switch is `withDefaults`'). */
+  private lessSwitchedOff(botId: string, manifest: BotManifest): BotManifest {
+    for (const off of this.store.disabledPermissions(botId)) {
+      const permission = switchedOffPermission(off)
       if (permission) manifest = withoutPermission(manifest, permission)
     }
     return manifest
+  }
+
+  /**
+   * What `granted` gives the bot now: "Allow everything" expanded, less what the owner switched off. Approval's comparison
+   * (`holdsWithin`), whether an open card is already Allowed (`settleHeldAsks`) and the repeat guard (`givenKey`) all read
+   * it, so none of them can see a permission the runtime does not give.
+   */
+  private grantGives(botId: string, granted: BotManifest): BotManifest {
+    return this.lessSwitchedOff(botId, withFullTrust(granted))
+  }
+
+  /**
+   * Whether `wanted` asks for nothing `granted` does not give, with the owner's switch-offs taken out of both: what is
+   * switched off is never given, so asking for it neither needs approval nor blocks a run. What passes is exactly what
+   * the runtime gives (`effectiveManifest`).
+   */
+  private holdsWithin(botId: string, wanted: BotManifest, granted: BotManifest): boolean {
+    return manifestSubset(this.lessSwitchedOff(botId, wanted), this.grantGives(botId, granted))
+  }
+
+  /** What `wanted` adds to `granted`, read as `holdsWithin` reads them: the approval dialog's lines. */
+  private addedTo(botId: string, wanted: BotManifest, granted: BotManifest | null): BotPermissionLine[] {
+    return addedPermissions(this.lessSwitchedOff(botId, wanted), granted ? this.grantGives(botId, granted) : null)
+  }
+
+  /**
+   * What the active grant gives, as a key: the same for two grants that give the same (a tool listed again under "Allow
+   * everything" changes the digest, not this), and with the default switches. The repeat guard compares it.
+   */
+  private givenKey(botId: string): string {
+    const grant = this.store.activeGrant(botId)
+    return grant ? `${botManifestDigest(this.grantGives(botId, grant.manifest))}${this.defaultsKey(botId)}` : ''
   }
 
   /**
@@ -3608,7 +3648,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       else if (row.id === BOT_AUTOMATIONS_SWITCH) off.automations = true
       else if (isBotDefaultSwitch(row.id)) off.servers.add(row.id.slice(BOT_MCP_SERVER_SWITCH.length))
       else {
-        const held = grantedPermissions(row.manifest).find((item) => permissionId(item) === row.id)
+        const held = switchedOffPermission(row)
         if (held && 'mcp' in held) off.servers.add(installationOf(held.mcp.serverId))
       }
     }
@@ -4840,21 +4880,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * Whether asking for `permission` now repeats an ask the owner said Not now to (issue #1363): there is no open ask for
-   * it, the bot's newest answered ask for it was denied after the owner last wrote, and the grant in place is the one it
-   * was denied under (by digest; a Not now an older build kept without it compares the grant's approval time). Asks are
-   * counted nowhere: a repeat is refused until the owner writes or the grant changes. A limit is not a repeat (a run that
-   * ran out of room ends by itself).
+   * it, and one of its Not nows since the owner last wrote (and since they last allowed it) was said under a grant that
+   * gives the same as the one in place: Allow everything expanded, less what is switched off (`givenKey`). So a grant
+   * changed and changed back, or one that lists again a tool Allow everything gives, is still the same. A Not now kept
+   * before that key compares the grant's digest, and one an older build kept without either its approval time. Asks are
+   * counted nowhere: a repeat is refused until the owner writes or what the grant gives changes. A limit is not a repeat
+   * (a run that ran out of room ends by itself).
    */
   private repeatedAsk(botId: string, permission: BotAskRequest): boolean {
     if ('budget' in permission) return false
     const fingerprint = this.fingerprintOf('', 'escalate', this.limitAsk(botId, permission))
     if (this.store.openAsk(botId, fingerprint)) return false
-    const denied = this.store.lastAnsweredAsk(botId, fingerprint)
-    if (denied?.status !== 'denied' || !denied.answeredAt) return false
     const grant = this.store.activeGrant(botId)
-    const kept = this.store.denialOf(denied)
-    if (kept?.grant !== undefined ? kept.grant !== (grant?.digest ?? '') : grant !== undefined && grant.approvedAt > denied.answeredAt) return false
-    return !this.store.ownerWroteSinceDenial(denied)
+    const given = this.givenKey(botId)
+    for (const denied of this.store.deniedSinceAllowed(botId, fingerprint)) {
+      // Newest first: once the owner wrote after one, they wrote after every older one too.
+      if (!denied.answeredAt || this.store.ownerWroteSinceDenial(denied)) return false
+      const kept = this.store.denialOf(denied)
+      const same = kept?.given !== undefined ? kept.given === given
+        : kept?.grant !== undefined ? kept.grant === (grant?.digest ?? '')
+          : !(grant !== undefined && grant.approvedAt > denied.answeredAt)
+      if (same) return true
+    }
+    return false
   }
 
   /** The fingerprint of an ask: one open ask per bot and permission (a limit's by its key alone). */
@@ -5097,7 +5145,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const status = input.answer === 'deny' ? 'denied' : input.answer === 'allow_bot' ? 'allowed_bot' : 'allowed_once'
     let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
-      if (!this.store.answerEscalation(escalation.id, status, amount)) return false
+      if (!this.store.answerEscalation(escalation.id, status, amount, undefined, status === 'denied' ? this.givenKey(row.botId) : undefined)) return false
       if (!special && (input.answer === 'allow_once' || input.answer === 'allow_more')) this.store.putOverlay(row.id, escalation.id, escalation.permission, amount)
       if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone' && !this.alone.answer(row.botId, row.id, status !== 'denied', escalation.permission)) this.withdrawChangedAloneAsk(escalation.id)
       this.journalAnswer(escalation, status === 'denied' ? 'not_now' : 'allow')
@@ -5154,7 +5202,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const cooldown = answer === 'not_now' && escalation.mode === 'ask' ? new Date(this.now() + BOT_ASK_DENY_COOLDOWN_MS).toISOString() : undefined
     let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
-      if (!this.store.answerEscalation(escalation.id, answer === 'allow' ? 'allowed_bot' : 'denied', amount, cooldown)) return false
+      if (!this.store.answerEscalation(escalation.id, answer === 'allow' ? 'allowed_bot' : 'denied', amount, cooldown, answer === 'allow' ? undefined : this.givenKey(botId))) return false
       if ('ask' in escalation.permission && escalation.permission.ask === 'let_alone' && !this.alone.answer(botId, escalation.activationId, answer === 'allow', escalation.permission)) this.withdrawChangedAloneAsk(escalation.id)
       this.journalAnswer(escalation, answer)
       // Work that waits for room goes on with the wider grant, or ends with what it posted, with the answer.
@@ -5179,12 +5227,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private settleHeldAsks(botId: string): string[] {
     const grant = this.store.activeGrant(botId)
     if (!grant) return []
+    const given = this.grantGives(botId, grant.manifest)
     const walls = new Set<string>()
     for (const ask of this.store.openAsks(botId)) {
       if (isSpecialAsk(ask.permission) || 'budget' in ask.permission) continue
       // An MCP ask waiting for its server's tools grants nothing yet, so the grant "holds" it trivially: it stays open.
       if (waitsForTools(ask.permission)) continue
-      if (!manifestSubset(withPermission(grant.manifest, ask.permission), grant.manifest)) continue
+      // Allowed only when the grant gives it now: Allow everything expanded, and never what the owner switched off.
+      if (this.permissionOff(botId, ask.permission) || !manifestSubset(withPermission(given, ask.permission), given)) continue
       if (!this.store.answerEscalation(ask.id, 'allowed_bot')) continue
       if (ask.mode === 'wall') walls.add(ask.activationId)
       this.republishAsk(ask.id)
@@ -5242,7 +5292,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const answered = this.store.db.transaction(() => {
       let any = false
       for (const wall of walls.filter((entry) => entry.activationId === activationId))
-        if (this.store.answerEscalation(wall.id, 'denied')) {
+        if (this.store.answerEscalation(wall.id, 'denied', undefined, undefined, this.givenKey(botId))) {
           this.journalAnswer(wall, 'not_now')
           // Work that waits on the same limit as this wall ends with it: the message counts as Not now for it too.
           if ('budget' in wall.permission) settled.push(this.settleRoomInTx(botId, wall.permission.budget.key, false, waiting!))
@@ -5365,7 +5415,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if ('skill' in request && defaults.skills) return true
     if ('tool' in request && defaults.automations && BOT_AUTOMATION_APP_TOOLS.includes(request.tool)) return true
     return this.store.disabledPermissions(botId).some((off) => {
-      const held = grantedPermissions(off.manifest).find((item) => permissionId(item) === off.id)
+      const held = switchedOffPermission(off)
       if (!held) return false
       if ('tool' in held) return 'tool' in request && botGrantTool(held.tool) === botGrantTool(request.tool)
       return permissionId(held) === permissionId(request)
@@ -5389,8 +5439,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (isBotDefaultSwitch(id)) return this.setDefault(botId, id, enabled)
     const grant = this.store.activeGrant(botId)
     const off = this.store.disabledPermissions(botId).find((item) => item.id === id)
+    // A permission only "Allow everything" gives (About lists each as its own row) is switched as one the grant names.
     const manifest = off?.manifest ?? grant?.manifest
-    const permission = manifest && grantedPermissions(manifest).find((item) => permissionId(item) === id)
+    const permission = manifest && grantedPermissions(withFullTrust(manifest)).find((item) => permissionId(item) === id)
     if (!grant || !permission) throw new BotEngineError('permission_not_found', 'This bot does not have that permission.')
     if (enabled === !off) return
     this.store.db.transaction(() => {
@@ -5398,7 +5449,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.store.forgetDisabledPermission(botId, id)
         this.allowForBot(botId, permission, undefined, off!.manifest)
       } else {
-        this.store.keepDisabledPermission(botId, id, grant.manifest)
+        // Kept with Allow everything expanded, so the row names the permission even when only Allow everything gave it.
+        this.store.keepDisabledPermission(botId, id, withFullTrust(grant.manifest))
         this.narrowGrant(botId, (held) => withoutPermission(held, permission), true)
       }
     })
@@ -5465,7 +5517,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const off = this.store.disabledPermissions(botId)
     // A server an older build switched off: its row names the server's pairs.
     const older = server ? off.filter((row) => {
-      const held = grantedPermissions(row.manifest).find((item) => permissionId(item) === row.id)
+      const held = switchedOffPermission(row)
       return Boolean(held && 'mcp' in held && installationOf(held.mcp.serverId) === server)
     }) : []
     if (enabled === !(off.some((row) => row.id === id) || older.length > 0)) return
@@ -5488,9 +5540,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * About → Remove (§5.4): the manifest narrows, the revision is published and the narrower grant
+   * About → Remove (§5.4), and Allow everything off: the manifest narrows, the revision is published and the narrower grant
    * approved at once (narrowing never needs consent). A turn running under the wider grant goes on: only a call of
-   * what was taken away is refused (`authorityFor`). Queued work moves to the narrower grant.
+   * what was taken away is refused (`authorityFor`). Queued work moves to the narrower grant. A chat turn that waits at a
+   * card ends as at any narrowing (`endUnderGrant`): its card is withdrawn and the chat is free.
    */
   narrowGrant(botId: string, narrower: (manifest: BotManifest) => BotManifest, switching = false): void {
     const entry = this.entry(botId)
@@ -5498,7 +5551,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const grant = this.store.activeGrant(botId)
     if (!published || !grant) throw new BotEngineError('bot_approval_required', 'This bot has no permissions to remove.')
     const granted = narrower(grant.manifest)
-    const next: BotDefinition = { ...published, permissions: intersectManifest(narrower(published.permissions), granted) }
+    const next: BotDefinition = { ...published, permissions: intersectManifest(narrower(published.permissions), withFullTrust(granted)) }
     const revision = this.definitionCall(() => this.host.definitions.publishRevision(next))
     const digest = botManifestDigest(granted)
     // A running dispatch keeps the wider grant's digest, and each of its calls is checked against the narrower one too;
@@ -5516,10 +5569,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
     })
     try {
-      this.host.definitions.save({ ...entry.draft, permissions: intersectManifest(narrower(entry.draft.permissions), granted) }, entry.draftHash)
+      this.host.definitions.save({ ...entry.draft, permissions: intersectManifest(narrower(entry.draft.permissions), withFullTrust(granted)) }, entry.draftHash)
     } catch (error) {
       console.warn('the bot draft was left as it was', { botId, error: error instanceof Error ? error.message : String(error) })
     }
+    // After the caller's transaction (Remove forgets the switch-off in it): what still waits under the wider grant ends.
+    this.store.db.afterCommit(() => this.endUnderGrant(botId, 'grant_replaced', digest, { runningGoesOn: true }))
     this.changed({ botId })
   }
 
@@ -8002,7 +8057,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private grantHolds(row: BotActivationRow): boolean {
     const grant = this.store.activeGrant(row.botId)
     const definition = this.host.definitions.revision(row.botId, row.revision)
-    return Boolean(grant && definition && grant.digest === row.grantDigest && manifestSubset(definition.permissions, grant.manifest))
+    return Boolean(grant && definition && grant.digest === row.grantDigest && this.holdsWithin(row.botId, definition.permissions, grant.manifest))
   }
 
   // -- Threads ----------------------------------------------------------------------------------
@@ -9412,12 +9467,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       return false
     }
-    let manifest = withFullTrust(intersectManifest(published.permissions, grant.manifest))
-    for (const off of this.store.disabledPermissions(botId)) {
-      const permission = grantedPermissions(off.manifest).find((item) => permissionId(item) === off.id)
-      if (permission) manifest = withoutPermission(manifest, permission)
-    }
-    return manifest.tools.includes('shell')
+    return this.lessSwitchedOff(botId, withFullTrust(intersectManifest(published.permissions, withFullTrust(grant.manifest)))).tools.includes('shell')
   }
 
   /**

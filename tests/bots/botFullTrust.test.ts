@@ -12,14 +12,14 @@
  * and refuses its next call.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DUPLICATE_TEXT, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { BOT_AUTOMATIONS_SWITCH, BOT_FULL_TRUST_PERMISSION } from '../../src/shared/bots/personal/manifest'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
-import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 const command: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: 'ls' } }
 const read: NormalisedCall = { kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: 'notes.md' } }
@@ -194,5 +194,120 @@ describe('approving a new grant', () => {
     await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
     await flush()
     expect(f.store.activationByKey('chat:next')!.status).toBe('running')
+  })
+})
+
+describe('Allow everything, row by row', () => {
+  it('each permission it gives is a row of its own: switching one off keeps the rest and Allow everything stays on', async () => {
+    f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, true)
+    // Run commands on a bot that never asked for it: only Allow everything gives it.
+    const shell = () => f.bots.service.get(botId).permissions.find((item) => /run commands/i.test(item.title))
+    expect(shell()).toMatchObject({ enabled: true, fromFullTrust: true })
+    f.bots.service.setPermission(botId, shell()!.id, false)
+    expect(shell()).toMatchObject({ enabled: false })
+    expect(f.bots.service.get(botId).fullTrust).toBe(true)
+    const run = await start(f, await activate('off'))
+    expect(run.prepared.authority.check(command)).toMatchObject({ ok: false })
+    expect(run.prepared.authority.appTools.has('browser_open')).toBe(true)
+    await finish(f, run.payload, 'completed', { text: 'Done.' })
+    f.bots.service.setPermission(botId, shell()!.id, true)
+    expect((await start(f, await activate('on'))).prepared.authority.check(command)).toEqual({ ok: true })
+  })
+})
+
+describe('approval and the runtime read Allow everything the same way', () => {
+  it('a revision that names a tool only Allow everything gives needs no approval, and runs with it', async () => {
+    f.bots.setFullTrust(botId, true)
+    const entry = f.bots.get(botId)
+    const { fullTrust: _on, ...rest } = entry.published!.permissions
+    const saved = f.bots.save({ ...entry.draft, permissions: { ...rest, tools: [...rest.tools, 'shell'] } }, entry.draftHash)
+    f.bots.publish(botId, saved.draftHash)
+    expect(f.bots.list().find((bot) => bot.id === botId)!.needsApproval).toEqual([])
+    const run = await start(f, await activate('named'))
+    expect(run.prepared.authority.check(command)).toEqual({ ok: true })
+    // The revision left Allow everything out, so it narrows: what it does not name, it does not get.
+    expect(run.prepared.authority.appTools.has('browser_open')).toBe(false)
+  })
+
+  it('an open card is not marked Allowed for a permission the owner switched off, though Allow everything gives it', async () => {
+    const asking = await start(f, await activate('ask'))
+    asking.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })
+    await finish(f, asking.payload, 'completed', { text: 'Asked.' })
+    const card = f.store.openAsks(botId).find((ask) => 'tool' in ask.permission && ask.permission.tool === 'shell')!
+    f.bots.setFullTrust(botId, true)
+    const shell = f.bots.service.get(botId).permissions.find((item) => /run commands/i.test(item.title))!
+    f.bots.setPermission(botId, shell.id, false)
+    // Any Allow settles the open cards the grant now gives.
+    await f.bots.service.chatSend({ botId, text: 'Export your memory', clientRequestId: 'export' })
+    const chat = await start(f, f.store.activationByKey('chat:export')!.id)
+    chat.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })
+    await finish(f, chat.payload, 'completed', { text: 'Pick a folder.' })
+    const exportAsk = f.store.openAsks(botId).find((ask) => 'ask' in ask.permission)!
+    await f.bots.service.answer(botId, exportAsk.id, 'allow')
+    expect(f.store.escalation(card.id)!.status).toBe('open')
+  })
+})
+
+describe('a chat turn waiting at a card ends at every narrowing', () => {
+  const shellRow = () => f.bots.service.get(botId).permissions.find((item) => /run commands/i.test(item.title))!
+  it.each([
+    ['Allow everything off', () => { f.bots.setFullTrust(botId, true) }, () => { f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, false) }],
+    ['Remove', () => { approve((held) => ({ ...held, tools: [...held.tools, 'shell'] })) }, () => { f.bots.service.revokePermission(botId, shellRow().id) }]
+  ])('%s: the card is withdrawn and the chat slot is free', async (_name, setup, narrow) => {
+    setup()
+    await f.bots.service.chatSend({ botId, text: 'Export your memory', clientRequestId: 'wall' })
+    const turn = await start(f, f.store.activationByKey('chat:wall')!.id)
+    turn.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })
+    await finish(f, turn.payload, 'completed', { text: 'Pick a folder.' })
+    const id = turn.payload.activationId
+    expect(f.store.activation(id)).toMatchObject({ status: 'waiting_grant' })
+    const [ask] = f.store.openAsks(botId)
+    narrow()
+    await flush()
+    expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
+    expect(f.store.escalation(ask!.id)!.status).toBe('withdrawn')
+    await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
+    await flush()
+    expect(f.store.activationByKey('chat:next')!.status).toBe('running')
+  })
+})
+
+describe('the repeat guard compares what grants give', () => {
+  /** A chat asks to save its memory, and the owner says Not now. Returns what the ask told the bot. */
+  async function deniedExport(id: string): Promise<string | undefined> {
+    await f.bots.service.chatSend({ botId, text: 'Export your memory', clientRequestId: id })
+    const turn = await start(f, f.store.activationByKey(`chat:${id}`)!.id)
+    const said = turn.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })
+    await finish(f, turn.payload, 'completed', { text: 'Pick a folder.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'not_now')
+    // The chat goes on after the Not now, and ends.
+    await runDispatch(f, turn.payload.activationId, 2, { text: 'All right.' })
+    return said
+  }
+  /** A run started by hand asks again. */
+  async function asksAgain(id: string): Promise<string | undefined> {
+    const run = await start(f, await activate(id))
+    return run.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Again.' })
+  }
+
+  it('holds after the grant changes and changes back, though a Not now under the other grant came between', async () => {
+    // Not now under A, in the chat; then under B, to a run's ask, with no owner message since.
+    expect(await deniedExport('a1')).not.toBe(BOT_ASK_DUPLICATE_TEXT)
+    approve((held) => ({ ...held, tools: [...held.tools, 'shell'] }))
+    expect(await asksAgain('b1')).toMatch(/^Asked the owner/)
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'not_now')
+    approve((held) => ({ ...held, tools: held.tools.filter((tool) => tool !== 'shell') }))
+    // Past the day a run's Not now holds by itself: only the repeat guard is left.
+    f.clock.now += 25 * 60 * 60_000
+    expect(await asksAgain('a2')).toBe(BOT_ASK_DUPLICATE_TEXT)
+  })
+
+  it('holds when the grant lists again a tool Allow everything already gives', async () => {
+    f.bots.setFullTrust(botId, true)
+    expect(await deniedExport('t1')).not.toBe(BOT_ASK_DUPLICATE_TEXT)
+    const before = f.store.activeGrant(botId)!.digest
+    approve((held) => ({ ...held, tools: [...held.tools, 'shell'] }))
+    expect(f.store.activeGrant(botId)!.digest).not.toBe(before)
+    expect(await asksAgain('t2')).toBe(BOT_ASK_DUPLICATE_TEXT)
   })
 })

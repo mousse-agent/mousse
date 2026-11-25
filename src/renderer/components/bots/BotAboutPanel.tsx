@@ -509,7 +509,7 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
                 {...(item.note ? { desc: item.note } : {})}
                 {...(off ? { status: { text: off, tone: 'warn' as const } } : {})}>
                 {item.enabled !== undefined && <span title={item.note}><Switch label={item.title} checked={item.enabled} onChange={(enabled) => void store().setPermission(bot.id, item.id, enabled)} /></span>}
-                {item.builtIn ? null : <ConfirmRemoveButton label={`Remove ${item.title}`} onRemove={() => void store().revokePermission(bot.id, item.id)} />}
+                {item.builtIn || item.fromFullTrust ? null : <ConfirmRemoveButton label={`Remove ${item.title}`} onRemove={() => void store().revokePermission(bot.id, item.id)} />}
               </Row>
             })}
           </div>

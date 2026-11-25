@@ -306,6 +306,19 @@ describe('About this bot', () => {
     expect(fake.calls).toContainEqual(['setPermission', 'b1', 'default:skills', true])
   })
 
+  it('a permission Allow everything gives has its own switch and no Remove', async () => {
+    const grantedAt = '2026-11-06T10:00:00.000Z'
+    fake.details.b1 = { ...fake.details.b1!, fullTrust: true, permissions: [
+      { id: 'tool:shell', enabled: true, fromFullTrust: true, title: 'run commands', note: 'Runs commands on this computer.', grantedAt },
+      { id: 'tool:browser', enabled: false, fromFullTrust: true, title: 'use the browser', note: 'Switched off for this bot.', grantedAt }
+    ] }
+    await show()
+    expect(rows('Can use')).toEqual(['Allow everything', 'Run commands', 'Use the browser'])
+    expect([...section('Can use')!.querySelectorAll('button')].some((element) => element.getAttribute('aria-label')?.startsWith('Remove'))).toBe(false)
+    await click(host.querySelector('[role="switch"][aria-label="run commands"]') ?? undefined)
+    expect(fake.calls).toContainEqual(['setPermission', 'b1', 'tool:shell', false])
+  })
+
   it('marks an MCP server that gives nothing now with what is true of it, keeping Remove', async () => {
     fake.details.b1!.permissions = [
       { id: 'fp3', title: 'use your GitHub tools', note: 'GitHub is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.', grantedAt: '2026-11-06T10:00:00.000Z', mark: 'Switched off' },
