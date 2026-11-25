@@ -47,6 +47,19 @@
       "expiresAt": "2026-11-25T04:21:52.392Z"
     },
     {
+      "task": "fix-windows-update-install-path",
+      "session": "Animatrix-ccfd0b",
+      "machine": "Animatrix",
+      "branch": "fix-windows-update-install-path",
+      "paths": [
+        "build/installer.nsh",
+        "src/main/updates",
+        "src/main/index.ts"
+      ],
+      "claimedAt": "2026-11-25T15:27:21.463Z",
+      "expiresAt": "2026-11-25T17:27:21.463Z"
+    },
+    {
       "task": "fix/browser-automation-bugs",
       "session": "agibook-664429",
       "machine": "agibook",
