@@ -102,6 +102,9 @@ function boundsOverlap(a: FrameBounds, b: FrameBounds): boolean {
   return a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y
 }
 
+/** How many frames from other sites, one inside the next, an image point is followed into. */
+const MAX_IMAGE_POINT_FRAME_DEPTH = 8
+
 /** A target that is only a viewport point (a wheel at a spot): no element stands behind it. */
 function pointTarget(cdpSessionId: string, point: { x: number; y: number }): ActionableTarget {
   return { cdpSessionId, backendNodeId: 0, objectId: '', point, bounds: { x: point.x, y: point.y, width: 0, height: 0 }, disabled: false, hidden: false, readOnly: false, tag: '', type: '', secret: false }
@@ -2766,21 +2769,70 @@ export class ManagedSession {
     return located.backendNodeId
   }
 
+  /**
+   * The element at a tab's viewport point, in the innermost frame there: an `<iframe>` of another
+   * site the point falls on is entered, with the point moved into that frame's own viewport. A
+   * frame that cannot be entered (one of the same site, or one not placed) leaves its `<iframe>`.
+   */
+  private async elementAtPoint(tab: TabState, mapped: BrowserPoint, signal: AbortSignal | undefined): Promise<{ sessionId: string; frameId: string; point: BrowserPoint; backendNodeId: number }> {
+    let at = { sessionId: tab.cdpSessionId, frameId: tab.frameId, point: mapped }
+    let backendNodeId = await this.nodeAtPoint(at.sessionId, at.point, signal)
+    let under: Array<{ frame: AttachedFrameState; bounds: FrameBounds }> | undefined
+    const entered = new Set<string>([tab.cdpSessionId])
+    for (let depth = 0; depth < MAX_IMAGE_POINT_FRAME_DEPTH; depth += 1) {
+      const content = await this.contentFrameOf(at.sessionId, backendNodeId, signal)
+      if (!content) break
+      under ??= await this.attachedFramesAt(tab, mapped)
+      const open = under.filter((entry) => !entered.has(entry.frame.sessionId))
+      const next = open.find((entry) => entry.frame.frameId === content) ?? open.find((entry) => entry.frame.parentFrameId === at.frameId)
+      if (!next) break
+      entered.add(next.frame.sessionId)
+      at = { sessionId: next.frame.sessionId, frameId: next.frame.frameId, point: { x: mapped.x - next.bounds.x, y: mapped.y - next.bounds.y } }
+      backendNodeId = await this.nodeAtPoint(at.sessionId, at.point, signal)
+    }
+    return { ...at, backendNodeId }
+  }
+
+  /** The frame an `<iframe>` (or `<frame>`) element shows, or undefined for any other element. */
+  private async contentFrameOf(sessionId: string, backendNodeId: number, signal: AbortSignal | undefined): Promise<string | undefined> {
+    try {
+      const described = await this.requireChrome().cdp.send<{ node?: { nodeName?: string; frameId?: string; contentDocument?: { frameId?: string } } }>('DOM.describeNode', { backendNodeId }, { sessionId, signal })
+      const nodeName = (described.node?.nodeName ?? '').toUpperCase()
+      return nodeName === 'IFRAME' || nodeName === 'FRAME' ? described.node?.frameId ?? described.node?.contentDocument?.frameId : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** A tab's attached frames from other sites whose box holds a viewport point, innermost (smallest) first. */
+  private async attachedFramesAt(tab: TabState, point: BrowserPoint): Promise<Array<{ frame: AttachedFrameState; bounds: FrameBounds }>> {
+    const out: Array<{ frame: AttachedFrameState; bounds: FrameBounds }> = []
+    for (const frame of this.framesOf(tab)) {
+      await this.frameEnables.get(frame.sessionId)?.catch(() => undefined)
+      if (!this.frames.has(frame.sessionId)) continue
+      const bounds = await this.frameViewportBounds(tab, frame)
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue
+      if (point.x >= bounds.x && point.x < bounds.x + bounds.width && point.y >= bounds.y && point.y < bounds.y + bounds.height) out.push({ frame, bounds })
+    }
+    return out.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height)
+  }
+
   private async resolveOneTarget(request: BrowserActionRequest, tab: TabState, target: BrowserTarget): Promise<ActionableTarget> {
     if (target.kind === 'image-point') {
-      const mapped = this.imagePointInViewport(request, tab, target.point)
-      const backendNodeId = await this.nodeAtPoint(tab.cdpSessionId, mapped, this.inFlight?.abort.signal)
-      const prepared = await prepareActionableTarget(this.requireChrome().cdp, tab.cdpSessionId, {
-        backendNodeId, frameRef: 'frame_' + tab.frameId, cdpSessionId: tab.cdpSessionId, frameId: tab.frameId, fingerprint: 'image-point'
-      }, this.inFlight?.abort.signal)
+      const signal = this.inFlight?.abort.signal
+      const at = await this.elementAtPoint(tab, this.imagePointInViewport(request, tab, target.point), signal)
+      // Made ready and hit-tested at the point itself: a tall element's middle may be off screen.
+      const prepared = await prepareActionableTarget(this.requireChrome().cdp, at.sessionId, {
+        backendNodeId: at.backendNodeId, frameRef: 'frame_' + at.frameId, cdpSessionId: at.sessionId, frameId: at.frameId, fingerprint: 'image-point'
+      }, signal, { point: at.point })
       const hit = await this.requireChrome().cdp.send<{ result?: { value?: { ok?: boolean } } }>('Runtime.callFunctionOn', {
         objectId: prepared.objectId,
         functionDeclaration: 'function(x, y) { const hit = document.elementFromPoint(x, y); return { ok: this === hit || this.contains(hit) }; }',
-        arguments: [{ value: mapped.x }, { value: mapped.y }],
+        arguments: [{ value: at.point.x }, { value: at.point.y }],
         returnByValue: true
-      }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
+      }, { sessionId: at.sessionId, signal })
       if (!hit.result?.value?.ok) fail('not_actionable', 'Image point is intercepted by an overlay')
-      return { ...prepared, point: mapped }
+      return { ...prepared, point: at.point }
     }
     if (!this.refs.hasObservation(request.observationId)) fail('stale_observation', 'Observation is not in the reference store')
     const identity: ReferenceIdentity = {
