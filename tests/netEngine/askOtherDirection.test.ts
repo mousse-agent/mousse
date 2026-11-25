@@ -121,6 +121,12 @@ describe('asking for the other direction of a one-way pairing', () => {
       if (op === 'grant.add_connected') atGrant = policyOf(caller, ownerOnCaller)
       return (request as (...args: unknown[]) => Promise<Record<string, unknown>>)(op, ...rest)
     }) as typeof caller.engine.request
+    // Every connection the owner asks its helper to dial from here on.
+    const dials: unknown[] = []
+    const channel = (owner.engine as unknown as { channel: { request(op: string, ...rest: unknown[]): Promise<unknown> } })
+      .channel
+    const toHelper = channel.request.bind(channel)
+    channel.request = (op, ...rest) => (op === 'dial' && dials.push(rest[0]), toHelper(op, ...rest))
     const view = accessPreset('view').fields
     await caller.dispatch(
       'netEngine.access.answer',
@@ -150,6 +156,8 @@ describe('asking for the other direction of a one-way pairing', () => {
     })
     expect(await accessThere(owner, callerOnOwner)).toMatchObject({ work: false })
     expect(await accessThere(caller, ownerOnCaller)).toMatchObject({ blocked: false })
+    // The owner works on the caller over the caller's own connection: it dials nothing.
+    expect(dials).toEqual([])
 
     // Either direction is still removed on its own: the owner stops using the caller, the caller still uses it.
     await owner.dispatch('netEngine.remove', { node: callerOnOwner, direction: 'out' }, true)
