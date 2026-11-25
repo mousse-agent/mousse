@@ -1702,6 +1702,30 @@ export class BotStore {
     }
   }
 
+  /**
+   * What a runtime that reserves nothing reported a request used (Claude Code, Codex, Antigravity): one more request
+   * when `request`, and its tokens and cost, added to the activation's counters and spend. A measurement only: it
+   * checks no limit and never refuses, and a runtime that counts or settles through the scopes is never mirrored here.
+   */
+  recordObservedUsage(activationId: string, usage: { request: boolean; input: number; output: number; usdMicros?: number }): void {
+    const whole = (value: number | undefined): number => (value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
+    const input = whole(usage.input)
+    const output = whole(usage.output)
+    const usd = whole(usage.usdMicros)
+    if (!usage.request && !input && !output && !usd) return
+    this.db.transaction(() => {
+      this.run(
+        'UPDATE bot_counters SET requests = requests + ?, input_tokens = input_tokens + ?, output_tokens = output_tokens + ? WHERE activation_id = ?',
+        usage.request ? 1 : 0, input, output, activationId
+      )
+      if (input || output || usd)
+        this.run(
+          'UPDATE bot_spend SET committed_input = committed_input + ?, committed_output = committed_output + ?, committed_usd_micros = committed_usd_micros + ? WHERE activation_id = ?',
+          input, output, usd, activationId
+        )
+    })
+  }
+
   // -- Turn usage (v12): what each main turn cost and carried ----------------------------------
 
   /** A main dispatch began: its row, before any usage is reported. A second start of the same dispatch changes nothing. */

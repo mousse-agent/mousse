@@ -16068,8 +16068,9 @@ export class OrchestratorService extends EventEmitter {
             model, input: usage.input, output: usage.output,
             cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
           })
-          // A bot's turn keeps what it cost with its dispatch (`bot_turn_usage`).
-          try { opts?.bot?.usage?.({ input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite }) }
+          // A bot's turn keeps what it cost with its dispatch (`bot_turn_usage`), and its activation's counts and spend
+          // where its runtime records none of it itself.
+          try { opts?.bot?.usage?.({ input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}) }) }
           catch (error) { logDebug('OrchestratorService', 'bot turn usage could not be recorded', error, { threadId: session.threadId }) }
         },
         providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),
@@ -16319,7 +16320,7 @@ export class OrchestratorService extends EventEmitter {
             ...(app ? { app } : {}),
             // A bot turn: the activation's shared counts and spend (its instructions are in the preamble).
             ...(opts?.bot ? {
-              counters: opts.bot.authority.counters,
+              counters: opts.bot.runtimeCounters ?? opts.bot.authority.counters,
               ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
             } : {})
           }).result

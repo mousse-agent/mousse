@@ -3125,6 +3125,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('the bot supervisor could not be armed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
     const counterScope = this.wallingCounters(new BotCounterScope(this.store, row.id), row.id, dispatch.n)
+    // Whether the turn's runtime counts its model requests itself (Pi's budget charges each one): if not, the requests
+    // its usage reports name are counted for it (`recordObservedUsage`). Only the runtime's own charges say so; a tool
+    // that makes a request (an image) charges the authority's scope.
+    let runtimeCountsRequests = false
+    const runtimeCounters: CounterScope = {
+      charge: (kind, limit) => {
+        if (kind === 'request') runtimeCountsRequests = true
+        return counterScope.charge(kind, limit)
+      }
+    }
     const spendLimited = spendLimits(effective)
     const spendScope = Object.keys(spendLimited).length ? this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId), row.id, dispatch.n) : null
     const startedMono = this.monotonic()
@@ -3171,7 +3181,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const meter = startTurnMeter({
       row, n: dispatch.n, fresh: dispatch.kind === 'start' && (cleared || row.lane !== 'chat'), contextGen: epoch?.id ?? row.id, prompt,
       ...(told.instructions ? { instructions: told.instructions } : {}), ...(preamble ? { preamble } : {})
-    }, { store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}) })
+    }, {
+      store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}),
+      // A spend limit runs only where each request is reserved and settled on the activation's ledger (Pi), which
+      // keeps its tokens and cost already; with none, nothing else records them.
+      mirror: () => ({ request: !runtimeCountsRequests, tokens: !spendScope })
+    })
     // Where the reply's time goes, marked from here on the bot's thread (`turnTiming`).
     if (row.lane === 'chat') turnTimingBind(row.botId, payload.threadId)
     return {
@@ -3196,6 +3211,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       selection: { ...selection },
       policy: compiled.policy,
       authority,
+      runtimeCounters,
       scratch,
       skills: compiled.permissions.skills,
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : epoch ? 'thread' : 'none') : 'thread',

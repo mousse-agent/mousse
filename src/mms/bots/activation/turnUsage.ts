@@ -27,19 +27,22 @@ export interface TurnMeterInput {
 }
 
 export interface TurnMeter {
-  usage(usage: { input: number; output: number; cacheRead: number; cacheWrite: number }): void
+  usage(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number }): void
   metrics(metrics: ProviderMetrics): void
   compacted(): void
 }
 
 /**
  * Starts a turn's row and returns what the runtime's reports feed. `tools` measures the Mousse tools the turn's runtime
- * is offered; it is asked once, at the first report, when the turn is registered and its tools are known.
+ * is offered; it is asked once, at the first report, when the turn is registered and its tools are known. `mirror`,
+ * asked at each usage report, says what of it the activation's counters and spend take too (`recordObservedUsage`):
+ * the request where the runtime counted none itself, the tokens and cost where it settled no reservation.
  */
 export function startTurnMeter(input: TurnMeterInput, deps: {
   store: BotStore
   now: () => number
   tools?: () => { count: number; chars: number } | undefined
+  mirror?: () => { request: boolean; tokens: boolean }
   warn?: (message: string, error: unknown) => void
 }): TurnMeter {
   const { row, n } = input
@@ -81,7 +84,18 @@ export function startTurnMeter(input: TurnMeterInput, deps: {
   return {
     usage: (usage) => {
       askTools()
-      safely('a bot turn\'s usage could not be recorded', () => deps.store.addTurnUsage(row.id, n, { ...usage, at: deps.now() }))
+      const { costUsd, ...tokens } = usage
+      safely('a bot turn\'s usage could not be recorded', () => deps.store.addTurnUsage(row.id, n, { ...tokens, at: deps.now() }))
+      if (deps.mirror) safely('a bot turn\'s usage could not be counted', () => {
+        const mirror = deps.mirror!()
+        if (!mirror.request && !mirror.tokens) return
+        deps.store.recordObservedUsage(row.id, {
+          request: mirror.request,
+          input: mirror.tokens ? usage.input + usage.cacheRead + usage.cacheWrite : 0,
+          output: mirror.tokens ? usage.output : 0,
+          ...(mirror.tokens && costUsd !== undefined && Number.isFinite(costUsd) && costUsd > 0 ? { usdMicros: Math.max(0, Math.round(costUsd * 1_000_000)) } : {})
+        })
+      })
     },
     metrics: (metrics) => {
       askTools()
