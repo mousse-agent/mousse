@@ -20,6 +20,7 @@ import type { EngineMessage } from './frame'
 import {
   Channel,
   fromWireError,
+  GRANT_ROLE,
   SESSION_FEATURES,
   type EngineConnection,
   type EngineLabel
@@ -125,7 +126,7 @@ export class EngineClient implements BridgeClient {
   async hello(
     name: string,
     deadlineMs = engineLimits().helloDeadlineMs
-  ): Promise<{ name: string; features: string[] }> {
+  ): Promise<{ name: string; features: string[]; role?: string }> {
     const reply = await this.exchange(
       'mousse.hello',
       { t: 'hello', proto: 1, name, features: [...(this.port.features?.() ?? SESSION_FEATURES)] },
@@ -135,7 +136,9 @@ export class EngineClient implements BridgeClient {
     const features = Array.isArray(reply.header.features)
       ? reply.header.features.filter((feature): feature is string => typeof feature === 'string')
       : []
-    return { name: String(reply.header.name ?? ''), features }
+    // This computer's role there (§8.4), from an app that says it.
+    const role = typeof reply.header.role === 'string' && GRANT_ROLE.test(reply.header.role) ? reply.header.role : undefined
+    return { name: String(reply.header.name ?? ''), features, ...(role ? { role } : {}) }
   }
 
   /**

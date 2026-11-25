@@ -251,12 +251,17 @@ describe('the Hub over an engine pairing', () => {
 
     it('answers what this computer lets the pairing do', async () => {
       expect(await ask()).toMatchObject({ v: 1, blocked: false, threads: true, work: true })
+      // Each change moves the pairing's role, which ends its connection; it connects again.
+      const again = () => pair.fabric.connect(pair.callerComputer, pair.ownerOnCaller)
       await pair.ownerLocal('bridge.policy', { node: pair.callerOnOwner, work: false })
       try {
+        await again()
         expect(await ask()).toMatchObject({ v: 1, threads: true, work: false })
       } finally {
         await pair.ownerLocal('bridge.policy', { node: pair.callerOnOwner, work: true })
+        await again()
       }
+      expect(await ask()).toMatchObject({ work: true })
     })
 
     it('authorizes no call from a grant that is not live, or a caller that is not the owner', () => {

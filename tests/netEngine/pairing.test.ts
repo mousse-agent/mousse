@@ -273,6 +273,7 @@ describe('removal racing the pairing', () => {
     const sent: string[] = []
     const helper = {
       info: {},
+      has: () => false,
       claim: () => undefined,
       dial: async () => undefined,
       request: async (op: string, fields: Record<string, unknown> = {}) => {

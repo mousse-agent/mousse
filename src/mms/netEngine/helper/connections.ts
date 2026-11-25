@@ -5,6 +5,7 @@ import { parseRelayDestination } from '../../../shared/netEngine/routes'
 import { engineLimits } from '../limits'
 import {
   ENGINE_LABELS,
+  GRANT_ROLE,
   type EngineConnection,
   type EngineRoute,
   type EngineLabel,
@@ -45,7 +46,8 @@ class HelperStream implements EngineStream {
     readonly label: EngineLabel,
     readonly cls: StreamClass,
     private readonly channel: AppChannel,
-    private readonly gone: () => void
+    private readonly gone: () => void,
+    readonly role?: string
   ) {}
 
   /** The sink the channel delivers this stream's bytes to. */
@@ -210,14 +212,14 @@ export class HelperConnection implements EngineConnection {
     return stream
   }
 
-  /** A stream the other side opened (`stream.incoming`), accepted. */
-  incoming(handle: number, label: EngineLabel, cls: StreamClass): void {
+  /** A stream the other side opened (`stream.incoming`), accepted, with the role of the grant it is served under. */
+  incoming(handle: number, label: EngineLabel, cls: StreamClass, role?: string): void {
     if (!this.open_ || this.live >= engineLimits().appStreamsPerConnection) {
       this.channel.reset(handle, 'refused')
       return
     }
     this.live += 1
-    const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream))
+    const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream), role)
     this.streams.add(stream)
     this.channel.bind(handle, cls, stream.sink)
     stream.bound(handle)
@@ -330,12 +332,14 @@ export class EngineHelper {
   /**
    * The helper's `hello` with this computer's name and profile; answers what it said of itself. The app offers
    * protocol 1.2 (pairing flow §1): a 1.2 helper lists what it implements in `features`; a 1.1 helper answers
-   * `[1, 1]` with no list, and a 1.0 helper `[1, 0]`, serving 1a's messages only.
+   * `[1, 1]` with no list, and a 1.0 helper `[1, 0]`, serving 1a's messages only. The app says it takes streams of
+   * grants whose role is not `owner` (`grant-roles`): a helper hands those only to an app that said so (§8.4).
    */
   async hello(): Promise<Record<string, unknown>> {
     const profile = this.options.profile?.()
     const answer = await this.channel.request('hello', {
       proto: [1, 2],
+      features: ['grant-roles'],
       name: this.options.name(),
       ...(profile ? { profile } : {})
     })
@@ -463,11 +467,13 @@ export class EngineHelper {
 
   /**
    * Whether the helper implements `feature` (its 1.2 `hello` lists it). A new field or operation is sent only then:
-   * an older helper ignores a field it does not know and would answer as if it had not been sent.
+   * an older helper ignores a field it does not know and would answer as if it had not been sent. `grant-roles` is
+   * read from any helper that lists it (a 1.0 or 1.1 helper lists nothing): without it every grant is `owner`, so
+   * the app lets a device in below Full control only when it is listed.
    */
   has(feature: EngineFeature): boolean {
     const features = this.info.features
-    return this.speaks(2) && Array.isArray(features) && features.includes(feature)
+    return (this.speaks(2) || feature === 'grant-roles') && Array.isArray(features) && features.includes(feature)
   }
 
   /** What the helper implements beyond 1.1, as its `hello` listed it. */
@@ -631,6 +637,7 @@ export class EngineHelper {
         label = event.label
       if (typeof handle !== 'number') return
       const cls = event.class === 'bulk' ? 'bulk' : 'interactive'
+      const role = typeof event.role === 'string' && GRANT_ROLE.test(event.role) ? event.role : undefined
       // Only the engine's labels (the helper resets the rest too).
       if (!connection || typeof label !== 'string' || !(ENGINE_LABELS as readonly string[]).includes(label)) {
         this.channel.reset(handle, 'refused')
@@ -653,10 +660,10 @@ export class EngineHelper {
           this.channel.reset(handle, 'refused')
           return
         }
-        served.incoming(handle, label as EngineLabel, cls)
+        served.incoming(handle, label as EngineLabel, cls, role)
         return
       }
-      connection.incoming(handle, label as EngineLabel, cls)
+      connection.incoming(handle, label as EngineLabel, cls, role)
       // The dialler opened a stream: this computer may call it back on the same connection, when it uses that one.
       if (
         up?.both === true &&

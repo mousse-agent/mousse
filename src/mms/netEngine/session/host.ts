@@ -157,7 +157,7 @@ export class EngineHost {
           sub?.request(message.header)
           return
         }
-        void this.route(stream.label, channel, message, first, caller).catch(refuse)
+        void this.route(stream.label, channel, message, first, caller, stream.role).catch(refuse)
       } catch (error) {
         if (sub) sub.end(error)
         else refuse(error)
@@ -170,7 +170,9 @@ export class EngineHost {
     channel: Channel,
     message: EngineMessage,
     first: boolean,
-    caller: EngineCaller
+    caller: EngineCaller,
+    /** The role of the grant the stream is served under, when the helper named it. */
+    role?: string
   ): Promise<void> {
     const h = message.header
     switch (label) {
@@ -190,11 +192,14 @@ export class EngineHost {
             ? h.features.filter((feature): feature is string => typeof feature === 'string')
             : []
           this.port.calledBy?.(caller, typeof h.name === 'string' ? h.name : '', features)
+          // The caller's role here now (§8.4): it learns a role edit from the hello of the connection the edit
+          // makes it open again. It only records it; this side enforces from its own grant.
           channel.send({
             t: 'hello',
             proto: 1,
             name: this.port.name(),
-            features: [...(this.port.features?.() ?? SESSION_FEATURES)]
+            features: [...(this.port.features?.() ?? SESSION_FEATURES)],
+            ...(role ? { role } : {})
           })
         }
         else if (h.t === 'pairback') {
