@@ -223,7 +223,8 @@ export function ProjectTerminalPanel() {
         }
 
         // A new chat runs where the composer says (a project, a worktree) only once that pick is applied, as the first
-        // send does; until then it is a thread with no folder. Apply it first, so the terminal starts in that folder.
+        // send does; until then it is a thread with no folder. Apply it first, so the terminal starts in that project's
+        // folder. Until work starts there, the service opens it in the project folder and leaves the checkout free.
         if (tab.ownerThreadId && !isQualifiedId(tab.ownerThreadId) && opensWithComposerPick(tab.ownerThreadId)) {
           const state = useAppStore.getState()
           const from = tab.ownerThreadId
