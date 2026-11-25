@@ -1,8 +1,9 @@
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, open, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FileService } from '../src/mms/files/FileService'
+import { MAX_ASSET_BYTES } from '../src/shared/fileAssets'
 
 const roots: string[] = []
 
@@ -54,5 +55,31 @@ describe('FileService rich assets', () => {
     const service = new FileService()
     await expect(service.readAssetRange(root, 'archive.zip', 0, 4)).rejects.toThrow(/does not support/)
     await expect(service.readAssetRange(root, '../outside.pdf', 0, 4)).rejects.toThrow()
+  })
+
+  it('streams byte ranges of videos larger than the whole-file preview cap while keeping that cap on whole reads and images', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse-assets-'))
+    roots.push(root)
+    const largeSize = MAX_ASSET_BYTES + 4096
+    const videoPath = join(root, 'recording.mp4')
+    const imagePath = join(root, 'huge.png')
+    for (const filePath of [videoPath, imagePath]) {
+      const handle = await open(filePath, 'w')
+      try {
+        await handle.truncate(largeSize)
+        await handle.write(Buffer.from([1, 2, 3, 4]), 0, 4, largeSize - 4)
+      } finally {
+        await handle.close()
+      }
+    }
+
+    const service = new FileService()
+    const tail = await service.readAssetRange(root, 'recording.mp4', largeSize - 4, 4)
+    expect(tail.mimeType).toBe('video/mp4')
+    expect(tail.size).toBe(largeSize)
+    expect([...tail.data]).toEqual([1, 2, 3, 4])
+
+    await expect(service.readAsset(root, 'recording.mp4')).rejects.toThrow(/exceeds 100MB limit/)
+    await expect(service.readAssetRange(root, 'huge.png', 0, 4)).rejects.toThrow(/exceeds 100MB limit/)
   })
 })

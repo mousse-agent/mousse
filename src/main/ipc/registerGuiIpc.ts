@@ -32,7 +32,8 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, screen, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
-import { readAssetInPieces, readAssetStamp } from './assetPieces'
+import { readAssetInPieces, readAssetStamp, type AssetPiece } from './assetPieces'
+import { attachMediaProtocol, MediaStreamRegistry } from './mediaStream'
 import { browsedRootParams, browseSupport } from './browsedRoot'
 import { daemonGitParams, daemonGitReadParams } from './daemonGitParams'
 import { headsFromOlderService } from './gitHeadsFallback'
@@ -140,6 +141,7 @@ import type {
   CreateScheduledJobInput,
   FileAsset,
   FileEntry,
+  FileMediaSource,
   FileText,
   FileGrepResponse,
   FileSearchResponse,
@@ -3303,6 +3305,63 @@ export function registerGuiIpc(
       return readAssetStamp((offset, length) =>
         guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
       )
+    }
+  )
+  const mediaStreams = new MediaStreamRegistry()
+  const mediaSenders = new Set<number>()
+  attachMediaProtocol(
+    session.defaultSession,
+    mediaStreams,
+    (senderId) => guiMms.getWindowBindingForSender(senderId)?.profileId
+  )
+  registerHandler(
+    'fs:openMediaUrl',
+    // Streams video files in byte ranges over `mousse-media://` via the daemon's `files.readAsset`,
+    // avoiding whole-file IPC transfers and in-memory Blob buffering.
+    async (event, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false): Promise<FileMediaSource> => {
+      const browsed = await browsedRoot(root)
+      const scope = filesScope(projectId, threadId)
+      const first = await guiMms.request<AssetPiece>('files.readAsset', {
+        ...scope, ...browsed, ...canonicalFileParams(details, threadId),
+        path: filePath, offset: 0, length: 1
+      })
+      if (!first.mimeType.startsWith('video/')) {
+        throw new Error('This file type does not support media streaming')
+      }
+      const sender = event.sender
+      if (!mediaSenders.has(sender.id)) {
+        mediaSenders.add(sender.id)
+        sender.once('destroyed', () => {
+          mediaSenders.delete(sender.id)
+          mediaStreams.releaseForSender(sender.id)
+        })
+        sender.on('did-start-navigation', (_navEvent, _url, isInPlace, isMainFrame) => {
+          if (isMainFrame && !isInPlace) mediaStreams.releaseForSender(sender.id)
+        })
+      }
+      const profileId = guiMms.getWindowBindingForSender(sender.id)?.profileId
+      const { url } = mediaStreams.register({
+        senderId: sender.id,
+        profileId,
+        mimeType: first.mimeType,
+        size: first.size,
+        ...(typeof first.mtimeMs === 'number' ? { mtimeMs: first.mtimeMs } : {}),
+        readPiece: (offset, length) =>
+          guiMms.request<AssetPiece>('files.readAsset', { ...scope, ...browsed, path: filePath, offset, length })
+      })
+      return {
+        url,
+        mimeType: first.mimeType,
+        size: first.size,
+        ...(typeof first.mtimeMs === 'number' ? { mtimeMs: first.mtimeMs } : {}),
+        ...(first.canonicalPath ? { canonicalPath: first.canonicalPath } : {})
+      }
+    }
+  )
+  registerHandler(
+    'fs:releaseMediaUrl',
+    async (event, url: string): Promise<void> => {
+      if (typeof url === 'string') mediaStreams.release(url, event.sender.id)
     }
   )
   registerHandler(

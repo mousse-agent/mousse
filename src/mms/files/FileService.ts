@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { open, readdir, readFile, writeFile, stat, lstat, rename, unlink, type FileHandle } from 'fs/promises'
 import { basename, dirname, join, posix } from 'path'
 import type { FileAsset, FileEntry, FileStat, FileText } from '../../shared/types'
+import { MAX_ASSET_BYTES, MAX_VIDEO_ASSET_BYTES } from '../../shared/fileAssets'
 import { countLineEdits } from '../../shared/lineEditStats'
 import { SKIP_DIR_NAMES, lexicalGuard, type GuardedPath, type PathGuard } from './pathGuard'
 import { OTHER_NAMES, PathContainmentError } from './routedGuard'
@@ -17,7 +18,6 @@ async function fileIdentity(path: string, include: boolean): Promise<{ canonical
 }
 
 const MAX_READ_BYTES = 512 * 1024
-const MAX_ASSET_BYTES = 100 * 1024 * 1024
 /**
  * Lines changed are counted exactly (line by line) when both versions are this large or smaller. A larger save
  * (up to 25 MiB from another computer) counts only the difference in the number of lines, by scanning bytes, so a
@@ -105,21 +105,25 @@ export class FileService {
   }
 
   /** The asset's file, once the root guard, the size limit and the preview types have passed. */
-  private async assetFile(root: string, filePath: string, guard: PathGuard): Promise<{ absPath: string; mimeType: string; size: number; mtimeMs: number }> {
+  private async assetFile(root: string, filePath: string, guard: PathGuard, allowLargeVideo = false): Promise<{ absPath: string; mimeType: string; size: number; mtimeMs: number }> {
     const { absolute: absPath } = guard.resolve(root, filePath, 'read')
     const info = await stat(absPath)
     if (!info.isFile()) throw new Error('Not a file')
-    if (info.size > MAX_ASSET_BYTES) {
-      throw new Error(`Preview exceeds ${MAX_ASSET_BYTES / 1024 / 1024}MB limit`)
-    }
     const extension = filePath.split('.').pop()?.toLowerCase() ?? ''
     const mimeType = ASSET_MIME_TYPES[extension]
     if (!mimeType) throw new Error('This file type does not support binary preview')
+    const maxBytes = allowLargeVideo && mimeType.startsWith('video/') ? MAX_VIDEO_ASSET_BYTES : MAX_ASSET_BYTES
+    if (info.size > maxBytes) {
+      const limitLabel = maxBytes >= 1024 * 1024 * 1024
+        ? `${maxBytes / 1024 / 1024 / 1024}GB`
+        : `${maxBytes / 1024 / 1024}MB`
+      throw new Error(`Preview exceeds ${limitLabel} limit`)
+    }
     return { absPath, mimeType, size: info.size, mtimeMs: info.mtimeMs }
   }
 
   async readAsset(root: string, filePath: string, guard: PathGuard = lexicalGuard): Promise<FileAsset> {
-    const { absPath, mimeType, size, mtimeMs } = await this.assetFile(root, filePath, guard)
+    const { absPath, mimeType, size, mtimeMs } = await this.assetFile(root, filePath, guard, false)
     const data = await readFile(absPath)
     return { data: new Uint8Array(data), mimeType, size, mtimeMs }
   }
@@ -129,7 +133,7 @@ export class FileService {
    * daemon message. `size` is the whole file's; a piece past its end is empty.
    */
   async readAssetRange(root: string, filePath: string, offset: number, length: number, guard: PathGuard = lexicalGuard, includeCanonicalPath = false): Promise<FileAsset> {
-    const { absPath, mimeType, size, mtimeMs } = await this.assetFile(root, filePath, guard)
+    const { absPath, mimeType, size, mtimeMs } = await this.assetFile(root, filePath, guard, true)
     const wanted = Math.max(0, Math.min(length, size - offset))
     const buffer = Buffer.alloc(wanted)
     const handle = await open(absPath, 'r')

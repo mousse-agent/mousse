@@ -1,5 +1,5 @@
 import { attachLinuxWindowShape } from './linuxWindowShape'
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { WarmStartCache } from './warmStartCache'
@@ -24,6 +24,7 @@ import {
   getWindowShortcuts,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
+import { MOUSSE_MEDIA_SCHEME_PRIVILEGES } from './ipc/mediaStream'
 import { registerFontIpc } from './fonts/registerFontIpc'
 import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import { surfaceToWindowBackground } from '../shared/accentPalette'
@@ -157,6 +158,8 @@ function startGuiApp(): void {
   configureLinuxVsync(app, process.platform, process.env)
   // Keeps compiled WebGL programs (the bot face shader) on disk between launches; see the constant.
   addToSwitchList(app.commandLine, 'enable-features', KEEP_GPU_PROGRAMS_FEATURE)
+  // Allows streamed byte-range video playback over `mousse-media://` without buffering files whole in RAM.
+  protocol.registerSchemesAsPrivileged([MOUSSE_MEDIA_SCHEME_PRIVILEGES])
   let mainWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
   let connectionLog: GuiConnectionLog | undefined
