@@ -29,7 +29,7 @@ it('brings a legacy-index trashed thread back to Archived at profile startup, on
     expect(existsSync(trashPath)).toBe(false)
     const listed = (await f.rpc.request<{ threads: Thread[] }>('threads.list', {})).threads.filter((thread) => thread.id === threadId)
     expect(listed).toHaveLength(1)
-    expect(listed[0]!.settledAt).toBeTruthy()
+    expect(listed[0]!.archivedAt).toBeTruthy()
     // It was done once: the marker says so, and the thread takes fresh writes.
     expect(existsSync(join(f.home, 'profiles', f.alice.id, 'lifecycle', 'trash-returned-to-archive.json'))).toBe(true)
     await f.rpc.request('threads.rename', { threadId, name: 'restored legacy task accepts fresh writes' })

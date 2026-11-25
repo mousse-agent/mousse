@@ -78,6 +78,7 @@ import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
 import { stampOf as threadDbStampOf } from './threadDb/threadIndex'
 import { publishStagedBlobs } from './threadDb/threadBlobs'
 import { forEachYielding } from '../startup/startupTiming'
+import { withArchivedAt } from '../../shared/archivedAt'
 
 export { ThreadDataCorruptionError } from './legacyThreadData'
 
@@ -130,7 +131,7 @@ interface ThreadMeta {
   goal?: ThreadGoal
   order: number
   pinnedAt?: string
-  settledAt?: string
+  archivedAt?: string
   /** Set once the user commits the first message (send/enqueue). */
   startedAt?: string
 }
@@ -357,7 +358,7 @@ export interface ThreadSearchOptions {
   /** Read transcripts of at most this many threads (the most recently updated first). */
   maxMessageThreads?: number
   /** Archived threads are searched too; without it they are left out. */
-  includeSettled?: boolean
+  includeArchived?: boolean
   /**
    * One message match per thread (its first), so a word that many messages of one thread hold does not use up the
    * limit: for a caller that asks which threads match, not where (`searchThreadsAsync` only).
@@ -365,9 +366,12 @@ export interface ThreadSearchOptions {
   perThread?: boolean
 }
 
-/** A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field. */
+/**
+ * A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field,
+ * and an archive time written as `settledAt` (before archived threads were called archived) read as `archivedAt`.
+ */
 function readThreadMeta<T extends { modelOverride?: ModelOverride; settingsRevision?: number }>(path: string): T {
-  const meta = JSON.parse(readFileSync(path, 'utf-8')) as T
+  const meta = withArchivedAt(JSON.parse(readFileSync(path, 'utf-8')) as T)
   if (!meta || typeof meta !== 'object') return meta
   // A thread saved before the settings revision existed is at 0: said, so no reader has to guess it.
   const revised = typeof meta.settingsRevision === 'number' ? meta : { ...meta, settingsRevision: 0 }
@@ -1083,7 +1087,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /**
-   * One change to a project's thread metadata (a create, rename, pin, settle, reorder, trash or restore), under the
+   * One change to a project's thread metadata (a create, rename, pin, archive, reorder, trash or restore), under the
    * project's list lock:
    * 1. the revision is read; when it is not the one this store last saw for the project (or the store has no list of
    *    it), the cached list is dropped and `write` is told so (`cacheTrusted` false);
@@ -1600,7 +1604,7 @@ export class ThreadDataStore extends EventEmitter {
     return withThreadLifecyclePath(threadDir, 'write', () => withFileLock(join(threadDir, '.execution-init.lock'), () => {
       const metaPath = join(threadDir, 'meta.json')
       let meta = existsSync(metaPath) ? readThreadMeta<ThreadMeta>(metaPath) : initial
-      if (meta.id !== id || meta.projectId !== projectId || meta.settledAt) throw new Error('Execution thread identity or state changed')
+      if (meta.id !== id || meta.projectId !== projectId || meta.archivedAt) throw new Error('Execution thread identity or state changed')
       let markedBot = false
       if (opts?.botOwned === true && !meta.botOwned && meta !== initial) {
         markedBot = true
@@ -2010,7 +2014,8 @@ export class ThreadDataStore extends EventEmitter {
     return updated
   }
 
-  setThreadSettled(id: string, settled: boolean): Thread {
+  /** Archives (`archived`) or unarchives a thread; an archived thread is unpinned. */
+  setThreadArchived(id: string, archived: boolean): Thread {
     const thread = this.getThread(id)
     if (!thread) {
       throw new Error(`Thread not found: ${id}`)
@@ -2019,11 +2024,11 @@ export class ThreadDataStore extends EventEmitter {
     const now = new Date().toISOString()
     const updated = this.writeThreadMeta(thread, (base) => {
       const next: Thread = { ...base, updatedAt: now }
-      if (settled) {
-        next.settledAt = now
+      if (archived) {
+        next.archivedAt = now
         delete next.pinnedAt
       } else {
-        delete next.settledAt
+        delete next.archivedAt
       }
       return next
     })
@@ -2543,7 +2548,7 @@ export class ThreadDataStore extends EventEmitter {
   bumpThreadToFront(id: string): { thread: Thread; bumped: boolean } | undefined {
     const thread = this.getThread(id)
     if (!thread) return undefined
-    if (thread.settledAt) return { thread, bumped: false }
+    if (thread.archivedAt) return { thread, bumped: false }
 
     // The group's list, read from disk again only when its files changed since.
     const siblings = this.listThreads(thread.projectId)
@@ -2730,6 +2735,8 @@ export class ThreadDataStore extends EventEmitter {
     }
     const stamp = this.stamp(path)
     let entries = this.readJsonFile<Thread[]>(path, [])
+    // An entry written before archived threads were called archived carries its archive time as `settledAt`.
+    if (Array.isArray(entries)) entries = entries.map(withArchivedAt)
     const kept = this.standaloneIndex
     if (kept && this.standaloneIndexPending.size && Array.isArray(entries)) {
       const mine = new Map(kept.filter((entry) => this.standaloneIndexPending.has(entry.id)).map((entry) => [entry.id, entry]))
@@ -3051,7 +3058,7 @@ export class ThreadDataStore extends EventEmitter {
     const titles: ScoredSearchResult[] = []
     const candidates: Thread[] = []
     for (const thread of threads) {
-      if (thread.settledAt && !options.includeSettled) continue
+      if (thread.archivedAt && !options.includeArchived) continue
       // Skip pure empty drafts; startedAt may be backfilled above via ensureStartedAt.
       if (!thread.startedAt && isDefaultThreadName(thread.name)) continue
       const projectName = thread.projectId ? projectNameById.get(thread.projectId) : undefined
@@ -3146,9 +3153,11 @@ export class ThreadDataStore extends EventEmitter {
     const targets = [...this.indexDirty].map(([threadId, target]) => ({ threadId, ...target })).filter((target) => !final || !target.drop)
     this.indexDirty.clear()
     if (!targets.length) return
+    const closes = this.indexCloses
     this.indexUpdate = this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).then(() => undefined, (error: unknown) => {
-      // Skipped while the index worker backs off after crashing; the client has logged that once.
-      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
+      // Skipped while the index worker backs off after crashing; the client has logged that once. One sent at or
+      // before closing that fails after it (its folder may be gone) is expected: the next start's reconcile catches it up.
+      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || final || this.indexCloses !== closes) return
       console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
     })
   }
@@ -3186,6 +3195,8 @@ export class ThreadDataStore extends EventEmitter {
   /** The search index's first sweep while it is waited for or runs: a search waits for it (`indexedMessageResults`). */
   private firstSweep?: Promise<void>
   private sweepStopped = false
+  /** Counts `stopSearchIndexSweep` calls: index work sent before one is expected to fail if it ends after it. */
+  private indexCloses = 0
 
   /**
    * Reconciles the search index with every listed thread's database: once `after` settles (at once without it), then
@@ -3205,8 +3216,10 @@ export class ThreadDataStore extends EventEmitter {
       try {
         const live = await this.databaseThreads(() => this.sweepStopped)
         if (this.sweepStopped || (!live.length && !this.threadDbStore)) return
+        const closes = this.indexCloses
         this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
-          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
+          // A reconcile cut off by closing runs again at the next start.
+          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE || this.indexCloses !== closes) return
           console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
         })
       } finally {
@@ -3223,6 +3236,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   stopSearchIndexSweep(): void {
+    this.indexCloses += 1
     this.sweepStopped = true
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.sweepTimer = undefined

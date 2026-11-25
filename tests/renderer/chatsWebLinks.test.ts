@@ -55,15 +55,15 @@ describe('a web link in a message', () => {
   })
 })
 
-describe('a GitHub link in a bot or group chat message', () => {
-  it('leads with the GitHub mark, and a bare pull request address reads as #123', async () => {
+describe('web link site marks in a bot or group chat message', () => {
+  it('leads with a monochrome site mark (GitHub for GitHub, globe for other sites) and shortens bare GitHub PR addresses', async () => {
     const pr = 'https://github.com/acme/app/pull/35130'
     await act(async () => root.render(createElement(MarkdownPreview, { value: `See ${pr} and [the docs](https://example.com/a).` })))
     const [github, other] = [...host.querySelectorAll('a')]
     expect(github!.getAttribute('href')).toBe(pr)
     expect(github!.textContent).toBe('#35130')
-    expect(github!.querySelector('svg.chat-link-mark')).not.toBeNull()
+    expect(github!.querySelector('svg.chat-link-mark')?.getAttribute('data-site-mark')).toBe('github')
     expect(other!.textContent).toBe('the docs')
-    expect(other!.querySelector('svg')).toBeNull()
+    expect(other!.querySelector('svg.chat-link-mark')?.getAttribute('data-site-mark')).toBe('web')
   })
 })

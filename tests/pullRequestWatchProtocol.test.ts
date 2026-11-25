@@ -148,8 +148,8 @@ describe('the watch through the daemon protocol', () => {
   it('ends the watch when the thread is archived, saying so, not that it was stopped', async () => {
     const thread = newThread()
     await client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', number: 7 })
-    await client.request('threads.settle', { threadId: thread.id, settled: true })
-    expect(mms.pullRequestWatch.status(thread.id)).toMatchObject({ state: 'ended', ended: { reason: 'settled' } })
+    await client.request('threads.archive', { threadId: thread.id, archived: true })
+    expect(mms.pullRequestWatch.status(thread.id)).toMatchObject({ state: 'ended', ended: { reason: 'archived' } })
     const lines = mms.orchestrator.getMessagesForPersistence(thread.id).filter((message) => message.role === 'system').map((message) => message.content)
     expect(lines).toEqual([expect.stringContaining('archived')])
   })

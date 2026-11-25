@@ -1624,6 +1624,12 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   justify-content: flex-end;
 }
 
+.usage-heading-end .settings-btn {
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+}
+
 .usage-heading:not(.has-tabs) .usage-heading-start {
   flex: 1;
 }

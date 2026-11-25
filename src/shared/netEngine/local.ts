@@ -36,6 +36,11 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.cloudflare.connect',
   'netEngine.cloudflare.stop',
   'netEngine.cloudflare.forget',
+  // The pairing flow (protocol 1.2): which ways can make a code, and a link read and tried before Connect
+  'netEngine.routes.available',
+  'netEngine.join.check',
+  'netEngine.join.probe',
+  'netEngine.join.probe.cancel',
   // Phase 1b: Add over SSH (§3.4)
   'netEngine.ssh.resolve',
   'netEngine.ssh.probe',
@@ -48,7 +53,12 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.relay.rotate',
   'netEngine.relay.allow',
   'netEngine.relay.disallow',
-  'netEngine.relay.dismiss'
+  'netEngine.relay.dismiss',
+  // The other direction of a one-way pairing: ask for it, cancel that, answer a request, or let it in from here
+  'netEngine.access.ask',
+  'netEngine.access.cancel',
+  'netEngine.access.answer',
+  'netEngine.access.let'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -143,14 +153,45 @@ export interface NetEngineDevice {
   ssh?: string
   /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
   source?: 'ssh'
-  /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */
+  /**
+   * A pairing with one direction only (added over SSH, or paired one way): `out`, this computer uses it; `in`, it
+   * uses this computer. Unset: both ways.
+   */
   direction?: 'out' | 'in'
+  /**
+   * Its Mousse is older than one-way pairing. Used one way from here: its own row keeps waiting for this computer to
+   * let it in, until it is updated. Only let in here: its pairback adds nothing, so this computer uses it only once
+   * it is added from here.
+   */
+  olderApp?: boolean
   /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */
   unfinished?: boolean
   /** That link is still valid, so Retry may ask for the code again. */
   linkValid?: boolean
   /** Its relays (Phase 3), when anything about them needs showing. */
   relay?: NetEngineDeviceRelay
+  /** The missing direction of a pairing made one way, when its row may offer it. */
+  other?: NetEngineOtherWay
+}
+
+/**
+ * The other direction of a one-way pairing on its row. `ask` (it uses this computer): "Use <name> from here…" asks
+ * it, and its owner answers there. `let` (this computer uses it): "Let <name> use this computer…" is this owner's own
+ * decision, made here at once. Offered only while both apps and this helper can, over the live connection.
+ */
+export interface NetEngineOtherWay {
+  offer: 'ask' | 'let'
+  /** Why it can't be done just now; the menu item is disabled with this. */
+  blocked?: string
+  /** This computer asked: waiting for its owner, declined (Not now), or no answer in time. */
+  asked?: 'waiting' | 'declined' | 'expired'
+}
+
+/** Another computer asks to use this one (`netEngine.access.answer {node, request, yes, access?}`). */
+export interface NetEngineAccessAsk {
+  node: string
+  request: string
+  name: string
 }
 
 /** What a device's row shows about relays (Phase 3 §B.5, §B.11). */
@@ -233,7 +274,63 @@ export interface NetEngineApproval {
   name: string
   /** The start of its endpoint id. */
   device: string
+  /** Its endpoint id, when the helper names it. */
+  identity?: string
 }
+
+/**
+ * What a 1.2 helper may list in its `hello` (pairing flow §1). The app sends a new field or operation only when the
+ * helper lists the feature that covers it; without it, that part works as it did with protocol 1.1.
+ */
+export const ENGINE_FEATURES = [
+  'invite-way',
+  'route-readiness',
+  'join-probe',
+  'grant-revoke-local',
+  'grant-roles',
+  'grant-add-connected'
+] as const
+export type EngineFeature = (typeof ENGINE_FEATURES)[number]
+
+/** How another device connects to this computer, as an invitation picks it (`invite.create {way}`). */
+export const NET_ENGINE_WAYS = ['lan', 'tailnet', 'public', 'tunnel', 'relay'] as const
+export type NetEngineWay = (typeof NET_ENGINE_WAYS)[number]
+export const isNetEngineWay = (value: unknown): value is NetEngineWay =>
+  (NET_ENGINE_WAYS as readonly unknown[]).includes(value)
+
+/** Whether this computer can make a code for one way now (`routes.available`, pairing flow §3). */
+export interface NetEngineWayReadiness {
+  way: NetEngineWay
+  state: 'ready' | 'off' | 'unavailable'
+  /** Why it is not ready (`disabled`, `no_interface`, `not_configured`, `paused`, …); undefined when ready. */
+  reason?: string
+  /** What a code of this way alone would carry now. */
+  routes: string[]
+}
+
+/** One hint of a link, as this computer reads it before Connect (`join.check`, pairing flow §4). */
+export interface NetEngineJoinHint {
+  route: string
+  way: NetEngineWay | null
+  eligibility: 'automatic' | 'approval_required' | 'skip'
+  reason?: string
+  /** Advice only: whether this computer has an address of that kind. */
+  local: 'interface_present' | 'no_matching_interface' | 'unknown'
+}
+
+/** What `netEngine.join.check` answers: what the link names, with nothing dialled. */
+export interface NetEngineJoinCheck {
+  /** 1: shown in person (QR); 2: sent as a link with a code. */
+  kind: number
+  name?: string
+  hints: NetEngineJoinHint[]
+}
+
+/** What `netEngine.join.probe` answers: whether the computer in the link answered from here. */
+export type NetEngineJoinProbe =
+  | { reachable: true; route: string; ms?: number }
+  | { reachable: null; reason: string }
+  | { reachable: false; reason: string }
 
 /** One class of the paid relay (typing, or copies) as the helper's blocks stand. */
 export interface NetEngineRelayClass {
@@ -354,7 +451,8 @@ export interface NetEngineStatus {
   /** The engine runs and serves this profile's pairings now. */
   on: boolean
   /** The helper process: `off`, `starting`, `running`, `restarting`, `not_in_build`, `mismatch` or `failed`. */
-  helper: { state: string; text?: string }
+  /** `step`, while `starting`: `launch` (the process starts) or `hello` (it says who it is). */
+  helper: { state: string; text?: string; step?: 'launch' | 'hello' }
   /** Why networking is paused (a removal not saved yet), while it is. */
   paused?: string
   /** This endpoint's id, once its helper said hello. */
@@ -362,11 +460,13 @@ export interface NetEngineStatus {
   devices: NetEngineDevice[]
   /** Computers waiting for Yes or No. */
   approvals: NetEngineApproval[]
+  /** Paired computers asking to use this one too (the other direction of a one-way pairing). */
+  accessAsks?: NetEngineAccessAsk[]
   /** Where this computer listens (`tcp://host:port`), for Add address on the other computer. */
   routes?: string[]
   /** Another profile under this OS account has the new networking on too, so they can read each other's keys. */
   sharedAccount?: boolean
-  /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
+  /** How often Scan its code reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
   /** Mousse Plus, once the helper said. */
   plus?: NetEnginePlus
@@ -388,6 +488,8 @@ export interface NetEngineStatus {
   cloudflare?: NetEngineCloudflare
   /** The helper speaks protocol 1.1, so Send link and Enter link work. */
   sendLink?: boolean
+  /** What the helper implements beyond 1.1 (its 1.2 `hello`); absent from an older helper. */
+  features?: EngineFeature[]
   /** Send links this computer shows. */
   links?: NetEngineLinkInvite[]
   /** Send link joins running here. */

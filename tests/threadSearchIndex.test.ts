@@ -2,17 +2,18 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, utimesSync, wr
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { BLOB_TEXT_THRESHOLD } from '../src/mms/data/threadDb/threadBlobs'
 import { INDEX_FILE } from '../src/mms/data/threadDb/threadIndex'
-import { closeSharedThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
+import { closeSharedThreadDbClient, ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import type { ChatMessage } from '../src/shared/types'
 
 const homes: string[] = []
 const stores: ThreadDataStore[] = []
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const store of stores.splice(0)) store.closeThreadStorage()
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
@@ -43,6 +44,40 @@ const messageIds = (results: Array<{ matchType: string; messageId?: string }>): 
   results.filter((result) => result.matchType === 'message').map((result) => result.messageId!)
 
 describe('thread search index', () => {
+  // Index work runs in a worker and can end after the store closed, when the profile's folder may already be gone. The
+  // next start's reconcile catches it up, so only work sent while the store is open, and failing while it still is, is
+  // reported; a store used again after closing reports again.
+  it.each([
+    { work: 'an update', op: 'indexUpdate', when: 'open', warns: 'thread search index update failed' },
+    { work: 'an update', op: 'indexUpdate', when: 'sent, then closed', warns: undefined },
+    { work: 'an update', op: 'indexUpdate', when: 'sent by the close', warns: undefined },
+    { work: 'an update', op: 'indexUpdate', when: 'sent after reuse', warns: 'thread search index update failed' },
+    { work: 'a reconcile', op: 'indexReconcile', when: 'open', warns: 'thread search index sweep failed' },
+    { work: 'a reconcile', op: 'indexReconcile', when: 'sent, then closed', warns: undefined }
+  ])('reports $work that fails when $when', async ({ op, when, warns }) => {
+    const failures: Array<(error: Error) => void> = []
+    vi.spyOn(ThreadDbClient.prototype, 'callIndex').mockImplementation(((called: string) => called === op
+      ? new Promise((_, reject) => { failures.push(reject) })
+      : Promise.resolve(undefined)) as never)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const store = open(home())
+    const id = thread(store, 'Alpha', [message('m1', 'the zebra crossing')])
+    if (when === 'sent after reuse') {
+      store.closeThreadStorage()
+      store.mutateThreadData(id, () => ({ messages: [message('m1', 'the zebra crossing'), message('m2', 'again')] }))
+      failures.length = 0
+    }
+    if (when === 'sent by the close') store.closeThreadStorage()
+    else if (op === 'indexUpdate') void store.flushSearchIndex()
+    else store.startSearchIndexSweep(60_000)
+    await vi.waitFor(() => expect(failures.length).toBeGreaterThan(0))
+    if (when === 'sent, then closed') store.closeThreadStorage()
+    failures.at(-1)!(new Error('unable to open database file'))
+    await new Promise((done) => setImmediate(done))
+    const reported = warn.mock.calls.filter(([text]) => typeof text === 'string' && text.startsWith('thread search index'))
+    expect(reported.map(([text]) => text)).toEqual(warns ? [expect.stringContaining(warns)] : [])
+  })
+
   it('finds a message right after it is saved, and forgets it once removed or edited', async () => {
     const store = open(home())
     const id = thread(store, 'Alpha', [message('m1', 'the zebra crossing'), message('m2', 'nothing')])

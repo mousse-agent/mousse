@@ -1,17 +1,19 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import type {
-  CreatePullRequestResult,
-  GitPullRequestInfo,
-  PullRequestActionResult,
-  PullRequestBaseBranches,
-  PullRequestDetail,
-  PullRequestDraft,
-  PullRequestFormInput,
-  PullRequestMergeMethod,
-  PullRequestRef,
-  PullRequestScope,
-  ThreadPullRequestLink
+import {
+  pullRequestIdentityKey,
+  type CreatePullRequestResult,
+  type GitPullRequestInfo,
+  type PullRequestActionResult,
+  type PullRequestBaseBranches,
+  type PullRequestDetail,
+  type PullRequestDraft,
+  type PullRequestFormInput,
+  type PullRequestIdentity,
+  type PullRequestMergeMethod,
+  type PullRequestRef,
+  type PullRequestScope,
+  type ThreadPullRequestLink
 } from '../../shared/pullRequests'
 import type { GitPullRequestLookup } from '../../shared/types'
 import { errorText, ipcErrorLine } from '../lib/errorText'
@@ -49,6 +51,10 @@ interface PullRequestState {
   entries: Record<string, PullRequestEntry>
   /** Details by folder and pull request number. */
   details: Record<string, PullRequestDetailEntry>
+  /** Details read by explicit repository identity (`pullRequestIdentityKey`), e.g. from clicking a PR link in chat. */
+  viewedDetails: Record<string, PullRequestDetailEntry>
+  /** Pull request opened explicitly from a link in `threadId`; null shows the active thread's own pull request. */
+  viewedPullRequest: { identity: PullRequestIdentity; threadId: string | null } | null
   /** The scope the create form is open for; the form shows in the section of that folder and branch. */
   createForm: PullRequestScope | null
   /** The surface whose button opened the form; only that surface shows it, so it never opens twice. */
@@ -58,7 +64,14 @@ interface PullRequestState {
 /** The surfaces that can show the Create PR form: the side card's Git section, the Git panel's diff toolbar and the pull request panel. */
 export type PullRequestFormHost = 'changes' | 'pull-request-panel'
 
-export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, details: {}, createForm: null, createFormHost: 'changes' }))
+export const useGitPullRequestStore = create<PullRequestState>(() => ({
+  entries: {},
+  details: {},
+  viewedDetails: {},
+  viewedPullRequest: null,
+  createForm: null,
+  createFormHost: 'changes'
+}))
 
 /** Lookups kept in memory; the least recently fetched ones that no section shows go first. */
 const MAX_PULL_REQUEST_ENTRIES = 200
@@ -246,6 +259,89 @@ export function refreshPullRequestDetail(path: string, number: number, options: 
     }
   })()
   return next.promise
+}
+
+const viewedFlights = new Map<string, Flight>()
+
+function setViewedDetailEntry(key: string, next: PullRequestDetailEntry) {
+  useGitPullRequestStore.setState((state) => {
+    const previous = state.viewedDetails[key]
+    const detail = previous?.detail && next.detail && JSON.stringify(previous.detail) === JSON.stringify(next.detail) ? previous.detail : next.detail
+    const viewedDetails = { ...state.viewedDetails, [key]: { ...next, detail } }
+    const keys = Object.keys(viewedDetails)
+    if (keys.length > MAX_PULL_REQUEST_DETAILS) {
+      const stale = keys
+        .filter((other) => other !== key)
+        .sort((a, b) => viewedDetails[a].fetchedAt - viewedDetails[b].fetchedAt)
+      for (const other of stale.slice(0, keys.length - MAX_PULL_REQUEST_DETAILS)) delete viewedDetails[other]
+    }
+    return { viewedDetails }
+  })
+}
+
+async function fetchViewedInto(identity: PullRequestIdentity, force: boolean): Promise<void> {
+  const key = pullRequestIdentityKey(identity)
+  try {
+    const detail = await (force
+      ? window.mousse.pullRequests.view(identity, true)
+      : window.mousse.pullRequests.view(identity))
+    setViewedDetailEntry(key, { detail, error: null, fetchedAt: Date.now() })
+  } catch (error) {
+    const previous = useGitPullRequestStore.getState().viewedDetails[key]?.detail ?? null
+    const message = ipcErrorLine(error).replace(/^[A-Za-z]*Error:\s*/, '')
+    setViewedDetailEntry(key, { detail: previous, error: message || 'Could not read the pull request.', errorReason: failureReason(error), fetchedAt: Date.now() })
+  }
+}
+
+/** Read a pull request by explicit repository identity (`host`, `owner/repo`, `number`). Never rejects. */
+export function refreshViewedPullRequest(identity: PullRequestIdentity, options: { force?: boolean } = {}): Promise<void> {
+  const key = pullRequestIdentityKey(identity)
+  const flight = viewedFlights.get(key)
+  if (flight) {
+    if (options.force) flight.rerun = true
+    return flight.promise
+  }
+  const entry = useGitPullRequestStore.getState().viewedDetails[key]
+  if (!options.force && entry && Date.now() - entry.fetchedAt < PULL_REQUEST_MAX_AGE_MS) {
+    return Promise.resolve()
+  }
+  const next: Flight = { promise: Promise.resolve(), rerun: false }
+  viewedFlights.set(key, next)
+  next.promise = (async () => {
+    try {
+      let force = options.force === true
+      do {
+        next.rerun = false
+        await fetchViewedInto(identity, force)
+        force = true
+      } while (next.rerun)
+    } finally {
+      viewedFlights.delete(key)
+    }
+  })()
+  return next.promise
+}
+
+/** Opens a linked GitHub pull request in the pull request side panel for `threadId` and begins reading it. */
+export function openViewedPullRequest(identity: PullRequestIdentity, threadId: string | null): void {
+  useGitPullRequestStore.setState({ viewedPullRequest: { identity, threadId } })
+  void refreshViewedPullRequest(identity)
+}
+
+/** Returns the pull request side panel to the active thread's own pull request. */
+export function clearViewedPullRequest(): void {
+  useGitPullRequestStore.setState({ viewedPullRequest: null })
+}
+
+/** The detail of a pull request opened from a chat link; null when none is selected. */
+export function useViewedPullRequestDetail(identity: PullRequestIdentity | null): PullRequestDetailEntry | null {
+  const key = identity ? pullRequestIdentityKey(identity) : null
+  const entry = useGitPullRequestStore((state) => (key ? state.viewedDetails[key] ?? null : null))
+  useEffect(() => {
+    if (!identity) return
+    void refreshViewedPullRequest(identity)
+  }, [key])
+  return entry
 }
 
 interface Retained {

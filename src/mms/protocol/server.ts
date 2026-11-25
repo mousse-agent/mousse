@@ -484,7 +484,7 @@ export class MmsProtocolServer {
       leftForBots.add(change.id)
     })
 
-    // One push per change. Creating, renaming or settling a thread fires the store's event and the request's own,
+    // One push per change. Creating, renaming or archiving a thread fires the store's event and the request's own,
     // often several of them; they are sent once, after the turn of the event loop that made them, with the list as it
     // is then. A change to one thread is sent as that thread's row (`threads.row`, or its removal), with the version
     // of the list it was read from, so a turn's end costs one row, not every thread; a session that cannot apply rows
@@ -522,9 +522,9 @@ export class MmsProtocolServer {
     }
     this.threadListPushers.set(services.profileId, pushThreadsUpdated)
     // Changes no request or store event above announces reach the windows too, each as part of the same one push:
-    // - the store's other list writes (pin, settle, archive, reorder, trash, restore, purge, a first message);
+    // - the store's other list writes (pin, archive, reorder, trash, restore, purge, a first message);
     // - the service bus's `threads:updated`, which in-daemon producers raise (an expiry deletion, a routed pin,
-    //   settle, reorder or delete through the phone's backend, agent executions, chats). A request's own
+    //   archive, reorder or delete through the phone's backend, agent executions, chats). A request's own
     //   `threads.updated` also reaches the bus (`pushRequestEvent`); joined to the pending push, it makes it the
     //   whole list, as the request's own did.
     onEmitter(services.threads, 'list-changed', (change: { id?: string; wholeList?: boolean } | undefined) =>

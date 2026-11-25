@@ -18,6 +18,8 @@ export const BRIDGE_REMOTE_METHODS = {
   'projects.open': { capability: 'write', mutating: true },
   'threads.rename': { capability: 'write', mutating: true },
   'threads.pin': { capability: 'write', mutating: true },
+  'threads.archive': { capability: 'write', mutating: true },
+  // Legacy name of `threads.archive`, from a phone that runs an older Mousse.
   'threads.settle': { capability: 'write', mutating: true },
   // The thread menu's Regenerate title and Archive after: the same handlers as a window here. Delete itself is not
   // exposed: only the computer that runs a thread deletes it.

@@ -66,7 +66,7 @@ beforeEach(() => {
     threads: [
       thread('parent', 'Fix the build'),
       thread('mine', 'Why is CI slow', sideOf('parent'), { lastReply: 'The cache misses.' } as Partial<Thread>),
-      thread('ended', 'Old question', sideOf('parent'), { settledAt: '2026-11-18T11:00:00.000Z' }),
+      thread('ended', 'Old question', sideOf('parent'), { archivedAt: '2026-11-18T11:00:00.000Z' }),
       thread('theirs', 'Elsewhere', sideOf('other'))
     ],
     // The thread's first run has ended: there is something to fork.

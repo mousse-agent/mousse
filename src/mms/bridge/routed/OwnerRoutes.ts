@@ -64,6 +64,7 @@ import { cleanUpBlockedDevice } from './blockCleanup'
 import type { RoutedStaging } from './staging'
 import { RoutedTerminals, type TerminalClaim } from './terminals'
 import { withHiddenBots } from '../remote/botReach'
+import { withLegacySettledAtIn } from '../../../shared/archivedAt'
 import { parseRoutedAgentMark, RemoteAgentCalls, type RemoteAgentCall } from './remoteAgent'
 
 /** Ids are text of this length at most, as in the protocol handlers. */
@@ -629,6 +630,8 @@ export class OwnerRoutes {
       } else result = marked ? await this.remoteAgent.run(method, params, marked) : await this.dispatch(method, row, params, context, head, slot)
       // A thread a bot started names that bot only to a computer that reaches it ("Started by a bot" otherwise).
       if (!row.sequenced) result = withHiddenBots(result, this.options.services.botReach?.hiddenFor(node))
+      // A caller that runs an older Mousse reads a thread's archive time only as `settledAt`.
+      if (!row.sequenced) result = withLegacySettledAtIn(result)
       if (method === 'projects.open')
         project = (result as { project?: { id?: string } }).project?.id ?? project
       if (method === 'pty.create') {

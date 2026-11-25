@@ -60,9 +60,9 @@ describe('a project’s color', () => {
   ]
   const threads = [
     thread('live-mousse', 'mousse'),
-    thread('old-mousse', 'mousse', { settledAt: now }),
-    thread('old-smiletrack', 'smiletrack', { settledAt: now }),
-    thread('old-removed', 'removed-project', { settledAt: now })
+    thread('old-mousse', 'mousse', { archivedAt: now }),
+    thread('old-smiletrack', 'smiletrack', { archivedAt: now }),
+    thread('old-removed', 'removed-project', { archivedAt: now })
   ]
 
   it('is the same in Projects, Threads and Archived, from the project and not its place in the list', () => {

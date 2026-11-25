@@ -260,4 +260,55 @@ describe('two subagent calls started in the same instant', () => {
     expect(call!.failed).toBe(true)
     expect(joinSubagentCards([call!], subagents, { loaded: true }).size).toBe(0)
   })
+
+  it('recognizes Antigravity mcp_mousse_delegate_task and mcp_mousse_continue_subagent rows and joins them to their subagent cards', () => {
+    expect(recordSubagentCall('mcp_mousse_delegate_task', { title: 'API reviewer', prompt: 'SECRET' }, { text: JSON.stringify({ delegationId: 'd-api', childThreadId: 't-api' }) })).toEqual({
+      input: { recordVersion: 1, title: 'API reviewer' },
+      response: JSON.stringify({ delegationId: 'd-api', childThreadId: 't-api' }),
+      failed: false
+    })
+    expect(recordSubagentCall('Run mcp_mousse_continue_subagent', { subagent: 'Docs', prompt: 'next' }, {})).toEqual({
+      input: { recordVersion: 1, subagent: 'Docs' },
+      failed: false
+    })
+    expect(recordSubagentCall('mcp_other_delegate_task', { title: 'A' }, {})).toBeNull()
+
+    const messages = assemble([
+      runtimeToolEvent({
+        phase: 'start',
+        callId: 'agy-1',
+        title: 'Run mcp_mousse_delegate_task',
+        toolName: 'mcp_mousse_delegate_task',
+        record: recordSubagentCall('mcp_mousse_delegate_task', { title: 'API reviewer', prompt: 'SECRET' }, {})!
+      }),
+      runtimeToolEvent({
+        phase: 'start',
+        callId: 'agy-2',
+        title: 'Run mcp_mousse_delegate_task',
+        toolName: 'mcp_mousse_delegate_task',
+        record: recordSubagentCall('mcp_mousse_delegate_task', { title: 'Docs', prompt: 'SECRET' }, {})!
+      }),
+      runtimeToolEvent({
+        phase: 'complete',
+        callId: 'agy-1',
+        title: 'Run mcp_mousse_delegate_task',
+        toolName: 'mcp_mousse_delegate_task',
+        record: recordSubagentCall('mcp_mousse_delegate_task', { title: 'API reviewer' }, { text: JSON.stringify({ delegationId: 'd-api', childThreadId: 't-api', title: 'API reviewer' }) })!
+      }),
+      runtimeToolEvent({
+        phase: 'complete',
+        callId: 'agy-2',
+        title: 'Run mcp_mousse_delegate_task',
+        toolName: 'mcp_mousse_delegate_task',
+        record: recordSubagentCall('mcp_mousse_delegate_task', { title: 'Docs' }, { text: JSON.stringify({ delegationId: 'd-docs', childThreadId: 't-docs', title: 'Docs' }) })!
+      })
+    ])
+    const calls = collectSubagentCalls(mousseToUIMessages(messages))
+    expect(calls).toHaveLength(2)
+    const cards = joinSubagentCards(calls, subagents, { loaded: true })
+    expect([...cards.values()].map((card) => [card.title, card.childThreadId, card.delegationId])).toEqual([
+      ['API reviewer', 't-api', 'd-api'],
+      ['Docs', 't-docs', 'd-docs']
+    ])
+  })
 })

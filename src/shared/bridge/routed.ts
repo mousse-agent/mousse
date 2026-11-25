@@ -546,6 +546,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- thread writes
   'threads.rename': write('thread', ['threadId', 'name'], { required: ['name'] }),
   'threads.pin': write('thread', ['threadId', 'pinned']),
+  'threads.archive': write('thread', ['threadId', 'archived']),
+  // Legacy: `threads.archive` under its old name. An owner keeps it for a caller that runs an older Mousse; a caller
+  // sends it only to an owner that does not advertise `threads.archive` (`ROUTED_RENAMED_METHODS`).
   'threads.settle': write('thread', ['threadId', 'settled']),
   'threads.delete': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
   'threads.regenerateTitle': write('thread', ['threadId']),
@@ -901,6 +904,21 @@ export const routedMethodOf = (name: string): string | undefined =>
   isRoutedNetMethod(name) ? name.slice('routed.'.length) : undefined
 
 /**
+ * Rows that were renamed: by new name, the old row and the call as the old row takes it. A caller sends the old row to
+ * an owner that advertises it but not the new one (an owner that runs an older Mousse); the owner keeps the old row
+ * for callers that run an older Mousse.
+ */
+export const ROUTED_RENAMED_METHODS: Readonly<
+  Record<string, { legacy: string; params: (params: Record<string, unknown>) => Record<string, unknown> }>
+> = Object.freeze({
+  // Archived threads were called settled.
+  'threads.archive': {
+    legacy: 'threads.settle',
+    params: ({ archived, ...rest }: Record<string, unknown>) => ({ ...rest, settled: archived })
+  }
+})
+
+/**
  * The params of a call as an owner at `version` of the row takes them, for a row whose newer version
  * accepts a value an older one rejects. An owner from before the Auto permission mode (`threads.setPermissionMode`
  * below version 2) is sent Auto-accept edits for Auto: the mode Auto runs as on an agent without an auto mode,
@@ -994,6 +1012,10 @@ export interface RoutedLocalRule {
  */
 export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
+    methods: ['pullRequests.view'],
+    reason: 'Reads a GitHub pull request linked in a chat message through this computer’s GitHub CLI without binding to a remote project folder.'
+  },
+  {
     methods: ['git.heads'],
     reason: 'The sidebar batches IDs owned by its local profile. Remote workspaces are looked up individually on their owners.'
   },
@@ -1033,6 +1055,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['projects.icon', 'projects.setIcon'],
     reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
+  },
+  {
+    methods: ['projects.setPath'],
+    reason: "A project's folder is chosen in the folder picker of the computer itself; another computer opens a folder there with projects.open."
   },
   {
     methods: ['appearance.wallpaperImport', 'appearance.wallpaperImportBytes', 'appearance.wallpaperRead', 'appearance.wallpaperSaveCopy'],

@@ -24,7 +24,7 @@ describe('the thread opened after an archive', () => {
   // In the sidebar's order: a1, a2, a3 in p; b1 in q; o1 without a project.
   const threads = [
     thread('a1', 'p', 1), thread('a2', 'p', 2), thread('a3', 'p', 3),
-    thread('b1', 'q', 4), thread('o1', undefined, 5), thread('gone', 'p', 6, { settledAt: at(7) })
+    thread('b1', 'q', 4), thread('o1', undefined, 5), thread('gone', 'p', 6, { archivedAt: at(7) })
   ]
   it.each([
     ['the next one in its project', 'a1', 'a2'],
@@ -40,16 +40,16 @@ describe('the thread opened after an archive', () => {
 let host: HTMLDivElement
 let root: Root
 let select: ReturnType<typeof vi.fn>
-let settle: ReturnType<typeof vi.fn>
+let archive: ReturnType<typeof vi.fn>
 const original = Object.fromEntries((['projects', 'threads', 'activeThreadId', 'threadsSidebarView'] as const).map((key) => [key, useAppStore.getState()[key]]))
 
 beforeEach(() => {
   select = vi.fn(async () => undefined)
-  settle = vi.fn(async (threadId: string, archived: boolean) => {
-    useAppStore.setState({ threads: useAppStore.getState().threads.map((t) => (t.id === threadId ? { ...t, settledAt: archived ? at(30) : undefined } : t)) })
+  archive = vi.fn(async (threadId: string, archived: boolean) => {
+    useAppStore.setState({ threads: useAppStore.getState().threads.map((t) => (t.id === threadId ? { ...t, archivedAt: archived ? at(30) : undefined } : t)) })
   })
   ;(window as unknown as { mousse: object }).mousse = {
-    threads: { settle, select, pin: vi.fn(async () => undefined), delete: vi.fn(async () => undefined) },
+    threads: { archive, select, pin: vi.fn(async () => undefined), delete: vi.fn(async () => undefined) },
     editors: { list: vi.fn(async () => []) },
   }
   ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} }
@@ -82,13 +82,13 @@ const archiveFromMenu = async (threadId: string) => {
 describe('archiving from the sidebar', () => {
   it('opens the next thread in the project when the archived one was open', async () => {
     await archiveFromMenu('a2')
-    expect(settle).toHaveBeenCalledWith('a2', true)
+    expect(archive).toHaveBeenCalledWith('a2', true)
     expect(select).toHaveBeenCalledWith('a3')
   })
 
   it('leaves the pane on its thread when another one is archived', async () => {
     await archiveFromMenu('a1')
-    expect(settle).toHaveBeenCalledWith('a1', true)
+    expect(archive).toHaveBeenCalledWith('a1', true)
     expect(select).not.toHaveBeenCalled()
   })
 })
@@ -96,7 +96,7 @@ describe('archiving from the sidebar', () => {
 describe('the Archive shortcut', () => {
   it('archives the open thread and opens the next one in its project', async () => {
     await act(async () => { await archiveOpenThread() })
-    expect(settle).toHaveBeenCalledWith('a2', true)
+    expect(archive).toHaveBeenCalledWith('a2', true)
     expect(select).toHaveBeenCalledWith('a3')
   })
 })

@@ -339,7 +339,7 @@ export class AgentChatService {
   }
   private workspace(record: ChatRecord): string {
     const thread = this.options.services.threads.getThread(record.conversation.threadId)
-    if (!thread || thread.projectId !== record.conversation.projectId || thread.settledAt) throw new DomainRpcError('chat_unavailable', 'The backing chat thread is unavailable')
+    if (!thread || thread.projectId !== record.conversation.projectId || thread.archivedAt) throw new DomainRpcError('chat_unavailable', 'The backing chat thread is unavailable')
     if (!existsSync(record.workspaceRoot) || !lstatSync(record.workspaceRoot).isDirectory() || realpathSync(record.workspaceRoot) !== record.workspaceRoot) throw new DomainRpcError('workspace_changed', 'The chat workspace changed')
     if (record.conversation.projectId) {
       const project = this.options.services.projects.getProject(record.conversation.projectId)

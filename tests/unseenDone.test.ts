@@ -120,7 +120,7 @@ describe('Done until seen', () => {
     const kept = mms.threads.createThread('Kept')
     finishTurn(archived.id)
     finishTurn(kept.id)
-    mms.threads.setThreadSettled(archived.id, true)
+    mms.threads.setThreadArchived(archived.id, true)
     await stopService()
 
     await startService()

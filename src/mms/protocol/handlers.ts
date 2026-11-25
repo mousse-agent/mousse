@@ -255,7 +255,7 @@ function setDraftCheckout(directory: string, choice: DraftCheckoutChoice, apply:
 /** Prepares the selected checkout while a window shows an empty local project thread. */
 function prepareShownNewThread(ctx: HandlerContext, threadId: string): void {
   const thread = ctx.mms.threads.getThread(threadId)
-  if (!thread?.projectId || isThreadStarted(thread) || thread.settledAt || thread.lineage || thread.runsOn || thread.native || thread.hidden || thread.scheduledJobId) return
+  if (!thread?.projectId || isThreadStarted(thread) || thread.archivedAt || thread.lineage || thread.runsOn || thread.native || thread.hidden || thread.scheduledJobId) return
   const project = ctx.mms.projects.getProject(thread.projectId)
   const worktree = thread.worktreeEnabled ?? project?.newThread?.worktreeEnabled ?? ctx.mms.settings.get().runs.newThreadWorktree
   if (!project?.path || !worktree || ctx.mms.orchestrator.isActiveTurnRunning(threadId)) return
@@ -1113,6 +1113,24 @@ async function readPullRequestDetail(ctx: HandlerContext, root: string, number: 
   }
 }
 
+async function readPullRequestDetailByIdentity(
+  ctx: HandlerContext,
+  identity: { host: string; nameWithOwner: string; number: number },
+  force: boolean
+): Promise<PullRequestDetail> {
+  const codeHost = ctx.mms.gitService.codeHost
+  if (!codeHost.getPullRequestDetailByIdentity) {
+    throw new DomainRpcError('pull_request_unavailable', 'Viewing pull requests by repository is not supported.', { number: identity.number, reason: 'error' })
+  }
+  try {
+    return await codeHost.getPullRequestDetailByIdentity(identity, { force })
+  } catch (error) {
+    const kind = error instanceof PullRequestReadError ? error.kind : 'error'
+    const code = kind === 'not-found' || kind === 'rate-limited' ? PULL_REQUEST_READ_CODES[kind] : 'pull_request_unavailable'
+    throw new DomainRpcError(code, error instanceof Error ? error.message : String(error), { number: identity.number, reason: kind })
+  }
+}
+
 /**
  * Writes a thread's link. The same pull request keeps its watch; a different one ends the old watch (with its line), since
  * a watch belongs to the pull request it began on and must not resume later with an old cutoff and a backlog.
@@ -1900,7 +1918,7 @@ function lifecycleExpectedGeneration(params: Record<string, unknown>): number | 
 function refuseDelete(ctx: HandlerContext, threadId: string): void {
   const listed = ctx.mms.threads.getThread(threadId)
   const root = listed?.lineage?.rootThreadId
-  if (listed && !listed.settledAt && !(root && root !== threadId && ctx.mms.threads.getThread(root)?.settledAt))
+  if (listed && !listed.archivedAt && !(root && root !== threadId && ctx.mms.threads.getThread(root)?.archivedAt))
     throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
   if (ctx.connection?.clientType === 'bridge') throw new DomainRpcError('not_available_remotely', 'Delete the thread on the computer that runs it.', { threadId })
 }
@@ -2050,7 +2068,7 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
  */
 const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
 const FOLDER_METHODS = new Set([
-  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup',
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'projects.setPath', 'orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup',
   'thread.fork', 'thread.mergeBack', 'threads.delete', 'agents.spawn', 'tasks.create',
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
@@ -2264,6 +2282,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projectId = asString(p.projectId, 'projectId', 256)
       const name = asString(p.name, 'name', 512)
       const project = ctx.mms.projects.renameProject(projectId, name)
+      const projects = ctx.mms.projects.listProjects()
+      ctx.emitEvent?.('projects.updated', { projects })
+      return { project, projects: listedProjectsFor(ctx, projects) }
+    }
+    case 'projects.setPath': {
+      // A folder of this computer, chosen in its own folder picker; another computer opens a folder with projects.open.
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', "A project's folder is changed on its own computer")
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const path = asString(p.path, 'path', 4096)
+      if (!isAbsolute(path)) throw new DomainRpcError('invalid_params', 'path must be absolute')
+      if (!ctx.mms.projects.getProject(projectId)) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
+      const project = ctx.mms.projects.setProjectPath(projectId, path)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects: listedProjectsFor(ctx, projects) }
@@ -2512,13 +2543,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
+    // `threads.settle` is the legacy name, still called by a phone or a computer that runs an older Mousse.
+    case 'threads.archive':
     case 'threads.settle': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const settled = asOptionalBoolean(p.settled, 'settled') === true
-      // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it (`settleThread`, which a
+      const archived = method === 'threads.archive'
+        ? asOptionalBoolean(p.archived, 'archived') === true
+        : asOptionalBoolean(p.settled, 'settled') === true
+      // Archiving a thread (the sidebar's Archive) is a Stop: what it still runs ends with it (`archiveThread`, which a
       // bot's `thread_archive` uses too).
-      const thread = await ctx.mms.orchestrator.settleThread(threadId, settled)
+      const thread = await ctx.mms.orchestrator.archiveThread(threadId, archived)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
@@ -2560,7 +2595,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A personal bot's threads are its chat, never a thread result (`Thread.botOwned`). Archived threads are found too.
       const results = await ctx.mms.threads.searchThreadsAsync(query, limit, {
         hideSubagents: true,
-        includeSettled: true,
+        includeArchived: true,
         allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
         ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {}),
         ...(perThread ? { perThread } : {})
@@ -4112,7 +4147,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const history = await usageHistoryReader(ctx.mms.getHomeDir()).history({ range, ...(timeZone ? { timeZone } : {}), ...(agent ? { agent } : {}) })
       // Folders, projects and sessions stay on this computer: another one gets the totals only.
       if (!connectionIsLocal(ctx.connection)) return { ...history, sources: history.sources.map((source) => ({ ...source, path: '' })), projects: [], topSessions: [] }
-      return nameUsageProjects(history, ctx.mms.projects.listProjects(), (ids) => ctx.mms.runEngine.store.threadsForSessions(ids), (id) => ctx.mms.threads.getThread(id)?.name)
+      const threadsFor = (ids: string[]) => {
+        let map: Map<string, string>
+        try {
+          map = ctx.mms.runEngine.store.threadsForSessions(ids)
+        } catch {
+          map = new Map()
+        }
+        for (const [sessionId, threadId] of ctx.mms.antigravity?.threadsForSessions(ids) ?? []) {
+          if (!map.has(sessionId)) map.set(sessionId, threadId)
+        }
+        return map
+      }
+      return nameUsageProjects(history, ctx.mms.projects.listProjects(), threadsFor, (id) => ctx.mms.threads.getThread(id)?.name)
     }
     case 'providers.getUsageFor': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
@@ -5406,6 +5453,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       await materializeRequestedWorkspace(ctx, p)
       const detail = await readPullRequestDetail(ctx, pullRequestFolder(ctx, p), number, asOptionalBoolean(p.force, 'force') === true)
+      notePullRequestStates(ctx, [detail])
+      return { detail }
+    }
+    case 'pullRequests.view': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['host', 'nameWithOwner', 'number', 'force'])
+      const host = asString(p.host, 'host', 256).trim().toLowerCase()
+      const nameWithOwner = asString(p.nameWithOwner, 'nameWithOwner', 256).trim()
+      const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      const segments = nameWithOwner.split('/')
+      if (
+        !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/i.test(host)
+        || segments.length !== 2
+        || segments.some((segment) => !segment || segment.startsWith('-') || !/^[A-Za-z0-9._-]+$/.test(segment))
+      ) {
+        throw new DomainRpcError('invalid_params', 'host and nameWithOwner must name a valid repository')
+      }
+      const detail = await readPullRequestDetailByIdentity(ctx, { host, nameWithOwner, number }, asOptionalBoolean(p.force, 'force') === true)
       notePullRequestStates(ctx, [detail])
       return { detail }
     }

@@ -14,6 +14,8 @@ import { ReadAloudHost } from './readAloud/ReadAloudModal'
 import { PhoneSpeechHost } from './speechRelay/PhoneSpeechHost'
 import { EnrollmentRequestHost } from './components/EnrollmentRequestPrompt'
 import { EditorAskHost } from './components/EditorAskPrompt'
+import { AccessAskHost } from './components/netEngine/AccessAskHost'
+import { OnboardingHost } from './components/onboarding/Onboarding'
 import { startFaceFrameStore, warmFaceRendererAfterPaint } from './components/bots/face/faceRenderer'
 import './styles/global.css'
 import './styles/compact-shell.css'
@@ -72,6 +74,9 @@ function Root() {
       {profileReady && <PhoneSpeechHost />}
       {profileReady && <EnrollmentRequestHost />}
       {profileReady && <EditorAskHost />}
+      {/* A computer this one uses asks to use this one too: the Allow prompt, wherever the window is (Settings too). */}
+      {profileReady && <AccessAskHost />}
+      {profileReady && <OnboardingHost />}
       <AppTooltip />
     </>
   )

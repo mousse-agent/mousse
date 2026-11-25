@@ -292,7 +292,7 @@ export class MmsWorkflowAgents {
     if (request.threadId) {
       const thread = this.services.threads.getThread(request.threadId)
       const newExecutionThread = !parent && request.threadId === executionThreadId(request.profileId + '/workflow/' + request.requestId)
-      if ((!thread && !newExecutionThread) || (thread && (thread.settledAt || thread.projectId !== request.projectId))) throw new DomainRpcError('thread_unavailable', 'Workflow agent thread is unavailable')
+      if ((!thread && !newExecutionThread) || (thread && (thread.archivedAt || thread.projectId !== request.projectId))) throw new DomainRpcError('thread_unavailable', 'Workflow agent thread is unavailable')
     }
     // Preparation can be retried after its own durable write but before the
     // coordinator commits admission. Reuse the exact snapshot without discovery.
@@ -818,7 +818,7 @@ export class MmsWorkflowAgents {
   private async scope(context: ExecutionContext, policy?: ExecutionPolicySnapshot) {
     const projectPath = this.project(context.profileId, context.projectId)
     const thread = this.services.threads.getThread(context.threadId)
-    if (!thread || thread.settledAt || thread.projectId !== context.projectId || !context.runId) throw new DomainRpcError('thread_unavailable', 'Workflow agent thread is unavailable')
+    if (!thread || thread.archivedAt || thread.projectId !== context.projectId || !context.runId) throw new DomainRpcError('thread_unavailable', 'Workflow agent thread is unavailable')
     const manifest = await this.run(context)
     if (
       manifest.profileId !== context.profileId || manifest.threadId !== context.threadId || manifest.projectId !== context.projectId

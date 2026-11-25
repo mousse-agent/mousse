@@ -14,6 +14,7 @@ import type { PairingStep } from '../../../src/mms/netEngine/pairing'
 import {
   approveAll,
   connectedBothWays,
+  connectedWhole,
   deviceState,
   Fabric,
   CHECK_ROUTE,
@@ -134,7 +135,8 @@ describe('phase1a.pair-both-ways', () => {
           await step(undefined, () =>
             expect.poll(() => hit, { timeout: 60_000, interval: 50 }).toBe(true)
           )
-          // While the stopped computer is down, the half that is done stays, and neither row reads Connected.
+          // While the stopped computer is down, the half that is done stays, and neither row reads Connected both
+          // ways (the owner's may read Connected for the one direction it has: the caller uses it).
           await new Promise((resolve) => setTimeout(resolve, 1_500))
           await step('false_connected', () => {
             for (const [a, b] of [
@@ -142,7 +144,7 @@ describe('phase1a.pair-both-ways', () => {
               [caller, owner]
             ] as const) {
               const row = rowFor(a, b)
-              if (row) expect(deviceState(a, row.localId)).not.toBe('connected')
+              if (row) expect(connectedWhole(a, row.localId)).toBe(false)
             }
           })
           await step('auto_removed', async () => {

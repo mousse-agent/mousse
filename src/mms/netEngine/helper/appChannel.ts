@@ -183,10 +183,13 @@ export class AppChannel {
     name: string,
     fields: Json = {},
     deadlineMs = engineLimits().appRequestDeadlineMs,
-    onReply?: (reply: Json) => void
+    onReply?: (reply: Json) => void,
+    /** Told the request's id as it is sent (a later request may name it, as `join.probe.cancel` does). */
+    onId?: (id: number) => void
   ): Promise<Json> {
     if (this.closed) return Promise.reject(new NetError('peer_offline'))
     const id = this.nextId++
+    onId?.(id)
     const frame = jsonFrame({ id, op: name, ...fields })
     if (this.controlBytes + frame.byteLength > engineLimits().appControlQueueBytes)
       return Promise.reject(new NetError('rate_limited', 'Too much waiting for the helper.'))

@@ -551,7 +551,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       ['orchestrator.abort with the active runId', (s) => s.protocol('orchestrator.abort', { threadId: s.parentId, runId: s.parentRunId })],
       ['abortRun', (s) => s.d.orch.abortRun(s.parentRunId, 'stop-1', s.parentId)],
       ['deleting the thread (markThreadDeleted)', async (s) => s.d.orch.markThreadDeleted(s.parentId)],
-      ['settling the thread (threads.settle)', (s) => s.protocol('threads.settle', { threadId: s.parentId, settled: true })]
+      ['archiving the thread (threads.archive)', (s) => s.protocol('threads.archive', { threadId: s.parentId, archived: true })]
     ]
 
     it.each(entries)('%s stops the parent and its running subagent, cancels the task, and raises both generations', async (_name, stop) => {

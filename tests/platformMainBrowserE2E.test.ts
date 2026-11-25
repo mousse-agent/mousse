@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { build } from 'esbuild'
@@ -17,6 +17,7 @@ import { ProviderInstanceService } from '../src/mms/harness/instanceMap'
 import { TURN_TOKEN_KEY } from '../src/mms/run/mcp/appTools/registry'
 import { adapterDriver, testHarness } from '../src/mms/run/testkit/harness'
 import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { fixtureBundleDir, removeFixtureBundleDir } from './fixtures/agent-platform/fixtureBundleDir'
 import { makeBrowserCommandTempRoot, removeBrowserCommandTempRoot } from './fixtures/agent-platform/browser-command-transport/ownedTemp'
 
 import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
@@ -27,7 +28,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   if (priorHome === undefined) delete process.env.MOUSSE_HOME
   else process.env.MOUSSE_HOME = priorHome
-  for (const root of roots.splice(0)) removeBrowserCommandTempRoot(root)
+  for (const root of roots.splice(0)) { removeFixtureBundleDir(root); removeBrowserCommandTempRoot(root) }
 })
 
 describe('main-agent existing in-app browser pipeline', () => {
@@ -259,7 +260,7 @@ describe('main-agent existing in-app browser pipeline', () => {
       const draft = main.platform.workflowDefinitions.saveDraft({ bundle: encodedBundle })
       const published = main.platform.workflowDefinitions.publish({ definitionId: workflowId,
         expectedDraftSemanticHash: draft.semanticHash, expectedHeadRevisionId: null })
-      const buildDir = join(root, 'bundle'); mkdirSync(buildDir, { recursive: true })
+      const buildDir = fixtureBundleDir(root)
       const script = resolve('tests/fixtures/agent-platform/main-browser-e2e/launch.mjs')
       const payload = join(buildDir, 'electron-main.mjs')
       await build({ entryPoints: [resolve('tests/fixtures/agent-platform/main-browser-e2e/electron-main.ts')], outfile: payload,

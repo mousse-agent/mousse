@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -437,6 +437,8 @@ describe('review round 1', () => {
  * bytes directly into the index for base.txt as someone else would. The worktree stays untouched, so a retry waiting
  * for the lock cannot look like a new edit before staging succeeds. When Discard holds the index lock
  * at that moment, that Git waits for it, as a person's Git would retry, in the background. `done` appears once staged.
+ * The retry runs from this process, not from the `git` on PATH: Mousse stops the process group of each Git it starts
+ * once that Git exits, so a retry left behind by it would be stopped too, and another person's Git is not in that group.
  */
 function stagerAfterCheck(cwd: string, staged: string): { restore: () => void; done: string } {
   const marks = scratch('mousse-proven-marks-'), done = join(marks, 'done')
@@ -450,9 +452,7 @@ case " $* " in
     if [ -f '${marks}/written' ] && [ ! -f '${marks}/fired' ]; then
       : > '${marks}/fired'
       "${real}" "$@"; status=$?
-      if ! ( ${stage} ) >/dev/null 2>&1; then
-        ( for i in $(seq 1 200); do ( ${stage} ) >/dev/null 2>&1 && break; sleep 0.05; done ) </dev/null >/dev/null 2>&1 &
-      fi
+      ( ${stage} ) >/dev/null 2>&1 || : > '${marks}/retry'
       exit $status
     fi ;;
 esac
@@ -460,7 +460,13 @@ exec "${real}" "$@"
 `, { mode: 0o755 })
   const previous = process.env.PATH
   process.env.PATH = `${bin}:${previous}`
-  return { restore: () => { process.env.PATH = previous }, done }
+  let tries = 0, running = false
+  const retry = setInterval(() => {
+    if (running || existsSync(done) || !existsSync(join(marks, 'retry')) || tries++ >= 200) return
+    running = true
+    execFile('sh', ['-c', stage], () => { running = false })
+  }, 50)
+  return { restore: () => { clearInterval(retry); process.env.PATH = previous }, done }
 }
 const waitFor = async (path: string): Promise<void> => { for (let i = 0; i < 200 && !existsSync(path); i++) await new Promise((settle) => setTimeout(settle, 50)) }
 

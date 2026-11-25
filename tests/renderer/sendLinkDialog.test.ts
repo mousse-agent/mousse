@@ -1,22 +1,23 @@
 // @vitest-environment jsdom
 /**
- * Send link and Enter link in Add device (design 1b §5): the host's link with its code and tries left, the end
- * after three wrong codes; the joiner's paste, the consent with the destinations and "Also share", the six code
- * boxes and the swapped-link text; the "Pairing didn't finish" row; and a `mousse://` link that opened Mousse,
- * with the profile choice when more than one profile has networking on. The daemon is stubbed at
- * `platformRequest`.
+ * Send link and Enter link (design 1b §5): in Let a device in, the host's link with its code and tries left, the
+ * end after three wrong codes; in Use another computer, the joiner's paste, the consent with the destinations,
+ * "Also let" unticked and "Also share" under it, the six code boxes and the swapped-link text; the "Pairing didn't
+ * finish" row; and a `mousse://` link that opened Mousse, with the profile choice when more than one profile has
+ * networking on. The daemon is stubbed at `platformRequest`.
  */
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { accessPreset } from '../../src/shared/net/accessPresets'
 import type { NetEngineDevice, NetEngineStatus } from '../../src/shared/netEngine/local'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { EngineDevicesSection } =
   await import('../../src/renderer/components/netEngine/EngineDevicesSection')
-const { AddEngineDeviceDialog } =
-  await import('../../src/renderer/components/netEngine/AddEngineDeviceDialog')
+const { LetDeviceInDialog } = await import('../../src/renderer/components/netEngine/LetDeviceInDialog')
+const { UseComputerDialog } = await import('../../src/renderer/components/netEngine/UseComputerDialog')
 const { PairLinkHost } = await import('../../src/renderer/components/netEngine/PairLinkHost')
 const { engineRow } = await import('../../src/renderer/components/netEngine/engineRows')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
@@ -177,15 +178,20 @@ const submit = async (input: HTMLInputElement) => {
   await flush()
 }
 
-/** The dialog with the status the daemon gives now; the answer re-renders it with a changed status. */
-async function dialog(d: ReturnType<typeof daemon>, props: Record<string, unknown> = {}) {
+/**
+ * A dialog with the status the daemon gives now; the answer re-renders it with a changed status. `in`: Let a device
+ * in; `out`: Use another computer.
+ */
+async function dialog(d: ReturnType<typeof daemon>, side: 'in' | 'out') {
   const render = () =>
     root.render(
-      createElement(AddEngineDeviceDialog, {
-        status: d.state.status,
-        onClose: () => undefined,
-        ...props
-      })
+      side === 'in'
+        ? createElement(LetDeviceInDialog, {
+            status: d.state.status,
+            onClose: () => undefined,
+            onSetUp: () => undefined
+          })
+        : createElement(UseComputerDialog, { status: d.state.status, onClose: () => undefined })
     )
   await act(async () => render())
   await flush()
@@ -196,13 +202,48 @@ async function dialog(d: ReturnType<typeof daemon>, props: Record<string, unknow
   }
 }
 
+const ALSO_LET = () =>
+  [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((box) =>
+    box.closest('label')?.textContent?.startsWith('Also let ')
+  )
+
+describe('Let a device in while networking starts', () => {
+  it('waits with how far it is, no error, and shows the code once the helper runs', async () => {
+    const d = daemon({ on: false, helper: { state: 'starting', step: 'launch' } })
+    const update = await dialog(d, 'in')
+    expect(d.called('netEngine.invite')).toEqual([])
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    expect(text()).toContain('Getting ready to connect… 25%')
+
+    await update({ helper: { state: 'starting', step: 'hello' } })
+    expect(text()).toContain('50%')
+
+    await update({ on: true, helper: { state: 'running' } })
+    expect(d.called('netEngine.invite')).toEqual([{}])
+    expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
+  })
+})
+
 describe('Send link (§5.1)', () => {
-  it('shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
+  it('asks what the device may do first, then shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
     const d = daemon()
-    const update = await dialog(d)
-    await click(button('Send a link'))
-    // The dialog's own code first, then the link.
-    expect(d.called('netEngine.invite')).toEqual([{}, { kind: 'link' }])
+    const update = await dialog(d, 'in')
+    await click(button('Send a link with a code instead'))
+    // No Allow follows a link: the level is picked before the link exists, Work on threads first.
+    expect(text()).toContain('What can it do here?')
+    const radio = (label: string) =>
+      [...document.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Access"] [role="radio"]')].find(
+        (row) => row.querySelector('.engine-choice-label')?.textContent === label
+      )
+    expect(radio('Work on threads')?.getAttribute('aria-checked')).toBe('true')
+    expect(button('Customize')).toBeTruthy()
+    expect(d.called('netEngine.invite')).toEqual([{}])
+    await click(radio('View and chat'))
+    expect(button('Make link')?.classList.contains('ui-btn-primary')).toBe(true)
+    await click(button('Make link'))
+    // The dialog's own code first, then the link with its level.
+    const view = { kind: 'link', access: accessPreset('view').fields }
+    expect(d.called('netEngine.invite')).toEqual([{}, view])
     expect(field('Link').value).toBe(LINK)
     expect(button('Copy link')).toBeTruthy()
     expect(text()).toContain('123 456')
@@ -219,36 +260,39 @@ describe('Send link (§5.1)', () => {
     })
     expect(text()).toContain('Three wrong codes. This link no longer works.')
     await click(button('New link'))
-    expect(d.called('netEngine.invite')).toHaveLength(3)
+    expect(d.called('netEngine.invite')).toEqual([{}, view, view])
   })
 
   it('is offered only when the helper speaks Send link', async () => {
-    await dialog(daemon({ sendLink: undefined }))
+    await dialog(daemon({ sendLink: undefined }), 'in')
     expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
-    expect(button('Send a link')).toBeUndefined()
-    expect(button('Enter link')).toBeUndefined()
+    expect(button('Send a link with a code instead')).toBeUndefined()
   })
 })
 
 describe('Scan or paste a sent link (§5.3)', () => {
-  it('takes a sent link in the one paste field, asks consent with the destinations, shares nothing unticked, then asks for the code', async () => {
+  it('takes a sent link in the one paste field, asks consent with the destinations, one way unless ticked, then asks for the code', async () => {
     const d = daemon(
       {},
       { shareable: [{ route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' }] }
     )
-    const update = await dialog(d)
+    const update = await dialog(d, 'out')
     await type(field('Pairing link'), LINK)
     await submit(field('Pairing link'))
-    expect(text()).toContain(
-      'Connect to the computer in this link? It will also be able to use this computer.'
-    )
+    expect(text()).toContain('Use the computer in this link from here?')
     expect(text()).toContain('192.168.1.20:7443 (Same network), 100.101.7.2:7443 (Tailscale)')
-    const share = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(ALSO_LET()!.checked).toBe(false)
+    // One way: nothing of this computer's is offered to share.
+    expect(text()).not.toContain('Internet 203.0.113.7:7443')
+    await click(ALSO_LET())
+    const share = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((box) =>
+      box.parentElement!.textContent?.includes('Internet 203.0.113.7:7443')
+    )!
     expect(share.checked).toBe(false)
-    expect(share.parentElement!.textContent).toContain('Internet 203.0.113.7:7443')
+    await click(ALSO_LET())
 
     await click(button('Connect'))
-    expect(d.called('netEngine.join')).toEqual([{ ticket: LINK, arrival: 'link' }])
+    expect(d.called('netEngine.join')).toEqual([{ ticket: LINK, arrival: 'link', back: false }])
     expect(text()).toContain('Connecting…')
 
     await update({ joins: [{ invitation: 'inv-j', needsCode: true, attemptsLeft: 3 }] })
@@ -270,27 +314,33 @@ describe('Scan or paste a sent link (§5.3)', () => {
     expect(text()).toContain('2 tries left')
   })
 
-  it('sends a ticked "Also share" route', async () => {
+  it('sends "Also let" and a ticked "Also share" route', async () => {
     const d = daemon(
       {},
       { shareable: [{ route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' }] }
     )
-    await dialog(d, { initial: 'enter' })
-    await type(field('Link'), LINK)
-    await submit(field('Link'))
-    await click(document.querySelector<HTMLInputElement>('input[type="checkbox"]'))
+    await dialog(d, 'out')
+    await type(field('Pairing link'), LINK)
+    await submit(field('Pairing link'))
+    await click(ALSO_LET())
+    await click(
+      [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((box) =>
+        box.parentElement!.textContent?.includes('Internet 203.0.113.7:7443')
+      )
+    )
     await click(button('Connect'))
-    expect(d.called('netEngine.join')[0].share).toEqual(['tcp://203.0.113.7:7443'])
+    expect(d.called('netEngine.join')[0]).toMatchObject({ back: true, share: ['tcp://203.0.113.7:7443'] })
   })
 
   it('says a damaged link is damaged, and joins nothing', async () => {
     const d = daemon({}, { damaged: true })
-    await dialog(d, { initial: 'enter' })
-    await type(field('Link'), 'mousse://pair#%%%')
-    await submit(field('Link'))
+    await dialog(d, 'out')
+    await type(field('Pairing link'), LINK)
+    await submit(field('Pairing link'))
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(
       'This link is damaged. Ask for a new one.'
     )
+    expect(button('Connect')).toBeUndefined()
     expect(d.called('netEngine.join')).toEqual([])
   })
 })
@@ -338,8 +388,8 @@ describe('a mousse:// link that opened Mousse (§5.2)', () => {
     useAppStore.setState({ profileId: 'p1' })
     await mount(both())
     await d.arrive(LINK)
-    expect(d.called('netEngine.join.preview')).toEqual([{ ticket: LINK }])
-    expect(text()).toContain('Connect to the computer in this link?')
+    expect(d.called('netEngine.join.preview')).toContainEqual({ ticket: LINK })
+    expect(text()).toContain('Use the computer in this link from here?')
   })
 
   it('asks which profile joins when more than one has networking on', async () => {
@@ -357,6 +407,6 @@ describe('a mousse:// link that opened Mousse (§5.2)', () => {
     expect(button('Off')).toBeUndefined()
     expect(d.called('netEngine.join.preview')).toEqual([])
     await click(button('Work'))
-    expect(d.called('netEngine.join.preview')).toEqual([{ ticket: LINK }])
+    expect(d.called('netEngine.join.preview')).toContainEqual({ ticket: LINK })
   })
 })

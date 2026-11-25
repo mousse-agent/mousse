@@ -1,4 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
+import type { GitSetup } from '../shared/gitSetup'
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import type { WindowCacheSize } from '../shared/diagnostics/profiler'
@@ -107,6 +108,7 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestIdentity,
   PullRequestListItem,
   PullRequestMergeMethod,
   PullRequestPushTarget,
@@ -677,6 +679,9 @@ const api = {
       ipcRenderer.invoke('pullRequests:get', ref, branch, force),
     detail: (ref: PullRequestRef, number: number, force?: boolean): Promise<PullRequestDetail> =>
       ipcRenderer.invoke('pullRequests:detail', ref, number, force),
+    /** One pull request read by explicit repository identity (`host`, `owner/repo`, `number`), e.g. from a chat link. */
+    view: (identity: PullRequestIdentity, force?: boolean): Promise<PullRequestDetail> =>
+      ipcRenderer.invoke('pullRequests:view', identity, force),
     draft: (scope: PullRequestScope, base?: string): Promise<PullRequestDraft> =>
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
@@ -997,6 +1002,9 @@ const api = {
       ipcRenderer.invoke('projects:rename', projectId, name),
     pin: (projectId: string, pinned: boolean): Promise<Project> =>
       ipcRenderer.invoke('projects:pin', projectId, pinned),
+    /** Asks for a new folder for the project, starting at `defaultPath`, and points the project there; null when cancelled. */
+    changeFolder: (projectId: string, defaultPath?: string): Promise<Project | null> =>
+      ipcRenderer.invoke('projects:changeFolder', projectId, defaultPath),
     reorder: (projectIds: string[]): Promise<Project[]> =>
       ipcRenderer.invoke('projects:reorder', projectIds),
     trustGitSettings: (projectId: string): Promise<{ filters: string[] }> =>
@@ -1107,8 +1115,9 @@ const api = {
       ipcRenderer.invoke('threads:applySettings', threadId, settings, ifRevision),
     setPermissionMode: (threadId: string, mode: PermissionMode): Promise<Thread> =>
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
-    settle: (threadId: string, settled: boolean): Promise<Thread> =>
-      ipcRenderer.invoke('threads:settle', threadId, settled),
+    /** Archives (`archived`) or unarchives the thread. */
+    archive: (threadId: string, archived: boolean): Promise<Thread> =>
+      ipcRenderer.invoke('threads:archive', threadId, archived),
     /** When the thread archives itself (`Thread.expiresAt`); null: never. */
     setExpiry: (threadId: string, expiresAt: string | null, stopsRun?: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
@@ -1449,6 +1458,23 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
+    installGit: (): Promise<boolean> => ipcRenderer.invoke('app:installGit'),
+    /**
+     * The app's link to its background service: `ready` when connected; `connecting`, `reconnecting`, `failed` and the
+     * rest while it is not.
+     */
+    serviceConnection: (): Promise<string> => ipcRenderer.invoke('app:serviceConnection'),
+    onServiceConnectionChanged: (cb: (state: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, state: string) => cb(state)
+      ipcRenderer.on('app:serviceConnectionChanged', handler)
+      return () => ipcRenderer.removeListener('app:serviceConnectionChanged', handler)
+    },
+    gitSetup: (): Promise<GitSetup> => ipcRenderer.invoke('app:gitSetup'),
+    onGitSetupChanged: (cb: (setup: GitSetup) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, setup: GitSetup) => cb(setup)
+      ipcRenderer.on('app:gitSetupChanged', handler)
+      return () => ipcRenderer.removeListener('app:gitSetupChanged', handler)
+    },
     /**
      * What this window's profile showed last time, to show until the service answers (display only). Synchronous, so
      * the window's first frame shows it; answered once per page load, then null.

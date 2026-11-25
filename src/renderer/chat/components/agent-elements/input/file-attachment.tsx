@@ -29,7 +29,11 @@ export type FileAttachmentProps = {
   className?: string;
   /** What getting the file ready to send came to: one short line on the chip, the details in its tooltip. */
   status?: { tone: "pending" | "info" | "error"; label: string; title: string };
-  display?: "chip" | "image-only";
+  /**
+   * `tile`: a file as a square the size of an image thumbnail, its icon at the top, its name at the bottom left and its
+   * size at the bottom right, for a row that also holds thumbnails.
+   */
+  display?: "chip" | "image-only" | "tile";
   /**
    * When true (default) clicking the image thumbnail opens a fullscreen
    * preview. Set to false to render a non-interactive thumbnail.
@@ -147,6 +151,7 @@ export function FileAttachment({
   // discoverable via the hover tooltip on the chip.
   const isImageOnly = isImage && !!url;
   const canPreview = Boolean(enableImagePreview && isImage && url);
+  const isTile = display === "tile" && !isImageOnly;
 
   const openLightbox = (event: React.MouseEvent) => {
     event.preventDefault();
@@ -161,9 +166,12 @@ export function FileAttachment({
         "relative bg-an-background-secondary rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding))]",
         isImageOnly
           ? "size-32 flex items-center justify-center"
-          : "flex items-center gap-2 pl-1 pr-2 py-1 min-w-[120px] max-w-[200px]",
+          : isTile
+            ? "size-32 flex flex-col justify-between p-2"
+            : "flex items-center gap-2 pl-1 pr-2 py-1 min-w-[120px] max-w-[200px]",
         className,
       )}
+      data-attachment-id={id}
       title={isImageOnly ? (status ? `${filename}: ${status.title}` : filename) : undefined}
       data-status={status?.tone}
       draggable={onDragStart ? true : undefined}
@@ -174,7 +182,41 @@ export function FileAttachment({
           <span className="composer-attachment-status" data-tone={status.tone}>{status.label}</span>
         </div>
       )}
-      {isImageOnly ? (
+      {isTile ? (
+        <>
+          <div className="flex items-center justify-center size-8 bg-an-background-tertiary rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]">
+            {renderFileIcon(iconName)}
+          </div>
+          <div className="flex items-end gap-1.5 min-w-0">
+            <span
+              className="flex-1 min-w-0 text-sm font-medium text-an-foreground line-clamp-2 [overflow-wrap:anywhere]"
+              title={status ? `${filename}: ${status.title}` : (title ?? filename)}
+            >
+              {filename}
+            </span>
+            {status ? (
+              <span className="composer-attachment-status shrink-0" data-tone={status.tone} title={status.title}>
+                {status.label}
+              </span>
+            ) : size !== undefined && (
+              <span className="shrink-0 text-[10px] leading-5 text-an-foreground-muted">{formatFileSize(size)}</span>
+            )}
+          </div>
+          {onOpen && (
+            <button
+              type="button"
+              className="absolute inset-0 rounded-[inherit] cursor-pointer hover:bg-an-foreground/5"
+              aria-label={`Open ${filename}`}
+              title={title ?? filename}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpen();
+              }}
+            />
+          )}
+        </>
+      ) : isImageOnly ? (
         <PreviewTarget
           canPreview={canPreview}
           filename={filename}
@@ -250,7 +292,7 @@ export function FileAttachment({
             e.stopPropagation();
             onInsertText();
           }}
-          className="shrink-0 size-5 rounded-full flex items-center justify-center z-10 text-an-foreground-muted hover:text-an-foreground hover:bg-an-background"
+          className={`${isTile ? "absolute top-1 right-7" : "shrink-0"} size-5 rounded-full flex items-center justify-center z-10 text-an-foreground-muted hover:text-an-foreground hover:bg-an-background`}
           aria-label="Insert as text"
           title="Insert as text"
         >
@@ -270,7 +312,7 @@ export function FileAttachment({
             e.stopPropagation();
             onRemove();
           }}
-          className={`${isImageOnly ? "absolute top-1 right-1" : "shrink-0"} size-5 rounded-full bg-an-background border border-an-border-color
+          className={`${isImageOnly || isTile ? "absolute top-1 right-1" : "shrink-0"} size-5 rounded-full bg-an-background border border-an-border-color
                      flex items-center justify-center transition-[opacity,transform] duration-150 ease-out active:scale-[0.97] z-10
                      text-an-foreground hover:bg-an-background-secondary opacity-100`}
           aria-label={`Remove ${filename}`}

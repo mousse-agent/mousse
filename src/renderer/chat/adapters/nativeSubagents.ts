@@ -86,7 +86,9 @@ export function nativeSubagentModel(
   const input = record(part.input) ?? {}
   const output = record(part.output)
   const state = nativeSubagentState(part, backgroundLive)
-  const launched = input.tool_name === 'invoke_subagent' && state === 'done'
+  const summary = report(output?.summary)
+  const reported = summary && summary !== BACKGROUND_SUMMARY ? summary : null
+  const launched = input.tool_name === 'invoke_subagent' && state === 'done' && !reported
   const agentType = text(input.subagent_type)
   const named = text(input.description) !== null || agentType !== null
   const acp = isAcpSubagentTool(input.tool_name)
@@ -97,8 +99,6 @@ export function nativeSubagentModel(
   // A background row's end is when its turn settled, not when the agent finished: only its reported duration counts.
   const background = input.run_in_background === true
   const ended = duration !== null && startedAt !== null ? startedAt + duration : background ? null : timeOf(output?.endedAt)
-  const summary = report(output?.summary)
-  const reported = summary && summary !== BACKGROUND_SUMMARY ? summary : null
   return {
     toolCallId: part.toolCallId,
     pending: false,

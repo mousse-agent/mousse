@@ -67,7 +67,7 @@ describe("the bot's Recent list", () => {
     ['an ended thread updated exactly then is listed', meta('edge', { updatedAt: SINCE }), undefined, true],
     ['an ended thread updated before is not', meta('stale', { updatedAt: OLD }), undefined, false],
     ['a thread that never ran, made before, is not', meta('never', { updatedAt: undefined }), undefined, false],
-    ['an archived thread is not, however recent', meta('archived', { settledAt: NOW }), undefined, false],
+    ['an archived thread is not, however recent', meta('archived', { archivedAt: NOW }), undefined, false],
     ['a thread still working is listed however old', meta('working', { updatedAt: OLD }), 'running', true]
   ]
   const list = (thread: LaunchedThreadMeta, own: RunRecord['status'] | undefined, doneSince?: string) => launchedThreadsOf({
@@ -114,7 +114,7 @@ describe('a thread the bot started, with a queued run', () => {
 // An archived thread never makes the bot busy, whatever it left behind (a run that never ended, a question, a subagent):
 // archiving one on 15 Nov left a queued run, and the bot said "Managing" it for a day.
 describe('an archived thread the bot started', () => {
-  const archived: LaunchedThreadMeta[] = [{ ...threads[0]!, settledAt: NOW }, ...threads.slice(1)]
+  const archived: LaunchedThreadMeta[] = [{ ...threads[0]!, archivedAt: NOW }, ...threads.slice(1)]
   const rows: Array<[string, { own?: RunRecord['status']; below?: RunRecord['status']; asks?: string[]; standing?: RunStanding }]> = [
     ['a run of it still runs', { own: 'running' }],
     ['a run of it waits its turn', { own: 'queued' }],
@@ -128,7 +128,7 @@ describe('an archived thread the bot started', () => {
   it.each([['runs', { below: 'running' as const }], ['asks the owner', { asks: ['child'] }]])('is not managed because an archived subagent %s', (_name, state: { below?: RunRecord['status']; asks?: string[] }) => {
     const [listed] = launchedThreadsOf({
       creators: new Set(['home']),
-      threads: [threads[0]!, { ...threads[1]!, settledAt: NOW }, threads[2]!],
+      threads: [threads[0]!, { ...threads[1]!, archivedAt: NOW }, threads[2]!],
       activeRuns: state.below ? [run('child', state.below)] : [],
       lastRun: (id) => (id === 'launched' ? run('launched', 'completed') : undefined),
       asks: (id) => (state.asks ?? []).includes(id),

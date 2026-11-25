@@ -5,6 +5,9 @@ import { MMS_PROTOCOL_MAX_ENVELOPE_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES
 /** Frames waiting to be written to one peer before it is disconnected as too slow. */
 export const OUTBOUND_MAX_PENDING = 1024
 
+/** How long one entry (all of its frames) may take to write before it fails. */
+export const OUTBOUND_ENTRY_DEADLINE_MS = 60_000
+
 export interface OutboundEnqueueOptions {
   /** A connection event waits until its frame is flushed, so its producer is paced by the peer. */
   flush?: boolean
@@ -18,7 +21,6 @@ export interface OutboundEnqueueOptions {
 interface Entry {
   bytes: number
   frames: () => Iterable<Buffer>
-  signal: AbortSignal
   callerSignal?: AbortSignal
   before?: () => void
   flush: boolean
@@ -53,9 +55,8 @@ export class OutboundWriter {
       return null
     }
     if (replaced) this.drop(replaced)
-    const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
     const result = new Promise<void>((resolve, reject) => {
-      const entry: Entry = { bytes, frames, signal: combined, callerSignal: signal, before, flush: options.flush === true, key: options.supersedes, dropped: false, resolve, reject }
+      const entry: Entry = { bytes, frames, callerSignal: signal, before, flush: options.flush === true, key: options.supersedes, dropped: false, resolve, reject }
       this.queue.push(entry)
       if (entry.key !== undefined) this.waiting.set(entry.key, entry)
     })
@@ -109,17 +110,31 @@ export class OutboundWriter {
 
   private async write(entry: Entry): Promise<void> {
     entry.before?.()
-    const activeSignal = AbortSignal.any([entry.signal, AbortSignal.timeout(60_000)])
-    for (const frame of entry.frames()) {
-      if (entry.flush) {
-        // Batched frames before it may still be in Node's buffer; the bound below is for the event's own frame.
-        // Without a pending drain Node holds less than its high-water mark, far below the bound.
-        if (this.socket.writableNeedDrain) await waitForDrain(this.socket, activeSignal)
-        if (this.socket.writableLength + frame.length > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES) throw new Error('Outbound socket backlog exceeded')
-        await writeConnectionEventFrame(this.socket, frame, activeSignal)
-      } else {
-        await writeBatchedFrame(this.socket, frame, activeSignal)
+    // The write stops when its caller cancels, the connection closes or the deadline passes. The listeners and the
+    // timer are removed as soon as the write ends: the service writes many frames a second while a reply streams, and
+    // `AbortSignal.timeout` and `AbortSignal.any` here kept a timer and two signals alive for a minute after each one.
+    const active = new AbortController()
+    const sources = entry.callerSignal ? [entry.callerSignal, this.lifetime.signal] : [this.lifetime.signal]
+    const stop = (): void => active.abort()
+    for (const source of sources) source.addEventListener('abort', stop, { once: true })
+    if (sources.some((source) => source.aborted)) stop()
+    const deadline = setTimeout(stop, OUTBOUND_ENTRY_DEADLINE_MS)
+    deadline.unref?.()
+    try {
+      for (const frame of entry.frames()) {
+        if (entry.flush) {
+          // Batched frames before it may still be in Node's buffer; the bound below is for the event's own frame.
+          // Without a pending drain Node holds less than its high-water mark, far below the bound.
+          if (this.socket.writableNeedDrain) await waitForDrain(this.socket, active.signal)
+          if (this.socket.writableLength + frame.length > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES) throw new Error('Outbound socket backlog exceeded')
+          await writeConnectionEventFrame(this.socket, frame, active.signal)
+        } else {
+          await writeBatchedFrame(this.socket, frame, active.signal)
+        }
       }
+    } finally {
+      clearTimeout(deadline)
+      for (const source of sources) source.removeEventListener('abort', stop)
     }
   }
 }

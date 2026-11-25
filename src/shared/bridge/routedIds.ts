@@ -10,6 +10,7 @@
  * an owner id is left unqualified.
  */
 import { ensureQualified, parseQualifiedId, qualifyId } from '../threadRef'
+import { withArchivedAt } from '../archivedAt'
 
 /** Fields that hold a thread id, wherever they are in a result or an event. */
 export const ROUTED_THREAD_ID_KEYS: readonly string[] = [
@@ -60,6 +61,7 @@ export const ROUTED_RESULT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
   'threads.create': THREAD_AND_PROJECT,
   'threads.rename': THREAD_AND_PROJECT,
   'threads.pin': THREAD_AND_PROJECT,
+  'threads.archive': THREAD_AND_PROJECT,
   'threads.settle': THREAD_AND_PROJECT,
   'threads.regenerateTitle': THREAD_AND_PROJECT,
   'threads.setWorktreeEnabled': THREAD_AND_PROJECT,
@@ -284,8 +286,11 @@ function walk(value: unknown, context: QualifyContext, depth: number): unknown {
     }
     // An object under `thread`, `threads`, `project` or `projects` is a thread or a project: its `id` is the id.
     if (ID_OBJECT_KEYS[key] && (isRecord(inner) || Array.isArray(inner))) {
+      // A thread from a computer that runs an older Mousse carries its archive time as `settledAt`.
       const named = (item: unknown): unknown =>
-        isRecord(item) && typeof item.id === 'string' ? { ...item, id: ensureQualified(context.node, item.id) } : item
+        isRecord(item) && typeof item.id === 'string'
+          ? { ...(ID_OBJECT_KEYS[key] === 'thread' ? withArchivedAt(item) : item), id: ensureQualified(context.node, item.id) }
+          : item
       const next = walk(Array.isArray(inner) ? inner.map(named) : named(inner), context, depth + 1)
       if (next !== inner) set(key, next)
       continue

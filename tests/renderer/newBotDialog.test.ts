@@ -188,6 +188,27 @@ describe('New bot', () => {
     expect(creates()[0]![1]).not.toHaveProperty('model')
   })
 
+  it('shows an added ACP agent that cannot enforce bot permissions, even when there are no selectable models', async () => {
+    vi.mocked(fake.client.modelChoices).mockResolvedValue({
+      models: [], providers: [], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }],
+      unavailableProviders: [{ instanceId: 'acp:custom', label: 'Custom agent', reason: 'This agent can run tools without asking Mousse.' }]
+    })
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    await click(dialog()!.querySelector<HTMLElement>(`[aria-label^="New bot's Talk model"]`)!)
+    const search = document.querySelector<HTMLInputElement>('[role="combobox"][aria-label="Search models"]')!
+    const agent = () => document.querySelector<HTMLElement>('[role="listbox"] [role="option"][aria-disabled="true"]')
+    expect(agent()?.textContent ?? '').toContain('Custom agent')
+    expect(agent()?.textContent ?? '').toContain('without asking Mousse')
+    await type(search, 'other')
+    expect(agent()).toBeNull()
+    await type(search, 'custom')
+    await click(agent()!)
+    await keyDown(search, { key: 'Enter' })
+    expect(createButton()?.disabled).toBe(true)
+    expect(creates()).toHaveLength(0)
+  })
+
   it('Devices on Runs on: Everywhere unless This computer only is picked, after the model, which keeps the focus', async () => {
     vi.mocked(fake.client.modelChoices).mockImplementation(async () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }], reachOnCreate: true }))
     const devices = () => dialog()!.querySelector<HTMLElement>('[aria-label="Devices that reach the new bot"]')

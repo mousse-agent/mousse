@@ -142,8 +142,11 @@ describe('the profiler in the service', () => {
     const { settings, events, domains, mms, protocolServer } = fakeService(dir)
     const created: MemoryMonitor[] = []
     const now = { t: T0 }
-    const handle = prepareMemoryMonitor({ mms, protocolServer, homeDir: dir, version: '0.1.3', env: {}, createMonitor: () => { const m = testMonitor(dir, now); created.push(m); return m } })!
+    const idleTrim = { start: vi.fn(), stop: vi.fn() }
+    const handle = prepareMemoryMonitor({ mms, protocolServer, homeDir: dir, version: '0.1.3', env: {}, idleTrim, createMonitor: () => { const m = testMonitor(dir, now); created.push(m); return m } })!
     handle.start()
+    // The idle heap trim is not a profiler feature: it runs with the service, with the profiler off.
+    expect(idleTrim.start).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(10 * 60_000)
     expect(created).toHaveLength(0)
     expect(existsSync(join(dir, 'diagnostics', 'memory.jsonl'))).toBe(false)
@@ -167,6 +170,7 @@ describe('the profiler in the service', () => {
     expect(profilerService()?.monitor()).toBeNull()
     handle.stop()
     expect(profilerService()).toBeNull()
+    expect(idleTrim.stop).toHaveBeenCalledOnce()
   })
 
   it('asks the app for a report on request and resolves when its answer carries the id', async () => {
@@ -351,9 +355,113 @@ describe('the profiler tools', () => {
     const { service } = profilerFixture(dir)
     const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_overview')
     expect(value).toMatchObject({ profiler: 'on', serviceUptimeMinutes: expect.any(Number), service: { mb: 150 }, app: { gpuMb: 334, largestWindowMb: 320 }, trend: { serviceMb: [150] }, breaches: [] })
-    expect(value.processes.map((row: { label: string }) => row.label)).toEqual(['Service', 'Service workers (1)', 'Main', 'Window', 'GPU', 'Agents and tools (2)', 'App total'])
+    expect(value.processes.map((row: { label: string }) => row.label)).toEqual(['Service', 'Service workers (1)', 'Main', 'Window', 'GPU', 'Agents and tools (2)', 'Desktop total', 'Workload total'])
     expect(value.processes.find((row: { label: string }) => row.label === 'GPU')).toMatchObject({ privateMb: 334, workingSetMb: 380, cpuPercent: 3 })
+    expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: 980, serviceWorkingSetMb: 190, childrenWorkingSetMb: 222, workloadWorkingSetMb: 1392 })
+    expect(value.processes.filter((row: { group: string }) => row.group === 'total').every((row: { privateMb?: number }) => row.privateMb === undefined)).toBe(true)
     expectNoPrivateData(outcome.text, dir)
+  })
+
+  it('profiler_sample_now refreshes provider memory between detailed samples', async () => {
+    const { monitor, service, now } = profilerFixture(home())
+    const registry = toolsFor(() => ON, service)
+    await call(registry, 'profiler_overview')
+    const read = vi.spyOn(monitor, 'readChildrenNow').mockResolvedValue([{ kind: 'codex', mb: 333 }])
+    now.t += 60_000
+    await monitor.tick()
+    const cached = await call(registry, 'profiler_overview')
+    expect(cached.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('claude 210') })
+    expect(read).not.toHaveBeenCalled()
+    const fresh = await call(registry, 'profiler_sample_now')
+    expect(fresh.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('codex 333 MB') })
+    expect(fresh.value.childrenSampledSecondsAgo).toBe(0)
+    expect(read).toHaveBeenCalledTimes(1)
+    monitor.stop()
+  })
+
+  it('profiler_sample_now waits for an in-flight periodic sample then takes a fresh child reading', async () => {
+    const { monitor, service, now } = profilerFixture(home())
+    const registry = toolsFor(() => ON, service)
+    await call(registry, 'profiler_overview')
+    let finish!: (children: Array<{ kind: string; mb: number }>) => void
+    let started!: () => void
+    const reading = new Promise<void>((resolve) => { started = resolve })
+    const read = vi.spyOn(monitor, 'readChildrenNow')
+      .mockImplementationOnce(() => { started(); return new Promise((resolve) => { finish = resolve }) })
+      .mockResolvedValue([{ kind: 'codex', mb: 444 }])
+    now.t += 5 * 60_000
+    const periodic = monitor.tick()
+    await reading
+    const requested = call(registry, 'profiler_sample_now')
+    const alsoRequested = call(registry, 'profiler_sample_now')
+    finish([{ kind: 'codex', mb: 111 }])
+    await periodic
+    const fresh = await requested
+    expect((await alsoRequested).value).toMatchObject({ childrenSampledSecondsAgo: 0 })
+    expect(fresh.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('codex 444 MB') })
+    expect(read).toHaveBeenCalledTimes(2)
+    monitor.stop()
+  })
+
+  it('reports missing child working sets through the agent tools without calling them zero', async () => {
+    const dir = home()
+    const { service, monitor } = profilerFixture(dir)
+    // Recorded monitor samples can contain footprint-only, unreadable, or absent measurements.
+    await service.collectApp(false, 1000)
+    await monitor.tick()
+    const status = monitor.status()
+    const sample = status.sample!
+    const registry = toolsFor(() => ON, service)
+    for (const children of [
+      [{ kind: 'codex', mb: 210, footprint: true }],
+      [{ kind: 'codex', mb: null }],
+      undefined
+    ]) {
+      vi.spyOn(monitor, 'status').mockReturnValue({ ...status, sample: { ...sample, children } })
+      const { value } = await call(registry, 'profiler_overview')
+      expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: 980, workloadWorkingSetMb: null, measuredWorkingSetMb: 1170, unavailableChildren: 2 })
+      expect(value.processes.find((row: { label: string }) => row.label === 'Measured workload subtotal')).toMatchObject({ workingSetMb: 1170 })
+      expect(value.units).toContain('not unique physical RAM')
+    }
+    vi.restoreAllMocks()
+  })
+
+  it('reports a live service process with no desktop as a subtotal through the registered handler', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    const monitor = new MemoryMonitor({
+      homeDir: dir, version: '0.1.3',
+      readCounts: async () => ({ counts: { sqliteConnections: 0, workerThreads: 0, loadedThreads: 0, threadRuntimes: 0, threadCacheThreads: 0, threadCacheMb: 0, replayEvents: 0, ptys: 0, fileWatchers: 0, profiles: 1, activeTurns: 0 }, workerHeaps: [] }),
+      readChildren: async () => [], childCount: () => 0
+    })
+    try {
+      const registry = toolsFor(() => ON, { ...service, monitor: () => monitor, collectApp: async () => false })
+      const { value, outcome } = await call(registry, 'profiler_sample_now')
+      expect(outcome.isError).not.toBe(true)
+      expect(value.memoryTotals.serviceWorkingSetMb).toBeGreaterThan(0)
+      expect(value.memoryTotals.measuredWorkingSetMb).toBe(value.memoryTotals.serviceWorkingSetMb)
+      expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: null, workloadWorkingSetMb: null, childrenWorkingSetMb: 0, desktopSampleAvailable: false, childrenSampleAvailable: true })
+      expect(value.processes.find((row: { label: string }) => row.label === 'Measured workload subtotal')).toMatchObject({ workingSetMb: value.memoryTotals.serviceWorkingSetMb })
+    } finally {
+      monitor.stop()
+    }
+  })
+
+  it('keeps missing and mixed child measurements explicit in the child tool', async () => {
+    const { service, monitor } = profilerFixture(home())
+    vi.spyOn(monitor, 'readChildTreeNow').mockResolvedValue({ discovery: 'complete', children: [
+      { kind: 'codex', mb: 80 }, { kind: 'codex', mb: null },
+      { kind: 'mcp', mb: 40, footprint: true }, { kind: 'mcp', mb: 20 }
+    ].map((child) => ({ ...child, relationship: 'tracked' as const })) })
+    try {
+      const { value } = await call(toolsFor(() => ON, service), 'profiler_children')
+      expect(value.totalMb).toBeNull()
+      expect(value.byKind.find((row: { kind: string }) => row.kind === 'codex')).toMatchObject({ mb: null, measuredMb: 80, unavailable: 1, metric: 'working-set' })
+      expect(value.byKind.find((row: { kind: string }) => row.kind === 'mcp')).toMatchObject({ mb: null, measuredMb: null, metric: 'mixed' })
+      expect(value.processes[2]).toMatchObject({ mb: 40, metric: 'footprint' })
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('profiler_service_breakdown: heap, counts, caches, this profile\'s threads by id and other profiles as totals', async () => {
@@ -524,7 +632,7 @@ describe('the profiler tools', () => {
     expect(gpu.value).toMatchObject({ gpu: { privateMb: 334, workingSetMb: 380 }, hints: { surfaceMb: 10.8, acrylic: true, webglContexts: 1, views: { applet: 1 } }, viewSizes: { applet: [{ w: 640, h: 480 }] } })
     expectNoPrivateData(gpu.outcome.text, dir)
     const children = await call(registry, 'profiler_children')
-    expect(children.value).toMatchObject({ processes: [{ kind: 'claude', mb: 210 }, { kind: 'other', mb: 12 }], totalMb: 222 })
+    expect(children.value).toMatchObject({ processes: [{ kind: 'claude', mb: 210 }, { kind: 'other', mb: 12 }], totalMb: null, measuredTotalMb: 222, discovery: 'unavailable' })
     expectNoPrivateData(children.outcome.text, dir)
   })
 
@@ -534,7 +642,8 @@ describe('the profiler tools', () => {
     const registry = toolsFor(() => ON, service)
     await monitor.tick()
     const { value, outcome } = await call(registry, 'profiler_sample_now')
-    expect(value.now).toMatchObject({ serviceMb: 150, gpuMb: 334, loadedThreads: 1 })
+    expect(value.now).toMatchObject({ serviceMb: 150, gpuMb: 334, loadedThreads: 1, desktopWorkingSetMb: 980, workloadWorkingSetMb: 1392 })
+    expect(value.memoryTotals).toMatchObject({ workloadWorkingSetMb: 1392, unavailableChildren: 0 })
     expect(value.sincePreviousSample).toMatchObject({ change: expect.any(Object) })
     expect(monitor.samples()).toHaveLength(2)
     expectNoPrivateData(outcome.text, dir)
@@ -557,6 +666,20 @@ describe('the profiler tools', () => {
     expect(value.points.at(-1).atSeconds).toBeLessThanOrEqual(600)
     expect(value.points[0]).toMatchObject({ serviceMb: 150, loadedThreads: 1 })
     expectNoPrivateData(outcome.text, dir)
+  })
+
+  it('shows cached provider age in watch points without counting it as growth', async () => {
+    vi.useFakeTimers({ now: T0 })
+    const { service, monitor, now } = profilerFixture(home())
+    now.t = T0
+    const pending = call(toolsFor(() => ON, service), 'profiler_watch', { intervalSeconds: 30, minutes: 0.5 })
+    await vi.advanceTimersByTimeAsync(0)
+    now.t += 30_000
+    await vi.advanceTimersByTimeAsync(30_000)
+    const { value } = await pending
+    expect(value.points.map((point: { childrenSampledSecondsAgo: number }) => point.childrenSampledSecondsAgo)).toEqual([0, 30])
+    expect(value.change).not.toHaveProperty('childrenSampledSecondsAgo')
+    monitor.stop()
   })
 
   it('profiler_watch stops when the call is stopped', async () => {

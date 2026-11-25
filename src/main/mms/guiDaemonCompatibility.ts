@@ -12,6 +12,8 @@ export const GUI_REQUIRED_METHODS = [
   'review.files', 'review.file',
   'operations.get', 'operations.abort', 'operations.recover', 'publish.status', 'publish.start',
   'threads.focus',
+  // Archive and Unarchive; a service from before archived threads were called archived lacks it.
+  'threads.archive',
   'storage.policy', 'storage.configure', 'storage.reviewDismiss', 'storage.cleanup.plan', 'storage.cleanup.run', 'storage.cleanup.lastReport',
   'storage.usage',
   'subagents.list',

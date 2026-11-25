@@ -10,9 +10,12 @@ import type {
   NetEngineDevice,
   NetEngineJoinPreview,
   NetEngineLinkJoin,
-  NetEngineStatus
+  NetEngineStatus,
+  NetEngineWay
 } from '../../../shared/netEngine/local'
+import type { AccessPresetFields } from '../../../shared/net/accessPresets'
 import { ROUTE_WORDS, unreachableDetail } from './engineRows'
+import { defaultLevel, LevelPicker } from './AllowPrompt'
 import { CopyButton } from '../settings/IconButtons'
 import { errorText, useDaemonCall } from '../devices/useDaemonCall'
 
@@ -22,6 +25,13 @@ import { errorText, useDaemonCall } from '../devices/useDaemonCall'
  */
 export function JoinedLine({ device }: { device: NetEngineDevice }) {
   const { call, busy, error } = useDaemonCall()
+  // Let in one way: done once it is let in.
+  if (device.direction === 'in')
+    return (
+      <p role="status" className="settings-muted">
+        {device.name} can use this computer.
+      </p>
+    )
   if (device.state === 'connected')
     return (
       <p role="status" className="settings-muted">
@@ -61,18 +71,25 @@ export const spacedCode = (code: string): string =>
 const triesLeft = (left: number): string => (left === 1 ? '1 try left' : `${left} tries left`)
 
 /**
- * Send link (§5.1): a kind-2 invitation's link to copy into a chat, and the code to read out another way, with
- * the tries left. Three wrong codes end it; New link makes another.
+ * Send link (§5.1): what the device may do here first (there is no Allow on a link: the level is saved with the link,
+ * before anyone has it), then a kind-2 invitation's link to copy into a chat, and the code to read out another way,
+ * with the tries left. Three wrong codes end it; New link makes another at the same level.
  */
 export function SendLinkPanel({
   status,
+  way,
   onInvitation
 }: {
   status: NetEngineStatus | undefined
+  /** The one way the link carries; every way when unset. */
+  way?: NetEngineWay
   /** The invitation shown now (the dialog ends it on close), or undefined once it ended or was used. */
   onInvitation: (invitation: string | undefined) => void
 }) {
   const { error, call } = useDaemonCall()
+  const [fields, setFields] = useState<AccessPresetFields>(defaultLevel)
+  // The level the link is made with, once Make link was tapped.
+  const [level, setLevel] = useState<AccessPresetFields>()
   const [made, setMade] = useState<{
     invitation: string
     uri: string
@@ -84,11 +101,12 @@ export function SendLinkPanel({
   onInvitationRef.current = onInvitation
 
   useEffect(() => {
+    if (!level) return
     let live = true
     setMade(undefined)
     void call<{ invitation: string; uri: string; code?: string; attemptsLeft?: number }>(
       'netEngine.invite',
-      { kind: 'link' }
+      { kind: 'link', access: level, ...(way ? { way } : {}) }
     ).then((answer) => {
       if (!answer || !live) return
       setMade(answer.value)
@@ -97,7 +115,7 @@ export function SendLinkPanel({
     return () => {
       live = false
     }
-  }, [round, call])
+  }, [round, call, level, way])
 
   const shown = made && status?.links?.find((link) => link.invitation === made.invitation)
   const code = shown?.code ?? made?.code ?? ''
@@ -108,6 +126,18 @@ export function SendLinkPanel({
     if (shown?.ended) onInvitationRef.current(undefined)
   }, [shown?.ended])
 
+  if (!level)
+    return (
+      <div className="engine-allow" role="group" aria-label="Send a link">
+        <p className="engine-allow-title">What can it do here?</p>
+        <LevelPicker fields={fields} onChange={setFields} busy={false} />
+        <div className="devices-dialog-actions">
+          <button type="button" className="settings-btn ui-btn-primary" onClick={() => setLevel(fields)}>
+            Make link
+          </button>
+        </div>
+      </div>
+    )
   if (error)
     return (
       <p role="alert" className="chat-error">
@@ -164,8 +194,8 @@ export function SendLinkPanel({
 
 /**
  * Enter link (§5.3): the link, read here before anything is dialled (a decode error says the link is damaged);
- * the consent with the destinations it will contact and "Also share", unticked; then the code, typed in six boxes
- * while the join waits for it.
+ * the consent with the destinations it will contact and "Also let it use this computer", unticked ("Also share"
+ * under it once ticked); then the code, typed in six boxes while the join waits for it.
  */
 export function EnterLinkPanel({
   status,
@@ -181,6 +211,7 @@ export function EnterLinkPanel({
   const [text, setText] = useState(initialLink ?? '')
   const [preview, setPreview] = useState<NetEngineJoinPreview & { link: string }>()
   const [share, setShare] = useState<string[]>([])
+  const [back, setBack] = useState(false)
   const [joining, setJoining] = useState(false)
 
   const read = async (link: string) => {
@@ -209,7 +240,8 @@ export function EnterLinkPanel({
     const answer = await call('netEngine.join', {
       ticket: preview.link,
       arrival: 'link',
-      ...(share.length ? { share } : {})
+      back,
+      ...(back && share.length ? { share } : {})
     })
     setJoining(false)
     if (answer) onJoined()
@@ -230,12 +262,25 @@ export function EnterLinkPanel({
       </p>
     )
 
-  if (preview)
+  if (preview) {
+    const name = preview.name || 'the other computer'
     return (
       <div className="engine-confirm">
-        <p>Connect to the computer in this link? It will also be able to use this computer.</p>
+        <p>Use {preview.name || 'the computer in this link'} from here?</p>
+        <label className="engine-check-box" title="Without it, this computer only uses it.">
+          <input
+            type="checkbox"
+            checked={back}
+            disabled={busy}
+            onChange={(event) => {
+              setBack(event.target.checked)
+              if (!event.target.checked) setShare([])
+            }}
+          />
+          Also let {name} use this computer
+        </label>
         <JoinRoutes
-          preview={preview}
+          preview={back ? preview : { ...preview, shareable: [] }}
           share={share}
           onShare={(route, on) =>
             setShare((list) => (on ? [...list, route] : list.filter((item) => item !== route)))
@@ -244,7 +289,7 @@ export function EnterLinkPanel({
         <div className="devices-dialog-actions">
           <button
             type="button"
-            className="settings-btn primary"
+            className="settings-btn ui-btn-primary"
             disabled={busy}
             onClick={() => void connect()}
           >
@@ -258,6 +303,7 @@ export function EnterLinkPanel({
         )}
       </div>
     )
+  }
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -277,7 +323,7 @@ export function EnterLinkPanel({
             setError('')
           }}
         />
-        <button type="submit" className="settings-btn" disabled={busy || !text.trim()}>
+        <button type="submit" className="settings-btn ui-btn-primary" disabled={busy || !text.trim()}>
           Continue
         </button>
       </form>
@@ -381,7 +427,7 @@ export function CodeEntry({ join }: { join: NetEngineLinkJoin }) {
         </p>
       )}
       <div className="devices-dialog-actions">
-        <button type="submit" className="settings-btn primary" disabled={busy || code.length !== 6}>
+        <button type="submit" className="settings-btn ui-btn-primary" disabled={busy || code.length !== 6}>
           Confirm
         </button>
       </div>

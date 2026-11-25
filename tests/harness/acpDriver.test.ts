@@ -3,9 +3,9 @@
  * checked with an `initialize`-only handshake, runs only for interactive purposes, and a sign-in
  * changed from outside between two turns forgets the thread's native session.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AcpConnection } from '../../src/mms/harness/acp/connection'
@@ -43,10 +43,11 @@ function lateUpdates(connection: AcpConnection): AcpConnection {
   })
 }
 
-function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; lateUpdates?: boolean; updates?: Update[] } = {}) {
+function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; lateUpdates?: boolean; updates?: Update[]; model?: string } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
+  const sessionCwds: string[] = []
   const agent = inProcessAgent((app) => {
     app
       .onRequest(methods.agent.initialize, () => {
@@ -62,9 +63,16 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
         calls.push('logout')
         return {}
       })
-      .onRequest(methods.agent.session.new, () => {
+      .onRequest(methods.agent.session.new, (c) => {
         calls.push('session/new')
-        return { sessionId: `s${calls.length}` }
+        sessionCwds.push(c.params.cwd)
+        return {
+          sessionId: `s${calls.length}`,
+          ...(options.model ? { configOptions: [{
+            id: 'model', name: 'Model', category: 'model', type: 'select',
+            currentValue: options.model, options: [{ value: options.model, name: 'Listed model' }]
+          }] } : {})
+        }
       })
       .onRequest(methods.agent.session.prompt, async (c) => {
         calls.push(`prompt ${c.params.sessionId}`)
@@ -91,20 +99,21 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
     control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
     host: { mcp: null, context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as TurnSpec['host']
   })
-  return { home, harness, calls, agent, notices, spec, tick: (ms: number) => { clock += ms } }
+  return { home, harness, calls, sessionCwds, agent, notices, spec, tick: (ms: number) => { clock += ms } }
 }
 
 describe('the generic ACP driver', () => {
-  it('adds a Custom command and checks it with an initialize-only handshake that never opens a session', async () => {
-    const { harness, calls, agent } = fixture()
+  it('checks a new Custom command with an initialize-only handshake and then lists its models', async () => {
+    const { harness, calls, agent } = fixture([], { model: 'listed' })
     const added = await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath, args: ['agent.js'] } })
     expect(added.instanceId).toBe('acp:fake-agent')
     await vi.waitFor(async () => {
       const [snapshot] = await harness.instances.snapshots({ kind: 'device' })
       expect(snapshot).toMatchObject({ runs: { state: 'yes' }, binary: { version: '1.2.3', source: 'override' }, caps: { toolControl: 'uncontrolled', planMode: false }, auth: { state: 'not_required' } })
+      expect(snapshot?.models.entries.some((model) => model.id === 'listed')).toBe(true)
+      expect(agent.connections.map(({ request, killed }) => [request.purpose, killed])).toEqual([['handshake', true], ['models', true]])
     })
-    expect(calls).toEqual(['initialize'])
-    expect(agent.connections.every((connection) => connection.request.purpose === 'handshake' && connection.killed)).toBe(true)
+    expect(calls).toEqual(['initialize', 'initialize', 'session/new'])
   })
 
   it('offers Sign in from Settings before the account is checked, and Sign out after a Mousse sign-in', async () => {
@@ -208,5 +217,21 @@ describe('the generic ACP driver', () => {
     const prompted = calls.filter((call) => call.startsWith('prompt'))
     expect(prompted).toHaveLength(2)
     expect(prompted[0]).not.toBe(prompted[1])
+  })
+
+  it('runs a standalone turn (cwd: null) in a private per-thread workspace inside the instance state dir', async () => {
+    const { home, harness, sessionCwds, spec } = fixture()
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
+    const turn = spec(binding)
+    turn.input.cwd = null
+    turn.input.threadId = '../../outside'
+    await expect(harness.startTurn(turn).result).resolves.toMatchObject({ text: 'hello' })
+    const expected = harness.standaloneWorkspace('acp:fake-agent', '../../outside')
+    expect(expected).toBeTruthy()
+    expect(sessionCwds).toEqual([expected])
+    expect(existsSync(expected!)).toBe(true)
+    expect(statSync(expected!).isDirectory()).toBe(true)
+    expect(relative(home, expected!).startsWith('..')).toBe(false)
   })
 })

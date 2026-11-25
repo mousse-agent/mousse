@@ -4,7 +4,7 @@ GitHub records work intended for the shared codebase: meaningful tasks, ownershi
 
 ## Using the skills
 
-The repository contains three shared workflow skills under `.agents/skills/`: `work`, `check-related-work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. `check-related-work` runs before a plan is presented as final or a substantial implementation starts, and reports open and merged work that overlaps it. `test-the-claim` applies whenever tests are written, changed or reviewed: it decides what to test for a change and at which level. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. `AGENTS.md` routes these requests to the same files even for clients that do not automatically discover this directory. The work skill drives small scripts (see "Work helpers") instead of having agents read and list everything by hand.
+The repository keeps its agent skills in `moostack/skills/<name>/`, listed in `moostack/README.md`. The shared workflow ones are `work`, `check-related-work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. `check-related-work` runs before a plan is presented as final or a substantial implementation starts, and reports open and merged work that overlaps it. `test-the-claim` applies whenever tests are written, changed or reviewed: it decides what to test for a change and at which level. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. No client discovers that folder on its own, so `AGENTS.md` routes each request to its file. The work skill drives small scripts (see "Work helpers") instead of having agents read and list everything by hand.
 
 Clients must load this checkout's project instructions. OpenCode discovery has been verified; Grok's inspector suppresses project instructions and skills in an untrusted checkout, so its discovery must be checked after the user trusts the project through the normal client UI.
 
@@ -91,7 +91,7 @@ For routine changes, the present human may authorize a merge after verification,
 
 For small, low-risk documentation and communication-guidance changes, review the complete diff, run checks appropriate to the change, and merge promptly without another confirmation or an arbitrary waiting period. This standing authorization still requires a PR, current-head verification, resolution of review conversations, and any required GitHub checks or reviews. It does not cover application behavior changes or sensitive changes listed below. A direct instruction to document and apply a specific workflow preference authorizes that exact procedural update; do not expand it into broader permission changes.
 
-Changes to authentication/authorization, credentials, destructive data migrations, or the merge/permission rules themselves require review by the other teammate. If unavailable, preserve a draft or ready PR and record the blocker. Expand or revise this list through an agreed policy change. Actual GitHub requirements always apply; no timer, label, or agent judgment bypasses them.
+Sensitive changes are changes to authentication/authorization, credentials, destructive data migrations, or the merge/permission rules themselves. They need no review by the other teammate. They merge like other changes: after verification, once the present human authorizes that merge. Actual GitHub requirements always apply; no timer, label, or agent judgment bypasses them.
 
 Move follow-up work to another task branch before merging. Remote deletion on merge, by GitHub or the cleanup helper, does not remove local commits or worktrees; see "Cleanup after merge". Review abandoned branches manually.
 
@@ -125,7 +125,7 @@ Skills are instructions, not access controls. Maintainers must configure GitHub 
 
 - Require PRs into the default branch and the basic CI checks. Do not make a hosted full-suite run the routine gate; PRs are gated on the relevant local tests. Confirm checks pass before making them required.
 - Require conversation resolution and block default-branch force pushes and deletion.
-- Set the review policy consistently with the routine/sensitive distinction above. A blanket one-review requirement will block routine merges during absences; sensitive-review requirements here remain procedural unless separately enforced in GitHub.
+- Set the review policy consistently with "Review and merge" above, which requires no teammate review. A one-review requirement will block merges during absences.
 - Enable automatic deletion of merged PR head branches (needs repository admin). The cleanup helper covers this until it is enabled. Do not automatically delete unmerged branches.
 
 Adding workflow files does not enable these settings. Verify actual rules and permissions before reporting them as active. CI uses the repository's existing typecheck, lint, build and test commands.

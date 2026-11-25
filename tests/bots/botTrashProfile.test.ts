@@ -148,7 +148,7 @@ async function withBot() {
   const purged: string[] = []
   const host = (bots as unknown as { host: BotEngineHost }).host
   host.models = { resolve: async () => ({ selection: { instanceId: 'pi:test', model: 'test' } }), markLimited: () => {} }
-  host.archiveThread = (threadId) => { services.threads.setThreadSettled(threadId, true) }
+  host.archiveThread = (threadId) => { services.threads.setThreadArchived(threadId, true) }
   host.memory = { list: () => ({ entries: [], gauge: '' }), forget: () => ({ redacted: [] }), edit: () => { throw new Error('unused') }, export: async () => ({ files: [] }), reindex: async () => {}, purge: async (botId) => { purged.push(botId) } }
   const definition: BotDefinition = {
     format: 2, id: 'review-bot', name: 'Review bot', description: 'test', look: { colour: 'coral', accessory: 'none' },
@@ -207,7 +207,7 @@ describe('deleting a bot through the real request path (archive, then the 30-day
     expect(Date.parse(result.purgeAt) - Date.now()).toBeGreaterThan(29 * 24 * 60 * 60_000)
     expect(bots.getActivation(activation.id).status).toBe('cancelled')
     // Kept, archived: it leaves every list but is not purged yet.
-    expect(services.threads.getThread(home)?.settledAt).toBeTruthy()
+    expect(services.threads.getThread(home)?.archivedAt).toBeTruthy()
     expect(services.threads.lifecycleStore.get(home)?.state ?? 'active').not.toBe('purged')
     expect(bots.service.list().bots).toEqual([])
     expect(await bots.sweepDeleted(Date.now())).toEqual([])

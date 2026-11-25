@@ -2,7 +2,7 @@ import { constants } from 'node:fs'
 import { access, lstat, readFile, stat } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { physicalPath } from './gitDirFiles'
-import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
+import { IN_PROGRESS_GIT_MARKERS, NOT_A_GIT_REPOSITORY } from './gitMarkers'
 import { runGitProcess } from './runGitProcess'
 import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
 
@@ -192,7 +192,7 @@ export async function folderBranch(folder: string, options: { requireRoot?: bool
   const checkout = await runGitProcess(await withoutRepoProgramsAsync(folder, checkoutArgs), { cwd: folder, env: repoProgramEnv() })
   if (checkout.error) throw checkout.error
   if (checkout.status !== 0) {
-    if (/not a git repository|must be run in a work tree/i.test(checkout.stderr)) return { repo: false, branch: null }
+    if (NOT_A_GIT_REPOSITORY.test(checkout.stderr) || /must be run in a work tree/i.test(checkout.stderr)) return { repo: false, branch: null }
     throw new Error(checkout.stderr.trim() || `git rev-parse failed with exit code ${checkout.status}`)
   }
   const [inside, ...top] = checkout.stdout.replace(/\r?\n$/, '').split(/\r?\n/)
@@ -205,7 +205,7 @@ export async function folderBranch(folder: string, options: { requireRoot?: bool
   if (ran.status === 0) return { repo: true, branch: ran.stdout.trim() || null }
   // Status 1: HEAD names a commit; which one is not asked (a second process).
   if (ran.status === 1) return { repo: true, branch: null, detachedAt: '' }
-  if (/not a git repository/i.test(ran.stderr)) return { repo: false, branch: null }
+  if (NOT_A_GIT_REPOSITORY.test(ran.stderr)) return { repo: false, branch: null }
   throw new Error(ran.stderr.trim() || `git symbolic-ref failed with exit code ${ran.status}`)
 }
 

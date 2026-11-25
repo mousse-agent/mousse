@@ -1,0 +1,124 @@
+/* ConnectingDots: a composer's background while the app is not connected to its service. A grid of small dots in the
+   accent colour, faint and still, with a brighter copy of the grid shown through two soft bands that travel across it
+   in opposite directions, so the dots swell and fade like a dot-matrix display. The animation moves in 15 steps a
+   second (the rule for looping animations, loopingIndicatorSteps.test.ts); only the mask moves, on one element. With reduced motion, motion Off, or the window at rest, the bands hold still. */
+.connecting-dots {
+  --connecting-dot-pitch: 10px;
+  --connecting-dots-still: 0.1;
+  --connecting-dots-lit: 0.8;
+  position: absolute;
+  inset: 0;
+  /* Behind the composer's text and controls, above its background: its host is a stacking context (below). */
+  z-index: -1;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 240ms ease;
+}
+
+.connecting-dots[data-shown] {
+  opacity: 1;
+}
+
+/* The thread composer is a stacking context only while it holds the dots; the other hosts always are. */
+.composer:has(> .connecting-dots) {
+  isolation: isolate;
+}
+
+@starting-style {
+  .connecting-dots[data-shown]:not([data-instant]) {
+    opacity: 0;
+  }
+}
+
+.connecting-dots::before,
+.connecting-dots-wave {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle at center, rgb(var(--accent-rgb)) 0 1.1px, transparent 1.7px);
+  background-size: var(--connecting-dot-pitch) var(--connecting-dot-pitch);
+  background-position: 3px 3px;
+}
+
+.connecting-dots::before {
+  opacity: var(--connecting-dots-still);
+}
+
+.connecting-dots-wave {
+  opacity: var(--connecting-dots-lit);
+  mask-image:
+    linear-gradient(90deg, transparent 20%, rgba(0, 0, 0, 0.85) 50%, transparent 80%),
+    linear-gradient(90deg, transparent 25%, rgba(0, 0, 0, 0.5) 50%, transparent 75%);
+  mask-size: 400px 100%, 600px 100%;
+  mask-repeat: repeat-x;
+  mask-position: 0 0, 0 0;
+  /* 40 steps, about 15 a second; the first band moves one dot column a step. */
+  animation: connecting-dots-travel 2.6s steps(40) infinite;
+}
+
+@keyframes connecting-dots-travel {
+  from { mask-position: 0 0, 0 0; }
+  to { mask-position: 400px 0, -600px 0; }
+}
+
+.connecting-dots[data-rest] .connecting-dots-wave {
+  animation-play-state: paused;
+}
+
+[data-motion='off'] .connecting-dots-wave {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connecting-dots-wave {
+    animation: none;
+  }
+}
+
+html[data-theme='light'] .connecting-dots {
+  --connecting-dots-still: 0.14;
+  --connecting-dots-lit: 0.85;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .connecting-dots {
+    --connecting-dots-still: 0.14;
+    --connecting-dots-lit: 0.85;
+  }
+}
+
+/* High contrast keeps the composer plain: the still grid only, so nothing moves behind the text. */
+html[data-theme='high-contrast'] .connecting-dots-wave {
+  display: none;
+}
+
+/* The composer while connecting: its toolbar row keeps its place (the composer does not change height) with its
+   controls faded out, and says Connecting… there once the box holds a draft (the placeholder says it otherwise). */
+.composer-footer > .composer-footer-left,
+.composer-footer > .composer-footer-right {
+  transition: opacity 240ms ease;
+}
+
+.composer-footer[data-connecting] {
+  position: relative;
+}
+
+.composer-footer[data-connecting] > .composer-footer-left,
+.composer-footer[data-connecting] > .composer-footer-right {
+  opacity: 0;
+}
+
+.composer-connecting-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: inherit;
+  padding-left: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 20px;
+  pointer-events: none;
+}

@@ -8,7 +8,7 @@ import { cn } from "./utils/cn";
 import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
 import { codeBlockPre } from "./code-block";
-import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
+import { classifyLink, inlineCodeFileHref, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 import { LinkLabel, threadLinkLabel } from "./link-label-view";
 import { ThreadChip } from "../../../components/ThreadChip";
 import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
@@ -41,11 +41,22 @@ function collapseLooseListGaps(text: string): string {
 /** Preserve fenced code exactly while normalizing prose and list whitespace. */
 const MOUSSE_FILE_MARKER = "/__mousse_file_open__?";
 const MOUSSE_THREAD_MARKER = "/__mousse_thread__/";
+const LOCAL_FILE_MARKER = "/__mousse_local_file__?";
 
-/** The `mousse-file:` or `mousse://thread/` address a link's marker stands for (see `normalizeMarkdown`). */
+/**
+ * The address a link's marker stands for: `mousse-file:` or `mousse://thread/` (see `normalizeMarkdown`), or a local
+ * file link as written (see `markFileLinks`).
+ */
 export function restoreMousseHref(href: string): string {
   if (href.startsWith(MOUSSE_FILE_MARKER)) return `mousse-file://open?${href.slice(MOUSSE_FILE_MARKER.length)}`;
   if (href.startsWith(MOUSSE_THREAD_MARKER)) return `${THREAD_LINK_PREFIX}${href.slice(MOUSSE_THREAD_MARKER.length)}`;
+  if (href.startsWith(LOCAL_FILE_MARKER)) {
+    try {
+      return decodeURIComponent(href.slice(LOCAL_FILE_MARKER.length));
+    } catch {
+      return "";
+    }
+  }
   return href;
 }
 
@@ -542,6 +553,51 @@ function markImageSources(node: Root | Element): void {
 /** Runs after raw HTML is parsed and before it is sanitized, so HTML images are marked like Markdown ones. */
 const markImages = () => markImageSources;
 
+/** A link to a file of this computer: a relative or absolute path, a Windows path, or a local `file:` URL. */
+function isLocalFileHref(href: string): boolean {
+  return !href.startsWith("/__mousse_") && !href.startsWith("#") && classifyLink(href).kind === "relative-file";
+}
+
+function inlineCodeText(node: Element): string | null {
+  if (node.tagName !== "code" || node.properties.className !== undefined) return null;
+  if (node.children.length !== 1) return null;
+  const sole = node.children[0];
+  return sole && sole.type === "text" ? sole.value : null;
+}
+
+function markFileLinksIn(node: Root | Element): void {
+  for (let index = 0; index < node.children.length; index += 1) {
+    const child = node.children[index];
+    if (!child || child.type !== "element") continue;
+    // Fenced code blocks stay verbatim; inline code inside an existing link is never double-wrapped.
+    if (child.tagName === "pre") continue;
+    if (child.tagName === "a") {
+      const href = child.properties.href;
+      if (typeof href === "string" && isLocalFileHref(href)) child.properties.href = `${LOCAL_FILE_MARKER}${encodeURIComponent(href)}`;
+      continue;
+    }
+    const text = inlineCodeText(child);
+    const fileHref = text !== null ? inlineCodeFileHref(text) : null;
+    if (fileHref !== null) {
+      node.children[index] = {
+        type: "element",
+        tagName: "a",
+        properties: { href: `${LOCAL_FILE_MARKER}${encodeURIComponent(fileHref)}` },
+        children: [child],
+      };
+      continue;
+    }
+    markFileLinksIn(child);
+  }
+}
+
+/**
+ * The URL hardening blocks a relative path or a `file:` URL ("[blocked]") and resolves `./a.ts` to `/a.ts`, and the
+ * sanitizer drops a Windows path. Run after raw HTML is parsed and before both, a local file link (Markdown or HTML) is
+ * carried through as a same-origin marker, which both keep as written and the anchor restores (`restoreMousseHref`).
+ */
+const markFileLinks = () => markFileLinksIn;
+
 type RawNode = { type: "raw"; value: string };
 type TextNode = { type: "text"; value: string };
 
@@ -579,8 +635,8 @@ function showUnknownTags(node: { children?: unknown[] }): void {
  * is parsed, each tag the sanitizer would drop becomes plain text. Code is never raw HTML, so it is untouched.
  */
 const literalTags = () => showUnknownTags;
-const threadPlugins = [literalTags, defaultRehypePlugins.raw!, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
-const imageRulePlugins = [literalTags, defaultRehypePlugins.raw!, markImages, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
+const threadPlugins = [literalTags, defaultRehypePlugins.raw!, markFileLinks, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
+const imageRulePlugins = [literalTags, defaultRehypePlugins.raw!, markImages, markFileLinks, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
 
 /** Elements whose text stays as it is: code (highlighted whole), links and chips (drawn from their text), math, SVG. */
 const UNWRAPPED_TAGS = new Set(["pre", "code", "a", "svg", "math", "script", "style", "kbd"]);

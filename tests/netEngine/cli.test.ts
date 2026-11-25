@@ -48,7 +48,8 @@ describe('net-engine command lines', () => {
     [['devices'], { kind: 'devices' }],
     [['invite'], { kind: 'invite', link: false }],
     [['invite', '--link'], { kind: 'invite', link: true }],
-    [['join', LINK, '--yes'], { kind: 'join', ticket: LINK, yes: true }],
+    [['join', LINK, '--yes'], { kind: 'join', ticket: LINK, yes: true, both: false }],
+    [['join', '--both', LINK], { kind: 'join', ticket: LINK, yes: false, both: true }],
     [['remove', 'Studio'], { kind: 'remove', device: 'Studio' }],
     [['addresses', 'Studio', 'tcp://203.0.113.7:7443', 'ssh://me@box'], { kind: 'addresses', device: 'Studio', routes: ['tcp://203.0.113.7:7443', 'ssh://me@box'] }],
     [['addresses', 'Studio'], { kind: 'addresses', device: 'Studio', routes: [] }],
@@ -125,7 +126,7 @@ describe('net-engine through a profile\'s local methods', () => {
     const inviting = executeNetEngineCommand({ kind: 'invite', link: false }, cli(owner), term.io)
     await eventually(() => expect(term.emitted).toHaveLength(1))
     const { uri } = term.emitted[0]!.value
-    // The other computer scans it with Add device.
+    // The other computer scans it with Use another computer.
     const joined = await caller.dispatch('netEngine.join', { ticket: uri }, true)
     expect(await inviting).toBe(0)
     expect(term.asked).toEqual([expect.stringMatching(/^Is caller computer .* next to you\?/)])
@@ -275,15 +276,26 @@ describe('net-engine join of a Send link', () => {
   it('lists the destinations, asks before dialling, and sends only the code typed at the terminal', async () => {
     const { client, calls } = service('123456')
     const term = terminal(['y', '111 111', '12345', '123 456'])
-    expect(await executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false }, client, term.io)).toBe(0)
+    expect(await executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false, both: false }, client, term.io)).toBe(0)
     // The destinations are the service's, by class, as the join dialog lists them.
     expect(term.said[0]).toMatch(/192\.168\.1\.5:7000 \(lan\).*100\.101\.1\.2:7000 \(tailnet\)/s)
+    // One way unless asked for both, and the question says so.
+    expect(term.said[0]).toMatch(/One way: it won't be able to use this computer\./)
     const join = calls.find(([method]) => method === 'netEngine.join')![1]
-    expect(join).toEqual({ ticket: LINK, arrival: 'link' })
+    expect(join).toEqual({ ticket: LINK, arrival: 'link', back: false })
     // The five-digit one never left the terminal.
     expect(calls.filter(([method]) => method === 'netEngine.join.code').map(([, p]) => p.code)).toEqual(['111111', '123456'])
     expect(term.said.some((line) => /didn't work/.test(line))).toBe(true)
-    expect(term.emitted[0]!.text).toMatch(/Paired with Studio/)
+    expect(term.emitted[0]!.text).toMatch(/Paired with Studio, one way/)
+  })
+
+  it('pairs both ways with --both, and says so before and after', async () => {
+    const { client, calls } = service('123456')
+    const term = terminal(['y', '123456'])
+    expect(await executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false, both: true }, client, term.io)).toBe(0)
+    expect(term.said[0]).toMatch(/It will also be able to use this computer\./)
+    expect(calls.find(([method]) => method === 'netEngine.join')![1]).toEqual({ ticket: LINK, arrival: 'link', back: true })
+    expect(term.emitted[0]!.text).toMatch(/Paired with Studio\. The other direction finishes on its own\./)
   })
 
   it('a join that fails while the code question waits ends the question and the command', async () => {
@@ -297,7 +309,7 @@ describe('net-engine join of a Send link', () => {
       setImmediate(() => fail(new Error('join_refused')))
       return new Promise((resolve) => signal?.addEventListener('abort', () => resolve(undefined), { once: true }))
     }
-    await expect(executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false }, client, term.io)).rejects.toThrow(
+    await expect(executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false, both: false }, client, term.io)).rejects.toThrow(
       /join_refused/
     )
     expect(term.asked.some((question) => /code/.test(question))).toBe(true)
@@ -305,12 +317,12 @@ describe('net-engine join of a Send link', () => {
 
   it('a No sends nothing; without a terminal nothing is asked or sent, --yes included', async () => {
     const no = service('123456')
-    expect(await executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false }, no.client, terminal(['n']).io)).toBe(1)
+    expect(await executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false, both: false }, no.client, terminal(['n']).io)).toBe(1)
     // Only the preview was read: nothing was dialled.
     expect(no.calls.map(([method]) => method)).toEqual(['netEngine.join.preview'])
     for (const yes of [false, true]) {
       const piped = service('123456')
-      await expect(executeNetEngineCommand({ kind: 'join', ticket: LINK, yes }, piped.client, terminal(['y', '123456'], false).io)).rejects.toThrow(
+      await expect(executeNetEngineCommand({ kind: 'join', ticket: LINK, yes, both: false }, piped.client, terminal(['y', '123456'], false).io)).rejects.toThrow(
         /terminal/
       )
       expect(piped.calls).toEqual([])

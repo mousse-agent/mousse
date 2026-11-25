@@ -96,7 +96,10 @@ describe('chat references', () => {
       kind: 'relative-file', path: 'C:\\repo\\src\\a.ts', line: 42, column: 7
     })
     expect(classifyLink('src/a.ts#L9C2')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: 2 })
+    expect(classifyLink('src/a.ts#L9-L20')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: undefined })
+    expect(classifyLink('src/a.ts#L9C2-L20C8')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: 2 })
     expect(classifyLink('src/a.ts:9:2')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: 2 })
+    expect(classifyLink('src/a.ts:9-20')).toEqual({ kind: 'relative-file', path: 'src/a.ts', line: 9, column: undefined })
     expect(classifyLink('/repo/src/a.ts:9')).toEqual({ kind: 'relative-file', path: '/repo/src/a.ts', line: 9, column: undefined })
   })
 
@@ -104,7 +107,10 @@ describe('chat references', () => {
     expect(classifyLink('https://example.com/docs').kind).toBe('web')
     expect(classifyLink('javascript:alert(1)').kind).toBe('reject')
     expect(classifyLink('data:text/html,bad').kind).toBe('reject')
-    expect(classifyLink('file:///etc/passwd').kind).toBe('reject')
+    // A file URL opens like its path, only on this computer: another host would be reached when opened.
+    expect(classifyLink('file:///repo/a.ts')).toEqual({ kind: 'relative-file', path: '/repo/a.ts' })
+    expect(classifyLink('file://server/share/a.ts').kind).toBe('reject')
+    expect(classifyLink('file:////server/share/a.ts').kind).toBe('reject')
     expect(safeMarkdownUrl('mousse-file://open?path=src%2Fa.ts&line=2')).toBe('mousse-file://open?path=src%2Fa.ts&line=2')
     expect(safeMarkdownUrl('javascript:alert(1)')).toBe('')
   })

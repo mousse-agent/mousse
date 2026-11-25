@@ -689,6 +689,12 @@ html[data-theme='light'] .chat-user-bubble {
   font-feature-settings: "liga" 0, "calt" 0;
 }
 
+/* Inline code inside a link (including linkified file paths) keeps the link colour so it reads as clickable. */
+.an-markdown .an-md-link .an-md-code {
+  color: inherit;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
 /* A nested list lives inside its parent item: the item gap above it, no
    paragraph rhythm. Block margins on top of line-box half-leading read as a
    phantom blank line between every parent bullet and its nested group. */

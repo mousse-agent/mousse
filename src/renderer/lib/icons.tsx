@@ -28,6 +28,7 @@ import ArrowUpDoubleIcon from '@hugeicons/core-free-icons/ArrowUpDoubleIcon'
 import ArrowUpRight01Icon from '@hugeicons/core-free-icons/ArrowUpRight01Icon'
 import CircleArrowUp02Icon from '@hugeicons/core-free-icons/CircleArrowUp02Icon'
 import AtIcon from '@hugeicons/core-free-icons/AtIcon'
+import Key01Icon from '@hugeicons/core-free-icons/Key01Icon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
 import Brain01Icon from '@hugeicons/core-free-icons/Brain01Icon'
@@ -285,6 +286,7 @@ export const Unlink = /* @__PURE__ */ createIcon('Unlink', Unlink01Icon)
 export const ListTree = /* @__PURE__ */ createIcon('ListTree', Structure01Icon)
 export const Loader2 = /* @__PURE__ */ createIcon('Loader2', Loading03Icon)
 export const Lock = /* @__PURE__ */ createIcon('Lock', SquareLock01Icon)
+export const KeyRound = /* @__PURE__ */ createIcon('KeyRound', Key01Icon)
 export const MessageSquare = /* @__PURE__ */ createIcon('MessageSquare', BubbleChatIcon)
 export const MessageSquarePlus = /* @__PURE__ */ createIcon('MessageSquarePlus', BubbleChatAddIcon)
 export const MessagesSquare = /* @__PURE__ */ createIcon('MessagesSquare', MessageMultiple01Icon)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
 import type {
   NetEngineDevice,
@@ -9,6 +9,7 @@ import type {
 import { relayText, routeText } from '../../../shared/netEngine/routes'
 import type { PlatformRequestMethod } from '../../../shared/platform'
 import type { SshRecordView } from '../../../shared/net/local'
+import type { AccessPresetFields } from '../../../shared/net/accessPresets'
 import { refreshComputers, useComputers } from '../../lib/computers'
 import {
   canWorkOnThreads,
@@ -35,15 +36,24 @@ import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { MousseIdAccount } from '../MousseIdAccount'
 import { AddPhoneDialog, EnrollmentRequestRow, useEnrollmentRequests } from '../MousseIdSection'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { Modal } from '../ui/Modal'
 import { AccessPanel } from './AccessPanel'
-import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
+import { AllowPrompt } from './AllowPrompt'
 import { EnginePlusGroup } from './EnginePlusGroup'
+import { LetDeviceInDialog, type LetDeviceInStart } from './LetDeviceInDialog'
+import { UseComputerDialog } from './UseComputerDialog'
+import { hasFeatures } from './ways'
 import { hostLabel, removalText, removalTitle } from './plusRows'
 import {
+  askedLine,
   engineAddresses,
-  engineRow,
+  engineSideRow,
+  engineSides,
+  engineWay,
   engineWhere,
+  otherWayItem,
+  type EngineSide,
   relayLimitDetail,
   relayLimitLine,
   relayOfferLine,
@@ -67,38 +77,12 @@ import {
 } from './legacyRows'
 import { LegacyAddonRows, legacyAddonsOn, LegacyRelayRows, legacyRelaysSet, LegacyServeRow } from './LegacyRelayRows'
 import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
+import { useEngineStatus } from './useEngineStatus'
 import { CodeEntry } from './SendLinkParts'
 import { ReachSection } from './ReachSection'
 import { RoutesPanel } from './RoutesPanel'
 import '../../styles/devices.css'
 import './engine.css'
-
-/** Reads `netEngine.status` for this window's profile, again whenever the daemon says it changed. */
-export function useEngineStatus(): {
-  status: NetEngineStatus | undefined
-  read: () => void
-} {
-  const profileId = useAppStore((state) => state.profileId)
-  const [status, setStatus] = useState<NetEngineStatus>()
-  const read = useCallback(() => {
-    const profile = useAppStore.getState().profileId
-    void window.mousse.platformRequest
-      .request<NetEngineStatus>('netEngine.status', {})
-      .then((value) => {
-        if (useAppStore.getState().profileId === profile) setStatus(value)
-      })
-      .catch(() => undefined)
-  }, [])
-  useEffect(() => {
-    setStatus(undefined)
-    read()
-    const off = window.mousse?.netEngine?.onChanged?.((change) => {
-      if (!change.profileId || change.profileId === useAppStore.getState().profileId) read()
-    })
-    return () => off?.()
-  }, [profileId, read])
-  return { status, read }
-}
 
 /** What the group says under its title while networking is not simply on. */
 function helperLine(status: NetEngineStatus): string | undefined {
@@ -123,6 +107,8 @@ function orList(names: string[]): string {
 
 type RowView = {
   key: string
+  node: string
+  side: EngineSide
   name: string
   icon: ReactNode
   line: string
@@ -138,10 +124,14 @@ type RowView = {
   quiet?: boolean
 }
 
+/** A row's key: one per direction, so a pairing both ways has a row in each list. */
+const sideKey = (node: string, side: EngineSide): string => `${node}:${side}`
+
 /**
- * Settings → Devices (design §7): one Networking switch, one list of my devices, what this computer shares, and
- * how other computers reach it. Engine pairings and the old networking's devices (paired before the engine, and
- * phones) sit in the same list and open the same Access panel.
+ * Settings → Devices (design §7): one Networking switch and two lists, the computers this one uses and the devices
+ * that can use it, then what this computer shares and how other computers reach it. Each direction of a pairing is
+ * its own row; a pairing both ways shows in both lists. The old networking's devices (paired before the engine, and
+ * phones) sit in the same lists and open the same Access panel.
  */
 export function EngineDevicesSection() {
   const { status, read } = useEngineStatus()
@@ -152,11 +142,18 @@ export function EngineDevicesSection() {
   const { devices: nodes } = useComputers(!!status?.on || v1Ready)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [adding, setAdding] = useState<'choose' | 'link' | 'cloudflare'>()
+  // Which add dialog is open: `in`, Let a device in; `out`, Use another computer.
+  const [adding, setAdding] = useState<EngineSide>()
+  // Where Let a device in opens when Reach this computer opened it: the tunnel's setup, or a link over it.
+  const [letInFrom, setLetInFrom] = useState<LetDeviceInStart>()
+  const letIn = (from: LetDeviceInStart) => {
+    setLetInFrom(from)
+    setAdding('in')
+  }
   const [addingPhone, setAddingPhone] = useState(false)
   const [selected, setSelected] = useState<string>()
   const [picked, setPicked] = useState<string>()
-  const [removing, setRemoving] = useState<NetEngineDevice>()
+  const [removing, setRemoving] = useState<{ device: NetEngineDevice; side: EngineSide }>()
   const [revoking, setRevoking] = useState<Device>()
   const [limits, setLimits] = useState<Device>()
   const [granting, setGranting] = useState<Device>()
@@ -168,6 +165,8 @@ export function EngineDevicesSection() {
     name: string
   }>()
   const [everywhere, setEverywhere] = useState<NetEngineDevice>()
+  // "Let <name> use this computer…": the Allow prompt for a computer this one uses.
+  const [letting, setLetting] = useState<NetEngineDevice>()
   // A `mousse://pair` link that opened Mousse opens Scan or paste with it.
   const offered = useOfferedPairLink()
   const [linkToEnter, setLinkToEnter] = useState<string>()
@@ -183,7 +182,7 @@ export function EngineDevicesSection() {
       const node = takePendingDevice()
       if (node) {
         setPicked(node)
-        setSelected(node)
+        setSelected(sideKey(node, 'in'))
       }
     }
     pick()
@@ -192,7 +191,11 @@ export function EngineDevicesSection() {
   }, [])
   useEffect(() => {
     if (!picked) return
-    document.querySelector(`[data-device-node="${picked}"]`)?.scrollIntoView?.({ block: 'center' })
+    // Its Can use row, where its access is; else its other row.
+    ;(
+      document.querySelector(`[data-device-node="${picked}"][data-device-side="in"]`) ??
+      document.querySelector(`[data-device-node="${picked}"]`)
+    )?.scrollIntoView?.({ block: 'center' })
     const timer = window.setTimeout(() => setPicked(undefined), 4000)
     return () => window.clearTimeout(timer)
   }, [picked, status, legacy.devices.length])
@@ -248,29 +251,55 @@ export function EngineDevicesSection() {
     if (status?.enabled) await action('netEngine.disable', {})
     if (v1On) await action('net.disable', {})
   }
-  // Add device turns networking on first; nothing listens until then.
-  const addDevice = async () => {
-    if (status && !status.enabled && !notInBuild) await action('netEngine.enable', {})
-    setAdding('choose')
+  // Adding turns networking on first; nothing listens until then.
+  const addDevice = async (side: EngineSide) => {
+    if (notInBuild) {
+      // Without the helper, Let a device in is Add a phone alone.
+      if (side === 'in') setAddingPhone(true)
+      return
+    }
+    if (status && !status.enabled) await action('netEngine.enable', {})
+    setLetInFrom(undefined)
+    setAdding(side)
   }
   const canAddPhone = mousseId && !phoneBlocked
-  const canAdd = !notInBuild || canAddPhone
+  const canUse = !notInBuild
+  const canLetIn = !notInBuild || canAddPhone
+  // Ending one direction of a pairing both ways needs the helper's local revoke; without it Remove ends both.
+  const oneDirection = (device: NetEngineDevice, side: EngineSide): boolean =>
+    engineSides(device).length === 2 && (side === 'out' || hasFeatures(status, 'grant-revoke-local'))
 
-  const toggle = (node: string) => setSelected((current) => (current === node ? undefined : node))
-  const accessItem = (node: string): RowMenuItem => ({
-    label: selected === node ? 'Hide access' : 'Access',
-    action: 'device-access',
-    onSelect: () => toggle(node)
-  })
+  const toggle = (key: string) => setSelected((current) => (current === key ? undefined : key))
+  const accessItem = (node: string): RowMenuItem => {
+    const key = sideKey(node, 'in')
+    return {
+      label: selected === key ? 'Hide access' : 'Access',
+      action: 'device-access',
+      onSelect: () => toggle(key)
+    }
+  }
 
-  const engineView = (device: NetEngineDevice): RowView => {
-    const view = engineRow(device)
+  const engineView = (device: NetEngineDevice, side: EngineSide): RowView => {
+    const view = engineSideRow(device, side)
+    const key = sideKey(device.node, side)
     const node = nodes.find((item) => item.node === device.node)
     const connected = view.line === 'Connected'
     const relay = device.relay
+    // Remove on all my hosts goes with the device's use of computers: its Can use row, else its only row.
+    const everywhereItem: RowMenuItem[] =
+      status?.identity && (side === 'in' || !engineSides(device).includes('in'))
+        ? [
+            {
+              label: 'Remove on all my hosts…',
+              danger: true,
+              action: 'engine-remove-everywhere',
+              onSelect: () => setEverywhere(device)
+            }
+          ]
+        : []
     // An allowed relay route can be taken back from the row (Phase 3 §B.11), before Remove.
     const relayItems: RowMenuItem[] =
-      device.state === 'removing'
+      side === 'in' || device.state === 'removing'
         ? []
         : (relay?.allowed ?? []).map((destination) => ({
             label: `Stop using relay ${relayText(destination)}`,
@@ -282,7 +311,14 @@ export function EngineDevicesSection() {
       kind === 'access'
         ? [accessItem(device.node)]
         : kind === 'address'
-          ? []
+          ? [
+              // Its routes show in the open row.
+              {
+                label: selected === key ? 'Hide routes' : 'Routes',
+                action: 'device-routes',
+                onSelect: () => toggle(key)
+              }
+            ]
           : kind === 'retry'
             ? [
                 {
@@ -293,29 +329,44 @@ export function EngineDevicesSection() {
               ]
             : [
                 ...relayItems,
-                ...(status?.identity
-                  ? [
-                      {
-                        label: 'Remove on all my hosts…',
-                        danger: true,
-                        action: 'engine-remove-everywhere',
-                        onSelect: () => setEverywhere(device)
-                      }
-                    ]
-                  : []),
-                { label: 'Remove…', danger: true, action: 'engine-remove', onSelect: () => setRemoving(device) }
+                ...everywhereItem,
+                {
+                  label: 'Remove…',
+                  danger: true,
+                  action: 'engine-remove',
+                  onSelect: () => setRemoving({ device, side })
+                }
               ]
     )
     if (!view.actions.includes('remove')) items.push(...relayItems)
-    // Its routes show in the open row; a device with no Access panel opens for them alone.
-    if (!view.actions.includes('access'))
+    // The missing direction of a pairing made one way comes first.
+    const other = otherWayItem(device, side)
+    if (other)
       items.unshift({
-        label: selected === device.node ? 'Hide routes' : 'Routes',
-        action: 'device-routes',
-        onSelect: () => toggle(device.node)
+        ...other,
+        action: 'engine-other-way',
+        onSelect: () =>
+          side === 'in'
+            ? void action('netEngine.access.ask', { node: device.node })
+            : setLetting(device)
       })
+    // Its routes stay at hand on a row with a problem, where a fixed address is often the fix.
+    if (side === 'out' && !view.actions.includes('address') && device.state !== 'removing')
+      items.unshift({
+        label: selected === key ? 'Hide routes' : 'Routes',
+        action: 'device-routes',
+        onSelect: () => toggle(key)
+      })
+    // The level holds whatever the old networking says of its connection: one way, this computer never dials it,
+    // and the row's own state already says whether it is connected.
+    const access =
+      side === 'in' && !view.warn && node
+        ? accessShort({ ...node, connection: undefined }, { workOnThreads: true, shareBots: true })
+        : undefined
     return {
-      key: device.node,
+      key,
+      node: device.node,
+      side,
       name: device.name,
       icon: <Laptop size={16} />,
       line: view.line,
@@ -323,38 +374,39 @@ export function EngineDevicesSection() {
       warn: view.warn,
       how: connected ? engineWhere(device) : undefined,
       howDetail: engineAddresses(device),
-      access: view.warn ? undefined : accessShort(node, { workOnThreads: true, shareBots: true }),
-      extra: (
-        <>
-          {relay?.stale && (
-            <>
-              {' · '}
-              <span className="settings-muted" title={RELAY_STALE_DETAIL(device.name)}>
-                {RELAY_STALE_LINE}
-              </span>
-            </>
-          )}
-          {relay?.limit && (
-            <>
-              {' · '}
-              <span className="settings-muted" title={relayLimitDetail(relay.limit.callersMax)}>
-                {relayLimitLine(relay.limit.callersMax)}
-              </span>
-            </>
-          )}
-        </>
-      ),
+      access,
+      extra:
+        side === 'out' ? (
+          <>
+            {relay?.stale && (
+              <>
+                {' · '}
+                <span className="settings-muted" title={RELAY_STALE_DETAIL(device.name)}>
+                  {RELAY_STALE_LINE}
+                </span>
+              </>
+            )}
+            {relay?.limit && (
+              <>
+                {' · '}
+                <span className="settings-muted" title={relayLimitDetail(relay.limit.callersMax)}>
+                  {relayLimitLine(relay.limit.callersMax)}
+                </span>
+              </>
+            )}
+          </>
+        ) : undefined,
       items
     }
   }
 
-  const legacyView = (device: Device): RowView => {
+  const legacyView = (device: Device, side: EngineSide): RowView => {
     const record = sshRecordFor(device, legacy.ssh)
     const state = legacyLine(device, now, { signedOut })
     const step = connectStep(device)
     const items: RowMenuItem[] = [
-      ...(device.policy ? [accessItem(device.node)] : []),
-      ...(step && 'connect' in step
+      ...(side === 'in' && device.policy ? [accessItem(device.node)] : []),
+      ...(side === 'out' && step && 'connect' in step
         ? [
             {
               label: 'Connect',
@@ -363,7 +415,7 @@ export function EngineDevicesSection() {
             }
           ]
         : []),
-      ...(record?.owner === 'managed'
+      ...(side === 'out' && record?.owner === 'managed'
         ? [
             {
               label: 'Update…',
@@ -372,7 +424,7 @@ export function EngineDevicesSection() {
             }
           ]
         : []),
-      ...(record
+      ...(side === 'out' && record
         ? [
             {
               label: 'Undo setup…',
@@ -386,13 +438,15 @@ export function EngineDevicesSection() {
         : [])
     ]
     return {
-      key: device.node,
+      key: sideKey(device.node, side),
+      node: device.node,
+      side,
       name: device.name,
       icon: device.kind === 'phone' ? <Smartphone size={16} /> : <Laptop size={16} />,
       line: state.line,
       detail: state.detail,
       warn: state.warn,
-      access: state.warn ? undefined : accessShort(device, switches),
+      access: side === 'in' && !state.warn ? accessShort(device, switches) : undefined,
       items,
       // Signed out, devices that are not nearby are quiet.
       quiet: signedOut && device.state !== 'open'
@@ -404,15 +458,21 @@ export function EngineDevicesSection() {
     return (
       <SettingsRow
         key={view.key}
-        data-device-node={view.key}
-        className={[open ? 'engine-row-selected' : '', picked === view.key ? 'devices-row-picked' : '']
+        data-device-node={view.node}
+        data-device-side={view.side}
+        className={[
+          open ? 'engine-row-selected' : '',
+          picked === view.node && (view.side === 'in' || !rowSides.get(view.node)?.has('in')) ? 'devices-row-picked' : ''
+        ]
           .filter(Boolean)
           .join(' ') || undefined}
         disabled={view.quiet}
         leading={view.icon}
         title={idTip ? <span title={idTip}>{view.name}</span> : view.name}
         description={
+          // Can use: level · state · how. Computers I use: state · how.
           <span className="engine-row-line">
+            {view.access && <>{view.access}{' · '}</>}
             <span className={view.warn ? 'settings-status-warn' : undefined} title={view.detail}>
               {view.line}
             </span>
@@ -422,7 +482,6 @@ export function EngineDevicesSection() {
                 <span title={view.howDetail}>{view.how}</span>
               </>
             )}
-            {view.access && <>{' · '}{view.access}</>}
             {view.extra}
           </span>
         }
@@ -438,11 +497,35 @@ export function EngineDevicesSection() {
   const block = (node: string) => (blocked: boolean) => void action('bridge.policy', { node, blocked })
 
   const engineDevices = status?.on ? status.devices : []
-  const engineRows = engineDevices.flatMap((device) => {
-    const view = engineView(device)
-    const node = nodes.find((item) => item.node === device.node)
+  const engineNodes = new Set(engineDevices.map((device) => device.node))
+  const oldDevices = legacyListed(legacy.devices).filter((device) => !engineNodes.has(device.node))
+  // The old networking pairs computers both ways; a phone only uses this computer.
+  const oldSides = (device: Device): EngineSide[] => (device.kind === 'phone' ? ['in'] : ['out', 'in'])
+  const rowSides = new Map<string, Set<EngineSide>>([
+    ...engineDevices.map((device) => [device.node, new Set(engineSides(device))] as const),
+    ...oldDevices.map((device) => [device.node, new Set(oldSides(device))] as const)
+  ])
+
+  // Computers I use: this computer's direction, with its routes, relay offers and Retry.
+  const engineOutRows = engineDevices.flatMap((device) => {
+    if (!engineSides(device).includes('out')) return []
+    const view = engineView(device, 'out')
     return [
       row(view, `Id ${device.shortId}`),
+      device.olderApp && (
+        <SettingsRow
+          key={`${device.node}-older`}
+          indent
+          title={
+            <span className="settings-status-warn">{device.name} runs an older Mousse</span>
+          }
+          description={
+            <span title={`Its own list keeps waiting for this computer. Update Mousse on ${device.name}, or remove it and connect again with “Also let ${device.name} use this computer” ticked.`}>
+              Update it, or connect again with “Also let” ticked.
+            </span>
+          }
+        />
+      ),
       !!device.offered?.length && (
         <SettingsRow
           key={`${device.node}-offered`}
@@ -498,7 +581,7 @@ export function EngineDevicesSection() {
           }
         />
       )),
-      selected === device.node && (
+      selected === view.key && (
         <RoutesPanel
           key={`${device.node}-routes`}
           device={device}
@@ -506,8 +589,51 @@ export function EngineDevicesSection() {
           action={action}
           onChanged={reloadAll}
         />
+      )
+    ]
+  })
+  // Can use this computer: its direction here, with its level and the Access panel.
+  const engineInRows = engineDevices.flatMap((device) => {
+    if (!engineSides(device).includes('in')) return []
+    const view = engineView(device, 'in')
+    const node = nodes.find((item) => item.node === device.node)
+    const asked = askedLine(device)
+    return [
+      row(view, `Id ${device.shortId}`),
+      asked && (
+        <SettingsRow
+          key={`${device.node}-asked`}
+          indent
+          leading={asked.waiting ? <DelayedLoader size="small" delayMs={0} label="Waiting" /> : undefined}
+          title={<span title={asked.detail}>{asked.line}</span>}
+          control={
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              title={asked.waiting ? 'Takes the request back.' : undefined}
+              onClick={() => void action('netEngine.access.cancel', { node: device.node })}
+            >
+              {asked.waiting ? 'Cancel' : 'Dismiss'}
+            </button>
+          }
+        />
       ),
-      selected === device.node && engineRow(device).actions.includes('access') && (
+      device.olderApp && device.direction === 'in' && (
+        <SettingsRow
+          key={`${device.node}-older`}
+          indent
+          title={
+            <span className="settings-status-warn">{device.name} runs an older Mousse</span>
+          }
+          description={
+            <span title={`It asks to be used from here as well, but only this computer decides that. To use ${device.name} from here, add it with Use another computer.`}>
+              To use it from here, add it from this computer.
+            </span>
+          }
+        />
+      ),
+      selected === view.key && engineSideRow(device, 'in').actions.includes('access') && (
         <AccessPanel
           key={`${device.node}-access`}
           name={device.name}
@@ -517,16 +643,17 @@ export function EngineDevicesSection() {
           onChanged={reloadAll}
           onLimits={() => node && setLimits(node)}
           onBlock={block(device.node)}
-          onRemove={() => setRemoving(device)}
+          onRemove={() => setRemoving({ device, side: 'in' })}
         />
       )
     ]
   })
-  const engineNodes = new Set(engineDevices.map((device) => device.node))
-  const oldDevices = legacyListed(legacy.devices).filter((device) => !engineNodes.has(device.node))
-  const oldRows = oldDevices.flatMap((device) => [
-    row(legacyView(device)),
-    selected === device.node && (
+  const oldOutRows = oldDevices
+    .filter((device) => oldSides(device).includes('out'))
+    .map((device) => row(legacyView(device, 'out')))
+  const oldInRows = oldDevices.flatMap((device) => [
+    row(legacyView(device, 'in')),
+    selected === sideKey(device.node, 'in') && (
       <AccessPanel
         key={`${device.node}-access`}
         name={device.name}
@@ -572,13 +699,16 @@ export function EngineDevicesSection() {
   const held = heldDevices(legacy.devices).filter(({ device }) => !notNow.includes(device.node))
   const unfinishedJoin = v1 && !v1.self ? v1.unfinishedJoin : undefined
   const unfinishedSsh = legacy.ssh.filter((record) => record.phase !== 'done' && !record.node)
-  const empty =
-    !engineRows.length &&
-    !oldRows.length &&
+  const removals = status?.on ? removalGroups(status.removals) : []
+  const removalAsks = status?.on ? (status.removalAsks ?? []) : []
+  const emptyOut = !engineOutRows.length && !oldOutRows.length && !unfinishedJoin && !unfinishedSsh.length
+  const emptyIn =
+    !engineInRows.length &&
+    !oldInRows.length &&
     !held.length &&
-    !unfinishedJoin &&
-    !unfinishedSsh.length &&
-    !enrollment.requests.length
+    !enrollment.requests.length &&
+    !removals.length &&
+    !removalAsks.length
 
   // This computer: what it shares with my other devices.
   const engineWorkHere = status?.workOnThreads !== undefined
@@ -634,8 +764,8 @@ export function EngineDevicesSection() {
 
       <SettingsGroup
         anchor="devices-list"
-        title="My devices"
-        icon={MonitorSmartphone}
+        title="Computers I use from here"
+        icon={Laptop}
         className="devices-group engine-group"
         description={
           status?.sharedAccount ? (
@@ -646,19 +776,17 @@ export function EngineDevicesSection() {
         }
         action={
           <span className="engine-group-actions">
-            {canAdd && (
-              // Search's "Add a phone" lands here: Add device has the phone under More ways.
-              <span data-settings-anchor="account-phones">
-                <button
-                  type="button"
-                  className="settings-btn"
-                  disabled={busy}
-                  onClick={() => void addDevice()}
-                >
-                  <Plus size={14} aria-hidden="true" />
-                  Add device
-                </button>
-              </span>
+            {canUse && (
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busy}
+                title="Paste its link, scan its code, or connect over SSH."
+                onClick={() => void addDevice('out')}
+              >
+                <Plus size={14} aria-hidden="true" />
+                Use another computer
+              </button>
             )}
             {(!notInBuild || switchOn) && (
               <Switch
@@ -701,6 +829,56 @@ export function EngineDevicesSection() {
             }
           />
         )}
+        {unfinishedJoin && (
+          <LegacyJoinRow
+            name={unfinishedJoin.name}
+            locked={locked}
+            busy={busy}
+            onRetry={(passphrase) => void action('net.join.retry', passphrase ? { passphrase } : {})}
+            onGiveUp={() => setGivingUp(true)}
+          />
+        )}
+        {engineOutRows}
+        {oldOutRows}
+        {unfinishedSsh.map((record) => (
+          <LegacyUnfinishedSshRow
+            key={record.id}
+            record={record}
+            busy={busy}
+            onUndo={() => setRecordDialog({ kind: 'undo', record, name: record.endpoint })}
+          />
+        ))}
+        {emptyOut && switchOn && <p className="settings-muted devices-note">None yet.</p>}
+        {error && (
+          <p role="alert" className="chat-error devices-error">
+            {error}
+          </p>
+        )}
+      </SettingsGroup>
+
+      <SettingsGroup
+        anchor="devices-can-use"
+        title="Can use this computer"
+        icon={MonitorSmartphone}
+        className="devices-group engine-group"
+        action={
+          canLetIn ? (
+            // Search's "Add a phone" lands here: Let a device in has the phone.
+            <span className="engine-group-actions" data-settings-anchor="account-phones">
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busy}
+                title="A code for your phone or another computer."
+                onClick={() => void addDevice('in')}
+              >
+                <Plus size={14} aria-hidden="true" />
+                Let a device in
+              </button>
+            </span>
+          ) : undefined
+        }
+      >
         {enrollment.requests.map((request) => (
           <EnrollmentRequestRow
             key={request.id}
@@ -726,27 +904,9 @@ export function EngineDevicesSection() {
             onRemove={() => setRevoking(device)}
           />
         ))}
-        {unfinishedJoin && (
-          <LegacyJoinRow
-            name={unfinishedJoin.name}
-            locked={locked}
-            busy={busy}
-            onRetry={(passphrase) => void action('net.join.retry', passphrase ? { passphrase } : {})}
-            onGiveUp={() => setGivingUp(true)}
-          />
-        )}
-        {engineRows}
-        {oldRows}
-        {unfinishedSsh.map((record) => (
-          <LegacyUnfinishedSshRow
-            key={record.id}
-            record={record}
-            busy={busy}
-            onUndo={() => setRecordDialog({ kind: 'undo', record, name: record.endpoint })}
-          />
-        ))}
-        {status?.on &&
-          status.removalAsks?.map((ask) => (
+        {engineInRows}
+        {oldInRows}
+        {removalAsks.map((ask) => (
             <p
               key={`${ask.host}-${ask.grant}`}
               className="settings-muted devices-note engine-ask"
@@ -787,8 +947,7 @@ export function EngineDevicesSection() {
               </button>
             </p>
           ))}
-        {status?.on &&
-          removalGroups(status.removals).map(([removed, items]) => {
+        {removals.map(([removed, items]) => {
             const title = removalTitle(items[0]!.name || removed.slice(0, 8), items)
             return (
               <SettingsRow
@@ -816,12 +975,7 @@ export function EngineDevicesSection() {
               />
             )
           })}
-        {empty && switchOn && <p className="settings-muted devices-note">No devices yet.</p>}
-        {error && (
-          <p role="alert" className="chat-error devices-error">
-            {error}
-          </p>
-        )}
+        {emptyIn && switchOn && <p className="settings-muted devices-note">No devices yet.</p>}
       </SettingsGroup>
 
       {thisComputer && (
@@ -863,8 +1017,8 @@ export function EngineDevicesSection() {
         <ReachSection
           status={status}
           onChanged={read}
-          onSendLink={() => setAdding('link')}
-          onCloudflareSetup={() => setAdding('cloudflare')}
+          onSendLink={() => letIn({ kind: 'link', way: 'tunnel' })}
+          onCloudflareSetup={() => letIn({ kind: 'tunnel' })}
           moreWays={
             oldWays ? (
               <>
@@ -881,10 +1035,10 @@ export function EngineDevicesSection() {
         <EditorSshSettings />
       </SettingsAdvanced>
 
-      {adding && (
-        <AddEngineDeviceDialog
+      {adding === 'in' && (
+        <LetDeviceInDialog
           status={status}
-          initial={adding}
+          initial={letInFrom}
           onAddPhone={
             canAddPhone
               ? () => {
@@ -893,15 +1047,26 @@ export function EngineDevicesSection() {
                 }
               : undefined
           }
+          onSetUp={() => {
+            // Reach this computer holds the settings each way needs.
+            setAdding(undefined)
+            window.setTimeout(
+              () =>
+                document
+                  .querySelector('[data-settings-anchor="devices-engine-reach"]')
+                  ?.scrollIntoView?.({ block: 'center' }),
+              0
+            )
+          }}
           onClose={() => setAdding(undefined)}
         />
       )}
+      {adding === 'out' && <UseComputerDialog status={status} onClose={() => setAdding(undefined)} />}
       {addingPhone && <AddPhoneDialog onClose={() => setAddingPhone(false)} />}
 
       {linkToEnter && !adding && (
-        <AddEngineDeviceDialog
+        <UseComputerDialog
           status={status}
-          initial="enter"
           initialLink={linkToEnter}
           onClose={() => setLinkToEnter(undefined)}
         />
@@ -923,6 +1088,35 @@ export function EngineDevicesSection() {
         })()}
 
 
+      {/* This owner lets a computer it uses in from its row. A computer's own ask is AccessAskHost's, app-wide. */}
+      {status?.on &&
+        !adding &&
+        letting &&
+        (() => {
+          const device = letting
+          const close = () => setLetting(undefined)
+          const answer = async (yes: boolean, access?: AccessPresetFields) => {
+            const done = yes ? await action('netEngine.access.let', { node: device.node, access }) : true
+            if (done) close()
+          }
+          return (
+            <Modal open hideTitle title={`Let ${device.name} use this computer?`} onClose={close}>
+              <AllowPrompt
+                key={`let-${device.node}`}
+                approval={device}
+                busy={busy}
+                line={`Connects over ${engineWay(device)}, already in use.`}
+                onAnswer={(yes, access) => void answer(yes, access)}
+              />
+              {error && (
+                <p role="alert" className="chat-error">
+                  {error}
+                </p>
+              )}
+            </Modal>
+          )
+        })()}
+
       {everywhere && (
         <RemoveEverywhereDialog
           device={everywhere}
@@ -935,32 +1129,19 @@ export function EngineDevicesSection() {
       )}
 
       {removing && (
-        <Modal open title={`Remove ${removing.name}?`} onClose={() => setRemoving(undefined)}>
-          <p
-            className="settings-muted"
-            title="Remove it on the other computer too, or it keeps trying to connect."
-          >
-            It can no longer use this computer.
-          </p>
-          <div className="devices-dialog-actions">
-            <button type="button" className="settings-btn" onClick={() => setRemoving(undefined)}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="settings-btn danger-fill"
-              disabled={busy}
-              onClick={() => {
-                const node = removing.node
-                setRemoving(undefined)
-                if (selected === node) setSelected(undefined)
-                void action('netEngine.remove', { node })
-              }}
-            >
-              Remove
-            </button>
-          </div>
-        </Modal>
+        <RemoveDialog
+          device={removing.device}
+          side={removing.side}
+          oneDirection={oneDirection(removing.device, removing.side)}
+          busy={busy}
+          onClose={() => setRemoving(undefined)}
+          onRemove={(direction) => {
+            const node = removing.device.node
+            setRemoving(undefined)
+            if (selected?.startsWith(`${node}:`)) setSelected(undefined)
+            void action('netEngine.remove', direction ? { node, direction } : { node })
+          }}
+        />
       )}
 
       {revoking && (
@@ -1069,6 +1250,63 @@ export function EngineDevicesSection() {
   )
 }
 
+
+/**
+ * Remove one row: on a pairing both ways, only that direction (the other row stays); otherwise the whole pairing.
+ * Where networking can't end one direction yet, it says Remove ends both.
+ */
+function RemoveDialog({
+  device,
+  side,
+  oneDirection,
+  busy,
+  onClose,
+  onRemove
+}: {
+  device: NetEngineDevice
+  side: EngineSide
+  oneDirection: boolean
+  busy: boolean
+  onClose: () => void
+  onRemove: (direction?: EngineSide) => void
+}) {
+  const both = engineSides(device).length === 2
+  const name = device.name
+  const title = !oneDirection
+    ? `Remove ${name}?`
+    : side === 'in'
+      ? `Stop ${name} using this computer?`
+      : `Stop using ${name}?`
+  const line = oneDirection
+    ? side === 'in'
+      ? `It can no longer use this computer. This computer still uses it.`
+      : `This computer stops using it. It can still use this computer.`
+    : both
+      ? 'Networking here can’t end one direction yet, so this removes both.'
+      : side === 'in'
+        ? 'It can no longer use this computer.'
+        : 'This computer no longer uses it.'
+  return (
+    <Modal open title={title} onClose={onClose}>
+      <p className="settings-muted" title="Remove it on the other computer too, or it keeps trying to connect.">
+        {line}
+      </p>
+      <div className="devices-dialog-actions">
+        <button type="button" className="settings-btn" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="settings-btn danger-fill"
+          disabled={busy}
+          onClick={() => onRemove(oneDirection ? side : undefined)}
+        >
+          Remove
+        </button>
+      </div>
+    </Modal>
+  )
+}
 
 /** Removals by the device removed, in the order they were made. */
 function removalGroups(

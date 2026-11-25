@@ -36,10 +36,10 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   let threadId = initialThreadId
 
   if (!threadId && !opts.privateChat) {
-    const list = await client.request<{ threads: { id: string; settledAt?: string }[] }>(
+    const list = await client.request<{ threads: { id: string; archivedAt?: string }[] }>(
       'threads.list'
     )
-    threadId = list.threads.find((t) => !t.settledAt)?.id ?? null
+    threadId = list.threads.find((t) => !t.archivedAt)?.id ?? null
   }
   if (!threadId) {
     const created = await client.request<{ thread: { id: string } }>('threads.create', {

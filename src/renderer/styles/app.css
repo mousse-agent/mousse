@@ -1876,7 +1876,7 @@ html[data-chat-width='full'] .chat {
   transition: background 0.12s;
 }
 
-.model-picker-row:hover,
+.model-picker-row:not([aria-disabled="true"]):hover,
 .model-picker-row.highlighted,
 .model-picker-row.active {
   background: var(--ui-hover);
@@ -1904,6 +1904,10 @@ html[data-chat-width='full'] .chat {
 
 .model-picker-row:is(:hover, .highlighted, .active, .selected) .model-picker-row-main {
   color: var(--text-primary);
+}
+
+.model-picker-row[aria-disabled="true"] .model-picker-row-main {
+  color: var(--text-secondary);
 }
 
 .model-picker-row-icon {
@@ -2402,6 +2406,7 @@ html[data-chat-width='full'] .chat {
 
 .composer-attachments-scroll {
   display: flex;
+  align-items: center;
   gap: 6px;
   overflow-x: auto;
   overflow-y: hidden;
@@ -2490,6 +2495,48 @@ html[data-chat-width='full'] .chat {
 }
 
 .composer-reference-link:hover { color: #93c5fd; text-decoration: underline; }
+
+/* Beside image thumbnails: a tile of their size, icon at the top, name at the foot, × in the corner. */
+.composer-attachment-pill.composer-reference-tile {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  max-width: none;
+  padding: 8px;
+  border-radius: 6px;
+  align-items: stretch;
+}
+
+.composer-reference-tile .composer-reference-link {
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.composer-reference-tile .composer-reference-link svg {
+  width: 16px;
+  height: 16px;
+  margin: 8px;
+}
+
+.composer-attachment-pill.composer-reference-tile .composer-reference-link span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.composer-reference-tile .composer-attachment-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
 
 /* Inline `@skill` token layer. The wrap stacks a click-through backdrop behind
  * the real textarea (same grid cell): the textarea keeps native text, caret,
@@ -2636,6 +2683,78 @@ html[data-chat-width='full'] .chat {
   left: 50%;
   transform: translate(-50%, -50%);
   color: var(--text-secondary);
+}
+
+/* A thread chip: a thread's link in the draft (lib/composerThreadChips.ts). Its icon and status dot sit in the token's
+ * blank slots; the hover tint and the remove mark follow the pointer over the text box (`data-hover`). */
+.composer-thread-chip {
+  padding: 2px 2px;
+  margin: 0 -2px;
+  border-radius: 6px;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.13);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.composer-thread-chip[data-hover] {
+  background: rgba(var(--accent-rgb), 0.22);
+}
+
+.composer-thread-chip[data-archived],
+.composer-thread-chip[data-status='missing'] {
+  color: var(--text-secondary);
+}
+
+.composer-input.composer-input-on-chip {
+  cursor: pointer;
+}
+
+.composer-chip-slot {
+  position: relative;
+}
+
+.composer-thread-chip-icon,
+.composer-thread-chip-remove,
+.composer-thread-chip-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.composer-thread-chip-icon {
+  color: currentColor;
+}
+
+.composer-thread-chip-computer {
+  color: var(--text-secondary);
+}
+
+.composer-thread-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-secondary) 70%, transparent);
+}
+
+.composer-thread-chip[data-status='working'] .composer-thread-chip-dot { background: var(--status-running); }
+.composer-thread-chip[data-status='waiting'] .composer-thread-chip-dot { background: var(--status-waiting); }
+.composer-thread-chip[data-status='approval'] .composer-thread-chip-dot,
+.composer-thread-chip[data-status='question'] .composer-thread-chip-dot,
+.composer-thread-chip[data-status='paused'] .composer-thread-chip-dot { background: var(--warning); }
+.composer-thread-chip[data-status='done'] .composer-thread-chip-dot { background: var(--status-done); }
+.composer-thread-chip[data-status='failed'] .composer-thread-chip-dot { background: var(--danger); }
+
+.composer-thread-chip-remove {
+  color: var(--text-secondary);
+  border-radius: 50%;
+}
+
+.composer-thread-chip[data-hover='close'] .composer-thread-chip-remove {
+  color: var(--text-primary);
+  background: rgba(var(--accent-rgb), 0.22);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.22);
 }
 
 /* A quote in a sent message: the reply icon and the quoted words, on a line of their own. */
@@ -5503,6 +5622,18 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 @keyframes composer-question-from-previous {
   from { opacity: 0; transform: translateX(-16px); }
   to { opacity: 1; transform: none; }
+}
+
+/* Read aloud sits at the header's end; after the dots when there are several questions. */
+.composer-question-modal-title + [data-read-aloud] {
+  margin-left: auto;
+}
+
+/* The question can be selected, to read part of it aloud or reply to it (the app root is not selectable). */
+.composer-question-prompt,
+.composer-question-reason {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .composer-question-prompt {

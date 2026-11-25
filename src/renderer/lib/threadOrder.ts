@@ -9,7 +9,7 @@ import { groupProjects } from './projectGroups'
  * Projects view: each project group in its list order with its threads, then the threads without a project.
  * A group holds the threads of a project and of the other computers' projects for the same repository, in
  * one sidebar order. Threads view: one list, in the order its rows were dragged into, threads started since
- * on top. Settled threads, empty drafts and subagent threads are not listed. `excluded` holds threads the
+ * on top. Archived threads, empty drafts and subagent threads are not listed. `excluded` holds threads the
  * sidebar leaves out because another list owns them (agent chats).
  */
 export function orderedThreadIds(input: {
@@ -21,7 +21,7 @@ export function orderedThreadIds(input: {
   arranged?: readonly string[]
 }): string[] {
   const started = visibleThreads(input.threads).filter(
-    (thread) => !thread.settledAt && isThreadStarted(thread) && !input.excluded?.has(thread.id)
+    (thread) => !thread.archivedAt && isThreadStarted(thread) && !input.excluded?.has(thread.id)
   )
   if (input.view !== 'projects') return sortThreadFeed(started, input.arranged).map((thread) => thread.id)
   const listed = sortSidebarThreads(started)

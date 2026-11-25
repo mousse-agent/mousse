@@ -56,7 +56,7 @@ it('finishes at the next start a delete that an actual daemon crash cut short ri
     writeFileSync(join(original, 'sole-copy.bin'), payload)
     writeFileSync(control, JSON.stringify({ from: original, marker }))
     // The app's delete of an archived thread; the process dies right after the trash moved its folder.
-    await rpc!.request('threads.settle', { threadId: thread.id, settled: true })
+    await rpc!.request('threads.archive', { threadId: thread.id, archived: true })
     await rpc!.request('threads.delete', { threadId: thread.id }).catch(() => undefined)
     await until(() => first.daemon.done, Boolean)
     expect(existsSync(marker), 'fault must actually intercept the completed rename').toBe(true)

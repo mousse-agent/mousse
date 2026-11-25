@@ -64,10 +64,10 @@ export async function resolveThreadId(
     return globals.sessionId
   }
   if (globals.continueSession) {
-    const res = await ctx.client.request<{ threads: { id: string; settledAt?: string }[] }>(
+    const res = await ctx.client.request<{ threads: { id: string; archivedAt?: string }[] }>(
       'threads.list'
     )
-    const open = res.threads.find((t) => !t.settledAt)
+    const open = res.threads.find((t) => !t.archivedAt)
     return open?.id ?? null
   }
   return null

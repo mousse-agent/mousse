@@ -222,11 +222,12 @@ describe('No project', () => {
 describe('thread titles', () => {
   const css = readFileSync('src/renderer/styles/threads-sidebar.css', 'utf8')
 
-  it('run up to the status at rest, and end before the hover actions, which take the status\'s place', () => {
-    const rest = /\n\.threads-sidebar-thread-container > \.threads-sidebar-thread:not\(\.threads-sidebar-card\) > \.threads-sidebar-thread-trailing \{([^}]*)\}/.exec(css)
-    expect(rest?.[1]).not.toMatch(/min-width/)
-    const hovered = /:hover[^{}]*> \.threads-sidebar-thread:not\(\.threads-sidebar-card\) > \.threads-sidebar-thread-trailing[^{]*\{([^}]*)\}/.exec(css)
-    expect(hovered?.[1]).toMatch(/min-width:\s*calc\(var\(--thread-actions-room\)/)
+  it('take the row\'s whole first line at rest, and end before the hover actions', () => {
+    const rest = /\n\.threads-sidebar-thread:not\(\.threads-sidebar-card\) \.threads-sidebar-thread-line \{([^}]*)\}/.exec(css)
+    expect(rest?.[1]).toMatch(/grid-area:\s*1 \/ 1 \/ 2 \/ -1/)
+    const hovered = /:hover[^{}]*> \.threads-sidebar-thread:not\(\.threads-sidebar-card\),[^{]*\{([^}]*)\}/.exec(css)
+    expect(hovered?.[1]).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) var\(--thread-actions-clear\)/)
+    expect(css).toMatch(/--thread-actions-clear:\s*calc\(var\(--thread-actions-room\)/)
     // No rule changes a row's padding on hover or focus.
     for (const [, selector, body] of css.matchAll(/([^{}]*):(?:hover|focus-within)[^{}]*\{([^}]*)\}/g)) {
       if (selector.includes('threads-sidebar-thread')) expect(body).not.toMatch(/padding/)
@@ -250,7 +251,7 @@ describe('the project menu', () => {
     expect(menuEntries()).toEqual([
       'New thread', 'New thread from a pull request', '—',
       'Open in Cursor', 'Show in Finder', 'Copy path', '—',
-      'Pin', 'Rename', 'Change icon…', 'Git', '—',
+      'Pin', 'Rename', 'Change folder…', 'Change icon…', 'Git', '—',
       'Remove project…'
     ])
   })

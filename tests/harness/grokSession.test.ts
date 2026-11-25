@@ -268,6 +268,28 @@ describe('Grok sessions', () => {
     expect(agent.calls.filter((call) => call.method === 'session/resume')).toHaveLength(1)
   })
 
+  it('opens a new session after a stop when the process ended by itself instead of being ended by Mousse', async () => {
+    let prompts = 0
+    const agent = grokAgent(async (c, cancelled) => {
+      if ((prompts += 1) > 1) return { stopReason: 'end_turn' }
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'working'))
+      await cancelled
+      agent.connections[0]!.connection.child.kill()
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    let sessionId: string | undefined
+    const turn = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'long', history: '', onText: vi.fn(), onSession: (id) => { sessionId = id } }).catch(() => undefined)
+    await vi.waitFor(() => expect(sessionId).toBe('grok-1'))
+    await vi.waitFor(() => expect(agent.calls.filter((call) => call.method === 'session/prompt')).toHaveLength(1))
+    expect(await sessions.interrupt('grok-1')).toBe('interrupted')
+    await turn
+    sessions.commitConversation('t', 'h')
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'again', history: 'h', onText: vi.fn() })
+    expect(agent.connections).toHaveLength(2)
+    expect(agent.calls.filter((call) => call.method === 'session/resume')).toHaveLength(0)
+  })
+
   describe('steers', () => {
     const STEER = 'Use pnpm, not npm'
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -348,5 +370,30 @@ describe('Grok sessions', () => {
       expect(read).toEqual([])
       expect(returned).toEqual([`${STEER}@drain-1`])
     }, 20_000)
+
+    it('cancels an unsolicited ask_user_question arriving outside a turn without prompting and closes the idle process', async () => {
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      const agent = grokAgent(async (c) => {
+        idleClient = c.client
+        return { stopReason: 'end_turn' }
+      })
+      const { sessions, saved, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'first', onText: vi.fn() })
+      sessions.commitConversation('t', 'h')
+      expect(saved.get('t')?.sessionId).toBe('grok-1')
+
+      const answer = await idleClient!.request('_x.ai/ask_user_question', {
+        sessionId: 'grok-1',
+        questions: [{ question: 'Still there?', options: [{ label: 'Yes' }] }]
+      })
+      expect(answer).toEqual({ outcome: 'cancelled' })
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      expect(saved.get('t')).toBeUndefined()
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+    })
   })
 })

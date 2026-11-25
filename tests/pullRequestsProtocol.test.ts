@@ -553,6 +553,25 @@ describe('pull request methods through the daemon protocol', () => {
         message: 'HTTP 502: Bad Gateway'
       })
     })
+
+    it('reads any repository pull request by identity via pullRequests.view and rejects malformed inputs', async () => {
+      const expected = detailOf({ identity: { host: 'github.com', nameWithOwner: 'other/repo', number: 42 }, number: 42 })
+      const viewSpy = vi.spyOn(mms.gitService.codeHost, 'getPullRequestDetailByIdentity').mockResolvedValue(expected)
+
+      const answer = await client.request<{ detail: PullRequestDetail }>('pullRequests.view', {
+        host: 'GitHub.com',
+        nameWithOwner: 'other/repo',
+        number: 42,
+        force: true
+      })
+      expect(answer.detail).toMatchObject({ number: 42, identity: { host: 'github.com', nameWithOwner: 'other/repo', number: 42 } })
+      expect(viewSpy).toHaveBeenCalledWith({ host: 'github.com', nameWithOwner: 'other/repo', number: 42 }, { force: true })
+
+      await expect(client.request('pullRequests.view', { host: 'github.com', nameWithOwner: 'other/repo', number: 0 })).rejects.toThrow(/number/)
+      await expect(client.request('pullRequests.view', { host: '--bad', nameWithOwner: 'other/repo', number: 1 })).rejects.toThrow(/valid repository/)
+      await expect(client.request('pullRequests.view', { host: 'github.com', nameWithOwner: '-bad/repo', number: 1 })).rejects.toThrow(/valid repository/)
+      await expect(client.request('pullRequests.view', { host: 'github.com', nameWithOwner: 'other/repo', number: 1, extra: true })).rejects.toThrow(/extra is not allowed/)
+    })
   })
 
   it('links a pull request to a thread, and unlinks it, announcing each change', async () => {

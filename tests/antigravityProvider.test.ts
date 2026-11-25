@@ -80,4 +80,25 @@ describe('Antigravity ACP auth transport', () => {
       rmSync(home, { recursive: true, force: true })
     }
   })
+
+  it('maps saved Antigravity session ids back to their Mousse threads', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-agy-sessions-'))
+    const profile = join(home, 'profile')
+    mkdirSync(join(profile, 'providers', 'antigravity'), { recursive: true })
+    writeFileSync(join(profile, 'providers', 'antigravity', 'settings.json'), JSON.stringify({
+      nativeSignedIn: true,
+      sessions: {
+        thr_a: { sessionId: 'ses-a', cwd: home, instanceId: 'antigravity' },
+        thr_b: { sessionId: 'ses-b', cwd: home, instanceId: 'antigravity' }
+      }
+    }))
+    const service = new AntigravityProviderService(profile, home, new UserQuestionService())
+    try {
+      expect(service.threadsForSessions(['ses-a', 'ses-missing'])).toEqual(new Map([['ses-a', 'thr_a']]))
+      expect(service.threadsForSessions([])).toEqual(new Map())
+    } finally {
+      service.stop()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 })

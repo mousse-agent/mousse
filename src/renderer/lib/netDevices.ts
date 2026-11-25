@@ -76,7 +76,7 @@ export function connectStep(device: Pick<Device, 'connection' | 'routeHeld' | 'n
 export const WORKS_ON_THREADS: NodeCapability = 'settings'
 
 /**
- * What pairing a computer opens, in both directions, said where a person pairs one (Add device, an SSH setup).
+ * What pairing a computer opens, in both directions, said where a person pairs one (Let a device in, Use another computer, an SSH setup).
  * The numbers are the defaults a new computer starts with; they are limits, not promises, and are changed per device.
  */
 export const PAIRING_DISCLOSURE =

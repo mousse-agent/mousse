@@ -256,6 +256,22 @@ describe('the window before the service answers', () => {
     expect(sends()).toHaveLength(1)
   })
 
+  it('says Connecting… in its composer, with its controls out of reach, until the live chat takes its place', async () => {
+    stubBridge(warmView)
+    await launch()
+    const reachable = () => [...host.querySelectorAll('[data-mousse="chat"] [data-mousse="composer"] button')]
+      .filter((button) => !button.closest('[inert], [aria-hidden="true"]'))
+      .map((button) => button.getAttribute('aria-label'))
+    expect(composer().placeholder).toBe('Connecting…')
+    expect(reachable()).not.toContain('Send message')
+    expect(reachable()).not.toContain('Attach files')
+
+    await connect(WARM_PROFILE, { threads: freshThreads, messages: freshMessages })
+    expect(host.querySelector('[data-warm-start]')).toBeNull()
+    await vi.waitFor(() => expect(composer().placeholder).not.toBe('Connecting…'))
+    expect(reachable()).toContain('Send message')
+  })
+
   it('keeps showing it behind the error when the service never answers, and Retry asks again', async () => {
     stubBridge(warmView)
     await launch()
@@ -347,7 +363,7 @@ describe('the handover', () => {
       realThread('t-lead', 'Limits review lead', 'p-mousse', -6),
       subagent('t-sub-1', 'Limits e2e tester', 't-lead', -5),
       subagent('t-sub-2', 'Worktree pause fixer', 't-lead', -4),
-      realThread('t-old', 'Archived audit', 'p-mousse', -3, { settledAt: T, lastRun: 'done' }),
+      realThread('t-old', 'Archived audit', 'p-mousse', -3, { archivedAt: T, lastRun: 'done' }),
       realThread('t-site', 'Pricing page copy', 'p-site', 0)
     ]
     // Main keeps only Done and Input: here every Done the service had, the subagents' included.

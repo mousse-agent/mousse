@@ -16,7 +16,7 @@ import { REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId } 
  * The tool call runs the first attempt and waits for it (`launch`). A launch the call did not finish (a lost link, a
  * restart) is finished by later passes: at boot, when Bridge comes up, and every few seconds while one is open. One that
  * is refused for good before it is set up ends `abandoned`, and a thread already made for it there is archived
- * (`threads.settle`); deleting it is that computer's choice. A first message refused for good keeps the thread.
+ * (`threads.archive`); deleting it is that computer's choice. A first message refused for good keeps the thread.
  */
 
 export interface RemoteThreadLaunchesDeps {
@@ -228,7 +228,7 @@ export class RemoteThreadLaunches {
     const updated = this.deps.records.update(record.creationKey, { state: 'abandoned', lastError: message })!
     if (remoteThreadId) {
       const port = this.deps.port()
-      await port?.call(record.node, 'threads.settle', { threadId: remoteThreadId, settled: true }, { idem: `${record.creationKey}:settle`, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) }).catch(() => undefined)
+      await port?.call(record.node, 'threads.archive', { threadId: remoteThreadId, archived: true }, { idem: `${record.creationKey}:archive`, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) }).catch(() => undefined)
     }
     return { ok: false, code, message, record: updated }
   }

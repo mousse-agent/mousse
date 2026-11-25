@@ -50,7 +50,14 @@
   color: var(--text-secondary);
   cursor: text;
   transition: background 0.15s, box-shadow 0.15s;
+  /* Holds the Connecting… dots behind its text (ConnectingDots). */
+  position: relative;
+  isolation: isolate;
 }
+
+/* Not connected to the service: Create fades out and keeps its place. */
+.inbox-composer-send { transition: opacity 240ms ease; }
+.inbox-composer-box[data-connecting] .inbox-composer-send { opacity: 0; }
 
 .inbox-composer:focus-within {
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);

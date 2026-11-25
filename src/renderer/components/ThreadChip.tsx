@@ -67,7 +67,7 @@ export function threadChipState(
     const title = thread.name.trim() || 'Untitled thread'
     const reach = node ? threadComputerState(thread, computer) : 'online'
     if (reach !== 'online') return { kind: reach, title, computer: computerName }
-    return { kind: 'listed', title, status: threadLinkStatus(activity, lastPhase, false, thread.setupFailure !== undefined, thread.lastRun), archived: thread.settledAt !== undefined }
+    return { kind: 'listed', title, status: threadLinkStatus(activity, lastPhase, false, thread.setupFailure !== undefined, thread.lastRun), archived: thread.archivedAt !== undefined }
   }
   if (node) {
     // Not listed, but its computer's other rows say it stopped sharing, or the device list says it is not connected.

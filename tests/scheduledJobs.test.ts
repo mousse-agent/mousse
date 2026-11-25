@@ -1412,7 +1412,7 @@ describe('ScheduledJobService concurrency and occurrences', () => {
       const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
       const { service, threads } = withThreads(runner)
       const archivedThread = threads.createThread('Archived')
-      threads.setThreadSettled(archivedThread.id, true)
+      threads.setThreadArchived(archivedThread.id, true)
       const live = threads.createThread('Alive')
       const archived = due('Archived target', { threadId: archivedThread.id })
       const orphan = due('Orphaned', { createdBy: { threadId: 'deleted-thread' } })

@@ -4,6 +4,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatStatusFromTurn, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { collectNativeSubagentCards } from '../../src/renderer/chat/adapters/nativeSubagents'
+import { collectSubagentCalls, joinSubagentCards } from '../../src/renderer/chat/adapters/subagentCards'
+import { runtimeToolEvent } from '../../src/mms/run/transcript/promptRuntime'
+import { TranscriptAssembler, type TranscriptHooks, type TranscriptStreamState } from '../../src/mms/run/transcript/TranscriptAssembler'
+import { recordSubagentCall } from '../../src/shared/subagentTools'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { LOCATED_CLASS } from '../../src/renderer/chat/components/agent-elements/reveal-message'
 import { SubagentCardsContext } from '../../src/renderer/chat/components/agent-elements/tools/subagent-cards-context'
@@ -170,5 +174,56 @@ describe('Nest rows of a thread', () => {
     expect(cardButton.getAttribute('aria-expanded')).toBe('true')
     expect(document.activeElement).toBe(cardButton)
     expect(useChatNavigationStore.getState().subagent).toBeNull()
+  })
+
+  it('groups Antigravity mcp_mousse_delegate_task calls into an inline subagent group card and lists them in Nest', async () => {
+    const assembled: ChatMessage[] = [user('u1', 0, 'Create researchers')]
+    const state: TranscriptStreamState = { activeAssistantMessageId: null, activeThinkingMessageId: null, activeToolCallMessageIds: new Map() }
+    const hooks: TranscriptHooks = {
+      getMessage: (id) => assembled.find((m) => m.id === id),
+      addMessage: (m) => assembled.push(m),
+      updateMessage: (m) => { const idx = assembled.findIndex((x) => x.id === m.id); if (idx >= 0) assembled[idx] = m },
+      removeMessage: (id) => { const idx = assembled.findIndex((x) => x.id === id); if (idx >= 0) assembled.splice(idx, 1) },
+      emitAdded: () => {},
+      emitUpdated: () => {},
+      persist: () => {},
+      setPhase: () => {}
+    }
+    const assembler = new TranscriptAssembler(hooks, state)
+    for (const [callId, title, delegationId, childThreadId] of [
+      ['c1', 'GitHub researcher', 'd-gh', 'child-gh'],
+      ['c2', 'Reddit researcher', 'd-rd', 'child-rd']
+    ] as const) {
+      assembler.tool(runtimeToolEvent({
+        phase: 'start', callId, title: 'Run mcp_mousse_delegate_task', toolName: 'mcp_mousse_delegate_task',
+        record: recordSubagentCall('mcp_mousse_delegate_task', { title, prompt: 'Research' }, {})!
+      }))
+      assembler.tool(runtimeToolEvent({
+        phase: 'complete', callId, title: 'Run mcp_mousse_delegate_task', toolName: 'mcp_mousse_delegate_task',
+        record: recordSubagentCall('mcp_mousse_delegate_task', { title }, { text: JSON.stringify({ delegationId, childThreadId, title }) })!
+      }))
+    }
+    const subagents: SubagentSummary[] = [
+      { childThreadId: 'child-gh', title: 'GitHub researcher', activity: 'idle', state: 'done', latestDelegationId: 'd-gh', unread: false, provider: 'antigravity', model: 'gemini-4-neon', workspace: 'shared', role: null, createdAt: at(1), updatedAt: at(5), waitingOn: [], tasks: [{ delegationId: 'd-gh', childRunId: 'r-gh', outcome: 'done', unread: false, continued: false, createdAt: at(1), completedAt: at(5) }] },
+      { childThreadId: 'child-rd', title: 'Reddit researcher', activity: 'idle', state: 'done', latestDelegationId: 'd-rd', unread: false, provider: 'antigravity', model: 'gemini-4-neon', workspace: 'shared', role: null, createdAt: at(2), updatedAt: at(6), waitingOn: [], tasks: [{ delegationId: 'd-rd', childRunId: 'r-rd', outcome: 'done', unread: false, continued: false, createdAt: at(2), completedAt: at(6) }] }
+    ]
+    const ui = mousseToUIMessages(assembled)
+    const cards = joinSubagentCards(collectSubagentCalls(ui), subagents, { loaded: true })
+    expect(cards.size).toBe(2)
+
+    useAppStore.setState({ activeThreadId: 't1', messages: assembled, turnStates: { t1: { phase: 'completed', turnId: RUN } } })
+    ;(window as unknown as { mousse: { subagents: { list: unknown } } }).mousse.subagents.list = async () => subagents
+    await act(async () => {
+      root.render(createElement(Fragment, null,
+        createElement(SubagentCardsContext.Provider, { value: cards },
+          createElement(MessageList, { messages: ui, status: chatStatusFromTurn({ phase: 'completed', turnId: RUN }) })),
+        createElement('aside', null, createElement(LineageSection, { threadId: 't1', projectId: null }))))
+    })
+    const group = host.querySelector('.subagent-cards.is-group')
+    expect(group?.textContent).toContain('2 subagents')
+    expect(group?.textContent).toContain('2 done')
+    expect(group?.textContent).toContain('GitHub researcher')
+    expect(group?.textContent).toContain('Reddit researcher')
+    await vi.waitFor(() => expect(host.querySelector('aside')?.textContent).toContain('2 finished'))
   })
 })

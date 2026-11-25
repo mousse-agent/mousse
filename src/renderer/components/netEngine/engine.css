@@ -1,4 +1,4 @@
-/* New networking (design §7): Settings -> Devices and its Add device dialog. */
+/* New networking (design §7): Settings -> Devices and its Let a device in and Use another computer dialogs. */
 
 .engine-group-actions {
   display: inline-flex;
@@ -27,23 +27,19 @@
   min-width: 280px;
 }
 
-/* Add device, all in one: the code, its time left and link, then the paste field and More ways. */
+/* Use another computer: the paste field, then Scan its code and Connect over SSH. */
 .engine-dialog-home {
   display: flex;
   flex-direction: column;
   gap: var(--space-12);
-  width: min(420px, 100%);
 }
 
 .engine-dialog-home .engine-qr .engine-paste {
   align-self: stretch;
 }
 
-.engine-qr-timer {
-  font-variant-numeric: tabular-nums;
-}
-
 .engine-dialog-home .settings-input {
+  max-width: none;
   height: var(--settings-control-h, 28px);
   padding: 0 var(--space-8);
   border: 1px solid var(--ui-line-strong);
@@ -52,60 +48,40 @@
   font-size: var(--settings-fs-small, 12.5px);
 }
 
-.engine-dialog-choices {
+.engine-dialog-alt {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: var(--space-8);
 }
 
 /* Buttons in the Devices dialogs share the row control size, as they do in Settings rows. */
-:is(.devices-dialog-actions, .engine-paste, .engine-choice, .engine-link-ended) > .settings-btn {
+:is(.devices-dialog-actions, .engine-paste, .engine-dialog-alt, .engine-link-ended, .engine-check-blocked) > .settings-btn {
   height: var(--settings-control-h, 28px);
   border-radius: var(--ui-control-radius);
   font-size: var(--settings-fs-small, 12.5px);
 }
 
-/* One way to add a device: its name over a one-line hint. */
-.engine-choice {
-  display: flex;
-  align-items: center;
+/* The main action and the ones beside it keep the usual gap, also in the Allow prompt wherever it shows. */
+:is(.engine-dialog, .engine-allow) .devices-dialog-actions {
   gap: var(--space-8);
 }
 
-.engine-choice > .settings-btn {
-  min-width: 120px;
+.engine-check-blocked {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.engine-dialog-more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-12);
 }
 
 .engine-choice-hint {
   color: var(--text-muted);
   font-size: var(--font-size-small, 12px);
-}
-
-.engine-more-ways {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-8);
-}
-
-.engine-more-ways > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-4);
-  cursor: pointer;
-  color: var(--text-muted);
-  list-style: none;
-}
-
-.engine-more-ways > summary::-webkit-details-marker {
-  display: none;
-}
-
-.engine-more-ways[open] > summary .settings-advanced-chevron {
-  transform: rotate(90deg);
-}
-
-.engine-more-ways > .engine-choice + .engine-choice {
-  margin-top: var(--space-8);
 }
 
 .engine-qr {
@@ -115,13 +91,28 @@
   gap: var(--space-8);
 }
 
+/* Holds the code's place while it is made, so nothing jumps when it shows. */
+.engine-preparing {
+  justify-content: center;
+  min-height: 208px;
+}
+
+.engine-preparing-percent {
+  font-variant-numeric: tabular-nums;
+}
+
 .engine-qr p {
   margin: 0;
 }
 
-.engine-approval p,
+.engine-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
 .engine-confirm p {
-  margin: 0 0 var(--space-8);
+  margin: 0;
 }
 
 .engine-scan {
@@ -320,4 +311,201 @@
 
 .engine-route-kinds > .settings-btn.engine-route-kind-on {
   background: var(--ui-selected, var(--ui-hover));
+}
+
+/*
+ * The pairing flow: a list to pick one from (a way, an access level, a profile). Each row is its name over a muted
+ * detail; the picked one has a background, no edge.
+ */
+.engine-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-choice-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  overflow: hidden;
+}
+
+.engine-choice-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+  min-height: 40px;
+  padding: var(--space-8) var(--space-12, 12px);
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.engine-choice-row + .engine-choice-row {
+  border-top: 1px solid var(--ui-line);
+}
+
+.engine-choice-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.engine-ready-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  vertical-align: 1px;
+}
+
+.engine-choice-row:hover:not(:disabled, [aria-disabled='true']) {
+  background: var(--ui-hover);
+}
+
+.engine-choice-row.selected {
+  background: var(--ui-selected, var(--ui-hover));
+}
+
+.engine-choice-row:disabled,
+.engine-choice-row[aria-disabled='true'] {
+  cursor: default;
+}
+
+.engine-choice-row:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.engine-check-line {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-8);
+}
+
+.engine-check-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.engine-check-icon.ok {
+  color: var(--success);
+}
+
+.engine-check-icon.warn {
+  color: var(--warning);
+}
+
+/* What to do about a failed check, under its text (past the icon). */
+.engine-check-todo {
+  padding-left: calc(16px + var(--space-8));
+}
+
+/* A way that isn't ready: its name muted, why after it, and the action that fixes it at the end. */
+.engine-way-off .engine-choice-label {
+  color: var(--text-muted);
+}
+
+.engine-way-fix {
+  margin-left: auto;
+}
+
+.engine-choice-row .engine-way-fix.settings-btn {
+  height: 24px;
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+.engine-choices-title,
+.engine-allow-title,
+.engine-check-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.engine-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-small, 12px);
+}
+
+.engine-text-btn {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--font-size-small, 12px);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.engine-text-btn:hover {
+  color: var(--text-primary);
+}
+
+.engine-allow,
+.engine-check,
+.engine-code {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-allow p,
+.engine-check p,
+.engine-code p {
+  margin: 0;
+}
+
+.engine-allow-switches {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.engine-allow-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding: var(--space-4) var(--space-8);
+}
+
+.engine-code-line {
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.engine-check-box {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-ssh-effects {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.engine-ssh-effects p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.engine-ssh-effects ul {
+  margin: 0;
+  padding-left: var(--space-16, 16px);
+  color: var(--text-muted);
 }

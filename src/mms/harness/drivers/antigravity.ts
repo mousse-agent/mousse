@@ -7,6 +7,7 @@ import { decodeInstanceConfig, type AuthReading, type DriverContext, type Driver
 import { cliNames } from '../env'
 import { LAUNCH_MIRROR_FIELDS } from '../vendorMirror'
 import { compatibilityFields } from '../compatibility'
+import { ACP_NATIVE_TOOLS } from '../acp/botApprovals'
 
 /**
  * The account a recorded sign-in stands for. Mousse never reads the Google account itself, so a
@@ -65,6 +66,10 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     ownsSignIn: true,
     // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`service.oneShot`).
     oneShot: true,
+    // Only the native agy launch can switch off the user's customizations on a bot turn.
+    botAuthority: () => options.builtIn().supportsBotTurns(),
+    botApprovals: () => true,
+    nativeToolNames: (neutral) => ACP_NATIVE_TOOLS[neutral] ?? [],
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,
@@ -111,6 +116,10 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         validateOverride: (path) => void manualAntigravityRuntime(path),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         oneShot: (spec, signal) => service.oneShot(spec, signal),
+        setLiveHost: (host) => service.setLiveHost(host),
+        inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
+        hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
+        discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
         stop: () => {}
       }
     }

@@ -87,7 +87,7 @@ function searchableThreads(threads: readonly Thread[]): Thread[] {
 
 /** Threads the sidebar lists outside Archived. */
 function listedThreads(threads: readonly Thread[]): Thread[] {
-  return searchableThreads(threads).filter((thread) => !thread.settledAt)
+  return searchableThreads(threads).filter((thread) => !thread.archivedAt)
 }
 
 const byNewest = (a: Thread, b: Thread): number => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0)
@@ -177,7 +177,7 @@ export function buildPaletteGroups({
   for (const chat of chats) if (chat.threadId) places.set(chat.threadId, { kind: 'chat', id: chat.id, title: chat.name, detail: chat.kind === 'group' ? 'Group' : 'Chat' })
   const notChats = (pool: readonly Thread[]) => pool.filter((thread) => !places.has(thread.id))
   const listed = notChats(listedThreads(threads))
-  const archivedIds = new Set(threads.filter((thread) => thread.settledAt).map((thread) => thread.id))
+  const archivedIds = new Set(threads.filter((thread) => thread.archivedAt).map((thread) => thread.id))
   const { groups: projectGroups, groupOf } = groupProjects(projects)
   const groupById = new Map(projectGroups.map((group) => [group.id, group]))
   const computerName = (node: string): string => computers?.[node]?.name ?? UNKNOWN_COMPUTER_NAME
@@ -191,7 +191,7 @@ export function buildPaletteGroups({
       key: `thread:${thread.id}`,
       id: thread.id,
       title: thread.name,
-      detail: where(thread.startedByBot?.name, group?.project.name, thread.node, Boolean(thread.settledAt) && !inArchived)
+      detail: where(thread.startedByBot?.name, group?.project.name, thread.node, Boolean(thread.archivedAt) && !inArchived)
     }
   }
 
@@ -215,7 +215,7 @@ export function buildPaletteGroups({
   const open = rankThreads(listed)
   const yours = open.filter((thread) => !thread.startedByBot).map((thread) => threadItem(thread))
   const byBots = open.filter((thread) => thread.startedByBot).map((thread) => threadItem(thread))
-  const archived = rankThreads(notChats(searchableThreads(threads)).filter((thread) => thread.settledAt)).map((thread) => threadItem(thread, true))
+  const archived = rankThreads(notChats(searchableThreads(threads)).filter((thread) => thread.archivedAt)).map((thread) => threadItem(thread, true))
   const titled = new Set([...yours, ...byBots, ...archived].map((row) => row.id))
 
   const botRows = rankItems(text, bots.map((bot) => ({ bot, title: bot.name, terms: [bot.description, bot.last?.text ?? ''] }))).map(

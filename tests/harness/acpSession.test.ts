@@ -3,9 +3,12 @@
  * the prompt, a native cancel that misses its deadline ends in a kill and a forgotten session, and
  * closing uses `session/close` only when the agent offers it.
  */
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, RequestError, type AgentApp } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/session'
+import { AcpSessions, readAcpPromptUsage, type AcpTurnUsage, type SavedAcpSession } from '../../src/mms/harness/acp/session'
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { interruptWithDeadline } from '../../src/mms/harness/supervise'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
@@ -13,14 +16,18 @@ import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import type { LlmModelOption } from '../../src/shared/settings'
 import type { HarnessCaps } from '../../src/shared/harness/types'
 import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
+import type { ContinuationInfo, ProviderTaskEnd } from '../../src/mms/harness/driver'
 import { AcpAdapter } from '../../src/mms/harness/drivers/acp/adapter'
+import { BACKGROUND_SUMMARY } from '../../src/shared/agentActivity'
 import { GENERIC_ACP_CAPS } from '../../src/mms/harness/acp/presets/generic'
 import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
 import { holdControl } from '../support/steerHoldControl'
 
 const sessionsUnderTest: AcpSessions[] = []
+const tempDirs: string[] = []
 afterEach(() => {
   for (const sessions of sessionsUnderTest.splice(0)) sessions.stop()
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
 interface AgentScript {
@@ -29,8 +36,8 @@ interface AgentScript {
   session?: Record<string, unknown>
   /** Slash commands the agent advertises (`available_commands_update`) when it opens a session. */
   commands?: string[]
-  /** Runs one prompt; resolves with its stop reason. `blocks` is the text of every block of the prompt. */
-  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; update: (update: Record<string, unknown>) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string>
+  /** Runs one prompt; resolves with its stop reason or full prompt response. `blocks` is the text of every block of the prompt. */
+  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; update: (update: Record<string, unknown>) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string | { stopReason?: string; usage?: Record<string, unknown> }>
 }
 
 const DEFAULT_SESSION = { configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fast', options: [{ value: 'fast', name: 'Fast' }, { value: 'deep', name: 'Deep' }] }] }
@@ -64,7 +71,7 @@ function scriptedAgent(script: AgentScript) {
         const cancelled = new Promise<void>((resolve) => { cancel = resolve })
         const notify = (chunk: string) => c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } } })
         const blocks = c.params.prompt.map((block) => (block as { text?: string }).text ?? '')
-        const stopReason = await (script.prompt ?? (async (prompt, ctx) => { await ctx.notify(`echo: ${prompt}`); return 'end_turn' }))(text, {
+        const result = await (script.prompt ?? (async (prompt, ctx) => { await ctx.notify(`echo: ${prompt}`); return 'end_turn' }))(text, {
           notify,
           update: (update) => c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update } as never),
           cancelled,
@@ -75,8 +82,9 @@ function scriptedAgent(script: AgentScript) {
             options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }]
           })
         })
+        if (typeof result === 'object') return result as { stopReason: 'end_turn' }
         // An empty reason stands for an agent that sends no `stopReason` at all.
-        return (stopReason ? { stopReason: stopReason as 'end_turn' } : {}) as { stopReason: 'end_turn' }
+        return (result ? { stopReason: result as 'end_turn' } : {}) as { stopReason: 'end_turn' }
       })
       .onNotification(methods.agent.session.cancel, (c) => {
         cancels.push(c.params.sessionId)
@@ -86,7 +94,7 @@ function scriptedAgent(script: AgentScript) {
   return { ...agentApp, calls, cancels }
 }
 
-function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number } = {}) {
+function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean; formElicitation?: boolean; backgroundWork?: boolean; continuationSettleMs?: number; continuationQuietMs?: number; wakeGraceMs?: number } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
   const questions = new UserQuestionService()
@@ -95,10 +103,14 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     defaultInstanceId: 'acp:fake',
     questions,
     connect,
-    quirks: NO_QUIRKS,
+    quirks: { ...NO_QUIRKS, ...(options.clientFs ? { clientFs: true } : {}), ...(options.backgroundWork ? { backgroundWork: true } : {}) },
+    ...(options.formElicitation ? { formElicitation: true } : {}),
     ...(options.closeSessions ? { closeSessions: true } : {}),
     ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {}),
     ...(options.promptSilenceMs !== undefined ? { promptSilenceMs: options.promptSilenceMs } : {}),
+    ...(options.continuationSettleMs !== undefined ? { continuationSettleMs: options.continuationSettleMs } : {}),
+    ...(options.continuationQuietMs !== undefined ? { continuationQuietMs: options.continuationQuietMs } : {}),
+    ...(options.wakeGraceMs !== undefined ? { wakeGraceMs: options.wakeGraceMs } : {}),
     store: {
       saved: (threadId) => saved.get(threadId),
       setSaved: (threadId, value) => (value ? saved.set(threadId, value) : saved.delete(threadId)),
@@ -133,6 +145,44 @@ describe('ACP sessions', () => {
       activity: { kind: 'subagent', description: rawInput.Role, agentType: rawInput.TypeName, prompt: rawInput.Prompt }
     }))
     expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({ phase: 'complete', callId: launch.toolCallId, status: 'completed' }))
+  })
+
+  it('records Antigravity mcp_mousse_delegate_task and mcp_mousse_thread_send tool calls with their subagent ids', async () => {
+    const delegateIn = { title: 'GitHub researcher', prompt: 'Research GitHub', workspace: 'shared' }
+    const delegateOut = { delegationId: 'd-gh', childThreadId: 't-gh', title: 'GitHub researcher' }
+    const sendOut = { delegationId: 'd-gh-2', threadId: 't-gh', title: 'GitHub researcher', subagent: true }
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-del', name: 'mcp_mousse_delegate_task', title: 'Run mcp_mousse_delegate_task', rawInput: delegateIn, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-del', status: 'completed', rawOutput: { content: [{ type: 'text', text: JSON.stringify(delegateOut) }] } })
+        await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'c-send', name: 'mcp_mousse_thread_send', title: 'Run mcp_mousse_thread_send', rawInput: { threadId: 't-gh', message: 'follow up' }, status: 'in_progress' })
+        await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'c-send', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: JSON.stringify(sendOut) } }] })
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    const onTool = vi.fn()
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'Start researcher', onText: vi.fn(), onTool })
+    expect(onTool).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      phase: 'start',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-del',
+      toolName: 'mcp_mousse_delegate_task',
+      status: 'completed',
+      record: { input: { recordVersion: 1, title: 'GitHub researcher' }, response: JSON.stringify(delegateOut), failed: false }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      phase: 'complete',
+      callId: 'c-send',
+      toolName: 'mcp_mousse_thread_send',
+      status: 'completed',
+      activity: { output: JSON.stringify(sendOut) }
+    }))
   })
 
   it('lists the session’s models, sets the chosen one, and runs the agent default without setting one', async () => {
@@ -1014,5 +1064,619 @@ describe('ACP sessions', () => {
     sessions.closeIdle()
     await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
     expect(agent.calls.filter((call) => call.method === 'session/close').map((call) => call.method)).toEqual(expected)
+  })
+
+  describe('PromptResponse.usage reporting', () => {
+    it.each([
+      [
+        'agy 1.5.13 payload with cached read and thought tokens',
+        { stopReason: 'end_turn', usage: { inputTokens: 2145, outputTokens: 20, cachedReadTokens: 8752, cachedWriteTokens: 0, thoughtTokens: 18, totalTokens: 10917 } },
+        { input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917, hasOutput: true }
+      ],
+      [
+        'payload without totalTokens sums reported token fields',
+        { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 25, cachedReadTokens: 50 } },
+        { input: 100, output: 25, cacheRead: 50, cacheWrite: 0, totalTokens: 175, hasOutput: true }
+      ],
+      [
+        'payload with only totalTokens marks output unavailable so speed stays unset',
+        { stopReason: 'end_turn', usage: { totalTokens: 500 } },
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 500, hasOutput: false }
+      ],
+      ['response without usage', { stopReason: 'end_turn' }, undefined],
+      ['null usage', { stopReason: 'end_turn', usage: null }, undefined],
+      ['empty or negative usage fields', { stopReason: 'end_turn', usage: { inputTokens: -1, outputTokens: Number.NaN } }, undefined]
+    ])('readAcpPromptUsage handles %s', (_label, outcome, expected) => {
+      expect(readAcpPromptUsage(outcome)).toEqual(expected)
+    })
+
+    it('sums PromptResponse.usage across multiple prompts in one steered turn', async () => {
+      let promptCount = 0
+      const agent = scriptedAgent({
+        prompt: async (prompt, ctx) => {
+          promptCount += 1
+          await ctx.notify(`reply ${promptCount}: ${prompt}`)
+          if (promptCount === 1) {
+            return {
+              stopReason: 'end_turn',
+              usage: { inputTokens: 10801, outputTokens: 20, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 18, totalTokens: 10821 }
+            }
+          }
+          return {
+            stopReason: 'end_turn',
+            usage: { inputTokens: 2145, outputTokens: 30, cachedReadTokens: 8752, cachedWriteTokens: 0, thoughtTokens: 12, totalTokens: 10927 }
+          }
+        }
+      })
+      const { sessions } = core(agent.connect)
+      let drained = false
+      const reported: AcpTurnUsage[] = []
+      await sessions.chat({
+        threadId: 't',
+        cwd: process.cwd(),
+        model: 'default',
+        prompt: 'first',
+        onText: vi.fn(),
+        onBoundary: () => {
+          // Make the boundary steer available right after the first prompt finishes.
+        },
+        drainSteer: () => {
+          if (promptCount === 1 && !drained) {
+            drained = true
+            return 'follow-up'
+          }
+          return undefined
+        },
+        onUsage: (usage) => reported.push(usage)
+      })
+      expect(promptCount).toBe(2)
+      expect(reported).toEqual([
+        { input: 12946, output: 50, cacheRead: 8752, cacheWrite: 0, reasoning: 30, totalTokens: 21748, hasOutput: true }
+      ])
+    })
+  })
+
+  describe('requests from an idle agent outside a turn', () => {
+    it('cancels unsolicited permission requests without asking, closes the idle process, forgets the session, and runs the next turn cleanly in Full access', async () => {
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      let turn = 0
+      let inTurnAnswer: unknown
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: `native-${turn + 1}`, ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            turn += 1
+            if (turn === 1) {
+              idleClient = c.client as unknown as { request: (method: string, params: unknown) => Promise<unknown> }
+              return { stopReason: 'end_turn' as const }
+            }
+            inTurnAnswer = await c.client.request(methods.client.session.requestPermission, {
+              sessionId: c.params.sessionId,
+              toolCall: { toolCallId: 'tool-turn-2', title: 'Run tests', kind: 'execute' },
+              options: [
+                { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+                { optionId: 'reject', name: 'Reject', kind: 'reject_once' }
+              ]
+            })
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const { sessions, saved, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'start background work', onText: vi.fn() })
+      sessions.commitConversation('t', 'history-1')
+      expect(saved.get('t')?.sessionId).toBe('native-1')
+
+      // After Turn 1 completes, the idle process wakes up on its own and fires permission requests outside any turn.
+      const outOfTurnExecute = await idleClient!.request(methods.client.session.requestPermission, {
+        sessionId: 'native-1',
+        toolCall: { toolCallId: 'rogue-1', title: 'Run git status', kind: 'execute' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'reject', name: 'Reject', kind: 'reject_once' }
+        ]
+      })
+      expect(outOfTurnExecute).toEqual({ outcome: { outcome: 'cancelled' } })
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      expect(saved.get('t')).toBeUndefined()
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+
+      // The next turn opens a clean process with Full access and auto-allows without prompting.
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', history: 'history-1', prompt: 'continue', onText: vi.fn() })
+      expect(agent.connections).toHaveLength(2)
+      expect(inTurnAnswer).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+      expect(pending).not.toHaveBeenCalled()
+    })
+
+    it('rejects client file reads and writes outside a turn without prompting or touching disk', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mousse-acp-idle-fs-'))
+      tempDirs.push(dir)
+      writeFileSync(join(dir, 'existing.txt'), 'secret-data', 'utf8')
+      let idleClient: { request: (method: string, params: unknown) => Promise<unknown> } | undefined
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: 'native-fs', ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            idleClient = c.client as unknown as { request: (method: string, params: unknown) => Promise<unknown> }
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const { sessions, questions } = core(agent.connect, { clientFs: true })
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: dir, model: 'default', permissionMode: 'full', prompt: 'turn 1', onText: vi.fn() })
+      await expect(idleClient!.request(methods.client.fs.readTextFile, { sessionId: 'native-fs', path: join(dir, 'existing.txt') })).rejects.toThrow(/outside a turn/i)
+      await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+
+      await sessions.chat({ threadId: 't', cwd: dir, model: 'default', permissionMode: 'full', prompt: 'turn 2', onText: vi.fn() })
+      await expect(idleClient!.request(methods.client.fs.writeTextFile, { sessionId: 'native-fs', path: join(dir, 'rogue.txt'), content: 'bad' })).rejects.toThrow(/outside a turn/i)
+      expect(existsSync(join(dir, 'rogue.txt'))).toBe(false)
+      expect(pending).not.toHaveBeenCalled()
+      expect(questions.listPendingForThread('t')).toEqual([])
+      await vi.waitFor(() => expect(agent.connections[1].killed).toBe(true))
+    })
+
+    it('still reuses an idle session and auto-allows in-turn requests on a normal follow-up turn', async () => {
+      let inTurnAnswer: unknown
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text === 'second') inTurnAnswer = await ctx.askPermission()
+          return 'end_turn'
+        }
+      })
+      const { sessions, questions } = core(agent.connect)
+      const pending = vi.fn()
+      questions.on('pending', pending)
+
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt: 'first', onText: vi.fn() })
+      sessions.commitConversation('t', 'h')
+      await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', history: 'h', prompt: 'second', onText: vi.fn() })
+
+      expect(agent.connections).toHaveLength(1)
+      expect(agent.connections[0].killed).toBe(false)
+      expect(inTurnAnswer).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+      expect(pending).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Antigravity background work and reactive continuations', () => {
+    it('tracks a backgrounded run_command after end_turn, updates its row on completion, runs the reactive wakeup under the continuation turn permissionMode, and clears backgroundWork', async () => {
+      let agentClient: {
+        notify: (method: string, params: unknown) => Promise<void>
+        request: (method: string, params: unknown) => Promise<unknown>
+      } | undefined
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: 'agy-bg-1', ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            agentClient = c.client as unknown as typeof agentClient
+            await c.client.notify(methods.client.session.update, {
+              sessionId: 'agy-bg-1',
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'cmd-1',
+                name: 'run_command',
+                title: 'Run verify',
+                status: 'in_progress',
+                rawInput: { CommandLine: 'node scripts/verify.mjs', WaitMsBeforeAsync: 500 }
+              }
+            } as never)
+            await c.client.notify(methods.client.session.update, {
+              sessionId: 'agy-bg-1',
+              update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Verification is running in the background...' } }
+            })
+            await c.client.notify(methods.client.session.update, {
+              sessionId: 'agy-bg-1',
+              update: { sessionUpdate: 'usage_update', size: 100000, used: 1000 } as never
+            })
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const formReceived = vi.fn()
+      const { sessions, questions } = core((launch) => {
+        const elicit = launch.handlers.createElicitation!
+        return agent.connect({
+          ...launch,
+          handlers: {
+            ...launch.handlers,
+            createElicitation: (request) => {
+              const reply = elicit(request)
+              formReceived()
+              return reply
+            }
+          }
+        })
+      }, { backgroundWork: true, formElicitation: true, continuationSettleMs: 30, wakeGraceMs: 500 })
+      const bgStates: Array<[string, boolean]> = []
+      const endedTasks: Array<[string, ProviderTaskEnd]> = []
+      const continuations: Array<[string, ContinuationInfo]> = []
+      sessions.setLiveHost({
+        backgroundWork: (threadId, active) => bgStates.push([threadId, active]),
+        taskEnded: (threadId, info) => endedTasks.push([threadId, info]),
+        continuationStarted: (threadId, info) => continuations.push([threadId, info])
+      })
+
+      const turn1Tools: Array<Record<string, unknown>> = []
+      const turn1Text = await sessions.chat({
+        threadId: 't-bg',
+        cwd: process.cwd(),
+        model: 'default',
+        permissionMode: 'full',
+        prompt: 'run verify',
+        onText: vi.fn(),
+        onTool: (e) => turn1Tools.push(e as unknown as Record<string, unknown>)
+      })
+      sessions.commitConversation('t-bg', 'h-1')
+      expect(turn1Text).toBe('Verification is running in the background...')
+      expect(turn1Tools).toEqual([
+        expect.objectContaining({ phase: 'start', callId: 'cmd-1', toolName: 'run_command', activity: { kind: 'command', command: 'node scripts/verify.mjs' } }),
+        expect.objectContaining({ phase: 'complete', callId: 'cmd-1', toolName: 'run_command', status: 'background' })
+      ])
+      expect(bgStates).toEqual([['t-bg', true]])
+
+      // Background command finishes out-of-turn: taskEnded updates the row while backgroundWork stays true during grace.
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'cmd-1',
+          status: 'completed',
+          rawOutput: { output: 'All 42 checks passed' }
+        }
+      })
+      await vi.waitFor(() => expect(endedTasks).toHaveLength(1))
+      expect(endedTasks[0]).toEqual(['t-bg', expect.objectContaining({ toolUseId: 'cmd-1', taskId: 'cmd-1', status: 'completed', summary: 'All 42 checks passed' })])
+      expect(bgStates).toEqual([['t-bg', true]])
+
+      // Reactive wakeup arrives: thought + follow-up tool + permission request BEFORE chat({ continuation: true }) attaches!
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Verify passed, opening PR.' } }
+      })
+      await vi.waitFor(() => expect(continuations).toHaveLength(1))
+      const contId = continuations[0]![1].id
+      expect(sessions.hasContinuation('t-bg', contId)).toBe(true)
+      expect(sessions.inFlightContinuation('t-bg')).toEqual({ id: contId, discarded: false })
+
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'pr-1', name: 'run_command', title: 'gh pr create', status: 'in_progress', rawInput: { CommandLine: 'gh pr create' } }
+      })
+      const permPromise = agentClient!.request(methods.client.session.requestPermission, {
+        sessionId: 'agy-bg-1',
+        toolCall: { toolCallId: 'pr-1', title: 'gh pr create', kind: 'execute' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }]
+      })
+
+      const formReply = agentClient!.request(methods.client.elicitation.create, {
+        sessionId: 'agy-bg-1',
+        mode: 'form',
+        message: 'Which branch should this go to?',
+        requestedSchema: {
+          type: 'object',
+          properties: { branch: { type: 'string', title: 'Base branch', enum: ['main', 'release'] } }
+        }
+      })
+      await vi.waitFor(() => expect(formReceived).toHaveBeenCalledOnce())
+      expect(sessions.hasContinuation('t-bg', contId)).toBe(true)
+      expect(questions.listPendingForThread('t-bg')).toEqual([])
+
+      // Now attach the continuation turn (with a different historyKey, since OrchestratorService inserts a notice).
+      const contTools: Array<Record<string, unknown>> = []
+      let contThinking = ''
+      const contPromise = sessions.chat({
+        threadId: 't-bg',
+        cwd: process.cwd(),
+        model: 'default',
+        permissionMode: 'full',
+        history: 'h-1-plus-notice',
+        continuation: true,
+        continuationId: contId,
+        prompt: 'A background task finished.',
+        onText: vi.fn(),
+        onThinking: (t) => { contThinking = t },
+        onTool: (e) => contTools.push(e as unknown as Record<string, unknown>)
+      })
+
+      // Permission request waited for continuation attach and auto-allowed under permissionMode: 'full'.
+      await expect(permPromise).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+      await vi.waitFor(() => expect(questions.listPendingForThread('t-bg')).toHaveLength(1))
+      const [form] = questions.listPendingForThread('t-bg')
+      expect(form!.questions[0]?.prompt).toBe('Base branch')
+      questions.submitAnswers(form!.requestId, { q0: 'option-0' })
+      await expect(formReply).resolves.toEqual({ action: 'accept', content: { branch: 'main' } })
+
+      const followUp = JSON.stringify({ delegationId: 'd-next', threadId: 't-child', title: 'Reviewer', subagent: true })
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'follow-up', name: 'mcp_mousse_thread_send', title: 'Follow up with reviewer', status: 'in_progress' }
+      })
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'tool_call_update', toolCallId: 'follow-up', status: 'completed', rawOutput: { content: [{ type: 'text', text: followUp }] } }
+      })
+
+      // Complete the follow-up tool and emit final reply + usage_update.
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'tool_call_update', toolCallId: 'pr-1', status: 'completed', rawOutput: 'https://github.com/org/repo/pull/99' }
+      })
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'PR #99 created.' } }
+      })
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-bg-1',
+        update: { sessionUpdate: 'usage_update', size: 100000, used: 2000 } as never
+      })
+
+      const contText = await contPromise
+      expect(contText).toBe('PR #99 created.')
+      expect(contThinking).toBe('Verify passed, opening PR.')
+      expect(contTools).toEqual([
+        expect.objectContaining({ phase: 'start', callId: 'pr-1', toolName: 'run_command' }),
+        expect.objectContaining({ phase: 'start', callId: 'follow-up', toolName: 'mcp_mousse_thread_send' }),
+        expect.objectContaining({ phase: 'complete', callId: 'follow-up', status: 'completed', activity: { output: followUp } }),
+        expect.objectContaining({ phase: 'complete', callId: 'pr-1', status: 'completed' })
+      ])
+      expect(bgStates).toEqual([['t-bg', true], ['t-bg', false]])
+      expect(sessions.inFlightContinuation('t-bg')).toBeUndefined()
+      expect(agent.connections).toHaveLength(1)
+    })
+
+    it('closes a daemon run_command (IsDaemon: true) as background without holding backgroundWork', async () => {
+      const agent = scriptedAgent({
+        prompt: async (_text, ctx) => {
+          await ctx.update({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'daemon-1',
+            name: 'run_command',
+            title: 'Dev server',
+            status: 'in_progress',
+            rawInput: { CommandLine: 'npm run dev', IsDaemon: true, WaitMsBeforeAsync: 500 }
+          })
+          await ctx.notify('Dev server started.')
+          return 'end_turn'
+        }
+      })
+      const { sessions } = core(agent.connect, { backgroundWork: true })
+      const bgStates: Array<[string, boolean]> = []
+      sessions.setLiveHost({ backgroundWork: (threadId, active) => bgStates.push([threadId, active]) })
+      const tools: Array<Record<string, unknown>> = []
+      await sessions.chat({ threadId: 't-daemon', cwd: process.cwd(), model: 'default', prompt: 'start dev', onText: vi.fn(), onTool: (e) => tools.push(e as unknown as Record<string, unknown>) })
+      expect(tools[1]).toMatchObject({ phase: 'complete', callId: 'daemon-1', status: 'background' })
+      expect(bgStates).toEqual([])
+    })
+
+    it('tracks a slow invoke_subagent as background work until reactive wakeup settles it, while a fast in-turn invoke_subagent does not hold backgroundWork', async () => {
+      let agentClient: { notify: (method: string, params: unknown) => Promise<void> } | undefined
+      const agent = inProcessAgent((app: AgentApp) => {
+        app
+          .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+          .onRequest(methods.agent.session.new, () => ({ sessionId: 'agy-sub-1', ...DEFAULT_SESSION }) as never)
+          .onRequest(methods.agent.session.prompt, async (c) => {
+            agentClient = c.client as unknown as typeof agentClient
+            const promptText = (c.params.prompt[0] as { text: string }).text
+            const slow = promptText.includes('slow')
+            const callId = slow ? 'sub-slow' : 'sub-fast'
+            await c.client.notify(methods.client.session.update, {
+              sessionId: 'agy-sub-1',
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: callId,
+                name: 'invoke_subagent',
+                title: 'Run invoke_subagent',
+                status: 'in_progress',
+                rawInput: { Role: slow ? 'Slow Researcher' : 'Fast Solver', TypeName: 'research', Prompt: 'Check files' }
+              }
+            } as never)
+            await c.client.notify(methods.client.session.update, {
+              sessionId: 'agy-sub-1',
+              update: { sessionUpdate: 'tool_call_update', toolCallId: callId, status: 'completed' }
+            })
+            await c.client.notify(methods.client.session.update, {
+              sessionId: 'agy-sub-1',
+              update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Launched subagent.' } }
+            })
+            await c.client.notify(methods.client.session.update, {
+              sessionId: 'agy-sub-1',
+              update: { sessionUpdate: 'usage_update', size: 100000, used: 500 } as never
+            })
+            if (!slow) {
+              // Fast subagent wakes up and reports before session/prompt returns.
+              await c.client.notify(methods.client.session.update, {
+                sessionId: 'agy-sub-1',
+                update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' Answer is 42.' } }
+              })
+              await c.client.notify(methods.client.session.update, {
+                sessionId: 'agy-sub-1',
+                update: { sessionUpdate: 'usage_update', size: 100000, used: 900 } as never
+              })
+            }
+            return { stopReason: 'end_turn' as const }
+          })
+      })
+      const { sessions } = core(agent.connect, { backgroundWork: true, continuationSettleMs: 30 })
+      const bgStates: Array<[string, boolean]> = []
+      const endedTasks: Array<[string, ProviderTaskEnd]> = []
+      const continuations: Array<[string, ContinuationInfo]> = []
+      sessions.setLiveHost({
+        backgroundWork: (threadId, active) => bgStates.push([threadId, active]),
+        taskEnded: (threadId, info) => endedTasks.push([threadId, info]),
+        continuationStarted: (threadId, info) => continuations.push([threadId, info])
+      })
+
+      // 1) Fast subagent completes in-turn: does NOT set backgroundWork(true), immediately settles taskEnded.
+      await sessions.chat({ threadId: 't-sub', cwd: process.cwd(), model: 'default', prompt: 'fast subagent', onText: vi.fn() })
+      sessions.commitConversation('t-sub', 'h-fast')
+      expect(bgStates).toEqual([])
+      expect(endedTasks).toEqual([['t-sub', expect.objectContaining({ toolUseId: 'sub-fast', status: 'completed' })]])
+
+      // 2) Slow subagent is still running at end_turn: emits status: 'background' & background: true, sets backgroundWork(true).
+      const slowTools: Array<Record<string, unknown>> = []
+      await sessions.chat({
+        threadId: 't-sub',
+        cwd: process.cwd(),
+        model: 'default',
+        history: 'h-fast',
+        prompt: 'slow subagent',
+        onText: vi.fn(),
+        onTool: (e) => slowTools.push(e as unknown as Record<string, unknown>)
+      })
+      expect(slowTools).toEqual([
+        expect.objectContaining({ phase: 'start', callId: 'sub-slow', activity: expect.objectContaining({ kind: 'subagent', description: 'Slow Researcher', background: true }) }),
+        expect.objectContaining({ phase: 'complete', callId: 'sub-slow', status: 'background' })
+      ])
+      expect(bgStates).toEqual([['t-sub', true]])
+
+      // Reactive wakeup arrives when slow subagent finishes.
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-sub-1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Slow Researcher finished.' } }
+      })
+      await agentClient!.notify(methods.client.session.update, {
+        sessionId: 'agy-sub-1',
+        update: { sessionUpdate: 'usage_update', size: 100000, used: 1200 } as never
+      })
+      await vi.waitFor(() => expect(continuations).toHaveLength(1))
+      const contId = continuations[0]![1].id
+      const reply = await sessions.chat({
+        threadId: 't-sub',
+        cwd: process.cwd(),
+        model: 'default',
+        continuation: true,
+        continuationId: contId,
+        prompt: 'A background task finished.',
+        onText: vi.fn()
+      })
+      expect(reply).toBe('Slow Researcher finished.')
+      expect(endedTasks).toHaveLength(2)
+      expect(endedTasks[1]).toEqual(['t-sub', expect.objectContaining({ toolUseId: 'sub-slow', status: 'completed' })])
+      expect(bgStates).toEqual([['t-sub', true], ['t-sub', false]])
+    })
+
+    it('stopThread kills a process waiting on background work, marks pending tasks stopped, and clears backgroundWork', async () => {
+      const agent = scriptedAgent({
+        prompt: async (_text, ctx) => {
+          await ctx.update({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'cmd-stop',
+            name: 'run_command',
+            title: 'Long build',
+            status: 'in_progress',
+            rawInput: { CommandLine: 'npm run build' }
+          })
+          await ctx.notify('Building in background.')
+          return 'end_turn'
+        }
+      })
+      const { sessions } = core(agent.connect, { backgroundWork: true })
+      const bgStates: Array<[string, boolean]> = []
+      const endedTasks: Array<[string, ProviderTaskEnd]> = []
+      sessions.setLiveHost({
+        backgroundWork: (threadId, active) => bgStates.push([threadId, active]),
+        taskEnded: (threadId, info) => endedTasks.push([threadId, info])
+      })
+
+      await sessions.chat({ threadId: 't-stop', cwd: process.cwd(), model: 'default', prompt: 'build', onText: vi.fn() })
+      expect(bgStates).toEqual([['t-stop', true]])
+      expect(sessions.stopThread('t-stop')).toBe('stopped')
+      expect(endedTasks).toEqual([['t-stop', expect.objectContaining({ toolUseId: 'cmd-stop', status: 'stopped' })]])
+      expect(bgStates).toEqual([['t-stop', true], ['t-stop', false]])
+      expect(agent.connections[0].killed).toBe(true)
+      expect(sessions.stopThread('t-stop')).toBe('not_active')
+    })
+
+    it('records bounded subagent call metadata for Antigravity mcp_mousse_delegate_task calls and keeps drained_turn settled for native background tools', async () => {
+      const agent = scriptedAgent({
+        prompt: async (_text, ctx) => {
+          await ctx.update({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'mcp-1',
+            name: 'mcp_mousse_delegate_task',
+            title: 'mcp_mousse_delegate_task',
+            status: 'in_progress',
+            rawInput: { title: 'API reviewer', prompt: 'SECRET PROMPT' }
+          })
+          await ctx.update({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'mcp-1',
+            status: 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: JSON.stringify({ delegationId: 'd-1', childThreadId: 'child-1', title: 'API reviewer', status: 'started' }) } }]
+          })
+          await ctx.update({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'bg-cmd',
+            name: 'run_command',
+            title: 'Verify',
+            status: 'in_progress',
+            rawInput: { CommandLine: 'npm test' }
+          })
+          await ctx.notify('Delegated and running tests.')
+          return 'end_turn'
+        }
+      })
+      const { sessions } = core(agent.connect, { backgroundWork: true })
+      const adapter = new AcpAdapter(
+        () => ({
+          chat: (i) => sessions.chat(i),
+          commitConversation: (t, h) => sessions.commitConversation(t, h),
+          configured: () => true,
+          stopThread: (t) => sessions.stopThread(t)
+        }),
+        { driver: 'antigravity', label: 'Antigravity', capabilities: GENERIC_ACP_CAPS }
+      )
+      const toolEvents: Array<Record<string, unknown>> = []
+      const sink: TurnSink = {
+        providerRef: vi.fn(),
+        progress: vi.fn(),
+        text: vi.fn(),
+        thinking: vi.fn(),
+        tool: (e) => toolEvents.push(e as unknown as Record<string, unknown>),
+        usage: vi.fn(),
+        providerMetrics: vi.fn(),
+        steerAccepted: vi.fn()
+      }
+      const host: AdapterHost = {
+        context: {
+          prepareNativeContext: () => undefined,
+          nativeHistoryAfterTurn: (t) => t
+        }
+      } as unknown as AdapterHost
+      const result = await adapter.startTurn(
+        {
+          runId: 'r1',
+          attemptId: 'a1',
+          threadId: 't-mcp',
+          cwd: process.cwd(),
+          instanceId: 'antigravity',
+          model: 'default',
+          llmProvider: 'antigravity',
+          modelPinned: true,
+          mode: 'agent',
+          permissionMode: 'full',
+          prompt: 'go',
+          messages: [],
+          signal: new AbortController().signal
+        } as TurnInput,
+        sink,
+        { heartbeat: vi.fn(), drainSteer: () => undefined } as never,
+        host
+      )
+      expect(result.drain).toEqual({ toolCalls: 2, toolsSettled: true })
+      const mcpStart = toolEvents.find((e) => e.callId === 'mcp-1' && e.phase === 'start')
+      const mcpEnd = toolEvents.find((e) => e.callId === 'mcp-1' && e.phase === 'complete')
+      expect(mcpStart?.input).toEqual({ recordVersion: 1, title: 'API reviewer' })
+      expect(JSON.parse(String(mcpEnd?.response))).toEqual({ delegationId: 'd-1', childThreadId: 'child-1', title: 'API reviewer', status: 'started' })
+      const bgEnd = toolEvents.find((e) => e.callId === 'bg-cmd' && e.phase === 'complete')
+      expect(bgEnd?.activity).toMatchObject({ status: 'done', summary: BACKGROUND_SUMMARY })
+    })
   })
 })

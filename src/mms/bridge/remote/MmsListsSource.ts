@@ -99,12 +99,15 @@ export interface ListsSnapshot {
       | 'updatedAt'
       | 'order'
       | 'pinnedAt'
-      | 'settledAt'
+      | 'archivedAt'
       | 'startedAt'
       | 'worktreeEnabled'
       | 'expiresAt'
       | 'expiryStopsRun'
-    > &
+    > & {
+      /** `archivedAt` again, for a reader that runs an older Mousse. */
+      settledAt?: string
+    } &
       /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
       Partial<
         Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom'>
@@ -329,7 +332,7 @@ export class MmsListsSource {
     const cutoff = Date.now() - ARCHIVE_KEEP_MS
     const dropped = new Set<string>()
     for (const thread of inventory)
-      if (thread.settledAt && !thread.lineage && new Date(thread.settledAt).getTime() < cutoff)
+      if (thread.archivedAt && !thread.lineage && new Date(thread.archivedAt).getTime() < cutoff)
         dropped.add(thread.id)
     if (!dropped.size) return snapshot
     // Whatever hangs below a dropped thread goes with it.
@@ -390,7 +393,9 @@ export class MmsListsSource {
           updatedAt: thread.updatedAt,
           order: thread.order,
           pinnedAt: thread.pinnedAt,
-          settledAt: thread.settledAt,
+          archivedAt: thread.archivedAt,
+          // The same time for a computer or a phone that runs an older Mousse, which reads only `settledAt`.
+          ...(thread.archivedAt ? { settledAt: thread.archivedAt } : {}),
           startedAt: thread.startedAt,
           worktreeEnabled: thread.worktreeEnabled,
           // When it archives itself, for the menu's Archive after (a phone keeps "stop a running turn" when it changes the time).

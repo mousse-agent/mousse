@@ -60,11 +60,18 @@ const REPOSITORY_PACKAGES = fileURLToPath(new URL('../../node_modules', import.m
 /**
  * Banner for an ESM crash-child bundle: bundled CommonJS dependencies call `require`, which an ES module does not have.
  * The bundle is written outside the repository, so a package it loads when it runs (koffi, for Git on Windows) is
- * found in the repository's packages.
+ * found in the repository's packages. The child names itself in `MOUSSE_TEST_CRASH_PID` ({@link KILL_CRASH_CHILD}).
  */
 export const CRASH_CHILD_REQUIRE = "import { createRequire as crashChildRequire, Module as CrashChildModule } from 'node:module'; " +
+  "process.env.MOUSSE_TEST_CRASH_PID = String(process.pid); " +
   "process.env.NODE_PATH = [" + JSON.stringify(REPOSITORY_PACKAGES) + ", process.env.NODE_PATH].filter(Boolean).join(" + JSON.stringify(delimiter) + "); " +
   "CrashChildModule._initPaths(); const require = crashChildRequire(import.meta.url);"
+
+/**
+ * Shell that kills a crash child (SIGKILL) from a Git it started, as the computer turning off would stop Mousse. Not
+ * `$PPID`: Git's parent is the helper process that starts Git (`gitSpawn.ts`), not Mousse itself.
+ */
+export const KILL_CRASH_CHILD = 'kill -9 "$MOUSSE_TEST_CRASH_PID"'
 
 export const contextBoundary = {
   messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const, safeBoundaryProof: 'fixture'

@@ -418,6 +418,18 @@ describe('AntigravityAdapter', () => {
     expect(service.chat).not.toHaveBeenCalled()
   })
 
+  it('uses the runtime standalone workspace when a thread has no project, and keeps the project cwd when one exists', async () => {
+    const standaloneWorkspace = vi.fn((threadId: string) => `/standalone/${threadId}`)
+    const service = { ...client(async () => 'ok'), standaloneWorkspace }
+    const adapter = antigravityAdapter(() => service)
+    const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
+    expect(adapter.standaloneWorkspace('thread-1')).toBe('/standalone/thread-1')
+    await adapter.startTurn(input({ ...turn, cwd: null }), recordingSink(), control(), host())
+    expect(service.chat.mock.calls[0][0].cwd).toBe('/standalone/thread-1')
+    await adapter.startTurn(input({ ...turn, cwd: '/project' }), recordingSink(), control(), host())
+    expect(service.chat.mock.calls[1][0].cwd).toBe('/project')
+  })
+
   it('reports the history a failed or stopped turn left, so the next turn may resume the agent session', async () => {
     const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
     const failing = { ...client(async () => { throw new Error('quota') }), commitInterrupted: vi.fn() }
@@ -510,6 +522,62 @@ describe('AntigravityAdapter', () => {
       expect(completes(await toolEvents(stop.signal)).open).toEqual({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
     })
   })
+
+  it('reports tokens and output speed from ACP usage before committing canonical history', async () => {
+    const order: string[] = []
+    const service = client(async (chat) => {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      chat.onText('Gemini answer')
+      chat.onUsage?.({ input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917, hasOutput: true })
+      return 'Gemini answer'
+    })
+    const sink = recordingSink()
+    const origMetrics = sink.providerMetrics
+    sink.providerMetrics = (metrics) => {
+      order.push('providerMetrics')
+      origMetrics(metrics)
+    }
+    const turnHost = host()
+    const origHistory = turnHost.context.nativeHistoryAfterTurn
+    turnHost.context.nativeHistoryAfterTurn = (text) => {
+      order.push('nativeHistoryAfterTurn')
+      return origHistory(text)
+    }
+    const result = await antigravityAdapter(() => service).startTurn(
+      input({ instanceId: 'antigravity', llmProvider: 'antigravity', model: 'gemini-4-neon' }),
+      sink,
+      control(),
+      turnHost
+    )
+    expect(order).toEqual(['providerMetrics', 'nativeHistoryAfterTurn'])
+    expect(result.totalTokensUsed).toBe(10917)
+    expect(result.tokensPerSecond).toBeGreaterThan(0)
+    expect(result.usage).toEqual({ input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0 })
+    expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0 })
+    expect(sink.calls.find(([name]) => name === 'providerMetrics')?.[1]).toMatchObject({
+      totalTokensUsed: 10917,
+      tokensPerSecond: result.tokensPerSecond,
+      usage: { input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0, reasoning: 18, totalTokens: 10917 }
+    })
+  })
+
+  it('omits tokensPerSecond when ACP usage reports only totalTokens without outputTokens', async () => {
+    const service = client(async (chat) => {
+      await new Promise((resolve) => setTimeout(resolve, 15))
+      chat.onText('done')
+      chat.onUsage?.({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 500, hasOutput: false })
+      return 'done'
+    })
+    const sink = recordingSink()
+    const result = await antigravityAdapter(() => service).startTurn(
+      input({ instanceId: 'antigravity', llmProvider: 'antigravity', model: 'gemini-4-neon' }),
+      sink,
+      control(),
+      host()
+    )
+    expect(result.totalTokensUsed).toBe(500)
+    expect(result.tokensPerSecond).toBeUndefined()
+  })
 })
 
 /**
@@ -560,6 +628,57 @@ describe('an agent that got the prompt is no longer starting', () => {
       )
       expect(seenWhileWorking.filter(([name]) => name === 'status')).toEqual([['status', 'waiting']])
       expect(seenWhileWorking.some(([name]) => name === 'text' || name === 'progress')).toBe(false)
+    } finally {
+      service.stop()
+      questions.shutdown()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('AntigravityProviderService + AcpSessions + AcpAdapter carry PromptResponse.usage through to TurnResult', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-acp-usage-'))
+    const workspace = join(home, 'workspace')
+    mkdirSync(workspace)
+    const questions = new UserQuestionService()
+    const sink = recordingSink()
+    const connect = vi.fn(() => {
+      const abort = new AbortController()
+      return {
+        child: { exitCode: 0, signalCode: null, kill: () => true },
+        connection: {
+          signal: abort.signal,
+          close: () => abort.abort(new Error('closed')),
+          agent: {
+            request: async (method: string) => {
+              if (method === 'initialize') return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {} }
+              if (method === 'session/new')
+                return { sessionId: 'acp-session', configOptions: [{ id: 'model', name: 'Model', type: 'select', currentValue: 'gemini-4-neon', options: [{ value: 'gemini-4-neon', name: 'Gemini 4 Neon' }] }] }
+              if (method === 'session/prompt') {
+                await new Promise((resolve) => setTimeout(resolve, 20))
+                return {
+                  stopReason: 'end_turn',
+                  usage: { inputTokens: 2145, outputTokens: 20, cachedReadTokens: 8752, cachedWriteTokens: 0, thoughtTokens: 18, totalTokens: 10917 }
+                }
+              }
+              return {}
+            },
+            notify: async () => undefined
+          }
+        }
+      }
+    })
+    const service = new AntigravityProviderService(home, home, questions, undefined, { connect: connect as never })
+    Object.assign(service as unknown as Record<string, unknown>, { configured: () => true })
+    try {
+      const result = await antigravityAdapter(() => service).startTurn(
+        input({ instanceId: 'antigravity', llmProvider: 'antigravity', model: 'gemini-4-neon', cwd: workspace }),
+        sink,
+        control(),
+        host()
+      )
+      expect(result.totalTokensUsed).toBe(10917)
+      expect(result.tokensPerSecond).toBeGreaterThan(0)
+      expect(result.usage).toEqual({ input: 2145, output: 20, cacheRead: 8752, cacheWrite: 0 })
     } finally {
       service.stop()
       questions.shutdown()

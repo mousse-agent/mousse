@@ -17,7 +17,7 @@ const actions = vi.hoisted(() => ({
   createAndSelectThread: vi.fn(async () => undefined),
   createAndSelectProjectThread: vi.fn(async () => undefined)
 }))
-// Archive runs the real archiveThread, so the test still sees the settle call it makes.
+// Archive runs the real archiveThread, so the test still sees the archive call it makes.
 vi.mock('../../src/renderer/lib/threadActions', async (importOriginal) => ({
   ...actions,
   archiveThread: (await importOriginal<typeof import('../../src/renderer/lib/threadActions')>()).archiveThread
@@ -38,7 +38,7 @@ const thread = (id: string, name: string, over: Partial<Thread> = {}): Thread =>
 
 const threadsApi = {
   pin: vi.fn(async () => undefined),
-  settle: vi.fn(async () => undefined),
+  archive: vi.fn(async () => undefined),
   rename: vi.fn(async () => undefined),
   delete: vi.fn(async () => undefined),
   regenerateTitle: vi.fn(async () => undefined)
@@ -47,6 +47,7 @@ const projectsApi = {
   pin: vi.fn(async () => undefined),
   rename: vi.fn(async () => undefined),
   remove: vi.fn(async () => undefined),
+  changeFolder: vi.fn(async (): Promise<unknown> => null),
   trustGitSettings: vi.fn(async () => undefined),
   open: vi.fn(async () => null)
 }
@@ -117,7 +118,7 @@ describe('naming', () => {
     expect(shell).toContain('aria-label="New thread"')
     expect(html).toContain('aria-label="Chats"')
     expect(html).toContain('<span>Archived</span>')
-    expect(html).not.toContain('threads-sidebar-settled-count')
+    expect(html).not.toContain('threads-sidebar-archived-count')
     expect(html).toContain('aria-label="New thread in Mousse"')
     expect(html).not.toMatch(/Settle|Recent chats|New chat/)
   })
@@ -132,8 +133,8 @@ describe('naming', () => {
 
 describe('an archived thread', () => {
   it('opens on click', () => {
-    show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
-    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    show([thread('a', 'Old work', { archivedAt: at }), thread('b', 'Other')], 'threads')
+    click(host.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!)
     click(row('a'))
     expect(actions.selectThread).toHaveBeenCalledWith('a')
   })
@@ -233,7 +234,7 @@ describe('the row menu', () => {
   it('opens on a project row from its "…" button, with Remove project…', () => {
     show([thread('a', 'Fix tests')])
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
-    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Change icon…', 'Git', 'Remove project…'])
+    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Change folder…', 'Change icon…', 'Git', 'Remove project…'])
   })
 
   it('Copy reference puts the thread\'s link on the clipboard and closes the menu', async () => {
@@ -257,18 +258,20 @@ describe('archive and delete', () => {
     click(host.querySelector('[aria-label="More actions for Fix tests"]')!)
     click(menuItem('Archive'))
     await flush()
-    expect(threadsApi.settle).toHaveBeenCalledWith('a', true)
+    expect(threadsApi.archive).toHaveBeenCalledWith('a', true)
     expect(toast()).toBeNull()
   })
 
   it('deletes an archived thread from its "…" menu only after the confirmation, with no Undo toast', async () => {
-    show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
-    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    show([thread('a', 'Old work', { archivedAt: at }), thread('b', 'Other')], 'threads')
+    click(host.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!)
     click(host.querySelector('[aria-label="More actions for Old work"]')!)
     expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Copy reference', 'Delete…', 'Delete all archived…'])
     click(menuItem('Delete…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Delete “Old work”?')
+    // Outside the sidebar: a size container pins a fixed overlay inside itself, where the main view covers it.
+    expect(dialog.closest('.threads-sidebar')).toBeNull()
     expect(threadsApi.delete).not.toHaveBeenCalled()
     click(dialog.querySelector('[data-testid="archived-delete-confirm"]')!)
     await flush()
@@ -283,11 +286,26 @@ describe('archive and delete', () => {
     click(menuItem('Remove project…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Mousse leaves the sidebar. Its folder and threads stay.')
+    // Outside the sidebar: a size container pins a fixed overlay inside itself, where the main view covers it.
+    expect(dialog.closest('.threads-sidebar')).toBeNull()
     expect(projectsApi.remove).not.toHaveBeenCalled()
     click(dialog.querySelector('[data-testid="remove-project-confirm"]')!)
     await flush()
     expect(projectsApi.remove).toHaveBeenCalledWith('p1')
     expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+})
+
+describe('Change folder…', () => {
+  it("asks for the project's new folder from its current one, and shows a refusal as a toast", async () => {
+    projectsApi.changeFolder.mockRejectedValueOnce(new Error("Error invoking remote method 'projects:changeFolder': Error: That folder is already the project Docs."))
+    show([thread('a', 'Fix tests')])
+    click(host.querySelector('[aria-label="More actions for Mousse"]')!)
+    click(menuItem('Change folder…'))
+    await flush()
+    expect(projectsApi.changeFolder).toHaveBeenCalledWith('p1', '/p/Mousse')
+    expect(menu()).toBeNull()
+    expect(toast()?.textContent).toContain('Could not change the folder · That folder is already the project Docs.')
   })
 })
 
@@ -308,8 +326,8 @@ describe('failures', () => {
 
   it('shows a failed delete in its dialog, without Undo or Retry', async () => {
     threadsApi.delete.mockRejectedValueOnce(new Error('offline'))
-    show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
-    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    show([thread('a', 'Old work', { archivedAt: at }), thread('b', 'Other')], 'threads')
+    click(host.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!)
     click(host.querySelector('[aria-label="Delete Old work…"]')!)
     click(document.querySelector('[data-testid="archived-delete-confirm"]')!)
     await flush()

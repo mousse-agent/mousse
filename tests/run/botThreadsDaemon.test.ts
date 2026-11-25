@@ -157,7 +157,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       expect((error as McpToolError).code).toBe('mousse_scope_denied')
     }
     expect(w.d.store.listAllThreads()).toHaveLength(before)
-    expect(w.d.store.getThread(target.id)!.settledAt).toBeUndefined()
+    expect(w.d.store.getThread(target.id)!.archivedAt).toBeUndefined()
     expect(w.pi.turns).toHaveLength(0)
   })
 
@@ -366,31 +366,31 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     let release!: () => void
     const held = new Promise<string>((resolve) => { release = () => resolve('done late') })
     const w = world({ script: (input) => (input.threadId === busy ? held : 'done') })
-    const settledEvents: string[] = []
-    w.d.orch.on('thread-settled', (payload: { threadId: string }) => settledEvents.push(payload.threadId))
+    const archivedEvents: string[] = []
+    w.d.orch.on('thread-archived', (payload: { threadId: string }) => archivedEvents.push(payload.threadId))
     const actions = (threadId: string) => w.d.engine.store.listEvents(threadId).filter((event) => event.type === 'agent.action').map((event) => (event.payload as { action: string; actorThreadId: string }))
     // Archived as the app's Archive does: in Archived, its pull request watch told, and the change recorded as the bot's.
     const done = w.d.store.createThread('Merged work', w.project.id)
     expect(await w.archive(done.id)).toEqual({ status: 'accepted', archived: true, changed: true })
-    expect(w.d.store.getThread(done.id)!.settledAt).toEqual(expect.any(String))
-    expect(settledEvents).toEqual([done.id])
+    expect(w.d.store.getThread(done.id)!.archivedAt).toEqual(expect.any(String))
+    expect(archivedEvents).toEqual([done.id])
     expect(actions(done.id)).toEqual([expect.objectContaining({ action: 'archived_thread', actorThreadId: w.chat.id })])
     // Again: already archived, nothing changes.
     expect(await w.archive(done.id)).toEqual({ status: 'accepted', archived: true, changed: false })
     // Unarchived: back in the list, nothing deleted.
     expect(await w.archive(done.id, false)).toEqual({ status: 'accepted', archived: false, changed: true })
-    expect(w.d.store.getThread(done.id)!.settledAt).toBeUndefined()
+    expect(w.d.store.getThread(done.id)!.archivedAt).toBeUndefined()
     expect(actions(done.id).map((action) => action.action)).toEqual(['archived_thread', 'unarchived_thread'])
     // Never its own chat thread.
     await expect(w.archive(w.chat.id)).rejects.toMatchObject({ code: 'mousse_scope_denied' })
-    expect(w.d.store.getThread(w.chat.id)!.settledAt).toBeUndefined()
+    expect(w.d.store.getThread(w.chat.id)!.archivedAt).toBeUndefined()
     // A thread still working is refused, and keeps working; once its turn ends it can be archived.
     const target = w.d.store.createThread('Busy', w.project.id)
     busy = target.id
     const owner = await w.d.orch.send('Work on this.', false, { threadId: target.id, clientRequestId: 'owner-busy', awaitMode: 'ack' })
     await waitFor(() => w.d.engine.getRun(owner.runId!)?.status === 'running', 'the owner\'s turn running')
     expect(await w.archive(target.id)).toEqual({ status: 'rejected', reason: 'thread_running' })
-    expect(w.d.store.getThread(target.id)!.settledAt).toBeUndefined()
+    expect(w.d.store.getThread(target.id)!.archivedAt).toBeUndefined()
     expect(w.d.engine.getRun(owner.runId!)!.status).toBe('running')
     // So is a thread whose subagent is still working.
     const parent = w.d.store.createThread('Parent', w.project.id)
@@ -568,7 +568,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(managed([w.chat.id]).map((thread) => [thread.status, launchedActive(thread)])).toEqual([['needs_input', true]])
     seen = changed.length
     await w.archive(made.threadId)
-    expect(w.d.store.getThread(made.threadId)?.settledAt).toBeTruthy()
+    expect(w.d.store.getThread(made.threadId)?.archivedAt).toBeTruthy()
     expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
     expect(changed.length).toBeGreaterThan(seen)
     // Its Recent list leaves the archived thread out at once; unarchived, it is back.

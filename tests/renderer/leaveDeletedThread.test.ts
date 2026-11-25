@@ -65,7 +65,7 @@ afterEach(() => {
 
 describe('the shown thread is deleted', () => {
   it('from this window: the chat goes to the first thread that is not archived', async () => {
-    windowShowing('a', [thread('archived-one', { settledAt: at }), thread('a', { settledAt: at }), thread('b'), thread('c')])
+    windowShowing('a', [thread('archived-one', { archivedAt: at }), thread('a', { archivedAt: at }), thread('b'), thread('c')])
     // The sidebar's Delete: the service deletes it, and the list without it reaches the window.
     deleteInService('a')
     await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('b'))
@@ -74,7 +74,7 @@ describe('the shown thread is deleted', () => {
   })
 
   it('with no other thread to show: the chat goes to a new chat', async () => {
-    windowShowing('a', [thread('a'), thread('old', { settledAt: at })])
+    windowShowing('a', [thread('a'), thread('old', { archivedAt: at })])
     deleteInService('a')
     await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('new-chat'))
     expect(api.newChatAfterDelete).toHaveBeenCalledTimes(1)
@@ -83,7 +83,7 @@ describe('the shown thread is deleted', () => {
 
   it('a subagent thread shown when its parent is deleted: the chat leaves it, never for another subagent', async () => {
     const child = (id: string, parent: string) => thread(id, { lineage: { parentThreadId: parent, rootThreadId: parent, relationship: 'subagent' } })
-    windowShowing('child', [thread('parent', { settledAt: at }), child('child', 'parent'), thread('other'), child('other-child', 'other')])
+    windowShowing('child', [thread('parent', { archivedAt: at }), child('child', 'parent'), thread('other'), child('other-child', 'other')])
     deleteInService('parent', 'child')
     await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('other'))
   })
@@ -185,7 +185,7 @@ describe('helpers', () => {
 
   it('threadAfterDeletion skips archived threads, subagents and the deleted thread', () => {
     const sub = thread('s', { lineage: { parentThreadId: 'p', rootThreadId: 'p', relationship: 'subagent' } })
-    expect(threadAfterDeletion([thread('x', { settledAt: at }), thread('p'), sub], 'p')).toBeUndefined()
-    expect(threadAfterDeletion([thread('x', { settledAt: at }), thread('p', { settledAt: at }), sub, thread('y')], 'z')).toBe('y')
+    expect(threadAfterDeletion([thread('x', { archivedAt: at }), thread('p'), sub], 'p')).toBeUndefined()
+    expect(threadAfterDeletion([thread('x', { archivedAt: at }), thread('p', { archivedAt: at }), sub, thread('y')], 'z')).toBe('y')
   })
 })

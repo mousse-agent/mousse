@@ -36,8 +36,9 @@ describe('composer picker from snapshots', () => {
     { id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'claude-opus-4', label: 'Claude Opus 4', speed: 'fast' }] }
   ]
 
-  it('shows the daemon catalog as it is until snapshots arrive', () => {
-    expect(pickerProviders(undefined, catalog)).toEqual([{ ...catalog[0], llmProvider: 'claude-subscription' }])
+  it('shows providers with models from the daemon catalog until snapshots arrive', () => {
+    const empty = { id: 'codex', instanceId: 'codex', label: 'Codex', models: [] }
+    expect(pickerProviders(undefined, [...catalog, empty])).toEqual([{ ...catalog[0], llmProvider: 'claude-subscription' }])
   })
 
   it('lists enabled instances with their visible models, caps and status', () => {
@@ -58,6 +59,12 @@ describe('composer picker from snapshots', () => {
       status: { headline: 'Signed in · Max plan', tone: 'ready' }
     })
     expect(providers[0].caps?.planMode).toBe(true)
+  })
+
+  it('leaves out a default agent that is signed out, but keeps a model API that needs attention', () => {
+    const agent = snapshot({ auth: { state: 'signed_out' }, models: { entries: claudeModels, source: 'live' } })
+    const api = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', auth: { state: 'signed_out' }, models: { entries: [model('gpt-5')], source: 'live' } })
+    expect(pickerProviders([agent, api], []).map((entry) => entry.instanceId)).toEqual(['pi:openai'])
   })
 
   it('gives the same entries for the same snapshots, so switching threads does not group the models again', () => {
@@ -142,7 +149,7 @@ describe('composer picker from snapshots', () => {
     })
 
     it('uses the first offered provider when none is ready, and nothing when none is offered', () => {
-      expect(fallbackModel(pickerProviders([claude({ auth: { state: 'signed_out' } })], []))?.model).toBe('claude-opus-4')
+      expect(fallbackModel(pickerProviders([claude({ instanceId: 'claude:work', builtIn: false, auth: { state: 'signed_out' } })], []))?.model).toBe('claude-opus-4')
       expect(fallbackModel([])).toBeUndefined()
     })
 

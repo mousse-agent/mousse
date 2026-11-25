@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowTurnForward, ArrowUp, Check, Layers, Loader2, Mic, Paperclip, Square, X, Zap } from '../lib/icons'
 import type { AudioLevels } from '../speech/audioLevels'
 import { SpeechHistoryWave } from '../speech/SpeechHistoryWave'
@@ -137,10 +137,14 @@ export interface ComposerFooterProps {
    * button and the send button queues (a bot's chat, an idle thread, a card that takes the message).
    */
   sendMode?: ComposerSendModeProps
-  /** Dictation stays offered while a run can be stopped: a bot's chat, which takes messages while it works. */
-  dictateWhileStoppable?: boolean
   /** Buttons of the caller's own, left of Attach (a bot's chat: emoji). */
   extraActions?: ReactNode
+  /**
+   * The app is not connected to its service: the controls fade out and cannot be reached, keeping the row's height
+   * (connecting-dots.css). `connectingNote` is said in their place.
+   */
+  connecting?: boolean
+  connectingNote?: string | null
 }
 
 /** The permission chip and the model button with its picker. */
@@ -202,12 +206,19 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
   // The picker's run settings: the highlighted model's level and speed, with the chosen level carried over.
   // The permission mode has its own chip beside the model button, so the picker's footer holds only the speed.
   const runSettings = modelPickerRunSettings({ providers, selection, onSelect: onModelSelect, onClose: closePicker })
+  const emptyModelMenuOpen = !modelReadOnly && modelMenuOpen && providers.length === 0
+  const addProviderRef = useRef<HTMLButtonElement>(null)
   const emptyModelMenuStyle = useFloatingPosition({
-    open: modelMenuOpen && providers.length === 0,
+    open: emptyModelMenuOpen,
     anchorRef: modelButtonRef,
     contentRef: modelMenuContentRef,
     placement: 'above-start'
   })
+  useLayoutEffect(() => {
+    if (emptyModelMenuOpen && emptyModelMenuStyle.visibility === 'visible') {
+      addProviderRef.current?.focus({ preventScroll: true })
+    }
+  }, [emptyModelMenuOpen, emptyModelMenuStyle.visibility])
 
   useEffect(() => {
     if (!modelMenuOpen) return
@@ -249,7 +260,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
                 <div
                   ref={modelMenuContentRef}
                   className="composer-model-picker-shell composer-model-picker-shell-empty composer-model-picker-shell-floating"
-                  role="listbox"
+                  role="dialog"
                   aria-label="Select model"
                   style={emptyModelMenuStyle}
                 >
@@ -257,6 +268,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
                     <div className="composer-model-menu-empty">
                       <p>No providers connected.</p>
                       <button
+                        ref={addProviderRef}
                         type="button"
                         className="composer-model-menu-settings"
                         onClick={() => {
@@ -264,7 +276,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
                           onOpenSettings()
                         }}
                       >
-                        Open Settings
+                        Add provider
                       </button>
                     </div>
                   </div>
@@ -291,7 +303,7 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
           type="button"
           className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
           aria-expanded={pickerDisabled ? undefined : modelMenuOpen}
-          aria-haspopup={pickerDisabled ? undefined : 'listbox'}
+          aria-haspopup={pickerDisabled ? undefined : providers.length === 0 ? 'dialog' : 'listbox'}
           aria-label={buttonLabel}
           title={modelButtonTitle}
           disabled={pickerDisabled}
@@ -402,9 +414,10 @@ export function ComposerFooter({
   permission,
   sendLabel,
   sendBlocked = null,
-  dictateWhileStoppable = false,
   extraActions,
-  sendMode
+  sendMode,
+  connecting = false,
+  connectingNote = null
 }: ComposerFooterProps) {
   const bindings = useCommandBindings()
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
@@ -481,13 +494,16 @@ export function ComposerFooter({
     )
   }
 
+  // While connecting the controls stay laid out, so the row keeps its height, but are hidden and out of reach.
+  const away = connecting ? { inert: true, 'aria-hidden': true } as const : {}
   return (
-    <div className="composer-footer">
-      <div className="composer-footer-left">
+    <div className="composer-footer" data-connecting={connecting ? '' : undefined}>
+      {connecting && connectingNote ? <span className="composer-connecting-note" role="status">{connectingNote}</span> : null}
+      <div className="composer-footer-left" {...away}>
         {run ? <ComposerRunControls run={run} permission={permission} /> : null}
       </div>
 
-      <div className="composer-footer-right">
+      <div className="composer-footer-right" {...away}>
         {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={run.workInProgress ?? stoppable} /> : null}
 
         {extraActions}
@@ -503,7 +519,8 @@ export function ComposerFooter({
           <Paperclip size={16} strokeWidth={2} />
         </button>
 
-        {(!stoppable || dictateWhileStoppable) && onStartRecording ? (
+        {/* Offered while a run goes too, so a message to steer or queue can be dictated. */}
+        {onStartRecording ? (
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"

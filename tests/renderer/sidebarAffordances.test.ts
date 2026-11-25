@@ -198,39 +198,39 @@ describe('tabs', () => {
 
 describe('the footer', () => {
   it('ends Projects and Threads with Archived only', () => {
-    show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined }), thread('c', 'Old', { settledAt: at })])
+    show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined }), thread('c', 'Old', { archivedAt: at })])
     expect(headings()).toEqual(['Archived1'])
     act(() => useAppStore.setState({ threadsSidebarView: 'threads' }))
     expect(headings()).toEqual(['Archived1'])
   })
 
   it('holds archived threads inside Archived, with no Clear all and no Recently deleted', () => {
-    show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
-    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
-    const archived = host.querySelector('.threads-sidebar-section-settled')!
+    show([thread('a', 'Fix tests'), thread('c', 'Old', { archivedAt: at })])
+    click(host.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!)
+    const archived = host.querySelector('.threads-sidebar-section-archived')!
     expect(archived.querySelector('[data-thread-id="c"]')).not.toBeNull()
     expect(archived.textContent).not.toContain('Clear all')
     expect(host.textContent).not.toContain('Recently deleted')
   })
 
   it('heads Archived with its count and a chevron that turns while it is open; the whole heading toggles', () => {
-    show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at }), thread('d', 'Older', { settledAt: at })])
-    const archived = host.querySelector<HTMLElement>('.threads-sidebar-section-settled')!
+    show([thread('a', 'Fix tests'), thread('c', 'Old', { archivedAt: at }), thread('d', 'Older', { archivedAt: at })])
+    const archived = host.querySelector<HTMLElement>('.threads-sidebar-section-archived')!
     const toggle = archived.querySelector<HTMLButtonElement>('.threads-sidebar-heading-toggle')!
     expect(archived.querySelectorAll('.threads-sidebar-heading > *')).toHaveLength(1)
-    expect(toggle.querySelector('.threads-sidebar-settled-count')?.textContent).toBe('2')
-    expect(toggle.querySelector('.threads-sidebar-settled-chevron')).not.toBeNull()
+    expect(toggle.querySelector('.threads-sidebar-archived-count')?.textContent).toBe('2')
+    expect(toggle.querySelector('.threads-sidebar-archived-chevron')).not.toBeNull()
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     click(toggle)
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     expect(archived.classList.contains('expanded')).toBe(true)
-    expect(rule(sidebarCss, '.threads-sidebar-section-settled.expanded .threads-sidebar-settled-chevron')).toMatch(/rotate\(90deg\)/)
-    expect(rule(sidebarCss, '.app .threads-sidebar-section-settled .threads-sidebar-heading-toggle')).toMatch(/flex:\s*1/)
+    expect(rule(sidebarCss, '.threads-sidebar-section-archived.expanded .threads-sidebar-archived-chevron')).toMatch(/rotate\(90deg\)/)
+    expect(rule(sidebarCss, '.app .threads-sidebar-section-archived .threads-sidebar-heading-toggle')).toMatch(/flex:\s*1/)
   })
 
   it('hides the count when nothing is archived', () => {
     show([thread('a', 'Fix tests')])
-    expect(host.querySelector('.threads-sidebar-settled-count')).toBeNull()
+    expect(host.querySelector('.threads-sidebar-archived-count')).toBeNull()
     expect(headings()).toEqual(['Archived'])
   })
 
@@ -242,23 +242,23 @@ describe('the footer', () => {
   })
 
   it('records the Archived heading height when Archived opens', () => {
-    show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
-    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
-    expect(host.querySelector<HTMLElement>('.threads-sidebar-footer')!.style.getPropertyValue('--threads-sidebar-settled-head')).toMatch(/px$/)
+    show([thread('a', 'Fix tests'), thread('c', 'Old', { archivedAt: at })])
+    click(host.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!)
+    expect(host.querySelector<HTMLElement>('.threads-sidebar-footer')!.style.getPropertyValue('--threads-sidebar-archived-head')).toMatch(/px$/)
   })
 
   // Scrolling, kept focus and the last row's menu need layout: archived-list-electron.test.ts.
   it('builds no archived card while Archived is closed, and opens hundreds with only the first cards drawn', async () => {
-    const archived = Array.from({ length: 300 }, (_, index) => thread(`old-${index}`, `Old ${index}`, { settledAt: at }))
+    const archived = Array.from({ length: 300 }, (_, index) => thread(`old-${index}`, `Old ${index}`, { archivedAt: at }))
     const counts = startRenderCounts()
     try {
       show([thread('a', 'Fix tests'), ...archived])
       // Another sidebar update while closed builds none either.
       act(() => useAppStore.setState({ threadActivity: {} }))
       expect(Object.keys(counts).filter((name) => name.startsWith('SidebarRow:old-'))).toEqual([])
-      expect(host.querySelector('.threads-sidebar-settled-count')?.textContent).toBe('300')
-      click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
-      const drawn = host.querySelectorAll('.threads-sidebar-settled-list [data-thread-id]')
+      expect(host.querySelector('.threads-sidebar-archived-count')?.textContent).toBe('300')
+      click(host.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!)
+      const drawn = host.querySelectorAll('.threads-sidebar-archived-list [data-thread-id]')
       expect(drawn.length).toBeGreaterThan(0)
       expect(drawn.length).toBeLessThanOrEqual(ARCHIVED_FIRST_ROWS)
       // The menu of a drawn row still acts on the whole list.
@@ -398,7 +398,8 @@ describe('row marks', () => {
 
     show([thread('plain', 'Notes', { projectId: 'plain' })], { view: 'threads', active: 'plain', projects: [project('plain', 'Plain')] })
     await settle()
-    expect(card('plain')?.textContent).toBe('')
+    // Nothing to name: the card has no lower line.
+    expect(card('plain')).toBeNull()
   })
 
   it('gives a title a tooltip only when it does not fit', () => {
@@ -528,8 +529,8 @@ describe('the Projects tree', () => {
   })
 
   it('asks before deleting an archived thread on Delete, and deletes it for good only on confirm', async () => {
-    show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
-    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    show([thread('a', 'Fix tests'), thread('c', 'Old', { archivedAt: at })])
+    click(host.querySelector('.threads-sidebar-section-archived .threads-sidebar-heading-toggle')!)
     row('c').focus()
     key(row('c'), { key: 'Delete' })
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!

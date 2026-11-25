@@ -104,7 +104,7 @@ describe('thread workspace persistence', () => {
 })
 
 describe("a thread's browser tabs when the thread leaves", () => {
-  const thread = (id: string, settledAt?: string) => ({ id, name: id, order: 0, ...(settledAt ? { settledAt } : {}) })
+  const thread = (id: string, archivedAt?: string) => ({ id, name: id, order: 0, ...(archivedAt ? { archivedAt } : {}) })
   const setThreads = (threads: ReturnType<typeof thread>[]) => useAppStore.setState({ threads: threads as never })
   const tabOwners = () => useAppStore.getState().browserTabs.map((tab) => tab.ownerThreadId)
   // A thread from another computer has a qualified id; it leaves the list while that computer is away.

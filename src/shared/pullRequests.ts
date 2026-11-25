@@ -357,7 +357,8 @@ export type PullRequestWatchEnd =
   | 'stopped'
   | 'unlinked'
   | 'project_missing'
-  | 'settled'
+  /** The thread was archived. A watch saved by an older Mousse says `settled`; it is read as this. */
+  | 'archived'
   | 'trashed'
 
 /** What a thread's watch is doing now, for the side card. */

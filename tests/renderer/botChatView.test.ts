@@ -1647,7 +1647,7 @@ describe('the composer', () => {
     expect(await file.text()).toBe(log)
   })
 
-  it('a pasted thread reference goes in as text and is sent where it was written; a private thread is refused, a subagent is not', async () => {
+  it('a pasted thread reference shows as its chip and is sent as its link where it was written; a private thread is refused, a subagent is not', async () => {
     const pasted: Event[] = []
     const pasteText = async (text: string) => {
       const event = new Event('paste', { bubbles: true, cancelable: true })
@@ -1669,16 +1669,16 @@ describe('the composer', () => {
     expect(composerError()?.textContent).toContain('“Secret plans” is private')
     expect(box().value).toBe('')
 
-    // A subagent is read through the thread that started it, as far as the bot reaches that one. The text box inserts
-    // the paste at the caret, as any paste.
+    // A subagent is read through the thread that started it, as far as the bot reaches that one. Each shows as its
+    // thread's chip in the line, and goes as its link.
     await pasteText('mousse://thread/thread-b mousse://thread/thread-s')
     await settle()
-    expect(pasted.at(-1)!.defaultPrevented).toBe(false)
+    expect(pasted.at(-1)!.defaultPrevented).toBe(true)
     expect(pills()).toEqual([])
-    await type(box(), 'What is left on mousse://thread/thread-b and mousse://thread/thread-s?')
+    expect(composer().querySelectorAll('.composer-thread-chip')).toHaveLength(2)
     await click(button('Send message'))
     await settle()
-    expect(fake.calls.find(([name]) => name === 'send')?.[2]).toBe('What is left on mousse://thread/thread-b and mousse://thread/thread-s?')
+    expect(fake.calls.filter(([name]) => name === 'send').at(-1)?.[2]).toBe('mousse://thread/thread-b mousse://thread/thread-s')
   })
 
   it('a send that fails gives its thread pills back, beside one dropped while it was sending', async () => {
@@ -2153,7 +2153,7 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
 
     it("See all counts the threads it started that are not archived, and opens the sidebar's Threads tab filtered to it", async () => {
       const started = (id: string, over: Record<string, unknown> = {}) => ({ id, name: id, createdAt: ago(600), updatedAt: ago(600), startedByBot: { botId: inbox.id, name: inbox.name }, hidden: true as const, ...over })
-      useAppStore.setState({ threads: [started('s1'), started('s2'), started('s3', { settledAt: ago(500) }), started('s4', { lineage: { parentThreadId: 's1' } })] as never, threadsSidebarView: 'projects', sidebarMode: 'threads' })
+      useAppStore.setState({ threads: [started('s1'), started('s2'), started('s3', { archivedAt: ago(500) }), started('s4', { lineage: { parentThreadId: 's1' } })] as never, threadsSidebarView: 'projects', sidebarMode: 'threads' })
       try {
         // Nothing works and nothing is recent, yet the line opens: See all is there.
         await open({ ...inbox, threads: [] })

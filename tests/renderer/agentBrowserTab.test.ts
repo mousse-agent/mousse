@@ -198,7 +198,7 @@ describe('browser tabs out of use', () => {
   })
 
   it('close with their thread when it is archived or deleted', async () => {
-    const thread = (id: string, settledAt?: string) => ({ id, name: id, order: 0, ...(settledAt ? { settledAt } : {}) })
+    const thread = (id: string, archivedAt?: string) => ({ id, name: id, order: 0, ...(archivedAt ? { archivedAt } : {}) })
     useAppStore.setState({
       threads: [thread('thread_a'), thread('thread_b'), thread('thread_c')] as never,
       browserTabs: [tab('a1', 'thread_a'), tab('b1', 'thread_b'), tab('c1', 'thread_c')]

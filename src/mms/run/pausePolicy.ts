@@ -70,7 +70,8 @@ export function decideUsageLimit(input: {
       ...(limit.provider ? { provider: limit.provider } : {}),
       ...(limit.limitKind ? { limitKind: limit.limitKind } : {}),
       count,
-      autoResume: input.autoResume
+      // Only a reset the provider reported continues by itself; a guess waits for Try now.
+      autoResume: input.autoResume && reported !== undefined
     }
   }
 }

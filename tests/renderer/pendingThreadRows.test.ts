@@ -127,7 +127,7 @@ describe('the list the sidebar shows', () => {
       made('bot-chat'),
       made('subagent', { lineage: { parentThreadId: 'a', rootThreadId: 'a', relationship: 'subagent' } }),
       made('manager', { automationManager: true } as Partial<Thread>),
-      made('archived', { settledAt: at })
+      made('archived', { archivedAt: at })
     ]
     const shown = withPendingRows([...listed, ...others], [row], {}, 'd1', undefined, new Set(['bot-chat']))
     expect(shown.threads.map((entry) => entry.id)).toEqual(['a', 'b', ...others.map((entry) => entry.id), 'pending:k1'])
@@ -273,7 +273,8 @@ describe('in the sidebar', () => {
       act(() => useAppStore.setState({ sidebarAnimations: false }))
       expect(row.querySelector('.turning.icon-spin')).toBeNull()
       expect(cancel).toHaveBeenCalled()
-      expect(row.textContent).toContain('Working')
+      // Still marked working, by a mark that holds still.
+      expect(row.querySelector('.threads-sidebar-status-icon--working, .threads-sidebar-card-status-working .threads-sidebar-status-dot')).not.toBeNull()
 
       act(() => useAppStore.setState({ sidebarAnimations: true }))
       expect(row.querySelector('.turning.icon-spin')).not.toBeNull()

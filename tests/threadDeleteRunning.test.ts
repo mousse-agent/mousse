@@ -240,7 +240,7 @@ describe('deleting a thread while its turn runs', () => {
     try {
       const target = await p.thread('long turn')
       await p.run(target.id)
-      await p.f.rpc.request('threads.settle', { threadId: target.id, settled: true })
+      await p.f.rpc.request('threads.archive', { threadId: target.id, archived: true })
       const peer = await p.f.connect(p.f.alice.id, ['browser.viewer.v1'])
       const browser = p.f.services.platform.browser, status = browser.accessStatus()
       const hold = new Promise<void>((resolve) => { release = resolve })
@@ -287,13 +287,13 @@ describe('deleting a thread while its turn runs', () => {
         if (tries++ === 0) {
           poll = peer.request('browser.access.status', { profileId: p.f.alice.id }).catch(() => undefined)
           await vi.waitFor(() => expect(p.f.services.getOwnedActivity()['rpc:browser.access.status']).toBe(1))
-          setTimeout(() => { p.f.services.threads.setThreadSettled(target.id, false); release() }, 300)
+          setTimeout(() => { p.f.services.threads.setThreadArchived(target.id, false); release() }, 300)
         }
         return trash(...args)
       })
       await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow('Archive the thread before deleting it')
       expect(tries).toBe(1)
-      expect(p.f.services.threads.getThread(target.id)?.settledAt).toBeUndefined()
+      expect(p.f.services.threads.getThread(target.id)?.archivedAt).toBeUndefined()
       expect(p.f.services.threads.lifecycleStore.get(target.id)?.state ?? 'active').toBe('active')
     } finally {
       release()
@@ -317,7 +317,7 @@ describe('deleting a thread while its turn runs', () => {
       expect(refused).toBeInstanceOf(Error)
       expect(Date.now() - started).toBeLessThan(20_000)
       // Nothing was stopped or removed: the thread is listed, archived, and its turn goes on.
-      expect(p.f.services.threads.getThread(target.id)?.settledAt).toBeTruthy()
+      expect(p.f.services.threads.getThread(target.id)?.archivedAt).toBeTruthy()
       expect(p.f.services.threads.lifecycleStore.get(target.id)?.state ?? 'active').toBe('active')
       expect(p.adapter.live(target.id)).toBe(1)
     } finally {
@@ -741,7 +741,7 @@ describe('a delete is refused, stopping nothing, while other work touches what i
       // delete of a thread an earlier one left in the trash does.
       await expect((p.f.services as unknown as { deleteExpiredThread: (id: string) => Promise<void> }).deleteExpiredThread(target.id)).rejects.toThrow(refusal)
       expect(p.f.services.threads.lifecycleStore.get(target.id)?.state).not.toMatch(/purge/)
-      expect(p.f.services.threads.getThread(target.id)?.settledAt).toBeTruthy()
+      expect(p.f.services.threads.getThread(target.id)?.archivedAt).toBeTruthy()
       expect(existsSync(workspace.worktreePath)).toBe(true)
       expect(p.adapter.live(child.id)).toBe(1)
     } finally {

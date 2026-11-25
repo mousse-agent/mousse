@@ -80,6 +80,34 @@ describe('native subagent cards', () => {
     expect(nativeSubagentsOfMessages(messages, false).map((card) => [card.toolCallId, card.state])).toEqual([['f', 'failed'], ['s', 'stopped'], ['r', 'working']])
   })
 
+  it('tracks Antigravity invoke_subagent as working while background work is live, done once settled, and launched for legacy rows', () => {
+    const running = [
+      user('u1', 0, 'Run research'),
+      row('agy-bg', 5, { kind: 'subagent', toolName: 'invoke_subagent', agentType: 'research', description: 'Codebase Researcher', prompt: 'Inspect files', background: true, summary: BACKGROUND_SUMMARY, endedAt: at(7) } as never)
+    ]
+    const liveCard = collectNativeSubagentCards(mousseToUIMessages(running), true).get('agy-bg')
+    expect(liveCard).toMatchObject({ state: 'working', title: 'Codebase Researcher', native: { acp: { launched: false, prompt: 'Inspect files' } } })
+    expect(lineageTitle(nativeSubagentsOfMessages(running, true).map(nativeLineageEntry))).toBe('Nest · 1 running')
+
+    // Once taskEnded replaces BACKGROUND_SUMMARY with Finished, the card settles as done (not idle/launched).
+    const finished = [
+      running[0]!,
+      row('agy-bg', 5, { kind: 'subagent', toolName: 'invoke_subagent', agentType: 'research', description: 'Codebase Researcher', prompt: 'Inspect files', background: true, summary: 'Finished', durationMs: 12_000, endedAt: at(17) } as never)
+    ]
+    const doneCard = collectNativeSubagentCards(mousseToUIMessages(finished), false).get('agy-bg')
+    expect(doneCard).toMatchObject({ state: 'done', native: { result: 'Finished', acp: { launched: false } } })
+
+    // Legacy invoke_subagent row with no summary still renders as Launched (idle).
+    const legacy = [
+      running[0]!,
+      row('agy-old', 5, { kind: 'subagent', toolName: 'invoke_subagent', description: 'Old Researcher', status: 'done', endedAt: at(7) } as never)
+    ]
+    expect(collectNativeSubagentCards(mousseToUIMessages(legacy), true).get('agy-old')).toMatchObject({
+      state: 'idle',
+      native: { acp: { launched: true } }
+    })
+  })
+
   it('carry the continuation notice on the message metadata, never parsed from its text', () => {
     const [message] = mousseToUIMessages([user('w', 5, 'A background task finished: report', { backgroundNotice: [{ taskId: 'task-a1', description: 'Map design language' }] })])
     expect(readBackgroundNotice(message)).toEqual([{ taskId: 'task-a1', description: 'Map design language' }])

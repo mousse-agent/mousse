@@ -425,5 +425,33 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
       await surviving
       expect(reasons.get('thread-b')).toBe('The Mousse MCP server stopped')
     })
+    it('compacts tools/list schemas for Antigravity bearers so delegate_task stays well inside its eager tool budget, while keeping full schemas for other providers', async () => {
+      const { server, bearer } = await setup()
+      const codex = bearer({ instanceId: 'codex', generation: 'codex|default|0|0' })
+      const codexList = await rpc(server.url, codex.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+      expect(codexList.status).toBe(200)
+
+      const agy = bearer({ instanceId: 'antigravity', generation: 'antigravity|default|0|0' })
+      const agyList = await rpc(server.url, agy.token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+      expect(agyList.status).toBe(200)
+      const codexTools = codexList.body.result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+      const agyTools = agyList.body.result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+      expect(agyTools.map((t) => t.name)).toEqual(codexTools.map((t) => t.name))
+
+      const codexDelegate = codexTools.find((t) => t.name === 'delegate_task')!
+      const agyDelegate = agyTools.find((t) => t.name === 'delegate_task')!
+      // Full schema stays untouched on non-Antigravity providers.
+      expect(codexDelegate.description.length).toBeGreaterThan(1000)
+      // Antigravity gets a compact schema that keeps every parameter, enum and required field intact.
+      expect(agyDelegate.description.length).toBeLessThanOrEqual(120)
+      expect(JSON.stringify(agyDelegate).length).toBeLessThan(1000)
+      expect(JSON.stringify(agyTools).length).toBeLessThan(JSON.stringify(codexTools).length * 0.5)
+      const agyProps = (agyDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
+      const codexProps = (codexDelegate.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] }).properties
+      expect(Object.keys(agyProps).sort()).toEqual(Object.keys(codexProps).sort())
+      expect((agyDelegate.inputSchema as { required: string[] }).required).toEqual((codexDelegate.inputSchema as { required: string[] }).required)
+      expect(agyProps.workspace).toEqual({ type: 'string', enum: ['isolated', 'shared'] })
+      expect(agyProps.wake).toEqual({ type: 'string', enum: ['always', 'settled_only'] })
+    })
   })
 })

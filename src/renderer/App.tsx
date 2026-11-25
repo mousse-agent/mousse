@@ -19,6 +19,7 @@ import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
+import type { GitSetup } from '../shared/gitSetup'
 import { WarmChat } from './components/WarmChat'
 import { showSavedView } from './lib/warmHandover'
 
@@ -206,7 +207,13 @@ export default function App() {
   const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
   const [bootstrapError, setBootstrapError] = useState<string | null>(null)
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
+  const [gitSetup, setGitSetup] = useState<GitSetup>(null)
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), [])
+  const installGit = useCallback(() => {
+    void window.mousse.app.installGit().then((finished) => {
+      if (finished) retryBootstrap()
+    }).catch(() => retryBootstrap())
+  }, [retryBootstrap])
   // A rail page that replaces the workspace hides the sidebar, so the peek stands down for it.
   const threadsPeek = useThreadsPeek(!threadsSidebarOpen && !railPageOpen)
   const resizeRef = useRef<{
@@ -217,6 +224,22 @@ export default function App() {
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (profileReady) return
+    let live = true
+    let receivedUpdate = false
+    const unsubscribe = window.mousse.app.onGitSetupChanged((setup) => {
+      receivedUpdate = true
+      setGitSetup(setup)
+    })
+    void window.mousse.app.gitSetup().then((setup) => {
+      if (live && !receivedUpdate) setGitSetup(setup)
+    }).catch(() => {})
+    return () => {
+      live = false
+      unsubscribe()
+    }
+  }, [profileReady])
   useEffect(() => {
     if (profileReady) return
     let disposed = false
@@ -625,6 +648,8 @@ export default function App() {
         {!workspaceShown && <WorkspaceLoading
           error={bootstrapError}
           onRetry={retryBootstrap}
+          gitSetup={gitSetup}
+          onInstallGit={installGit}
           sidebarWidth={threadsSidebarOpen ? threadsSidebarWidth : undefined}
         />}
 
@@ -683,7 +708,8 @@ export default function App() {
           {botThread && profileReady && <Suspense fallback={null}><BotThreadHeader botId={botThread.botId} threadId={botThread.threadId} /></Suspense>}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {workspaceReady ? <OrchestratorChat key={profileId} />
-            : warmShown ? <WarmChat error={bootstrapError} onRetry={retryBootstrap} />
+            : gitSetup ? <WorkspaceLoading conversationOnly gitSetup={gitSetup} onInstallGit={installGit} onRetry={retryBootstrap} />
+              : warmShown ? <WarmChat error={bootstrapError} onRetry={retryBootstrap} />
               : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
           </KeepMounted>

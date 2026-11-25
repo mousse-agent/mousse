@@ -1,6 +1,7 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
 import type { RouteClass } from '../../../shared/netEngine/routes'
 import { parseRoute, relayText, routeClass, routeText } from '../../../shared/netEngine/routes'
+import { WAY_LABEL } from './ways'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -184,6 +185,71 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
   return { line: 'Connected', actions: ['access', 'address', 'remove'] }
 }
 
+/** One direction of a pairing: `out`, this computer uses it; `in`, it uses this computer. */
+export type EngineSide = 'out' | 'in'
+
+/**
+ * The lists a pairing shows in: one direction in its own list, both in both. A pairing still being made shows only
+ * under Computers I use, where it was started.
+ */
+export function engineSides(device: NetEngineDevice): EngineSide[] {
+  if (device.direction) return [device.direction]
+  if (device.state === 'finishing' || device.unfinished) return ['out']
+  return ['out', 'in']
+}
+
+/**
+ * One direction's row: the pairing's own problem where it belongs to this direction, else that direction's state.
+ * Access belongs to `in`, routes and Retry to `out`; Remove on either ends only that direction.
+ */
+export function engineSideRow(device: NetEngineDevice, side: EngineSide): EngineRowView {
+  const whole = engineRow(device)
+  const name = device.name
+  // A problem of the other direction leaves this one working.
+  if (device.unreachable && device.unreachable !== side) return sideActions({ line: 'Connected', actions: [] }, side)
+  if (device.unreachable || device.state === 'removing' || device.state === 'finishing') return whole
+  if (side === 'out' && (device.unfinished || device.notAccepted || device.sshParked || device.certificateWindow))
+    return whole
+  if (side === 'in' && device.certificateWindow) return whole
+  if (device.state === 'connecting')
+    return sideActions(
+      device.direction
+        ? { line: 'Connecting…', actions: [] }
+        : { line: 'Connecting…', detail: `One direction to ${name} is up; the other is still connecting.`, actions: [] },
+      side
+    )
+  if (device.state === 'offline')
+    return sideActions(
+      side === 'out'
+        ? {
+            line: `Can't reach it · open Mousse on ${name}`,
+            detail: `Mousse is closed on ${name}, or it is on another network.`,
+            actions: []
+          }
+        : { line: 'Not connected now', detail: `It connects when Mousse is open on ${name}.`, actions: [] },
+      side
+    )
+  return sideActions(
+    {
+      line: 'Connected',
+      ...(device.source === 'ssh'
+        ? { detail: side === 'out' ? 'Added over SSH' : `Added over SSH from ${name}` }
+        : {}),
+      actions: []
+    },
+    side
+  )
+}
+
+function sideActions(view: EngineRowView, side: EngineSide): EngineRowView {
+  const live = view.line === 'Connected'
+  return {
+    ...view,
+    actions:
+      side === 'in' ? ['access', 'remove'] : live ? ['address', 'remove'] : ['address', 'retry', 'remove']
+  }
+}
+
 /**
  * How a device is connected, in plain words: the class of the route it is connected on (1b §7 `conn.up.route`),
  * "through relay host:port" on a relay (Phase 3), else "same network". The addresses go in the tooltip.
@@ -191,6 +257,60 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
 export function engineWhere(device: NetEngineDevice): string {
   if (device.route === 'relay') return device.via ? `through relay ${device.via}` : 'through a relay'
   return device.route ? HOW[device.route] : HOW.lan
+}
+
+/**
+ * The way a device's live connection runs, by the name the way picker gives it, for "Connects over <way>, already
+ * in use." (as "Connects over Same Wi-Fi" reads when using a computer).
+ */
+export function engineWay(device: NetEngineDevice): string {
+  const route = device.route ?? 'lan'
+  if (route === 'relay') return device.via ? `relay ${device.via}` : WAY_LABEL.relay
+  return route === 'ssh' ? ROUTE_WORDS.ssh : WAY_LABEL[route]
+}
+
+/**
+ * The menu item for the missing direction of a pairing made one way, on the row of the list that holds it: "Use
+ * <name> from here…" under Can use this computer (it asks), "Let <name> use this computer…" under Computers I use
+ * (this owner decides). Disabled, with why, while it can't be done; absent where the pairing can't.
+ */
+export function otherWayItem(
+  device: NetEngineDevice,
+  side: EngineSide
+): { label: string; disabled?: boolean; title?: string; detail?: string } | undefined {
+  const other = device.other
+  if (!other || device.state === 'removing') return undefined
+  // Unavailable: the reason is the item's second line.
+  const blocked = (why: string) => ({ disabled: true, detail: why })
+  if (other.offer === 'ask' && side === 'in')
+    return {
+      label: `Use ${device.name} from here…`,
+      ...(other.blocked
+        ? blocked(other.blocked)
+        : other.asked === 'waiting'
+          ? blocked('Waiting for an answer.')
+          : { title: `Asks ${device.name} to let this computer in.` })
+    }
+  if (other.offer === 'let' && side === 'out')
+    return {
+      label: `Let ${device.name} use this computer…`,
+      ...(other.blocked ? blocked(other.blocked) : { title: 'You pick what it may do here.' })
+    }
+  return undefined
+}
+
+/** What a row says under it after this computer asked for the other direction. */
+export function askedLine(device: NetEngineDevice): { line: string; detail?: string; waiting?: boolean } | undefined {
+  switch (device.other?.asked) {
+    case 'waiting':
+      return { line: `Waiting for ${device.name} to allow this…`, waiting: true }
+    case 'declined':
+      return { line: `${device.name} said Not now`, detail: 'Nothing changed. You can ask again from its menu.' }
+    case 'expired':
+      return { line: `No answer from ${device.name}`, detail: 'The request expired. You can ask again from its menu.' }
+    default:
+      return undefined
+  }
 }
 
 /** Every address kept for a device, for the tooltip on how it is connected. */

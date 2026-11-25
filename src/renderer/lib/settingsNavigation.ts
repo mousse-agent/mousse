@@ -68,3 +68,19 @@ export function takePendingProvider(): string | undefined {
   pendingProvider = undefined
   return instanceId
 }
+
+let pendingAddProvider = false
+
+/** Opens Settings, Providers, with Add provider open: first-run setup's Add key. */
+export function openAddProvider(): void {
+  pendingAddProvider = true
+  openSettingsSection('providers')
+  window.dispatchEvent(new CustomEvent('mousse:settings-add-provider'))
+}
+
+/** Whether Add provider was asked for before Providers was shown, consumed once. */
+export function takePendingAddProvider(): boolean {
+  const pending = pendingAddProvider
+  pendingAddProvider = false
+  return pending
+}

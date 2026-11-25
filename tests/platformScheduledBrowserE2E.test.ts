@@ -14,6 +14,7 @@ import { MmsProtocolServer } from '../src/mms/protocol'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import type { WorkflowBundle, WorkflowRunSnapshot } from '../src/shared/workflows'
 
+import { fixtureBundleDir, removeFixtureBundleDir } from './fixtures/agent-platform/fixtureBundleDir'
 import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
 
 const roots: string[] = []
@@ -22,6 +23,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) {
     const rel = relative(realpathSync(tmpdir()), realpathSync(root))
     if (isAbsolute(rel) || !rel.startsWith('mousse-scheduled-browser-') || rel.includes('..')) throw new Error('Unsafe fixture cleanup')
+    removeFixtureBundleDir(root)
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
@@ -121,7 +123,7 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
       const published = services.platform.workflowDefinitions.publish({ definitionId: draft.definitionId,
         expectedDraftSemanticHash: draft.semanticHash, expectedHeadRevisionId: null })
 
-      const buildDir = join(root, 'bundle'); mkdirSync(buildDir, { recursive: true })
+      const buildDir = fixtureBundleDir(root)
       const entry = join(buildDir, 'electron-gui.mjs')
       await build({ entryPoints: [resolve('tests/fixtures/agent-platform/scheduled-browser-e2e/electron-gui.ts')], outfile: entry,
         bundle: true, platform: 'node', format: 'esm', packages: 'external', logLevel: 'silent',

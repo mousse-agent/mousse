@@ -46,9 +46,11 @@
 .chat-start-hint { padding: 30px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
 .chat-start-hint h2 { font-size: 19px; color: var(--text-primary); font-weight: 500; }
 .chat-run-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
-.agent-chat-composer { margin: 10px 20px 20px; padding: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .2); border-radius: 14px; background: rgba(var(--surface-strong-rgb), .35); }
+.agent-chat-composer { position: relative; isolation: isolate; margin: 10px 20px 20px; padding: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .2); border-radius: 14px; background: rgba(var(--surface-strong-rgb), .35); }
 .agent-chat-composer textarea { display: block; background: transparent; border: 0; outline: 0; resize: vertical; color: var(--text-primary); font: inherit; font-size: 13px; width: 100%; min-height: 56px; max-height: 240px; }
-.agent-chat-composer-controls { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.agent-chat-composer-controls { display: flex; align-items: center; gap: 10px; margin-top: 8px; transition: opacity 240ms ease; }
+/* Not connected to the service: the controls fade out and keep their place, the Connecting… dots move behind the text. */
+.agent-chat-composer[data-connecting] .agent-chat-composer-controls { opacity: 0; }
 .chat-send-button { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--accent); color: var(--surface-strong, #18151c); margin-left: auto; }
 .chat-send-button:disabled { opacity: .35; }
 .chat-composer-device { font-size: 10px; color: var(--text-secondary); }

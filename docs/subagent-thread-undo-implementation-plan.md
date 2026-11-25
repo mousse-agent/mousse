@@ -411,7 +411,7 @@ Add `src/mms/git/RepositoryLease.ts`, modeled after but separate from `ThreadExe
 4. Create `mousse/thread/<threadId>/<mainConversationBranchId>` at the recorded primary `HEAD` under thread then repository leases.
 5. Place the worktree under the repository-level Mousse-home worktree base, never beneath another checkout.
 6. Persist branch, retained ref, worktree path, base/head SHA, relative subdirectory, schema, and lifecycle before exposing the workspace.
-7. Keep settled-thread worktrees initially. Reclamation is explicit GC only.
+7. Keep archived-thread worktrees initially. Reclamation is explicit GC only.
 8. On startup, validate branch/ref/worktree registration and HEAD. Rebuild a missing physical worktree from retained refs when clean and unambiguous.
 9. Never rely on reflog for recovery.
 
@@ -669,7 +669,7 @@ Require explicit confirmation flags for destructive/recovery operations in non-i
 ### Milestone M acceptance criteria
 
 - Delete, restart, restore, and purge are deterministic.
-- Settled, tombstoned, and purged are distinct states.
+- Archived, tombstoned, and purged are distinct states.
 - GC cannot remove commits required by undo, redo, publish, alternate branches, or agent recovery.
 
 ## 19. Feature Flags and Rollout

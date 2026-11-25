@@ -1,0 +1,153 @@
+/* First-run setup: a full window page with Settings' primitives, one readable column. */
+
+/* Under dialogs (1000) and Settings (1100): New project's Clone and Add key's Settings open over it. */
+.onb-page {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-base);
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.onb-titlebar-logo {
+  display: inline-flex;
+  width: calc(var(--titlebar-height) * 0.64);
+  height: calc(var(--titlebar-height) * 0.64);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.onb-titlebar-logo svg {
+  width: 100%;
+  height: 100%;
+}
+
+.onb-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  padding: 72px var(--space-24) var(--space-48);
+}
+
+.onb-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-24);
+  width: min(600px, 100%);
+}
+
+.onb-head {
+  margin-top: var(--space-16);
+}
+
+.onb-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+.onb-lead {
+  margin: var(--space-8) 0 0;
+  max-width: 540px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* The step head already separates the group; Settings' section gap would double it. */
+.onb-column > .settings-group.onb-group {
+  padding-top: 0;
+}
+
+.onb-group .settings-item {
+  min-height: 60px;
+}
+
+.onb-group .settings-item-lead {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+}
+
+.onb-lead-icon {
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-secondary);
+}
+
+.onb-agent-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-8);
+}
+
+.onb-agent-version {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.onb-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--success);
+}
+
+.onb-code {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+
+.onb-group .prov-command {
+  min-width: 190px;
+}
+
+.onb-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  margin-top: var(--space-4);
+}
+
+.onb-footer-end {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.onb-btn {
+  height: 32px;
+  padding: 0 var(--space-16);
+  border-radius: var(--ui-control-radius);
+  font-size: 13.5px;
+}
+
+.onb-btn-quiet {
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.onb-btn-quiet:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.onb-btn-primary {
+  min-width: 112px;
+}
+
+.onb-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}

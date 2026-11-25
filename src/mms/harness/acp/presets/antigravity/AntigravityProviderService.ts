@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
@@ -8,7 +8,7 @@ import { ANTIGRAVITY_INSTANCE_ID } from '../../../../../shared/providerInstances
 import type { UserQuestionService } from '../../../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../../../data/AtomicFs'
 import { harnessAppError } from '../../../../../shared/harness/types'
-import { compareVersions, type OneShotSpec, type RuntimeUsage } from '../../../driver'
+import { compareVersions, type LiveProcessHost, type OneShotSpec, type RuntimeUsage } from '../../../driver'
 import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
 import { isAuthRequired } from '../../auth'
 import type { AcpConnectionFactory } from '../../connection'
@@ -155,6 +155,9 @@ export class AntigravityProviderService {
       quirks: ANTIGRAVITY_QUIRKS,
       // Antigravity's own option labels; it asks for every tool.
       classifyOption: keepOption,
+      // Advertise ACP form elicitation so `agy` routes `ask_question` through Mousse's question widget instead of dumping markdown choices in chat.
+      formElicitation: true,
+      clientCapabilities: () => ({ elicitation: { form: {} } }),
       connect: options.connect ?? antigravityConnectionFactory({
         profileDir: this.profileDir,
         profileHome,
@@ -466,6 +469,18 @@ export class AntigravityProviderService {
     this.acp.commitInterrupted(threadId, history)
   }
 
+  /** Per-thread private working directory for standalone ("No Project") chats. */
+  standaloneWorkspace(threadId: string): string {
+    const directory = join(this.profileDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
+  }
+
+  /** The native agy CLI can run with only the bot's ACP tool servers and approvals. */
+  supportsBotTurns(): boolean {
+    return this.runtime()?.kind === 'native'
+  }
+
   /** A turn on the thread's agent session (see `AcpSessions.chat`). */
   async chat(input: AcpChatInput): Promise<string> {
     input.signal?.throwIfAborted()
@@ -514,6 +529,42 @@ export class AntigravityProviderService {
   /** Drops the saved ACP session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     this.acp.forgetConversation(threadId)
+  }
+
+  /** Where live ACP processes report background work, task ends and reactive continuation turns. */
+  setLiveHost(host: LiveProcessHost | null): void {
+    this.acp.setLiveHost(host)
+  }
+
+  /** The reactive continuation turn `threadId`'s live process is running now, if any. */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
+    return this.acp.inFlightContinuation(threadId)
+  }
+
+  /** Whether `threadId`'s live process still holds a reactive continuation waiting to run. */
+  hasContinuation(threadId: string, id?: string): boolean {
+    return this.acp.hasContinuation(threadId, id)
+  }
+
+  /** Drops reactive continuations held by `threadId`'s live process. */
+  discardContinuations(threadId: string, id?: string): void {
+    this.acp.discardContinuations(threadId, id)
+  }
+
+  /** Stops any background work or active turn on `threadId`'s live ACP process. */
+  stopThread(threadId: string): 'stopped' | 'not_active' {
+    return this.acp.stopThread(threadId)
+  }
+
+  /** The Mousse thread that owns each of these Antigravity session ids, where one does. */
+  threadsForSessions(sessionIds: readonly string[]): Map<string, string> {
+    const found = new Map<string, string>()
+    if (!sessionIds.length || !this.settings.sessions) return found
+    const wanted = new Set(sessionIds)
+    for (const [threadId, saved] of Object.entries(this.settings.sessions)) {
+      if (saved?.sessionId && wanted.has(saved.sessionId)) found.set(saved.sessionId, threadId)
+    }
+    return found
   }
 
   /** The installation's install, whichever profile started it: running, and its latest progress line. */

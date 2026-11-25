@@ -150,7 +150,7 @@ describe('rollUpActivities', () => {
 
 describe('sideChatsOf', () => {
   it("lists a thread's side chats that are not archived, newest first", () => {
-    const at = (thread: { id: string; lineage?: ThreadLineage }, updatedAt: string, settledAt?: string) => ({ ...thread, updatedAt, ...(settledAt ? { settledAt } : {}) })
+    const at = (thread: { id: string; lineage?: ThreadLineage }, updatedAt: string, archivedAt?: string) => ({ ...thread, updatedAt, ...(archivedAt ? { archivedAt } : {}) })
     const list = [
       at(side('old', 'root'), '2026-01-01'),
       at(side('new', 'root'), '2026-01-03'),

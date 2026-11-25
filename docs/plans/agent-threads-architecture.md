@@ -124,7 +124,7 @@ Stored sender for a message from another computer: `origin.from {node, thread, r
 3. The local receipt is written (`thread_create:<caller>:<key>`, now with the computer). The launch then runs as the durable sequence `RemoteSubagents.advanceStart` already uses, moved into a state machine both features share: `threads.create` → `threads.setModel` → `composer.options` → `threads.setPermissionMode` → `orchestrator.send`, each with its own idempotency key, every write marked.
 4. The owner stores the limits **with the thread** at the first call: `startedFrom.agent` and the mode (the launcher's own, narrowed to the device limit; §4.7). A launch cut off there leaves a thread already held to those limits, with no turn. A marked `setPermissionMode` above the stored mode is refused.
 5. The caller records the launch in a new table `remote_launches {launcherThreadId, node, remoteThreadId, creationKey, state}`, writes the launcher's note with a chip, and returns `{threadId: "<node>:<id>", runId?, computer, link, firstMessage: "sent" | "failed" | "uncertain"}`. A thread that was created is returned even when its first message failed, so a retry with the same `clientRequestId` continues the same launch and never makes a second thread.
-6. A launch nobody completes is finished at boot, or archived there with `threads.settle`.
+6. A launch nobody completes is finished at boot, or archived there with `threads.archive`.
 
 Remote subagents keep working with an older far computer exactly as today. They send the key only when that computer's row version knows it, and a task never changes form mid-flight (its row records which it started with): the owner's replay ledger is keyed by method, and a switch would send a task twice.
 

@@ -15,7 +15,9 @@ export function pausedLine(pause: Pick<RunPause, 'until' | 'estimated' | 'provid
   const provider = pauseProviderName(pause.provider)
   const window = pauseWindowLabel(pause.limitKind)
   const what = provider && window ? `${provider}'s ${window} limit was reached` : provider ? `${provider}'s usage limit was reached` : 'The usage limit was reached'
-  const source = pause.estimated ? 'estimated' : provider ? `time reported by ${provider}` : 'time reported by the provider'
   const next = pause.autoResume ? 'The run continues by itself when it resets.' : MANUAL_CONTINUE_TEXT
+  // No reset time from the provider: Mousse's guess is not shown as one.
+  if (pause.estimated) return `Paused: ${what}, with no reset time given. ${next}`
+  const source = provider ? `time reported by ${provider}` : 'time reported by the provider'
   return `Paused until ${formatPauseUntil(pause.until, nowMs)}: ${what} (${source}). ${next}`
 }

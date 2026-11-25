@@ -45,7 +45,7 @@ const threads = [
   thread('a', 'Fix tests', { projectId: 'p1', updatedAt: at(1) }),
   thread('b', 'Ship docs', { projectId: 'p2', updatedAt: at(5) }),
   thread('c', 'Refactor', { projectId: 'p1', updatedAt: at(3) }),
-  thread('d', 'Archived question', { projectId: 'p1', settledAt: at(4) })
+  thread('d', 'Archived question', { projectId: 'p1', archivedAt: at(4) })
 ]
 const waiting: ThreadActivitySnapshot = { a: 'awaiting_input', b: 'awaiting_input', c: 'processing', d: 'awaiting_input' }
 

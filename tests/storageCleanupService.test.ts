@@ -206,8 +206,8 @@ describe('inactive rule', () => {
     expect(existsSync(f.worktree)).toBe(true)
   }, 90_000)
 
-  it('is not reset by settling, pinning or toggling a thread (updatedAt is not activity), and a settled thread is swept', async () => {
-    const f = fixture({ thread: { updatedAt: new Date().toISOString(), pinnedAt: new Date().toISOString(), settledAt: new Date().toISOString() } }); setPolicy(f, inactive())
+  it('is not reset by archiving, pinning or toggling a thread (updatedAt is not activity), and an archived thread is swept', async () => {
+    const f = fixture({ thread: { updatedAt: new Date().toISOString(), pinnedAt: new Date().toISOString(), archivedAt: new Date().toISOString() } }); setPolicy(f, inactive())
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
   }, 60_000)
 

@@ -53,7 +53,7 @@ const threads: Thread[] = [
   thread('t2', 'Refactor router to nested routes', { projectId: 'p1', updatedAt: '2026-11-12T11:00:00.000Z' }),
   thread('t3', 'Add dark mode toggle', { projectId: 'p1', updatedAt: '2026-11-12T09:00:00.000Z' }),
   thread('t4', 'Upgrade Stripe SDK', { projectId: 'p2' }),
-  thread('archived', 'Old idea', { projectId: 'p1', settledAt: at }),
+  thread('archived', 'Old idea', { projectId: 'p1', archivedAt: at }),
   thread('draft', 'New Thread', { projectId: 'p1', startedAt: undefined }),
   thread('s1', 'Audit cart tests', { projectId: 'p1', lineage: subagentOf('t1', 't1') }),
   thread('s1b', 'Audit router tests', { projectId: 'p1', lineage: subagentOf('t1', 't1') }),

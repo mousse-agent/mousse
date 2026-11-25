@@ -335,6 +335,7 @@ export interface BotEngineHost {
   modelOptions?(): Promise<BotModelOption[]>
   /** The app's model listing (`harness.llmProviders`), which Runs on narrows to `modelOptions` for the model picker. */
   modelListing?(): Promise<LlmProviderOption[]>
+  unavailableModelReason?(instanceId: string): string | undefined
   /** Runs on's line for a bot's row on an entry (`HarnessGateway.botRunsOnNote`): a Codex not checked for bots. */
   runsOnNote?(instanceId: string): { text: string; title: string } | undefined
   /** Runs on's Images row (#1088): the image models on offer, and a bot's pictures today (`BotImageMaker`). */
@@ -949,6 +950,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       now: () => this.now(),
       ...(host.modelOptions ? { modelOptions: host.modelOptions } : {}),
       ...(host.modelListing ? { modelListing: host.modelListing } : {}),
+      ...(host.unavailableModelReason ? { unavailableModelReason: host.unavailableModelReason } : {}),
       ...(host.runsOnNote ? { runsOnNote: host.runsOnNote } : {}),
       ...(host.images ? { images: host.images } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),

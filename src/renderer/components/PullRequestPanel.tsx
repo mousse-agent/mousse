@@ -6,14 +6,17 @@ import { useProjectComputerName } from '../hooks/useProjectComputerName'
 import { useTransientError } from '../hooks/useTransientError'
 import { gitScopeFor } from '../lib/activeProject'
 import { GITHUB_SIGN_IN_COMMAND } from '../lib/githubSignIn'
-import { Check, ChevronDown, ChevronRight, CircleAlert, Cloud, Copy, ExternalLink, GitBranch, GitMerge, GitPullRequest, RefreshCw, Terminal } from '../lib/icons'
+import { ArrowLeft, Check, ChevronDown, ChevronRight, CircleAlert, Cloud, Copy, ExternalLink, GitBranch, GitMerge, GitPullRequest, RefreshCw, Terminal } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import {
+  clearViewedPullRequest,
   createPullRequestForBranch,
   refreshPullRequest,
   refreshPullRequestDetail,
+  refreshViewedPullRequest,
   useGitPullRequestStore,
-  usePullRequestDetail
+  usePullRequestDetail,
+  useViewedPullRequestDetail
 } from '../stores/pullRequestStore'
 import { routeLink } from '../utils/chatLinks'
 import { useGitActionRunner } from './git/useGitActionRunner'
@@ -38,6 +41,7 @@ import {
   showFirst,
   summarizeReviewers,
   threadLineLabel,
+  viewedPullRequestPanelState,
   type PullRequestFileGroup,
   type PullRequestLineThread,
   type PullRequestPanelState,
@@ -495,6 +499,8 @@ export interface PullRequestPanelViewProps {
   createAction?: ReactNode
   /** The computer that reads the pull request, when it is another of the user's computers. */
   computerName?: string | null
+  /** Shown at the top of the panel across all states (e.g. "Back to thread PR" when viewing a linked PR). */
+  topBanner?: ReactNode
 }
 
 /** What the panel draws for a state: a message, or the pull request with its checks, reviews and comments. */
@@ -508,7 +514,8 @@ export function PullRequestPanelView({
   headerActions,
   headerBelow,
   createAction,
-  computerName = null
+  computerName = null,
+  topBanner
 }: PullRequestPanelViewProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialSelectedKey)
   const actions: PanelActions = {
@@ -521,6 +528,7 @@ export function PullRequestPanelView({
   }
   return (
     <div className="pr-panel" data-state={state.kind}>
+      {topBanner}
       {state.kind === 'ready' ? (
         <>
           <PanelHeader detail={state.detail} refreshing={refreshing} onRefresh={onRefresh} actions={headerActions} />
@@ -627,11 +635,13 @@ function HeaderActions({ row, running, onAsk }: { row: PullRequestFoundRow; runn
   )
 }
 
-/** The pull request of the active thread: reviews and comments grouped by file and line, read through the daemon. */
+/** The pull request of the active thread, or a GitHub pull request clicked from chat: reviews and comments grouped by file and line, read through the daemon. */
 export function PullRequestPanel() {
   const threadId = useAppStore((state) => state.activeThreadId)
   const source = useActiveThreadPullRequest(threadId)
   const { path, branch, projectId, folderThreadId, lookup } = source
+  const viewedRecord = useGitPullRequestStore((state) => state.viewedPullRequest)
+  const viewedCandidate = viewedRecord && viewedRecord.threadId === threadId ? viewedRecord.identity : null
   const { running, begin, end } = useGitActionRunner()
   // The open Merge or Close question, with the thread, folder and pull request it was asked about.
   const [asked, setAsked] = useState<{ action: 'merge' | 'close'; identity: string } | null>(null)
@@ -641,12 +651,30 @@ export function PullRequestPanel() {
   const number = lookup?.state === 'found' ? lookup.pullRequest.number : null
   // Any state is read in full here; the side card reads only open ones. Same entry, same flight, when it is open.
   const entry = usePullRequestDetail(path, number, projectId, folderThreadId)
+  const threadIdentity = entry?.detail?.identity ?? source.detail?.identity ?? null
+  const matchesThreadPr = Boolean(
+    viewedCandidate
+    && threadIdentity
+    && viewedCandidate.number === threadIdentity.number
+    && viewedCandidate.host.toLowerCase() === threadIdentity.host.toLowerCase()
+    && viewedCandidate.nameWithOwner.toLowerCase() === threadIdentity.nameWithOwner.toLowerCase()
+  )
+  const viewedIdentity = matchesThreadPr ? null : viewedCandidate
+  const viewedEntry = useViewedPullRequestDetail(viewedIdentity)
   const [refreshing, setRefreshing] = useState(false)
-  const state = pullRequestPanelState({ hasBranch: path !== null && branch !== null, branch, lookup, entry })
+  const state = viewedIdentity
+    ? viewedPullRequestPanelState(viewedIdentity.number, viewedEntry)
+    : pullRequestPanelState({ hasBranch: path !== null && branch !== null, branch, lookup, entry })
   const computerName = useProjectComputerName(projectId)
 
   const refresh = () => {
-    if (!path || !branch || refreshing) return
+    if (refreshing) return
+    if (viewedIdentity) {
+      setRefreshing(true)
+      void refreshViewedPullRequest(viewedIdentity, { force: true }).finally(() => setRefreshing(false))
+      return
+    }
+    if (!path || !branch) return
     setRefreshing(true)
     const options = { force: true, projectId: projectId ?? undefined, threadId: folderThreadId ?? undefined }
     const reads = [refreshPullRequest(path, branch, options)]
@@ -654,14 +682,26 @@ export function PullRequestPanel() {
     void Promise.all(reads).finally(() => setRefreshing(false))
   }
 
+  const sameRepoAsThread = Boolean(
+    !viewedIdentity
+    || (threadIdentity
+      && viewedIdentity.host.toLowerCase() === threadIdentity.host.toLowerCase()
+      && viewedIdentity.nameWithOwner.toLowerCase() === threadIdentity.nameWithOwner.toLowerCase())
+  )
+
   const openFile = (comment: PullRequestComment) => {
+    if (!sameRepoAsThread) {
+      if (comment.url) openExternalUrl(comment.url)
+      return
+    }
     const link = commentFileLink(comment)
     if (link) routeLink(link, { threadId: threadId ?? undefined })
   }
 
   // The same row, merge rules and expected head the side card uses, for the pull request the panel shows.
+  // Merge and close actions belong to the active thread's own pull request, never an external linked PR.
   const inWorktree = source.location.workspaceThreadId !== null
-  const row = state.kind === 'ready' && path
+  const row = !viewedIdentity && state.kind === 'ready' && path
     ? pullRequestRows(lookup, source.git.status, state.detail, source.link, inWorktree).find((item) => item.value === state.detail.number) ?? null
     : null
   const changes = path
@@ -713,6 +753,23 @@ export function PullRequestPanel() {
   }
   const createLock = gitActionLock(running, 'pullRequest')
 
+  const viewedBanner = viewedIdentity ? (
+    <div className="pr-panel-viewed-bar" role="region" aria-label="Viewing linked pull request">
+      <button
+        type="button"
+        className="pr-panel-action"
+        onClick={() => clearViewedPullRequest()}
+        title="Return to this thread’s pull request"
+      >
+        <ArrowLeft size={13} strokeWidth={2} aria-hidden="true" />
+        Back to thread PR
+      </button>
+      <span className="pr-panel-viewed-repo" title={`${viewedIdentity.nameWithOwner}#${viewedIdentity.number}`}>
+        {viewedIdentity.nameWithOwner} #{viewedIdentity.number}
+      </span>
+    </div>
+  ) : undefined
+
   return (
     <div ref={headerRef} className="pr-panel-host">
       <PullRequestPanelView
@@ -720,7 +777,8 @@ export function PullRequestPanel() {
         refreshing={refreshing}
         onRefresh={refresh}
         onOpenFile={openFile}
-        computerName={computerName}
+        computerName={viewedIdentity ? null : computerName}
+        topBanner={viewedBanner}
         headerActions={row?.merge && confirm === null ? <HeaderActions row={row} running={running} onAsk={ask} /> : undefined}
         headerBelow={
           <>

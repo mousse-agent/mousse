@@ -200,6 +200,7 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestIdentity,
   PullRequestListItem,
   PullRequestMergeMethod,
   PullRequestPushTarget,
@@ -2177,6 +2178,20 @@ export function registerGuiIpc(
     broadcast('projects:updated', res.projects)
     return res.project
   })
+  // Asks for the project's new folder, starting at its current one; null when cancelled.
+  registerHandler('projects:changeFolder', async (_e, projectId: string, defaultPath?: unknown) => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose the project folder',
+      properties: ['openDirectory'],
+      ...(typeof defaultPath === 'string' && defaultPath.length <= 4096 ? { defaultPath } : {})
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const res = await guiMms.request<{ project: unknown; projects: unknown[] }>('projects.setPath', { projectId, path: result.filePaths[0] })
+    broadcast('projects:updated', res.projects)
+    return res.project
+  })
   registerHandler('projects:pin', async (_e, projectId: string, pinned: boolean) => {
     const res = await guiMms.request<{ project: unknown; projects: unknown[] }>(
       'projects.pin',
@@ -2527,7 +2542,7 @@ export function registerGuiIpc(
   // files only the thread had go with it. A window showing the thread leaves it when the list without it arrives
   // (`watchDeletedShownThread`), as for a delete from anywhere else. Another computer's thread is never deleted from here.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
+    const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'archivedAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId, discard: true }
     ).catch((error: unknown) => {
@@ -2712,11 +2727,8 @@ export function registerGuiIpc(
     broadcastIfRouted([threadId], res)
     return res.thread
   })
-  registerHandler('threads:settle', async (_e, threadId: string, settled: boolean) => {
-    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
-      'threads.settle',
-      { threadId, settled }
-    )
+  registerHandler('threads:archive', async (_e, threadId: string, archived: boolean) => {
+    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.archive', { threadId, archived })
     broadcastIfRouted([threadId], res)
     return res.thread
   })
@@ -3138,6 +3150,29 @@ export function registerGuiIpc(
     return info
   })
 
+  // The app's link to its background service, as the composers show it (Connecting… until it is `ready`). Every
+  // window hears each change; a window that opens later asks once (`lib/serviceConnection.ts`).
+  registerHandler('app:serviceConnection', () => guiMms.connectionState)
+  guiMms.on('state', (state: string) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('app:serviceConnectionChanged', state)
+    }
+  })
+
+  registerHandler('app:gitSetup', () => guiMms.gitPrerequisite)
+  registerHandler('app:installGit', (event) => {
+    if (event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) {
+      throw new Error('Git setup is only available from the workspace window')
+    }
+    return guiMms.installGit()
+  })
+  guiMms.on('git-setup', (setup: import('../../shared/gitSetup').GitSetup) => {
+    // This runs before any window has a profile binding.
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('app:gitSetupChanged', setup)
+    }
+  })
+
   // Profile operations are installation metadata plus a trusted per-window
   // binding. The renderer supplies only an id/slug; daemon admission resolves
   // the owned profile root and changes the sender's session epoch.
@@ -3421,6 +3456,15 @@ export function registerGuiIpc(
       ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
       ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
       number,
+      ...(force === true ? { force } : {})
+    })
+    return response.detail
+  })
+  registerHandler('pullRequests:view', async (_e, identity: PullRequestIdentity | undefined, force?: boolean) => {
+    const response = await guiMms.request<{ detail: PullRequestDetail }>('pullRequests.view', {
+      host: identity?.host,
+      nameWithOwner: identity?.nameWithOwner,
+      number: identity?.number,
       ...(force === true ? { force } : {})
     })
     return response.detail

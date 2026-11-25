@@ -20,7 +20,7 @@ export async function bootstrapPresentation(
   const isCurrent = opts?.isCurrent ?? (() => true)
   const initialActiveId = presentation.getActiveThreadId()
   const [threadsRes, projectsRes] = await Promise.all([
-    guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'name' | 'lineage'>[] }>('threads.list'),
+    guiMms.request<{ threads: Pick<Thread, 'id' | 'archivedAt' | 'name' | 'lineage'>[] }>('threads.list'),
     guiMms.request<{ projects: unknown[] }>('projects.list')
   ])
   if (!isCurrent()) return
@@ -28,7 +28,7 @@ export async function bootstrapPresentation(
   broadcast('threads:updated', threadListPayload(threadsRes))
 
   let activeId = presentation.getActiveThreadId()
-  const usable = threadsRes.threads.filter((t) => !t.settledAt)
+  const usable = threadsRes.threads.filter((t) => !t.archivedAt)
   if (activeId === initialActiveId && activeId && !usable.some((t) => t.id === activeId)) activeId = null
   if (!activeId) {
     // Startup never opens a subagent: it sits under its parent, which is what the sidebar lists.

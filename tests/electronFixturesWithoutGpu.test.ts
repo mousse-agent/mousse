@@ -65,10 +65,10 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
   'tests/errorElectronBridge.test.ts:44': { starts: 'tests/fixtures/repository-upgrades/electron-error-bridge.ts', how: 'esbuild bundle of tests/fixtures/repository-upgrades/electron-error-bridge.ts (line 36) in a temporary folder' },
   'tests/gitFoundationFullShell.test.ts:29': { starts: 'tests/fixtures/git-foundation-full-shell-driver.mjs', how: 'fullShellElectronArgs(resolve(the driver)) adds only display flags' },
   'tests/platformBrowserPackaging.test.ts:42': { starts: 'tests/fixtures/browser-host-probe/main.ts', how: 'esbuild bundle of tests/fixtures/browser-host-probe/main.ts (line 37) in a temporary folder' },
-  'tests/platformEditorCrossFeature.test.ts:36': { starts: 'tests/fixtures/agent-platform/editor-cross-feature/electron-main.ts', how: 'esbuild bundle of tests/fixtures/agent-platform/editor-cross-feature/electron-main.ts (line 29) in a temporary folder' },
+  'tests/platformEditorCrossFeature.test.ts:38': { starts: 'tests/fixtures/agent-platform/editor-cross-feature/electron-main.ts', how: 'esbuild bundle of tests/fixtures/agent-platform/editor-cross-feature/electron-main.ts (line 31) in node_modules/.cache' },
   'tests/platformElectronAttachedBrowser.test.ts:561': { starts: 'tests/fixtures/agent-platform/electron-attached-browser/electron-main.ts', how: 'esbuild bundle of fixtureDir/electron-main.ts in a temporary folder' },
-  'tests/platformMainBrowserE2E.test.ts:276': { starts: 'tests/fixtures/agent-platform/main-browser-e2e/launch.mjs', how: 'script = resolve(the launcher); it loads the bundle of main-browser-e2e/electron-main.ts' },
-  'tests/platformScheduledBrowserE2E.test.ts:135': { starts: 'tests/fixtures/agent-platform/scheduled-browser-e2e/electron-gui.ts', how: 'esbuild bundle of tests/fixtures/agent-platform/scheduled-browser-e2e/electron-gui.ts (line 126) in a temporary folder' },
+  'tests/platformMainBrowserE2E.test.ts:277': { starts: 'tests/fixtures/agent-platform/main-browser-e2e/launch.mjs', how: 'script = resolve(the launcher); it loads the bundle of main-browser-e2e/electron-main.ts' },
+  'tests/platformScheduledBrowserE2E.test.ts:137': { starts: 'tests/fixtures/agent-platform/scheduled-browser-e2e/electron-gui.ts', how: 'esbuild bundle of tests/fixtures/agent-platform/scheduled-browser-e2e/electron-gui.ts (line 128) in node_modules/.cache' },
   'tests/promptMarkers.test.ts:19': { starts: 'tests/fixtures/prompt-markers/main.ts', how: 'esbuild bundle of tests/fixtures/prompt-markers/main.ts (line 16) in a temporary folder' },
   'tests/providerCredentialVaultRuntime.test.ts:48': { starts: 'tests/fixtures/provider-credentials/vault-probe-electron.ts', how: 'esbuild bundle of tests/fixtures/provider-credentials/vault-probe-electron.ts (line 46) in a temporary folder' },
   'tests/providerCredentialVaultRuntime.test.ts:56': { starts: 'tests/fixtures/provider-credentials/vault-probe-electron.ts', how: 'esbuild bundle of tests/fixtures/provider-credentials/vault-probe-electron.ts (line 46) in a temporary folder' },
@@ -103,9 +103,17 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
 
 const READY_EVENT_METHODS = new Set(['on', 'once', 'addListener', 'prependListener'])
 
+// The scans below read every test file several times; each file and string is parsed once.
+const parsed = new Map<string, ts.SourceFile>()
+
 function parse(source: string, fileName: string): ts.SourceFile {
+  const key = `${fileName}\0${source}`
+  const cached = parsed.get(key)
+  if (cached) return cached
   const kind = /\.[cm]?js$/.test(fileName) ? ts.ScriptKind.JS : fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  return ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind)
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind)
+  parsed.set(key, file)
+  return file
 }
 
 function walk(node: ts.Node, visit: (node: ts.Node) => void): void {
@@ -549,7 +557,8 @@ describe('what a launch of the Electron binary starts', () => {
   })
 })
 
-describe('Electron apps the tests start', () => {
+// These scans parse every test file in the repository, so they get more time than one unit test.
+describe('Electron apps the tests start', { timeout: 60_000 }, () => {
   const tests = join(process.cwd(), 'tests')
   const sources = readdirSync(tests, { recursive: true, encoding: 'utf8' })
     .filter((path) => /\.(?:[cm]?[jt]s|tsx)$/.test(path))

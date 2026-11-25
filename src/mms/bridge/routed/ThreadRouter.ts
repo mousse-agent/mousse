@@ -43,6 +43,7 @@ const RESULT_WITH_THREADS = new Set([
   'threads.delete',
   'threads.rename',
   'threads.pin',
+  'threads.archive',
   'threads.settle',
   'threads.regenerateTitle',
   'threads.setModel',

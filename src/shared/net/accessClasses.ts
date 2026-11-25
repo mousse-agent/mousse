@@ -62,6 +62,8 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'projects.open': 'work',
   'threads.rename': 'work',
   'threads.pin': 'work',
+  'threads.archive': 'work',
+  // Legacy name of `threads.archive`, from a phone that runs an older Mousse.
   'threads.settle': 'work',
   'threads.regenerateTitle': 'work',
   'threads.setExpiry': 'work',
@@ -248,6 +250,8 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'pullRequests.startThread': 'work',
     'threads.rename': 'work',
     'threads.pin': 'work',
+    'threads.archive': 'work',
+    // Legacy name of `threads.archive`, from a computer that runs an older Mousse.
     'threads.settle': 'work',
     'threads.delete': 'work',
     'threads.regenerateTitle': 'work',

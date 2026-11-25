@@ -105,6 +105,7 @@ import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds, type SendRetry } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { compactNowFailureLine, errorText, isRequestTimeout, readableError, sendErrorLine } from '../lib/errorText'
+import { openSettingsSection } from '../lib/settingsNavigation'
 import { showToast } from './ui/Toast'
 import { editablePrompt, PromptUndoNotice } from './PromptUndoControls'
 import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils/threadActionHistory'
@@ -237,7 +238,6 @@ export function OrchestratorChat() {
   const loading = useAppStore((s) => s.loading)
   const transcriptPending = useAppStore((s) => s.transcriptPending)
   const setLoading = useAppStore((s) => s.setLoading)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const chatMode = useAppStore((s) => s.chatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
@@ -1196,9 +1196,9 @@ export function OrchestratorChat() {
       if (targetThreadId) {
         const store = useAppStore.getState()
         const current = store.threads.find((t) => t.id === targetThreadId)
-        if (current && !current.settledAt) {
+        if (current && !current.archivedAt) {
           const siblings = store.threads.filter(
-            (entry) => (entry.projectId ?? null) === (current.projectId ?? null) && !entry.settledAt
+            (entry) => (entry.projectId ?? null) === (current.projectId ?? null) && !entry.archivedAt
           )
           const minOrder = siblings.reduce((min, entry) => Math.min(min, entry.order), current.order)
           store.upsertThread({
@@ -2272,7 +2272,7 @@ export function OrchestratorChat() {
                 modelMenuOpen,
                 onModelMenuOpenChange: setModelMenuOpen,
                 onModelSelect: (providerId, modelId) => void handleModelSelect(providerId, modelId),
-                onOpenSettings: () => setSettingsOpen(true),
+                onOpenSettings: () => openSettingsSection('providers'),
                 contextUsage,
                 contextCompactionSetting,
                 contextOpen,

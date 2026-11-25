@@ -115,10 +115,16 @@ describe('ACP permission requests under a permission mode', () => {
     expect(ask.choose).not.toHaveBeenCalled()
   })
 
-  it('asks when a request arrives outside a turn', async () => {
+  it('falls back to Ask when a turn scope omits permissionMode', async () => {
     const ask = prompter('no')
     expect(await answerPermission(ask, scope(undefined), request('edit'), classify)).toEqual(selected('no'))
     expect(ask.choose).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels without asking when no turn owns the scope', async () => {
+    const ask = prompter('once')
+    expect(await answerPermission(ask, { ...scope('full'), threadId: undefined }, request('edit'), classify)).toEqual(cancelled)
+    expect(ask.choose).not.toHaveBeenCalled()
   })
 
   it('tells the prompter what kind of action is asked about, so who may answer is decided by the rule', async () => {

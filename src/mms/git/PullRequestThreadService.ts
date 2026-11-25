@@ -193,7 +193,7 @@ export class PullRequestThreadService {
 
   private threadsOf(identity: PullRequestIdentity): Array<{ id: string; name: string }> {
     return this.deps.threads.listAllThreads()
-      .filter((thread) => thread.pullRequest && !thread.settledAt && sameRepository(thread.pullRequest, identity) && !this.deps.hidden?.(thread))
+      .filter((thread) => thread.pullRequest && !thread.archivedAt && sameRepository(thread.pullRequest, identity) && !this.deps.hidden?.(thread))
       .map((thread) => ({ id: thread.id, name: thread.name }))
   }
 

@@ -381,9 +381,9 @@ export function watchEndedLine(reason: PullRequestWatchEnd, number: number): str
     stopped: `The thread was stopped, so the watch on pull request #${number} ended.`,
     project_missing: `The project of this thread is not available, so the watch on pull request #${number} ended.`,
     unlinked: `The thread's link to pull request #${number} was removed, so the watch ended.`,
-    settled: `The thread was archived, so the watch on pull request #${number} ended.`,
+    archived: `The thread was archived, so the watch on pull request #${number} ended.`,
     trashed: `The thread was deleted, so the watch on pull request #${number} ended.`
   }
-  const advice = reason === 'merged' || reason === 'closed' || reason === 'unlinked' || reason === 'settled' || reason === 'trashed' ? '' : ` ${again}`
+  const advice = reason === 'merged' || reason === 'closed' || reason === 'unlinked' || reason === 'archived' || reason === 'trashed' ? '' : ` ${again}`
   return `Watch ended: ${why[reason]}${advice}`
 }
