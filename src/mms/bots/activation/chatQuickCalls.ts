@@ -42,6 +42,8 @@ export class ChatQuickCalls implements BotQuickCalls {
   private spentMs = 0
   private running = 0
   private busySince = 0
+  /** The turn's total ran out (its deadline cut a call): a timer may fire a moment early, so the clock is not asked again. */
+  private spent = false
   private readonly reading = new Map<AbortController, () => boolean>()
   private readonly callMs: number
   private readonly turnMs: number
@@ -75,7 +77,7 @@ export class ChatQuickCalls implements BotQuickCalls {
 
   async run<T extends { text: string; isError?: boolean }>(input: { tool: string; readOnly: boolean; stillReadOnly?(): boolean; signal: AbortSignal; call(signal: AbortSignal): Promise<T> }): Promise<T | { text: string; isError: true; callState?: 'uncertain' }> {
     const left = this.turnMs - this.busyMs()
-    if (left <= 0) {
+    if (this.spent || left <= 0) {
       return {
         text: refusalText('work_required', `This turn has used its ${seconds(this.turnMs)} for calls in the chat, so ${input.tool} didn't run. Hand the rest to work with work_start: it has the time.`, { fix: 'work_start' }),
         isError: true
@@ -103,6 +105,8 @@ export class ChatQuickCalls implements BotQuickCalls {
         if ('done' in first) return bounded(first.done)
       }
       const reason = own.signal.reason
+      // Cut by what was left of the turn's total: it is spent.
+      if (reason === DEADLINE && ms < this.callMs) this.spent = true
       if (reason === STEERED || reason === STEERED_QUEUED) {
         const next = reason === STEERED ? 'Read what they wrote first; call it again only if it is still needed.' : 'Their message comes to you after this turn: end this turn now, and call it again then only if it is still needed.'
         return { text: refusalText('cancelled', `Stopped: your owner wrote while ${input.tool} ran, and nothing came of it. ${next}`, { retry: 'after_change' }), isError: true }
