@@ -103,6 +103,12 @@ export const BOT_QUESTION_TOOL = 'ask_owner'
 export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
 
 /**
+ * Taking back a question the bot asked and no longer needs (`question_withdraw`, issue #1446). Held with `ask_owner`,
+ * wherever a turn may ask; it grants nothing either.
+ */
+export const BOT_QUESTION_WITHDRAW_TOOL = 'question_withdraw'
+
+/**
  * Attaching a small card to the turn's next message (`show_card`, issue #1123): facts, a checklist, progress or a
  * gallery of pictures from the bot's files folder, drawn by the app from fixed components. It grants nothing, so it is
  * always on and never grantable. A bot's main turns get it in both lanes; never a consult or a subagent.
@@ -338,6 +344,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_APPLET_TOOL,
   BOT_QUESTION_TOOL,
   BOT_QUESTION_ANSWER_TOOL,
+  BOT_QUESTION_WITHDRAW_TOOL,
   BOT_CARD_TOOL,
   BOT_REPORT_BUG_TOOL,
   ...BOT_MESSAGE_TOOLS,

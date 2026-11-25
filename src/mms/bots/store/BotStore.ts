@@ -929,7 +929,8 @@ export interface BotDispatchRow {
     workActionIds?: string[]
     workRefusalIds?: string[]
     /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
-    workDelivery?: { answers: string[]; notes: number[]; question?: string }
+    /** `question`: one question's answer, as an older build carried it; `questions`: every answer the dispatch carried. */
+    workDelivery?: { answers: string[]; notes: number[]; question?: string; questions?: string[] }
     /**
      * A chat turn's first dispatch: the queued notices it took in with its own input (`BotEngine.noticeBatchInTx`). They
      * stay queued while it runs, and end as `merged` when it ends done (`moveActivation`); else they run after it.
@@ -1108,11 +1109,11 @@ const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN (
 
 const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
   prompt.workRefusalIds?.length || prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
-  prompt.workDelivery?.answers.length || prompt.workDelivery?.question
+  prompt.workDelivery?.answers.length || prompt.workDelivery?.question || prompt.workDelivery?.questions?.length
 )
 
 /** Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. */
-const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question'): string => `
+const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question' | 'questions'): string => `
   EXISTS (SELECT 1 FROM bot_dispatches carried, json_each(carried.prompt_json, '$.workDelivery.${member}') item
     WHERE carried.activation_id = ${table}.activation_id AND item.value = ${table}.id)
   AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') item
@@ -1897,15 +1898,10 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, rowid`, ...params).map(escalationOf)
   }
 
-  /** The walls an activation hit (a run's refused asks never count: they don't stop it). */
-  /** The run asks (`mode = 'ask'`) a bot wrote: of one activation, or since a time. */
-  countNewAsks(botId: string, input: { activationId?: string; since?: string }): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE bot_id = ? AND mode = 'ask' AND (? IS NULL OR activation_id = ?) AND created_at >= ?",
-      botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
-  }
-
-  countEscalations(activationId: string): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'", activationId)?.n ?? 0)
+  /** The bot's newest ask for a fingerprint that the owner answered (allowed or denied), if any. */
+  lastAnsweredAsk(botId: string, fingerprint: string): BotEscalationRow | undefined {
+    const row = this.get("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC LIMIT 1", botId, fingerprint)
+    return row ? escalationOf(row) : undefined
   }
 
   /**
@@ -1959,9 +1955,15 @@ export class BotStore {
     return this.run('UPDATE bot_escalations SET permission_json = ?, fingerprint = ?, title = ?, note = ? WHERE id = ?', JSON.stringify(ask.permission), ask.fingerprint, ask.title, ask.note, id) > 0
   }
 
-  /** Compare-and-set from `open`: false when it was already answered, expired or cancelled. */
+  /**
+   * Compare-and-set from `open`: false when it was already answered, expired or cancelled. A Not now keeps where the
+   * owner had last written then (`ownerWroteSinceDenial`), so a repeat of the ask is told apart from one they wrote about.
+   */
   answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string): boolean {
-    return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
+    const moved = this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
+    const botId = moved && status === 'denied' ? this.get('SELECT bot_id FROM bot_escalations WHERE id = ?', id)?.bot_id : undefined
+    if (typeof botId === 'string') this.run('INSERT OR REPLACE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `ask-denied:${id}`, String(this.ownerLastWroteSeq(botId)))
+    return moved
   }
 
   /**
@@ -2352,6 +2354,18 @@ export class BotStore {
     return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, next_at = NULL WHERE activation_id = ? AND status = 'open' AND message_id IS NULL", this.now(), activationId)
   }
 
+  /**
+   * The bot takes back its own open question (`question_withdraw`, issue #1446): compare-and-set on the question, the bot
+   * and the activation that asked it, so no other bot's or other work's question is touched, and an answer that came
+   * first is kept. Read at once: it is not one the owner forgot, and no continuation says to ask it again. False when it
+   * was not this caller's open question.
+   */
+  withdrawOwnQuestion(id: string, botId: string, activationId: string): boolean {
+    const at = this.now()
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, read_at = ?, next_at = NULL WHERE id = ? AND bot_id = ? AND activation_id = ? AND status = 'open'",
+      at, at, id, botId, activationId) > 0
+  }
+
   /** Every open or moved-on question of a bot is withdrawn (it was deleted). */
   withdrawQuestions(botId: string): number {
     return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, next_at = NULL WHERE bot_id = ? AND status IN ('open', 'moved_on')", this.now(), botId)
@@ -2389,12 +2403,18 @@ export class BotStore {
 
   /**
    * The question work asked and has not carried on from yet: open, or answered (by the owner, or with its default) with
-   * the answer not yet sent to it (`read_at`). At most one (`MAX_OPEN_QUESTIONS_PER_WORK`); the newest when an older build
-   * left more.
+   * the answer not yet sent to it (`read_at`). Work may ask several (issue #1363): an open one it waits on comes first,
+   * then any other open one, then the newest answered one, so work never goes on while a question it waits on is open.
    */
   workQuestion(activationId: string): BotQuestionRow | undefined {
-    const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered', 'defaulted') ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
+    const row = this.get(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered', 'defaulted')
+      ORDER BY CASE WHEN status = 'open' AND json_extract(spec_json, '$.wait') IS NOT 0 THEN 0 WHEN status = 'open' THEN 1 ELSE 2 END, created_at DESC, rowid DESC LIMIT 1`, activationId)
     return row ? questionOf(row) : undefined
+  }
+
+  /** Whether work still has a question open, whose answer it has not had (it waits for every one before it goes on). */
+  workQuestionOpen(activationId: string): boolean {
+    return Boolean(this.get("SELECT 1 FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND status = 'open' LIMIT 1", activationId))
   }
 
   /**
@@ -2507,11 +2527,14 @@ export class BotStore {
       AND status IN ('allowed_bot', 'allowed_once', 'denied') AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_escalations', 'answers')}))
       ORDER BY created_at, rowid`, activationId).map(escalationOf)
   }
-  unreadWorkQuestion(activationId: string): BotQuestionRow | undefined {
-    const row = this.get(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
-      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question')}))
-      ORDER BY created_at DESC, rowid DESC LIMIT 1`, activationId)
-    return row ? questionOf(row) : undefined
+  /**
+   * Work's answered questions whose answers it has not had yet, oldest first: unread, or carried by a dispatch that never
+   * confirmed it told the model (`workDelivery.questions`, or an older build's single `question`).
+   */
+  unreadWorkQuestions(activationId: string): BotQuestionRow[] {
+    return this.all(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
+      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question')}) OR (${unconfirmedDelivery('bot_questions', 'questions')}))
+      ORDER BY created_at, rowid`, activationId).map(questionOf)
   }
   /** Notes in a started prompt may have reached the model even without confirmed output. */
   carriedWorkNoteIds(activationId: string): Set<number> {
@@ -2544,6 +2567,18 @@ export class BotStore {
    */
   ownerLastWroteSeq(botId: string): number {
     return num(this.get("SELECT MAX(seq) AS seq FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.seq) ?? 0
+  }
+
+  /**
+   * Whether the owner wrote to a bot (a message, or a tapped answer) after they said Not now to `ask`: their newest row
+   * comes after the one they had written last then (`answerEscalation`). An ask denied by an older build kept no row, so
+   * its answer's time is compared instead. The repeat guard for asks (issue #1363).
+   */
+  ownerWroteSinceDenial(ask: Pick<BotEscalationRow, 'id' | 'botId' | 'answeredAt'>): boolean {
+    const last = this.ownerLastWroteSeq(ask.botId)
+    const kept = this.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', ask.botId, `ask-denied:${ask.id}`)?.value
+    if (kept !== undefined && kept !== null) return last > Number(kept)
+    return Boolean(ask.answeredAt && this.get("SELECT 1 FROM bot_messages WHERE bot_id = ? AND author = 'owner' AND seq = ? AND at > ?", ask.botId, last, ask.answeredAt))
   }
 
   /** How many messages from other bots reached bot `botId`'s chat after row `afterSeq` (the ping-pong guard). */

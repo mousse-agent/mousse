@@ -139,8 +139,6 @@ export interface BotEscalationSummary {
 export const BOT_ESCALATION_TTL_MS = 30 * 60_000
 /** The waits a bot may choose (30 minutes, 4 hours, 24 hours). */
 export const BOT_ESCALATION_TTLS_MS: readonly number[] = [30 * 60_000, 4 * 60 * 60_000, 24 * 60 * 60_000]
-/** Walls one activation may hit; the next one ends it `blocked`. */
-export const MAX_BOT_WALLS = 5
 
 const BUDGET_WORDS: Record<BotBudgetWallKey, string> = {
   maxActiveMs: 'work time',

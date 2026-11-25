@@ -971,7 +971,7 @@ it('R4 a question after a settled action ends as a question, not an approval', a
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
   const next = await start(f, t.workId, 2)
-  expect(f.bots.askOwner(t.botId, t.workId, { question: 'Which next?', choices: [{ label: 'A' }, { label: 'B' }], other: true }).asked).toBe(true)
+  expect(f.bots.askOwner(t.botId, t.workId, [{ spec: { question: 'Which next?', choices: [{ label: 'A' }, { label: 'B' }], other: true } }]).asked).toBe(true)
   const denied = next.prepared.authority.check({ kind: 'app', tool: 'web_fetch', args: {} })
   expect(JSON.stringify(denied)).not.toContain('call is held')
   expect(JSON.stringify(denied)).toContain('question')
@@ -2788,7 +2788,7 @@ it.each([true, false])('C4 next wrapper preserves held review and retry identity
 
 it('C4 next wait-false question survives a held call and its answer reaches the continuation', async () => {
   const t = await setup(true)
-  const asked = f.bots.askOwner(t.botId, t.workId, { question: 'Which inbox?', choices: [{ label: 'Personal' }, { label: 'Work' }], other: false, wait: false })
+  const asked = f.bots.askOwner(t.botId, t.workId, [{ spec: { question: 'Which inbox?', choices: [{ label: 'Personal' }, { label: 'Work' }], other: false, wait: false } }])
   expect(asked.asked).toBe(true)
   expect(f.store.activation(t.workId)!.status).toBe('running')
   const q = f.store.workQuestion(t.workId)!
@@ -3057,7 +3057,7 @@ it.each(['expiry', 'nudges'] as const)('C9 failed action %s backs off without st
   const chat = await f.bots.enqueueChat(other, 'chat:upkeep-choice', 'Pick one')
   await flush()
   const turn = await start(f, chat.id)
-  f.bots.askOwner(other, chat.id, { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: false }, { kind: 'default', afterMs: 15 * 60_000, default: 'A' })
+  f.bots.askOwner(other, chat.id, [{ spec: { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: false }, follow: { kind: 'default', afterMs: 15 * 60_000, default: 'A' } }])
   await finish(f, turn.payload, 'completed', { text: 'Pick one.' })
   const questionId = String(f.store.get('SELECT id FROM bot_questions WHERE activation_id = ?', chat.id)!.id)
   f.clock.now += 15 * 60_000

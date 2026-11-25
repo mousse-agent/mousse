@@ -25,7 +25,7 @@ async function parked(reason: string) {
   await runDispatch(f, chat.id, 1, { text: 'On it.' })
   const turn = await start(f, workId)
   if (reason === 'question') {
-    f.bots.askOwner(botId, workId, { question: 'Which flat?', choices: ['A', 'B'] })
+    f.bots.askOwner(botId, workId, [{ spec: { question: 'Which flat?', choices: ['A', 'B'] } }])
     await finish(f, turn.payload, 'completed', { text: 'Unsent draft.' })
   } else if (reason === 'budget_exhausted') {
     // Its 3 model requests used up: the 4th is over the limit, a wall.
