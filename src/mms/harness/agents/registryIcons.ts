@@ -165,9 +165,10 @@ export function sanitizeRegistrySvg(input: string | Uint8Array): SanitizedIcon |
     const name = match[1]!.toLowerCase()
     if (!ELEMENTS.has(name.slice(name.indexOf(':') + 1))) return undefined
   }
-  // References stay inside the icon (`href="#gradient"`).
-  for (const match of text.matchAll(/(?:^|[\s"'])(?:[\w.-]+:)?href\s*=\s*(["'])([^"']*)\1/gi))
-    if (!match[2]!.trim().startsWith('#')) return undefined
+  // References stay inside the icon (`href="#gradient"`). Each quote style is matched on its own,
+  // as in `ATTRIBUTES`, so a value holding the other kind (`href="x.svg#g'"`) is checked too.
+  for (const match of text.matchAll(/(?:^|[\s"'])(?:[\w.-]+:)?href\s*=\s*(?:"([^"]*)"|'([^']*)')/gi))
+    if (!(match[1] ?? match[2] ?? '').trim().startsWith('#')) return undefined
   for (const match of text.matchAll(/(?:https?|ftp|file|wss?):\/\/[^\s"'<>]*/gi)) if (!NAMESPACES.has(match[0])) return undefined
   if (/\b(?:https?|ftp|file):/i.test(text.replace(/(?:https?):\/\/[^\s"'<>]*/gi, ''))) return undefined
   // An SVG shown as an image needs its namespace.

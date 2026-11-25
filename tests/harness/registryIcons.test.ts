@@ -90,6 +90,8 @@ describe('registry icon cleaning', () => {
     ['a style sheet instruction', '<?xml-stylesheet href="https://example.com/x.css"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>'],
     ['an external URL', svg('<path d="M0 0h1"/>', 'viewBox="0 0 16 16" xmlns:x="https://example.com/ns"')],
     ['an external href on an allowed element', svg('<linearGradient href="https://example.com/g.svg#a"/>')],
+    ['an external href whose value holds the other quote', svg(`<linearGradient id="g" href="//e.com/x.svg#g'"/>`)],
+    ['an external xlink:href whose value holds the other quote', svg(`<linearGradient xlink:href="other.svg#g'"/>`)],
     ['CDATA', svg('<text><![CDATA[x]]></text>')]
   ]
   it.each(refused)('refuses %s', (_name, icon) => {
