@@ -43,7 +43,12 @@ describe('registry icon cleaning', () => {
     ['one brand colour', svg('<path fill="#4285F4" d="M1 1h14v14H1z"/>'), false],
     ['currentColor tile with a white cut-out', svg('<rect width="16" height="16" fill="currentColor"/><path fill="white" d="M4 4h8v8H4z"/>'), false],
     ['default-black tile with a white cut-out', svg('<rect width="16" height="16"/><path fill="#ffffff" d="M4 4h8v8H4z"/>'), false],
-    ['two brand colours', svg('<path fill="#f00" d="M1 1h4v4H1z"/><path fill="rgb(0, 128, 0)" d="M9 9h4v4H9z"/>'), false]
+    ['two brand colours', svg('<path fill="#f00" d="M1 1h4v4H1z"/><path fill="rgb(0, 128, 0)" d="M9 9h4v4H9z"/>'), false],
+    // A design tool's export: the clip shape's white is never painted, so the mark is one ink.
+    ['a dark mark under clip-path="url(#clip0)"', svg('<g clip-path="url(#clip0)"><path fill="#1A1A1A" d="M1 1h14v14H1z"/></g><defs><clipPath id="clip0"><rect width="16" height="16" fill="white"/></clipPath></defs>'), true],
+    ['a mark under mask="url(#m)"', svg('<mask id="m"><rect width="16" height="16" fill="#fff"/></mask><path mask="url(#m)" fill="currentColor" d="M1 1h14v14H1z"/>'), true],
+    ['a gradient fill="url(#g)"', svg('<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs><path fill="url(#g)" d="M1 1h14v14H1z"/>'), false],
+    ['plain paint and stroke in a style', svg('<path style="fill:none; stroke: rgb(0, 0, 0); stroke-width: 1.5px; stroke-linecap: round" d="M1 1h14"/>'), true]
   ]
   it.each(inks)('tells one ink from several: %s', (_name, icon, monochrome) => {
     expect(sanitizeRegistrySvg(icon)?.monochrome).toBe(monochrome)
@@ -67,7 +72,18 @@ describe('registry icon cleaning', () => {
     ['set', svg('<path d="M0 0h1"><set attributeName="fill" to="red"/></path>')],
     ['a javascript: URL', svg('<path d="M0 0h1"/><title>javascript:alert(1)</title>')],
     ['a data: URL', svg('<path fill="red" d="M0 0h1"/><linearGradient href="data:image/svg+xml,x"/>')],
-    ['url(…) paint', svg('<linearGradient id="g"><stop offset="0"/></linearGradient><path fill="url(#g)" d="M0 0h1"/>')],
+    ['a url(…) to another file', svg('<path fill="url(other.svg#g)" d="M0 0h1"/>')],
+    ['a url(…) to another host', svg('<path clip-path="url(//evil.example/x.svg#a)" d="M0 0h1"/>')],
+    ['a url(#…) with more after it', svg('<path fill="url(#g) url(x.svg)" d="M0 0h1"/>')],
+    ['a url(#…) in text', svg('<path d="M0 0h1"/><title>url(#a)</title>')],
+    ['a url(#…) in a style', svg('<path style="clip-path:url(#a)" d="M0 0h1"/>')],
+    // CSS escapes spell `url(https:` without the words the other checks look for.
+    ['a CSS-escaped URL in a style', svg(String.raw`<path style="fill:u\72l(\68ttps\3a//evil.example/x.svg#a)" d="M0 0h1"/>`)],
+    ['a backslash anywhere', svg(String.raw`<path d="M0 0h1"/><title>a\b</title>`)],
+    ['a style property beyond paint', svg('<path style="filter: blur(1px)" d="M0 0h1"/>')],
+    ['a style value that is not plain', svg('<path style="fill: var(--x)" d="M0 0h1"/>')],
+    ['a style with a quoted value', svg(`<path style="font-family: 'x'" d="M0 0h1"/>`)],
+    ['an unquoted style', svg('<path style=fill:red d="M0 0h1"/>')],
     ['@import', svg('<path d="M0 0h1"/><title>@import "x"</title>')],
     ['an entity declaration', '<!DOCTYPE svg [<!ENTITY x "y">]><svg xmlns="http://www.w3.org/2000/svg"><text>&x;</text></svg>'],
     ['a character reference', svg('<text>&#106;avascript</text>')],

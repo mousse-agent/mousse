@@ -66,10 +66,11 @@ const FORBIDDEN: readonly RegExp[] = [
   /<\s*\/?\s*(?:[\w.-]+:)?(?:script|foreignobject|iframe|object|embed|style|animate\w*|set|use|image|feimage|a|audio|video|handler|listener)\b/i,
   // Event handler attributes (`onload=`, `onclick =`).
   /[\s"'/]on[a-z]+\s*=/i,
+  // A CSS escape (`u\72l(`) could spell any word the other checks look for.
+  /\\/,
   /javascript\s*:/i,
   /vbscript\s*:/i,
   /data\s*:/i,
-  /url\s*\(/i,
   /@import/i,
   /<!DOCTYPE/i,
   /<!ENTITY/i,
@@ -83,11 +84,61 @@ const FORBIDDEN: readonly RegExp[] = [
 
 const SHAPES = /<\s*(?:[\w.-]+:)?(?:path|circle|ellipse|line|polyline|polygon|rect|text)\b([^>]*)>/gi
 
+/** Every quoted `name="value"` in the icon. */
+const ATTRIBUTES = /(?<=^|[\s"'])((?:[\w.-]+:)?[\w.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+/** Every `style=`, quoted or not, so none goes unchecked. */
+const STYLE_ATTRIBUTE = /(?<![\w.-])(?:[\w.-]+:)?style\s*=/gi
+
+/** The one URL an attribute may hold: a part of the icon itself (`clip-path="url(#clip0)"`). */
+const LOCAL_URL = /^\s*url\(\s*#[A-Za-z_][\w.-]*\s*\)\s*$/i
+
+/** What a `style` attribute may set: how shapes are painted and laid out, nothing that loads or moves. */
+const STYLE_PROPERTIES = new Set([
+  'fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width', 'stroke-opacity', 'stroke-linecap', 'stroke-linejoin',
+  'stroke-miterlimit', 'stroke-dasharray', 'stroke-dashoffset', 'opacity', 'color', 'stop-color', 'stop-opacity',
+  'clip-rule', 'display', 'visibility', 'font-family', 'font-size', 'font-weight', 'font-style', 'text-anchor',
+  'letter-spacing', 'isolation', 'mix-blend-mode'
+])
+
+/** A plain style value: words, numbers, units, `#hex` and `rgb()`/`rgba()` of numbers, nothing else. */
+function plainStyle(style: string): boolean {
+  for (const declaration of style.split(';')) {
+    if (!declaration.trim()) continue
+    const colon = declaration.indexOf(':')
+    if (colon < 0) return false
+    const property = declaration.slice(0, colon).trim().toLowerCase()
+    const value = declaration.slice(colon + 1).replace(/rgba?\([\d.%\s,]*\)/gi, '')
+    if (!STYLE_PROPERTIES.has(property) || !/^[-#\w.%\s,]*$/.test(value)) return false
+  }
+  return true
+}
+
+/**
+ * Attributes are where styles and URLs hide: every `style` must be plain, and the only `url(` the
+ * icon may hold is a whole attribute value pointing inside it (`url(#clip0)`), never in a `style`.
+ */
+function attributesAreSafe(text: string): boolean {
+  let unsafe = false
+  let styles = 0
+  const rest = text.replace(ATTRIBUTES, (whole, name: string, double?: string, single?: string) => {
+    const value = double ?? single ?? ''
+    const local = name.slice(name.indexOf(':') + 1).toLowerCase()
+    if (local === 'style') {
+      styles += 1
+      if (!plainStyle(value)) unsafe = true
+      return whole
+    }
+    return LOCAL_URL.test(value) ? `${name}=""` : whole
+  })
+  return !unsafe && styles === (text.match(STYLE_ATTRIBUTE) ?? []).length && !/url\s*\(/i.test(rest)
+}
+
 /**
  * The icon cleaned for display, or undefined when it is not a plain SVG mark of at most
  * `ICON_MAX_BYTES` UTF-8 bytes. A leading XML declaration and an external DOCTYPE (no internal
  * subset) are removed; a DOCTYPE with one, entities, scripts, styles, links, images, animation,
- * event handlers and any URL other than a namespace name reject the icon.
+ * event handlers, backslashes (CSS escapes), a `style` attribute beyond plain paint and any URL
+ * other than a namespace name or a `url(#part)` of the icon itself reject the icon.
  */
 export function sanitizeRegistrySvg(input: string | Uint8Array): SanitizedIcon | undefined {
   let text: string
@@ -109,7 +160,7 @@ export function sanitizeRegistrySvg(input: string | Uint8Array): SanitizedIcon |
   text = text.replace(/^<!DOCTYPE\s+svg\b[^<>[\]]*>\s*/i, '')
   text = text.replace(/<!--[\s\S]*?-->/g, '')
   if (!/^<svg[\s>]/.test(text) || !/<\/svg\s*>$/.test(text)) return undefined
-  if (FORBIDDEN.some((pattern) => pattern.test(text))) return undefined
+  if (FORBIDDEN.some((pattern) => pattern.test(text)) || !attributesAreSafe(text)) return undefined
   for (const match of text.matchAll(/<\s*\/?\s*([A-Za-z_][\w.:-]*)/g)) {
     const name = match[1]!.toLowerCase()
     if (!ELEMENTS.has(name.slice(name.indexOf(':') + 1))) return undefined
@@ -148,9 +199,12 @@ function isNeutral(color: string): boolean {
 /**
  * Whether every painted part is one ink. Counts each fill, stroke and stop colour in attributes and
  * `style`, plus the default black of a shape with no fill when nothing above it sets one, so a
- * black tile with a white cut-out counts as two colours, never as one white mark.
+ * black tile with a white cut-out counts as two colours, never as one white mark. The insides of
+ * a `clipPath` or `mask` are left out: they cut shapes and are never painted themselves (a design
+ * tool's `<clipPath><rect fill="white"/></clipPath>` does not make a dark mark two colours).
  */
-function isMonochrome(svg: string): boolean {
+function isMonochrome(icon: string): boolean {
+  const svg = icon.replace(/<\s*(?:[\w.-]+:)?(clippath|mask)\b[\s\S]*?<\/\s*(?:[\w.-]+:)?\1\s*>/gi, '')
   const colors = new Set<string>()
   const add = (value: string) => {
     const key = paintKey(value)
