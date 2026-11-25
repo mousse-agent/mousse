@@ -122,18 +122,6 @@
       ],
       "claimedAt": "2026-11-25T18:29:30.139Z",
       "expiresAt": "2026-11-25T20:29:30.139Z"
-    },
-    {
-      "task": "turn-summary-truthful-files",
-      "session": "Animatrix-2c50ac",
-      "machine": "Animatrix",
-      "branch": "turn-summary-truthful-files",
-      "paths": [
-        "src/renderer/chat/components/agent-elements/turn-edit-summary.tsx",
-        "src/renderer/chat/components/agent-elements/turn-recorded-files.ts"
-      ],
-      "claimedAt": "2026-11-25T18:56:59.420Z",
-      "expiresAt": "2026-11-25T20:56:59.420Z"
     }
   ]
 }
