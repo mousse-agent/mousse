@@ -86,18 +86,24 @@ export async function prepareActionableTarget(
   cdp: CdpTransport,
   cdpSessionId: string,
   node: ObservedNode,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** `point`: a viewport CSS point the caller chose (an image point); hit-tested as is, without scrolling the target. */
+  options?: { point?: BrowserPoint }
 ): Promise<ActionableTarget> {
+  const requestedPoint = options?.point
   await cdp.send('DOM.enable', {}, { sessionId: cdpSessionId, signal })
   try {
     await cdp.send('DOM.describeNode', { backendNodeId: node.backendNodeId }, { sessionId: cdpSessionId, signal })
   } catch {
     fail('stale_ref', 'Observed node is detached')
   }
-  try {
-    await cdp.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: node.backendNodeId }, { sessionId: cdpSessionId, signal })
-  } catch {
-    fail('not_actionable', 'Target could not be scrolled into view')
+  // A requested point is already in viewport coordinates; scrolling would move the target out from under it.
+  if (!requestedPoint) {
+    try {
+      await cdp.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: node.backendNodeId }, { sessionId: cdpSessionId, signal })
+    } catch {
+      fail('not_actionable', 'Target could not be scrolled into view')
+    }
   }
   const first = await quads(cdp, cdpSessionId, node.backendNodeId, signal)
   await sleep(50, signal)
@@ -112,7 +118,9 @@ export async function prepareActionableTarget(
   const value = state.result?.value
   if (!value) fail('stale_ref', 'Observed node could not be resolved')
   if (value.hidden) fail('not_actionable', 'Target is hidden')
-  const point = { x: second.x + second.width / 2, y: second.y + second.height / 2 }
+  const point = requestedPoint
+    ? { x: requestedPoint.x, y: requestedPoint.y }
+    : { x: second.x + second.width / 2, y: second.y + second.height / 2 }
   const hit = await cdp.send<{ result: { value?: { ok?: boolean; occluded?: boolean; hitTag?: string; hitText?: string } } }>('Runtime.callFunctionOn', {
     objectId,
     functionDeclaration: TRUSTED_HIT,
