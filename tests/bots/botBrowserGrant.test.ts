@@ -72,7 +72,7 @@ describe('the browser permission, in plain words', () => {
 describe('a bot asking for and using the browser', () => {
   let f: BotFixture
   let botId: string
-  let turns: Array<{ botId: string; activationId: string; lane: string; homeThreadId: string }>
+  let turns: Array<{ botId: string; activationId: string; lane: string; homeThreadId: string; filesFolder?: string }>
   let ended: string[]
 
   beforeEach(async () => {
@@ -81,7 +81,7 @@ describe('a bot asking for and using the browser', () => {
     ended = []
     const browser: BotBrowserHost = {
       turn: (input) => {
-        turns.push({ botId: input.botId, activationId: input.activationId, lane: input.lane, homeThreadId: input.homeThreadId })
+        turns.push({ botId: input.botId, activationId: input.activationId, lane: input.lane, homeThreadId: input.homeThreadId, filesFolder: input.filesFolder })
         return { binding: { mode: 'structured' } as never, runtime: { resolveTarget: () => ({ backend: 'managed-chromium' }), dispatch: async () => ({}) } }
       },
       activationEnded: (input) => { ended.push(input.activationId) }
@@ -132,6 +132,8 @@ describe('a bot asking for and using the browser', () => {
     // Every run has the browser, with no new ask.
     const scheduled = await run('r1')
     expect(scheduled.prepared.browser).toBeDefined()
+    // Its browser saves its screenshots in its files folder, for its owner to see.
+    expect(turns.at(-1)).toMatchObject({ activationId: scheduled.activation.id, filesFolder: f.bots.filesFolder(botId) })
     expect(scheduled.prepared.authority.check(act)).toEqual({ ok: true })
     for (const tool of BOT_BROWSER_TOOLS) expect(scheduled.prepared.policy.tools!.allow).toContain(tool)
     await finish(f, scheduled.payload, 'completed', { text: 'Report.' })
