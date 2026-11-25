@@ -34,7 +34,7 @@ import { fail } from '../errors'
 import { readWorkspaceLock, WorkspaceLock } from '../lifecycle/lock'
 import { isProcessAlive } from '../lifecycle/process'
 import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '../lifecycle/paths'
-import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/ReferenceStore'
+import { BrowserReferenceStore, type ObservedNode, type ReferenceIdentity } from '../observation/ReferenceStore'
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
@@ -87,12 +87,18 @@ interface AttachedFrameState {
 interface FrameTreeEntry { id?: string; parentId?: string; url?: string }
 interface FrameTreeNode { frame?: FrameTreeEntry; childFrames?: unknown }
 interface FrameBounds { x: number; y: number; width: number; height: number }
+/** The element an observation is narrowed to (`observe({ ref })`): an `<iframe>` brings the frame it shows. */
+interface ObserveScope { node: ObservedNode; sessionId: string; contentFrameId?: string }
 
 /** A frame's URL as frame trees give it: without credentials or fragment. */
 function frameUrlKey(value: string): string {
   const url = sanitizeUrl(value)
   const hash = url.indexOf('#')
   return hash >= 0 ? url.slice(0, hash) : url
+}
+
+function boundsOverlap(a: FrameBounds, b: FrameBounds): boolean {
+  return a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y
 }
 
 function originOf(value: string): string | undefined {
@@ -1120,6 +1126,9 @@ export class ManagedSession {
   async observe(params: Record<string, unknown>): Promise<BrowserObservation> {
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
     const includeScreenshot = optionalBoolean(params.includeScreenshot) === true
+    // Narrowed to one element seen before: resolved first, as reading the page mints new refs.
+    const scopeRef = optionalString(params.ref, 160)
+    const scope = scopeRef ? await this.resolveObserveScope(tab, scopeRef, params.observationId) : undefined
     if (typeof params.deviceScaleFactor === 'number' && params.deviceScaleFactor > 0) {
       await this.requireChrome().cdp.send('Emulation.setDeviceMetricsOverride', {
         width: this.page.width,
@@ -1142,14 +1151,17 @@ export class ManagedSession {
     tab.frameId = collected.frameId
     // Only this tab's frames: every page attaches its own, and one tab never reads another's.
     const attachedFrames = this.framesOf(tab)
+    const scopeFrames = scope ? await this.framesWithin(tab, scope.contentFrameId ?? scope.node.frameId ?? collected.frameId) : undefined
+    // Narrowed to frames from other sites: the page around them neither uses up nor cuts short their budget.
+    const scopeInFrames = !!scopeFrames && attachedFrames.some((frame) => scopeFrames.has(frame.frameId))
     const childCollections: CollectedObservation[] = []
-    let remainingElements = requestedMax - collected.elements.length
+    let remainingElements = scopeInFrames ? requestedMax : requestedMax - collected.elements.length
     let childObservationTruncated = attachedFrames.length > MAX_ATTACHED_FRAMES_PER_OBSERVATION
     // Frames read, and frames that could not be (not placed in the page, or gone meanwhile).
     let observedFrames = 0
     let skippedFrames = 0
     for (const frame of attachedFrames.slice(0, MAX_ATTACHED_FRAMES_PER_OBSERVATION)) {
-      if (collected.truncated || remainingElements <= 0) {
+      if ((collected.truncated && !scopeInFrames) || remainingElements <= 0) {
         childObservationTruncated ||= attachedFrames.length > 0
         break
       }
@@ -1160,10 +1172,12 @@ export class ManagedSession {
         continue
       }
       const offset = await this.frameViewportOffset(tab, frame)
+      const inScope = !scopeFrames || scopeFrames.has(frame.frameId)
       if (!offset) {
-        skippedFrames += 1
+        if (inScope) skippedFrames += 1
         continue
       }
+      if (!inScope) continue
       try {
         const child = await collectStructuredObservation(this.requireChrome().cdp, frame.sessionId, {
           visibleOnly: optionalBoolean(params.visibleOnly),
@@ -1190,8 +1204,24 @@ export class ManagedSession {
       }
     }
     const mergedNodes = [collected, ...childCollections]
-    const mergedElements = mergedNodes.flatMap((item) => item.elements)
-    const mergedObservedNodes = mergedNodes.flatMap((item) => item.nodes)
+    let mergedElements = mergedNodes.flatMap((item) => item.elements)
+    let mergedObservedNodes = mergedNodes.flatMap((item) => item.nodes)
+    const scopeWarnings: string[] = []
+    if (scope && scopeFrames) {
+      const scopedSessions = new Set(attachedFrames.filter((frame) => scopeFrames.has(frame.frameId)).map((frame) => frame.sessionId))
+      // A plain element keeps what lies on it; an `<iframe>` keeps all its frame shows.
+      const box = scope.contentFrameId ? undefined : await this.scopeViewportBounds(tab, scope)
+      if (!scope.contentFrameId && !box) scopeWarnings.push('scope-not-laid-out')
+      const keep = mergedObservedNodes.map((node, index) => {
+        if (node.backendNodeId === scope.node.backendNodeId && (node.cdpSessionId ?? tab.cdpSessionId) === scope.sessionId) return true
+        if (!(node.frameId && scopeFrames.has(node.frameId)) && !(node.cdpSessionId && scopedSessions.has(node.cdpSessionId))) return false
+        if (scope.contentFrameId) return true
+        const bounds = mergedElements[index]?.bounds
+        return !!box && !!bounds && boundsOverlap(bounds, box)
+      })
+      mergedElements = mergedElements.filter((_, index) => keep[index]).slice(0, requestedMax)
+      mergedObservedNodes = mergedObservedNodes.filter((_, index) => keep[index]).slice(0, requestedMax)
+    }
     const observationId = 'obs_' + randomUUID()
     const identity: ReferenceIdentity = {
       profileId: this.profileId,
@@ -1226,9 +1256,9 @@ export class ManagedSession {
       tabs: this.listTabs(),
       elements,
       ...(screenshot ? { screenshot } : {}),
-      truncated: collected.truncated || childObservationTruncated,
-      ...(collected.continuation ? { continuation: collected.continuation } : {}),
-      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(observedFrames ? ['oopif-attached'] : []), ...(skippedFrames ? ['oopif-observation-skipped'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
+      truncated: (collected.truncated && !scopeInFrames) || childObservationTruncated,
+      ...(collected.continuation && !scopeInFrames ? { continuation: collected.continuation } : {}),
+      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(observedFrames ? ['oopif-attached'] : []), ...(skippedFrames ? ['oopif-observation-skipped'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...scopeWarnings, ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
       provenance: 'untrusted-page'
     }
   }
@@ -1250,9 +1280,8 @@ export class ManagedSession {
 
   async extract(params: Record<string, unknown>): Promise<{ provenance: 'untrusted-page'; text: string; truncated: boolean }> {
     const observation = await this.observe({ ...params, includeScreenshot: false })
-    const ref = optionalString(params.ref, 160)
-    const selected = ref ? observation.elements.filter((element) => element.ref === ref) : observation.elements
-    const text = boundText(selected.map((element) => [element.role, element.name, element.text].filter(Boolean).join(' ')).join('\n'), 8_000)
+    // With a ref the observation is already narrowed to that element and what it holds.
+    const text = boundText(observation.elements.map((element) => [element.role, element.name, element.text].filter(Boolean).join(' ')).join('\n'), 8_000)
     return { provenance: 'untrusted-page', text, truncated: text.length >= 8_000 }
   }
 
@@ -1261,12 +1290,14 @@ export class ManagedSession {
     const timeoutMs = typeof params.timeoutMs === 'number' ? params.timeoutMs : 5_000
     const deadline = Date.now() + Math.min(timeoutMs, 30_000)
     const startedAt = Date.now()
-    let observation = await this.observe(params)
+    // An element condition's ref is what it waits for, not a narrowing of what it reads.
+    const observeParams = { ...params, ref: undefined }
+    let observation = await this.observe(observeParams)
     while (Date.now() < deadline) {
       if (signal?.aborted) fail('cancelled', 'Wait cancelled')
       if (this.matchWait(observation, condition)) return observation
       await new Promise((resolve) => setTimeout(resolve, 100))
-      observation = await this.observe(params)
+      observation = await this.observe(observeParams)
     }
     // A page that never stops loading (a stream, a script that keeps fetching) is still usable.
     if (observation.warnings.includes(PAGE_STILL_LOADING)) {
@@ -2610,6 +2641,86 @@ export class ManagedSession {
       const bounds = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }
       if (laidOut && (bounds.width <= 0 || bounds.height <= 0)) return null
       return bounds
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The element a ref names, from this tab's observations still held (the one given first, then the
+   * newest), checked to be still there. Refused as stale when no held observation knows it.
+   */
+  private async resolveObserveScope(tab: TabState, ref: string, observationId: unknown): Promise<ObserveScope> {
+    const ids = [...this.observations.keys()].reverse()
+    if (typeof observationId === 'string') ids.unshift(observationId)
+    let stored: ObservedNode | undefined
+    for (const id of ids) {
+      const entry = this.observations.get(id)
+      if (!entry || entry.tabId !== tab.publicId || entry.generation !== this.generation || !this.refs.hasObservation(id)) continue
+      try {
+        stored = this.refs.resolve({ profileId: this.profileId, sessionId: this.id, generation: this.generation, tabId: tab.publicId, documentId: entry.documentId, observationId: id }, ref)
+        break
+      } catch {
+        continue
+      }
+    }
+    if (!stored) fail('stale_ref', 'Observed ref is not valid for this session')
+    const sessionId = stored.cdpSessionId ?? tab.cdpSessionId
+    if (sessionId !== tab.cdpSessionId && this.frames.get(sessionId)?.pageSessionId !== tab.cdpSessionId) fail('stale_ref', 'Observed ref is not valid for this session')
+    type Described = { node?: { nodeName?: string; frameId?: string; contentDocument?: { frameId?: string } } }
+    let described: Described
+    try {
+      described = await this.requireChrome().cdp.send<Described>('DOM.describeNode', { backendNodeId: stored.backendNodeId }, { sessionId })
+    } catch {
+      fail('stale_ref', 'Observed ref is not valid for this session')
+    }
+    const nodeName = (described.node?.nodeName ?? '').toUpperCase()
+    const contentFrameId = nodeName === 'IFRAME' || nodeName === 'FRAME' ? described.node?.frameId ?? described.node?.contentDocument?.frameId : undefined
+    return { node: stored, sessionId, ...(contentFrameId ? { contentFrameId } : {}) }
+  }
+
+  /** A frame of a tab and every frame inside it, by the tab's frame tree and the frames attached from other sites. */
+  private async framesWithin(tab: TabState, frameId: string): Promise<Set<string>> {
+    const parents = new Map<string, string | undefined>()
+    try {
+      const tree = await this.requireChrome().cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
+      const visit = (node: FrameTreeNode | undefined) => {
+        if (node?.frame?.id) parents.set(node.frame.id, node.frame.parentId)
+        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) visit(child)
+      }
+      visit(tree.frameTree)
+    } catch { /* the attached frames still say */ }
+    for (const frame of this.framesOf(tab)) if (!parents.has(frame.frameId)) parents.set(frame.frameId, frame.parentFrameId)
+    const within = new Set<string>([frameId])
+    for (const id of parents.keys()) {
+      const seen = new Set<string>()
+      for (let current: string | undefined = id; current && !seen.has(current); current = parents.get(current)) {
+        if (current === frameId) {
+          within.add(id)
+          break
+        }
+        seen.add(current)
+      }
+    }
+    return within
+  }
+
+  /** The box of a scope element in its tab's viewport, or null when it is not laid out. */
+  private async scopeViewportBounds(tab: TabState, scope: ObserveScope): Promise<FrameBounds | null> {
+    try {
+      let offset = { x: 0, y: 0 }
+      if (scope.sessionId !== tab.cdpSessionId) {
+        const frame = this.frames.get(scope.sessionId)
+        const placed = frame ? await this.frameViewportOffset(tab, frame) : null
+        if (!placed) return null
+        offset = placed
+      }
+      const quads = await this.requireChrome().cdp.send<{ quads?: number[][] }>('DOM.getContentQuads', { backendNodeId: scope.node.backendNodeId }, { sessionId: scope.sessionId })
+      const points = (quads.quads ?? []).filter((quad) => quad.length >= 8)
+      if (!points.length) return null
+      const xs = points.flatMap((quad) => [quad[0], quad[2], quad[4], quad[6]])
+      const ys = points.flatMap((quad) => [quad[1], quad[3], quad[5], quad[7]])
+      return { x: offset.x + Math.min(...xs), y: offset.y + Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }
     } catch {
       return null
     }
