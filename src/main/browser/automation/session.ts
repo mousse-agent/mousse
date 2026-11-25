@@ -52,10 +52,30 @@ class PreemptedBeforeDispatch extends BrowserWorkerError {
 }
 
 /** The CDP input commands, by the kind of input event they raise in the page (`TabActivity.beginSynthetic`). */
-function inputKindOf(method: string): UserInputKind | undefined {
-  if (method === 'Input.dispatchMouseEvent' || method === 'Input.dispatchTouchEvent' || method === 'Input.emulateTouchFromMouseEvent') return 'pointer'
+function inputKindOf(method: string, params?: Record<string, unknown>): UserInputKind | undefined {
+  if (method === 'Input.dispatchMouseEvent') return params?.type === 'mouseWheel' ? 'wheel' : 'pointer'
+  if (method === 'Input.dispatchTouchEvent' || method === 'Input.emulateTouchFromMouseEvent') return 'pointer'
+  if (method === 'Input.synthesizeScrollGesture') return 'wheel'
   if (method === 'Input.dispatchKeyEvent' || method === 'Input.insertText' || method === 'Input.imeSetComposition') return 'key'
   return undefined
+}
+
+/** The actions that type into the page: they take the window's keyboard focus while they run. */
+const KEYBOARD_ACTIONS: ReadonlySet<string> = new Set(['fill', 'type', 'key'])
+
+/**
+ * The turns that gave way to the person (`USER_CONFLICT_MESSAGE`), kept apart from any one session: a session that
+ * failed to open, or a step that worked in another tab, does not forget it. A new turn starts afresh.
+ */
+export class ConflictBreaker {
+  private readonly turns = new Set<string>()
+  constructor(private readonly limit = 512) {}
+  gaveWay(turn: string): boolean { return this.turns.has(turn) }
+  record(turn: string): void {
+    this.turns.delete(turn)
+    this.turns.add(turn)
+    while (this.turns.size > this.limit) this.turns.delete(this.turns.values().next().value!)
+  }
 }
 
 /** A tab's CDP that tells its activity which kind of input the agent sends while each input command runs. */
@@ -63,7 +83,7 @@ function syntheticInput(cdp: CdpTransport, activity: TabActivity): CdpTransport 
   return {
     get connected() { return cdp.connected },
     send: async <T = unknown>(method: string, params?: Record<string, unknown>, options?: CdpCommandOptions): Promise<T> => {
-      const kind = inputKindOf(method)
+      const kind = inputKindOf(method, params)
       const release = kind ? activity.beginSynthetic(kind) : undefined
       try { return await cdp.send<T>(method, params, options) }
       finally { release?.() }
@@ -78,14 +98,18 @@ function syntheticInput(cdp: CdpTransport, activity: TabActivity): CdpTransport 
  * tabs kept in every thread; never another thread's.
  */
 export interface AttachedTabsPort {
-  /** The uiTabIds this thread's agent may see. */
-  visible(threadId: string): AttachedUiTabId[]
+  /** The uiTabIds this thread's agent may see; with `ownOnly`, only the thread's own tabs, never those kept in every thread. */
+  visible(threadId: string, ownOnly?: boolean): AttachedUiTabId[]
   /** Binds a tab to the thread for automation and returns its trusted guest. Refuses another thread's tab or another session's. */
-  claim(uiTabId: AttachedUiTabId, threadId: string, sessionId: string): TrustedGuestRecord
+  claim(uiTabId: AttachedUiTabId, threadId: string, sessionId: string, ownOnly?: boolean): TrustedGuestRecord
   /** Whether another live session drives the tab (claimed it or is stepping in it); listing a tab never counts. */
   drivenByOther(uiTabId: AttachedUiTabId, sessionId: string): boolean
   /** Asks the window for a new tab of the thread; resolves once it is registered. */
   open(input: { threadId: string; activate: boolean }, signal?: AbortSignal): Promise<AttachedUiTabId>
+  /** Whether an agent of the thread opened the tab (and it is still the thread's): only such a tab may be closed by one. */
+  closable(uiTabId: AttachedUiTabId, threadId: string): boolean
+  /** Whether the person is using another tab of the window (typing in it, its address bar or the picker): typing elsewhere would take their focus. */
+  personBusyElsewhere(uiTabId: AttachedUiTabId): boolean
   /** Asks the window to close a tab. */
   close(uiTabId: AttachedUiTabId): void
   /** Commands for the session go through another tab from now on (its first tab is closing). */
@@ -115,6 +139,10 @@ export interface AttachedPageSessionConfig {
   activityFor?: (uiTabId: AttachedUiTabId) => TabActivity
   /** The window's other tabs; without it the session has its one tab. */
   tabs?: AttachedTabsPort
+  /** A run without a person's tree grant (an editor try-run, an app-started workflow): its thread's own tabs only. */
+  ownThreadOnly?: boolean
+  /** The turns that gave way to the person, shared by the window's sessions. */
+  conflicts?: ConflictBreaker
   /** The wait between tries while the person uses a tab (tests shorten it). */
   conflictBackoffMs?: readonly number[]
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
@@ -140,12 +168,16 @@ interface SessionTab {
   attached: boolean
   /** The session drives this tab: its first tab, or one it switched to, opened, or named in a call. A listed tab is only known. */
   claimed: boolean
+  /** Aborted when the session forgets the tab: a step waiting for it stops at once. */
+  readonly gone: AbortController
 }
 
 /** Options a mutating call carries: the turn (for the conflict breaker) and its cancellation. */
 export interface AttachedStepOptions {
   signal?: AbortSignal
   turn?: string
+  /** The step types into the page, taking the window's keyboard focus. */
+  keyboard?: boolean
 }
 
 const ATTACHED_CDP_SESSION = ''
@@ -182,8 +214,15 @@ export class AttachedPageSession {
   }>()
   private lastActionFingerprint = ''
   private repeatedActionCount = 0
-  /** The turn that last gave way to the person (`USER_CONFLICT_REPEAT_MESSAGE`). */
-  private conflictTurn: string | undefined
+  /** The turns that gave way to the person (`USER_CONFLICT_REPEAT_MESSAGE`). */
+  private readonly conflicts: ConflictBreaker
+  /** Aborted when the session closes or disconnects: a waiting step stops at once. */
+  private readonly ended = new AbortController()
+  /** The tab this session handed to the person (`browser_request_human`): the only hold it may end. */
+  private heldTab: SessionTab | null = null
+  /** Tabs this session asked its window to close: never listed again, though the window may not have closed them yet. */
+  private readonly closingTabs = new Set<AttachedUiTabId>()
+  private readonly ownThreadOnly: boolean
   private readonly onControlStateChange?: (state: AttachedControlState) => void
   private readonly onAgentCursor?: AttachedPageSessionConfig['onAgentCursor']
   private readonly interceptCommand?: DebuggerTransportOptions['interceptCommand']
@@ -221,6 +260,8 @@ export class AttachedPageSession {
       return activity
     })
     this.port = config.tabs
+    this.ownThreadOnly = config.ownThreadOnly === true
+    this.conflicts = config.conflicts ?? new ConflictBreaker()
     this.backoff = config.conflictBackoffMs ?? CONFLICT_BACKOFF_MS
     this.sleep = config.sleep ?? sleep
     this.refs = new BrowserReferenceStore({ profileId: this.profileId, sessionId: this.id, generation: this.generation })
@@ -275,7 +316,7 @@ export class AttachedPageSession {
   async start(initialUrl?: string, options: AttachedStepOptions = {}): Promise<BrowserSessionRecord> {
     await this.assertBinding(this.anchor)
     await this.attach(this.anchor)
-    if (initialUrl) await this.exclusive(this.anchor, options, (fence) => this.navigate(this.anchor, initialUrl, fence))
+    if (initialUrl) await this.exclusive(this.anchor, options, (fence) => this.navigate(this.anchor, initialUrl, fence, options.signal))
     this.lifecycle = 'agent-controlled'
     this.touch()
     this.emitControl()
@@ -290,7 +331,7 @@ export class AttachedPageSession {
     if (this.inFlight) fail('invalid_action', 'A browser action is still running; wait before opening this tab again')
     await this.attach(tab)
     this.current = tab
-    if (url) await this.exclusive(tab, options, (fence) => this.navigate(tab, url, fence))
+    if (url) await this.exclusive(tab, options, (fence) => this.navigate(tab, url, fence, options.signal))
     return this.record()
   }
 
@@ -298,12 +339,13 @@ export class AttachedPageSession {
     if (this.closed) return
     this.closed = true
     this.lifecycle = 'closed'
+    this.ended.abort()
     this.fenceInFlight('cancelled')
     this.refs.clear()
+    this.endHold()
     for (const tab of this.tabs.values()) {
       tab.stopNav?.()
       tab.stopNav = null
-      tab.activity.setHumanHold(false)
       try { await tab.transport?.close() } catch { /* already gone */ }
       tab.transport = null
     }
@@ -315,11 +357,12 @@ export class AttachedPageSession {
     if (this.closed) return
     this.disconnected = true
     this.lifecycle = 'disconnected'
+    this.ended.abort()
     this.fenceInFlight('cancelled')
     this.refs.clear()
     this.observations.clear()
+    this.endHold()
     for (const tab of this.tabs.values()) {
-      tab.activity.setHumanHold(false)
       tab.stopNav?.()
       tab.stopNav = null
       if (reason !== 'debugger') {
@@ -337,8 +380,8 @@ export class AttachedPageSession {
     if (!tab) return
     if (tab === this.anchor) { this.markDisconnected('guest'); return }
     // A tab handed to the person takes the handover with it: the agent goes on in its other tabs.
-    if (this.controlOwner === 'human' && tab.activity.state() === 'waiting-human') {
-      tab.activity.setHumanHold(false)
+    if (tab === this.heldTab) {
+      this.endHold()
       this.controlOwner = 'agent'
       this.lifecycle = 'agent-controlled'
     }
@@ -372,29 +415,36 @@ export class AttachedPageSession {
    */
   async newTab(url: string | undefined, options: AttachedStepOptions = {}): Promise<BrowserTab & { tabs: BrowserTab[] }> {
     if (!this.port) fail('unsupported', 'This in-app browser cannot open tabs')
+    // While the person holds a tab the agent handed them, it opens nothing new either.
+    if (this.controlOwner !== 'agent') fail('human_controlled', 'The person has control of the browser; wait until they resume the agent')
     if (this.inFlight) fail('invalid_action', 'A browser action is still running; wait before opening a tab')
     const target = url === undefined ? undefined : browserNavigationUrl(url)
     const uiTabId = await this.port.open({ threadId: this.threadId, activate: !this.port.anyUserActive() }, options.signal)
     if (this.closed || this.disconnected) fail('session_closed', 'Attached browser session is closed')
-    const guest = this.port.claim(uiTabId, this.threadId, this.id)
+    const guest = this.port.claim(uiTabId, this.threadId, this.id, this.ownThreadOnly)
     const tab = [...this.tabs.values()].find((candidate) => candidate.uiTabId === uiTabId) ?? this.addTab(uiTabId, guest)
     tab.guest = guest
     tab.claimed = true
     await this.assertBinding(tab)
     await this.attach(tab)
     this.current = tab
-    if (target) await this.exclusive(tab, options, (fence) => this.navigate(tab, target, fence))
+    if (target) await this.exclusive(tab, options, (fence) => this.navigate(tab, target, fence, options.signal))
     this.touch()
     this.emitControl(tab)
     return { ...this.describe(tab), tabs: this.listTabs() }
   }
 
-  /** Closes one of the session's tabs in its window: never one the person is using, and never its last. */
+  /**
+   * Closes one of the session's tabs in its window: only one an agent of this thread opened, never one the person is
+   * using, and never its last.
+   */
   closeTab(tabId: string): { closed: string; tabs: BrowserTab[]; anchorUiTabId?: string } {
     if (!this.port) fail('unsupported', 'This in-app browser cannot close tabs')
     this.refreshTabs()
     const tab = this.tabs.get(tabId)
     if (!tab) fail('stale_ref', 'Unknown tab: list the tabs first')
+    // The person's own tabs keep their pages: an agent closes only the tabs its thread's agents opened.
+    if (!this.port.closable(tab.uiTabId, this.threadId)) fail('policy_denied', 'An agent closes only tabs its thread\'s agents opened; leave this one open.')
     if (tab.activity.userActive() || tab.activity.state() === 'waiting-human') fail('human_controlled', 'The person is using this tab; leave it open.')
     if (this.inFlight?.tab === tab) fail('invalid_action', 'A browser action is still running in this tab')
     if (this.port.drivenByOther(tab.uiTabId, this.id)) fail('invalid_action', 'Another agent is using this tab; leave it open.')
@@ -404,15 +454,15 @@ export class AttachedPageSession {
     if (tab === this.anchor) {
       // The session's commands come through its first tab: they move to another tab before it closes.
       const next = others.includes(this.current) ? this.current : others[0]!
-      next.guest = this.port.claim(next.uiTabId, this.threadId, this.id)
+      next.guest = this.port.claim(next.uiTabId, this.threadId, this.id, this.ownThreadOnly)
       next.claimed = true
       this.port.reanchor(this.id, next.uiTabId)
       this.anchor = next
       anchorUiTabId = next.uiTabId
     }
+    // The window closes the tab a moment later: until then it is still visible, but no longer the session's.
+    this.closingTabs.add(tab.uiTabId)
     this.forget(tab)
-    void tab.transport?.close().catch(() => undefined)
-    tab.transport = null
     this.port.close(tab.uiTabId)
     this.touch()
     return { closed: tabId, tabs: this.listTabs(), ...(anchorUiTabId ? { anchorUiTabId } : {}) }
@@ -548,8 +598,11 @@ export class AttachedPageSession {
     this.controlOwner = owner
     this.lifecycle = owner === 'human' ? 'human-controlled' : 'agent-controlled'
     // A person asked to step in holds the tab the agent was in until they hand it back.
-    if (owner === 'human') this.current.activity.setHumanHold(true)
-    else for (const tab of this.tabs.values()) tab.activity.setHumanHold(false)
+    if (owner === 'human') {
+      if (this.heldTab !== this.current) this.endHold()
+      this.heldTab = this.current
+      this.current.activity.setHumanHold(true)
+    } else this.endHold()
     this.touch()
     this.emitControl('all')
     return { controlLeaseId: this.controlLeaseId, generation: this.generation, lifecycle: this.lifecycle }
@@ -559,7 +612,7 @@ export class AttachedPageSession {
     if (controlLeaseId !== this.controlLeaseId) fail('stale_generation', 'Control lease does not match')
     this.controlOwner = 'agent'
     this.lifecycle = 'agent-controlled'
-    for (const tab of this.tabs.values()) tab.activity.setHumanHold(false)
+    this.endHold()
     this.touch()
     this.emitControl('all')
     return { ok: true, lifecycle: this.lifecycle, generation: this.generation }
@@ -575,7 +628,9 @@ export class AttachedPageSession {
     if (this.lifecycle === 'human-controlled' && !humanLease) fail('human_controlled', 'A human control lease is active')
     const tab = await this.resolveTab(params.tabId)
     if (humanLease) return this.actOnce(params, tab, signal, undefined, true)
-    return this.exclusive(tab, { signal, turn }, (fence) => this.actOnce(params, tab, signal, fence, false))
+    const type = (params.action as { type?: unknown } | null | undefined)?.type
+    const keyboard = typeof type === 'string' && KEYBOARD_ACTIONS.has(type)
+    return this.exclusive(tab, { signal, turn, keyboard }, (fence) => this.actOnce(params, tab, signal, fence, false))
   }
 
   async handle(method: BrowserWorkerRequest['method'], params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -605,62 +660,112 @@ export class AttachedPageSession {
 
   /**
    * Runs one step that changes `tab`'s page with the tab locked (`agent-busy`), after the person has finished with it.
-   * While they use it, the agent waits through `CONFLICT_BACKOFF_MS`; if they are still using it after the last wait,
-   * the step is refused, and a second refusal in the same turn comes at once.
+   * One step runs in a tab at a time: another step in it waits for this one to end. While the person uses the tab (or,
+   * for a step that types, any tab of the window), the agent waits through `CONFLICT_BACKOFF_MS`; if they are still
+   * using it after the last wait, the step is refused, and a second refusal in the same turn comes at once. After
+   * every wait the tab must still be the session's and its thread's.
    */
   private async exclusive<T>(tab: SessionTab, options: AttachedStepOptions, run: (fence: AbortSignal) => Promise<T>): Promise<T> {
     const { signal, turn } = options
+    // A wait ends at once when the call is stopped, the session ends or the tab leaves it.
+    const stop = AbortSignal.any([tab.gone.signal, this.ended.signal, ...(signal ? [signal] : [])])
     let attempt = 0
     while (true) {
-      if (signal?.aborted) fail('cancelled', 'Browser step cancelled')
-      if (this.closed || this.disconnected) fail('session_closed', 'Attached browser session is closed')
-      if (tab.activity.state() === 'waiting-human') fail('human_controlled', 'The person holds this tab; wait until they resume the agent')
-      if (tab.activity.userActive()) {
-        if (turn !== undefined && this.conflictTurn === turn) fail('human_controlled', USER_CONFLICT_REPEAT_MESSAGE)
+      this.assertStepAllowed(tab, signal)
+      if (this.personUsing(tab, options)) {
+        if (turn !== undefined && this.conflicts.gaveWay(turn)) fail('human_controlled', USER_CONFLICT_REPEAT_MESSAGE)
         if (attempt >= this.backoff.length) {
-          this.conflictTurn = turn
+          if (turn !== undefined) this.conflicts.record(turn)
           fail('human_controlled', USER_CONFLICT_MESSAGE)
         }
         const stopWaiting = tab.activity.beginWaiting()
-        try { await this.sleep(this.backoff[attempt++]!, signal) }
-        catch { fail('cancelled', 'Stopped while waiting for the person to finish with the tab') }
-        finally { stopWaiting() }
+        try { await this.sleep(this.backoff[attempt++]!, stop) }
+        catch {
+          this.assertStepAllowed(tab, signal)
+          fail('cancelled', 'Stopped while waiting for the person to finish with the tab')
+        } finally { stopWaiting() }
         continue
       }
-      const release = tab.activity.beginAgent()
-      const fence = new AbortController()
-      const stopPreempt = tab.activity.onPreempt(() => fence.abort(PREEMPTED))
+      let releaseStep: () => void
+      try { releaseStep = await tab.activity.acquireStep(stop) }
+      catch {
+        this.assertStepAllowed(tab, signal)
+        fail('cancelled', 'Stopped while waiting for another step in this tab')
+      }
       try {
-        const result = await run(fence.signal)
-        this.conflictTurn = undefined
-        return result
-      } catch (error) {
-        // Stopped by the person before anything reached the page: it is tried again once they are done. Only a step
-        // that says so is; one stopped after dispatch (even while its outcome is being written) never is.
-        if (error instanceof PreemptedBeforeDispatch && !signal?.aborted) continue
-        throw error
+        // Another step may have run meanwhile, the person may have come back, or the tab may have left the thread.
+        this.assertStepAllowed(tab, signal)
+        await this.assertBinding(tab)
+        if (this.personUsing(tab, options)) continue
+        const release = tab.activity.beginAgent()
+        const fence = new AbortController()
+        const stopPreempt = tab.activity.onPreempt(() => fence.abort(PREEMPTED))
+        try {
+          return await run(fence.signal)
+        } catch (error) {
+          // Stopped by the person before anything reached the page: it is tried again once they are done. Only a step
+          // that says so is; one stopped after dispatch (even while its outcome is being written) never is.
+          if (error instanceof PreemptedBeforeDispatch && !signal?.aborted) continue
+          throw error
+        } finally {
+          stopPreempt()
+          release()
+        }
       } finally {
-        stopPreempt()
-        release()
+        releaseStep()
       }
     }
   }
 
+  /** Whether a step may run (or go on waiting) in `tab`: the call goes on, the session is open, and the tab is still its thread's. */
+  private assertStepAllowed(tab: SessionTab, signal?: AbortSignal): void {
+    if (signal?.aborted) fail('cancelled', 'Browser step cancelled')
+    if (this.closed || this.disconnected) fail('session_closed', 'Attached browser session is closed')
+    if (this.tabs.get(tab.state.publicId) !== tab) fail('stale_ref', 'This tab is no longer one of the session\'s tabs')
+    if (this.port && tab !== this.anchor && !this.port.visible(this.threadId, this.ownThreadOnly).includes(tab.uiTabId)) {
+      this.forget(tab)
+      fail('stale_ref', 'This tab is no longer one of the thread\'s tabs')
+    }
+    if (tab.activity.state() === 'waiting-human') fail('human_controlled', 'The person holds this tab; wait until they resume the agent')
+  }
+
+  /** The person uses the tab, or, for a step that types (and would take the keyboard focus), another tab of the window. */
+  private personUsing(tab: SessionTab, options: AttachedStepOptions): boolean {
+    return tab.activity.userActive() || (options.keyboard === true && this.port?.personBusyElsewhere(tab.uiTabId) === true)
+  }
+
   /**
-   * Loads a URL the agent asked for (open, reopen, a new tab). Once `Page.navigate` is sent it counts as dispatched: if
-   * the person cuts in after that, it is never sent again, and the agent is told they took over.
+   * Loads a URL the agent asked for (open, reopen, a new tab). It is the tab's in-flight step while it runs. Once
+   * `Page.navigate` is sent it counts as dispatched: if the person cuts in after that, it is never sent again, and the
+   * agent is told they took over. Stopping the call stops the wait for the page to load.
    */
-  private async navigate(tab: SessionTab, url: string, fence: AbortSignal): Promise<void> {
+  private async navigate(tab: SessionTab, url: string, fence: AbortSignal, signal?: AbortSignal): Promise<void> {
     const cdp = this.requireCdp(tab)
     const target = browserNavigationUrl(url)
     if (fence.aborted && fence.reason === PREEMPTED) throw new PreemptedBeforeDispatch()
+    if (signal?.aborted) fail('cancelled', 'Browser step cancelled')
+    if (this.inFlight) fail('not_actionable', 'Another action is already in flight for this session')
+    const abort = new AbortController()
+    const onFence = () => abort.abort(fence.reason)
+    const onSignal = () => abort.abort(signal?.reason)
+    fence.addEventListener('abort', onFence, { once: true })
+    signal?.addEventListener('abort', onSignal, { once: true })
+    const requestId = 'nav_' + randomUUID()
+    // Dispatched from the moment it is sent: its own new document never fences it (`invalidateDocument`).
+    this.inFlight = { requestId, tab, actionType: 'navigate', dispatched: true, abort }
+    const endNavigation = tab.activity.beginOwnNavigation()
     try {
-      await cdp.send('Page.navigate', { url: target }, { sessionId: ATTACHED_CDP_SESSION, signal: fence })
-      await waitForLoad(cdp, ATTACHED_CDP_SESSION, 15_000, fence)
+      await cdp.send('Page.navigate', { url: target }, { sessionId: ATTACHED_CDP_SESSION, signal: abort.signal })
+      await waitForLoad(cdp, ATTACHED_CDP_SESSION, 15_000, abort.signal)
     } catch (error) {
       if (fence.aborted && fence.reason === PREEMPTED) fail('human_controlled', browserTakeoverMessage('unknown', 'The person'))
+      if (signal?.aborted) fail('cancelled', 'Stopped while the page was loading; it may still be loading')
       throw error
     } finally {
+      endNavigation()
+      fence.removeEventListener('abort', onFence)
+      signal?.removeEventListener('abort', onSignal)
+      if (this.inFlight?.requestId === requestId) this.inFlight = null
       this.refs.invalidateTab(tab.state.publicId)
     }
   }
@@ -696,6 +801,8 @@ export class AttachedPageSession {
     }
     this.inFlight = { requestId: request.requestId, tab, actionType: request.action.type, dispatched: false, abort }
     let dispatched = false
+    const navigates = ['navigate', 'reload', 'back', 'forward'].includes(request.action.type)
+    let endNavigation: (() => void) | undefined
     try {
       await this.journal.append({
         at: nowIso(this.clock),
@@ -747,6 +854,8 @@ export class AttachedPageSession {
         // renderer widget. Chromium otherwise acknowledges insertText without
         // inserting anything. Scope emulation to this one owned keyboard action.
         if (keyboardInput) await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, { sessionId: actionSessionId, signal: abort.signal })
+        // The agent's own back, forward, reload or URL: the window must not take it for the person's navigation.
+        if (navigates) endNavigation = tab.activity.beginOwnNavigation()
         await dispatchAction(input, actionSessionId, request.action, target, abort.signal)
       } finally {
         try {
@@ -829,6 +938,7 @@ export class AttachedPageSession {
       }
       throw error
     } finally {
+      endNavigation?.()
       signal?.removeEventListener('abort', onAbort)
       fence?.removeEventListener('abort', onFence)
       if (this.inFlight?.requestId === request.requestId) this.inFlight = null
@@ -848,6 +958,7 @@ export class AttachedPageSession {
       stopNav: null,
       attached: false,
       claimed: false,
+      gone: new AbortController(),
       state: {
         publicId: 'tab_' + randomUUID(),
         url: sanitizeUrl(guest.guest.getURL()),
@@ -861,11 +972,19 @@ export class AttachedPageSession {
     return tab
   }
 
-  /** The session forgets a tab (closed, gone, or no longer the thread's). */
+  /**
+   * The session forgets a tab (closed, gone, or no longer the thread's): its debugger leaves the tab, so the next
+   * agent to use it can attach, and a step waiting for it stops.
+   */
   private forget(tab: SessionTab): void {
     if (this.inFlight?.tab === tab) this.fenceInFlight('cancelled')
+    if (tab === this.heldTab) this.endHold()
     tab.stopNav?.()
     tab.stopNav = null
+    const transport = tab.transport
+    tab.transport = null
+    try { transport?.releaseAttachment() } catch { /* already gone */ }
+    tab.gone.abort()
     this.tabs.delete(tab.state.publicId)
     this.refs.invalidateTab(tab.state.publicId)
     if (this.current === tab) this.current = this.anchor
@@ -874,12 +993,13 @@ export class AttachedPageSession {
   /** Learns the window's tabs this thread may see, and forgets those it no longer may. */
   private refreshTabs(): void {
     if (!this.port || this.closed || this.disconnected) return
-    const visible = new Set(this.port.visible(this.threadId))
+    const visible = new Set(this.port.visible(this.threadId, this.ownThreadOnly))
+    for (const uiTabId of [...this.closingTabs]) if (!visible.has(uiTabId)) this.closingTabs.delete(uiTabId)
     for (const tab of [...this.tabs.values()]) {
       if (tab !== this.anchor && !visible.has(tab.uiTabId)) this.forget(tab)
     }
     for (const uiTabId of visible) {
-      if (this.hasTab(uiTabId)) continue
+      if (this.hasTab(uiTabId) || this.closingTabs.has(uiTabId)) continue
       const guest = this.registry.lookup(uiTabId)
       if (guest && !guest.guest.isDestroyed()) this.addTab(uiTabId, guest)
     }
@@ -898,7 +1018,7 @@ export class AttachedPageSession {
 
   private claim(tab: SessionTab): void {
     if (tab === this.anchor || !this.port) return
-    tab.guest = this.port.claim(tab.uiTabId, this.threadId, this.id)
+    tab.guest = this.port.claim(tab.uiTabId, this.threadId, this.id, this.ownThreadOnly)
     tab.claimed = true
   }
 
@@ -908,7 +1028,7 @@ export class AttachedPageSession {
     if (typeof tabId === 'string' && tabId !== this.current.state.publicId) {
       const named = this.tabs.get(tabId)
       if (!named) fail('stale_ref', 'Unknown attached tab')
-      if (this.port && named !== this.anchor && !this.port.visible(this.threadId).includes(named.uiTabId)) {
+      if (this.port && named !== this.anchor && !this.port.visible(this.threadId, this.ownThreadOnly).includes(named.uiTabId)) {
         this.forget(named)
         fail('stale_ref', 'This tab is no longer one of the thread\'s tabs')
       }
@@ -1060,6 +1180,13 @@ export class AttachedPageSession {
     return 'failed'
   }
 
+  /** Ends the hold this session placed for the person (`takeControl`), and no other session's. */
+  private endHold(): void {
+    const held = this.heldTab
+    this.heldTab = null
+    held?.activity.setHumanHold(false)
+  }
+
   private fenceInFlight(reason: 'cancelled' | 'human_controlled'): void {
     if (!this.inFlight) return
     this.inFlight.abort.abort(reason)
@@ -1094,9 +1221,9 @@ export class AttachedPageSession {
     tab.state.documentId = 'doc_' + randomUUID()
     this.refs.invalidateTab(tab.state.publicId)
     // A page changing in a tab the session is not acting in leaves its current work alone.
+    // A new document is a new generation; the control lease stays the same (only a change of control replaces it).
     if (tab === this.current) {
       this.generation += 1
-      this.controlLeaseId = 'lease_' + randomUUID()
       this.refs = new BrowserReferenceStore({ profileId: this.profileId, sessionId: this.id, generation: this.generation })
       this.observations.clear()
     }

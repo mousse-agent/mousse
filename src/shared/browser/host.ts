@@ -1,7 +1,7 @@
 /**
  * Daemon browser host contract for root composition.
- * GUI methods are the public GUI allowlist: Take control and Resume for an in-app tab's session, and a
- * session's screenshot. A browser without a window is watched and taken over through its view
+ * GUI methods are the public GUI allowlist: Resume agent for an in-app tab the agent handed to the person, and a
+ * session's screenshot. The person takes an in-app tab over just by using it. A browser without a window is watched and taken over through its view
  * (`threadView.ts`). Attachment methods are main-only (GuiMmsController / trusted did-attach-webview),
  * never a renderer platform API.
  */
@@ -13,7 +13,6 @@ import type { BrowserViewerHumanAction, BrowserViewerSnapshot } from './viewer'
 export const BROWSER_VIEWER_CAPABILITY = 'browser.viewer.v1' as const
 
 export const BROWSER_GUI_METHODS = [
-  'browser.sessions.takeControl',
   'browser.sessions.resume',
   'browser.artifacts.read'
 ] as const
@@ -22,7 +21,8 @@ export const BROWSER_ATTACHMENT_METHODS = [
   'browser.attachments.register',
   'browser.attachments.unregister',
   'browser.attachments.acknowledgeClosed',
-  'browser.attachments.select'
+  'browser.attachments.select',
+  'browser.attachments.owner'
 ] as const
 
 export type BrowserGuiMethod = (typeof BROWSER_GUI_METHODS)[number]
@@ -55,6 +55,12 @@ export interface BrowserAttachmentAcknowledgeClosedParams extends BrowserAttachm
 export interface BrowserAttachmentSelectParams {
   uiTabId: string
   threadId: string
+}
+
+/** The window moved an in-app tab to a thread (`threadId`), or kept it in every thread (none). */
+export interface BrowserAttachmentOwnerParams {
+  uiTabId: string
+  threadId?: string
 }
 
 export interface BrowserAttachmentRegisterResult {

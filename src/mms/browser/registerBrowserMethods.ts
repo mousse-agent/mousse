@@ -23,18 +23,18 @@ const ATTACH_FIELDS: Record<(typeof BROWSER_ATTACHMENT_METHODS)[number], readonl
   'browser.attachments.register': ['registrationId', 'registrationEpoch', 'closureToken', 'uiTabId', 'threadId'],
   'browser.attachments.unregister': ['registrationId', 'registrationEpoch'],
   'browser.attachments.acknowledgeClosed': ['registrationId', 'registrationEpoch', 'closureToken'],
-  'browser.attachments.select': ['uiTabId', 'threadId']
+  'browser.attachments.select': ['uiTabId', 'threadId'],
+  'browser.attachments.owner': ['uiTabId', 'threadId']
 }
 const GUI_FIELDS: Record<(typeof BROWSER_GUI_METHODS)[number], readonly string[]> = {
-  'browser.sessions.takeControl': ['threadId', 'sessionId'],
   'browser.sessions.resume': ['threadId', 'sessionId'],
   'browser.artifacts.read': ['threadId', 'sessionId', 'artifactId']
 }
 
 /**
  * A browser without a window is taken over only through its view's hold (`browser.view.hold` for a
- * thread's, `bots.browser.hold` for a bot's), which ends when the window that took it goes away. Take
- * control and Resume here are the in-app tab's, which its own window shows and drives.
+ * thread's, `bots.browser.hold` for a bot's), which ends when the window that took it goes away. Resume
+ * agent here is the in-app tab's, which its own window shows and drives.
  */
 const WINDOWLESS_REFUSAL = 'Take over this browser from its view in the thread\'s Browser panel.'
 
@@ -183,6 +183,12 @@ export function registerBrowserMethods(
               closureToken: asString(params.closureToken, 'closureToken', 128)
             }, owner)
           }
+          if (method === 'browser.attachments.owner') {
+            return browser.setAttachmentOwner({
+              uiTabId: asString(params.uiTabId, 'uiTabId'),
+              ...(params.threadId === undefined ? {} : { threadId: asString(params.threadId, 'threadId') })
+            }, owner)
+          }
           return browser.selectAttachment({
             uiTabId: asString(params.uiTabId, 'uiTabId'),
             threadId: asString(params.threadId, 'threadId')
@@ -232,15 +238,12 @@ export function registerBrowserMethods(
                 bytesBase64: Buffer.from(file.bytes).toString('base64')
               } satisfies BrowserArtifactReadResult
             }
-            // Take control and Resume belong to the in-app tab; a browser without a window has one hold rule, its view's.
+            // Resume agent belongs to the in-app tab; a browser without a window has one hold rule, its view's.
             if (selected.backend !== 'electron-attached') throw new DomainRpcError('policy_denied', WINDOWLESS_REFUSAL)
             assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
-            if (method === 'browser.sessions.takeControl') await browser.sessions.control(viewContext, selected.id, 'human')
-            else {
-              await browser.sessions.control(viewContext, selected.id, 'agent')
-              // A fresh generation fences input made before the agent had the tab again, without needing a screenshot.
-              await browser.sessions.observe({ ...viewContext, vision: false }, { sessionId: selected.id, includeScreenshot: false })
-            }
+            await browser.sessions.control(viewContext, selected.id, 'agent')
+            // A fresh generation fences input made before the agent had the tab again, without needing a screenshot.
+            await browser.sessions.observe({ ...viewContext, vision: false }, { sessionId: selected.id, includeScreenshot: false })
             // The session as a window may see it: never its control lease.
             const session: BrowserSessionPublicRecord = browser.listPublicSessions(threadId).find((record) => record.id === selected.id) ?? selected
             return { session }

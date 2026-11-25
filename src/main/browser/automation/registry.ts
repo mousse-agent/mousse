@@ -127,6 +127,13 @@ export class TrustedGuestRegistry {
     return this.descriptor(record)
   }
 
+  /** A tab kept in every thread that an agent's refused open had taken: no thread holds it again. */
+  unassignThread(uiTabId: AttachedUiTabId): AttachedGuestDescriptor {
+    const record = this.requireUiTab(uiTabId)
+    record.thread = { kind: 'unbound' }
+    return this.descriptor(record)
+  }
+
   revokeUiTab(uiTabId: AttachedUiTabId): void {
     const record = this.byUiTab.get(uiTabId)
     if (record) this.drop(record, 'revoked')

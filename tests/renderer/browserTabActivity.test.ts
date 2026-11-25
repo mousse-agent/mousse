@@ -126,7 +126,7 @@ describe('who is using the tab', () => {
     ])
   })
 
-  it('lets go of the tab the address bar held when another tab is shown while it has focus', async () => {
+  it('moves the address bar\'s hold to the tab shown while it has focus, and lets go of the one it held', async () => {
     const second = useAppStore.getState().addBrowserTab('thread_a')
     act(() => useAppStore.getState().setActiveBrowserTab('thread_a', tabId))
     await show()
@@ -134,16 +134,50 @@ describe('who is using the tab', () => {
     act(() => address.focus())
     act(() => useAppStore.getState().setActiveBrowserTab('thread_a', second))
     await settle()
-    // Let go at once, not when the bar loses focus later: the first tab is free for its agent again.
+    // At once, not when the bar loses focus later: the first tab is free for its agent, the shown one is the person's.
     expect(reported).toEqual([
       { localTabId: tabId, kind: 'pin', pin: 'address' },
-      { localTabId: tabId, kind: 'unpin', pin: 'address' }
+      { localTabId: tabId, kind: 'unpin', pin: 'address' },
+      { localTabId: second, kind: 'pin', pin: 'address' }
     ])
     act(() => address.blur())
-    expect(reported).toEqual([
-      { localTabId: tabId, kind: 'pin', pin: 'address' },
-      { localTabId: tabId, kind: 'unpin', pin: 'address' }
-    ])
+    expect(reported.at(-1)).toEqual({ localTabId: second, kind: 'unpin', pin: 'address' })
+    expect(reported).toHaveLength(4)
+  })
+
+  it('tells main when a tab is kept in every thread or given back to the thread, once it is registered', async () => {
+    await show()
+    const webview = host.querySelector(`webview[data-browser-tab-id="${tabId}"]`) as HTMLElement & Record<string, unknown>
+    Object.assign(webview, { getURL: () => 'https://example.test/', getTitle: () => 'Example', canGoBack: () => false, canGoForward: () => false, isLoading: () => false, setZoomFactor: () => {}, getWebContentsId: () => 7 })
+    act(() => { webview.dispatchEvent(new Event('dom-ready')) })
+    await settle()
+    const setTabOwner = (window as unknown as { mousse: { inAppBrowser: { setTabOwner: ReturnType<typeof vi.fn> } } }).mousse.inAppBrowser.setTabOwner
+    const keep = async () => {
+      await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Browser menu"]')!.click())
+      await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemcheckbox"]')].find((item) => item.textContent?.includes('Keep tab in every thread'))!.click())
+      await settle()
+    }
+    await keep()
+    expect(setTabOwner).toHaveBeenLastCalledWith({ localTabId: tabId, threadId: null })
+    await keep()
+    expect(setTabOwner).toHaveBeenLastCalledWith({ localTabId: tabId, threadId: 'thread_a' })
+    expect(setTabOwner).toHaveBeenCalledTimes(2)
+  })
+
+  it('registers a tab it opened for an agent as one agents may close, and the person\'s own tab as not', async () => {
+    access = { allowed: false, pending: [], tabRequests: [{ requestId: 'request_1', threadId: 'thread_a' }] }
+    await show()
+    const agentTab = useAppStore.getState().browserTabs.find((tab) => tab.id !== tabId)!.id
+    const registerTab = (window as unknown as { mousse: { inAppBrowser: { registerTab: ReturnType<typeof vi.fn> } } }).mousse.inAppBrowser.registerTab
+    for (const id of [tabId, agentTab]) {
+      const webview = host.querySelector(`webview[data-browser-tab-id="${id}"]`) as HTMLElement & Record<string, unknown>
+      Object.assign(webview, { getURL: () => 'about:blank', getTitle: () => '', canGoBack: () => false, canGoForward: () => false, isLoading: () => false, setZoomFactor: () => {}, getWebContentsId: () => 7 })
+      act(() => { webview.dispatchEvent(new Event('dom-ready')) })
+      await settle()
+    }
+    const registered = new Map(registerTab.mock.calls.map(([input]: [{ localTabId: string; agentOpened?: boolean }]) => [input.localTabId, input.agentOpened]))
+    expect(registered.get(agentTab)).toBe(true)
+    expect(registered.get(tabId)).toBeUndefined()
   })
 
   it('offers Resume agent for a tab the agent handed over, and sends it to that tab', async () => {

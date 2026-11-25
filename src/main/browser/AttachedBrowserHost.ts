@@ -15,6 +15,7 @@ import type { AttachedControlState } from '../../shared/browser/attached'
 import type { InAppBrowserActivity, InAppBrowserCursor, InAppBrowserTabCommand } from '../../shared/browser/inApp'
 import type {
   BrowserAttachmentAcknowledgeClosedParams,
+  BrowserAttachmentOwnerParams,
   BrowserAttachmentRegisterParams,
   BrowserAttachmentRegisterResult,
   BrowserAttachmentUnregisterParams
@@ -36,6 +37,8 @@ interface Registration {
   threadId?: string
   /** The thread the window shows the tab in; `null`: kept in every thread. Agents of other threads never see it. */
   ownerThreadId: string | null
+  /** The window opened the tab because an agent asked for it (`browser_tabs` new, or its first tab): agents may close it. */
+  agentOpened: boolean
   /** Who is using the tab: the person's input in it and around it, and the agent's steps. */
   readonly activity: TabActivity
   readonly stopActivity: Array<() => void>
@@ -128,7 +131,7 @@ export class AttachedBrowserHost {
     })
   }
 
-  async registerTab(sender: WebContents, input: { localTabId: string; webContentsId: number; threadId?: string; openRequestId?: string }): Promise<{ uiTabId: string }> {
+  async registerTab(sender: WebContents, input: { localTabId: string; webContentsId: number; threadId?: string; openRequestId?: string; agentOpened?: boolean }): Promise<{ uiTabId: string }> {
     const localTabId = identifier(input.localTabId)
     const openRequestId = input.openRequestId === undefined ? undefined : identifier(input.openRequestId)
     if (!Number.isSafeInteger(input.webContentsId) || input.webContentsId < 1) invalid('Invalid guest handle')
@@ -156,7 +159,8 @@ export class AttachedBrowserHost {
     if (host.records.size >= 128) invalid('Too many attached tabs in this window')
     const record: Registration = {
       sender, guest, localTabId, uiTabId: randomUUID(), registrationId: randomUUID(), registrationEpoch: 1,
-      binding: { ...binding }, threadId, ownerThreadId: threadId ?? null, activity: new TabActivity(this.options.activityClock), stopActivity: [],
+      binding: { ...binding }, threadId, ownerThreadId: threadId ?? null, agentOpened: input.agentOpened === true || openRequestId !== undefined,
+      activity: new TabActivity(this.options.activityClock), stopActivity: [],
       closureToken: randomBytes(32).toString('base64url'), pending: new Set(), stopping: false
     }
     const guestHandle = wrapElectronWebContents(guest)
@@ -239,17 +243,28 @@ export class AttachedBrowserHost {
     if (request.method === 'session.open') {
       // Another thread's tab is never opened for an agent, whatever the daemon chose.
       if (record.ownerThreadId !== null && record.ownerThreadId !== request.params.threadId) return denied('Browser tab belongs to another thread')
-      // A daemon-admitted session can claim a registered tab of its thread, or one kept in
-      // every thread that no session holds. Native ownership stays here.
-      if (record.threadId !== request.params.threadId && request.params.uiTabId === record.uiTabId && ![...host.sessions.values()].includes(record)) {
-        const threadId = identifier(request.params.threadId)
-        host.registry.reassignThread(record.uiTabId, threadId)
-        record.threadId = threadId
-      }
-      if (request.params.uiTabId !== record.uiTabId || request.params.threadId !== record.threadId || !record.threadId) return denied('Browser target or thread does not match the selected tab')
     } else if (host.sessions.get(String(request.params.sessionId)) !== record) return denied('Browser session belongs to another tab')
+    // A daemon-admitted session can claim a registered tab of its thread, or one kept in every thread that no session
+    // drives (as its first tab or any other). Native ownership stays here, and a refused open gives the tab back.
+    let rebound: { previous: string | undefined } | undefined
+    if (request.method === 'session.open' && record.threadId !== request.params.threadId && request.params.uiTabId === record.uiTabId) {
+      if ([...host.sessions.values()].includes(record) || host.backend.drivenByAny(record.uiTabId)) {
+        return { version: 1, id: request.id, ok: false, error: { code: 'human_controlled', message: 'This browser tab is in use by another agent execution' } }
+      }
+      const threadId = identifier(request.params.threadId)
+      rebound = { previous: record.threadId }
+      host.registry.reassignThread(record.uiTabId, threadId)
+      record.threadId = threadId
+    }
+    if (request.method === 'session.open' && (request.params.uiTabId !== record.uiTabId || request.params.threadId !== record.threadId || !record.threadId)) return denied('Browser target or thread does not match the selected tab')
     const operation = this.context.run({ host, record, command }, async () => {
       const response = await host.backend.call(request, { signal, timeoutMs: 60_000 })
+      if (!response.ok && rebound && !record.stopping && !host.stopping) {
+        // Refused: the tab goes back to the thread that had it.
+        if (rebound.previous) host.registry.reassignThread(record.uiTabId, rebound.previous)
+        else host.registry.unassignThread(record.uiTabId)
+        record.threadId = rebound.previous
+      }
       if (response.ok && request.method === 'session.open') {
         const session = (response.result as { session?: { id?: unknown } })?.session
         const id = identifier(session?.id)
@@ -283,13 +298,21 @@ export class AttachedBrowserHost {
     const owner = threadId === null ? null : identifier(threadId)
     if (record.ownerThreadId === owner) return
     record.ownerThreadId = owner
-    if (owner === null) return
-    // Other threads' agents lose the tab, as when it closes, and a handover hold on it ends.
-    host.backend.tabOwnerChanged(record.uiTabId, owner)
-    if (record.threadId && record.threadId !== owner) {
-      // The sessions that opened on it have ended: the new thread's agent may open it.
-      for (const [sessionId, held] of [...host.sessions]) if (held === record) host.sessions.delete(sessionId)
+    if (owner !== null) {
+      // Other threads' agents lose the tab, as when it closes, and a handover hold on it ends.
+      host.backend.tabOwnerChanged(record.uiTabId, owner)
+      if (record.threadId && record.threadId !== owner) {
+        // The sessions that opened on it have ended: the new thread's agent may open it.
+        for (const [sessionId, held] of [...host.sessions]) if (held === record) host.sessions.delete(sessionId)
+      }
     }
+    // The daemon hears it too: the thread that lost the tab asks for a new one, and its ended sessions close.
+    if (!record.artifactRoot || sender.isDestroyed() || !sameBinding(this.connection.binding(sender.id), record.binding)) return
+    const operation = this.connection.request(sender, 'browser.attachments.owner', {
+      uiTabId: record.uiTabId, ...(owner === null ? {} : { threadId: owner })
+    } satisfies BrowserAttachmentOwnerParams)
+    record.pending.add(operation)
+    void operation.catch(() => { /* A tab that closed meanwhile has nothing left to move. */ }).finally(() => record.pending.delete(operation))
   }
 
   /** **Resume agent**: the person hands a tab back to the agent that asked them to step in. Taking over needs no call. */
@@ -406,13 +429,14 @@ export class AttachedBrowserHost {
     const live = (record: Registration) => !record.stopping && Boolean(record.artifactRoot) && !record.guest.isDestroyed()
     const byUiTab = (uiTabId: string) => [...records.values()].find((item) => item.uiTabId === uiTabId && live(item))
     return {
-      visible: (threadId) => [...records.values()]
-        .filter((record) => live(record) && (record.ownerThreadId === null || record.ownerThreadId === threadId))
+      visible: (threadId, ownOnly) => [...records.values()]
+        .filter((record) => live(record) && (record.ownerThreadId === threadId || (!ownOnly && record.ownerThreadId === null)))
         .map((record) => record.uiTabId),
-      claim: (uiTabId, threadId) => {
+      claim: (uiTabId, threadId, ownOnly) => {
         const record = byUiTab(uiTabId)
         if (!record) invalid('Browser tab is unavailable')
         if (record.ownerThreadId !== null && record.ownerThreadId !== threadId) invalid('Browser tab belongs to another thread')
+        if (ownOnly && record.ownerThreadId !== threadId) invalid('This run uses only its thread\'s own tabs')
         if (record.threadId === threadId) return
         // A tab kept in every thread is driven by the agent that last took it.
         host().registry.reassignThread(record.uiTabId, identifier(threadId))
@@ -431,6 +455,12 @@ export class AttachedBrowserHost {
         this.pendingOpens.set(requestId, { sender, threadId, resolve: (uiTabId) => { settle(); resolve(uiTabId) }, reject: (error) => { settle(); reject(error) } })
         sender.send('browser:tab-command', { kind: 'open', requestId, threadId, activate } satisfies InAppBrowserTabCommand)
       }),
+      closable: (uiTabId, threadId) => {
+        const record = byUiTab(uiTabId)
+        return Boolean(record && record.agentOpened && record.ownerThreadId === threadId)
+      },
+      // Typing in one tab takes the window's keyboard focus from the tab, address bar or picker the person uses.
+      personBusyElsewhere: (uiTabId) => [...records.values()].some((record) => record.uiTabId !== uiTabId && live(record) && record.activity.userActive()),
       close: (uiTabId) => {
         const record = byUiTab(uiTabId)
         if (record && !sender.isDestroyed()) sender.send('browser:tab-command', { kind: 'close', localTabId: record.localTabId } satisfies InAppBrowserTabCommand)

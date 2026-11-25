@@ -15,7 +15,7 @@ import { optionalString, requiredId } from '../../../browser-worker/util'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
 import type { DebuggerTransportOptions } from './debuggerTransport'
 import { TrustedGuestRegistry, type TrustedGuestRecord } from './registry'
-import { AttachedPageSession, type AttachedTabsPort } from './session'
+import { AttachedPageSession, ConflictBreaker, type AttachedTabsPort } from './session'
 import { TabActivity, type ActivityClock } from './tabActivity'
 
 export interface AttachedBackendConfig {
@@ -37,11 +37,15 @@ export interface AttachedBackendConfig {
 
 /** The window's side of `browser_tabs` (`AttachedBrowserHost`). */
 export interface AttachedWindowTabs {
-  /** The uiTabIds a thread's agent may see: the thread's own tabs and those kept in every thread. */
-  visible(threadId: string): string[]
-  /** Binds a visible tab to the thread for automation; refuses another thread's tab. */
-  claim(uiTabId: string, threadId: string): void
+  /** The uiTabIds a thread's agent may see: the thread's own tabs and (unless `ownOnly`) those kept in every thread. */
+  visible(threadId: string, ownOnly?: boolean): string[]
+  /** Binds a visible tab to the thread for automation; refuses another thread's tab (and, with `ownOnly`, a shared one). */
+  claim(uiTabId: string, threadId: string, ownOnly?: boolean): void
   open(input: { threadId: string; activate: boolean }, signal?: AbortSignal): Promise<string>
+  /** Whether an agent of the thread opened the tab, and it is still the thread's. */
+  closable(uiTabId: string, threadId: string): boolean
+  /** Whether the person is using a tab of the window other than this one (its page, address bar or picker). */
+  personBusyElsewhere(uiTabId: string): boolean
   close(uiTabId: string): void
   reanchor(sessionId: string, uiTabId: string): void
   /** Whether the person is using any tab of the window. */
@@ -64,6 +68,8 @@ export class ElectronAttachedBrowserBackend {
   private readonly controlListeners = new Set<(state: AttachedControlState) => void>()
   private readonly cursorListeners = new Set<(event: { uiTabId: string; cursor: BrowserAgentCursor }) => void>()
   private readonly activities = new Map<string, TabActivity>()
+  /** The turns that gave way to the person, for every session of the window (a failed open keeps them too). */
+  private readonly conflicts = new ConflictBreaker()
   private accepting = true
   private shutdownWork: Promise<void> | null = null
   private readonly stopRevoke: () => void
@@ -289,6 +295,8 @@ export class ElectronAttachedBrowserBackend {
     if (guest.thread.kind !== 'thread') fail('policy_denied', 'Unbound or pinned tab requires trusted thread assignment')
     const boundThread = guest.thread.threadId
     const turn = optionalString(request.params.turn, 400)
+    // A run without a person's tree grant uses its thread's own tabs only, for as long as its session lives.
+    const ownTabsOnly = request.params.ownTabsOnly === true
     // A tab is driven by one session: the one that drives it (its first tab, or one it claimed) opens again. A session
     // that only listed the tab does not hold it.
     const existing = [...this.sessions.values()].find((candidate) => candidate.drives(uiTabId) && candidate.controlState().owner !== 'disconnected')
@@ -321,6 +329,8 @@ export class ElectronAttachedBrowserBackend {
       onAgentCursor: (event) => this.emitCursor(event),
       activityFor: (id) => this.activityFor(id),
       ...(this.config.tabs ? { tabs: this.sessionTabs(this.config.tabs) } : {}),
+      ownThreadOnly: ownTabsOnly,
+      conflicts: this.conflicts,
       ...(this.config.conflictBackoffMs ? { conflictBackoffMs: this.config.conflictBackoffMs } : {}),
       ...(this.config.sleep ? { sleep: this.config.sleep } : {})
     })
@@ -352,21 +362,28 @@ export class ElectronAttachedBrowserBackend {
   /** A session's view of the window's tabs: one driver per tab, and the trusted guest of each tab it claims. */
   private sessionTabs(window: AttachedWindowTabs): AttachedTabsPort {
     return {
-      visible: (threadId) => window.visible(threadId).filter((uiTabId) => this.config.registry.lookup(uiTabId)),
-      claim: (uiTabId, threadId, sessionId): TrustedGuestRecord => {
+      visible: (threadId, ownOnly) => window.visible(threadId, ownOnly).filter((uiTabId) => this.config.registry.lookup(uiTabId)),
+      claim: (uiTabId, threadId, sessionId, ownOnly): TrustedGuestRecord => {
         if (this.drivenByOther(uiTabId, sessionId)) fail('invalid_action', 'Another agent is using this tab')
-        if (!window.visible(threadId).includes(uiTabId)) fail('policy_denied', 'This tab belongs to another thread')
-        window.claim(uiTabId, threadId)
+        if (!window.visible(threadId, ownOnly).includes(uiTabId)) fail('policy_denied', ownOnly ? 'This run uses only its thread\'s own tabs' : 'This tab belongs to another thread')
+        window.claim(uiTabId, threadId, ownOnly)
         const guest = this.config.registry.lookup(uiTabId)
         if (!guest) fail('session_closed', 'In-app tab is not registered for attached automation')
         return guest
       },
       drivenByOther: (uiTabId, sessionId) => this.drivenByOther(uiTabId, sessionId),
       open: (input, signal) => window.open(input, signal),
+      closable: (uiTabId, threadId) => window.closable(uiTabId, threadId),
+      personBusyElsewhere: (uiTabId) => window.personBusyElsewhere(uiTabId),
       close: (uiTabId) => window.close(uiTabId),
       reanchor: (sessionId, uiTabId) => window.reanchor(sessionId, uiTabId),
       anyUserActive: () => window.anyUserActive()
     }
+  }
+
+  /** Whether a live session drives a tab: its first tab, one it claimed, or one a step of it runs in. */
+  drivenByAny(uiTabId: string): boolean {
+    return this.drivenByOther(uiTabId, '')
   }
 
   /** Whether a live session other than `sessionId` drives a tab: listing it is not driving it. */

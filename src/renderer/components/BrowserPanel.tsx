@@ -452,6 +452,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const editingAddress = useRef(false)
   /** The tab the address bar holds while it has focus: the one unpinned on blur, whatever tab is active by then. */
   const addressPin = useRef<string | null>(null)
+  /** The address bar has focus: whichever tab is shown is the person's while it does. */
+  const addressFocused = useRef(false)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const key = activeThreadId ?? '__standalone__'
@@ -470,6 +472,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [tabRequests, setTabRequests] = useState<NonNullable<BrowserAccessState['tabRequests']>>([])
   // Tabs an agent opened (`browser_tabs` new), by local tab id: their registration answers main's request.
   const openRequests = useRef(new Map<string, string>())
+  /** Tabs the window opened because an agent asked for one: the only tabs agents may close. */
+  const agentOpenedTabs = useRef(new Set<string>())
   // The thread each registered tab was last reported to main as belonging to.
   const reportedOwners = useRef(new Map<string, string | null>())
   const provisionedRequests = useRef(new Set<string>())
@@ -512,7 +516,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       const store = useAppStore.getState()
       // The tab belongs to the requesting thread. Hidden guests still load, so the
       // trusted host registers it on dom-ready and wakes the waiting tool call.
-      store.addBrowserTab(request.threadId)
+      agentOpenedTabs.current.add(store.addBrowserTab(request.threadId))
       if (store.activeThreadId === request.threadId) store.openSurfaceKind('browser')
     }
   }, [tabRequests])
@@ -527,6 +531,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     const previous = store.browserActiveTabByThread[command.threadId]
     const tabId = store.addBrowserTab(command.threadId)
     openRequests.current.set(tabId, command.requestId)
+    agentOpenedTabs.current.add(tabId)
     if (!command.activate && previous && previous !== tabId) store.setActiveBrowserTab(command.threadId, previous)
   }), [])
   // Main offers a tab only to its thread's agent: a tab moved to another thread, or kept in every thread, says so.
@@ -583,8 +588,14 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     addressPin.current = null
     if (held) reportBrowserActivity({ localTabId: held, kind: 'unpin', pin: 'address' })
   }, [])
-  // Another tab shown while the address bar has focus: the tab it held is let go.
-  useEffect(() => unpinAddress, [unpinAddress, activeTab?.id, activeThreadId, active])
+  // Another tab shown while the address bar has focus: the bar now holds that tab, and lets the one it held go.
+  useEffect(() => {
+    if (addressFocused.current && active && activeTab) {
+      addressPin.current = activeTab.id
+      reportBrowserActivity({ localTabId: activeTab.id, kind: 'pin', pin: 'address' })
+    }
+    return unpinAddress
+  }, [unpinAddress, activeTab?.id, activeThreadId, active])
 
   const cancelPicker = useCallback(() => {
     const current = picker.current
@@ -640,7 +651,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         const openRequestId = openRequests.current.get(id)
         openRequests.current.delete(id)
         const registration = window.mousse.inAppBrowser.registerTab({
-          localTabId: id, webContentsId: webview.getWebContentsId(), ...(threadId ? { threadId } : {}), ...(openRequestId ? { openRequestId } : {})
+          localTabId: id, webContentsId: webview.getWebContentsId(), ...(threadId ? { threadId } : {}), ...(openRequestId ? { openRequestId } : {}),
+          ...(agentOpenedTabs.current.has(id) ? { agentOpened: true } : {})
         })
         registrations.current.set(id, registration)
         reportedOwners.current.set(id, threadId ?? null)
@@ -779,6 +791,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   }
   const reportToolbarInput = () => { if (activeTab) reportBrowserActivity({ localTabId: activeTab.id, kind: 'input' }) }
   const pinAddress = (pinned: boolean) => {
+    addressFocused.current = pinned
     unpinAddress()
     if (!pinned || !activeTab) return
     addressPin.current = activeTab.id

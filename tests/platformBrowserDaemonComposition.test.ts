@@ -220,13 +220,16 @@ describe('browser daemon composition', () => {
     expect(png.artifact).not.toHaveProperty('path')
     expect(JSON.stringify(png)).not.toContain(registered.artifactRoot)
 
-    // Take control and Resume belong to the in-app tab, and never show its control lease.
-    const taken = await alice.request<{ session: BrowserSessionPublicRecord }>('browser.sessions.takeControl', { threadId: thread.id, sessionId })
-    expect(taken.session.lifecycle).toBe('human-controlled')
-    expect(taken.session).not.toHaveProperty('controlLeaseId')
-    const generation = taken.session.generation
+    // The person takes an in-app tab over just by using it: there is no call for it.
+    await expect(alice.request('browser.sessions.takeControl', { threadId: thread.id, sessionId })).rejects.toBeDefined()
+    // The agent hands the tab over; Resume agent belongs to the in-app tab and never shows its control lease.
+    const handed = await browser.dispatch(context(h.alice.id, thread.id), 'browser_request_human', { sessionId, reason: 'Sign in' })
+    expect(handed.ok, JSON.stringify(handed)).toBe(true)
+    const generation = browser.listPublicSessions(thread.id).find((record) => record.id === sessionId)!.generation
+    expect(browser.listPublicSessions(thread.id).find((record) => record.id === sessionId)!.lifecycle).toBe('human-controlled')
     const resumed = await alice.request<{ session: BrowserSessionPublicRecord }>('browser.sessions.resume', { threadId: thread.id, sessionId })
     expect(resumed.session.lifecycle).not.toBe('human-controlled')
+    expect(resumed.session).not.toHaveProperty('controlLeaseId')
     expect(resumed.session.generation).toBeGreaterThan(generation)
     expect(nativeSessionId).not.toBe(sessionId)
 
@@ -245,7 +248,7 @@ describe('browser daemon composition', () => {
     })).rejects.toMatchObject({ code: 'policy_denied' })
     await expect(sibling.request('browser.attachments.select', { uiTabId: 'window1:tab_live', threadId: thread.id }))
       .rejects.toMatchObject({ code: 'policy_denied' })
-    await expect(sibling.request('browser.sessions.takeControl', { threadId: thread.id, sessionId }))
+    await expect(sibling.request('browser.sessions.resume', { threadId: thread.id, sessionId }))
       .rejects.toMatchObject({ code: 'policy_denied' })
     await expect(sibling.request('browser.artifacts.read', { threadId: thread.id, sessionId, artifactId }))
       .rejects.toMatchObject({ code: 'policy_denied' })
@@ -262,9 +265,9 @@ describe('browser daemon composition', () => {
     h.clients.push(bobGui)
     await bobGui.connect()
     await bobGui.request('profiles.bind', { profile: h.bob.id })
-    await expect(bobGui.request('browser.sessions.takeControl', { threadId: thread.id, sessionId, profileId: h.alice.id }))
+    await expect(bobGui.request('browser.sessions.resume', { threadId: thread.id, sessionId, profileId: h.alice.id }))
       .rejects.toMatchObject({ code: 'profile_mismatch' })
-    await expect(bobGui.request('browser.sessions.takeControl', { threadId: bobThread.id, sessionId }))
+    await expect(bobGui.request('browser.sessions.resume', { threadId: bobThread.id, sessionId }))
       .rejects.toMatchObject({ code: expect.stringMatching(/session_closed|invalid_action/) })
     await expect(bobGui.request('browser.artifacts.read', { threadId: bobThread.id, sessionId, artifactId }))
       .rejects.toMatchObject({ code: expect.stringMatching(/session_closed|invalid_action|artifact_denied/) })
@@ -325,6 +328,22 @@ describe('browser daemon composition', () => {
     expect(reconnectExecutor.calls.some((call) => call.method === 'session.close')).toBe(false)
     expect(browser.selectedTarget(thread.id)).toEqual({ backend: 'electron-attached', uiTabId: 'window1:tab_live' })
 
+    // The window moves the tab to another thread: this thread loses it (its next browser_open asks for a tab of its
+    // own), the session that ran through it closes here with no call to the window, and the other thread has it.
+    const movedSession = replacementOpen.value.session!.id
+    await reconnected.request('browser.attachments.owner', { uiTabId: 'window1:tab_live', threadId: otherThread.id })
+    expect(browser.selectedTarget(thread.id)).toBeUndefined()
+    expect(browser.listPublicSessions(thread.id).map((record) => record.id)).not.toContain(movedSession)
+    const closedMoved = await browser.sessions.close(context(h.alice.id, thread.id), movedSession)
+    expect(closedMoved.session).toMatchObject({ id: movedSession, lifecycle: 'closed' })
+    expect(reconnectExecutor.calls.some((call) => call.method === 'session.close')).toBe(false)
+    expect(browser.selectedTarget(otherThread.id)).toEqual({ backend: 'electron-attached', uiTabId: 'window1:tab_live' })
+    const asking = new AbortController()
+    const reopening = browser.dispatch({ ...context(h.alice.id, thread.id), signal: asking.signal }, 'browser_open', {})
+    await vi.waitFor(() => expect(browser.accessStatus().tabRequests).toEqual([{ requestId: expect.any(String), threadId: thread.id }]))
+    asking.abort()
+    await expect(reopening).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+
     await expect(reconnected.request('browser.attachments.acknowledgeClosed', {
       registrationId,
       registrationEpoch: 1,
@@ -363,13 +382,20 @@ describe('browser daemon composition', () => {
       registrationId: 'reg_1', registrationEpoch: 1, uiTabId: 'tab_1', connectionId: 'conn_1',
       profileId, profileEpoch: 1, selectedThreadId: 'thread_1'
     }
+    const second = { ...registration, registrationId: 'reg_2', uiTabId: 'tab_2' }
+    const elsewhere = { ...registration, registrationId: 'reg_3', uiTabId: 'tab_other_window', connectionId: 'conn_2' }
     const dispatches: string[] = []
+    const routed: string[] = []
+    let closeAnswer: Record<string, unknown> = {}
     let unknown = false
     const backend = new AttachedBrowserConnectionBackend({
       profileId,
       commandRouter: {
         async dispatch(input) {
           dispatches.push(input.request.id)
+          routed.push(input.registrationId)
+          if (input.request.method === 'tabs.close') return { status: 'completed' as const, dispatched: true as const, response: { version: 1 as const, id: input.request.id, ok: true, result: { closed: 'tab_x', tabs: [], ...closeAnswer } } }
+          if (input.request.method === 'observe') return { status: 'completed' as const, dispatched: true as const, response: { version: 1 as const, id: input.request.id, ok: true, result: {} } }
           if (unknown) {
             return { status: 'unknown-effect', dispatched: true, code: 'timeout', message: 'Attached mutation timed out after dispatch; remote effect is uncertain' }
           }
@@ -381,8 +407,8 @@ describe('browser daemon composition', () => {
           return { status: 'completed' as const, dispatched: true as const, response: { version: 1 as const, id: input.request.id, ok: true, result: { session } } }
         }
       },
-      getRegistrationByUiTabId: (uiTabId) => uiTabId === 'tab_1' ? registration : undefined,
-      getRegistration: (id) => id === 'reg_1' ? registration : undefined
+      getRegistrationByUiTabId: (uiTabId) => [registration, second, elsewhere].find((item) => item.uiTabId === uiTabId),
+      getRegistration: (id) => [registration, second, elsewhere].find((item) => item.registrationId === id)
     })
     const opened = await backend.call({
       version: 1, id: 'open_ok', profileId, method: 'session.open',
@@ -390,6 +416,16 @@ describe('browser daemon composition', () => {
     })
     expect(opened).toMatchObject({ ok: true })
     expect(backend.bindingForSession('sess_open')?.registrationId).toBe('reg_1')
+    // Its first tab closed (`browser_tabs` close): the session's commands go through the tab its window moved them to,
+    // and never to a tab of another window.
+    closeAnswer = { anchorUiTabId: 'tab_other_window' }
+    expect(await backend.call({ version: 1, id: 'close_tab_1', profileId, method: 'tabs.close', params: { sessionId: 'sess_open', tabId: 'tab_x' } })).toMatchObject({ ok: true })
+    expect(backend.bindingForSession('sess_open')?.registrationId).toBe('reg_1')
+    closeAnswer = { anchorUiTabId: 'tab_2' }
+    expect(await backend.call({ version: 1, id: 'close_tab_2', profileId, method: 'tabs.close', params: { sessionId: 'sess_open', tabId: 'tab_y' } })).toMatchObject({ ok: true })
+    expect(backend.bindingForSession('sess_open')).toMatchObject({ registrationId: 'reg_2', uiTabId: 'tab_2' })
+    expect(await backend.call({ version: 1, id: 'observe_after', profileId, method: 'observe', params: { sessionId: 'sess_open' } })).toMatchObject({ ok: true })
+    expect(routed.at(-1)).toBe('reg_2')
     unknown = true
     const act: BrowserWorkerRequest = {
       version: 1, id: 'act_1', profileId, method: 'act',
@@ -408,7 +444,7 @@ describe('browser daemon composition', () => {
       error: { code: 'timeout', message: expect.stringMatching(/uncertain|do not retry/i) }
     })
     expect(backend.bindingForSession('sess_missing')).toBeUndefined()
-    expect(dispatches).toEqual(['open_ok', 'act_1', 'open_1'])
+    expect(dispatches).toEqual(['open_ok', 'close_tab_1', 'close_tab_2', 'observe_after', 'act_1', 'open_1'])
 
     const root = makeBrowserCommandTempRoot()
     roots.push(root)

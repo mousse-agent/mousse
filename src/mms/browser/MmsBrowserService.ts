@@ -44,6 +44,8 @@ interface LiveAttachment {
   profileEpoch: number
   threadId?: string
   selectedThreadId?: string
+  /** The selection was a free tab a run borrowed (`selectedTarget`), not one the window chose for the thread. */
+  borrowed?: boolean
 }
 
 interface PendingGuestClosure {
@@ -304,12 +306,26 @@ export class MmsBrowserService {
 
   selectedTarget(threadId: string, options: { borrow?: boolean } = {}): BrowserSelectedTarget | undefined {
     let uiTabId = this.selectedByThread.get(threadId)
+    // A run that may not borrow never inherits a shared tab another run of its thread borrowed: it needs the thread's own.
+    const cached = uiTabId ? this.liveByUiTab(uiTabId) : undefined
+    if (uiTabId && options.borrow === false && cached?.borrowed && cached.threadId !== threadId) {
+      const own = [...this.live.values()].find((tab) => tab.threadId === threadId && (!tab.selectedThreadId || tab.selectedThreadId === threadId))
+      if (!own) return undefined
+      const borrowed = this.liveByUiTab(uiTabId)
+      if (borrowed?.selectedThreadId === threadId) {
+        const { selectedThreadId: _released, borrowed: _borrowed, ...released } = borrowed
+        this.live.set(borrowed.registrationId, released)
+      }
+      this.selectedByThread.delete(threadId)
+      uiTabId = undefined
+    }
     if (!uiTabId) {
       // The thread's own tab wins over a tab shared by every thread.
       const free = [...this.live.values()].filter((tab) => (!tab.selectedThreadId || tab.selectedThreadId === threadId) && (!tab.threadId || tab.threadId === threadId))
       const available = free.find((tab) => tab.threadId === threadId) ?? (options.borrow === false ? undefined : free[0])
       if (available) {
         available.selectedThreadId = threadId
+        available.borrowed = available.threadId !== threadId
         this.selectedByThread.set(threadId, available.uiTabId)
         uiTabId = available.uiTabId
       }
@@ -460,10 +476,44 @@ export class MmsBrowserService {
     }
     const current = this.selectedByThread.get(threadId)
     if (current && current !== uiTabId) this.selectedByThread.delete(threadId)
-    const selected: LiveAttachment = { ...live, selectedThreadId: threadId }
+    const { borrowed: _borrowed, ...chosen } = live
+    const selected: LiveAttachment = { ...chosen, selectedThreadId: threadId }
     this.live.set(selected.registrationId, selected)
     this.selectedByThread.set(threadId, uiTabId)
     return { backend: 'electron-attached', uiTabId }
+  }
+
+  /**
+   * The window moved an in-app tab to another thread (`threadId`), or kept it in every thread (none). A thread that had
+   * it selected loses it, so its agent's next `browser_open` asks for a tab of its own; its sessions that ran through
+   * the tab end (the window already ended them). The new thread's agent finds the tab as its own.
+   */
+  setAttachmentOwner(params: { uiTabId: string; threadId?: string }, owner: BrowserAttachmentOwner): { ok: true } {
+    this.assertActive()
+    const uiTabId = requireIdentifier(params.uiTabId, 'uiTabId')
+    const threadId = params.threadId === undefined ? undefined : requireIdentifier(params.threadId, 'threadId')
+    if (threadId !== undefined && !this.options.threadExists(threadId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Thread does not belong to this profile' })
+    const live = this.liveByUiTab(uiTabId)
+    if (!live) return { ok: true }
+    if (live.connectionId !== owner.connectionId || live.profileId !== owner.profileId || live.profileEpoch !== owner.profileEpoch) {
+      throw new BrowserAutomationError({ code: 'policy_denied', message: 'This in-app tab is registered to another GUI connection' })
+    }
+    const next: LiveAttachment = { ...live }
+    if (threadId === undefined) delete next.threadId
+    else next.threadId = threadId
+    if (threadId !== undefined && live.selectedThreadId !== undefined && live.selectedThreadId !== threadId) {
+      if (this.selectedByThread.get(live.selectedThreadId) === uiTabId) this.selectedByThread.delete(live.selectedThreadId)
+      delete next.selectedThreadId
+    }
+    this.live.set(next.registrationId, next)
+    if (threadId !== undefined) {
+      for (const sessionId of this.attached.sessionsOnUiTab(uiTabId)) {
+        if (this.sessions.threadOf(sessionId) === threadId) continue
+        this.sessions.markEnded(sessionId)
+        this.attached.forgetSession(sessionId)
+      }
+    }
+    return { ok: true }
   }
 
   /** Connection close/rebind: revoke dispatch and selection. Guest-close proof stays with unregister/ack. */

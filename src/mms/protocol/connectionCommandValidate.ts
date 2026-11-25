@@ -138,8 +138,9 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
   let params: Record<string, unknown>
   switch (request.method) {
     case 'session.open': {
-      const v = exact([], ['persistent', 'workspaceId', 'runId', 'threadId', 'url', 'uiTabId', 'turn'])
+      const v = exact([], ['persistent', 'workspaceId', 'runId', 'threadId', 'url', 'uiTabId', 'turn', 'ownTabsOnly'])
       if (v.persistent !== undefined && typeof v.persistent !== 'boolean') throw new Error('invalid persistent flag')
+      if (v.ownTabsOnly !== undefined && v.ownTabsOnly !== true) throw new Error('invalid ownTabsOnly flag')
       const workspaceId = v.workspaceId === undefined ? undefined : id(v.workspaceId)
       const runId = optionalString(v.runId, 160)
       const threadId = optionalString(v.threadId, 160)
@@ -153,6 +154,8 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
         ...(threadId === undefined ? {} : { threadId }),
         ...(url === undefined ? {} : { url }),
         ...(uiTabId === undefined ? {} : { uiTabId }),
+        // A run without a person's tree grant: its thread's own in-app tabs only.
+        ...(v.ownTabsOnly === true ? { ownTabsOnly: true } : {}),
         ...turnOf(v)
       }
       break

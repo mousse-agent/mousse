@@ -268,6 +268,9 @@ export class BrowserSessionManager {
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
       ...(execution.runId === undefined ? {} : { runId: execution.runId }),
       ...(target.backend === 'electron-attached' ? { turn: stepTurn(execution) } : {}),
+      // A run a person did not start (no tree grant: an editor try-run, an app-started workflow) keeps to its thread's
+      // own in-app tabs for the whole session, never the tabs kept in every thread.
+      ...(target.backend === 'electron-attached' && !execution.browserGrant ? { ownTabsOnly: true } : {}),
       threadId: execution.threadId
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
@@ -293,6 +296,12 @@ export class BrowserSessionManager {
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId })
+    // A session that already ended (its tab went to another thread) is closed: closing it again says so.
+    const ended = this.sessions.get(sessionId)
+    if (ended && ended.record.lifecycle === 'closed' && ended.owner.threadId === context.execution.threadId &&
+        (!ended.owner.runId || ended.owner.runId === context.execution.runId) && !keptFrom(ended, context.keeper)) {
+      return { session: { ...ended.record } }
+    }
     const entry = this.requireOwned(sessionId, context)
     // A worker that no longer knows the session (it restarted or crashed) has nothing left to close.
     try { await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context)) }
@@ -516,6 +525,25 @@ export class BrowserSessionManager {
   assertHumanHandoffOwned(context: BrowserToolContext, request: { sessionId: string; reason: string; operation?: string }): void {
     this.authorize(context, 'browser_request_human', 'browser.task', 'external', request)
     this.requireOwned(request.sessionId, context)
+  }
+
+  /** The thread a session belongs to (trusted host lookup). */
+  threadOf(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.record.threadId
+  }
+
+  /**
+   * Its window already ended the session (an in-app tab moved to another thread): the record closes here too, with no
+   * call to the window. The agent then opens a new session, in a tab of its own thread.
+   */
+  markEnded(sessionId: string): void {
+    const entry = this.sessions.get(sessionId)
+    if (!entry || entry.record.lifecycle === 'closed') return
+    const updatedAt = new Date().toISOString()
+    entry.record = { ...entry.record, lifecycle: 'closed', updatedAt,
+      ...(entry.record.humanHandoff ? { humanHandoff: { ...entry.record.humanHandoff, state: 'closed', updatedAt } } : {}) }
+    this.observations.delete(sessionId)
+    this.persist()
   }
 
   async closeAll(backend?: BrowserSessionRecord['backend']): Promise<void> {

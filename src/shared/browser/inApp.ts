@@ -23,7 +23,8 @@ export type InAppBrowserTabCommand =
   | { kind: 'close'; localTabId: string }
 
 export interface InAppBrowserApi {
-  registerTab(input: { localTabId: string; webContentsId: number; threadId?: string; openRequestId?: string }): Promise<{ uiTabId: string }>
+  /** `agentOpened`: the window opened the tab because an agent asked for one (agents may close only such tabs). */
+  registerTab(input: { localTabId: string; webContentsId: number; threadId?: string; openRequestId?: string; agentOpened?: boolean }): Promise<{ uiTabId: string }>
   selectTab(input: { localTabId: string; threadId: string }): Promise<void>
   resumeAgent(localTabId: string): Promise<void>
   /** The person used the tab (see `InAppBrowserActivity`). */

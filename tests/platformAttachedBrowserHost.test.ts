@@ -204,10 +204,10 @@ describe('AttachedBrowserHost tabs and the person using them', () => {
     }, { activityClock: clock, sleep: async (ms) => { sleeps.push(ms); clock.advance(ms) } })
     const owner = new Contents(30, null, page('owner'))
     let nextId = 31
-    const tab = async (localTabId: string, threadId?: string, openRequestId?: string) => {
+    const tab = async (localTabId: string, threadId?: string, openRequestId?: string, agentOpened?: boolean) => {
       const guest = new Contents(nextId++, owner, page(localTabId))
       host.observeGuest(owner as never, guest as never)
-      const { uiTabId } = await host.registerTab(owner as never, { localTabId, webContentsId: guest.id, ...(threadId ? { threadId } : {}), ...(openRequestId ? { openRequestId } : {}) })
+      const { uiTabId } = await host.registerTab(owner as never, { localTabId, webContentsId: guest.id, ...(threadId ? { threadId } : {}), ...(openRequestId ? { openRequestId } : {}), ...(agentOpened ? { agentOpened } : {}) })
       return { guest, uiTabId }
     }
     const invoke = (uiTabId: string, method: BrowserWorkerRequest['method'], params: Record<string, unknown>) => host.handleCommand(owner as never, {
@@ -287,7 +287,7 @@ describe('AttachedBrowserHost tabs and the person using them', () => {
   it('takes a tab moved to another thread from this thread\'s agent and ends its handover; moving its first tab ends the session', async () => {
     const w = await window()
     const a = await w.tab('local_a', 'thread_host')
-    await w.tab('local_b', 'thread_host')
+    const b = await w.tab('local_b', 'thread_host')
     const opened = await w.invoke(a.uiTabId, 'session.open', { uiTabId: a.uiTabId, threadId: 'thread_host' })
     const sessionId = (opened.result as { session: BrowserSessionRecord }).session.id
     const listed = (await w.invoke(a.uiTabId, 'tabs.list', { sessionId })).result as { tabs: Array<{ id: string; title: string }> }
@@ -298,6 +298,8 @@ describe('AttachedBrowserHost tabs and the person using them', () => {
     expect(w.activityOf('local_b')).toBe('waiting-human')
     w.host.setTabOwner(w.owner as never, 'local_b', 'thread_2')
     expect(w.activityOf('local_b')).toBe('idle')
+    // The daemon hears it too, so the thread that lost the tab asks for a new one.
+    expect(w.requests).toContainEqual(['browser.attachments.owner', { uiTabId: b.uiTabId, threadId: 'thread_2' }])
     // The agent goes on in its own tab, never the one now another thread's.
     const observed = await w.invoke(a.uiTabId, 'observe', { sessionId })
     expect(observed.error).toBeUndefined()
@@ -356,6 +358,81 @@ describe('AttachedBrowserHost tabs and the person using them', () => {
     expect(w.activityOf('local_shared')).toBe('waiting-human')
     w.host.setTabOwner(w.owner as never, 'local_shared', 'thread_2')
     expect(w.activityOf('local_shared')).toBe('idle')
+    await w.host.shutdown()
+  })
+
+  it('never gives a shared tab one agent drives to another thread\'s agent, and leaves it working for the first', async () => {
+    const w = await window()
+    const a = await w.tab('local_a', 'thread_host')
+    const shared = await w.tab('local_shared')
+    const opened = await w.invoke(a.uiTabId, 'session.open', { uiTabId: a.uiTabId, threadId: 'thread_host' })
+    const sessionId = (opened.result as { session: BrowserSessionRecord }).session.id
+    const listed = (await w.invoke(a.uiTabId, 'tabs.list', { sessionId })).result as { tabs: Array<{ id: string; title: string }> }
+    const sharedTab = listed.tabs.find((tab) => tab.title === 'local_shared')!.id
+    expect((await w.invoke(a.uiTabId, 'tabs.switch', { sessionId, tabId: sharedTab })).error).toBeUndefined()
+    // The daemon offers the same tab, kept in every thread, to another thread's agent.
+    const refused = await w.invoke(shared.uiTabId, 'session.open', { uiTabId: shared.uiTabId, threadId: 'thread_2' })
+    expect(refused.error?.code).toBe('human_controlled')
+    const observed = await w.invoke(a.uiTabId, 'observe', { sessionId, tabId: sharedTab })
+    expect(observed.error).toBeUndefined()
+    expect((observed.result as BrowserObservation).tabId).toBe(sharedTab)
+    await w.host.shutdown()
+  })
+
+  it('takes the wheel events that follow the agent\'s scroll for its own, and the person\'s later scroll for theirs', async () => {
+    const w = await window()
+    const a = await w.tab('local_a', 'thread_host')
+    const opened = await w.invoke(a.uiTabId, 'session.open', { uiTabId: a.uiTabId, threadId: 'thread_host' })
+    const session = (opened.result as { session: BrowserSessionRecord }).session
+    const step = async (action: Record<string, unknown>) => {
+      const observation = (await w.invoke(a.uiTabId, 'observe', { sessionId: session.id })).result as BrowserObservation
+      return w.invoke(a.uiTabId, 'act', {
+        requestId: 'req_' + randomUUID(), sessionId: session.id, tabId: observation.tabId, generation: observation.generation,
+        observationId: observation.observationId, controlLeaseId: session.controlLeaseId,
+        action: action.type === 'click' ? { type: 'click', target: { kind: 'ref', ref: observation.elements.find((element) => element.name === 'Save')!.ref } } : action
+      })
+    }
+    // The order Electron 43 gives: the page's wheel event while the agent's command runs, then more once it returned.
+    const release = a.guest.debugger.holdMethod('Input.dispatchMouseEvent')
+    const scrolling = step({ type: 'scroll', deltaX: 0, deltaY: 400 })
+    await a.guest.debugger.waitUntilHeld('Input.dispatchMouseEvent')
+    a.guest.emit('input-event', {}, { type: 'mouseWheel' })
+    release()
+    expect((await scrolling).result).toMatchObject({ outcome: 'verified' })
+    a.guest.emit('input-event', {}, { type: 'gestureScrollBegin' })
+    w.clock.advance(100)
+    a.guest.emit('input-event', {}, { type: 'mouseWheel' })
+    expect(w.activityOf('local_a')).not.toBe('user-active')
+    // The next step runs at once.
+    expect((await step({ type: 'click' })).result).toMatchObject({ outcome: 'verified' })
+    expect(w.sleeps).toEqual([])
+    // The person's own scroll, after the agent's has settled, is theirs.
+    w.clock.advance(1_000)
+    a.guest.emit('input-event', {}, { type: 'mouseWheel' })
+    expect(w.activityOf('local_a')).toBe('user-active')
+    await w.host.shutdown()
+  })
+
+  it('routes a session\'s commands through the tab they moved to when its first tab closes, and closes only tabs an agent opened', async () => {
+    const w = await window()
+    const a = await w.tab('local_a', 'thread_host', undefined, true)
+    const b = await w.tab('local_b', 'thread_host', undefined, true)
+    await w.tab('local_person', 'thread_host')
+    const opened = await w.invoke(a.uiTabId, 'session.open', { uiTabId: a.uiTabId, threadId: 'thread_host' })
+    const sessionId = (opened.result as { session: BrowserSessionRecord }).session.id
+    const listed = (await w.invoke(a.uiTabId, 'tabs.list', { sessionId })).result as { tabs: Array<{ id: string; title: string }> }
+    const tabOf = (title: string) => listed.tabs.find((tab) => tab.title === title)!.id
+    // A tab the person opened keeps its page.
+    expect((await w.invoke(a.uiTabId, 'tabs.close', { sessionId, tabId: tabOf('local_person') })).error?.code).toBe('policy_denied')
+    expect((await w.invoke(a.uiTabId, 'tabs.switch', { sessionId, tabId: tabOf('local_b') })).error).toBeUndefined()
+    const closed = await w.invoke(a.uiTabId, 'tabs.close', { sessionId, tabId: tabOf('local_a') })
+    expect(closed.result).toMatchObject({ anchorUiTabId: b.uiTabId })
+    expect(w.owner.sent).toContainEqual({ channel: 'browser:tab-command', payload: { kind: 'close', localTabId: 'local_a' } })
+    // From now on the session's commands come through local_b's registration, never local_a's.
+    const observed = await w.invoke(b.uiTabId, 'observe', { sessionId })
+    expect(observed.error).toBeUndefined()
+    expect((observed.result as BrowserObservation).tabId).toBe(tabOf('local_b'))
+    expect((await w.invoke(a.uiTabId, 'observe', { sessionId })).error?.code).toBe('policy_denied')
     await w.host.shutdown()
   })
 

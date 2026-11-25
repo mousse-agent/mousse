@@ -167,7 +167,8 @@ export function wrapElectronWebContents(contents: WebContents): GuestWebContents
       const onKey = (_event: unknown, input: { type?: string }) => { if (input?.type === 'keyDown' || input?.type === 'rawKeyDown') listener('key') }
       const onInput = (_event: unknown, input: { type?: string }) => {
         const type = input?.type
-        if (type === 'mouseDown' || type === 'mouseWheel' || type === 'touchStart' || type === 'gestureScrollBegin') listener('pointer')
+        if (type === 'mouseDown' || type === 'touchStart') listener('pointer')
+        else if (type === 'mouseWheel' || type === 'gestureScrollBegin') listener('wheel')
       }
       contents.on('before-input-event', onKey)
       contents.on('input-event', onInput)

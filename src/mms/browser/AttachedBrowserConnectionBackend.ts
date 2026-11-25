@@ -74,6 +74,15 @@ export class AttachedBrowserConnectionBackend implements BrowserBackendPort {
     return binding ? { ...binding } : undefined
   }
 
+  /** The sessions whose commands go through an in-app tab (their first tab). */
+  sessionsOnUiTab(uiTabId: string): string[] {
+    return [...this.sessions.values()].filter((binding) => binding.uiTabId === uiTabId).map((binding) => binding.sessionId)
+  }
+
+  forgetSession(sessionId: string): void {
+    this.sessions.delete(sessionId)
+  }
+
   forgetRegistration(registrationId: string): void {
     for (const [sessionId, binding] of this.sessions) {
       if (binding.registrationId === registrationId) this.sessions.delete(sessionId)

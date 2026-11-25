@@ -216,6 +216,17 @@ describe('in-app tabs under a grant', () => {
     expect(service.targetFor(execution('root'))).toEqual({ backend: 'electron-attached', uiTabId: 'free_tab' })
   })
 
+  it('a run with no tree grant never inherits the shared tab a person\'s run on its thread borrowed', async () => {
+    const { service, register } = await browserService()
+    register('free_tab')
+    expect(service.targetFor(execution('root'))).toEqual({ backend: 'electron-attached', uiTabId: 'free_tab' })
+    const tryRun: ExecutionContext = { ...execution('root'), browserGrant: undefined }
+    expect(service.targetFor(tryRun)).toBeUndefined()
+    // A tab of its own thread is the one it gets.
+    register('root_tab', 'root')
+    expect(service.targetFor(tryRun)).toEqual({ backend: 'electron-attached', uiTabId: 'root_tab' })
+  })
+
   it('a reader gets no tab of its own and is told so at once', async () => {
     const { service, register } = await browserService()
     register('free_tab')

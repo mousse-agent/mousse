@@ -480,7 +480,7 @@ export function registerGuiIpc(
     return services.attachedBrowserHost
   }
   registerHandler('browser:register-tab', async (event, raw: unknown) => {
-    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId', 'openRequestId'])
+    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId', 'openRequestId', 'agentOpened'])
     return browserHost(event).registerTab(event.sender, input as unknown as Parameters<AttachedBrowserHost['registerTab']>[1])
   })
   registerHandler('browser:select-tab', async (event, raw: unknown) => {

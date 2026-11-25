@@ -24,6 +24,7 @@ const action = { requestId: 'req_a', sessionId: 'sess_1', tabId: 'tab_1', genera
 describe('the window\'s command boundary', () => {
   it.each([
     ['session.open', { uiTabId: 'tab_ui', threadId: 'thread_1' }],
+    ['session.open', { uiTabId: 'tab_ui', threadId: 'thread_1', ownTabsOnly: true }],
     ['tabs.list', { sessionId: 'sess_1' }],
     ['tabs.new', { sessionId: 'sess_1' }],
     ['tabs.switch', { sessionId: 'sess_1', tabId: 'tab_1' }],
@@ -66,6 +67,22 @@ describe('the daemon\'s in-app steps', () => {
     await sessions.act(context(backend), { sessionId, tabId: 'tab_1', generation: 1, observationId: 'obs_1', controlLeaseId: 'lease_1', action: { type: 'click', target: { kind: 'ref', ref: 'el_1' } } })
     const calls = (backend === 'electron-attached' ? attached : managed).call.mock.calls.map(([sent]) => [sent.method, sent.params.turn])
     expect(calls).toEqual([['session.open', turn], ['tabs.new', turn], ['act', turn]])
+    await sessions.closeAll()
+  })
+
+  it.each([
+    ['a run a person started', { grantId: 'grant_1', rootThreadId: 'thread_1', lease: true }, undefined],
+    ['an editor try-run or app-started workflow', undefined, true]
+  ] as const)('%s: its in-app session keeps to its own thread\'s tabs only when it has no grant', async (_name, browserGrant, ownTabsOnly) => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-browser-scope-')); roots.push(root)
+    const attached = port('electron-attached')
+    const sessions = new BrowserSessionManager({ profileId, profileRoot: root, broker: new BrowserBackendRouter({ profileId, managed: port('managed-chromium'), attached }) })
+    const base = context('electron-attached')
+    await sessions.open({ ...base, execution: { ...base.execution, ...(browserGrant ? { browserGrant } : {}) } }, {})
+    const [sent] = attached.call.mock.calls[0]!
+    expect(sent.params.ownTabsOnly).toBe(ownTabsOnly)
+    // The window's command boundary lets the flag through.
+    expect(validateAttachedBrowserWorkerRequest(request('session.open', sent.params)).params.ownTabsOnly).toBe(ownTabsOnly)
     await sessions.closeAll()
   })
 })

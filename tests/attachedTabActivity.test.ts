@@ -11,7 +11,7 @@ import { ElectronAttachedBrowserBackend, type AttachedWindowTabs } from '../src/
 import { TrustedGuestRegistry } from '../src/main/browser/automation/registry'
 import { createLoopbackAttachedPolicy } from '../src/main/browser/automation/policy'
 import { CONFLICT_BACKOFF_MS, USER_CONFLICT_MESSAGE, USER_CONFLICT_REPEAT_MESSAGE } from '../src/main/browser/automation/session'
-import { TabActivity, USER_ACTIVE_LEASE_MS, type ActivityClock } from '../src/main/browser/automation/tabActivity'
+import { AGENT_WHEEL_TAIL_MAX_MS, AGENT_WHEEL_TAIL_MS, TabActivity, USER_ACTIVE_LEASE_MS, type ActivityClock } from '../src/main/browser/automation/tabActivity'
 import { createFakeGuestPair } from './fixtures/agent-platform/electron-attached-browser/fakeGuest'
 
 const profileId = 'prof_attached'
@@ -50,17 +50,33 @@ function req(method: BrowserWorkerRequest['method'], params: Record<string, unkn
 function harness() {
   const clock = new FakeClock()
   const sleeps: number[] = []
-  const hooks: { onSleep?: () => void; intercept?: (method: string) => void; journal?: (entry: { phase: string }) => void } = {}
+  const hooks: { onSleep?: () => void; intercept?: (method: string) => void; journal?: (entry: { phase: string }) => void; sent?: (uiTabId: string, method: string) => void; slowLoad?: boolean; blockSleep?: boolean } = {}
   const commands: string[] = []
+  /** The CDP commands each tab's debugger really received (after the transport's own checks). */
+  const sent = new Map<string, string[]>()
   const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
   const pairs = new Map<string, ReturnType<typeof createFakeGuestPair>>()
   const owners = new Map<string, string | null>()
+  // Tabs the window opened for an agent (its first tab, or `browser_tabs` new): the only ones an agent closes.
+  const agentOpened = new Set<string>()
   const window = { opened: [] as boolean[], closed: [] as string[], reanchored: [] as string[] }
-  const add = (uiTabId: string, owner: string | null) => {
+  const add = (uiTabId: string, owner: string | null, options: { byPerson?: boolean } = {}) => {
+    if (!options.byPerson) agentOpened.add(uiTabId)
     const pair = createFakeGuestPair({ profileId })
     ;(pair.guest as unknown as { title: string }).title = uiTabId
     registry.registerGuest({ guest: pair.guest, owner: pair.owner, profileId, profileEpoch, uiTabId,
       thread: owner ? { kind: 'thread', threadId: owner } : { kind: 'unbound' } })
+    const received: string[] = []
+    sent.set(uiTabId, received)
+    const send = pair.debugger.sendCommand.bind(pair.debugger)
+    pair.debugger.sendCommand = async (method, params, sessionId) => {
+      received.push(method)
+      const result = await send(method, params, sessionId)
+      hooks.sent?.(uiTabId, method)
+      // A page the agent loads says it has loaded a moment later (unless the test keeps it loading).
+      if (method === 'Page.navigate' && !hooks.slowLoad) setTimeout(() => pair.debugger.emitEvent('Page.lifecycleEvent', { name: 'load' }), 5)
+      return result
+    }
     pairs.set(uiTabId, pair)
     owners.set(uiTabId, owner)
     return pair
@@ -68,8 +84,10 @@ function harness() {
   // eslint-disable-next-line prefer-const
   let backend: ElectronAttachedBrowserBackend
   const tabs: AttachedWindowTabs = {
-    visible: (thread) => [...owners].filter(([, owner]) => owner === null || owner === thread).map(([id]) => id),
+    visible: (thread, ownOnly) => [...owners].filter(([, owner]) => owner === thread || (!ownOnly && owner === null)).map(([id]) => id),
     claim: (uiTabId, thread) => { registry.reassignThread(uiTabId, thread) },
+    closable: (uiTabId, thread) => agentOpened.has(uiTabId) && owners.get(uiTabId) === thread,
+    personBusyElsewhere: (uiTabId) => [...owners.keys()].some((id) => id !== uiTabId && backend.activityFor(id).userActive()),
     open: async ({ threadId: thread, activate }) => {
       window.opened.push(activate)
       const uiTabId = `uitab_new_${window.opened.length}`
@@ -87,6 +105,8 @@ function harness() {
       sleeps.push(ms)
       hooks.onSleep?.()
       if (signal?.aborted) throw signal.reason
+      // A wait that ends only when it is stopped: it must stop at once, not after its time.
+      if (hooks.blockSleep) await new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
       clock.advance(ms)
     },
     interceptCommand: (method) => { commands.push(method); hooks.intercept?.(method) }
@@ -117,6 +137,16 @@ function harness() {
       ...(options.turn ? { turn: options.turn } : {})
     }), options.signal ? { signal: options.signal } : {})
   }
+  const click = async (session: BrowserSessionRecord, options: { turn?: string; tabId?: string } = {}) => {
+    const observation = await observe(session.id, options.tabId)
+    const save = observation.elements.find((element) => element.name === 'Save')!
+    return backend.call(req('act', {
+      requestId: 'req_' + randomUUID(), sessionId: session.id, tabId: observation.tabId, generation: observation.generation,
+      observationId: observation.observationId, controlLeaseId: session.controlLeaseId,
+      action: { type: 'click', target: { kind: 'ref', ref: save.ref } },
+      ...(options.turn ? { turn: options.turn } : {})
+    }))
+  }
   const tabsCall = async (sessionId: string, method: 'tabs.list' | 'tabs.switch' | 'tabs.new' | 'tabs.close', params: Record<string, unknown> = {}) =>
     backend.call(req(method, { sessionId, ...params }))
   const listTabs = async (sessionId: string) => {
@@ -124,7 +154,13 @@ function harness() {
     expect(listed.ok, JSON.stringify(listed.error)).toBe(true)
     return (listed.result as { tabs: BrowserTab[] }).tabs
   }
-  return { clock, sleeps, hooks, commands, registry, pairs, owners, add, window, backend, activity, states, open, observe, fill, tabsCall, listTabs }
+  /** The window moves a tab to another thread. */
+  const move = (uiTabId: string, owner: string) => {
+    owners.set(uiTabId, owner)
+    registry.reassignThread(uiTabId, owner)
+    backend.tabOwnerChanged(uiTabId, owner)
+  }
+  return { clock, sleeps, hooks, commands, sent, registry, pairs, owners, add, move, window, backend, activity, states, open, observe, fill, click, tabsCall, listTabs }
 }
 
 describe('who is using a tab', () => {
@@ -182,17 +218,25 @@ describe('who is using a tab', () => {
     typing()
   })
 
-  it('stops a running agent step on the person\'s input, but not on the agent\'s own navigation', () => {
-    const activity = new TabActivity(new FakeClock())
+  it('stops a running agent step on the person\'s input or navigation, but not on the agent\'s own navigation', () => {
+    const clock = new FakeClock()
+    const activity = new TabActivity(clock)
     let preempted = 0
     activity.onPreempt(() => { preempted += 1 })
     const release = activity.beginAgent()
     expect(activity.state()).toBe('agent-busy')
+    const navigating = activity.beginOwnNavigation()
     activity.noteUserNavigation()
     expect(activity.userActive()).toBe(false)
     expect(preempted).toBe(0)
-    activity.noteUserInput('guest', 'pointer')
+    navigating()
+    // While a step that does not navigate runs (a fill), a navigation from the address bar or back is the person's.
+    activity.noteUserNavigation()
+    expect(activity.userActive()).toBe(true)
     expect(preempted).toBe(1)
+    clock.advance(USER_ACTIVE_LEASE_MS)
+    activity.noteUserInput('guest', 'pointer')
+    expect(preempted).toBe(2)
     release()
     expect(activity.state()).toBe('user-active')
   })
@@ -345,11 +389,11 @@ describe('an agent step in the person\'s tab', () => {
     const h = harness()
     h.add('uitab_a', threadId)
     await h.open()
-    h.hooks.intercept = (method) => { if (method === 'Page.navigate') h.activity('uitab_a').noteUserInput('window') }
-    // Opening the tab again at a URL: the person's click lands after the navigation was sent.
+    // The person's click lands once the debugger has the navigation, before the page has loaded.
+    h.hooks.sent = (uiTabId, method) => { if (uiTabId === 'uitab_a' && method === 'Page.navigate') h.activity('uitab_a').noteUserInput('window') }
     const reopened = await h.backend.call(req('session.open', { uiTabId: 'uitab_a', threadId, url: 'http://127.0.0.1/next' }))
     expect(reopened.error).toMatchObject({ code: 'human_controlled', message: expect.stringContaining('took over the browser') })
-    expect(h.commands.filter((method) => method === 'Page.navigate')).toHaveLength(1)
+    expect(h.sent.get('uitab_a')!.filter((method) => method === 'Page.navigate')).toHaveLength(1)
     expect(h.sleeps).toEqual([])
     await h.backend.shutdown()
   })
@@ -406,18 +450,38 @@ describe('an agent\'s tabs', () => {
     await h.backend.shutdown()
   })
 
-  it('works in one tab while the person uses another, with no wait', async () => {
+  it('clicks in one tab while the person uses another, with no wait', async () => {
     const { h, session } = await setup()
     h.activity('uitab_a').pin('address')
     const tabs = await h.listTabs(session.id)
     const switched = await h.tabsCall(session.id, 'tabs.switch', { tabId: byTitle(tabs, 'uitab_b').id })
     expect(switched.ok, JSON.stringify(switched.error)).toBe(true)
-    const filled = await h.fill(session, 'Ada', { tabId: byTitle(tabs, 'uitab_b').id })
-    expect(filled.ok, JSON.stringify(filled.error)).toBe(true)
+    const clicked = await h.click(session, { tabId: byTitle(tabs, 'uitab_b').id })
+    expect(clicked.result).toMatchObject({ outcome: 'verified' })
     expect(h.sleeps).toEqual([])
-    expect(h.pairs.get('uitab_b')!.page.nameValue).toBe('Ada')
-    expect(h.pairs.get('uitab_a')!.page.nameValue).toBe('')
+    expect(h.pairs.get('uitab_b')!.page.result).toBe('saved::pwlen=0')
     expect(h.activity('uitab_a').state()).toBe('user-active')
+    await h.backend.shutdown()
+  })
+
+  it('types in another tab only once the person has left the address bar, so it never takes their keyboard focus', async () => {
+    const { h, session } = await setup()
+    h.activity('uitab_a').pin('address')
+    const tabB = byTitle(await h.listTabs(session.id), 'uitab_b').id
+    await h.tabsCall(session.id, 'tabs.switch', { tabId: tabB })
+    const guestB = h.pairs.get('uitab_b')!.guest
+    const focusWhileWaiting: number[] = []
+    h.hooks.onSleep = () => {
+      focusWhileWaiting.push(guestB.keyboardFocusCalls)
+      // The person leaves the address bar during the first wait; their lease runs on for 3 s.
+      h.activity('uitab_a').unpin('address')
+    }
+    const filled = await h.fill(session, 'Ada', { tabId: tabB })
+    expect(filled.result).toMatchObject({ outcome: 'verified' })
+    expect(h.sleeps).toEqual([500, 1000, 2000])
+    expect(focusWhileWaiting).toEqual([0, 0, 0])
+    expect(guestB.keyboardFocusCalls).toBeGreaterThan(0)
+    expect(h.pairs.get('uitab_b')!.page.nameValue).toBe('Ada')
     await h.backend.shutdown()
   })
 
@@ -499,5 +563,242 @@ describe('an agent\'s tabs', () => {
     const observed = await h.observe(session.id)
     expect(observed.tabId).toBe(byTitle(tabs, 'uitab_b').id)
     await h.backend.shutdown()
+  })
+})
+
+describe('one step at a time, and only in the session\'s own tabs', () => {
+  const byTitle = (tabs: BrowserTab[], title: string) => tabs.find((tab) => tab.title === title)!
+
+  it('makes a fill wait for a URL the agent is still loading in the same tab, then fences it as stale', async () => {
+    const h = harness()
+    const pair = h.add('uitab_a', threadId)
+    const session = await h.open()
+    const release = pair.debugger.holdMethod('Page.navigate')
+    const reopening = h.backend.call(req('session.open', { uiTabId: 'uitab_a', threadId, url: 'http://127.0.0.1/next' }))
+    await pair.debugger.waitUntilHeld('Page.navigate')
+    let settled = false
+    const filling = h.fill(session, 'Ada').then((result) => { settled = true; return result })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    // While the URL loads, the fill has not run: nothing typed, no answer yet.
+    expect(settled).toBe(false)
+    expect(h.sent.get('uitab_a')).not.toContain('Input.insertText')
+    release()
+    expect((await reopening).ok).toBe(true)
+    const filled = await filling
+    // It ran after the new page came: its observation was of the old one.
+    expect(filled.error?.code).toBe('stale_generation')
+    expect(h.sent.get('uitab_a')).not.toContain('Input.insertText')
+    await h.backend.shutdown()
+  })
+
+  it('stops waiting for a page to load when the call is stopped, and frees the tab at once', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    await h.open()
+    const controller = new AbortController()
+    h.hooks.slowLoad = true
+    let during: AttachedTabActivity | undefined
+    // The URL went out; the page is still loading (the fake never says so: the wait would run its full 8 s).
+    h.hooks.sent = (_uiTabId, method) => {
+      if (method !== 'Page.navigate') return
+      during = h.activity('uitab_a').state()
+      setTimeout(() => controller.abort(), 10)
+    }
+    const reopening = h.backend.call(req('session.open', { uiTabId: 'uitab_a', threadId, url: 'http://127.0.0.1/slow' }), { signal: controller.signal })
+    const outcome = await Promise.race([reopening, new Promise<'still waiting'>((resolve) => setTimeout(() => resolve('still waiting'), 1_000))])
+    expect(outcome).not.toBe('still waiting')
+    expect((outcome as Awaited<typeof reopening>).error?.code).toBe('cancelled')
+    expect(during).toBe('agent-busy')
+    expect(h.activity('uitab_a').state()).toBe('idle')
+    await h.backend.shutdown()
+  })
+
+  it('lets go of a tab moved to another thread, so that thread\'s agent can open it', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    const pairB = h.add('uitab_b', threadId)
+    const session = await h.open()
+    await h.tabsCall(session.id, 'tabs.switch', { tabId: byTitle(await h.listTabs(session.id), 'uitab_b').id })
+    expect(pairB.debugger.attached).toBe(true)
+    h.move('uitab_b', 'thread_2')
+    expect(pairB.debugger.attached).toBe(false)
+    const other = await h.open('uitab_b', 'thread_2')
+    expect(other.threadId).toBe('thread_2')
+    await h.backend.shutdown()
+  })
+
+  it('stops a step waiting for the person once its tab moves to another thread, and never acts in it', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    const pageB = h.add('uitab_b', threadId).page
+    const session = await h.open()
+    const tabB = byTitle(await h.listTabs(session.id), 'uitab_b').id
+    await h.tabsCall(session.id, 'tabs.switch', { tabId: tabB })
+    h.activity('uitab_b').noteUserInput('window')
+    h.hooks.blockSleep = true
+    h.hooks.onSleep = () => { if (h.sleeps.length === 1) setTimeout(() => h.move('uitab_b', 'thread_2'), 5) }
+    const filled = await h.fill(session, 'Ada', { tabId: tabB })
+    expect(filled.error?.code).toBe('stale_ref')
+    expect(h.sleeps).toEqual([500])
+    expect(pageB.nameValue).toBe('')
+    await h.backend.shutdown()
+  })
+
+  it('fails a step waiting on a tab that closes at once, though the person was in its address bar', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    h.add('uitab_b', threadId)
+    const session = await h.open()
+    const tabB = byTitle(await h.listTabs(session.id), 'uitab_b').id
+    await h.tabsCall(session.id, 'tabs.switch', { tabId: tabB })
+    h.activity('uitab_b').pin('address')
+    h.hooks.blockSleep = true
+    h.hooks.onSleep = () => {
+      if (h.sleeps.length !== 1) return
+      setTimeout(() => {
+        h.owners.delete('uitab_b')
+        h.registry.revokeUiTab('uitab_b')
+      }, 5)
+    }
+    const filled = await h.fill(session, 'Ada', { tabId: tabB })
+    expect(filled.error?.code).toBe('stale_ref')
+    expect(h.sleeps).toEqual([500])
+    await h.backend.shutdown()
+  })
+
+  it('keeps the control lease when a new tab loads a URL, so the next step in it works', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    const session = await h.open()
+    const opened = await h.tabsCall(session.id, 'tabs.new', { url: 'http://127.0.0.1/form' })
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+    const filled = await h.fill(session, 'Ada', { tabId: (opened.result as BrowserTab).id })
+    expect(filled.result).toMatchObject({ outcome: 'verified' })
+    expect(h.pairs.get('uitab_new_1')!.page.nameValue).toBe('Ada')
+    await h.backend.shutdown()
+  })
+
+  it('keeps a run without a person\'s grant to its thread\'s own tabs', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    h.add('uitab_shared', null)
+    const opened = await h.backend.call(req('session.open', { uiTabId: 'uitab_a', threadId, ownTabsOnly: true }))
+    const session = (opened.result as { session: BrowserSessionRecord }).session
+    expect((await h.listTabs(session.id)).map((tab) => tab.title)).toEqual(['uitab_a'])
+    // A person's run in the same window sees the shared tab.
+    h.add('uitab_b', threadId)
+    const granted = await h.open('uitab_b', threadId)
+    expect((await h.listTabs(granted.id)).map((tab) => tab.title).sort()).toEqual(['uitab_a', 'uitab_b', 'uitab_shared'])
+    await h.backend.shutdown()
+  })
+
+  it('ends only its own handover when a session closes, never another session\'s', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    h.add('uitab_b', threadId)
+    const driver = await h.backend.call(req('session.open', { uiTabId: 'uitab_b', threadId, runId: 'run_2' }))
+    const driverId = (driver.result as { session: BrowserSessionRecord }).session.id
+    expect((await h.backend.call(req('control.take', { sessionId: driverId, owner: 'human' }))).ok).toBe(true)
+    expect(h.activity('uitab_b').state()).toBe('waiting-human')
+    // Another session of the thread knows the tab from its list, then closes.
+    const lister = await h.open()
+    expect((await h.listTabs(lister.id)).map((tab) => tab.title)).toContain('uitab_b')
+    expect((await h.backend.call(req('session.close', { sessionId: lister.id }))).ok).toBe(true)
+    expect(h.activity('uitab_b').state()).toBe('waiting-human')
+    await h.backend.shutdown()
+  })
+
+  it('opens no new tab while the person has the browser the agent handed them', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    const session = await h.open()
+    expect((await h.backend.call(req('control.take', { sessionId: session.id, owner: 'human' }))).ok).toBe(true)
+    const refused = await h.tabsCall(session.id, 'tabs.new', { url: 'http://127.0.0.1/next' })
+    expect(refused.error?.code).toBe('human_controlled')
+    expect(h.window.opened).toEqual([])
+    await h.backend.shutdown()
+  })
+
+  it('closes only tabs an agent of its thread opened, and leaves the closed tab out of the list it returns', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    h.add('uitab_mine', threadId)
+    h.add('uitab_person', threadId, { byPerson: true })
+    const session = await h.open()
+    const tabs = await h.listTabs(session.id)
+    const refused = await h.tabsCall(session.id, 'tabs.close', { tabId: byTitle(tabs, 'uitab_person').id })
+    expect(refused.error?.code).toBe('policy_denied')
+    expect(h.window.closed).toEqual([])
+    // The window has not closed the tab yet when the answer is made: it is not listed all the same.
+    const closed = await h.tabsCall(session.id, 'tabs.close', { tabId: byTitle(tabs, 'uitab_mine').id })
+    expect(closed.ok, JSON.stringify(closed.error)).toBe(true)
+    expect(h.window.closed).toEqual(['uitab_mine'])
+    expect((closed.result as { tabs: BrowserTab[] }).tabs.map((tab) => tab.title).sort()).toEqual(['uitab_a', 'uitab_person'])
+    expect((await h.listTabs(session.id)).map((tab) => tab.title).sort()).toEqual(['uitab_a', 'uitab_person'])
+    await h.backend.shutdown()
+  })
+
+  it('remembers that a turn gave way even when its first open failed and opened no session', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    h.activity('uitab_a').pin('address')
+    const open = () => h.backend.call(req('session.open', { uiTabId: 'uitab_a', threadId, url: 'http://127.0.0.1/next', turn: 'run_1/turn_1' }))
+    expect((await open()).error).toMatchObject({ code: 'human_controlled', message: USER_CONFLICT_MESSAGE })
+    expect(h.sleeps).toEqual([...CONFLICT_BACKOFF_MS])
+    h.sleeps.length = 0
+    expect((await open()).error).toMatchObject({ code: 'human_controlled', message: USER_CONFLICT_REPEAT_MESSAGE })
+    expect(h.sleeps).toEqual([])
+    await h.backend.shutdown()
+  })
+
+  it('remembers that a turn gave way after a step in another tab worked', async () => {
+    const h = harness()
+    h.add('uitab_a', threadId)
+    h.add('uitab_b', threadId)
+    const session = await h.open()
+    const tabB = byTitle(await h.listTabs(session.id), 'uitab_b').id
+    h.activity('uitab_a').pin('address')
+    expect((await h.click(session, { turn: 'run_1/turn_1' })).error).toMatchObject({ message: USER_CONFLICT_MESSAGE })
+    expect(h.sleeps).toEqual([...CONFLICT_BACKOFF_MS])
+    h.sleeps.length = 0
+    expect((await h.click(session, { turn: 'run_1/turn_1', tabId: tabB })).result).toMatchObject({ outcome: 'verified' })
+    const again = await h.click(session, { turn: 'run_1/turn_1', tabId: byTitle(await h.listTabs(session.id), 'uitab_a').id })
+    expect(again.error).toMatchObject({ code: 'human_controlled', message: USER_CONFLICT_REPEAT_MESSAGE })
+    expect(h.sleeps).toEqual([])
+    await h.backend.shutdown()
+  })
+})
+
+describe('the person\'s scrolling and the agent\'s', () => {
+  it('takes the wheel events that follow the agent\'s scroll for its own, and the person\'s later ones for theirs', () => {
+    const clock = new FakeClock()
+    const activity = new TabActivity(clock)
+    // The order Electron gives: the page's wheel during the agent's command, then more after it returned.
+    const scrolling = activity.beginSynthetic('wheel')
+    activity.noteUserInput('guest', 'wheel')
+    scrolling()
+    activity.noteUserInput('guest', 'wheel')
+    clock.advance(AGENT_WHEEL_TAIL_MS - 50)
+    activity.noteUserInput('guest', 'wheel')
+    clock.advance(AGENT_WHEEL_TAIL_MS - 50)
+    activity.noteUserInput('guest', 'wheel')
+    expect(activity.userActive()).toBe(false)
+    // A click during the tail is the person's.
+    activity.noteUserInput('guest', 'pointer')
+    expect(activity.userActive()).toBe(true)
+    clock.advance(USER_ACTIVE_LEASE_MS)
+    // The tail never runs past its limit, and a wheel after it is the person's.
+    clock.advance(AGENT_WHEEL_TAIL_MAX_MS)
+    activity.noteUserInput('guest', 'wheel')
+    expect(activity.userActive()).toBe(true)
+  })
+
+  it('forgets the address bar of a tab that closed: nobody is using it', () => {
+    const activity = new TabActivity(new FakeClock())
+    activity.pin('address')
+    expect(activity.userActive()).toBe(true)
+    activity.dispose()
+    expect(activity.userActive()).toBe(false)
+    expect(activity.pinned()).toBe(false)
   })
 })
