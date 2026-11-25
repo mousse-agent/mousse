@@ -116,7 +116,8 @@ it('names a staged applet the cap refused, also when one of the reply\'s own app
     results.push(args[3]?.resultText)
     return markTerminal(...args)
   })
-  const own = ['Calculator', 'Table', 'Map'].map((title) => fence({ ...source, title })).join('\n')
+  // The reply's last applet has the staged one's title: the cap refuses the staged one, which takes nothing of it.
+  const own = ['Table', 'Map', 'Calculator'].map((title) => fence({ ...source, title })).join('\n')
   const adapter = piAdapter(() => own + '\nDone.')
   const startTurn = adapter.startTurn.bind(adapter)
   adapter.startTurn = async (input, sink, ctl, host) => {
@@ -127,7 +128,7 @@ it('names a staged applet the cap refused, also when one of the reply\'s own app
   await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
 
   expect(main.applets.list(thread.id)).toHaveLength(3)
-  expect(results.at(-1)).toMatch(/^\[Applet: Calculator \(appletId [^)]+\)\]\n\[Applet: Table \(appletId [^)]+\)\]\n\[Applet: Map \(appletId [^)]+\)\]\nDone\.\n\n\[Applet: Calculator\]$/)
+  expect(results.at(-1)).toMatch(/^\[Applet: Table \(appletId [^)]+\)\]\n\[Applet: Map \(appletId [^)]+\)\]\n\[Applet: Calculator \(appletId [^)]+\)\]\nDone\.\n\n\[Applet: Calculator\]$/)
 })
 
 it('cuts a fence an earlier row opened from what a stopped run hands back', async () => {
@@ -495,7 +496,8 @@ it('publishes a tool-staged applet whose source holds a separator then backticks
 
   // The staged fence follows the unfinished one, which publication reads as text to the end, as on master: neither publishes.
   expect(main.applets.list(thread.id)).toEqual([])
-  expect(results.at(-1)).toBe('Almost:\n[Applet: Draft]\n\n[Applet: Calculator]')
+  // Both are one cut, to the end: named as one applet, never by its source.
+  expect(results.at(-1)).toBe('Almost:\n[Applet]')
 
   // Without the unfinished fence, the staged one publishes whole.
   const second = await fixture()

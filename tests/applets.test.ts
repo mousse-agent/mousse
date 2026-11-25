@@ -363,25 +363,31 @@ describe('applet source kept from a model', () => {
     expect(redactAppletFences('```mousse-applet\n{"data":{"title":"Dataset heading"},"js":"')).toBe('[Applet]')
   })
 
-  it('reads a stored reply from the text the model wrote, naming published applets by their reference lines', () => {
-    const totals = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Totals' + LS + '```js', description: 'd' }
-    // The stored parts are not read: publication's added text could end a cut early.
-    const content = 'Here:\n' + fence({ ...source, title: totals.title }) + '\n' + fence(withCanary) + 'Done.'
-    const named = modelFacingReplyText({ role: 'assistant', content, presentationParts: [{ type: 'text', text: CANARY }, { type: 'applet', reference: totals }] })
-    expect(named).toBe('Here:\n[Applet: Totals ``js (appletId applet_a, revision rev_a)]\n\n[Applet: Calculator]\nDone.')
+  it('reads a stored reply from the text the model wrote, naming each published applet on the fence that published it', () => {
+    const { store } = fixture()
+    // The first fence names the second's title but fails (schema version 2): only the second publishes.
+    const content = 'Here:\n' + fence({ ...source, schemaVersion: 2 }) + '\n' + fence(withCanary) + 'Done.'
+    const presentationParts = publishAppletPresentation(store, { threadId: 'one', messageId: 'm', turnId: 't', content })
+    const [published] = store.list('one')
+    const named = modelFacingReplyText({ role: 'assistant', content, presentationParts })
+    expect(named).toBe(`Here:\n[Applet: Calculator]\n\n[Applet: Calculator (appletId ${published!.appletId}, revision ${published!.revisionId})]\nDone.`)
+    // Parts that do not match the text as publication read it put no reference on a fence: they follow the text.
+    expect(modelFacingReplyText({ role: 'assistant', content, presentationParts: [{ type: 'applet', reference: published! }] })).toBe(
+      `Here:\n[Applet: Calculator]\n\n[Applet: Calculator]\nDone.\n\n[Applet: Calculator (appletId ${published!.appletId}, revision ${published!.revisionId})]`
+    )
   })
 
   it('names a published applet inside an outer fence publication did not read, and cuts the outer one to its end', () => {
     const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Calculator', description: 'd' }
     const content = ' ~~~mousse-applet\n' + fence(source) + CANARY + '\n~~~\nDone.'
-    expect(redactAppletFences(content, [reference])).toBe(' [Applet]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\nDone.')
-    // A published applet the text does not name by its title still reaches the model, after the text.
-    expect(redactAppletFences('Done.', [reference])).toBe('Done.\n\n[Applet: Calculator (appletId applet_a, revision rev_a)]')
+    const at = new Map([[content.indexOf('```'), reference]])
+    expect(redactAppletFences(content, { at })).toBe(' [Applet]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\nDone.')
+    expect(redactAppletFences('Done.', { after: [reference] })).toBe('Done.\n\n[Applet: Calculator (appletId applet_a, revision rev_a)]')
   })
 
   it('names a published applet the same when its result is redacted again', () => {
     const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Demo ~~~mousse-applet', description: 'd' }
-    const once = redactAppletFences(fence({ ...source, title: reference.title }) + 'Done.', [reference])
+    const once = redactAppletFences(fence({ ...source, title: reference.title }) + 'Done.', { at: new Map([[0, reference]]) })
     // The title is an opening too, inside the fence: the cut runs to the end, which only hides more.
     expect(once).toContain('[Applet: Demo ~~mousse-applet (appletId applet_a, revision rev_a)]')
     expect(redactAppletFences(once)).toBe(once)
@@ -397,8 +403,8 @@ describe('applet source kept from a model', () => {
   })
   it('returns the text from a point, read as part of the whole', () => {
     const turn = 'Draft:\n~~~mousse-applet\n{"js":"' + CANARY + '"}\n~~~\nDone.'
-    expect(redactAppletFences(turn, [], turn.indexOf('{'))).toBe('[Applet]\nDone.')
-    expect(redactAppletFences(turn, [], turn.indexOf('Done.'))).toBe('Done.')
+    expect(redactAppletFences(turn, {}, turn.indexOf('{'))).toBe('[Applet]\nDone.')
+    expect(redactAppletFences(turn, {}, turn.indexOf('Done.'))).toBe('Done.')
   })
 
   it('reads a last row with the rows before it as they streamed, so no row closes a fence early', () => {
@@ -411,11 +417,8 @@ describe('applet source kept from a model', () => {
     })
     expect(redactAppletTail(record.allText(), record.finalText())).toBe('[Applet]')
     expect(redactAppletTail('Draft:\n', 'Done.')).toBe('Done.')
-  })
-
-  it('names a published applet on the fence that has all its parts, not an earlier one with its title', () => {
-    const reference = { appletId: 'applet_a', revisionId: 'rev_a', sourceHash: 'h', title: 'Calculator', description: 'd' }
-    expect(redactAppletFences(fence({ title: 'Calculator' }) + fence(source), [reference])).toBe('[Applet: Calculator]\n[Applet: Calculator (appletId applet_a, revision rev_a)]\n')
+    // A last row that is the end of the rows as it is keeps its white space.
+    expect(redactAppletTail('Here:\n    return 1\n', '    return 1\n')).toBe('    return 1\n')
   })
 
   it('leaves an action block inside an applet fence, so the fence is still cut whole', () => {

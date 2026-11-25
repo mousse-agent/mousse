@@ -15,7 +15,7 @@ import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { AppletValidationError, appendStagedApplets, appletReferenceLine, modelFacingReplyText, publishedApplets, redactAppletFences, redactAppletTail, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
+import { AppletValidationError, appendStagedApplets, modelFacingReplyText, publishedApplets, redactAppletFences, redactAppletTail, validateAppletSubmission, type AppletReference, type AppletSubmission } from '../../shared/applets'
 import { appletRevisionFromEdits, readAppletSource } from '../applets/appletSource'
 import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -16586,10 +16586,10 @@ export class OrchestratorService extends EventEmitter {
     const earlierText = split ? replyOnlyText.slice(0, replyOnlyText.length - finalReplyText.length) : ''
     const lastReply = split ? finalReplyText : replyOnlyText
     const displayText = earlierText + appendStagedApplets(lastReply, appletFences)
-    // The run's result (what a parent or `thread_wait` reads) is the text the model wrote with its applet fences cut, and
-    // the staged applets after it, by title until the reply publishes them, then by reference line (below). Fences added
-    // to the text are never read with it, where their closing lines could end a cut early.
-    let resultText = [redactAppletFences(replyOnlyText), ...stagedApplets.map((source) => appletReferenceLine({ title: source.title }))].filter(Boolean).join('\n\n')
+    // The run's result (what a parent or `thread_wait` reads) is the turn's text with its applet fences cut, each named by
+    // title until the reply publishes it, then by its reference line (below). The staged fences follow all the model
+    // wrote, so they never end one of its fences early.
+    let resultText = redactAppletFences(displayText)
     const finalText = unshownReplyText(displayText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
@@ -16633,15 +16633,12 @@ export class OrchestratorService extends EventEmitter {
         this.persist(true)
         this.emitMessageUpdated(finalMessage)
         // The text the model wrote again, with the last row's published applets named by their reference lines.
+        // Each published applet is named on the fence that published it, found as publication read the stored reply.
         if (finalMessage.presentationParts) {
-          const published = publishedApplets(finalMessage.presentationParts)
-          // The staged fences come last, so their publications are the last references: from the end, each staged applet
-          // the next reference names published, and any other is named by title. The rest are the model's own fences.
-          let modelOwn = published.length
-          const staged = [...stagedApplets].reverse().map((source) =>
-            modelOwn > 0 && published[modelOwn - 1]!.title.trim() === source.title.trim() ? appletReferenceLine(published[--modelOwn]!) : appletReferenceLine({ title: source.title })
-          ).reverse()
-          resultText = [redactAppletFences(replyOnlyText, published.slice(0, modelOwn)), ...staged].filter(Boolean).join('\n\n')
+          const published = publishedApplets(finalMessage.content, finalMessage.presentationParts, displayText.length - finalMessage.content.length)
+          // A stored reply that is not the end of the turn's text places nothing: its references follow the text.
+          const placed = displayText.endsWith(finalMessage.content)
+          resultText = redactAppletFences(displayText, placed ? published : { after: [...(published.at?.values() ?? []), ...(published.after ?? [])] })
         }
       }
     }
