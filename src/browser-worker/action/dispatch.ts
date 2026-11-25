@@ -16,6 +16,7 @@ import { BrowserWorkerError, fail } from '../errors'
 import { browserNavigationUrl } from '../../shared/browser/validation'
 import type { ActionableTarget } from './actionability'
 import { readControlValue } from './actionability'
+import { sleep } from '../util'
 
 function mouseButton(button?: 'left' | 'right' | 'middle'): 'left' | 'right' | 'middle' {
   return button ?? 'left'
@@ -358,6 +359,19 @@ export interface NavigationOptions {
   signs?: (frameId: string) => Promise<BrowserPageSigns | undefined>
   /** Answer at the commit (a person's own navigation: their view shows it loading from there). */
   untilCommit?: boolean
+  /** `navigateTab` only: retry once a connection the site closed before answering (default on; tests turn it off). */
+  retryTransient?: boolean
+}
+
+/** Chromium's codes for a connection dropped before any answer: on a cold start, often gone a moment later. */
+const TRANSIENT_CONNECTION_ERRORS = new Set(['net::ERR_CONNECTION_CLOSED', 'net::ERR_CONNECTION_RESET'])
+/** How long `navigateTab` waits before its one retry of a dropped connection. */
+const TRANSIENT_RETRY_DELAY_MS = 250
+/** The least time under the ceiling the retry must have left to be worth it. */
+const TRANSIENT_RETRY_MIN_LEFT_MS = 500
+
+function isTransientConnectionFailure(error: unknown): boolean {
+  return error instanceof BrowserWorkerError && error.problem?.kind === 'unreachable' && TRANSIENT_CONNECTION_ERRORS.has(error.problem.code ?? '')
 }
 
 /**
@@ -371,10 +385,26 @@ export interface NavigationOptions {
 export async function navigateTab(cdp: CdpTransport, cdpSessionId: string, url: string, options: NavigationOptions = {}): Promise<BrowserNavigation> {
   const targetUrl = browserNavigationUrl(url)
   // The command answers with this navigation's own loader: only that one counts.
-  return followNavigation(cdp, cdpSessionId, targetUrl, options, false, async () => {
+  const attempt = (attemptOptions: NavigationOptions) => followNavigation(cdp, cdpSessionId, targetUrl, attemptOptions, false, async () => {
     const result = await cdp.send<{ frameId: string; loaderId?: string; errorText?: string }>('Page.navigate', { url: targetUrl }, { sessionId: cdpSessionId, timeoutMs: 120_000, signal: options.signal })
     return result
   })
+  if (options.retryTransient === false) return attempt(options)
+  // On a cold start Chromium sometimes reports a connection closed or reset before any answer, and
+  // the same address opens a moment later: that one failure is retried once, within the same ceiling.
+  const ceilingMs = options.ceilingMs ?? (options.pace ?? navigationPace).ceilingMs()
+  const startedAt = Date.now()
+  try {
+    return await attempt({ ...options, ceilingMs })
+  } catch (error) {
+    if (!isTransientConnectionFailure(error) || options.signal?.aborted) throw error
+    const leftMs = ceilingMs - (Date.now() - startedAt) - TRANSIENT_RETRY_DELAY_MS
+    if (leftMs <= TRANSIENT_RETRY_MIN_LEFT_MS) throw error
+    await sleep(TRANSIENT_RETRY_DELAY_MS, options.signal).catch(() => {
+      throw new BrowserWorkerError('cancelled', 'Navigation cancelled')
+    })
+    return attempt({ ...options, ceilingMs: leftMs })
+  }
 }
 
 /** Back, forward or reload in a tab, followed like `navigateTab` (`url` is where it was). */
