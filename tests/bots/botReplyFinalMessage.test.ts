@@ -94,9 +94,12 @@ function notesThenCalls(input: Parameters<Chat>[0]): string {
   input.onText('Checking the system.')
   input.onTool?.({ phase: 'start', callId: 'sh-1', title: 'Bash', toolName: 'Bash' })
   input.onTool?.({ phase: 'complete', callId: 'sh-1', title: 'Bash', toolName: 'Bash' })
+  // Claude's frames put a blank line before each new text block, and say it is their own (`TurnFrames`).
+  input.onTextSeparator?.('Checking the system.'.length, '\n\n')
   input.onText(`Checking the system.\n\n${NOTE}`)
   input.onTool?.({ phase: 'start', callId: 'sh-2', title: 'Bash', toolName: 'Bash' })
   input.onTool?.({ phase: 'complete', callId: 'sh-2', title: 'Bash', toolName: 'Bash' })
+  input.onTextSeparator?.(`Checking the system.\n\n${NOTE}`.length, '\n\n')
   return `Checking the system.\n\n${NOTE}`
 }
 

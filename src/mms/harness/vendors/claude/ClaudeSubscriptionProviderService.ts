@@ -314,6 +314,10 @@ export type ClaudeSubscriptionChatInput = {
   continuationId?: string
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  /** A separator of the frames' own in the cumulative text (`TurnFrameSink.onTextSeparator`). */
+  onTextSeparator?: (atOffset: number, sep: string) => void
+  /** A separator of the frames' own in the cumulative thinking (`TurnFrameSink.onThinkingSeparator`). */
+  onThinkingSeparator?: (atOffset: number, sep: string) => void
   /** What Claude is doing while it shows nothing (`TurnFrameSink.onStatus`). */
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */

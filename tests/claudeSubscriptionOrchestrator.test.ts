@@ -391,11 +391,14 @@ describe('a turn whose notes come before its tool calls', () => {
       input.onText('Checking the tests.')
       input.onTool?.({ phase: 'start', callId: 'run-tests', title: 'Bash', toolName: 'Bash' })
       input.onTool?.({ phase: 'complete', callId: 'run-tests', title: 'Bash', toolName: 'Bash' })
+      // Claude's frames put a blank line before each new text block, and say it is their own (`TurnFrames`).
+      input.onTextSeparator?.('Checking the tests.'.length, '\n\n')
       input.onText('Checking the tests.\n\nThey pass. Reading the logs next.')
       input.onTool?.({ phase: 'start', callId: 'read-logs', title: 'Read', toolName: 'Read' })
       input.onTool?.({ phase: 'complete', callId: 'read-logs', title: 'Read', toolName: 'Read' })
       input.onThinking?.('The logs are clean.')
       const text = 'Checking the tests.\n\nThey pass. Reading the logs next.\n\nEverything works: 6 files pass and the logs are clean.'
+      input.onTextSeparator?.('Checking the tests.\n\nThey pass. Reading the logs next.'.length, '\n\n')
       input.onText(text)
       return text
     })

@@ -67,6 +67,8 @@ export interface CursorChatInput {
    */
   bot?: true
   onText(text: string): void
+  /** The session put `sep` into the cumulative text at `atOffset` (between two runs' replies): not the agent's words. */
+  onTextSeparator?(atOffset: number, sep: string): void
   onThinking?(text: string): void
   onTool?(event: CursorToolEvent): void
   drainSteer?(): string | undefined
@@ -707,18 +709,20 @@ export class CursorSessions {
       }
       const tools = new Map<string, string>()
       const base = progress.text ? `${progress.text}\n\n` : ''
+      if (base) input.onTextSeparator?.(progress.text.length, '\n\n')
       let runText = ''
       host.watchRun(runId, {
         update: (update) => {
           switch (update.type) {
             case 'text-delta':
-              if (typeof update.text !== 'string') return
+              // An empty delta adds nothing to show.
+              if (typeof update.text !== 'string' || !update.text) return
               runText += update.text
               progress.text = base + runText
               input.onText(progress.text)
               return
             case 'thinking-delta':
-              if (typeof update.text !== 'string') return
+              if (typeof update.text !== 'string' || !update.text) return
               thinking += update.text
               input.onThinking?.(thinking)
               return
