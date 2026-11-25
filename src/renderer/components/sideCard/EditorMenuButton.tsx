@@ -55,12 +55,13 @@ export function OpenInEditor({ compact = false }: { compact?: boolean } = {}) {
   const { projectId, path } = useActiveProjectLocation()
   const profileId = useAppStore((s) => s.profileId)
   const editors = useEditorsStore((s) => s.editors)
-  const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
-  const node = thread?.node
+  // The thread's id and computer only: a new copy of its row (a model or level saved) does not draw the button again.
+  const threadId = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId)?.id)
+  const node = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId)?.node)
   const computer = useComputer(node)
   const [lastId, setLastId] = useState<string | null>(() => loadLastEditorId(profileId))
   const local = Boolean(projectId && path) && !node
-  const remote = Boolean(projectId && node && thread)
+  const remote = Boolean(projectId && node && threadId)
 
   useEffect(() => { setLastId(loadLastEditorId(profileId)) }, [profileId])
   useEffect(() => {
@@ -68,7 +69,7 @@ export function OpenInEditor({ compact = false }: { compact?: boolean } = {}) {
   }, [local, remote])
 
   // Keyed by thread: an open or ask still under way for the previous thread reports nothing in this one.
-  if (node) return projectId && thread ? <OpenInRemoteEditor key={thread.id} threadId={thread.id} node={node} computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} profileId={profileId} /> : null
+  if (node) return projectId && threadId ? <OpenInRemoteEditor key={threadId} threadId={threadId} node={node} computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} profileId={profileId} /> : null
   if (!projectId || !path || !editors) return null
   const open = async (editor: EditorInfo, options: { remember?: boolean } = {}) => {
     await window.mousse.editors.open(editor.id, path)

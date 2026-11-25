@@ -36,7 +36,10 @@ const rowIcon = (Icon: typeof Laptop) => <Icon size={14} aria-hidden="true" />
  */
 export function DeviceSection({ threadId, projectId }: SideCardSectionContext) {
   const name = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
-  const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
+  // Only what the header shows: a new copy of the row (a model or level saved) does not draw it again.
+  const node = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId)?.node)
+  const offline = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId)?.offline)
+  const notShared = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId)?.notShared)
   const isNew = useAppStore((s) => isNewEmptyThread(
     s.activeThreadId,
     s.threads.find((entry) => entry.id === s.activeThreadId),
@@ -44,10 +47,10 @@ export function DeviceSection({ threadId, projectId }: SideCardSectionContext) {
   ))
   const locked = useAppStore(isComposerWorkspaceLocked)
   const project = useAppStore((s) => (projectId ? s.projects.find((entry) => entry.id === projectId)?.name ?? null : null))
-  const computer = useComputer(thread?.node)
-  const remote = Boolean(thread?.node) && !isNew
+  const computer = useComputer(node)
+  const remote = Boolean(node) && !isNew
   const computerName = remote ? computer?.name ?? UNKNOWN_COMPUTER_NAME : name
-  const state = remote && thread ? threadComputerState(thread, computer) : 'online'
+  const state = remote ? threadComputerState({ offline, notShared }, computer) : 'online'
   const Icon = remote ? Server : Laptop
   return (
     <section className="side-card-section side-card-header" data-thread-id={threadId ?? undefined} aria-label="Computer">

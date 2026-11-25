@@ -508,4 +508,28 @@ describe('another computer’s lists over a real link', () => {
     expect(routed.version.epoch).not.toBe(theirs.epoch)
     expect(routed.version.seq).toBeGreaterThan(before.version.seq)
   }, 60_000)
+  it('answers a routed change with the thread as this computer lists it: on its computer, in its place', async () => {
+    const remote = t.owner.threads.createThread('Listed here')
+    const id = t.qualified(remote.id)
+    await vi.waitFor(() => expect(lists().row(id)).toBeDefined(), { timeout: 30_000 })
+    for (const [method, params] of [
+      ['threads.setModel', { threadId: id, model: { llmProvider: 'claude-subscription', model: 'sonnet', effort: 'high' } }],
+      ['threads.setPermissionMode', { threadId: id, mode: 'ask' }],
+      ['threads.pin', { threadId: id, pinned: true }],
+      ['threads.rename', { threadId: id, name: 'Renamed here' }],
+      ['threads.get', { threadId: id }]
+    ] as const) {
+      const { thread } = await t.dispatch(method, params)
+      expect(thread.id, method).toBe(id)
+      expect(thread.node, method).toBe(t.node)
+      expect(thread.order, method).toBe(lists().row(id)!.order)
+      expect(thread.offline, method).toBeUndefined()
+    }
+    // The owner's own changes are in the reply too.
+    const { thread } = await t.dispatch('threads.get', { threadId: id })
+    expect(thread.modelOverride).toMatchObject({ model: 'sonnet', effort: 'high' })
+    expect(thread.permissionMode).toBe('ask')
+    expect(thread.name).toBe('Renamed here')
+    expect(thread.pinnedAt).toEqual(expect.any(String))
+  }, 60_000)
 })
