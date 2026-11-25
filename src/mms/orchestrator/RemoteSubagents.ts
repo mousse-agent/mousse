@@ -1,3 +1,4 @@
+import { modelFacingReplyText } from '../../shared/applets'
 import { ROUTED_AGENT_KEY, ROUTED_DEADLINE_KEY, ROUTED_DEADLINE_SINCE, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { qualifyId } from '../../shared/threadRef'
 import type { ThreadRunsOn } from '../../shared/types'
@@ -85,13 +86,18 @@ function terminalStatus(status: RunStatus): RunTerminalStatus {
   return status === 'completed' || status === 'cancelled' || status === 'interrupted' || status === 'failed' ? status : 'failed'
 }
 
-/** The final message of a far run: the last assistant message after the run's own user message. */
+/**
+ * The final message of a far run: the last assistant message after the run's own user message, with each applet it
+ * published, or failed to publish, as one line (`modelFacingReplyText`), as a local run's result has it.
+ */
 export function finalAssistantText(messages: unknown, userMessageId: string | null | undefined): string | undefined {
   if (!Array.isArray(messages)) return undefined
   const from = userMessageId ? messages.findIndex((message) => isRecord(message) && message.id === userMessageId) : -1
   for (let at = messages.length - 1; at > from; at -= 1) {
     const message: unknown = messages[at]
-    if (isRecord(message) && message.role === 'assistant' && typeof message.content === 'string' && message.content.trim()) return message.content
+    if (!isRecord(message) || message.role !== 'assistant') continue
+    const text = modelFacingReplyText(message)
+    if (text.trim()) return text
   }
   return undefined
 }

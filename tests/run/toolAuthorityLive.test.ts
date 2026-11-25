@@ -256,7 +256,7 @@ describe('skills in a Plan or read-only turn (§1.5)', () => {
 
 describe('applets in a subagent (§1.5)', () => {
   it('are offered and usable, as in the thread that delegated it', () => {
-    const subagent = appTurn({ threadId: 'child', runId: 'r', subagent: true, onPublishApplet: () => ({ queued: true }) }) as AppToolTurn
+    const subagent = appTurn({ threadId: 'child', runId: 'r', subagent: true, onPublishApplet: () => ({ queued: true }), onReadApplet: () => ({}) }) as AppToolTurn
     for (const applet of appletTools()) {
       expect(applet.offered?.(subagent) ?? true).toBe(true)
       expect(applet.available?.(subagent) ?? true).toBe(true)

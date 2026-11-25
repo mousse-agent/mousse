@@ -10,6 +10,7 @@ import { Modal } from '../ui/Modal'
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { AllowPrompt } from './AllowPrompt'
+import { CloudflareSetup } from './CloudflareSetup'
 import { ChoiceRow, clock, Preparing, QrCode, toMs, useNow } from './pairingParts'
 import { JoinedLine, SendLinkPanel } from './SendLinkParts'
 import { hasFeatures, WAY_LABEL, WAY_ORDER, wayFix, wayReason } from './ways'
@@ -21,7 +22,14 @@ interface Invite {
   ways?: NetEngineWay[]
 }
 
-type Step = { kind: 'pick' } | { kind: 'code'; way?: NetEngineWay } | { kind: 'link' }
+type Step =
+  | { kind: 'pick' }
+  | { kind: 'code'; way?: NetEngineWay }
+  | { kind: 'link'; way?: NetEngineWay }
+  | { kind: 'tunnel' }
+
+/** Where the dialog opens when Reach this computer opens it: the tunnel's setup, or a link over one way. */
+export type LetDeviceInStart = { kind: 'tunnel' } | { kind: 'link'; way?: NetEngineWay }
 
 const SSH_HINT = 'Can you SSH into this computer? Add it from the other computer instead. No code needed.'
 
@@ -32,11 +40,14 @@ const SSH_HINT = 'Can you SSH into this computer? Add it from the other computer
  */
 export function LetDeviceInDialog({
   status,
+  initial,
   onClose,
   onSetUp,
   onAddPhone
 }: {
   status: NetEngineStatus | undefined
+  /** Opens at this step instead of the way picker. */
+  initial?: LetDeviceInStart
   onClose: () => void
   /** Opens Reach this computer for a way that needs setting up there (the dialog closes). */
   onSetUp: (way: NetEngineWay) => void
@@ -46,7 +57,18 @@ export function LetDeviceInDialog({
   const engine = status && status.helper.state !== 'not_in_build' ? status : undefined
   const ready = engine?.helper.state === 'running'
   const picker = hasFeatures(status, 'route-readiness', 'invite-way')
-  const [step, setStep] = useState<Step>(() => (picker ? { kind: 'pick' } : { kind: 'code' }))
+  // A code or link names its way only to a helper that takes one.
+  const pickWay = hasFeatures(status, 'invite-way')
+  // Until networking has started, what the helper offers is unknown: the picker waits for its ways, and only a
+  // running helper without the picker goes straight to a code. Once running, the step holds through a restart.
+  const [chosen, setStep] = useState<Step | undefined>(initial)
+  const step: Step = chosen ?? (ready && !picker ? { kind: 'code' } : { kind: 'pick' })
+  useEffect(() => {
+    if (!chosen && ready) setStep(step)
+  }, [chosen, ready, step])
+  // The tunnel's setup is a step here when this computer can run Cloudflare Tunnel itself.
+  const managedTunnel = hasFeatures(status, 'managed-tunnel') && !!engine?.cloudflare
+  const setUp = (way: NetEngineWay) => (way === 'tunnel' && managedTunnel ? setStep({ kind: 'tunnel' }) : onSetUp(way))
   // A device asked to come in (or was let in): the dialog shows only that.
   const [answering, setAnswering] = useState(false)
   const { busy, error, setError, call } = useDaemonCall()
@@ -66,15 +88,34 @@ export function LetDeviceInDialog({
   )
 
   return (
-    <Modal open title="Use this computer from your phone or another computer" onClose={onClose}>
+    <Modal
+      open
+      title={step.kind === 'tunnel' ? 'Cloudflare Tunnel' : 'Use this computer from your phone or another computer'}
+      onClose={onClose}
+    >
       <div className="engine-dialog" data-step={step.kind}>
         {step.kind === 'pick' && (
           <WayPicker
             status={status}
             ready={ready}
             onMake={(way) => setStep({ kind: 'code', way })}
-            onSetUp={onSetUp}
+            onSetUp={setUp}
           />
+        )}
+        {step.kind === 'tunnel' && (
+          <>
+            <CloudflareSetup
+              connection={engine?.cloudflare}
+              readiness={hasFeatures(status, 'route-readiness')}
+              onMake={() => setStep({ kind: 'code', ...(pickWay ? { way: 'tunnel' as const } : {}) })}
+              onOwnTunnel={() => onSetUp('tunnel')}
+            />
+            {picker && (
+              <button type="button" className="engine-text-btn" onClick={() => setStep({ kind: 'pick' })}>
+                Pick another way
+              </button>
+            )}
+          </>
         )}
         {step.kind === 'code' && engine && (
           <CodeStep
@@ -94,12 +135,13 @@ export function LetDeviceInDialog({
         {step.kind === 'link' && (
           <SendLinkPanel
             status={status}
+            way={pickWay ? step.way : undefined}
             onInvitation={(invitation) => {
               linkRef.current = invitation
             }}
           />
         )}
-        {step.kind !== 'link' && !(step.kind === 'code' && answering) && (
+        {step.kind !== 'link' && step.kind !== 'tunnel' && !(step.kind === 'code' && answering) && (
           <>
             <p className="engine-hint">{SSH_HINT}</p>
             <div className="engine-dialog-more">
@@ -108,7 +150,7 @@ export function LetDeviceInDialog({
                   type="button"
                   className="engine-text-btn"
                   title="A link to send in a chat, with a code to read out another way."
-                  onClick={() => setStep({ kind: 'link' })}
+                  onClick={() => setStep({ kind: 'link', ...(step.kind === 'code' && step.way ? { way: step.way } : {}) })}
                 >
                   Send a link with a code instead
                 </button>

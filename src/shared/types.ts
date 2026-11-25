@@ -2208,6 +2208,15 @@ export interface FileAsset {
   canonicalPath?: string
 }
 
+export interface FileMediaSource {
+  url: string
+  mimeType: string
+  size: number
+  /** When the file was last written, as read; absent from an older daemon. */
+  mtimeMs?: number
+  canonicalPath?: string
+}
+
 export type GitChangeStatus =
   | 'modified'
   | 'added'

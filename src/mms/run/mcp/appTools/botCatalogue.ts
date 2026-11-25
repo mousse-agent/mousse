@@ -1,4 +1,6 @@
 import { BOT_CATALOGUE, BOT_CATALOGUE_TOOL, BOT_USE_TOOL, botCatalogueGroup, botCatalogueLine } from '../../../../shared/bots/personal/catalogue'
+import { BOT_COMPUTER_PERMISSION } from '../../../../shared/bots/personal/manifest'
+import { COMPUTER_TOOL_NAMES, COMPUTER_USE_REQUEST_TOOL, COMPUTER_USE_TOOL } from '../../../../shared/computerUse'
 import type { MousseTool, ToolCallContext } from './types'
 import type { ToolRegistry } from './registry'
 
@@ -39,6 +41,17 @@ function entry(groupId: unknown, ctx: ToolCallContext, registry: () => ToolRegis
   const held = registry().catalogued(ctx.caller.threadId, ctx.turn, group.tools)
   const missing = group.tools.filter((name) => !held.some((tool) => tool.name === name))
   const lines = [`# ${group.id}`, group.guidance]
+  // The computer: whether its tools that act (not the setup request) are held, and why not.
+  if (group.id === 'computer' && !held.some((tool) => COMPUTER_TOOL_NAMES.includes(tool.name))) {
+    if (!bot?.appTools.has(COMPUTER_USE_TOOL)) {
+      // No grant: ask for it, unless the owner switched it off or allowed it since the turn started (`held` says which).
+      lines.push('', bot?.held?.({ tool: BOT_COMPUTER_PERMISSION }) ?? 'None of these tools are yours on this turn. Ask for "use the computer" with escalate (tool computer) when your owner wants something done in an app.')
+      return lines.join('\n')
+    }
+    const request = held.some((tool) => tool.name === COMPUTER_USE_REQUEST_TOOL)
+    lines.push('', `Your owner allows "use the computer", but computer use isn't set up on this computer yet (Settings → Computer use on, with Cua Driver installed), so computer_tools and computer_use aren't yours on this turn. ${request ? 'Call computer_use_request once with why you need it: your owner gets a setup card, and the tools are yours from your next turn. Don\'t wait for it.' : 'Say in your report that computer use needs setting up on this computer.'}`)
+    if (!request) return lines.join('\n')
+  }
   if (!held.length) {
     lines.push('', 'None of these tools are yours on this turn. Where the group needs a permission, ask for it with escalate; otherwise this kind of turn does not use them.')
     return lines.join('\n')

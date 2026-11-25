@@ -489,7 +489,8 @@ export function TurnProgressRow({
   // The thought as it is written (see liveTextStore), or as the transcript holds it.
   const liveThought = useLiveThought(thought ? thoughtSourceOf(thought) : undefined);
   const thoughtText = liveThought || (thought ? thoughtTextFromPart(thought) : "");
-  const headline = thoughtHeadline(thoughtText);
+  // A thought still being written keeps its last full paragraph as the line while a new one begins.
+  const headline = thoughtHeadline(thoughtText, { live: thought?.state === "input-available" });
   const [ownOpen, setOwnOpen] = useState(false);
   const kept = useToolOpen(run?.openKey, false);
   const open = Boolean(run && run.count > 0) && (kept ? kept[0] : ownOpen);

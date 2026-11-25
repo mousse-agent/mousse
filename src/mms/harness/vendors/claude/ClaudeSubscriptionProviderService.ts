@@ -314,6 +314,10 @@ export type ClaudeSubscriptionChatInput = {
   continuationId?: string
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  /** A separator of the frames' own in the cumulative text (`TurnFrameSink.onTextSeparator`). */
+  onTextSeparator?: (atOffset: number, sep: string) => void
+  /** A separator of the frames' own in the cumulative thinking (`TurnFrameSink.onThinkingSeparator`). */
+  onThinkingSeparator?: (atOffset: number, sep: string) => void
   /** What Claude is doing while it shows nothing (`TurnFrameSink.onStatus`). */
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */
@@ -791,7 +795,7 @@ export function claudeOlderModelOptions(candidates: readonly ClaudeOlderCandidat
  * The Claude Code listing: the live models, then the ones the check found running. A current one
  * (not `older` in the catalog) is not folded and takes the place of the first live model of its
  * family. A live model the catalog marks `older` folds behind "Show more" once a current model of its
- * family is offered. `routes` maps an alias to the model it resolved to.
+ * family is offered. `routes` maps an alias to the model it resolved to; the alias's entry names it (`resolvedId`).
  */
 export function claudeModelListing(
   live: readonly LlmModelOption[],
@@ -823,7 +827,14 @@ export function claudeModelListing(
     }
     listing.push(entry?.older && entry.family && currentFamilies.has(entry.family) ? { ...model, older: true } : model)
   }
-  return [...listing, ...current.filter((model) => !placed.has(model.id)), ...found.filter((model) => model.older)]
+  return [...listing, ...current.filter((model) => !placed.has(model.id)), ...found.filter((model) => model.older)].map((model) => withResolvedId(model, routes))
+}
+
+/** An alias's listing names the model it resolved to (`haiku` → `claude-haiku-5-5`), for the catalog's ranking. */
+function withResolvedId(model: LlmModelOption, routes: Readonly<Record<string, string>>): LlmModelOption {
+  const route = routes[model.id]
+  const resolvedId = route ? bareModelId(route) : undefined
+  return resolvedId && resolvedId !== model.id ? { ...model, resolvedId } : model
 }
 
 /** Variables a running Claude Code session sets for the commands it starts. */
@@ -4171,7 +4182,11 @@ export class ClaudeSubscriptionProviderService {
           success = false
           resumedWithSteer = true
           steerUnanswered = false
-          if (frames.text) frames.text += '\n\n'
+          // The blank line before the steered reply is Mousse's own: the row that opens after the steer drops it.
+          if (frames.text) {
+            input.onTextSeparator?.(frames.text.length, '\n\n')
+            frames.text += '\n\n'
+          }
         }
       }
       input.signal?.throwIfAborted()

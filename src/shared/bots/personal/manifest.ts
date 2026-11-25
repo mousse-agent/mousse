@@ -1,5 +1,5 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
-import { COMPUTER_TOOL_NAMES } from '../../computerUse'
+import { COMPUTER_TOOL_NAMES, COMPUTER_USE_REQUEST_TOOL } from '../../computerUse'
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
 import { isNeutralTool, NEUTRAL_TOOLS, type NeutralTool } from '../../harness/tools'
 import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
@@ -153,6 +153,12 @@ export const BOT_COMPUTER_PERMISSION = 'computer'
 
 /** The computer tools a bot with "use the computer" gets. */
 export const BOT_COMPUTER_TOOLS: readonly string[] = COMPUTER_TOOL_NAMES
+
+/**
+ * The tool a bot's work asks its owner to set up computer use on this computer with (`computer_use_request`): under "use
+ * the computer" too, and only in work its owner asked for in its chat (`compileBotThread`, `BotAuthority.ownerRequested`).
+ */
+export const BOT_COMPUTER_REQUEST_TOOL = COMPUTER_USE_REQUEST_TOOL
 
 /**
  * The automation tools (`automation_*`, v4): a bot builds drafts the owner turns on, and lists, changes and pauses the
@@ -328,6 +334,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...[...BOT_APP_TOOLS].filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
   ...BOT_BROWSER_TOOLS,
   ...BOT_COMPUTER_TOOLS,
+  BOT_COMPUTER_REQUEST_TOOL,
   ...BOT_THEME_TOOLS,
   ...BOT_THREAD_TOOLS,
   ...BOT_PROFILER_TOOLS,
@@ -369,7 +376,7 @@ const GROUPED_TOOLS: ReadonlyMap<string, string> = new Map([
   ...[...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS].map((tool) => [tool, BOT_SCHEDULES_PERMISSION] as const),
   ...BOT_SECRET_TOOLS.map((tool) => [tool, BOT_SECRETS_PERMISSION] as const),
   ...BOT_QUICK_ACTION_TOOLS.map((tool) => [tool, BOT_QUICK_ACTIONS_PERMISSION] as const),
-  ...BOT_COMPUTER_TOOLS.map((tool) => [tool, BOT_COMPUTER_PERMISSION] as const)
+  ...[...BOT_COMPUTER_TOOLS, BOT_COMPUTER_REQUEST_TOOL].map((tool) => [tool, BOT_COMPUTER_PERMISSION] as const)
 ])
 
 const TASK_TOOL_SET: ReadonlySet<string> = new Set(BOT_TASK_TOOLS)

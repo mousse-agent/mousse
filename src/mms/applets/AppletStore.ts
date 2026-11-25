@@ -185,6 +185,12 @@ export class AppletStore {
       throw new AppletValidationError('Applet source integrity check failed.')
     return { ...bundle, source }
   }
+  /** The applet's newest committed revision in this thread, or undefined when the thread has none of that applet. */
+  head(threadId: string, appletId: string): AppletReference | undefined {
+    safeId(appletId)
+    const heads = this.index(this.directory(threadId)).heads
+    return Object.hasOwn(heads, appletId) ? heads[appletId] : undefined
+  }
   list(threadId: string): AppletReference[] {
     return Object.values(this.index(this.directory(threadId)).heads).map((reference) => {
       this.load(threadId, reference.appletId, reference.revisionId)

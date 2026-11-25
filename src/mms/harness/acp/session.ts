@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { methods, RequestError, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
 import { recordSubagentCall, subagentToolName, toolResultText } from '../../../shared/subagentTools'
+import { extractComputerUseRequestOutcome, isComputerUseRequestCall } from '../../../shared/computerUse'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -19,7 +20,8 @@ import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
 import { mousseServerToolOf } from '../../run/mcp/attachment'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
-import { AGENT_DEFAULT_MODEL, agentModels, agentModes, modelOptions, planModeId, type ModelControl } from './models'
+import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import { AGENT_DEFAULT_MODEL, agentModels, agentModes, mergeModelOptions, modelOptions, planModeId, thoughtConfigOption, type ModelControl, type ThoughtConfig } from './models'
 import {
   answerPermission,
   classifyGenericOption,
@@ -184,6 +186,8 @@ export interface AcpProcess extends AcpConnection {
   info?: AcpAgentInfo
   /** How the session's model is chosen. */
   modelControl?: ModelControl
+  /** The session's `thought_level` select config option, when the active model offers one. */
+  thoughtConfig?: ThoughtConfig
   /** The session's modes, the one it started in and the one it is in. */
   modes?: Array<{ id: string; name: string }>
   defaultModeId?: string
@@ -388,6 +392,7 @@ export interface SavedAcpSession {
 
 export interface SessionSetup {
   modelControl?: ModelControl
+  thoughtConfig?: ThoughtConfig
   modes?: Array<{ id: string; name: string }>
   defaultModeId?: string
 }
@@ -508,6 +513,8 @@ export interface AcpChatInput {
   /** The bot's authority (`AdapterHost.bot`): it answers the turn's permission and file requests (`botApprovals.ts`). */
   botAuthority?: Pick<BotAuthority, 'check'>
   onText: (text: string) => void
+  /** Mousse put `sep` into the cumulative text at `atOffset` (between prompts' replies): not the agent's words. */
+  onTextSeparator?: (atOffset: number, sep: string) => void
   /** The agent's thoughts so far this turn (`agent_thought_chunk`), cumulative like `onText`. */
   onThinking?: (text: string) => void
   drainSteer?: () => string | undefined
@@ -1219,6 +1226,7 @@ export class AcpSessions {
     const { models, control } = agentModels(session, active.info?.meta)
     const modes = agentModes(session)
     active.modelControl = control.kind === 'none' && known?.modelControl ? known.modelControl : control
+    active.thoughtConfig = thoughtConfigOption(session) ?? known?.thoughtConfig
     active.modes = modes.modes.length ? modes.modes : known?.modes ?? []
     active.defaultModeId = known?.defaultModeId ?? modes.current
     active.currentModeId = modes.current ?? known?.currentModeId ?? active.defaultModeId
@@ -1369,21 +1377,89 @@ export class AcpSessions {
     return null
   }
 
-  /** Sets the session's model: a fixed option (preset), else the control the session offers. */
+  /**
+   * Resolves a requested model string (`gemini-4-neon:xhigh`, `gemini-4-neon`, or a legacy
+   * `gemini-4-neon-high` id) against the store's listed models, separating any reasoning level.
+   */
+  private resolveListedModel(model: string): { modelId: string; effort?: string; listed?: LlmModelOption } {
+    const listed = this.options.store.models()
+    const exact = listed.find((entry) => entry.id === model)
+    if (exact) return { modelId: exact.id, listed: exact }
+
+    const parsed = parseThinkingSuffixFromModelId(model)
+    if (parsed.effort) {
+      const byBase = listed.find((entry) => entry.id === parsed.baseId)
+      if (byBase) return { modelId: byBase.id, effort: parsed.effort, listed: byBase }
+    }
+
+    // Legacy Antigravity selections stored the reasoning level in the model id (`gemini-4-neon-high`):
+    // map them onto the base model when the agent now lists base ids with separate `thought_level` efforts.
+    for (const entry of listed) {
+      if (!entry.efforts?.length || !model.startsWith(`${entry.id}-`)) continue
+      const suffix = model.slice(entry.id.length + 1)
+      if (entry.efforts.includes(suffix)) return { modelId: entry.id, effort: suffix, listed: entry }
+    }
+
+    return { modelId: parsed.baseId, ...(parsed.effort ? { effort: parsed.effort } : {}) }
+  }
+
+  /** Sets the session's model (and `thought_level` when advertised): a fixed option (preset), else the control the session offers. */
   private async selectModel(active: AcpProcess, model: string): Promise<void> {
     const { label, store, quirks } = this.options
-    if (quirks.modelConfigId) {
-      if (!store.models().some((entry) => entry.id === model)) throw new Error(`This ${label} model is unavailable for the signed-in account`)
-      await active.connection.agent.request(methods.agent.session.setConfigOption, { sessionId: active.sessionId!, configId: quirks.modelConfigId, value: model })
-      return
+    const resolved = this.resolveListedModel(model)
+    const setModel = async (): Promise<unknown> => {
+      if (quirks.modelConfigId) {
+        if (!resolved.listed) throw new Error(`This ${label} model is unavailable for the signed-in account`)
+        return await active.connection.agent.request(methods.agent.session.setConfigOption, {
+          sessionId: active.sessionId!,
+          configId: quirks.modelConfigId,
+          value: resolved.modelId
+        })
+      }
+      if (resolved.modelId === AGENT_DEFAULT_MODEL) return undefined
+      const listed = store.models()
+      if (listed.length && !resolved.listed) throw new Error(`This ${label} model is unavailable for the signed-in account`)
+      const control = active.modelControl ?? { kind: 'none' }
+      if (control.kind === 'config') {
+        return await active.connection.agent.request(methods.agent.session.setConfigOption, {
+          sessionId: active.sessionId!,
+          configId: control.configId,
+          value: resolved.modelId
+        })
+      }
+      if (control.kind === 'set_model') {
+        await active.connection.agent.request('session/set_model', { sessionId: active.sessionId!, modelId: resolved.modelId })
+        return undefined
+      }
+      throw new Error(`${label} offers no model choice; use its default model`)
     }
-    if (model === AGENT_DEFAULT_MODEL) return
-    const listed = store.models()
-    if (listed.length && !listed.some((entry) => entry.id === model)) throw new Error(`This ${label} model is unavailable for the signed-in account`)
-    const control = active.modelControl ?? { kind: 'none' }
-    if (control.kind === 'config') await active.connection.agent.request(methods.agent.session.setConfigOption, { sessionId: active.sessionId!, configId: control.configId, value: model })
-    else if (control.kind === 'set_model') await active.connection.agent.request('session/set_model', { sessionId: active.sessionId!, modelId: model })
-    else throw new Error(`${label} offers no model choice; use its default model`)
+    const response = await setModel()
+    const responseOptions = (response as { configOptions?: unknown } | null)?.configOptions
+    if (Array.isArray(responseOptions) && responseOptions.length > 0) {
+      active.thoughtConfig = thoughtConfigOption({ configOptions: responseOptions })
+    }
+    active.turnSignal?.throwIfAborted()
+    const thought = active.thoughtConfig
+    if (!thought) return
+    const requested = resolved.effort && thought.values.includes(resolved.effort) ? resolved.effort : undefined
+    const fallback = !requested && resolved.listed?.defaultEffort &&
+      thought.values.includes(resolved.listed.defaultEffort) &&
+      thought.currentValue !== resolved.listed.defaultEffort
+      ? resolved.listed.defaultEffort
+      : undefined
+    const target = requested ?? fallback
+    if (!target) return
+    const thoughtResponse = await active.connection.agent.request(methods.agent.session.setConfigOption, {
+      sessionId: active.sessionId!,
+      configId: thought.configId,
+      value: target
+    })
+    const updatedOptions = (thoughtResponse as { configOptions?: unknown } | null)?.configOptions
+    if (Array.isArray(updatedOptions) && updatedOptions.length > 0) {
+      active.thoughtConfig = thoughtConfigOption({ configOptions: updatedOptions })
+    } else {
+      active.thoughtConfig = { ...thought, currentValue: target }
+    }
   }
 
   /** Puts the session in the agent's plan mode for a plan turn, and back for a normal one. */
@@ -1473,6 +1549,12 @@ export class AcpSessions {
     input.signal?.addEventListener('abort', abort, { once: true })
     let text = ''
     let thinking = ''
+    // The blank line Mousse puts between prompts' replies is its own, not the agent's: a row it opens drops it.
+    const appendTextSeparator = (): void => {
+      if (!text) return
+      input.onTextSeparator?.(text.length, '\n\n')
+      text += '\n\n'
+    }
     let turnUsage: AcpTurnUsage | undefined
     interface TrackedTool {
       title: string
@@ -1584,8 +1666,10 @@ export class AcpSessions {
       if (event.sessionUpdate === 'agent_message_chunk' && textContent?.type === 'text') {
         const chunk = textContent.text ?? ''
         if (chunk) for (const sub of launchedSubagents.values()) sub.sawTextInStep = true
-        text += chunk
-        input.onText(text)
+        if (chunk.length > 0) {
+          text += chunk
+          input.onText(text)
+        }
       }
       if (event.sessionUpdate === 'usage_update') {
         for (const sub of launchedSubagents.values()) {
@@ -1616,9 +1700,12 @@ export class AcpSessions {
           : isCommand && activity?.kind === 'command'
             ? activity.command
             : title
+        // A start with a title only names a Mousse tool by it (`computer_use_request (mousse MCP Server)`): kept as that
+        // title, a form `mousseServerToolOf` reads, never made into another name.
+        const name = event.name ?? (event.title !== undefined && mousseServerToolOf(event.title)?.server === 'mousse' ? event.title : undefined)
         openTools.set(event.toolCallId, {
           title,
-          name: event.name,
+          name,
           rawInput: event.rawInput,
           startedAt: Date.now(),
           isDaemon: isCommand && isDaemonCommand(event.rawInput),
@@ -1626,13 +1713,13 @@ export class AcpSessions {
           description
         })
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
+        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: name, ...(activity ? { activity } : {}), ...(record ? { record } : {}) })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && openTools.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed') {
         const tracked = openTools.get(event.toolCallId)!
         if (event.rawInput !== undefined && tracked.rawInput === undefined) tracked.rawInput = event.rawInput
-        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title })
+        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: tracked.title, ...(tracked.name ? { toolName: tracked.name } : {}) })
       }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
         const tracked = openTools.get(event.toolCallId)
@@ -1671,6 +1758,10 @@ export class AcpSessions {
           const followUpOutput = !record && outputText && served?.server === 'mousse' && (served.tool === 'thread_send' || served.tool === 'thread_update')
             ? { output: outputText }
             : undefined
+          // computer_use_request (directly or through a bot's use_tool) keeps only its outcome line, nothing else it said.
+          const setupOutcome = !record && served?.server === 'mousse' && event.status === 'completed' && isComputerUseRequestCall(toolName, rawInput)
+            ? extractComputerUseRequestOutcome(outputText)
+            : undefined
           input.onTool?.({
             phase: 'complete',
             callId: event.toolCallId,
@@ -1678,12 +1769,16 @@ export class AcpSessions {
             ...(toolName ? { toolName } : {}),
             status: isBackgroundLaunch ? 'background' : event.status,
             ...(record ? { record } : {}),
-            ...(followUpOutput ? { activity: followUpOutput } : {})
+            ...(followUpOutput ? { activity: followUpOutput } : setupOutcome ? { activity: { output: setupOutcome } } : {})
           })
         }
       }
       if (event.sessionUpdate === 'config_option_update' && event.configOptions) {
-        const updated = quirks.modelConfigId ? modelOptions({ configOptions: event.configOptions }) : agentModels({ configOptions: event.configOptions }).models
+        current.thoughtConfig = thoughtConfigOption({ configOptions: event.configOptions })
+        const raw = quirks.modelConfigId
+          ? modelOptions({ configOptions: event.configOptions })
+          : agentModels({ configOptions: event.configOptions }).models
+        const updated = mergeModelOptions(store.models(), raw, event.configOptions)
         if (updated.length) store.setModels(updated)
       }
       if (event.sessionUpdate === 'current_mode_update' && typeof event.currentModeId === 'string') current.currentModeId = event.currentModeId
@@ -1751,13 +1846,19 @@ export class AcpSessions {
         const instructions = current.instructionsHash ? { instructionsHash: current.instructionsHash } : {}
         store.setSaved(input.threadId, { sessionId: current.sessionId!, cwd: input.cwd, instanceId, ...instructions })
         if (quirks.modelConfigId) {
-          const models = modelOptions((session ?? {}) as Pick<NewSessionResponse, 'configOptions'>)
+          const models = modelOptions((session ?? {}) as Pick<NewSessionResponse, 'configOptions'> & Record<string, unknown>)
           if (models.length) store.setModels(models)
+          current.thoughtConfig = thoughtConfigOption(session)
         } else {
           this.observeSession(current, session ?? {}, known)
           store.setSaved(input.threadId, {
             sessionId: current.sessionId!, cwd: input.cwd, instanceId, ...instructions,
-            setup: { ...(current.modelControl ? { modelControl: current.modelControl } : {}), modes: current.modes ?? [], ...(current.defaultModeId ? { defaultModeId: current.defaultModeId } : {}) }
+            setup: {
+              ...(current.modelControl ? { modelControl: current.modelControl } : {}),
+              ...(current.thoughtConfig ? { thoughtConfig: current.thoughtConfig } : {}),
+              modes: current.modes ?? [],
+              ...(current.defaultModeId ? { defaultModeId: current.defaultModeId } : {})
+            }
           })
         }
         this.sessions.set(input.threadId, current)
@@ -1928,7 +2029,7 @@ export class AcpSessions {
           adopted = taken.reply
           active.prompting ??= adopted.then(() => undefined, () => undefined)
           input.onProviderTurn?.()
-          if (text) text += '\n\n'
+          appendTextSeparator()
           watchSilence()
         } else {
           prompting = false
@@ -1944,7 +2045,7 @@ export class AcpSessions {
             blocks = [steers.map((entry) => entry.text).join('\n')]
             commandTurn = false
             attachments = steerImageBlocks(steers)
-            if (text) text += '\n\n'
+            appendTextSeparator()
           } else {
             runPromptLoop = false
           }
@@ -2020,7 +2121,7 @@ export class AcpSessions {
           active.prompting ??= adopted.then(() => undefined, () => undefined)
           completion?.dispose()
           input.onProviderTurn?.()
-          if (text) text += '\n\n'
+          appendTextSeparator()
           watchSilence()
           continue
         }
@@ -2065,7 +2166,7 @@ export class AcpSessions {
           blocks = [botRefusalFollowUp(refusals)]
           commandTurn = false
           attachments = []
-          if (text) text += '\n\n'
+          appendTextSeparator()
           continue
         }
         const steers = pendingSteers.splice(0)
@@ -2073,7 +2174,7 @@ export class AcpSessions {
         blocks = [steers.map((entry) => entry.text).join('\n')]
         commandTurn = false
         attachments = steerImageBlocks(steers)
-        if (text) text += '\n\n'
+        appendTextSeparator()
       }
       for (const sub of launchedSubagents.values()) {
         if (sub.sawTextInStep) {
@@ -2201,6 +2302,7 @@ export class AcpSessions {
       input.signal.throwIfAborted()
       input.onActivity()
       // The session's model control, read without recording anything: this session is not the profile's.
+      active.thoughtConfig = thoughtConfigOption(session)
       if (!quirks.modelConfigId) active.modelControl = agentModels(session, active.info?.meta).control
       await this.selectModel(active, input.model)
       input.signal.throwIfAborted()

@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ComposerFooter, type ComposerFooterProps, type ComposerRunProps } from '../../src/renderer/components/ComposerFooter'
+import { modelOptions } from '../../src/mms/harness/acp/models'
 import * as icons from '../../src/renderer/lib/icons'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import type { PermissionMode } from '../../src/shared/permissionMode'
@@ -31,6 +32,8 @@ afterEach(() => {
 const opus: LlmModelOption = { id: 'opus', label: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'], defaultEffort: 'medium', thinkingOff: false }
 const sonnet: LlmModelOption = { id: 'sonnet', label: 'Sonnet 5', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium', thinkingOff: false }
 const plain: LlmModelOption = { id: 'plain', label: 'Plain 1' }
+const haiku: LlmModelOption = { id: 'haiku', label: 'Haiku 5', efforts: ['low', 'medium', 'high'], thinkingOff: false }
+const deep: LlmModelOption = { id: 'deep', label: 'Deep 1', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', thinkingOff: false }
 const standardSpeed: LlmModelOption = { id: 'fast-model', label: 'Fast 1', efforts: ['low', 'high'], thinkingOff: false }
 const fastSpeed: LlmModelOption = { id: 'fast-model:fast', label: 'Fast 1 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }
 
@@ -97,13 +100,14 @@ const type = (text: string) => act(() => {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text)
   input.dispatchEvent(new Event('input', { bubbles: true }))
 })
-/** Rests the pointer on a model long enough for its run settings to show. */
+/** Rests the pointer on a model. */
 async function hover(name: string) {
   await act(async () => {
     row(name).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
-    await new Promise((resolve) => setTimeout(resolve, 120))
+    await new Promise((resolve) => setTimeout(resolve, 300))
   })
 }
+const clickModel = (name: string) => act(() => row(name).querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
 
 describe('composer model picker', () => {
   // Model IDs and reasoning levels advertised by the legacy Antigravity ACP catalogue.
@@ -129,6 +133,83 @@ describe('composer model picker', () => {
     expect(checkedLevel()).toBe('High')
     act(() => level('Low').click())
     expect(onModelSelect).toHaveBeenCalledWith(id, `${model}-low`, undefined)
+  })
+
+  it('shows reasoning levels for native Antigravity agy models from session/new configOptions and availableModels', async () => {
+    // Recorded agy 1.5.16 session/new response shape: base model IDs in configOptions[model],
+    // active model's thought_level select, and per-level variants in models.availableModels.
+    const models = modelOptions({
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: 'gemini-4-neon',
+          options: [
+            { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+            { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+            { value: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+            { value: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+            { value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+          ]
+        },
+        {
+          id: 'thought_level',
+          name: 'Thinking Level',
+          category: 'thought_level',
+          type: 'select',
+          currentValue: 'high',
+          options: [
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'high', name: 'High' },
+            { value: 'xhigh', name: 'Extra' }
+          ]
+        }
+      ],
+      models: {
+        currentModelId: 'gemini-4-neon-high',
+        availableModels: [
+          { modelId: 'gemini-4-neon-high', name: 'Gemini 4 Neon (High)' },
+          { modelId: 'gemini-4-neon-xhigh', name: 'Gemini 4 Neon (XHigh)' },
+          { modelId: 'gemini-4-neon-medium', name: 'Gemini 4 Neon (Medium)' },
+          { modelId: 'gemini-4-neon-low', name: 'Gemini 4 Neon (Low)' },
+          { modelId: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)' },
+          { modelId: 'gemini-4-argon-high', name: 'Gemini 4 Argon (High)' },
+          { modelId: 'gemini-4-argon-low', name: 'Gemini 4 Argon (Low)' },
+          { modelId: 'claude-opus-5-5-low', name: 'Claude Opus 5.5 (Low)' },
+          { modelId: 'claude-opus-5-5-medium', name: 'Claude Opus 5.5 (Medium)' },
+          { modelId: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
+          { modelId: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+          { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+        ]
+      }
+    } as never)
+
+    const agy = { providerId: 'antigravity', providers: [provider(models, false, 'Google Antigravity', 'antigravity')] }
+    const { onModelSelect } = render({ ...agy, modelId: 'gemini-4-neon:xhigh' })
+
+    expect(columnModel()).toBe('Gemini 4 Neon')
+    expect(levels()).toEqual(['Low', 'Medium', 'HighDefault', 'Extra high'])
+    expect(checkedLevel()).toBe('Extra high')
+    act(() => level('Medium').click())
+    expect(onModelSelect).toHaveBeenCalledWith('antigravity', 'gemini-4-neon:medium', undefined)
+
+    // Clicking Claude Opus 5.5 selects it at its default level.
+    clickModel('Opus 5.5')
+    expect(onModelSelect).toHaveBeenLastCalledWith('antigravity', 'claude-opus-5-5:high', undefined)
+
+    // Claude Opus 5.5 shows its three levels and notes that a saved Extra high runs at the default.
+    render({ ...agy, modelId: 'claude-opus-5-5:xhigh' })
+    expect(columnModel()).toBe('Opus 5.5')
+    expect(levels()).toEqual(['Low', 'Medium', 'HighDefault'])
+    expect(checkedLevel()).toBe('HighDefault')
+    expect(note()).toContain("Extra high isn't offered")
+
+    // Models without thinking levels show none.
+    render({ ...agy, modelId: 'gpt-oss-120b-medium' })
+    expect(column()!.querySelector('.model-picker-run-empty')!.textContent).toBe('None for this model')
   })
 
   it('shows "Opus 5.5 High" with no separator, the level apart, and opens one picker', () => {
@@ -177,22 +258,31 @@ describe('composer model picker', () => {
     expect(document.querySelector('.model-picker-search .model-picker-favorites-toggle')).toBeNull()
   })
 
-  it('shows a hovered model own levels, and picks the model and a level together', async () => {
-    const { onModelSelect } = render({ modelId: 'opus:high' })
+  it('keeps the selected model in the column and footer while another model is hovered, and a level applies to the selected model', async () => {
+    const { onModelSelect } = render({ models: [opus, sonnet, standardSpeed, fastSpeed], modelId: 'opus:high' })
     await hover('Sonnet 5')
-    expect(columnModel()).toBe('Sonnet 5')
-    expect(levels()).toEqual(['Low', 'MediumDefault', 'High'])
-    // Sonnet offers High, so it keeps it.
+    await hover('Fast 1')
+    expect(columnModel()).toBe('Opus 5.5')
     expect(checkedLevel()).toBe('High')
-    expect(note()).toBeNull()
-    act(() => level('Low').click())
-    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet:low', undefined)
+    // Fast 1 has two speeds and Opus one: the footer stays empty for Opus.
+    expect(footer()).not.toBeNull()
+    expect(speeds()).toHaveLength(0)
+    act(() => level('Extra high').click())
+    expect(onModelSelect).toHaveBeenCalledTimes(1)
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'opus:xhigh', undefined)
   })
 
-  it('keeps the current level when the new model offers it', () => {
-    const { onModelSelect } = render({ modelId: 'opus:high' })
-    act(() => row('Sonnet 5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
-    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet:high', undefined)
+  // Starting from Opus at Low, a level every model below offers: it never carries over.
+  it.each([
+    { name: 'Sonnet 5', picked: 'sonnet:medium', why: 'its default, Medium' },
+    { name: 'Deep 1', picked: 'deep:high', why: 'its default, High' },
+    { name: 'Haiku 5', picked: 'haiku:medium', why: 'Medium, with no default' },
+    { name: 'Fast 1', picked: 'fast-model', why: 'no level, with neither a default nor Medium' },
+    { name: 'Plain 1', picked: 'plain', why: 'no level, with no levels' }
+  ])('clicking $name selects it at $why', ({ name, picked }) => {
+    const { onModelSelect } = render({ models: [opus, sonnet, deep, haiku, standardSpeed, fastSpeed, plain], modelId: 'opus:low' })
+    clickModel(name)
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', picked, undefined)
   })
 
   it('saves the default level as chosen when picked, and changes nothing for the level already chosen', () => {
@@ -204,24 +294,6 @@ describe('composer model picker', () => {
     const chosen = render({ modelId: 'opus:high' })
     act(() => level('High').click())
     expect(chosen.onModelSelect).not.toHaveBeenCalled()
-  })
-
-  it('saves no level for the next model when none was chosen', async () => {
-    const { onModelSelect } = render({ modelId: 'opus' })
-    await hover('Sonnet 5')
-    expect(checkedLevel()).toBe('MediumDefault')
-    expect(note()).toBeNull()
-    act(() => row('Sonnet 5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
-    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet', undefined)
-  })
-
-  it('uses the new model default when it does not offer the current level, and says so', async () => {
-    const { onModelSelect } = render({ modelId: 'opus:max' })
-    await hover('Sonnet 5')
-    expect(checkedLevel()).toBe('MediumDefault')
-    expect(note()).toBe("Max isn't offered for Claude Sonnet 5; using its default.")
-    act(() => row('Sonnet 5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
-    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet', undefined)
   })
 
   it('runs a saved level the model does not offer at its default, and says so', () => {
@@ -248,24 +320,10 @@ describe('composer model picker', () => {
     expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'fast-model:fast:high', undefined)
   })
 
-  it('starts another model at its standard speed, never Fast by default', async () => {
+  it('starts another model at its standard speed, never Fast by default', () => {
     const { onModelSelect } = render({ models: [opus, standardSpeed, fastSpeed], modelId: 'opus:high' })
-    await hover('Fast 1')
-    expect(speeds().map((segment) => segment.getAttribute('aria-checked'))).toEqual(['true', 'false'])
-    act(() => row('Fast 1').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
-    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'fast-model:high', undefined)
-  })
-
-  it('keeps the footer while another listed model has speeds, so hovering one without never resizes the picker', async () => {
-    render({ models: [opus, standardSpeed, fastSpeed], modelId: 'opus:high' })
-    // Opus has one speed: the bar is there, empty.
-    expect(footer()).not.toBeNull()
-    expect(speeds()).toHaveLength(0)
-    await hover('Fast 1')
-    expect(speeds()).toHaveLength(2)
-    await hover('Opus 5.5')
-    expect(footer()).not.toBeNull()
-    expect(speeds()).toHaveLength(0)
+    clickModel('Fast 1')
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'fast-model', undefined)
   })
 
   it('adds a faster tier to the Speed toggle only when the model lists it', () => {
@@ -363,22 +421,17 @@ describe('composer model picker', () => {
     expect(document.querySelector('.model-picker-panel')!.classList.contains('has-run-settings')).toBe(false)
   })
 
-  it('says a hovered model without levels has none, and keeps the column in place', async () => {
-    render({ permission: false })
-    await hover('Plain 1')
+  it('says a selected model without levels has none, and keeps the column in place', () => {
+    render({ modelId: 'plain', permission: false })
     expect(columnModel()).toBe('Plain 1')
     expect(column()!.querySelector('.model-picker-run-empty')!.textContent).toBe('None for this model')
     expect(levelItems()).toHaveLength(0)
   })
 
-  it('keeps room for the longest level list, so hovering a model with fewer never resizes the picker', async () => {
-    render({ permission: false })
+  it('keeps room for the longest level list whichever model is selected', () => {
+    render({ modelId: 'sonnet:high', permission: false })
     const run = () => document.querySelector<HTMLElement>('.model-picker-run')!
-    // Opus lists six levels; the column holds room for six whichever model is hovered.
-    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
-    await hover('Plain 1')
-    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
-    await hover('Sonnet 5')
+    // Opus lists six levels; the column holds room for six while Sonnet, with three, is selected.
     expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
     // The column's own content does not size the picker; the reserved rows do.
     const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
@@ -405,8 +458,9 @@ describe('composer model picker', () => {
     expect(activeOption().textContent).toContain('Opus 5.5')
     key(search(), 'ArrowDown')
     expect(activeOption().textContent).toContain('Sonnet 5')
-    expect(columnModel()).toBe('Sonnet 5')
-    // Right moves into the levels on the one the model would run at; Left goes back to the list.
+    // Moving through the list does not change the column: it stays the selected model's.
+    expect(columnModel()).toBe('Opus 5.5')
+    // Right moves into the selected model's levels on its chosen one; Left goes back to the list.
     act(() => search().focus())
     key(search(), 'ArrowRight')
     expect(document.activeElement!.textContent).toBe('High')

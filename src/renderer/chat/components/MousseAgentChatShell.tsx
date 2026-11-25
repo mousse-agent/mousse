@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
 import { useAppStore } from '../../stores/appStore'
@@ -190,6 +190,12 @@ export function MousseAgentChatShell({
     <WorkspaceRecoveryBanner threadId={threadId} />
     {interrupted ? <RunInterruptedNotice onContinue={continueRun} uncertain={uncertain} onContinueUncertain={continueUncertain} /> : undefined}
   </>, [threadId, interrupted, continueRun, uncertain, continueUncertain])
+  const onSendRef = useRef(onSend)
+  onSendRef.current = onSend
+  const onStopRef = useRef(onStop)
+  onStopRef.current = onStop
+  const stableOnSend = useCallback((message: { role: 'user'; content: string }) => onSendRef.current(message), [])
+  const stableOnStop = useCallback(() => onStopRef.current(), [])
   return (
     <MousseComposerContext.Provider value={composer}>
       {/* A thread's undo starts over in another profile. Without a thread (the warm start's chat) there is none, and the
@@ -206,8 +212,8 @@ export function MousseAgentChatShell({
           className="mousse-chat-shell"
           messages={messages}
           status={status}
-          onSend={onSend}
-          onStop={onStop}
+          onSend={stableOnSend}
+          onStop={stableOnStop}
           error={error}
           toolRenderers={toolRenderers}
           slots={slots}

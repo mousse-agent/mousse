@@ -6,6 +6,7 @@ import type { InstanceModel, ProviderSelection, RunPolicy } from '../../../share
 import type { ModelCatalog } from '../../../shared/modelCatalog'
 import { shortModelName } from '../../../shared/modelNames'
 import { modelCatalog } from '../../models/modelCatalog'
+import { UsageLimitTracker } from '../../models/usageLimits'
 import type { BotModelResolution, BotModelResolver, BotPickMiss, BotPickReason, BotRuntimeHold } from '../seams'
 import { botModelCandidates, instanceReady, signInCandidate } from './candidates'
 import { chooseBotModel, effortFor, offeredEfforts, type BotModelCandidate } from './chooseModel'
@@ -13,8 +14,9 @@ import { chooseBotModel, effortFor, offeredEfforts, type BotModelCandidate } fro
 /**
  * The bots' model choice in the daemon (Bot Phase 1 §5.6, #673): `BotEngine` resolves each activation's first dispatch
  * here. A row picked by hand runs on its own entry or not at all; a bot from before picks still runs by usage, picking a
- * ready model by depth. Usage limits are remembered in memory, by instance, until their reset; a restart forgets them,
- * and the next limited turn marks the instance again.
+ * ready model by depth. Usage limits are remembered in memory, by instance (or one model on it), until their reset, in
+ * the profile's `UsageLimitTracker`, which Automatic thread naming shares; a restart forgets them, and the next limited
+ * turn marks the instance again.
  */
 
 export interface BotModelResolverDeps {
@@ -38,6 +40,8 @@ export interface BotModelResolverDeps {
    * Automatic, while it can run the bot. Absent or undefined: Automatic.
    */
   defaultModel?(): { instanceId: string; model: string } | undefined
+  /** The profile's usage limits, shared with Automatic thread naming; default: one of the chooser's own. */
+  usageLimits?: UsageLimitTracker
 }
 
 /**
@@ -55,9 +59,11 @@ export const REPRESENTATIVE_BOT_POLICY: RunPolicy = Object.freeze({
 const limitedNow = (candidate: BotModelCandidate, now: Date) => candidate.limitedUntil !== undefined && Date.parse(candidate.limitedUntil) > now.getTime()
 
 export class BotModelChooser implements BotModelResolver {
-  private readonly limited = new Map<string, string>()
+  private readonly limits: UsageLimitTracker
 
-  constructor(private readonly deps: BotModelResolverDeps) {}
+  constructor(private readonly deps: BotModelResolverDeps) {
+    this.limits = deps.usageLimits ?? new UsageLimitTracker()
+  }
 
   async resolve(input: { botId: string; pick: BotModelPick | null; depth: BotDepth; policy: RunPolicy }): Promise<BotModelResolution> {
     const now = this.now()
@@ -68,7 +74,7 @@ export class BotModelChooser implements BotModelResolver {
       hold: this.deps.hold,
       policy: input.policy,
       catalog: this.catalog(),
-      limited: this.limitedAt(now)
+      limitUntil: (instanceId, model) => this.limits.limitUntil(instanceId, model, now)
     })
     if (isPinned(input.pick)) return this.picked(input.pick, candidates, snapshots, input.policy, now)
     // A bot from before picks, as before: a model by name across entries, which falls back to by usage when it is
@@ -215,21 +221,14 @@ export class BotModelChooser implements BotModelResolver {
     return limitedNow(found, now) ? undefined : found
   }
 
+  /** The instance is at its usage limit until `until` (ISO); a later reset already held wins. */
   markLimited(instanceId: string, until: string): void {
-    if (Number.isNaN(Date.parse(until))) return
-    const held = this.limited.get(instanceId)
-    if (!held || Date.parse(until) > Date.parse(held)) this.limited.set(instanceId, until)
+    this.limits.markInstanceLimited(instanceId, until)
   }
 
-  /** The owner's Resume: the instance is tried again on the next turn. */
+  /** The owner's Resume: the instance, and each of its models, is tried again on the next turn. */
   clearLimited(instanceId: string): void {
-    this.limited.delete(instanceId)
-  }
-
-  /** The instances at their limit now; resets that passed are forgotten. */
-  private limitedAt(now: Date): ReadonlyMap<string, string> {
-    for (const [instanceId, until] of this.limited) if (Date.parse(until) <= now.getTime()) this.limited.delete(instanceId)
-    return this.limited
+    this.limits.clearInstance(instanceId)
   }
 
   private catalog(): ModelCatalog {

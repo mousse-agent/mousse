@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, RequestError, type AgentApp } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcpSessions, readAcpPromptUsage, type AcpTurnUsage, type SavedAcpSession } from '../../src/mms/harness/acp/session'
+import { mergeModelOptions, modelOptions } from '../../src/mms/harness/acp/models'
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
 import { interruptWithDeadline } from '../../src/mms/harness/supervise'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
@@ -22,6 +23,7 @@ import { BACKGROUND_SUMMARY } from '../../src/shared/agentActivity'
 import { GENERIC_ACP_CAPS } from '../../src/mms/harness/acp/presets/generic'
 import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
 import { holdControl } from '../support/steerHoldControl'
+import { transcriptSink } from '../support/transcriptSink'
 
 const sessionsUnderTest: AcpSessions[] = []
 const tempDirs: string[] = []
@@ -1678,5 +1680,316 @@ describe('ACP sessions', () => {
       const bgEnd = toolEvents.find((e) => e.callId === 'bg-cmd' && e.phase === 'complete')
       expect(bgEnd?.activity).toMatchObject({ status: 'done', summary: BACKGROUND_SUMMARY })
     })
+  })
+})
+
+/**
+ * What the agent wrote reaches the saved rows exactly: an empty chunk does not split a thought, a blank line or
+ * indentation the agent wrote after a tool call stays, and the blank line Mousse puts between a steer's prompts is
+ * the only thing a continuation row drops.
+ */
+describe('ACP rows keep the agent\'s words', () => {
+  const gate = () => {
+    let open!: () => void
+    const opened = new Promise<void>((resolve) => { open = resolve })
+    return { opened, open }
+  }
+  const thought = (text: string) => ({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } })
+  const toolCall = (id: string) => ({ sessionUpdate: 'tool_call', toolCallId: id, title: 'npm test', kind: 'execute', status: 'in_progress' })
+  const toolDone = (id: string) => ({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed' })
+
+  /** A turn through the real session core and the ACP adapter, its events saved as the thread saves them. */
+  function savedTurn(agent: ReturnType<typeof scriptedAgent>) {
+    const { sessions, questions } = core(agent.connect)
+    const hold = holdControl(GENERIC_ACP_CAPS, { questions: { pending: () => questions.listPendingForThread('t').length > 0 } })
+    const transcript = transcriptSink()
+    const adapter = new AcpAdapter(() => ({ chat: (input) => sessions.chat(input), commitConversation: () => {}, configured: () => true }), { driver: 'acp', label: 'Fake agent', capabilities: GENERIC_ACP_CAPS })
+    const input = { threadId: 't', instanceId: 'acp:fake', llmProvider: '', model: 'default', mode: 'agent', prompt: 'work', cwd: process.cwd(), signal: new AbortController().signal } as unknown as TurnInput
+    const result = adapter.startTurn(input, hold.wrap(transcript.sink), hold.ctl, { context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as AdapterHost)
+    return { hold, result, rows: transcript.rows }
+  }
+
+  it('an empty message chunk in the middle of a thought leaves it one row', async () => {
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update(thought('Check the fil'))
+        await ctx.notify('')
+        await ctx.update(thought('e.'))
+        await ctx.notify('Done.')
+        return 'end_turn'
+      }
+    })
+    const turn = savedTurn(agent)
+    await turn.result
+    expect(turn.rows()).toEqual([{ kind: 'thinking', content: 'Check the file.' }, { kind: 'text', content: 'Done.' }])
+  })
+
+  it('a blank line and indentation the agent wrote after a tool call stay on the thought and the note after it', async () => {
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update(thought('Plan'))
+        await ctx.update(toolCall('call-1'))
+        await ctx.update(toolDone('call-1'))
+        await ctx.update(thought('\n\n    next'))
+        await ctx.notify('old')
+        await ctx.update(toolCall('call-2'))
+        await ctx.update(toolDone('call-2'))
+        await ctx.notify('\n\n    next')
+        await ctx.update(toolCall('call-3'))
+        await ctx.update(toolDone('call-3'))
+        await ctx.notify('Done.')
+        return 'end_turn'
+      }
+    })
+    const turn = savedTurn(agent)
+    expect((await turn.result).text).toBe('old\n\n    nextDone.')
+    expect(turn.rows()).toEqual([
+      { kind: 'thinking', content: 'Plan' },
+      { kind: 'tool', content: 'npm test' },
+      { kind: 'thinking', content: '\n\n    next' },
+      { kind: 'text', content: 'old' },
+      { kind: 'tool', content: 'npm test' },
+      { kind: 'text', content: '\n\n    next' },
+      { kind: 'tool', content: 'npm test' },
+      { kind: 'text', content: 'Done.' }
+    ])
+  })
+
+  // A person's steer with its drain token (`drainSteerEntry`) cuts the prompt; the next prompt carries it, and Mousse
+  // puts a blank line into the reply's text between the two prompts' words.
+  it.each([
+    ['while the reply row is still open', false],
+    ['after a tool call, with a lone space written after it', true]
+  ])('a steer %s: the continuation row is the agent\'s words exactly', async (_name, afterTool) => {
+    const steerable = gate()
+    const agent = scriptedAgent({
+      prompt: async (text, ctx) => {
+        if (text !== 'work') {
+          await ctx.notify('    next')
+          return 'end_turn'
+        }
+        await ctx.notify('old')
+        if (afterTool) {
+          await ctx.update(toolCall('call-1'))
+          await ctx.update(toolDone('call-1'))
+          await ctx.notify(' ')
+        }
+        steerable.open()
+        await ctx.cancelled
+        return 'cancelled'
+      }
+    })
+    const turn = savedTurn(agent)
+    await steerable.opened
+    turn.hold.steer('Use pnpm')
+    const result = await turn.result
+    expect(result.text).toBe(afterTool ? 'old \n\n    next' : 'old\n\n    next')
+    expect(turn.hold.log.filter(([event]) => event === 'accepted').map(([, detail]) => detail)).toEqual(['Use pnpm@drain-1'])
+    expect(turn.rows()).toEqual([
+      { kind: 'text', content: 'old' },
+      ...(afterTool ? [{ kind: 'tool', content: 'npm test' }] : []),
+      { kind: 'text', content: '    next' }
+    ])
+  })
+})
+
+describe('ACP thought_level reasoning options', () => {
+  // Shape recorded from live agy 1.5.16: base models in configOptions[model], active model's
+  // thought_level select, and per-level variants in models.availableModels.
+  const AGY_MODEL_OPTIONS = [
+    { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+    { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+    { value: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+    { value: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+    { value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+  ]
+  const AGY_THOUGHT_NEON = {
+    id: 'thought_level',
+    name: 'Thinking Level',
+    category: 'thought_level',
+    type: 'select',
+    currentValue: 'high',
+    options: [
+      { value: 'low', name: 'Low' },
+      { value: 'medium', name: 'Medium' },
+      { value: 'high', name: 'High' },
+      { value: 'xhigh', name: 'Extra' }
+    ]
+  }
+  const AGY_THOUGHT_THREE = (currentValue: string) => ({
+    id: 'thought_level',
+    name: 'Thinking Level',
+    category: 'thought_level',
+    type: 'select',
+    currentValue,
+    options: [
+      { value: 'low', name: 'Low' },
+      { value: 'medium', name: 'Medium' },
+      { value: 'high', name: 'High' }
+    ]
+  })
+  const AGY_SESSION = {
+    configOptions: [
+      { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'gemini-4-neon', options: AGY_MODEL_OPTIONS },
+      AGY_THOUGHT_NEON
+    ],
+    models: {
+      currentModelId: 'gemini-4-neon-high',
+      availableModels: [
+        { modelId: 'gemini-4-neon-high', name: 'Gemini 4 Neon (High)' },
+        { modelId: 'gemini-4-neon-xhigh', name: 'Gemini 4 Neon (XHigh)' },
+        { modelId: 'gemini-4-neon-medium', name: 'Gemini 4 Neon (Medium)' },
+        { modelId: 'gemini-4-neon-low', name: 'Gemini 4 Neon (Low)' },
+        { modelId: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)' },
+        { modelId: 'gemini-4-argon-high', name: 'Gemini 4 Argon (High)' },
+        { modelId: 'gemini-4-argon-low', name: 'Gemini 4 Argon (Low)' },
+        { modelId: 'claude-opus-5-5-low', name: 'Claude Opus 5.5 (Low)' },
+        { modelId: 'claude-opus-5-5-medium', name: 'Claude Opus 5.5 (Medium)' },
+        { modelId: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
+        { modelId: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+        { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+      ]
+    }
+  }
+
+  it('extracts per-model efforts, defaultEffort, and thinkingOff from agy session/new and preserves them across config_option_update', () => {
+    const listed = modelOptions(AGY_SESSION as never)
+    expect(listed).toEqual([
+      { id: 'gemini-4-neon', label: 'Gemini 4 Neon', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high', thinkingOff: false },
+      { id: 'gemini-4-argon', label: 'Gemini 4 Argon', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', thinkingOff: false },
+      { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', thinkingOff: false },
+      { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)' },
+      { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' }
+    ])
+
+    // When agy starts at xhigh on Neon, 3-level models clamp defaultEffort to high (matching agy's switch behavior).
+    const xhighSession = {
+      ...AGY_SESSION,
+      configOptions: [AGY_SESSION.configOptions[0], { ...AGY_THOUGHT_NEON, currentValue: 'xhigh' }]
+    }
+    const clamped = modelOptions(xhighSession as never)
+    expect(clamped.find((m) => m.id === 'gemini-4-neon')?.defaultEffort).toBe('xhigh')
+    expect(clamped.find((m) => m.id === 'claude-opus-5-5')?.defaultEffort).toBe('high')
+
+    // A mid-session config_option_update after setting claude-opus-5-5 to low must keep other models'
+    // efforts and must not replace claude-opus-5-5's defaultEffort with low.
+    const updateOpts = [
+      { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'claude-opus-5-5', options: AGY_MODEL_OPTIONS },
+      AGY_THOUGHT_THREE('low')
+    ]
+    const merged = mergeModelOptions(listed, modelOptions({ configOptions: updateOpts } as never), updateOpts)
+    expect(merged.find((m) => m.id === 'gemini-4-neon')?.efforts).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(merged.find((m) => m.id === 'claude-opus-5-5')).toMatchObject({
+      efforts: ['low', 'medium', 'high'],
+      defaultEffort: 'high',
+      thinkingOff: false
+    })
+  })
+
+  it('sends model and thought_level config options on turns, resets stale levels on reused sessions, and handles legacy and no-thinking models', async () => {
+    const calls: Array<{ configId: string; value: string }> = []
+    let activeModel = 'gemini-4-neon'
+    let activeThought: string | undefined = 'high'
+    const currentConfigOptions = () => {
+      const thought = activeModel === 'gemini-4-neon'
+        ? { ...AGY_THOUGHT_NEON, currentValue: activeThought ?? 'high' }
+        : activeModel === 'claude-opus-5-5' || activeModel === 'gemini-4-argon'
+          ? AGY_THOUGHT_THREE(activeThought === 'xhigh' ? 'high' : (activeThought ?? 'high'))
+          : undefined
+      return [
+        { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: activeModel, options: AGY_MODEL_OPTIONS },
+        ...(thought ? [thought] : [])
+      ]
+    }
+    const agent = inProcessAgent((app: AgentApp) => {
+      app
+        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+        .onRequest(methods.agent.session.new, () => ({ sessionId: 'ses-1', ...AGY_SESSION }) as never)
+        .onRequest(methods.agent.session.setConfigOption, async (c) => {
+          const { configId, value } = c.params as { configId: string; value: string }
+          calls.push({ configId, value })
+          if (configId === 'model') {
+            activeModel = value
+            if (value === 'gpt-oss-120b-medium' || value === 'gemini-pro-orchestrator-neon') activeThought = undefined
+            else activeThought ??= 'medium'
+          } else if (configId === 'thought_level') {
+            activeThought = value
+          }
+          const configOptions = currentConfigOptions()
+          await c.client.notify(methods.client.session.update, {
+            sessionId: c.params.sessionId,
+            update: { sessionUpdate: 'config_option_update', configOptions }
+          } as never)
+          return { configOptions } as never
+        })
+        .onRequest(methods.agent.session.prompt, async (c) => {
+          await c.client.notify(methods.client.session.update, {
+            sessionId: c.params.sessionId,
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${activeModel}@${activeThought ?? 'none'}` } }
+          })
+          return { stopReason: 'end_turn' as const }
+        })
+    })
+    const saved = new Map<string, SavedAcpSession>()
+    let models: LlmModelOption[] = []
+    const sessions = new AcpSessions({
+      label: 'Antigravity',
+      defaultInstanceId: 'antigravity',
+      questions: new UserQuestionService(),
+      connect: agent.connect,
+      quirks: { modelConfigId: 'model' },
+      store: {
+        saved: (id) => saved.get(id),
+        setSaved: (id, value) => (value ? saved.set(id, value) : saved.delete(id)),
+        models: () => models,
+        setModels: (next) => { models = next }
+      },
+      launchGeneration: () => 0,
+      signInGeneration: () => 0,
+      markSignedOut: vi.fn(),
+      signInRequiredMessage: 'Sign in first'
+    })
+    sessionsUnderTest.push(sessions)
+
+    // 1. Explicit reasoning level: sets model, then thought_level; config_option_update keeps all models' efforts.
+    expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'gemini-4-neon:low', prompt: '1', onText: vi.fn() })).toBe('gemini-4-neon@low')
+    expect(calls.splice(0)).toEqual([
+      { configId: 'model', value: 'gemini-4-neon' },
+      { configId: 'thought_level', value: 'low' }
+    ])
+    expect(models.find((m) => m.id === 'claude-opus-5-5')?.efforts).toEqual(['low', 'medium', 'high'])
+    sessions.commitConversation('t', 'h1')
+
+    // 2. Reused session switching to a bare model (defaultEffort: high): resets thought_level instead of leaking low.
+    expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'claude-opus-5-5', prompt: '2', history: 'h1', onText: vi.fn() })).toBe('claude-opus-5-5@high')
+    expect(calls.splice(0)).toEqual([
+      { configId: 'model', value: 'claude-opus-5-5' },
+      { configId: 'thought_level', value: 'high' }
+    ])
+    sessions.commitConversation('t', 'h2')
+
+    // 3. Unsupported level (xhigh on 3-level Claude Opus 5.5): sets model only, never sends an invalid thought_level.
+    expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'claude-opus-5-5:xhigh', prompt: '3', history: 'h2', onText: vi.fn() })).toBe('claude-opus-5-5@high')
+    expect(calls.splice(0)).toEqual([{ configId: 'model', value: 'claude-opus-5-5' }])
+    sessions.commitConversation('t', 'h3')
+
+    // 4. Model without thought_level: sets model only, never sends thought_level.
+    expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'gpt-oss-120b-medium', prompt: '4', history: 'h3', onText: vi.fn() })).toBe('gpt-oss-120b-medium@none')
+    expect(calls.splice(0)).toEqual([{ configId: 'model', value: 'gpt-oss-120b-medium' }])
+    sessions.commitConversation('t', 'h4')
+
+    // 5. Legacy saved model id (`gemini-4-neon-xhigh`) maps onto base model + thought_level on native agy.
+    expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'gemini-4-neon-xhigh', prompt: '5', history: 'h4', onText: vi.fn() })).toBe('gemini-4-neon@xhigh')
+    expect(calls.splice(0)).toEqual([
+      { configId: 'model', value: 'gemini-4-neon' },
+      { configId: 'thought_level', value: 'xhigh' }
+    ])
+
+    // 6. One-shot requests also apply the chosen reasoning level.
+    expect(await sessions.oneShot({ cwd: process.cwd(), model: 'gemini-4-neon:low', system: 'Title', prompt: 'hi', signal: new AbortController().signal, onActivity: vi.fn() })).toBe('gemini-4-neon@low')
+    expect(calls.splice(0)).toEqual([
+      { configId: 'model', value: 'gemini-4-neon' },
+      { configId: 'thought_level', value: 'low' }
+    ])
   })
 })

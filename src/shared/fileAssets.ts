@@ -1,3 +1,9 @@
+/** Maximum bytes buffered whole in memory for non-streamed previews (images, PDFs, full reads). */
+export const MAX_ASSET_BYTES = 100 * 1024 * 1024
+
+/** Maximum bytes for video previews streamed in bounded byte ranges (never buffered whole in memory). */
+export const MAX_VIDEO_ASSET_BYTES = 4 * 1024 * 1024 * 1024
+
 /**
  * Bytes of a file preview in one `files.readAsset` reply. A preview can be 100 MB, a daemon message
  * is limited, and the bytes travel as base64 (a third larger), so a caller joins pieces of this size.

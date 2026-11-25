@@ -29,6 +29,10 @@ function isAbortedResult(message: SDKMessage): boolean {
 export interface TurnFrameSink {
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  /** The frames put `sep` into the cumulative text at `atOffset` (between blocks, or at a steer): not the model's words. */
+  onTextSeparator?: (atOffset: number, sep: string) => void
+  /** As `onTextSeparator`, for the cumulative thinking. */
+  onThinkingSeparator?: (atOffset: number, sep: string) => void
   onTool?: (event: ProviderToolEvent) => void
   /** What Claude is doing while it shows nothing: `waiting`, its first frame of the turn came; `reasoning`, a thinking block began. */
   onStatus?: (status: 'waiting' | 'reasoning') => void
@@ -203,8 +207,14 @@ export class TurnFrames {
 
   /** A steer cut the turn here: what follows is a new paragraph. */
   breakParagraph(): void {
-    if (this.text) this.text += '\n\n'
+    if (this.text) this.appendTextSeparator()
     this.segmentStart = this.text.length
+  }
+
+  /** A paragraph break of the frames' own between two parts of the text. */
+  private appendTextSeparator(): void {
+    this.sink.onTextSeparator?.(this.text.length, '\n\n')
+    this.text += '\n\n'
   }
 
   /**
@@ -244,24 +254,28 @@ export class TurnFrames {
     if (message.type === 'stream_event') {
       const event = message.event
       if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {
-        if (event.delta.type === 'text_delta') {
+        // An empty delta (a block whose text is omitted streams one) adds nothing to show.
+        if (event.delta.type === 'text_delta' && event.delta.text) {
           this.text += event.delta.text
           this.sink.onText(this.text)
         }
-        if (event.delta.type === 'thinking_delta') {
+        if (event.delta.type === 'thinking_delta' && event.delta.thinking) {
           this.thinking += event.delta.thinking
-          // A block whose text is omitted streams an empty delta: there is no thought to show yet.
-          if (this.thinking) this.sink.onThinking?.(this.thinking)
+          this.sink.onThinking?.(this.thinking)
         }
       }
       // Each thinking block is a paragraph of its own, and so is each text block (a note before a tool call, then the answer).
       if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && !message.parent_tool_use_id) {
-        if (this.thinking) this.thinking += '\n\n'
+        // An empty block before it left no paragraph to end.
+        if (/\S$/.test(this.thinking)) {
+          this.sink.onThinkingSeparator?.(this.thinking.length, '\n\n')
+          this.thinking += '\n\n'
+        }
         // Its text may come late, or not at all: the model is reasoning meanwhile.
         this.sink.onStatus?.('reasoning')
       }
       if (event.type === 'content_block_start' && event.content_block.type === 'text' && !message.parent_tool_use_id && /\S$/.test(this.text))
-        this.text += '\n\n'
+        this.appendTextSeparator()
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
         const parent = message.parent_tool_use_id ?? undefined
         // A call of a subagent this turn does not have open (a background agent of an earlier turn) is not this turn's.

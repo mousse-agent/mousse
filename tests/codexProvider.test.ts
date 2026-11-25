@@ -26,6 +26,7 @@ import {
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
 import { codexFixtureAccessToken } from '../src/mms/run/testkit/codexAppServerReplay'
 import { CODEX_ONE_SHOT_FEATURES_OFF, codexOneShotRunsOn } from '../src/mms/harness/vendors/codex/oneShot'
+import type { OneShotSpec } from '../src/mms/harness/driver'
 import { CHATGPT_CODEX_BASE_URL, type CodexDirectStream } from '../src/mms/harness/vendors/codex/directOneShot'
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream } from '@earendil-works/pi-ai'
 
@@ -1188,6 +1189,31 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(server.requests('turn/interrupt')).toEqual([])
     })
 
+    /** A listed model offering `low`, `medium` and `high`, whose own default is `medium`. */
+    const leveled = (id: string, multiAgentVersion?: string | null) => ({
+      ...listed(id, multiAgentVersion),
+      supportedReasoningEfforts: ['low', 'medium', 'high'].map((reasoningEffort) => ({ reasoningEffort, description: '' })),
+      defaultReasoningEffort: 'medium'
+    })
+
+    it('names a thread or branch at low reasoning when no level is chosen; other requests and chosen levels are left alone', async () => {
+      const effortOf = async (spec: Partial<OneShotSpec>, models: Array<Record<string, unknown>> = [leveled('gpt-x', null)]) => {
+        const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }], { status: 'completed' }, undefined, models)
+        const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'medium', 'high'] }] })
+        await service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity: () => {}, ...spec }, new AbortController().signal)
+        return (server.requests('turn/start')[0]!.params as { effort?: string }).effort
+      }
+      expect(await effortOf({ task: 'title' })).toBe('low')
+      expect(await effortOf({ task: 'branch_name' })).toBe('low')
+      expect(await effortOf({ task: 'pull_request' })).toBeUndefined()
+      expect(await effortOf({})).toBeUndefined()
+      // A chosen level wins, as an effort or the model id's suffix.
+      expect(await effortOf({ task: 'title', effort: 'high' })).toBe('high')
+      expect(await effortOf({ task: 'title', model: 'gpt-x:high' })).toBe('high')
+      // A model that does not offer `low` keeps its own default.
+      expect(await effortOf({ task: 'title' }, [listed('gpt-x', null)])).toBeUndefined()
+    })
+
     it('is refused, with no thread started, when the MCP servers cannot be listed or one cannot be turned off', async () => {
       const unreadable = oneShotServer([], { status: 'completed' }, null)
       await expect(once(create(unreadable))).rejects.toMatchObject({ code: 'policy_unenforceable' })
@@ -1264,13 +1290,13 @@ describe('CodexProviderService options (managed Codex)', () => {
         }) as unknown as CodexDirectStream
         return { send, requests }
       }
-      /** A server that answers `getAuthStatus` as `auth` says, and lists `LISTED`. */
-      function authServer(auth: Record<string, unknown>) {
+      /** A server that answers `getAuthStatus` as `auth` says, and lists `models`. */
+      function authServer(auth: Record<string, unknown>, models: Array<Record<string, unknown>> = LISTED) {
         const server = scriptedServer((message) => {
           const method = message.method!
           if (method === 'account/read') return chatgpt
           if (method === 'getAuthStatus') return { result: { authMethod: null, ...auth } }
-          if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
+          if (method === 'model/list') return { result: { data: models, nextCursor: null } }
           if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
           return { result: {} }
         })
@@ -1308,6 +1334,20 @@ describe('CodexProviderService options (managed Codex)', () => {
         ])
         expect(request.options).toMatchObject({ apiKey: TOKEN, transport: 'sse', maxRetries: 0, reasoningEffort: 'low' })
         expect(onActivity).toHaveBeenCalled()
+      })
+
+      it('names a thread or branch at low reasoning on this path too, unless a level is chosen', async () => {
+        const effortOf = async (spec: Partial<OneShotSpec>) => {
+          const direct = directStream()
+          const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }, [leveled('gpt-v2', 'v2')]), direct.send, { models: [{ id: 'gpt-v2', label: 'GPT V2', efforts: ['low', 'medium', 'high'] }] })
+          await service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {}, ...spec }, new AbortController().signal)
+          return direct.requests[0].options.reasoningEffort
+        }
+        expect(await effortOf({ task: 'title' })).toBe('low')
+        expect(await effortOf({ task: 'branch_name' })).toBe('low')
+        // Anything else runs at the model's own default.
+        expect(await effortOf({})).toBe('medium')
+        expect(await effortOf({ task: 'title', effort: 'high' })).toBe('high')
       })
 
       it("runs the model Codex lists for `default`, with that model's own effort, and refuses an unlisted one", async () => {

@@ -42,7 +42,7 @@ import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './li
 import { selectThread } from './lib/threadActions'
 import { useShownBotThread } from './lib/botThread'
 import { isSessionClosing } from './lib/errorText'
-import { useAppStore, withNewerTimes, withThreadRow } from './stores/appStore'
+import { samePlainData, useAppStore, withNewerTimes, withThreadRow } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
 import { applyStreamedUpdates, landMessage } from './stores/liveTextStore'
 import { useViewSwap } from './lib/motion'
@@ -467,8 +467,20 @@ export default function App() {
         applyPlusLegacy(settings)
       })),
       // A turn that ends shows with its last text, never a frame before it.
-      window.mousse.turn.onTurnState(applyIfCurrent(messageUpdates.flushBefore(setTurnState))),
-      window.mousse.turn.onTurnSnapshot(applyIfCurrent(messageUpdates.flushBefore(setTurnSnapshot))),
+      // Only flush held transcript frames when the selected thread's own turn state changes;
+      // background subagent turn updates must not break per-frame batching of the active chat.
+      window.mousse.turn.onTurnState(applyIfCurrent((state) => {
+        if (isSelectedThread(state.threadId)) messageUpdates.flush()
+        setTurnState(state)
+      })),
+      window.mousse.turn.onTurnSnapshot(applyIfCurrent((snapshot) => {
+        const current = useAppStore.getState()
+        const active = current.activeThreadId
+        if (active && Object.prototype.hasOwnProperty.call(snapshot, active) && !samePlainData(current.turnStates[active], snapshot[active])) {
+          messageUpdates.flush()
+        }
+        setTurnSnapshot(snapshot)
+      })),
       window.mousse.app.onNavigateMainView((view) => {
         if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git' || view === 'pullRequest') {
           openSurface(view)

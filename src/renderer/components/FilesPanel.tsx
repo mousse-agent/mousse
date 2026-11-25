@@ -56,6 +56,10 @@ interface OpenFileState {
   /** The last background refresh failed: `error` says so until a refresh reads the file again. */
   refreshFailed?: boolean
   assetUrl?: string
+  /** True when `assetUrl` is a streamed `mousse-media://` handle (released via IPC, not `URL.revokeObjectURL`). */
+  assetIsMediaUrl?: boolean
+  /** Size and write time from `fs:assetStamp` / `fs:openMediaUrl` / `fs:readAsset`, avoiding whole-file re-reads on poll. */
+  assetStamp?: string
   assetSignature?: string
 }
 
@@ -103,6 +107,33 @@ function readAssetAt(target: FileTabTarget, threadId: string | null, details?: b
   return details
     ? window.mousse.fs.readAsset(target.path, undefined, threadId, target.root, true)
     : window.mousse.fs.readAsset(target.path, undefined, threadId, target.root)
+}
+function assetStampAt(target: FileTabTarget, threadId: string | null) {
+  return window.mousse.fs.assetStamp(target.path, undefined, threadId, target.root)
+}
+function openMediaAt(target: FileTabTarget, threadId: string | null, details?: boolean) {
+  return details
+    ? window.mousse.fs.openMediaUrl(target.path, undefined, threadId, target.root, true)
+    : window.mousse.fs.openMediaUrl(target.path, undefined, threadId, target.root)
+}
+function releaseAssetUrl(url: string | undefined, isMediaUrl?: boolean): void {
+  if (!url) return
+  if (isMediaUrl) {
+    void window.mousse.fs.releaseMediaUrl?.(url)?.catch(() => undefined)
+    return
+  }
+  URL.revokeObjectURL(url)
+}
+function assetStampKey(info: { size: number; mtimeMs?: number }): string {
+  return typeof info.mtimeMs === 'number' ? `${info.size}:${info.mtimeMs}` : `size:${info.size}`
+}
+function assetBlobUrl(data: Uint8Array | ArrayLike<number>, mimeType: string): string {
+  const bytes = data instanceof Uint8Array
+    ? (data.buffer instanceof ArrayBuffer
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data))
+    : Uint8Array.from(data)
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }))
 }
 function writeText(target: FileTabTarget, content: string, threadId: string | null, expectedRoot?: string): Promise<void> {
   return window.mousse.fs.writeFile(target.path, content, undefined, threadId, target.root, expectedRoot)
@@ -238,6 +269,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const queues = useRef(new Map<string, SerializedAutosave>())
   const saveBlockers = useRef(new Set<string>())
   const loadSequences = useRef(new Map<string, number>())
+  const revalidating = useRef(new Set<string>())
   const monacoRef = useRef<Monaco | null>(null)
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const pendingPosition = useRef<{ path: string; line: number; column: number } | null>(null)
@@ -411,12 +443,31 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       return true
     }
     try {
-      if (isAssetView(kind)) {
+      if (kind === 'video' && typeof window.mousse.fs.openMediaUrl === 'function') {
+        const media = await openMediaAt(target, threadId, true)
+        if (!finish(media.canonicalPath, {
+          loading: false,
+          binary: true,
+          assetUrl: media.url,
+          assetIsMediaUrl: true,
+          assetStamp: assetStampKey(media),
+          initialLoadFailed: false
+        })) {
+          releaseAssetUrl(media.url, true)
+        }
+      } else if (isAssetView(kind)) {
         const asset = await readAssetAt(target, threadId, true)
-        const bytes = Uint8Array.from(asset.data)
-        const assetUrl = URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType }))
-        if (!finish(asset.canonicalPath, { loading: false, binary: true, assetUrl, assetSignature: assetSignature(asset.data, asset.mimeType), initialLoadFailed: false })) {
-          URL.revokeObjectURL(assetUrl)
+        const assetUrl = assetBlobUrl(asset.data, asset.mimeType)
+        if (!finish(asset.canonicalPath, {
+          loading: false,
+          binary: true,
+          assetUrl,
+          assetIsMediaUrl: false,
+          assetStamp: typeof asset.size === 'number' ? assetStampKey(asset) : undefined,
+          assetSignature: assetSignature(asset.data, asset.mimeType),
+          initialLoadFailed: false
+        })) {
+          releaseAssetUrl(assetUrl, false)
         }
       } else {
         const { content, canonicalPath, workspaceRoot: boundRoot } = await readText(target, threadId, undefined, true)
@@ -484,37 +535,87 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }, [flushPath, selected?.loading, selectedKey])
 
   useEffect(() => {
+    if (!showing) return
     const interval = window.setInterval(() => {
-      if (useAppStore.getState().profileId !== profileId) return
+      if (document.hidden || useAppStore.getState().profileId !== profileId) return
       for (const path of openPaths) {
         const key = fileKey(path)
+        if (revalidating.current.has(key)) continue
         const file = filesRef.current[key]
         const queue = queues.current.get(key)
         if (!file || file.loading || file.initialLoadFailed || file.saveState === 'saving' || file.saveState === 'conflict' || queue?.isBusy()) continue
         const sequence = loadSequences.current.get(key) ?? 0
         const pollProfileId = profileId
+        const isCurrentPoll = () => loadSequences.current.get(key) === sequence && useAppStore.getState().profileId === pollProfileId
         if (isAssetView(file.kind)) {
+          // Only check the active preview tab for changes; offscreen asset tabs recheck once shown.
+          if (key !== selectedKeyRef.current) continue
+          if (typeof window.mousse.fs.assetStamp === 'function') {
+            revalidating.current.add(key)
+            void assetStampAt(file.target, file.threadId).then(async (stamp) => {
+              const current = filesRef.current[key]
+              if (!current || !isCurrentPoll()) return
+              const nextStamp = assetStampKey(stamp)
+              if (current.assetStamp === nextStamp) {
+                if (current.refreshFailed) patchFile(key, refreshRecovered(current))
+                return
+              }
+              if (current.kind === 'video' && typeof window.mousse.fs.openMediaUrl === 'function') {
+                const media = await openMediaAt(current.target, current.threadId)
+                const latest = filesRef.current[key]
+                if (!latest || !isCurrentPoll()) {
+                  releaseAssetUrl(media.url, true)
+                  return
+                }
+                releaseAssetUrl(latest.assetUrl, latest.assetIsMediaUrl)
+                patchFile(key, { assetUrl: media.url, assetIsMediaUrl: true, assetStamp: assetStampKey(media), error: null, refreshFailed: false })
+                return
+              }
+              const asset = await readAssetAt(current.target, current.threadId)
+              const latest = filesRef.current[key]
+              if (!latest || !isCurrentPoll()) return
+              const signature = assetSignature(asset.data, asset.mimeType)
+              const updatedStamp = typeof asset.size === 'number' ? assetStampKey(asset) : nextStamp
+              if (latest.assetSignature === signature) {
+                patchFile(key, { assetStamp: updatedStamp, ...refreshRecovered(latest) })
+                return
+              }
+              const url = assetBlobUrl(asset.data, asset.mimeType)
+              releaseAssetUrl(latest.assetUrl, latest.assetIsMediaUrl)
+              patchFile(key, { assetUrl: url, assetIsMediaUrl: false, assetStamp: updatedStamp, assetSignature: signature, error: null, refreshFailed: false })
+            }).catch((error) => {
+              if (filesRef.current[key] && isCurrentPoll()) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
+            }).finally(() => {
+              revalidating.current.delete(key)
+            })
+            continue
+          }
+          // Without `assetStamp`, never re-read an entire video file over IPC every 2 seconds.
+          if (file.kind === 'video') continue
+          revalidating.current.add(key)
           void readAssetAt(file.target, file.threadId).then((asset) => {
             const current = filesRef.current[key]
             const signature = assetSignature(asset.data, asset.mimeType)
-            if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId) return
+            if (!current || !isCurrentPoll()) return
             if (current.refreshFailed) patchFile(key, refreshRecovered(current))
             if (current.assetSignature === signature) return
-            const bytes = Uint8Array.from(asset.data)
-            const url = URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType }))
-            if (current.assetUrl) URL.revokeObjectURL(current.assetUrl)
-            patchFile(key, { assetUrl: url, assetSignature: signature, error: null })
+            const url = assetBlobUrl(asset.data, asset.mimeType)
+            releaseAssetUrl(current.assetUrl, current.assetIsMediaUrl)
+            patchFile(key, { assetUrl: url, assetIsMediaUrl: false, assetSignature: signature, error: null })
           }).catch((error) => {
-            if (filesRef.current[key] && loadSequences.current.get(key) === sequence && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
+            if (filesRef.current[key] && isCurrentPoll()) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
+          }).finally(() => {
+            revalidating.current.delete(key)
           })
           continue
         }
         if (file.binary) continue
         const savedAtReadStart = file.savedContent
+        revalidating.current.add(key)
         void readText(file.target, file.threadId, file.workspaceRoot).then(({ content: diskContent }) => {
           const current = filesRef.current[key]
           // A save completed after this read began; its result is newer than this poll.
-          if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId || current.savedContent !== savedAtReadStart || queues.current.get(key)?.isBusy()) return
+          if (!current || !isCurrentPoll() || current.savedContent !== savedAtReadStart || queues.current.get(key)?.isBusy()) return
           if (current.refreshFailed) patchFile(key, refreshRecovered(current))
           const result = reconcileExternalContent(current.savedContent, current.content, diskContent)
           if (result.kind === 'replace') patchFile(key, { content: result.content, savedContent: result.content, error: null, saveState: 'saved' })
@@ -524,12 +625,14 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
             patchFile(key, { diskContent: result.diskContent, saveState: 'conflict', error: 'This file changed on disk. Your edits were kept.', refreshFailed: false })
           }
         }).catch((error) => {
-          if (filesRef.current[key] && loadSequences.current.get(key) === sequence && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
+          if (filesRef.current[key] && isCurrentPoll()) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
+        }).finally(() => {
+          revalidating.current.delete(key)
         })
       }
     }, REVALIDATE_MS)
     return () => window.clearInterval(interval)
-  }, [fileKey, openPaths, patchFile, profileId])
+  }, [fileKey, openPaths, patchFile, profileId, showing])
 
   useEffect(() => {
     // Resolves when this open has finished, or given way to a later one (services/fileLinks waits for it).
@@ -603,6 +706,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     for (const queue of queues.current.values()) queue.dispose()
     queues.current.clear()
     saveBlockers.current.clear()
+    revalidating.current.clear()
     for (const key of loadSequences.current.keys()) {
       loadSequences.current.set(key, (loadSequences.current.get(key) ?? 0) + 1)
     }
@@ -618,7 +722,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }, [profileId, replaceFiles])
 
   useEffect(() => () => {
-    for (const file of Object.values(filesRef.current)) if (file.assetUrl) URL.revokeObjectURL(file.assetUrl)
+    for (const file of Object.values(filesRef.current)) releaseAssetUrl(file.assetUrl, file.assetIsMediaUrl)
   }, [])
 
   // The editor keeps a file's model when it unmounts; a closed file's model goes with it.
@@ -684,7 +788,8 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     queues.current.get(key)?.dispose()
     queues.current.delete(key)
     saveBlockers.current.delete(key)
-    if (current?.assetUrl) URL.revokeObjectURL(current.assetUrl)
+    revalidating.current.delete(key)
+    releaseAssetUrl(current?.assetUrl, current?.assetIsMediaUrl)
     replaceFiles((all) => { const next = { ...all }; delete next[key]; return next })
     if (document.activeElement?.closest('.main-view-tabs')) closedFromStrip.current = path
     closeFileInStore(scope, path)
@@ -966,7 +1071,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
               if (key && width && height) setImageSizes((sizes) => sizes[key]?.width === width && sizes[key]?.height === height ? sizes : { ...sizes, [key]: { width, height } })
             }} />
           </div>
-          : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview"><video src={selected.assetUrl} controls /></div>
+          : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview files-video-preview"><video key={selected.assetUrl} src={selected.assetUrl} controls playsInline preload="metadata" /></div>
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
           : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} readOnly={lacksWorkspaceBinding(selected)} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} showViewTabs={false} wordWrap={wordWrap} minimap={false} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />

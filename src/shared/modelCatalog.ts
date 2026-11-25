@@ -12,9 +12,10 @@ export const MODEL_CATALOG_FORMAT = 1
 
 /**
  * Route keys this reader understands: an existing driver or provider id (`claude` is the Claude Code
- * driver, `anthropic` the Anthropic API provider). Other keys are ignored.
+ * driver, `anthropic` the Anthropic API provider, `codex` and `antigravity` those agents). Other keys
+ * are ignored.
  */
-export const MODEL_CATALOG_ROUTES = ['claude', 'anthropic', 'openai', 'codex'] as const
+export const MODEL_CATALOG_ROUTES = ['claude', 'anthropic', 'openai', 'codex', 'antigravity'] as const
 export type ModelCatalogRouteKey = (typeof MODEL_CATALOG_ROUTES)[number]
 
 export interface ModelCatalogRoute {
@@ -25,8 +26,8 @@ export interface ModelCatalogRoute {
 }
 
 /**
- * How capable a model is, for bots' hidden model choice (Bot Phase 1 §5.6): `frontier` the makers'
- * strongest, `standard` the everyday one, `small` the fast and cheap one.
+ * How capable a model is, for bots' hidden model choice (Bot Phase 1 §5.6) and Automatic thread naming:
+ * `frontier` the makers' strongest, `standard` the everyday one, `small` the fast and cheap one.
  */
 export const MODEL_CATALOG_TIERS = ['frontier', 'standard', 'small'] as const
 export type ModelCatalogTier = (typeof MODEL_CATALOG_TIERS)[number]
@@ -54,6 +55,12 @@ export interface ModelCatalog {
   format: number
   revision: number
   models: ModelCatalogEntry[]
+  /**
+   * Which connected providers Automatic thread naming tries first, best first: a driver kind (`claude`,
+   * `codex`, `antigravity`, `pi`), one Pi provider (`pi:openai`), or `*` for any other. Absent when the
+   * file lists none (readers then use the bundled catalog's).
+   */
+  namingProviders?: string[]
 }
 
 /** A file this reader cannot use at all: an unknown `format`, or not a catalog. */
@@ -154,7 +161,15 @@ export function parseModelCatalog(value: unknown): ModelCatalog {
     }
     models.push(parsed)
   }
-  return { format: MODEL_CATALOG_FORMAT, revision: raw.revision, models }
+  const naming = namingProviders(raw.namingProviders)
+  return { format: MODEL_CATALOG_FORMAT, revision: raw.revision, models, ...(naming ? { namingProviders: naming } : {}) }
+}
+
+/** The naming provider list: trimmed, non-empty, without repeats; undefined when nothing is left. */
+function namingProviders(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const list = [...new Set(value.flatMap((entry) => (text(entry) ? [text(entry)!] : [])))]
+  return list.length ? list : undefined
 }
 
 function parseJson(value: string): unknown {

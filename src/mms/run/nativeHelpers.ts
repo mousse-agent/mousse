@@ -253,7 +253,7 @@ const delegableViews = new WeakMap<AppToolTurn, AppToolTurn>()
 export function delegableTurn(turn: AppToolTurn): AppToolTurn {
   let view = delegableViews.get(turn)
   if (!view) {
-    const { onPublishApplet: _applet, ...rest } = turn
+    const { onPublishApplet: _applet, onReadApplet: _read, ...rest } = turn
     view = Object.assign({ ...rest, subagent: true }, { [HOSTING_TURN]: turn }) as AppToolTurn
     delegableViews.set(turn, view)
   }

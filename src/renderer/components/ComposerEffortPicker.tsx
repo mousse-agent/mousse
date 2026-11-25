@@ -24,21 +24,16 @@ export function withReasoningLevel({ providerId, modelId, models }: Selection, l
 }
 
 /**
- * The id picking another model selects, carrying the chosen level: kept when that model offers it;
- * otherwise left out, so the model runs at its default (`dropped` names the level).
+ * The id clicking a model in the picker selects: the model at its default level, else Medium when it
+ * offers Medium. The level the previous model ran at never carries over. A model with neither runs
+ * with no level saved, at whatever its agent defaults to.
  */
-export function carryReasoningLevel(target: Selection, level: string | undefined): { modelId: string; dropped?: string } {
-  const { levels } = resolveReasoning(target.providerId, target.modelId, target.models)
-  if (!level || levels.length === 0) return { modelId: target.modelId }
-  if (levels.includes(level)) return { modelId: withReasoningLevel(target, level) }
+export function atStartingLevel(target: Selection): string {
+  const { levels, defaultLevel } = resolveReasoning(target.providerId, target.modelId, target.models)
+  const level = defaultLevel ?? (levels.includes('medium') ? 'medium' : undefined)
+  if (level) return withReasoningLevel(target, level)
   const baseId = parseThinkingSuffixFromModelId(target.modelId).baseId
-  return { modelId: target.models.some((model) => model.id === baseId) ? baseId : target.modelId, dropped: level }
-}
-
-/** The level a selection runs at, when its model has levels. */
-export function shownReasoningLevel(selection: Selection): string | undefined {
-  const reasoning = resolveReasoning(selection.providerId, selection.modelId, selection.models)
-  return reasoning.levels.length > 0 ? reasoning.current : undefined
+  return target.models.some((model) => model.id === baseId) ? baseId : target.modelId
 }
 
 /** The selected model's reasoning levels, speeds and how to pick each. */
@@ -127,12 +122,11 @@ export function runFasterSpeed(selection: Selection): string {
   return speeds && speeds.current !== 'standard' && speeds.current !== 'slow' ? speedLabel(speeds.current) : ''
 }
 
-/** A model the picker shows run settings for, as `carryReasoningLevel` resolved it. */
+/** The selected model, whose run settings the picker shows. */
 export interface RunSettingsTarget extends Selection {
   instanceId?: string
   /** The model is the thread's: its settings show as they are. */
   selected: boolean
-  dropped?: string
 }
 
 /** Whether a target's model has reasoning levels. */
@@ -140,7 +134,7 @@ export function hasReasoningLevels(target: RunSettingsTarget): boolean {
   return resolveReasoning(target.providerId, target.modelId, target.models).levels.length > 0
 }
 
-/** The reasoning column's header. The model it is for is the highlighted row, so it is not named again. */
+/** The reasoning column's header. The model it is for is the checked row, so it is not named again. */
 function ReasoningHead() {
   return <div className="model-picker-run-head">
     <span className="model-picker-run-title">Reasoning</span>
@@ -175,7 +169,7 @@ function ReasoningLevels({ target, label, onSelect, onClose }: {
   const model = target.models.find((entry) => entry.id === target.modelId || entry.id === baseId)
   // Picking the level the thread runs at by default saves it as chosen, so it carries to the next model.
   const chosen = parseThinkingSuffixFromModelId(target.modelId).effort
-  const unsupported = target.dropped ?? reasoning.unsupported
+  const unsupported = reasoning.unsupported
   return <div className="model-picker-run-settings" role="menu" aria-label={`Reasoning for ${label}`} onKeyDown={moveFocus}>
     <ReasoningHead />
     {reasoning.levels.length === 0 ? <div className="model-picker-run-empty">None for this model</div> : null}
@@ -305,44 +299,41 @@ export function PermissionChip({ control }: { control: PermissionControl }) {
 
 /**
  * The model picker's run settings (`ModelFamilyMenu`'s `runSettings`), so one menu chooses the model, its
- * reasoning level and its speed: the highlighted model's levels beside the list and its speeds under it.
- * A level chosen for the selection carries to the next model picked when that model offers it; with none
- * chosen (or one it does not offer) the next model runs at its own default. `footerEnd` sits at the right
- * of the footer (the composer's permission mode).
+ * reasoning level and its speed: the selected model's levels beside the list and its speeds under it.
+ * Clicking another model selects it at its starting level (`atStartingLevel`) and leaves the picker open for its
+ * level; a level or speed always applies to the selected model and closes the picker, as does a click on a model
+ * with neither. `footerEnd` sits at the right of the footer (the composer's permission mode).
  */
-export function modelPickerRunSettings({ providers, selection, onSelect, onClose, footerEnd }: {
+export function modelPickerRunSettings({ providers, onSelect, onClose, footerEnd }: {
   providers: readonly LlmProviderOption[]
-  /** The selected model, as the menu offers it (the level is part of the id). */
-  selection: Selection
   onSelect: (providerId: string, modelId: string, instanceId?: string) => void
   onClose: () => void
   footerEnd?: ReactNode
 }) {
-  const chosen = parseThinkingSuffixFromModelId(selection.modelId).effort
-  const carried = chosen && chosen === shownReasoningLevel(selection) ? chosen : undefined
   const listingOf = (target: ModelPickTarget) => providers.find((entry) => listingServes(entry, { instanceId: target.instanceId, llmProvider: target.providerId }))
   const resolveTarget = (target: ModelPickTarget): RunSettingsTarget => {
     const pick = { providerId: target.providerId, modelId: target.modelId, models: listingOf(target)?.models ?? [] }
-    if (target.selected) return { ...pick, instanceId: target.instanceId, selected: true }
-    const { modelId, dropped } = carryReasoningLevel(pick, carried)
-    return { ...pick, modelId, instanceId: target.instanceId, selected: false, ...(dropped ? { dropped } : {}) }
+    return { ...pick, modelId: target.selected ? pick.modelId : atStartingLevel(pick), instanceId: target.instanceId, selected: target.selected }
   }
   return {
     pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
-    // Beside the list: the highlighted model's reasoning levels, whenever any model the picker lists has
+    picked: (target: ModelPickTarget) => {
+      const resolved = resolveTarget(target)
+      if (!hasReasoningLevels(resolved) && !getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models)) onClose()
+    },
+    // Beside the list: the selected model's reasoning levels, whenever any model the picker lists has
     // levels, so the column stays in place while you search or switch providers.
     render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
       if (!all.some((entry) => hasReasoningLevels(resolveTarget(entry)))) return null
       return <ReasoningColumn key={target ? `${target.instanceId ?? target.providerId}:${target.label}` : 'none'} target={target && resolveTarget(target)} label={target && shortModelName(target.label)} onSelect={onSelect} onClose={onClose} />
     },
-    // Room for the longest level list, so hovering a model with fewer (or none) keeps the picker's size.
+    // Room for the longest level list, so the picker keeps its size whichever model is selected.
     rows: (all: ModelPickTarget[]) => Math.max(1, ...all.map((entry) => {
       const resolved = resolveTarget(entry)
       return resolveReasoning(resolved.providerId, resolved.modelId, resolved.models).levels.length
     })),
-    // Under the picker: the highlighted model's speed on the left, `footerEnd` on the right. The bar
-    // stays while any listed model has speeds, so hovering one without (Fable after Opus) keeps the
-    // picker's size instead of sliding the rows under the pointer.
+    // Under the picker: the selected model's speed on the left, `footerEnd` on the right. The bar
+    // stays while any listed model has speeds, so the picker keeps its size whichever model is selected.
     footer: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
       const speedsOf = (entry: ModelPickTarget) => {
         const resolved = resolveTarget(entry)

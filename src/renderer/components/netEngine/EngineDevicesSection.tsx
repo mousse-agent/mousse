@@ -41,7 +41,7 @@ import { Modal } from '../ui/Modal'
 import { AccessPanel } from './AccessPanel'
 import { AllowPrompt } from './AllowPrompt'
 import { EnginePlusGroup } from './EnginePlusGroup'
-import { LetDeviceInDialog } from './LetDeviceInDialog'
+import { LetDeviceInDialog, type LetDeviceInStart } from './LetDeviceInDialog'
 import { UseComputerDialog } from './UseComputerDialog'
 import { hasFeatures } from './ways'
 import { hostLabel, removalText, removalTitle } from './plusRows'
@@ -144,6 +144,12 @@ export function EngineDevicesSection() {
   const [error, setError] = useState('')
   // Which add dialog is open: `in`, Let a device in; `out`, Use another computer.
   const [adding, setAdding] = useState<EngineSide>()
+  // Where Let a device in opens when Reach this computer opened it: the tunnel's setup, or a link over it.
+  const [letInFrom, setLetInFrom] = useState<LetDeviceInStart>()
+  const letIn = (from: LetDeviceInStart) => {
+    setLetInFrom(from)
+    setAdding('in')
+  }
   const [addingPhone, setAddingPhone] = useState(false)
   const [selected, setSelected] = useState<string>()
   const [picked, setPicked] = useState<string>()
@@ -253,6 +259,7 @@ export function EngineDevicesSection() {
       return
     }
     if (status && !status.enabled) await action('netEngine.enable', {})
+    setLetInFrom(undefined)
     setAdding(side)
   }
   const canAddPhone = mousseId && !phoneBlocked
@@ -1010,6 +1017,8 @@ export function EngineDevicesSection() {
         <ReachSection
           status={status}
           onChanged={read}
+          onSendLink={() => letIn({ kind: 'link', way: 'tunnel' })}
+          onCloudflareSetup={() => letIn({ kind: 'tunnel' })}
           moreWays={
             oldWays ? (
               <>
@@ -1029,6 +1038,7 @@ export function EngineDevicesSection() {
       {adding === 'in' && (
         <LetDeviceInDialog
           status={status}
+          initial={letInFrom}
           onAddPhone={
             canAddPhone
               ? () => {

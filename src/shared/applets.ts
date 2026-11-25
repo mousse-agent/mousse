@@ -35,7 +35,7 @@ export type AppletPresentationPart =
   { type: 'text'; text: string } | { type: 'applet'; reference: AppletReference }
 export type AppletExtractedPart =
   | { type: 'text'; text: string }
-  | { type: 'submission'; submission: AppletSubmission }
+  | { type: 'submission'; submission: AppletSubmission; source: string }
   | { type: 'error'; message: string; source: string }
 export class AppletValidationError extends Error {
   constructor(message: string) {
@@ -73,6 +73,8 @@ function viewportSizing(css: string): string | null {
   }
   return null
 }
+/** A quoted piece of source in a message, kept short: the message goes back to the model, which has the source. */
+const shown = (text: string): string => (text.length > 60 ? text.slice(0, 59) + '…' : text)
 /**
  * New applets may not size themselves to the frame. Published applets that already do still load and render; the
  * page's height report ignores changes that only follow the frame. JavaScript that sets such sizes is not checked.
@@ -80,17 +82,17 @@ function viewportSizing(css: string): string | null {
 function rejectViewportSizing(source: { html: string; css: string }): void {
   const found: string[] = []
   const inCss = viewportSizing(source.css)
-  if (inCss) found.push(`"${inCss}" in css`)
+  if (inCss) found.push(`"${shown(inCss)}" in css`)
   for (const block of source.html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)) {
     const inHtml = viewportSizing(block[1])
-    if (inHtml) found.push(`"${inHtml}" in a <style> element`)
+    if (inHtml) found.push(`"${shown(inHtml)}" in a <style> element`)
   }
   for (const tag of source.html.matchAll(/<([a-z][\w-]*)\b[^>]*?\sstyle\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi)) {
     const style = tag[2].replace(/^["']|["']$/g, '')
     const unit = VIEWPORT_HEIGHT_UNIT.exec(style)
     const full = /^(?:html|body)$/i.test(tag[1]) ? FULL_HEIGHT.exec(style) : null
-    if (unit) found.push(`"${unit[0].trim()}" in a style attribute`)
-    else if (full) found.push(`"${full[1]}" on <${tag[1].toLowerCase()}>`)
+    if (unit) found.push(`"${shown(unit[0].trim())}" in a style attribute`)
+    else if (full) found.push(`"${shown(full[1])}" on <${shown(tag[1].toLowerCase())}>`)
   }
   if (found.length)
     throw new AppletValidationError(
@@ -184,7 +186,8 @@ export function extractAppletParts(
         throw new AppletValidationError('Only three applets are allowed per message.')
       parts.push({
         type: 'submission',
-        submission: validateAppletSubmission(JSON.parse(content.slice(bodyStart, end.index)), options)
+        submission: validateAppletSubmission(JSON.parse(content.slice(bodyStart, end.index)), options),
+        source: content.slice(start, openings.lastIndex)
       })
     } catch (error) {
       parts.push({
@@ -199,4 +202,203 @@ export function extractAppletParts(
   if (cursor < content.length || parts.length === 0)
     parts.push({ type: 'text', text: content.slice(cursor) })
   return parts
+}
+/**
+ * The line that stands for an applet where a model reads a reply (a handoff, a run's result, `thread_read`): its source
+ * stays in the applet store, where `read_applet` reads it, and is never repeated into another model's context.
+ */
+export function appletReferenceLine(applet: { title: string; appletId?: string; revisionId?: string }): string {
+  // One line, with no fence marker: a title's own line breaks would start lines that could read as a code fence, and a
+  // run of three backticks or tildes would read as one when the line is redacted again.
+  const title = applet.title.replace(/([`~])\1{2,}/g, '$1$1').replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ')
+  return applet.appletId && applet.revisionId
+    ? `[Applet: ${title} (appletId ${applet.appletId}, revision ${applet.revisionId})]`
+    : `[Applet: ${title}]`
+}
+/** The applets a reply published, for `redactAppletFences`: by where each fence opens in the text, or else after it. */
+export interface PublishedApplets {
+  at?: ReadonlyMap<number, AppletReference>
+  after?: readonly AppletReference[]
+}
+/**
+ * The applets `content` published, by where each fence opens in it, read as publication read it: its parts map one to
+ * one onto `extractAppletParts` of the content (checked as a new reply's publication, else as a recovery). When they do
+ * not, the references follow the text, never put on a fence that may not be theirs.
+ */
+export function publishedApplets(content: string, parts: unknown, offset = 0): PublishedApplets {
+  const shown = Array.isArray(parts) ? (parts as AppletPresentationPart[]) : []
+  const references = shown.flatMap((part) => (part?.type === 'applet' && part.reference ? [part.reference] : []))
+  if (!references.length) return {}
+  for (const publishing of [true, false]) {
+    const extracted = extractAppletParts(content, true, { publishing })
+    if (extracted.length !== shown.length) continue
+    const at = new Map<number, AppletReference>()
+    let start = 0
+    const matches = extracted.every((part, index) => {
+      const applet = shown[index]?.type === 'applet' ? (shown[index] as { reference: AppletReference }).reference : undefined
+      if (applet && (part.type !== 'submission' || part.submission.title !== applet.title)) return false
+      if (applet) at.set(offset + start, applet)
+      start += part.type === 'text' ? part.text.length : part.source.length
+      return true
+    })
+    if (matches) return { at }
+  }
+  return { after: references }
+}
+/**
+ * A stored reply as a model reads it: the text the model wrote with every applet fence cut (`redactAppletFences`),
+ * each published applet named by its reference line. The stored text keeps its fences, which recovery and a bot's chat
+ * match on. The stored parts are not read as text: publication adds to them, which could end a cut early.
+ */
+export function modelFacingReplyText(message: { role?: unknown; content?: unknown; presentationParts?: unknown }): string {
+  const content = typeof message.content === 'string' ? message.content : ''
+  // A person's message never publishes an applet: a fence pasted there is what they wrote, kept for the model to read.
+  return message.role === 'user' ? content : redactAppletFences(content, publishedApplets(content, message.presentationParts))
+}
+/** The marker of the code block `text` leaves open, as `extractAppletParts` reads blocks, if any. */
+function openCodeBlock(text: string): string | undefined {
+  const probe = text.endsWith('\n') ? text : text + '\n'
+  const openings = /^(`{3,}|~{3,})([^\r\n]*)\r?\n/gm
+  let opening: RegExpExecArray | null
+  while ((opening = openings.exec(probe))) {
+    const marker = opening[1]
+    const closing = new RegExp(`^${marker[0]}{${marker.length},}[ \t]*(?:\\r?\\n|$)`, 'gm')
+    closing.lastIndex = openings.lastIndex
+    const end = closing.exec(text)
+    if (!end) return marker
+    openings.lastIndex = end.index + end[0].length
+  }
+  return undefined
+}
+/**
+ * Where an applet fence may open, read more widely than publication reads one: anywhere on a line (a stopped run's
+ * rows can join without a line break), any case, any spacing. It is tried only where a run of backticks or tildes
+ * starts, and the run is taken whole, so a long run is scanned once.
+ */
+const APPLET_OPENING = /(?:(?<!`)(`{3,})(?!`)|(?<!~)(~{3,})(?!~))[^\S\r\n]*mousse-applet(?![\w-])/gi
+/** The fences in one cut whose bodies are read for a title; the rest are named `[Applet]`. */
+const TITLED_FENCES = 10
+
+/** A cut fence: where it opens, and the title its body gives, if it is a JSON object with one. */
+interface CutFence {
+  at: number
+  title?: string
+}
+
+/** The title an applet fence's body gives, if it is a JSON object with one: a body that is not stays unnamed. */
+function fenceTitle(body: string): string | undefined {
+  try {
+    const title = (JSON.parse(body) as { title?: unknown } | null)?.title
+    return typeof title === 'string' && title.trim() ? title.trim().slice(0, 200) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** One stretch of text `redactAppletFences` cuts: the fences that open in it, and whether it closes. */
+interface AppletCut {
+  start: number
+  end: number
+  fences: CutFence[]
+  closed: boolean
+}
+
+/**
+ * The stretches of `text` that hold applet fences, read so that no reading of the text leaves an applet's source
+ * out. It ignores other code blocks (an applet inside one is still cut), counts, sizes and validity. A fence ends at the
+ * first line, after a line break, of its marker at least as long (publication also ends one after U+2028, U+2029 or
+ * `\r`, never later), or at the end of the text; a fence opening inside a stretch extends it to its own end.
+ */
+function appletCuts(text: string): AppletCut[] {
+  if (!/mousse-applet/i.test(text)) return []
+  const opening = new RegExp(APPLET_OPENING.source, APPLET_OPENING.flags)
+  // The first closing line at or after a position, by marker, so a cut with many fences scans the text once per marker.
+  const closings = new Map<string, { from: number; close: RegExpExecArray | null }>()
+  const closingAfter = (marker: string, from: number): RegExpExecArray | null => {
+    const known = closings.get(marker)
+    if (known && known.from <= from && (!known.close || known.close.index >= from)) return known.close
+    const closing = new RegExp(`(?<=\\n)${marker[0]}{${marker.length},}[ \\t]*(?:\\r?\\n|(?![\\s\\S]))`, 'g')
+    closing.lastIndex = from
+    const close = closing.exec(text)
+    closings.set(marker, { from, close })
+    return close
+  }
+  const cuts: AppletCut[] = []
+  let next = opening.exec(text)
+  while (next) {
+    const cut: AppletCut = { start: next.index, end: next.index, fences: [], closed: true }
+    do {
+      const lineEnd = text.indexOf('\n', next.index + next[0].length)
+      const bodyStart = lineEnd === -1 ? text.length : lineEnd + 1
+      const close = closingAfter(next[1] ?? next[2]!, bodyStart)
+      const titled = cut.fences.length < TITLED_FENCES
+      cut.fences.push({ at: next.index, title: titled ? fenceTitle(text.slice(bodyStart, close ? close.index : text.length)) : undefined })
+      if (!close) cut.closed = false
+      cut.end = Math.max(cut.end, close ? close.index + close[0].length : text.length)
+      opening.lastIndex = next.index + next[0].length
+      next = cut.end < text.length ? opening.exec(text) : null
+    } while (next && next.index < cut.end)
+    cuts.push(cut)
+  }
+  return cuts
+}
+
+/**
+ * `text` with every applet fence cut out (`appletCuts`) and one line naming each in its place (`[Applet: title]`, or
+ * `[Applet]` when no title can be read), for a reader that gets the applet's name but never its source: a run's
+ * result, a handoff, `thread_read`. It fails closed, unlike publication, which refuses what it cannot read. A fence
+ * that published (`published.at`, by where it opens) is named by its reference line; references that cannot be placed
+ * (`published.after`, or a position no fence opens at) follow the text. With `from`, only the text from there on is
+ * returned, read as part of the whole: a fence opened before `from` is still cut (a turn's last row, read after the
+ * rows before it).
+ */
+export function redactAppletFences(text: string, published: PublishedApplets = {}, from = 0): string {
+  const placed = new Map(published.at)
+  let out = ''
+  let cursor = from
+  for (const cut of appletCuts(text)) {
+    if (cut.end <= from) continue
+    const lines = cut.fences.map(({ at, title }) => {
+      const reference = placed.get(at)
+      placed.delete(at)
+      if (reference) return appletReferenceLine(reference)
+      return title === undefined ? '[Applet]' : appletReferenceLine({ title })
+    })
+    // A cut that took its closing line's break gives the naming lines one.
+    out += text.slice(cursor, Math.max(cursor, cut.start)) + lines.join('\n') + (text[cut.end - 1] === '\n' ? '\n' : '')
+    cursor = cut.end
+  }
+  out += text.slice(cursor)
+  const unplaced = [...(published.after ?? []), ...(from === 0 ? placed.values() : [])].map(appletReferenceLine)
+  return unplaced.length ? [out, ...unplaced].filter(Boolean).join('\n\n') : out
+}
+
+/** The stretches of `text` `redactAppletFences` cuts, for a change to the text that must leave them whole. */
+export function appletFenceSpans(text: string): Array<{ start: number; end: number }> {
+  return appletCuts(text).map(({ start, end }) => ({ start, end }))
+}
+
+/**
+ * `tail`, the end of `whole` (a turn's last row after the rows before it, joined as they streamed), with its applet
+ * fences cut as part of `whole`: a fence an earlier row opened is still cut. A `tail` that is not the end of `whole`,
+ * even ignoring white space at either end, is cut on its own.
+ */
+export function redactAppletTail(whole: string, tail: string): string {
+  if (tail && whole.endsWith(tail)) return redactAppletFences(whole, {}, whole.length - tail.length)
+  const text = whole.trimEnd()
+  const end = tail.trim()
+  return end && text.endsWith(end) ? redactAppletFences(text, {}, text.length - end.length) : redactAppletFences(tail)
+}
+
+/**
+ * `text`, a reply, with `fences` (applets a tool staged) after everything the model wrote, so they never fall inside
+ * an applet fence as `redactAppletFences` reads one, where their closing lines could end its cut early. A code block
+ * the reply leaves open is closed first, or the fences would be text inside it; one an applet fence leaves open is not,
+ * so an applet the model left unfinished is never published.
+ */
+export function appendStagedApplets(text: string, fences: string): string {
+  if (!fences) return text
+  const open = openCodeBlock(text)
+  if (!open || appletCuts(text).some((cut) => !cut.closed)) return text + fences
+  return (text.endsWith('\n') ? text : text + '\n') + open + fences
 }

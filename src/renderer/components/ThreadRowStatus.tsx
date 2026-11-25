@@ -4,7 +4,7 @@ import { formatPauseUntil } from '../../shared/pauseDisplay'
 import { expiresInLabel } from '../../shared/threadExpiry'
 import { isThreadActivityActive, type Thread, type ThreadActivitySnapshot, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { threadStatus, type ThreadLinkStatus } from '../../shared/threadAttention'
-import { isSubagentThread } from '../../shared/threadLineage'
+import { isSubagentThread, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
 import { pausedStatusLabel } from '../lib/pausedRun'
 import { useAppStore } from '../stores/appStore'
 import { countRender } from '../chat/components/agent-elements/render-counts'
@@ -258,17 +258,44 @@ export function plainThreads(threads: readonly Thread[]): ReadonlySet<string> {
 const isWorking = (state: ThreadActivityState | undefined): boolean => state === 'processing' || state === 'waiting'
 
 /**
- * Whether the list shows the same with activity `next` as with `held`: every thread's state is the same, except that
- * a plain thread (`plain`: no subagents above or below it) may swap Working and Waiting, which only its status shows.
+ * Whether the list shows the same with activity `next` as with `held`: every visible thread's rolled-up state is the
+ * same (allowing a plain thread to swap Working and Waiting, which only its own status component shows), no thread
+ * entered or left `awaiting_input` (which can move "Needs me"), and no unlisted/pending thread changed.
  */
-export function sameListedActivity(held: ThreadActivitySnapshot, next: ThreadActivitySnapshot, plain: ReadonlySet<string>): boolean {
+export function sameListedActivity(
+  held: ThreadActivitySnapshot,
+  next: ThreadActivitySnapshot,
+  plain: ReadonlySet<string>,
+  threads?: readonly Thread[]
+): boolean {
   if (held === next) return true
-  const keys = Object.keys(next)
-  if (keys.length !== Object.keys(held).length) return false
-  return keys.every((key) => {
+  const heldKeys = Object.keys(held)
+  const nextKeys = Object.keys(next)
+  if (nextKeys.length === heldKeys.length && nextKeys.every((key) => {
     if (!Object.prototype.hasOwnProperty.call(held, key)) return false
     const a = held[key]
     const b = next[key]
     return a === b || (plain.has(key) && isWorking(a) && isWorking(b))
-  })
+  })) {
+    return true
+  }
+  if (!threads) return false
+  const allKeys = new Set([...heldKeys, ...nextKeys])
+  for (const key of allKeys) {
+    if ((held[key] === 'awaiting_input') !== (next[key] === 'awaiting_input')) return false
+  }
+  const byId = new Map(threads.map((thread) => [thread.id, thread]))
+  for (const key of allKeys) {
+    if (!byId.has(key) && held[key] !== next[key]) return false
+  }
+  const rolledHeld = rollUpActivities(threads, held)
+  const rolledNext = rollUpActivities(threads, next)
+  for (const thread of visibleThreads(threads)) {
+    const a = rolledHeld[thread.id] ?? held[thread.id] ?? 'idle'
+    const b = rolledNext[thread.id] ?? next[thread.id] ?? 'idle'
+    if (a === b) continue
+    if (plain.has(thread.id) && isWorking(a) && isWorking(b)) continue
+    return false
+  }
+  return true
 }

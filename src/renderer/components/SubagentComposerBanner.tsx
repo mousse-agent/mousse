@@ -1,9 +1,9 @@
-import { useMemo } from 'react'
+import { useRef } from 'react'
 import { ChevronRight } from '../lib/icons'
 import { isRunningSubagent } from '../../shared/subagents'
 import { useSubagents } from '../hooks/useSubagents'
 import { openThread } from '../lib/openThread'
-import { useAppStore } from '../stores/appStore'
+import { samePlainData, useAppStore } from '../stores/appStore'
 import { BANNER_MAX_DEPTH, collectNeedingInput, needingInputLabel, type NeedingInput } from './subagentBannerLogic'
 import './subagentComposerBanner.css'
 
@@ -58,8 +58,13 @@ function WatchBelow({ threadId, depth }: { threadId: string; depth: number }) {
 /** The banner for `threadId`, from the subagents the store holds. */
 export function SubagentComposerBanner({ threadId }: { threadId: string | null }) {
   const subagents = useSubagents(threadId)
-  const lists = useAppStore((s) => s.subagentsByParent)
-  const asking = useMemo(() => collectNeedingInput(lists, threadId), [lists, threadId])
+  const heldAsking = useRef<NeedingInput[]>([])
+  const asking = useAppStore((s) => {
+    const next = collectNeedingInput(s.subagentsByParent, threadId)
+    if (samePlainData(heldAsking.current, next)) return heldAsking.current
+    heldAsking.current = next
+    return next
+  })
   return (
     <>
       {threadId && subagents.filter(isRunningSubagent).map((subagent) => (

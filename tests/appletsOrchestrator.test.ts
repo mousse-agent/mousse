@@ -5,9 +5,10 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
-import type { AppletReference } from '../src/shared/applets'
+import { modelFacingReplyText, type AppletReference } from '../src/shared/applets'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { piAdapter } from './run/phase6Fixture'
+import { HandoffService, type HandoffTranscriptSource } from '../src/mms/run/handoff/HandoffService'
 
 const source = {
   schemaVersion: 1,
@@ -83,6 +84,12 @@ it('publishes completed native fences in order and reloads source after daemon r
 })
 it('keeps interrupted native responses inert even when the complete fence was streamed', async () => {
   const { main, thread } = await fixture()
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
   vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
     input.onText(fence(source))
     expect(main.orchestrator.abortActiveTurn(thread.id)).toBe(true)
@@ -97,6 +104,58 @@ it('keeps interrupted native responses inert even when the complete fence was st
     messages.every((message) => !message.presentationParts?.some((part) => part.type === 'applet'))
   ).toBe(true)
   expect(main.applets.list(thread.id)).toEqual([])
+  // What a parent or `thread_wait` reads of the stopped run names the applet, not its source.
+  expect(results.at(-1)).toBe('[Applet: Calculator]')
+})
+it('names a staged applet the cap refused, also when one of the reply\'s own applets has its title', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  // The reply's last applet has the staged one's title: the cap refuses the staged one, which takes nothing of it.
+  const own = ['Table', 'Map', 'Calculator'].map((title) => fence({ ...source, title })).join('\n')
+  const adapter = piAdapter(() => own + '\nDone.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!({ ...source, js: 'window.staged = true' })
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  expect(main.applets.list(thread.id)).toHaveLength(3)
+  expect(results.at(-1)).toMatch(/^\[Applet: Table \(appletId [^)]+\)\]\n\[Applet: Map \(appletId [^)]+\)\]\n\[Applet: Calculator \(appletId [^)]+\)\]\nDone\.\n\n\[Applet: Calculator\]$/)
+})
+
+it('cuts a fence an earlier row opened from what a stopped run hands back', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'unused')
+  adapter.startTurn = async (_input, sink) => {
+    const first = 'Draft:\n~~~mousse-applet\n'
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: first, contentIndex: 0 })
+    sink.text({ phase: 'complete', content: first, contentIndex: 0 })
+    sink.tool({ phase: 'start', callId: 'read', kind: 'mcp_tool_call', title: 'Read', summary: '', details: [] })
+    sink.tool({ phase: 'complete', callId: 'read', kind: 'mcp_tool_result', title: 'Read', summary: '', details: [] })
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: '{"js":"STOP_CANARY"}', contentIndex: 0 })
+    expect(main.orchestrator.abortActiveTurn(thread.id)).toBe(true)
+    throw new DOMException('Aborted', 'AbortError')
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+  expect(results.at(-1)).toBe('[Applet]')
 })
 it('keeps malformed applets as inert source without failing the completed turn', async () => {
   const { main, thread } = await fixture()
@@ -205,6 +264,288 @@ it('stages structured tool submissions through the same final publication path a
     .messages.find((message) => message.presentationParts)
   expect(completed?.content).toContain('```mousse-applet')
   expect(completed?.presentationParts?.filter((part) => part.type === 'applet')).toHaveLength(3)
+})
+
+it('hands a published applet to other models as one line, while the stored reply keeps its source', async () => {
+  let transcriptOf: HandoffTranscriptSource | null = null
+  const install = HandoffService.prototype.setTranscriptSource
+  vi.spyOn(HandoffService.prototype, 'setTranscriptSource').mockImplementation(function (this: HandoffService, source) {
+    transcriptOf = source
+    return install.call(this, source)
+  })
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'Here is the chart.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(source)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  const line = `[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`
+  const reply = main.threads.loadThreadData(thread.id).messages.find((message) => message.presentationParts)!
+  // Stored for recovery and bots' chats: the fence with its source.
+  expect(reply.content).toContain(JSON.stringify(source.js))
+  // A parent's result, a handoff to another model, and an agent's thread_read: the line, not the source.
+  expect(results.at(-1)).toBe(`Here is the chart.\n\n${line}`)
+  const handedOver = transcriptOf!(thread.id).find((item) => item.role === 'assistant')
+  expect(handedOver?.text).toBe(`Here is the chart.\n\n${line}`)
+  const page = await request(main, 'thread.messages', { threadId: thread.id, index: 0 }) as { messages: Array<{ role: string; content: string }> }
+  const read = page.messages.find((message) => message.role === 'assistant')
+  expect(read?.content).toContain(line)
+  expect(read?.content).not.toContain('mousse-applet')
+})
+
+it('gives a parent the line, not the source, of an applet the model wrote as a fence', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  main.orchestrator.setHarness(testHarness({ adapters: [piAdapter(() => 'Before\n' + fence(source) + '\nAfter')], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+  const ref = reference(main, thread.id)
+  expect(results.at(-1)).toBe(`Before\n[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]\nAfter`)
+})
+
+it('publishes a tool-staged applet after a reply that left a code block open, and passes on its line', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'Here is the chart.\n```js\nconst open = true')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(source)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('publishes a tool-staged applet on a last row that follows a row left with an open code block', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const first = 'Trying it:\n~~~js\nconst open = true\n'
+  const adapter = piAdapter(() => 'Chart updated.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    // The first row ends at a tool call with a block still open; the turn's last row is a reply of its own.
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: first, contentIndex: 0 })
+    sink.text({ phase: 'complete', content: first, contentIndex: 0 })
+    sink.tool({ phase: 'start', callId: 'edit', kind: 'mcp_tool_call', title: 'publish_applet', summary: '', details: [] })
+    host.tools.onPublishApplet!(source)
+    sink.tool({ phase: 'complete', callId: 'edit', kind: 'mcp_tool_result', title: 'publish_applet', summary: '', details: [] })
+    // The last row streams only its own text; the turn's text is both rows, as a runtime reports it.
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: 'Chart updated.', contentIndex: 0 })
+    const result = await startTurn(input, sink, ctl, host)
+    return { ...result, text: first + result.text }
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  const replies = main.threads.loadThreadData(thread.id).messages.filter((message) => message.role === 'assistant' && !message.kind)
+  expect(replies.length).toBeGreaterThan(1)
+  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('closes a code block left open inside a closed applet fence before staging an applet, and still cuts the fence whole', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'Draft: ```mousse-applet\n~~~json\n{"html":"SOURCE_CANARY"}\n```')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(source)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  const reply = main.threads.loadThreadData(thread.id).messages.find((message) => message.presentationParts)!
+  for (const text of [results.at(-1), modelFacingReplyText(reply)]) {
+    expect(text).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+    expect(text).not.toContain('SOURCE_CANARY')
+  }
+})
+
+it('cuts a fence a row opened and the last row went on with, also after a tool-staged applet publishes', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const first = 'Draft:\n~~~mousse-applet\n'
+  const last = '{"js":"ROW_CANARY"}\n~~~\nDone.'
+  const adapter = piAdapter(() => last)
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: first, contentIndex: 0 })
+    sink.text({ phase: 'complete', content: first, contentIndex: 0 })
+    sink.tool({ phase: 'start', callId: 'publish', kind: 'mcp_tool_call', title: 'publish_applet', summary: '', details: [] })
+    host.tools.onPublishApplet!(source)
+    sink.tool({ phase: 'complete', callId: 'publish', kind: 'mcp_tool_result', title: 'publish_applet', summary: '', details: [] })
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: last, contentIndex: 0 })
+    const result = await startTurn(input, sink, ctl, host)
+    return { ...result, text: first + result.text }
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  const ref = reference(main, thread.id)
+  expect(results.at(-1)).toContain(`[Applet: Calculator (appletId ${ref.appletId}, revision ${ref.revisionId})]`)
+  expect(results.at(-1)).not.toContain('ROW_CANARY')
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('names an applet on an earlier reply row, also after a row that left a code block open', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const rows = ['Trying it:\n```js\nconst open = true\n', 'Here it is:\n' + fence(source) + '\n']
+  const adapter = piAdapter(() => 'Done.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    // Two rows, each ended by a tool call, then the last row: the turn's text is all three, as a runtime reports it.
+    rows.forEach((row, at) => {
+      sink.text({ phase: 'start', content: '', contentIndex: 0 })
+      sink.text({ phase: 'delta', content: row, contentIndex: 0 })
+      sink.text({ phase: 'complete', content: row, contentIndex: 0 })
+      sink.tool({ phase: 'start', callId: `call-${at}`, kind: 'mcp_tool_call', title: 'Read', summary: '', details: [] })
+      sink.tool({ phase: 'complete', callId: `call-${at}`, kind: 'mcp_tool_result', title: 'Read', summary: '', details: [] })
+    })
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: 'Done.', contentIndex: 0 })
+    const result = await startTurn(input, sink, ctl, host)
+    return { ...result, text: rows.join('') + result.text }
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  expect(results.at(-1)).toContain('Here it is:\n[Applet: Calculator]')
+  expect(results.at(-1)).not.toContain(source.js)
+})
+
+it('publishes a tool-staged applet whose source holds a separator then backticks, and never an applet the reply left unfinished', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const draft = { ...source, title: 'Draft', js: 'window.draft = "DRAFT_SOURCE"' }
+  const adapter = piAdapter(() => 'Almost:\n~~~mousse-applet\n' + JSON.stringify(draft))
+  const startTurn = adapter.startTurn.bind(adapter)
+  // A separator then backticks in a string: the staged fence still holds the whole source.
+  const ls = String.fromCharCode(0x2028)
+  const staged = { ...source, html: '<pre>' + ls + '```' + ls + '</pre>' }
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(staged)
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+
+  // The staged fence follows the unfinished one, which publication reads as text to the end, as on master: neither publishes.
+  expect(main.applets.list(thread.id)).toEqual([])
+  // Both are one cut, to the end: named as one applet, never by its source.
+  expect(results.at(-1)).toBe('Almost:\n[Applet]')
+
+  // Without the unfinished fence, the staged one publishes whole.
+  const second = await fixture()
+  second.main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const plain = piAdapter(() => 'Here:')
+  const startPlain = plain.startTurn.bind(plain)
+  plain.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(staged)
+    return startPlain(input, sink, ctl, host)
+  }
+  second.main.orchestrator.setHarness(testHarness({ adapters: [plain], profileHome: second.main.getProfileHomeDir() }))
+  await second.main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: second.thread.id })
+  expect(second.main.applets.list(second.thread.id).map((applet) => applet.title)).toEqual(['Calculator'])
+})
+
+it('names an applet that failed to publish to other models, without its source', async () => {
+  let transcriptOf: HandoffTranscriptSource | null = null
+  const install = HandoffService.prototype.setTranscriptSource
+  vi.spyOn(HandoffService.prototype, 'setTranscriptSource').mockImplementation(function (this: HandoffService, source) {
+    transcriptOf = source
+    return install.call(this, source)
+  })
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  // A valid applet that revises one this thread never published: publication fails when the reply completes.
+  const stale = { ...source, appletId: 'applet_missing', expectedRevision: 'rev_missing' }
+  main.orchestrator.setHarness(testHarness({ adapters: [piAdapter(() => 'Before\n' + fence(stale) + '\nAfter')], profileHome: main.getProfileHomeDir() }))
+  // A person's message never publishes: a fence pasted there reaches the next model as written.
+  const asked = 'Fix this:\n' + fence(source)
+  await main.orchestrator.send({ content: asked, mode: 'agent' }, false, { threadId: thread.id })
+
+  expect(main.applets.list(thread.id)).toEqual([])
+  const reply = main.threads.loadThreadData(thread.id).messages.find((message) => message.role === 'assistant')!
+  expect(reply.content).toContain(JSON.stringify(source.js))
+  expect(results.at(-1)).toBe('Before\n[Applet: Calculator]\nAfter')
+  const handedOver = transcriptOf!(thread.id).find((item) => item.role === 'assistant')
+  expect(handedOver?.text).toBe('Before\n[Applet: Calculator]\nAfter')
+  expect(transcriptOf!(thread.id).find((item) => item.role === 'user')?.text).toBe(asked)
+  const page = await request(main, 'thread.messages', { threadId: thread.id, index: 0 }) as { messages: Array<{ role: string; content: string }> }
+  const read = page.messages.find((message) => message.role === 'assistant')
+  expect(read?.content).toContain('[Applet: Calculator]')
+  expect(read?.content).not.toContain(source.html)
 })
 
 it('keeps one reply row when a tool-published applet follows a reply that already closed', async () => {
