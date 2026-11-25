@@ -1555,8 +1555,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.activationSummary(this.store.activation(id)!)
   }
 
-  /** Inserts a queued activation (inside a transaction), refused at once when its lane is full; how many were refused. */
-  private insertQueued(botId: string, id: string, key: string, trigger: BotActivationTrigger, lane: BotLane, admitted: ReturnType<BotEngine['admissible']>): number {
+  /**
+   * Inserts a queued activation (inside a transaction), refused at once when its lane is full; how many were refused.
+   * `provenance`: what started it, when its key does not say (Resume's retry keeps its original's).
+   */
+  private insertQueued(botId: string, id: string, key: string, trigger: BotActivationTrigger, lane: BotLane, admitted: ReturnType<BotEngine['admissible']>, provenance?: BotActivationProvenance): number {
     const { published, grant } = admitted
     this.store.insertActivation({
       id,
@@ -1568,7 +1571,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       status: 'queued',
       createdAt: this.store.now(),
       lane
-    }, limitsOf(intersectManifest(published.permissions, grant.manifest)))
+    }, limitsOf(intersectManifest(published.permissions, grant.manifest)), provenance ? { provenance } : {})
     return this.refuseOverQueue(botId, lane)
   }
 
@@ -8283,7 +8286,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (limited.length) this.updateModelStateInTx(botId, (state) => ({ ...state, limits: {} }))
       if (retry && !this.store.activationByKey(retry.key)) {
         const id = newActivationId()
-        this.insertQueued(botId, id, retry.key, retry.row.trigger, 'chat', retry.admitted)
+        // The retry keeps what started the original, whatever its key reads as.
+        this.insertQueued(botId, id, retry.key, retry.row.trigger, 'chat', retry.admitted, retry.row.provenance)
         this.store.moveOwnerRows(botId, retry.row.id, id)
       }
     })

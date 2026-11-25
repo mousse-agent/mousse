@@ -845,11 +845,15 @@ const CHAT_KEY_PROVENANCE: ReadonlyArray<readonly [string, BotActivationProvenan
 /** The start of a chat turn Resume retried after a usage limit (`BotEngine.chatToRetry`). */
 const RESUME_KEY = 'resume:'
 
+/** What only the owner's own message or tap starts: never behind a `resume:`. */
+const OWNER_PROVENANCES: ReadonlySet<BotActivationProvenance> = new Set(['owner_message', 'owner_tap'])
+
 /**
  * The provenance of an activation from its lane, idempotency key and trigger: what a row written before v14 means, and
  * what a new row stores. A run: its trigger's kind. A chat turn: its key's start, also behind the `resume:` of the turns
  * Resume retried (`resume:wake:<id>`, `resume:resume:job:<id>`). A bare `resume:<id>` is the retry of another bot's
- * message (`chatToRetry` keeps no other start that way), so `botmsg`. The bot's first message is still told by its raw
+ * message (`chatToRetry` keeps no other start that way), so `botmsg`; so is `resume:chat:<id>` or `resume:answer:<id>`,
+ * which no build writes and which never read as the owner's. The bot's first message is still told by its raw
  * `create:` key (`resume:create:<id>` is not one); this does not change that.
  */
 export function deriveBotProvenance(input: { lane: BotLane; idempotencyKey: string; trigger?: { kind: string } }): BotActivationProvenance {
@@ -861,7 +865,8 @@ export function deriveBotProvenance(input: { lane: BotLane; idempotencyKey: stri
   let key = input.idempotencyKey
   let hadResumePrefix = false
   while (key.startsWith(RESUME_KEY)) { key = key.slice(RESUME_KEY.length); hadResumePrefix = true }
-  const named = CHAT_KEY_PROVENANCE.find(([start]) => key.startsWith(start))
+  // The owner's own starts never follow a `resume:` (their retries are `chat:resume:<id>`, `answer:resume:<id>`).
+  const named = CHAT_KEY_PROVENANCE.find(([start, provenance]) => key.startsWith(start) && !(hadResumePrefix && OWNER_PROVENANCES.has(provenance)))
   if (named) return named[1]
   return hadResumePrefix ? 'botmsg' : 'unknown'
 }

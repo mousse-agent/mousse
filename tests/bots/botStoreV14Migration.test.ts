@@ -5,8 +5,8 @@
  *
  * Inputs: every start the engine writes (owner message and its continuation, a tapped answer, the bot's first message,
  * a wake, a question's default, a thread's notice and message, another bot's message, the three Resume retries, work,
- * a schedule, a run by hand) and one no build writes (`future:start`), in both lanes; both writers; reopen; an older
- * build opening the new database.
+ * a schedule, a run by hand) and ones no build writes (`future:start`, `resume:chat:`, `resume:answer:`), in both lanes;
+ * a stored provenance this build does not know; both writers; reopen; an older build opening the new database.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -48,6 +48,9 @@ const STARTS: Array<[string, BotLane, BotActivationTrigger, BotActivationProvena
   ['resume:act1', 'chat', manual, 'botmsg'],
   ['action:a1', 'chat', manual, 'action_result'],
   ['future:start', 'chat', manual, 'unknown'],
+  // Nor these: the owner's start behind a `resume:` is never the owner's.
+  ['resume:chat:act0', 'chat', manual, 'botmsg'],
+  ['resume:answer:act0', 'chat', manual, 'botmsg'],
   ['work:k1', 'run', work, 'work'],
   ['sched:b:s1:t', 'run', schedule, 'schedule'],
   ['manual:m1', 'run', manual, 'manual'],
@@ -75,7 +78,7 @@ describe('bots.db v13 → v14', () => {
     expect(store.all('SELECT provenance FROM bot_activations').every((row) => row.provenance === null)).toBe(true)
     STARTS.forEach(([key, lane, trigger, provenance], i) => {
       const row = store.activation(`old-${i}`)!
-      expect({ key, provenance: row.provenance }).toEqual({ key, provenance })
+      expect({ key: row.idempotencyKey, provenance: row.provenance }).toEqual({ key, provenance })
       expect(deriveBotProvenance({ lane, idempotencyKey: key, trigger })).toBe(provenance)
     })
   })
@@ -113,6 +116,15 @@ describe('bots.db v13 → v14', () => {
     expect(threadsReadOnlyOf(store.activation('copied')!)).toBe('not_owner')
     store.insertActivation({ ...owner, id: 'copied-work', lane: 'run', idempotencyKey: 'work:copied', trigger: work }, {})
     expect(asksOwner(store.activation('copied-work')!)).toBe(true)
+  })
+
+  it('a stored provenance only a newer build knows reads as its lane, key and trigger give', () => {
+    const store = open(folder())
+    store.insertActivation({ id: 'botmsg', botId: 'b', revision: 'r', grantDigest: 'g', trigger: manual, idempotencyKey: 'botmsg:b2:m2', status: 'queued', createdAt: T, lane: 'chat' }, {})
+    store.insertActivation({ id: 'run', botId: 'b', revision: 'r', grantDigest: 'g', trigger: work, idempotencyKey: 'work:k9', status: 'queued', createdAt: T, lane: 'run' }, {})
+    store.run("UPDATE bot_activations SET provenance = 'owner_voice'")
+    expect([store.activation('botmsg')!.provenance, store.activation('run')!.provenance]).toEqual(['botmsg', 'work'])
+    expect(threadsReadOnlyOf(store.activation('botmsg')!)).toBe('not_owner')
   })
 
   it('reopens without change, and an older build refuses the database', () => {

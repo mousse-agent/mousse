@@ -160,6 +160,24 @@ describe('usage limits', () => {
     const prepared = await runDispatch(f, retry.id, 1, { text: 'Not yet.' })
     expect(prepared.authority.threadsReadOnly).toBeUndefined()
     expect(memoryLaneOf(retry)).toBe('chat')
+    expect(retry.provenance).toBe('owner_message')
+  })
+
+  // Resume's retry of any start but the owner's is keyed `resume:<id>`, which reads as another bot's message: the row keeps
+  // what started the original instead.
+  it.each([['future:start', 'unknown'], ['action:a1', 'action_result']] as const)('a chat turn started by %s keeps its provenance (%s) when Resume retries it', async (key, provenance) => {
+    const until = new Date(f.clock.now + 2 * HOUR).toISOString()
+    const turn = await f.bots.enqueueChat(botId, key, 'Carry on.')
+    await flush()
+    expect(f.store.activation(turn.id)!.provenance).toBe(provenance)
+    for (const n of [1, 2]) await runDispatch(f, turn.id, n, limited(until))
+    await flush()
+    expect(f.store.activation(turn.id)).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
+    f.limited.clear()
+    await f.bots.service.resume(botId)
+    const retry = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(retry.idempotencyKey).toBe(`resume:${turn.id}`)
+    expect(f.store.get('SELECT provenance FROM bot_activations WHERE id = ?', retry.id)).toEqual({ provenance })
   })
 
   it('a bot\'s message a limit stopped stays another bot\'s after Resume: it only reads the owner\'s threads', async () => {
