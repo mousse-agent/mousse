@@ -88,19 +88,6 @@
       "expiresAt": "2026-11-25T08:03:52.715Z"
     },
     {
-      "task": "fix-antigravity-reasoning-levels",
-      "session": "agibook-121739",
-      "machine": "agibook",
-      "branch": "fix-antigravity-reasoning-levels",
-      "paths": [
-        "src/mms/harness/acp/models.ts",
-        "src/mms/harness/acp/session.ts",
-        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts"
-      ],
-      "claimedAt": "2026-11-25T04:16:47.050Z",
-      "expiresAt": "2026-11-25T06:16:47.050Z"
-    },
-    {
       "task": "issue-1830-grant-roles",
       "session": "Avarnics-Mac-mini.local-c3024a",
       "machine": "Avarnics-Mac-mini.local",
