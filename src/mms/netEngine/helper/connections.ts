@@ -350,12 +350,14 @@ export class EngineHelper {
   /**
    * The helper's `hello` with this computer's name and profile; answers what it said of itself. The app offers
    * protocol 1.2 (pairing flow §1): a 1.2 helper lists what it implements in `features`; a 1.1 helper answers
-   * `[1, 1]` with no list, and a 1.0 helper `[1, 0]`, serving 1a's messages only.
+   * `[1, 1]` with no list, and a 1.0 helper `[1, 0]`, serving 1a's messages only. The app says it takes streams of
+   * grants whose role is not `owner` (`grant-roles`): a helper hands those only to an app that said so (§8.4).
    */
   async hello(): Promise<Record<string, unknown>> {
     const profile = this.options.profile?.()
     const answer = await this.channel.request('hello', {
       proto: [1, 2],
+      features: ['grant-roles'],
       name: this.options.name(),
       ...(profile ? { profile } : {})
     })

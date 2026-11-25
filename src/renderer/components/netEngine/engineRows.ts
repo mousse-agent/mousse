@@ -211,6 +211,18 @@ export function engineSideRow(device: NetEngineDevice, side: EngineSide): Engine
   if (side === 'out' && (device.unfinished || device.notAccepted || device.sshParked || device.certificateWindow))
     return whole
   if (side === 'in' && device.certificateWindow) return whole
+  // A level the helper has not applied to its grant yet: a narrower one may still list and remove this computer's
+  // devices there.
+  if (side === 'in' && device.accessPending)
+    return sideActions(
+      {
+        line: 'Access change not applied yet',
+        detail: "Networking hasn't taken the new level. Retrying.",
+        warn: true,
+        actions: []
+      },
+      side
+    )
   if (device.state === 'connecting')
     return sideActions(
       device.direction

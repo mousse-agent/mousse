@@ -73,6 +73,7 @@ import { EnginePlus } from './plus'
 import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
 import { EngineAccess } from './access'
+import { DEFAULT_LEVEL, EngineRoles, roleForLevel } from './roles'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
@@ -119,6 +120,8 @@ interface Started {
   pairing: EnginePairing
   /** The other direction of one-way pairings: requests, answers and what each side grants. */
   access: EngineAccess
+  /** Each grant's role, following its device's level. */
+  roles: EngineRoles
   /** The host's owed rows being written from `grants.list`, while they are. */
   reconciling?: Promise<void>
   /** The engine's own editor tunnels and SSH endpoint (Phase 1b §9.2). */
@@ -1422,6 +1425,7 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(stuck ? { stuck: true } : {}),
           ...(unreachable ? { unreachable } : {}),
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
+          ...(started.roles.pending(node) ? { accessPending: true } : {}),
           ...(started.pairing.sshParked(node) ? { sshParked: started.pairing.sshParked(node) } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
           ...(row.ssh && !row.ssh.removed && (row.ssh.target || row.ssh.host)
@@ -1545,6 +1549,22 @@ export class NetEngineService implements EngineDirectoryPort {
         return undefined
       }
     }
+    // Each grant's role follows its device's level here (§8); a narrowing stops serving the device first.
+    const roles = new EngineRoles({
+      peers,
+      helper: () => this.helper,
+      level: (node) => rt.policy.get(node),
+      stopServing: (node) => this.stopServing(node),
+      changed: () => this.changed()
+    })
+    const grantRole = (node: NodeId | undefined, access?: AccessPresetFields): string =>
+      roleForLevel(
+        access
+          ? { ...access, blocked: node ? rt.policy.get(node).blocked : false }
+          : node
+            ? rt.policy.get(node)
+            : DEFAULT_LEVEL
+      )
     const sessions: EngineSessions = new EngineSessions({
       name: () => this.selfName(),
       host: {
@@ -1676,6 +1696,8 @@ export class NetEngineService implements EngineDirectoryPort {
             agentReach: saved.agentReach
           })
       },
+      grantRole,
+      followRole: (node) => void roles.follow(node),
       changed: () => this.changed(),
       crashAt: (step) => !!this.pairingCrash?.(step),
       sshRequest: (receipt) => this.sshHost?.requests.get(receipt)?.state,
@@ -1712,6 +1734,8 @@ export class NetEngineService implements EngineDirectoryPort {
       applyAccess: (node, fields) => {
         rt.policy.set(node, fields)
       },
+      grantRole: (node) => grantRole(node),
+      followRole: (node) => void roles.follow(node),
       // Over the other computer's own connection: this computer holds no address of it.
       dial: async (node) => {
         const row = peers.serving(node)
@@ -1742,7 +1766,7 @@ export class NetEngineService implements EngineDirectoryPort {
       rt.policy.onChange(() => editor.reconcile()),
       net.onWorkOnThreadsOff(() => editor.reconcile())
     ]
-    this.started = { rt, peers, sessions, timer, revocations, pairing, access, editor, rights, release }
+    this.started = { rt, peers, sessions, timer, revocations, pairing, access, roles, editor, rights, release }
     net.setEngineAuthorizer((method, caller, capability) =>
       this.authorizeEngine(method, caller, capability)
     )
@@ -1902,6 +1926,7 @@ export class NetEngineService implements EngineDirectoryPort {
     this.own = undefined
     started.pairing.stop()
     started.access.stop()
+    started.roles.stop()
     for (const release of started.release.splice(0)) release()
     this.options.net.setEngineEditor(undefined)
     // An ordinary end (a quit, a restart): editor servers keep running, as when an SSH server restarts.
@@ -1950,11 +1975,20 @@ export class NetEngineService implements EngineDirectoryPort {
     }
   }
 
-  /** `bridge.policy` for an engine pairing: what it may do here, kept in the same table as v1 devices'. */
-  setPolicy(node: NodeId, change: NodePolicyChange): { policy: BridgeNodePolicy } {
+  /**
+   * `bridge.policy` for an engine pairing: what it may do here, kept in the same table as v1 devices'. The level is
+   * saved first and is the truth; the grant's role then follows it (a narrowing stops serving the device first). A
+   * role the helper did not take is an error here and stays on the row until it is applied.
+   */
+  async setPolicy(node: NodeId, change: NodePolicyChange): Promise<{ policy: BridgeNodePolicy }> {
     const started = this.require()
     if (!started.peers.serving(node)) throw new NetError('bad_request', 'Unknown device.')
-    return { policy: policyView(started.rt.policy.set(node, change)) }
+    const policy = policyView(started.rt.policy.set(node, change))
+    if (!(await started.roles.follow(node)))
+      throw new NetError('peer_offline', "Saved, but networking hasn't applied it yet. Retrying.", {
+        details: { reason: 'role_pending' }
+      })
+    return { policy }
   }
 
   /** Saves a pairing (the end of the ceremony in later slices; tests pair directly). */
@@ -2021,6 +2055,9 @@ export class NetEngineService implements EngineDirectoryPort {
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) {
       if (engineControl('route-leak')) await this.openLeak(helper)
+      // Every grant's role follows its device's level: a stop between a level change and its role, or a grant an
+      // older build made `owner` under a lower level, is repaired now.
+      void started.roles.followAll().catch(() => undefined)
       void started.pairing.recover().catch(() => undefined)
       this.recoverSsh()
     }
@@ -2058,6 +2095,22 @@ export class NetEngineService implements EngineDirectoryPort {
     started.rt.rpc.abortCaller(node)
     started.sessions.teardown(node, 'grant_revoked')
     // Its editor tunnels end and what the endpoint started for it stops (its row is removing, or its grant gone).
+    started.editor.reconcile()
+    this.options.bridge()?.releaseNode(node)
+  }
+
+  /**
+   * Before its grant loses `owner` (§8.3): what this computer runs for the device ends (its calls, subscriptions,
+   * private streams and terminals), as at a revocation. Its connections stay: the helper's role edit closes them,
+   * and the device connects again under the new role.
+   */
+  private stopServing(node: NodeId): void {
+    const started = this.started
+    if (!started) return
+    started.revocations.get(node)?.abort()
+    started.revocations.delete(node)
+    started.rt.rpc.abortCaller(node)
+    started.sessions.endServing(node)
     started.editor.reconcile()
     this.options.bridge()?.releaseNode(node)
   }

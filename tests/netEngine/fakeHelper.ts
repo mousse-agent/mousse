@@ -56,6 +56,8 @@ export interface FakeReach {
 }
 
 const STREAM_CREDIT = 256 * 1024
+/** A role name (wire.md §7): 1 to 32 bytes of `[a-z0-9-]`. */
+const ROLE = /^[a-z0-9-]{1,32}$/
 
 /** A Send link invitation at its host (kind 2): the code it shows and the tries left (design 1b §5.1). */
 export interface FakeLinkInvite extends TicketFields {
@@ -64,6 +66,8 @@ export interface FakeLinkInvite extends TicketFields {
   code: string
   attemptsLeft: number
   ended?: string
+  /** The role fixed in the invitation (§8.1); absent: `owner`. */
+  role?: string
 }
 
 /** A joiner's flow record for one ticket, as the helper keeps it on disk (§5.4). */
@@ -137,7 +141,11 @@ export class FakeNetwork {
   /** For each identity, the identities it may dial (its peers). */
   private readonly peers = new Map<string, Set<string>>()
   /** Open invitations by ticket, with their host. */
-  readonly invitations = new Map<string, { host: string; invitation: string; routes: string[] }>()
+  readonly invitations = new Map<string, { host: string; invitation: string; routes: string[]; role?: string }>()
+  /** Each grant's role and revision (§8), by grant number; absent: `owner` at revision 1. */
+  readonly roles = new Map<string, { role: string; revision: number }>()
+  /** By helper identity: this many more `grant.set_role` saves fail (`store_failed`) before one goes through. */
+  readonly setRoleFailing = new Map<string, number>()
   private nextGrant = 1
   private readonly conns = new Set<Conn>()
   private next = 1
@@ -264,7 +272,8 @@ export class FakeNetwork {
   grant(
     host: string,
     caller: string,
-    grant?: number | string
+    grant?: number | string,
+    role?: string
   ): { grant: number | string; already: boolean } {
     let held = this.grants.get(host)
     if (!held) this.grants.set(host, (held = new Map()))
@@ -272,6 +281,7 @@ export class FakeNetwork {
     if (grant === undefined && had !== undefined) return { grant: had, already: true }
     const given = grant ?? this.nextGrant++
     held.set(caller, given)
+    if (role && role !== 'owner') this.roles.set(String(given), { role, revision: 1 })
     this.peer(caller, host)
     return { grant: given, already: false }
   }
@@ -282,7 +292,8 @@ export class FakeNetwork {
    */
   grantConnected(
     host: FakeHelper,
-    conn: Conn
+    conn: Conn,
+    role?: string
   ): { grant: number | string; already: boolean } | undefined {
     if (!conn.up || !this.conns.has(conn)) return undefined
     const peer = conn.a === host ? conn.b.identity : conn.a.identity
@@ -297,6 +308,7 @@ export class FakeNetwork {
     if (had !== undefined) return { grant: had, already: true }
     const given = this.nextGrant++
     held.set(peer, given)
+    if (role && role !== 'owner') this.roles.set(String(given), { role, revision: 1 })
     return { grant: given, already: false }
   }
 
@@ -319,8 +331,38 @@ export class FakeNetwork {
   }
 
   /** The grants callers hold at `host`, as `grants.list` answers. */
-  grantsAt(host: string): Array<{ caller: string; grant: number | string }> {
-    return [...(this.grants.get(host) ?? [])].map(([caller, grant]) => ({ caller, grant }))
+  grantsAt(host: string): Array<{ caller: string; grant: number | string; role: string; revision: number }> {
+    return [...(this.grants.get(host) ?? [])].map(([caller, grant]) => ({ caller, grant, ...this.roleOf(grant) }))
+  }
+
+  /** A grant's role and revision. */
+  roleOf(grant: number | string): { role: string; revision: number } {
+    return this.roles.get(String(grant)) ?? { role: 'owner', revision: 1 }
+  }
+
+  /**
+   * `grant.set_role` at `host`: the grant keeps its number and takes `role` at the next revision, and every connection
+   * between `host` and its caller closes (`cancelled`), as the helper's edit does (§8.3).
+   */
+  setRole(host: string, grant: number, expected: number, role: string): Record<string, unknown> {
+    const found = this.grantsAt(host).find((item) => Number(item.grant) === grant)
+    if (!found) return { error: 'no_grant', reason: 'no such grant' }
+    if (found.revision !== expected) return { error: 'revision_conflict', reason: 'stale revision' }
+    if (found.role === role) return { grant, role, revision: found.revision, changed: false }
+    const failing = this.setRoleFailing.get(host) ?? 0
+    if (failing > 0) {
+      this.setRoleFailing.set(host, failing - 1)
+      return { error: 'store_failed', reason: 'disk' }
+    }
+    const revision = found.revision + 1
+    this.roles.set(String(found.grant), { role, revision })
+    for (const conn of [...this.conns])
+      if (
+        (conn.a.identity === found.caller && conn.b.identity === host) ||
+        (conn.a.identity === host && conn.b.identity === found.caller)
+      )
+        this.down(conn, 'cancelled')
+    return { grant, role, revision, changed: true }
   }
 
   /** `host` removes the grant `grant`: its connections with that caller go down; answers the caller, if any. */
@@ -330,6 +372,7 @@ export class FakeNetwork {
       if (String(given) === String(grant)) {
         held!.delete(caller)
         this.receipts.delete(String(given))
+        this.roles.delete(String(given))
         for (const conn of [...this.conns])
           if (
             (conn.a.identity === caller && conn.b.identity === host) ||
@@ -352,6 +395,7 @@ export class FakeNetwork {
       if (String(given) === String(grant)) {
         held!.delete(caller)
         this.receipts.delete(String(given))
+        this.roles.delete(String(given))
         for (const conn of [...this.conns])
           if (conn.a.identity === caller && conn.b.identity === host) this.down(conn, 'grant_revoked')
         return caller
@@ -480,7 +524,7 @@ export class FakeNetwork {
         setImmediate(() => this.reset(theirs, 'refused'))
         return mine
       }
-      to.incoming(theirs, conn.id[to.identity]!, label, cls, { grant, role: 'owner' })
+      to.incoming(theirs, conn.id[to.identity]!, label, cls, { grant, role: this.roleOf(grant).role })
       return mine
     }
     to.incoming(theirs, conn.id[to.identity]!, label, cls)
@@ -883,7 +927,7 @@ export class FakeHelper {
   }
 
   /** `invite.create {kind: "link"}`: a kind-2 ticket, its code and three tries. */
-  private linkInvite(reply: (fields: Record<string, unknown>) => void): void {
+  private linkInvite(reply: (fields: Record<string, unknown>) => void, role?: string): void {
     const fields: TicketFields = {
       version: 1,
       kind: 2,
@@ -899,7 +943,8 @@ export class FakeHelper {
       ticket,
       hash: ticketHash(ticket),
       code: newCode(),
-      attemptsLeft: 3
+      attemptsLeft: 3,
+      ...(role ? { role } : {})
     }
     this.network.links.set(invite.invitation, invite)
     reply({
@@ -1081,7 +1126,7 @@ export class FakeHelper {
     reply: (fields: Record<string, unknown>) => void,
     candidates?: string[]
   ): void {
-    const { grant, already } = this.network.grant(host.identity, this.identity)
+    const { grant, already } = this.network.grant(host.identity, this.identity, undefined, invite.role)
     // The enrollment receipt names the invitation, as the helper's `grants.list` says.
     if (!already) this.network.receipts.set(String(grant), invite.invitation)
     invite.ended = 'used'
@@ -1090,6 +1135,7 @@ export class FakeHelper {
       ev: 'enrolled',
       invitation: invite.invitation,
       grant,
+      role: this.network.roleOf(grant).role,
       identity: this.identity,
       name: this.hello?.name ?? this.identity
     })
@@ -1365,11 +1411,14 @@ export class FakeHelper {
         case 'invite.create': {
           if (message.way !== undefined && !this.lists('invite-way'))
             return reply({ error: 'bad_request', reason: 'unknown field way' })
-          if (message.kind === 'link') return this.linkInvite(reply)
+          if (message.role !== undefined && (!this.lists('grant-roles') || !ROLE.test(String(message.role))))
+            return reply({ error: 'bad_request', reason: 'role' })
+          const role = typeof message.role === 'string' ? message.role : undefined
+          if (message.kind === 'link') return this.linkInvite(reply, role)
           const invitation = randomBytes(16).toString('hex')
           const routes = this.network.routes.get(this.identity) ?? []
           const uri = ticketOf(this.identity, invitation, routes)
-          this.network.invitations.set(uri, { host: this.identity, invitation, routes })
+          this.network.invitations.set(uri, { host: this.identity, invitation, routes, ...(role ? { role } : {}) })
           return reply({
             invitation,
             uri,
@@ -1466,30 +1515,61 @@ export class FakeHelper {
           const waiting = this.approvals.get(String(message.request))
           if (!waiting)
             return reply({ error: 'no_request', reason: 'no such approval request is waiting' })
+          if (
+            message.role !== undefined &&
+            (!this.lists('grant-roles') || message.yes !== true || !ROLE.test(String(message.role)))
+          )
+            return reply({ error: 'bad_request', reason: 'role' })
           this.approvals.delete(String(message.request))
           if (message.yes !== true) {
             reply()
             return waiting.answer({ error: 'declined', reason: 'the host declined' })
           }
+          let role = typeof message.role === 'string' ? message.role : undefined
           for (const [uri, open] of this.network.invitations)
-            if (open.invitation === waiting.invitation) this.network.invitations.delete(uri)
-          const { grant, already } = this.network.grant(this.identity, waiting.joiner.identity)
+            if (open.invitation === waiting.invitation) {
+              role ??= open.role
+              this.network.invitations.delete(uri)
+            }
+          const { grant, already } = this.network.grant(this.identity, waiting.joiner.identity, undefined, role)
           if (!already) this.network.receipts.set(String(grant), waiting.invitation)
           reply()
           this.event({
             ev: 'enrolled',
             invitation: waiting.invitation,
             grant,
+            role: this.network.roleOf(grant).role,
             identity: waiting.joiner.identity
           })
           this.event({ ev: 'invite.ended', invitation: waiting.invitation, reason: 'used' })
           return waiting.answer({})
         }
         case 'grant.add': {
-          const added = this.network.grant(this.identity, String(message.identity))
+          if (message.role !== undefined && (!this.lists('grant-roles') || !ROLE.test(String(message.role))))
+            return reply({ error: 'bad_request', reason: 'role' })
+          const role = typeof message.role === 'string' ? message.role : undefined
+          const added = this.network.grant(this.identity, String(message.identity), undefined, role)
           if (!added.already && typeof message.receipt === 'string')
             this.network.receipts.set(String(added.grant), message.receipt)
-          return reply(added)
+          return reply({ ...added, ...(this.lists('grant-roles') ? { role: this.network.roleOf(added.grant).role } : {}) })
+        }
+        case 'grant.set_role': {
+          if (!this.lists('grant-roles')) return reply({ error: 'unknown_op', reason: 'grant.set_role' })
+          const fields = Object.keys(message).filter((key) => key !== 'op' && key !== 'id')
+          if (
+            fields.some((key) => !['grant', 'expected_revision', 'role'].includes(key)) ||
+            !Number.isSafeInteger(message.grant) ||
+            !Number.isSafeInteger(message.expected_revision) ||
+            typeof message.role !== 'string' ||
+            !ROLE.test(message.role)
+          )
+            return reply({ error: 'bad_request', reason: 'fields' })
+          if (this.paused) return reply({ error: 'paused', reason: this.paused })
+          const answer = this.network.setRole(this.identity, message.grant, message.expected_revision, message.role)
+          reply(answer)
+          if (answer.changed === true)
+            this.event({ ev: 'grant.role_changed', grant: answer.grant, role: answer.role, revision: answer.revision })
+          return
         }
         case 'grant.add_connected': {
           if (!this.lists('grant-add-connected'))
@@ -1504,27 +1584,28 @@ export class FakeHelper {
             !name ||
             Buffer.byteLength(name) > 128 ||
             typeof message.role !== 'string' ||
-            !/^[a-z0-9-]{1,32}$/.test(message.role)
+            !ROLE.test(message.role)
           )
             return reply({ error: 'bad_request', reason: 'fields' })
           if (this.paused) return reply({ error: 'paused', reason: this.paused })
           const conn = this.conns.get(Number(message.conn))
-          const added = conn && this.network.grantConnected(this, conn)
+          const added = conn && this.network.grantConnected(this, conn, message.role)
           if (!added) return reply({ error: 'no_conn', reason: 'not live' })
           const failing = this.network.storeFailing.get(this.identity) ?? 0
           if (failing > 0) {
             this.network.storeFailing.set(this.identity, failing - 1)
             return reply({ error: 'store_failed', reason: 'disk' })
           }
-          return reply({ ...added, role: 'owner' })
+          return reply({ ...added, role: this.network.roleOf(added.grant).role })
         }
         case 'grants.list':
           return reply({
-            grants: this.network.grantsAt(this.identity).map(({ caller, grant }) => ({
+            grants: this.network.grantsAt(this.identity).map(({ caller, grant, role, revision }) => ({
               grant,
               identity: caller,
               name: '',
-              role: 'owner',
+              role,
+              ...(this.lists('grant-roles') ? { revision } : {}),
               expires_at: null,
               receipt: this.network.receipts.get(String(grant)) ?? null,
               ...(this.relays ? { relay: this.relays.grants.get(caller) ?? 'no_key' } : {})

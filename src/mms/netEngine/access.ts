@@ -26,6 +26,10 @@ export interface EngineAccessPort {
   callerSays(node: NodeId, feature: string): boolean | undefined
   /** Saves the level the owner picked for `node`, before the helper's grant for it exists. */
   applyAccess(node: NodeId, access: AccessPresetFields): void
+  /** The role of a grant made now for `node`, at its level here (§8). */
+  grantRole(node: NodeId): string
+  /** The row took a grant: its role follows the row's level. */
+  followRole(node: NodeId): void
   /** This computer may use `node` now: its call back on the other computer's connection is attached. */
   dial(node: NodeId): Promise<void>
   /**
@@ -507,7 +511,9 @@ export class EngineAccess {
     const conn = Number(sessions.client(node).connection.id)
     if (!Number.isSafeInteger(conn)) throw new NetError('peer_offline', 'Not connected right now.')
     this.port.applyAccess(node, access)
-    const fields = { conn, name: grantName(row.name, `Computer ${row.endpoint.slice(0, 8)}`), role: 'owner' }
+    // The grant takes the role of the level just saved; a helper without roles makes every grant `owner`.
+    const role = helper.has('grant-roles') ? this.port.grantRole(node) : 'owner'
+    const fields = { conn, name: grantName(row.name, `Computer ${row.endpoint.slice(0, 8)}`), role }
     let answer: Record<string, unknown>
     try {
       try {
@@ -532,6 +538,8 @@ export class EngineAccess {
     this.port.checkpoint('let-in')
     const grant = String(answer.grant)
     peers.advance(node, ['connected'], { grant, ways: null })
+    // A grant the peer held here already (an earlier Allow whose row write was lost) keeps its role until now.
+    this.port.followRole(node)
     this.port.changed()
   }
 }

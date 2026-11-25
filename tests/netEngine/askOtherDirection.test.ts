@@ -131,7 +131,8 @@ describe('asking for the other direction of a one-way pairing', () => {
     if (!REAL_HELPER) {
       const [granted] = sent(caller, 'grant.add_connected')
       expect(Object.keys(granted!).sort()).toEqual(['conn', 'id', 'name', 'op', 'role'])
-      expect(granted).toMatchObject({ name: ownerName, role: 'owner' })
+      // View and chat: not an owner here, so no device list and no removals.
+      expect(granted).toMatchObject({ name: ownerName, role: 'view' })
       expect(fabric.network.holds(caller.endpoint, owner.endpoint)).toBe(true)
       // No peer record: the caller is used over its own connection.
       expect(fabric.network.peersOf(owner.endpoint)).not.toContain(caller.endpoint)

@@ -80,6 +80,16 @@ describe('a direction of a pairing', () => {
     expect(engineSideRow(away, 'in')).toMatchObject({ line: 'Not connected now' })
     expect(engineSideRow(away, 'in').warn).toBeUndefined()
   })
+
+  it('says on Can use when a level change is not applied yet, keeping Access and Remove', () => {
+    const pending = device({ node: 'n1', accessPending: true })
+    expect(engineSideRow(pending, 'in')).toMatchObject({
+      line: 'Access change not applied yet',
+      warn: true,
+      actions: ['access', 'remove']
+    })
+    expect(engineSideRow(pending, 'out')).toMatchObject({ line: 'Connected' })
+  })
 })
 
 /** The daemon behind the section: a status, and every call it was asked. */

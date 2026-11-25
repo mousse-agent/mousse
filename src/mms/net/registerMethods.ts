@@ -529,7 +529,25 @@ export function registerNetMethods(
           if (routes && method === 'bridge.policy') {
             const { engine } = await routes(binding!.profileId)
             const { node, ...change } = params as { node: NodeId } & NodePolicyChange
-            if (engine.isEngine(node)) return engine.setPolicy(node, change)
+            if (engine.isEngine(node))
+              try {
+                return await engine.setPolicy(node, change)
+              } catch (error) {
+                // The engine words its failures for the window (a level saved but not applied yet).
+                if (error instanceof NetError) {
+                  const entry = NET_ERRORS[error.code]
+                  throw new AppError(
+                    {
+                      code: error.code,
+                      message: error.message || entry.message,
+                      ...(error.details === undefined ? {} : { details: error.details }),
+                      errorInfo: { category: entry.category, retryable: entry.retryable }
+                    },
+                    error
+                  )
+                }
+                throw error
+              }
           }
           return await (await forProfile(binding!.profileId)).request(method, params)
         } catch (error) {

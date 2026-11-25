@@ -66,6 +66,13 @@ export interface PairingPort {
   applyAccess?(node: NodeId, access: AccessPresetFields): void
   /** Gives `to` the access saved under the reserved id `from`, when one was saved; nothing otherwise. */
   copyAccess?(from: NodeId, to: NodeId): void
+  /**
+   * The role a grant made now takes (§8): for `node`'s level here, or for `access` when it is given (a device not
+   * known yet takes the default level).
+   */
+  grantRole?(node: NodeId | undefined, access?: AccessPresetFields): string
+  /** A row took a grant: its role follows the row's level (`EngineRoles.follow`). */
+  followRole?(node: NodeId): void
   changed(): void
   /** A test stops this computer at `step` when this answers true. */
   crashAt?(step: PairingStep): boolean
@@ -247,7 +254,10 @@ export class EnginePairing {
       throw new NetError('bad_request', 'Update networking to pick a way.', {
         details: { reason: 'not_supported' }
       })
-    const wayFields = way ? { way } : {}
+    // The role is fixed in the invitation (§8.1): for a link, at the level picked with it, since it has no Allow; in
+    // person, at the default level until the Allow names its own.
+    const role = this.roleOf(undefined, kind === 'link' ? access : undefined)
+    const wayFields = { ...(way ? { way } : {}), ...(role ? { role } : {}) }
     const ways = (answer: Record<string, unknown>): { ways?: NetEngineWay[] } => {
       const listed = Array.isArray(answer.ways) ? answer.ways.filter(isNetEngineWay) : []
       return listed.length ? { ways: listed } : way ? { ways: [way] } : {}
@@ -276,9 +286,10 @@ export class EnginePairing {
       this.port.changed()
       return { ...shown, uri: sendLink(ticket.slice(ticket.lastIndexOf('#') + 1)), ...ways(answer) }
     }
-    const answer = way
-      ? await this.helper().request('invite.create', wayFields)
-      : await this.helper().request('invite.create')
+    const answer =
+      way || role
+        ? await this.helper().request('invite.create', wayFields)
+        : await this.helper().request('invite.create')
     const ticket = String(answer.uri)
     return {
       invitation: String(answer.invitation),
@@ -304,10 +315,10 @@ export class EnginePairing {
   async approve(request: string, yes: boolean, access?: AccessPresetFields): Promise<void> {
     const approval = this.approvals.get(request)
     if (approval && yes) this.approvedNames.set(approval.invitation, approval.name)
+    const known =
+      approval?.identity && yes ? this.port.peers.byEndpoint(approval.identity) : undefined
     if (approval && yes && access && this.port.applyAccess) {
-      const { peers } = this.port
-      const known = approval.identity ? peers.byEndpoint(approval.identity) : undefined
-      const node = known?.localId ?? peers.pendingAccess(approval.invitation)
+      const node = known?.localId ?? this.port.peers.pendingAccess(approval.invitation)
       try {
         this.port.applyAccess(node, access)
       } catch (error) {
@@ -319,8 +330,10 @@ export class EnginePairing {
         throw error
       }
     }
+    // The grant takes the role of the level just saved (a computer known here keeps its own, unless Allow named one).
+    const role = yes ? this.roleOf(known?.localId, access) : undefined
     try {
-      await this.helper().request('approval.answer', { request, yes })
+      await this.helper().request('approval.answer', { request, yes, ...(role ? { role } : {}) })
     } finally {
       this.approvals.delete(request)
       this.port.changed()
@@ -477,6 +490,8 @@ export class EnginePairing {
         this.alive()
         // A removal that started meanwhile waits for this step, then revokes the grant: nothing is written here.
         if (!peers.advance(node, ['joined'], { grant, state: 'granted' })) return
+        // A grant the host held here already keeps its own role: it follows the row's level now.
+        this.port.followRole?.(node)
         this.port.changed()
         continue
       }
@@ -503,10 +518,12 @@ export class EnginePairing {
 
   /** `joined`: the grant the host holds here (`grant.add`, idempotent; a save that failed is repeated once). */
   private async grantBack(row: EnginePeerRow): Promise<string> {
+    const role = this.roleOf(row.localId)
     const fields = {
       identity: row.endpoint,
       name: row.name,
-      ...(row.receipt ? { receipt: row.receipt } : {})
+      ...(row.receipt ? { receipt: row.receipt } : {}),
+      ...(role ? { role } : {})
     }
     let answer: Record<string, unknown>
     try {
@@ -809,14 +826,22 @@ export class EnginePairing {
     if (added && !peers.holdsGrant(grant)) {
       // It uses this computer now. This computer added it over SSH (it keeps the route), so it uses that one too:
       // both ways. Added the other way round, only this one; a pairback, if it sends one, adds the other direction.
-      peers.update(added.localId, {
-        grant,
-        state: 'connected',
-        ways: added.ssh?.routeId ? null : 'in',
-        source: null,
-        ...(invitation ? { receipt: invitation, invitation } : {})
-      })
+      // It takes the level picked with the link, as a device new here would.
+      const reserved = peers.reserved(invitation)
+      if (reserved) this.port.copyAccess?.(reserved, added.localId)
+      peers.updateReleasing(
+        added.localId,
+        {
+          grant,
+          state: 'connected',
+          ways: added.ssh?.routeId ? null : 'in',
+          source: null,
+          ...(invitation ? { receipt: invitation, invitation } : {})
+        },
+        reserved ? invitation : undefined
+      )
       this.helper().claim(identity)
+      this.port.followRole?.(added.localId)
       this.port.changed()
     } else this.owe(identity, grant, name, invitation)
     if (shown) {
@@ -854,11 +879,12 @@ export class EnginePairing {
           : {},
         reserved ? receipt : undefined
       )
+      if (letIn) this.port.followRole?.(existing.localId)
       return
     }
     // The row takes the id reserved with the owner's level in the same write: a stop before it leaves the
     // reservation for the next start's reconciliation.
-    peers.add(
+    const row = peers.add(
       {
         endpoint: identity,
         fingerprint: fingerprintOf(identity),
@@ -872,12 +898,18 @@ export class EnginePairing {
       receipt
     )
     this.helper().claim(identity)
+    this.port.followRole?.(row.localId)
     this.port.changed()
   }
 
+  /** The role a grant made now takes, when the helper takes roles (`grant-roles`); undefined otherwise. */
+  private roleOf(node: NodeId | undefined, access?: AccessPresetFields): string | undefined {
+    return this.helper().has('grant-roles') ? this.port.grantRole?.(node, access) : undefined
+  }
+
   /**
-   * Rows the host owes (§5.1 recovery: the app stopped between `enrolled` and its write): every live owner grant
-   * with no row gets one in `awaiting_pairback`.
+   * Rows the host owes (§5.1 recovery: the app stopped between `enrolled` and its write): every live grant with no
+   * row gets one, whatever its role (a device let in below Full control holds one that is not `owner`).
    */
   async reconcileGrants(): Promise<void> {
     const answer = await this.helper().request('grants.list')
@@ -885,7 +917,6 @@ export class EnginePairing {
     const now = Date.now() / 1000
     for (const grant of Array.isArray(answer.grants) ? answer.grants : []) {
       if (!grant || typeof grant.identity !== 'string') continue
-      if (grant.role !== undefined && grant.role !== 'owner') continue
       // A grant an SSH add made belongs to its request, never to an owed row; a removed request's goes.
       const request = typeof grant.receipt === 'string' ? this.port.sshRequest?.(grant.receipt) : undefined
       if (request === 'removed' && !engineControl('removal-skips-unsaved-grant'))
