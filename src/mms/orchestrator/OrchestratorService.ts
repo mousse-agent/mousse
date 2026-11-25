@@ -1739,8 +1739,10 @@ export class OrchestratorService extends EventEmitter {
     const markTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }, resultText?: string): void => {
       if (terminal) return
       terminal = true
-      // As a turn's result: each applet fence a line naming it (`redactAppletFences`), never its source.
-      const named = resultText ? redactAppletFences(resultText) : resultText
+      // As a turn's result: each applet fence a line naming it (`redactAppletFences`), never its source, read with the
+      // rows before it when it is the turn's last row.
+      const whole = record.allText()
+      const named = resultText ? redactAppletFences(whole.endsWith(resultText) ? whole : resultText, [], whole.endsWith(resultText) ? whole.length - resultText.length : 0) : resultText
       const mask = named ? this.secretMaskerFor?.(threadId) : undefined
       this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && named ? mask(named) : named }))
       this.harness.runSettled?.(runId)
@@ -16513,6 +16515,8 @@ export class OrchestratorService extends EventEmitter {
       // one, else the last closed one) holds the rest and is marked incomplete.
       const replies = this.transcript.closedReplies()
       const last = this.transcript.openAssistantContent() === undefined ? replies.at(-1) : undefined
+      // The result is read with the turn's rows before it, when it is only the open row: a fence an earlier row opened is cut.
+      const turnRows = [...replies.map((reply) => stripActionBlocks(reply.content)), stripActionBlocks(this.transcript.openAssistantContent() ?? '')].filter(Boolean).join('\n')
       const unshown = unshownReplyText(partial, (last ? replies.slice(0, -1) : replies).map((reply) => stripActionBlocks(reply.content)))
       if (last && (!unshown || stripActionBlocks(last.content).trim() === unshown.trim())) {
         this.updateStreamingAssistantMessage(last.id, last.content, false, undefined, true)
@@ -16542,7 +16546,8 @@ export class OrchestratorService extends EventEmitter {
       const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
       const response: OrchestratorResponse = { message: stoppedReplyText(opts?.bot ? unshown : partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
-      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
+      const stoppedResult = partial && turnRows.endsWith(partial) ? redactAppletFences(turnRows, [], turnRows.length - partial.length) : partial
+      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, stoppedResult)
       try {
         // A turn cut off by the service stopping saves where it ended and nothing more: it does not wait for its
         // repository or run Git while the service exits. The next turn's recovery takes its snapshot.
@@ -16628,7 +16633,12 @@ export class OrchestratorService extends EventEmitter {
         this.persist(true)
         this.emitMessageUpdated(finalMessage)
         // The text the model wrote again, with the last row's published applets named by their reference lines.
-        if (finalMessage.presentationParts) resultText = redactAppletFences(replyOnlyText, publishedApplets(finalMessage.presentationParts))
+        if (finalMessage.presentationParts) {
+          const published = publishedApplets(finalMessage.presentationParts)
+          // A staged applet that failed to publish is still named, by title.
+          const unpublished = stagedApplets.filter((source) => !published.some((reference) => reference.title === source.title))
+          resultText = [redactAppletFences(replyOnlyText, published), ...unpublished.map((source) => appletReferenceLine({ title: source.title }))].filter(Boolean).join('\n\n')
+        }
       }
     }
 

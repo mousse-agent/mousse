@@ -95,10 +95,13 @@ function extractMousseActionBlocks(
     }
 
     let end = extracted.end
-    // Prefer consuming a trailing closing fence when present.
+    // Prefer consuming a trailing closing fence when present: one alone on its line, never the start of the next
+    // block's opening (```mousse-applet), which would be left as text without it.
     let j = end
     while (j < response.length && /[ \t\r\n]/.test(response[j]!)) j++
-    if (response.startsWith('```', j)) {
+    const closing = /```[ \t]*(?=\r?\n|$)/y
+    closing.lastIndex = j
+    if (closing.test(response)) {
       end = j + 3
     }
 

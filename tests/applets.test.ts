@@ -392,6 +392,12 @@ describe('applet source kept from a model', () => {
   ])('puts staged applets %s', (_name, reply, staged) => {
     expect(appendStagedApplets(reply, 'F')).toBe(staged)
   })
+  it('returns the text from a point, read as part of the whole', () => {
+    const turn = 'Draft:\n~~~mousse-applet\n{"js":"' + CANARY + '"}\n~~~\nDone.'
+    expect(redactAppletFences(turn, [], turn.indexOf('{'))).toBe('[Applet]\nDone.')
+    expect(redactAppletFences(turn, [], turn.indexOf('Done.'))).toBe('Done.')
+  })
+
   it('scans a long run of tildes once', () => {
     expect(redactAppletFences('mousse-applet\n' + '~'.repeat(1_000_000) + 'x')).toHaveLength(1_000_015)
   })

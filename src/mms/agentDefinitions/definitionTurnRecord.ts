@@ -40,6 +40,12 @@ export class DefinitionTurnRecord {
     return this.joined() || this.last
   }
 
+  /** All the text the turn streamed, row after row, so a fence a row opened is read with the rows after it. */
+  allText(): string {
+    const rows = this.entries.flatMap((entry) => (entry.role === 'assistant' ? [entry.content] : []))
+    return [...rows, this.joined()].filter(Boolean).join('\n')
+  }
+
   /** The turn's history: the user message, assistant text and tools in order, ending with `text`. */
   history(user: string, text: string): AgentExecutionHistoryEntry[] {
     this.open = new Map()

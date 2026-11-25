@@ -107,6 +107,32 @@ it('keeps interrupted native responses inert even when the complete fence was st
   // What a parent or `thread_wait` reads of the stopped run names the applet, not its source.
   expect(results.at(-1)).toBe('[Applet: Calculator]')
 })
+it('cuts a fence an earlier row opened from what a stopped run hands back', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  const results: Array<string | undefined> = []
+  const markTerminal = main.runEngine.markTerminal.bind(main.runEngine)
+  vi.spyOn(main.runEngine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+    results.push(args[3]?.resultText)
+    return markTerminal(...args)
+  })
+  const adapter = piAdapter(() => 'unused')
+  adapter.startTurn = async (_input, sink) => {
+    const first = 'Draft:\n~~~mousse-applet\n'
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: first, contentIndex: 0 })
+    sink.text({ phase: 'complete', content: first, contentIndex: 0 })
+    sink.tool({ phase: 'start', callId: 'read', kind: 'mcp_tool_call', title: 'Read', summary: '', details: [] })
+    sink.tool({ phase: 'complete', callId: 'read', kind: 'mcp_tool_result', title: 'Read', summary: '', details: [] })
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    sink.text({ phase: 'delta', content: '{"js":"STOP_CANARY"}', contentIndex: 0 })
+    expect(main.orchestrator.abortActiveTurn(thread.id)).toBe(true)
+    throw new DOMException('Aborted', 'AbortError')
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, { threadId: thread.id })
+  expect(results.at(-1)).toBe('[Applet]')
+})
 it('keeps malformed applets as inert source without failing the completed turn', async () => {
   const { main, thread } = await fixture()
   const content = '```mousse-applet\nnot JSON\n```'

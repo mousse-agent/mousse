@@ -125,6 +125,11 @@ describe('mode-aware prompts and plan output', () => {
     expect(stripActionBlocks('\n  Here is the plan.  \n')).toBe('Here is the plan.')
   })
 
+  it('leaves a block that opens right after an action block whole', () => {
+    const applet = '```mousse-applet\n{"title":"Chart"}\n```'
+    expect(stripActionBlocks('```mousse-actions\n{"type":"message","content":"ok"}\n' + applet)).toBe(applet)
+  })
+
   it('never executes ordinary or inline JSON examples', () => {
     const fenced = `Example only:\n\`\`\`json\n{ "actions": [{ "type": "spawn_agents", "agents": [] }] }\n\`\`\``
     const inline = `Example: { "actions": [{ "type": "complete_task", "agentIds": ["a"], "merge": true }] }`

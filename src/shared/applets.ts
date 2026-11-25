@@ -315,21 +315,23 @@ function appletCuts(text: string): AppletCut[] {
  * `[Applet]` when no title can be read), for a reader that gets the applet's name but never its source: a run's
  * result, a handoff, `thread_read`. It fails closed, unlike publication, which refuses what it cannot read.
  * `published` are the applets the text published, in order: a cut fence with the next one's title is named by its
- * reference line, and any left unnamed follow the text.
+ * reference line, and any left unnamed follow the text. With `from`, only the text from there on is returned, read as
+ * part of the whole: a fence opened before `from` is still cut (a turn's last row, read after the rows before it).
  */
-export function redactAppletFences(text: string, published: readonly AppletReference[] = []): string {
+export function redactAppletFences(text: string, published: readonly AppletReference[] = [], from = 0): string {
   const references = published.map(appletReferenceLine)
   let out = ''
-  let cursor = 0
+  let cursor = from
   let used = 0
   for (const cut of appletCuts(text)) {
+    if (cut.end <= from) continue
     const lines = cut.titles.map((title) => {
       if (title === undefined) return '[Applet]'
       if (used < published.length && published[used]!.title.trim().slice(0, 200) === title) return references[used++]!
       return appletReferenceLine({ title })
     })
     // A cut that took its closing line's break gives the naming lines one.
-    out += text.slice(cursor, cut.start) + lines.join('\n') + (text[cut.end - 1] === '\n' ? '\n' : '')
+    out += text.slice(cursor, Math.max(cursor, cut.start)) + lines.join('\n') + (text[cut.end - 1] === '\n' ? '\n' : '')
     cursor = cut.end
   }
   out += text.slice(cursor)
