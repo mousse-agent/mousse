@@ -1405,8 +1405,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return approved
     })
     this.alone.prune(botId)
-    // Work running under a grant that gave more ends now: it never goes on under another grant.
-    if (!widens) this.endUnderGrant(botId, 'grant_replaced', grant.digest)
+    // Work the new grant did not take over (all of it, unless it widens) ends now: it never goes on under another grant.
+    this.endUnderGrant(botId, 'grant_replaced', grant.digest)
     this.changed({ botId })
     return { digest: grant.digest, approvedAt: grant.approvedAt }
   }
@@ -3969,7 +3969,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const firstMessage = row.idempotencyKey.startsWith('create:')
     /**
      * What a turn is told about `asked` when the bot's grant holds it now, though this turn does not (issue #983): no
-     * card, and no count against the ask caps. A turn keeps the permissions it started with. A chat turn hands commands,
+     * card, and no new ask. A turn keeps the permissions it started with. A chat turn hands commands,
      * the web and the browser to work, which has them (the chat is never offered them). Otherwise the activation
      * continues with it once its turn ends (`advance`), unless its runtime would not offer it then. Undefined when the
      * grant does not hold it.

@@ -134,7 +134,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       return { message: reply, question: next }
     })),
     setPermission: vi.fn((botId, permissionId, enabled) => record('setPermission', [botId, permissionId, enabled], () => {
-      const next = { ...detail(botId), permissions: detail(botId).permissions.map((item) => item.id === permissionId ? { ...item, enabled } : item) }
+      const next = permissionId === 'full_trust' ? { ...detail(botId), fullTrust: enabled } : { ...detail(botId), permissions: detail(botId).permissions.map((item) => item.id === permissionId ? { ...item, enabled } : item) }
       fake.details[botId] = next
       return next
     })),
