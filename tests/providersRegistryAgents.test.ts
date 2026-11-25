@@ -123,7 +123,6 @@ describe('registry list and confirm panel', () => {
   it('lists name, version, licence, distribution and checksum; an unsupported agent is disabled with its reason', () => {
     const html = renderToStaticMarkup(createElement(RegistryAgentRows, {
       agents: [agent(), agent({ id: 'py', name: 'Py Agent', distribution: 'uvx', checksum: 'none', unsupported: 'Python (uvx) agents are not supported yet.' })],
-      iconId: 'acp',
       selectedId: null,
       disabled: false,
       onSelect: () => undefined
@@ -134,7 +133,6 @@ describe('registry list and confirm panel', () => {
     expect(html).toContain('Python (uvx) · No registry checksum')
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>).)*Py Agent/)
     expect(html).toContain('Python (uvx) agents are not supported yet.')
-    expect(html).not.toMatch(/<img/)
   })
 
   const confirm = (view: RegistryAgentView) =>
