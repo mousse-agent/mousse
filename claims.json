@@ -34,19 +34,6 @@
       "expiresAt": "2026-11-25T05:35:26.312Z"
     },
     {
-      "task": "bots-typed-provenance-and-contract",
-      "session": "Animatrix-949070",
-      "machine": "Animatrix",
-      "branch": "bots-typed-provenance-and-contract",
-      "paths": [
-        "src/mms/bots/store/BotStore.ts",
-        "src/mms/bots/activation/BotEngine.ts",
-        "tests/run/toolApiContract.test.ts"
-      ],
-      "claimedAt": "2026-11-25T02:21:52.392Z",
-      "expiresAt": "2026-11-25T04:21:52.392Z"
-    },
-    {
       "task": "fix-windows-update-install-path",
       "session": "Animatrix-ccfd0b",
       "machine": "Animatrix",
