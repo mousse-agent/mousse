@@ -118,22 +118,6 @@
       "expiresAt": "2026-11-25T20:09:20.891Z"
     },
     {
-      "task": "mac-developer-id-signing",
-      "session": "Animatrix-cb8895",
-      "machine": "Animatrix",
-      "branch": "mac-developer-id-signing",
-      "paths": [
-        "package.json",
-        ".github/workflows/package.yml",
-        ".github/workflows/nightly.yml",
-        ".github/workflows/release.yml",
-        "build",
-        "scripts"
-      ],
-      "claimedAt": "2026-11-26T08:45:48.840Z",
-      "expiresAt": "2026-11-26T10:45:48.840Z"
-    },
-    {
       "task": "macos-signing-notarization",
       "session": "Animatrix-7dc63c",
       "machine": "Animatrix",
