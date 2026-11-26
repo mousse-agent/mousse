@@ -219,6 +219,8 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
   fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
+  // A work's subagents run on the run engine's delegations, through the bots' port (as `MmsProfileServices` wires it).
+  runs.setBotPort(fixture.bots)
   scheduler.on('jobRemoved', (_id: string, job: ScheduledJob) => {
     if (job.bot) fixture.bots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job) })
   })
@@ -266,11 +268,34 @@ export async function start(f: BotFixture, activationId: string, n = 1): Promise
   return { payload, prepared }
 }
 
-/** The run ends and the executor settles it with its final message; then everything that follows runs. */
+/**
+ * The run ends and the executor settles it with its final message; then everything that follows runs. A work
+ * subagent's final message is its run's result, kept in the run's terminal write as the orchestrator keeps it, and the
+ * reconciler's pass hands what its delegation published to the bots (`deliverBotResults`).
+ */
 export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; messageId?: string; outcome?: RunOutcome; unanswered?: boolean } = {}): Promise<void> {
-  f.runs.markTerminal(payload.runId, status, options.outcome)
+  f.runs.markTerminal(payload.runId, status, options.outcome, payload.delegationId !== undefined && options.text !== undefined ? { resultText: options.text } : undefined)
   f.bots.settle(payload, { ...(options.text !== undefined ? { text: options.text } : {}), ...(options.messageId ? { messageId: options.messageId } : {}), ...(options.unanswered ? { unanswered: true } : {}) })
+  f.runs.deliverBotResults()
   await flush()
+}
+
+/** A work's subagent turns: the child runs of its delegations in the run database, oldest first. */
+export function subagentRuns(f: BotFixture, activationId: string): string[] {
+  return f.runs.delegations.listForRootActivation(activationId).map((delegation) => delegation.childRunId)
+}
+
+/** A work subagent's turn as the executor starts it: its delegation's bot `turn.start`, refreshed and prepared. */
+export async function startSubagent(f: BotFixture, childRunId: string): Promise<{ payload: BotTurnPayload; prepared: PreparedBotTurn }> {
+  const effect = f.outbox.listForRun(childRunId).find((entry) => entry.kind === 'turn.start')!
+  if (!isBotTurnPayload(effect.payload) || effect.payload.delegationId === undefined) throw new Error('not a bot subagent payload')
+  const payload = effect.payload
+  await f.bots.refresh(payload)
+  const prepared = f.bots.prepare(payload)
+  if ('refused' in prepared) throw new Error(`${prepared.code}: ${prepared.refused}`)
+  f.runs.markStarting(payload.runId)
+  f.runs.markRunning(payload.runId)
+  return { payload, prepared }
 }
 
 /** One whole dispatch: started, ended, settled. */

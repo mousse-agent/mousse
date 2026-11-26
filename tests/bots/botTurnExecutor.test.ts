@@ -317,3 +317,72 @@ describe('ordinary sends to bot threads', () => {
     expect(() => orch.steerActiveTurn('nudge', 'person-thread')).not.toThrow()
   })
 })
+
+describe('a bot subagent in the turn executor', () => {
+  /** The bots' side of the port: it allows every start, and records a result only when `records` says so. */
+  const port = { records: false, settled: [] as string[] }
+  beforeEach(() => {
+    port.records = false
+    port.settled = []
+    engine.setBotPort({
+      authorizeSubagent: () => ({ ok: true }),
+      reserveSubagent: () => {},
+      onSubagentSettled: (_root, _thread, outcome) => {
+        if (port.records) port.settled.push(outcome.childRunId)
+        return port.records
+      }
+    })
+  })
+
+  /** A work's running main turn on `bot-work`, and a subagent it started on `sub-1`. */
+  const delegated = async () => {
+    const sent = await engine.dispatch({ kind: 'send', threadId: 'bot-work', clientRequestId: 'bot-work:d1', source: 'bot' })
+    if (sent.status !== 'accepted') throw new Error('rejected')
+    engine.markStarting(sent.runId)
+    engine.markRunning(sent.runId)
+    const accepted = await engine.requestBotDelegation({
+      parentThreadId: 'bot-work', parentRunId: sent.runId, childThreadId: 'sub-1', newChild: true, clientRequestId: 'botsub:1',
+      prompt: 'Find the prices.', instanceId: 'pi:x', model: 'm', bot: { botId: 'b1', rootActivationId: 'act-1', access: null, readOnly: false }, subagent: { title: 'Prices' }
+    })
+    return { parentRunId: sent.runId, accepted, effect: outbox.listForRun(accepted.childRunId).find((effect) => effect.kind === 'turn.start')! }
+  }
+
+  it('without the bot port its turn is cancelled before the bots prepare it', async () => {
+    const { accepted, effect } = await delegated()
+    engine.setBotPort(null)
+    await execute(effect)
+    expect(prepared).toEqual([])
+    expect(runTurn).not.toHaveBeenCalled()
+    expect(engine.getRun(accepted.childRunId)).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_port_missing' } })
+  })
+
+  it('its thread is a bot\'s from the run database alone: refused even when the bots are not running', async () => {
+    await delegated()
+    orch.setBotDispatcher(null)
+    const refused = { code: 'bot_thread_read_only', message: 'This thread belongs to a bot. Use the Bots tab to continue it.' }
+    await expect(orch.send({ content: 'hello', mode: 'agent' }, false, { threadId: 'sub-1' })).rejects.toMatchObject(refused)
+    expect(() => orch.enqueueForThread('sub-1', { content: 'later', mode: 'agent' })).toThrow(expect.objectContaining(refused))
+    expect(runTurn).not.toHaveBeenCalled()
+    // The control: a thread no bot delegated into.
+    expect(() => orch.enqueueForThread('person-thread', { content: 'later', mode: 'agent' })).not.toThrow()
+  })
+
+  it('a wake that holds its result leaves the row for the bot port: never acknowledged by the wake, acknowledged once the bots record it', async () => {
+    const { parentRunId, accepted } = await delegated()
+    engine.markStarting(accepted.childRunId)
+    engine.markRunning(accepted.childRunId)
+    engine.markTerminal(accepted.childRunId, 'completed', undefined, { resultText: 'Prices: 199.' })
+    engine.markTerminal(parentRunId, 'completed')
+    const [row] = engine.inbox.listPending('bot-work')
+    const wake = await engine.dispatch({ kind: 'send', threadId: 'bot-work', clientRequestId: 'wake-1', source: 'wake' })
+    if (wake.status !== 'accepted') throw new Error('rejected')
+    engine.inbox.markDelivered([row!.inboxId], 'wake-effect')
+    await execute(outbox.enqueue({ threadId: 'bot-work', runId: wake.runId, kind: 'turn.start', payload: { kind: 'wake', threadId: 'bot-work', runId: wake.runId, inboxIds: [row!.inboxId] } }))
+    expect(runTurn).not.toHaveBeenCalled()
+    expect(engine.inbox.get(row!.inboxId)!.status).toBe('pending')
+    port.records = true
+    expect(engine.deliverBotResults()).toEqual([row!.inboxId])
+    expect(port.settled).toEqual([accepted.childRunId])
+    expect(engine.inbox.get(row!.inboxId)!.status).toBe('acknowledged')
+  })
+})

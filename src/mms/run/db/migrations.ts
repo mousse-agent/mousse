@@ -778,5 +778,19 @@ ALTER TABLE runs ADD COLUMN owner_proof TEXT;
 ALTER TABLE remote_launches ADD COLUMN hidden INTEGER CHECK(hidden IS NULL OR hidden IN (0,1));
 ALTER TABLE remote_subagents ADD COLUMN hidden INTEGER CHECK(hidden IS NULL OR hidden IN (0,1));
 `
+  },
+  {
+    // A personal bot's work subagents are delegations (issues #1454, #1369): the bot, the work's activation at the root
+    // of the tree (whose counts and spend in bots.db the subagent shares), and what the subagent inherits from that
+    // turn: the limit of the device its owner wrote from, and whether it may only read the owner's threads. Written in
+    // the delegation's own transaction (`RunEngine.commitDelegation`); NULL on every thread's delegation.
+    version: 27,
+    sql: `
+ALTER TABLE delegations ADD COLUMN bot_id TEXT;
+ALTER TABLE delegations ADD COLUMN root_activation_id TEXT;
+ALTER TABLE delegations ADD COLUMN bot_access TEXT;
+ALTER TABLE delegations ADD COLUMN bot_read_only INTEGER;
+CREATE INDEX delegations_by_root_activation ON delegations(root_activation_id) WHERE root_activation_id IS NOT NULL;
+`
   }
 ]

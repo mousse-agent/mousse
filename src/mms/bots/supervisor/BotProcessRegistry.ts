@@ -24,7 +24,8 @@ import { endGroup, groupAlive, waitGone, type EndGroupOptions } from './processS
  *   verified as the ones recorded: the leader's start time, `child_token`) and folds supervisor
  *   journals in.
  *
- * A dispatch is `bot_dispatches.client_request_id` (`<activationId>:d<n>`, `<activationId>:c<n>`).
+ * A dispatch is `bot_dispatches.client_request_id` (`<activationId>:d<n>`, `<activationId>:c<n>`), or a work
+ * subagent's turn, `sub:<child run>` (`bot_subagent_runs`, the same columns).
  * A dispatch may serve several processes in turn (a retried attempt): each gets a supervisor of its
  * own, and the row records the latest.
  */
@@ -40,21 +41,35 @@ export interface BotProcessRecords {
   unfinished(): Array<{ dispatchId: string; pid: number; pgid: number; token?: string }>
 }
 
-/** The records over `bots.db` (columns that exist since v1; `BotStore` itself is unchanged). */
+/** A work subagent's turn (`sub:<child run>`): its row is in `bot_subagent_runs` (v15), by child run. */
+const SUBAGENT_PREFIX = 'sub:'
+
+/** The table and key a dispatch id's process columns live in. */
+function processRowOf(dispatchId: string): { table: string; key: string; id: string } {
+  return dispatchId.startsWith(SUBAGENT_PREFIX)
+    ? { table: 'bot_subagent_runs', key: 'child_run_id', id: dispatchId.slice(SUBAGENT_PREFIX.length) }
+    : { table: 'bot_dispatches', key: 'client_request_id', id: dispatchId }
+}
+
+/** The records over `bots.db` (the dispatch columns that exist since v1, a subagent turn's since v15). */
 export function botStoreProcessRecords(store: Pick<BotStore, 'get' | 'all' | 'run'>): BotProcessRecords {
   return {
     threadOf: (dispatchId) => {
-      const thread = store.get('SELECT thread_id FROM bot_dispatches WHERE client_request_id = ?', dispatchId)?.thread_id
+      const row = processRowOf(dispatchId)
+      const thread = store.get(`SELECT thread_id FROM ${row.table} WHERE ${row.key} = ?`, row.id)?.thread_id
       return typeof thread === 'string' ? thread : undefined
     },
     setChild: (dispatchId, proc) => {
-      store.run('UPDATE bot_dispatches SET child_pid = ?, child_group = ?, child_token = ?, exit_at = NULL WHERE client_request_id = ?', proc.pid, proc.pgid, proc.token ?? null, dispatchId)
+      const row = processRowOf(dispatchId)
+      store.run(`UPDATE ${row.table} SET child_pid = ?, child_group = ?, child_token = ?, exit_at = NULL WHERE ${row.key} = ?`, proc.pid, proc.pgid, proc.token ?? null, row.id)
     },
     setExit: (dispatchId, exitAt) => {
-      store.run('UPDATE bot_dispatches SET exit_at = MAX(COALESCE(exit_at, 0), ?) WHERE client_request_id = ?', Math.round(exitAt), dispatchId)
+      const row = processRowOf(dispatchId)
+      store.run(`UPDATE ${row.table} SET exit_at = MAX(COALESCE(exit_at, 0), ?) WHERE ${row.key} = ?`, Math.round(exitAt), row.id)
     },
     unfinished: () =>
-      store.all('SELECT client_request_id, child_pid, child_group, child_token FROM bot_dispatches WHERE child_group IS NOT NULL AND exit_at IS NULL').map((row) => ({
+      store.all(`SELECT client_request_id, child_pid, child_group, child_token FROM bot_dispatches WHERE child_group IS NOT NULL AND exit_at IS NULL
+        UNION ALL SELECT '${SUBAGENT_PREFIX}' || child_run_id, child_pid, child_group, child_token FROM bot_subagent_runs WHERE child_group IS NOT NULL AND exit_at IS NULL`).map((row) => ({
         dispatchId: row.client_request_id as string,
         pid: Number(row.child_pid),
         pgid: Number(row.child_group),

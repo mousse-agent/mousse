@@ -30,6 +30,8 @@ export interface RepairReport {
   staleRuns: string[]
   /** Rule 3: stopped runs forced to `interrupted`. */
   forcedInterrupts: string[]
+  /** Bot subagent ends the bot port recorded, by inbox id (absent without bots). */
+  botResults?: string[]
   /** Rule 4: threads woken (wake runs, steers) for pending inbox rows, and wakes cancelled. */
   wakes: WakeReport
   /** Rule 5: queued runs whose dead `turn.start` was enqueued again from its stored send. */
@@ -60,6 +62,7 @@ export class Reconciler {
   private readonly capabilitiesFor: CapabilitiesFor | undefined
   private readonly awaitsAnswer: AwaitsAnswer | undefined
   private readonly credentials: { pruneExpired(): number } | undefined
+  private readonly botResults: (() => string[]) | undefined
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: {
@@ -74,6 +77,8 @@ export class Reconciler {
     awaitsAnswer?: AwaitsAnswer
     /** Phase 5: Mousse MCP credentials, pruned once per pass (SPEC §15.1, 24 h idle expiry). */
     credentials?: { pruneExpired(): number }
+    /** Bot subagent ends, handed to the bot port before rule 4 (`RunEngine.deliverBotResults`). */
+    botResults?: () => string[]
   }) {
     this.store = options.store
     this.outbox = options.outbox
@@ -83,6 +88,7 @@ export class Reconciler {
     this.capabilitiesFor = options.capabilitiesFor
     this.awaitsAnswer = options.awaitsAnswer
     this.credentials = options.credentials
+    this.botResults = options.botResults
   }
 
   /**
@@ -92,11 +98,13 @@ export class Reconciler {
   runOnce(): RepairReport {
     const now = this.now()
     const credentials = this.credentials
+    const botResults = this.botResults
     // Rules run in SPEC order; object literal members evaluate left to right.
     return {
       expiredLeases: this.rule('expired_leases', [], () => this.expiredLeases(now)),
       staleRuns: this.rule('stale_runs', [], () => this.staleRuns(now)),
       forcedInterrupts: this.rule('forced_interrupts', [], () => this.forcedInterrupts(now)),
+      ...(botResults ? { botResults: this.rule('bot_results', [], botResults) } : {}),
       wakes: this.rule('wakes', { wakes: [], steers: [], cancelled: [], restored: [] }, () =>
         wakeThreads(this.store, this.outbox, this.capabilitiesFor, now, this.awaitsAnswer)),
       ...this.rule('queued_starts', { queuedStarts: [], strandedCancelled: [] }, () => this.queuedStarts(now)),

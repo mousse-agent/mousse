@@ -22,7 +22,7 @@ import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { BotRuntimeHold } from '../../src/shared/bots/personal/subagentHold'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
-import { botFixture, chatOf, createBot, finish, flush, PI, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, PI, start, startSubagent, subagentRuns, type BotFixture } from './botFixture'
 
 const command: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: 'ls' } }
 const write = (path: string): NormalisedCall => ({ kind: 'builtin', tool: 'write', nativeName: 'write', args: { path } })
@@ -63,7 +63,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     if (options.shell) f.store.putOverlay(activation.id, `once-shell-${id}`, { tool: 'shell' })
     return { id: activation.id, ...(await start(f, activation.id)) }
   }
-  const subagentNs = (activationId: string) => f.store.dispatches(activationId).filter((dispatch) => dispatch.kind === 'subagent').map((dispatch) => dispatch.n)
+  const subagentNs = (activationId: string) => subagentRuns(f, activationId)
   const attemptOf = (runId: string) => f.runs.getRun(runId)!.activeAttemptId!
 
   it('on an entry that holds commands less tightly it runs without them: no command tool, refused at the call, it is told, the work is told, work_models and the work line say so', async () => {
@@ -73,7 +73,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     expect(subagents.holdOn!(choices.map((option) => option.instanceId))).toEqual({ [PIONLY.instanceId]: { lacks: ['run commands'] } })
     const started = await subagents.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })
     expect(started).toMatchObject({ started: { subagent: 'Reviews', model: 'Cheap Model on Cheap Router' }, lacks: ['run commands'], note: expect.stringMatching(/It can't run commands there: Cheap Router would hold that less tightly than your own entry/) })
-    const child = await start(f, job.id, subagentNs(job.id)[0])
+    const child = await startSubagent(f, subagentNs(job.id)[0])
     expect(child.prepared.policy.tools!.allow).toContain('cheap_read')
     expect(child.prepared.policy.tools!.allow).not.toContain('cheap_bash')
     expect(child.prepared.authority.check(command)).toMatchObject({ ok: false })
@@ -81,7 +81,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     expect(f.bots.service.get(botId).summary.work!.find((item) => item.id === job.id)!.subagents).toEqual([{ title: 'Reviews', model: 'Cheap Model on Cheap Router', lacks: ['run commands'] }])
     // The control: on another entry of the work's own runtime it keeps commands, and runs them.
     expect(await subagents.start({ title: 'Prices', brief: 'Find prices.', model: second })).not.toHaveProperty('lacks')
-    const priced = await start(f, job.id, subagentNs(job.id)[1])
+    const priced = await startSubagent(f, subagentNs(job.id)[1])
     expect(priced.prepared.authority.check(command)).toEqual({ ok: true })
     expect(priced.prepared.policy.tools!.allow).toContain('second_bash')
     // work_models, as the work's model reads it through the app tools.
@@ -106,7 +106,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     expect(job.prepared.authority.check(command)).toEqual({ ok: true })
     const started = await job.prepared.authority.subagents!.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })
     expect(started).toMatchObject({ lacks: ['run commands'] })
-    const child = await start(f, job.id, subagentNs(job.id)[0])
+    const child = await startSubagent(f, subagentNs(job.id)[0])
     expect(child.prepared.authority.check(command)).toMatchObject({ ok: false })
   })
 
@@ -129,7 +129,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     // Allowed for this work while its first turn runs: the turn gets it at its next turn, and so does a subagent.
     f.store.putOverlay(job.id, 'later', { tool: 'shell' })
     await job.prepared.authority.subagents!.start({ title: 'Look', brief: 'List the folder.' })
-    const child = await start(f, job.id, subagentNs(job.id)[0])
+    const child = await startSubagent(f, subagentNs(job.id)[0])
     expect(child.prepared.policy.tools!.allow).not.toContain('bash')
     expect(child.prepared.authority.check(command)).toMatchObject({ ok: false })
   })
@@ -147,7 +147,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
     const job = await work('w1')
     await job.prepared.authority.subagents!.start({ title: 'Builder', brief: 'Build it.', model: second })
-    const builder = await start(f, job.id, subagentNs(job.id)[0])
+    const builder = await startSubagent(f, subagentNs(job.id)[0])
     const own = join(builder.prepared.authority.workspace!.files!, 'notes.md')
     expect(builder.prepared.authority.check(write(own))).toEqual({ ok: true })
     f.runs.tools.start({ invocationId: 'inv-sub', runId: builder.payload.runId, attemptId: attemptOf(builder.payload.runId), tool, argsDigest: toolArgsDigest(tool === 'second_bash' ? { command: 'make' } : { path: own }), now: 'n', idempotent: false })
@@ -173,7 +173,7 @@ describe('a subagent on another entry is never held less tightly than its work',
   ] as const)('the work reports while a subagent is %s: done, with the stopped subagent named', async (_name, tool, title) => {
     const job = await work('w1', { shell: true })
     await job.prepared.authority.subagents!.start({ title: 'Look', brief: 'Look around.' })
-    const look = await start(f, job.id, subagentNs(job.id)[0])
+    const look = await startSubagent(f, subagentNs(job.id)[0])
     if (tool) f.runs.tools.start({ invocationId: 'inv-look', runId: look.payload.runId, attemptId: attemptOf(look.payload.runId), tool, argsDigest: 'd', now: 'n', idempotent: false })
     await finish(f, job.payload, 'completed', { text: 'Here is what I found.' })
     expect(f.stopped).toContain(look.payload.threadId)
@@ -188,7 +188,7 @@ describe('a subagent on another entry is never held less tightly than its work',
   it('the work\'s own interrupted call still holds it for the owner after it reports', async () => {
     const job = await work('w1', { shell: true })
     await job.prepared.authority.subagents!.start({ title: 'Look', brief: 'Look around.' })
-    const look = await start(f, job.id, subagentNs(job.id)[0])
+    const look = await startSubagent(f, subagentNs(job.id)[0])
     f.runs.tools.start({ invocationId: 'inv-own', runId: job.payload.runId, attemptId: attemptOf(job.payload.runId), tool: 'bash', argsDigest: 'd', now: 'n', idempotent: false })
     await finish(f, job.payload, 'completed', { text: 'Here.' })
     await finish(f, look.payload, 'interrupted', { outcome: { interruptedBy: 'user' } })
@@ -199,7 +199,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     f.host.quiesceTimeoutMs = 200
     const job = await work('w1')
     await job.prepared.authority.subagents!.start({ title: 'Slow', brief: 'Take your time.' })
-    const slow = await start(f, job.id, subagentNs(job.id)[0])
+    const slow = await startSubagent(f, subagentNs(job.id)[0])
     let removing: Promise<unknown> | undefined
     if (how === 'the owner\'s Stop') await f.bots.stop(job.id)
     else if (how === 'the end of its window') {
@@ -216,7 +216,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     expect(f.stopped).toContain(slow.payload.threadId)
     await finish(f, slow.payload, 'interrupted', { outcome: { interruptedBy: 'user' } })
     await removing
-    expect(f.store.dispatch(job.id, subagentNs(job.id)[0]!)!.endedAt).not.toBeNull()
+    expect(f.runs.delegations.listForRootActivation(job.id)[0]!.status).not.toBe('running')
     // The work itself ends, except at the end of its window: then it goes on in a fresh turn, without the subagent.
     if (how === 'the end of its window') expect(f.store.lastMainDispatch(job.id)!.prompt.text).toMatch(/ran as long as one turn may/)
     else expect(f.store.activation(job.id)!.status).not.toBe('running')
@@ -226,9 +226,9 @@ describe('a subagent on another entry is never held less tightly than its work',
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!
     await subagents.start({ title: 'Reviews', brief: 'Find reviews.', model: second })
-    await finish(f, (await start(f, job.id, subagentNs(job.id)[0])).payload, 'completed', { text: 'Done.' })
+    await finish(f, (await startSubagent(f, subagentNs(job.id)[0])).payload, 'completed', { text: 'Done.' })
     await subagents.start({ title: 'Notes', brief: 'Take notes.' })
-    await finish(f, (await start(f, job.id, subagentNs(job.id)[1])).payload, 'completed', { text: 'Done.' })
+    await finish(f, (await startSubagent(f, subagentNs(job.id)[1])).payload, 'completed', { text: 'Done.' })
     const until = new Date(f.clock.now + 60 * 60_000).toISOString()
     f.limited.set(SECOND.instanceId, until)
     expect(await subagents.send({ subagent: 'Reviews', message: 'More.' })).toMatchObject({ refused: expect.stringMatching(/Second Model on Second Claude is at its usage limit.*Nothing was started/) })
@@ -239,6 +239,6 @@ describe('a subagent on another entry is never held less tightly than its work',
     f.store.setActivationSelection(job.id, { ...SECOND })
     f.limited.delete(SECOND.instanceId)
     expect(await subagents.send({ subagent: 'Notes', message: 'More.' })).toMatchObject({ sent: { subagent: 'Notes', model: 'Second Model on Second Claude' } })
-    expect(f.store.dispatch(job.id, subagentNs(job.id).at(-1)!)!.prompt.subagent!.selection).toEqual(SECOND)
+    expect(f.store.subagentRun(job.id, subagentNs(job.id).at(-1)!)!.spec.selection).toEqual(SECOND)
   })
 })

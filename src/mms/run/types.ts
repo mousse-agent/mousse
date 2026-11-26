@@ -397,6 +397,21 @@ export interface DelegationRecord {
   workspace: DelegationWorkspace | null
   /** The requested role (`research`, `review`, `implement`, …); null when none was given. */
   role: string | null
+  /** Set only on a personal bot's work subagent (`BotDelegation`): the bot's tree it belongs to. */
+  bot?: BotDelegation
+}
+
+/**
+ * A bot subagent's place in its bot's work (Run DB v27): the bot, the work activation at the root of the tree (its counts
+ * and spend in bots.db are the subagent's too), and the narrowing the subagent inherits from the turn that started it.
+ */
+export interface BotDelegation {
+  botId: string
+  rootActivationId: string
+  /** The limit of the device the owner wrote from (`BotOwnerTurn.limit`), or null: none. */
+  access: PermissionMode | null
+  /** The subagent only reads the owner's threads (`threadsReadOnly` of the turn that started it). */
+  readOnly: boolean
 }
 
 export type DelegationWorkspace = 'isolated' | 'shared'
@@ -614,7 +629,17 @@ export interface BotTurnPayload {
   runId: string
   threadId: string
   activationId: string
+  /** The bot dispatch the run carries; 0 for a work subagent's turn, which is a delegation (`delegationId`) instead. */
   dispatchN: number
+  /**
+   * A work subagent's turn (Run DB v27): the delegation it runs for, under `activationId` (the work at the root). A build
+   * without it reads dispatch 0, which no activation has, and refuses the turn.
+   */
+  delegationId?: string
+  /** What the work started the subagent with (its title and model), for the bot engine; opaque to the run engine. */
+  subagent?: unknown
+  /** A work subagent's brief: what its turn is asked. */
+  prompt?: string
 }
 
 export function isBotTurnPayload(payload: unknown): payload is BotTurnPayload {

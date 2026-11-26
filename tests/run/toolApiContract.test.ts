@@ -348,7 +348,9 @@ describe('the turn-kind matrix through registered dispatch', () => {
     const questionId = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!.question!.questionId
     const started = await registryFor(work).call('subagent_start', { title: 'Look', brief: 'List the folder.', clientRequestId: 'sub' })
     expect(refusalOf(started) ?? started.isError).toBeFalsy()
-    expect(f.store.dispatches(workId).some((dispatch) => dispatch.kind === 'subagent')).toBe(true)
+    // A delegation of the work's run in the run database, with its place on the work's counts.
+    expect(f.runs.delegations.listForRootActivation(workId)).toHaveLength(1)
+    expect(f.store.subagentRuns(workId)).toHaveLength(1)
 
     const owner = await start(f, await begin('chat:msg'))
     const relayed = await registryFor(owner).call('question_answer', { questionId, answer: 'The second', clientRequestId: 'qa' })

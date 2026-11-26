@@ -20,6 +20,7 @@ import {
   type WakeTurnPayload
 } from '../types'
 import { formatWakeNotice, type PlannedNotice } from './notice'
+import { withoutBotParentRows } from './botPort'
 import { isQuestionAnswerRow } from '../OpenQuestions'
 
 /** Provider capabilities of the adapter that serves a thread's selected model; null when unknown. */
@@ -251,7 +252,8 @@ export function wakeThreads(
     if (onlyThreadId !== undefined && threadId !== onlyThreadId) continue
     try {
       store.db.transaction(() => {
-        const pending = inbox.listPending(threadId)
+        // A bot subagent's result is the bot port's to deliver (`deliverBotResults`): never a wake or a steer here.
+        const pending = withoutBotParentRows(store, inbox.listPending(threadId))
         // A row of a kind no longer written never wakes or steers: it is settled here instead.
         const retired = pending.filter(isRetiredInboxRow)
         if (retired.length) inbox.markAcknowledged(retired.map((row) => row.inboxId))
@@ -367,7 +369,7 @@ export function deliverAtToolBoundary(
     if (!active || active.runId !== runId || active.outcome?.stopRequested) return null
     if (steerStrategy(caps, active) !== 'interrupt_restart') return null
     const inbox = new Inbox(store)
-    const pending = deliverableRows(inbox.listPending(threadId).filter((row) => !isRetiredInboxRow(row)), input.awaitsAnswer ?? false)
+    const pending = deliverableRows(withoutBotParentRows(store, inbox.listPending(threadId)).filter((row) => !isRetiredInboxRow(row)), input.awaitsAnswer ?? false)
     const rows = input.prepare ? input.prepare(pending) : pending
     if (rows.length === 0) return null
     const delegations = new Delegations(store, inbox)
