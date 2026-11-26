@@ -110,7 +110,7 @@ export interface ListsSnapshot {
     } &
       /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
       Partial<
-        Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom'>
+        Pick<Thread, 'lineage' | 'permissionMode' | 'modelOverride' | 'startedFrom' | 'sentFrom' | 'hidden'>
       >
   >
   /** Threads that are not idle, by id. */
@@ -314,9 +314,12 @@ export class MmsListsSource {
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.
     // A thread a bot keeps out of the sidebar (`Thread.hidden`) is left out of every device's list too, with the subagents
-    // below it; its bot's chat lists it.
-    const hidden = new Set(inventory.filter((thread) => thread.hidden).map((thread) => thread.id))
-    const listed = (thread: Thread) => !thread.hidden && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
+    // below it; its bot's chat lists it. One an agent keeps out of the sidebar reaches the person's other computers,
+    // marked hidden: the side panel of the thread that started it there lists it, and All and search find it. A phone
+    // has neither, so its list leaves it out like a bot's.
+    const quiet = (thread: Thread) => Boolean(thread.hidden) && (!own || Boolean(thread.startedByBot))
+    const hidden = new Set(inventory.filter(quiet).map((thread) => thread.id))
+    const listed = (thread: Thread) => !quiet(thread) && !(thread.lineage && hidden.has(thread.lineage.rootThreadId))
     const threads = (own ? inventory : visibleThreads(inventory)).filter(listed)
     const snapshot = this.build(s, inventory, threads, own, activity, turns, chats, bots)
     return own ? this.trimmed(snapshot, inventory) : snapshot
@@ -410,6 +413,8 @@ export class MmsListsSource {
                 settingsRevision: thread.settingsRevision ?? 0,
                 startedFrom: thread.startedFrom,
                 sentFrom: thread.sentFrom,
+                // Out of the sidebar there as here (`Thread.hidden`); an older computer reads no such key and lists it.
+                ...(thread.hidden ? { hidden: true } : {}),
                 // A chat made for its first message: a window binds that message (`Thread.firstSendPending`).
                 ...(thread.firstSendPending ? { firstSendPending: true } : {})
               }

@@ -68,7 +68,10 @@ export interface AgentThreadRequest {
   firstMessage?: string
   /** Mode of the first message; defaults to agent. */
   mode?: 'agent' | 'plan'
-  /** A personal bot's thread kept out of the owner's sidebar (`Thread.hidden`). */
+  /**
+   * Keep the thread out of the person's sidebar (`Thread.hidden`): a bot's chat lists it, and the side panel of the
+   * thread that launched it. Absent: hidden. false: an independent thread the person follows in the sidebar.
+   */
   hidden?: boolean
 }
 
@@ -91,6 +94,8 @@ export interface AgentRemoteThreadRequest {
   effort?: string
   firstMessage?: string
   mode?: 'agent' | 'plan'
+  /** As for a thread here: absent or true keeps it out of the sidebar of the computer that runs it; false shows it there. */
+  hidden?: boolean
 }
 
 /** A project of another computer that may be the caller's repository, offered when the launch cannot choose one. */

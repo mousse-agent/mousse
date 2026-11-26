@@ -252,11 +252,13 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     caller?: { node: NodeId },
     started?: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
   ): Promise<{ thread: { id: string } } & Record<string, unknown>> {
-    const { startedFromProjectId, ...create } = params
+    const { startedFromProjectId, hidden, ...create } = params
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
     if (!caller) return result
-    // A thread an agent of the device started holds who started it and its mode from this same write on.
+    // A thread an agent of the device started holds who started it and its mode from this same write on. It is out of the
+    // sidebar here when the caller asks (`hidden: true`, what a newer computer sends for an agent's thread); a computer
+    // from before it sends none and the thread shows, as it always did. A person's thread from a phone never is hidden.
     const thread = this.services.threads.updateThreadMeta(
       result.thread.id,
       {
@@ -265,8 +267,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       },
       { touch: false }
     )
+    const shown = started && hidden === true ? this.services.threads.setThreadHidden(thread.id, true) : thread
     this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
-    return { ...result, thread }
+    return { ...result, thread: shown }
   }
   /**
    * Which of this machine's projects is the same Git repository as the one described: an id, or

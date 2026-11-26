@@ -5,6 +5,7 @@
  * the answer. Rows: the thread controls (steer, queues, forks, approvals), Git, other computers, scheduled jobs, secrets,
  * quick actions, the task list, and what a subagent of the work holds.
  */
+import { remoteThreadFingerprint } from '../../src/mms/orchestrator/remoteThreadRequest'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -210,6 +211,11 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(await call('thread_create', { computer: 'Mac mini', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: true, text: expect.stringMatching(/fromProjectId/) })
       expect(await call('thread_create', { computer: 'Mac mini', fromProjectId: 'p1', title: 'Build', firstMessage: 'Build it.' })).toMatchObject({ error: false })
       expect(createRemoteThread).toHaveBeenCalledWith(expect.objectContaining({ computer: 'Mac mini', fromProjectId: 'p1' }), expect.objectContaining({ clientRequestId: expect.stringMatching(/^thread_create:work:/) }))
+      // Its request names no hidden: the thread shows there, and a key it stored before hidden existed keeps its
+      // fingerprint, so its retry is the same launch.
+      const [request] = createRemoteThread.mock.calls.at(-1)! as unknown as [Record<string, unknown>]
+      expect(request).not.toHaveProperty('hidden')
+      expect(remoteThreadFingerprint(request as never)).not.toMatch(/hidden/)
     })
   })
 

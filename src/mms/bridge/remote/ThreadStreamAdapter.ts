@@ -280,11 +280,13 @@ export class ThreadStreamAdapter {
             return target.getStream(stream)
           }
         if (key === 'openSnapshot')
-          return (stream: StreamId) => {
+          return (stream: StreamId, options?: Parameters<StreamStore['openSnapshot']>[1]) => {
             const thread = this.active.get(stream)
             // The snapshot already published, with the records after it, is what a fresh one would show.
             if (thread && !thread.published) this.refreshSnapshot(thread)
-            return target.openSnapshot(stream)
+            // Where to read from goes through: a copy of another computer's stream is read from its newest snapshot,
+            // not from its oldest record.
+            return target.openSnapshot(stream, options)
           }
         const value = Reflect.get(target, key, target)
         return typeof value === 'function' ? value.bind(target) : value

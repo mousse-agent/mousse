@@ -172,18 +172,20 @@ export function rollUpActivities(threads: readonly LineageThread[], activity: Th
 }
 
 /**
- * True for a thread kept out of the owner's sidebar by one of their bots (`Thread.hidden`), and for any subagent
- * below one: a subagent takes its root's visibility. Such a thread notifies the owner only when they chose
- * `notifications.botThreads`; Show in sidebar clears the mark and it notifies like any thread again.
+ * True for a thread kept out of the owner's sidebar by one of their bots (`Thread.hidden` on a thread a bot started),
+ * and for any subagent below one: a subagent takes its root's visibility. Such a thread notifies the owner only when
+ * they chose `notifications.botThreads`; Show in sidebar clears the mark and it notifies like any thread again. A hidden
+ * thread an agent started is not one: its questions and approvals are the person's, so it notifies like any thread.
  */
 export function hiddenFromOwner(
   threadId: string,
-  threadOf: (id: string) => Pick<Thread, 'id' | 'lineage' | 'hidden'> | undefined
+  threadOf: (id: string) => Pick<Thread, 'id' | 'lineage' | 'hidden' | 'startedByBot'> | undefined
 ): boolean {
+  const quiet = (thread: Pick<Thread, 'hidden' | 'startedByBot'> | undefined) => Boolean(thread?.hidden && thread.startedByBot)
   let current = threadOf(threadId)
-  if (current?.lineage?.rootThreadId && threadOf(current.lineage.rootThreadId)?.hidden) return true
+  if (current?.lineage?.rootThreadId && quiet(threadOf(current.lineage.rootThreadId))) return true
   for (let depth = 0; current && depth < 64; depth++) {
-    if (current.hidden) return true
+    if (quiet(current)) return true
     const parentId = current.lineage?.parentThreadId
     current = parentId ? threadOf(parentId) : undefined
   }

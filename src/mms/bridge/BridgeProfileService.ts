@@ -553,7 +553,20 @@ export class BridgeProfileService {
     // The copies of other computers' threads and lists on disk are tidied once the Bridge has started, in the
     // background (`BridgeHub.tidyCopies`): a start never waits for it.
     const tidy = setTimeout(
-      () => void this.track(this.hub.tidyCopies().catch(() => 0)),
+      () =>
+        void this.track(
+          this.hub.tidyCopies().catch((error: unknown) => {
+            console.warn('[net] the copies of other computers could not be tidied', {
+              code:
+                error instanceof NetError
+                  ? error.code
+                  : error instanceof Error
+                    ? error.name
+                    : 'internal'
+            })
+            return 0
+          })
+        ),
       copyLimits().sweepDelayMs
     )
     tidy.unref?.()

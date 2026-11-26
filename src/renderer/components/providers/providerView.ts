@@ -1,3 +1,4 @@
+import { nextEntryName } from '../../../shared/providerInstances'
 import type { BinarySource, InstallOwner, InstanceSnapshot } from '../../../shared/harness/status'
 import type {
   HarnessDriverKind,
@@ -89,10 +90,12 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     iconId: 'google',
     family: 'agent',
     description: "Google's Antigravity CLI (agy), signed in with your Google account.",
-    multiInstance: false,
+    // A further entry is another Google account, kept in a home of its own.
+    multiInstance: true,
     customModels: false,
     executableHint: "agy, or Google's 1.1.1 ACP server",
     addHint: 'Mousse uses agy on this computer, or installs it after adding.',
+    // The first entry only: an entry with a home of its own signs out of that home alone.
     signOutHint: 'Also signs out agy on this computer'
   },
   cursor: {
@@ -289,11 +292,7 @@ export function lastCheckedAt(snapshots: readonly InstanceSnapshot[]): number | 
 
 /** A label for a new instance that no other instance uses ("Claude Code 2"). */
 export function nextInstanceLabel(base: string, snapshots: readonly InstanceSnapshot[]): string {
-  const taken = new Set(snapshots.map((snapshot) => snapshot.displayName.trim().toLowerCase()))
-  for (let n = 2; ; n += 1) {
-    const label = `${base} ${n}`
-    if (!taken.has(label.toLowerCase())) return label
-  }
+  return nextEntryName(base, snapshots.map((snapshot) => snapshot.displayName))
 }
 
 /** `NAME=value` lines; blank lines and lines without a name are skipped. */

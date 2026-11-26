@@ -172,7 +172,7 @@ export function SetupRow({
     </button>
   )
   const signOut = account && auth.canSignOut && (
-    <button type="button" className="settings-btn" disabled={!idle} title={DRIVER_INFO[snapshot.driver].signOutHint} onClick={() => void run('signout', actions.signOut)}>
+    <button type="button" className="settings-btn" disabled={!idle} title={snapshot.config?.home === 'private' ? undefined : DRIVER_INFO[snapshot.driver].signOutHint} onClick={() => void run('signout', actions.signOut)}>
       <Logout size={14} />
       Sign out
     </button>

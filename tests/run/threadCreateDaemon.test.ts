@@ -262,6 +262,33 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       for (const result of Object.values(seen)) expect(w.d.orch.requestedPermissionMode(result.threadId)).toBe('accept_edits')
     })
 
+    it('is out of the person\'s sidebar unless started as independent, and its agent shows or hides only the threads it started', async () => {
+      const seen: Record<string, unknown> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId !== w.parent.id) return 'ok'
+        seen.quiet = parse(await w.create(mcp!, { title: 'Background check', clientRequestId: 'quiet' }))
+        seen.independent = parse(await w.create(mcp!, { title: 'Release notes', hidden: false, clientRequestId: 'own' }))
+        seen.shown = parse(await call(mcp!, 'thread_update', { threadId: (seen.quiet as AgentCreatedThread).threadId, hidden: false }))
+        seen.notMine = refusal(await call(mcp!, 'thread_update', { threadId: w.other.id, hidden: true }))
+        return 'ok'
+      })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+
+      const quiet = seen.quiet as AgentCreatedThread & { hidden: boolean; note: string }
+      const independent = seen.independent as AgentCreatedThread & { hidden: boolean }
+      // Started hidden: the agent is told where the person finds it.
+      expect(quiet).toMatchObject({ hidden: true, note: expect.stringContaining('side panel of your thread lists it') })
+      expect(independent.hidden).toBe(false)
+      expect(w.d.store.getThread(independent.threadId)?.hidden).toBeUndefined()
+      // thread_update hidden: false put the first one in the sidebar.
+      expect(seen.shown).toMatchObject({ threadId: quiet.threadId, hidden: false, changed: true })
+      expect(w.d.store.getThread(quiet.threadId)?.hidden).toBeUndefined()
+      // A thread the agent did not start stays as the person left it.
+      expect(seen.notMine).toMatch(/not one you started/)
+      expect(w.d.store.getThread(w.other.id)?.hidden).toBeUndefined()
+    })
+
     it('is a started thread: listed from the start, and the app\'s New chat never takes it over as an empty draft', async () => {
       const seen: { made?: AgentCreatedThread } = {}
       const w = world(async (input, mcp) => {

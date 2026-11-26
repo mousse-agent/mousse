@@ -31,6 +31,11 @@ export interface RemoteLaunchRecord {
   /** The project there that is the same repository as the launcher's. */
   remoteProjectId: string
   worktree: boolean
+  /**
+   * The `hidden` the create sends that computer: whether it keeps the thread out of its sidebar. Null sends none (a
+   * launch from before it, or a bot's), which that computer takes as shown, as it always did.
+   */
+  hidden: boolean | null
   instanceId: string | null
   model: string | null
   /** The most the thread may run in there, before that computer's limit narrows it: the launcher's own mode. */
@@ -114,6 +119,7 @@ function fromRow(row: Row): RemoteLaunchRecord {
     title: String(row.title),
     remoteProjectId: String(row.remote_project_id),
     worktree: int(row.worktree) === 1,
+    hidden: row.hidden === null || row.hidden === undefined ? null : int(row.hidden) === 1,
     instanceId: str(row.instance_id),
     model: str(row.model),
     permissionMode: isPermissionMode(mode) ? mode : 'ask',
@@ -132,7 +138,7 @@ function fromRow(row: Row): RemoteLaunchRecord {
 }
 
 /** What a caller may change on a row; `undefined` keeps a field, `null` clears a nullable one. */
-export type RemoteLaunchPatch = Partial<Pick<RemoteLaunchRecord, 'remoteThreadId' | 'remoteRunId' | 'remoteMode' | 'state' | 'firstMessageState' | 'lastError'>>
+export type RemoteLaunchPatch = Partial<Pick<RemoteLaunchRecord, 'remoteThreadId' | 'remoteRunId' | 'remoteMode' | 'state' | 'firstMessageState' | 'lastError' | 'hidden'>>
 
 const COLUMNS: Record<keyof RemoteLaunchPatch, string> = {
   remoteThreadId: 'remote_thread_id',
@@ -140,7 +146,8 @@ const COLUMNS: Record<keyof RemoteLaunchPatch, string> = {
   remoteMode: 'remote_mode',
   state: 'state',
   firstMessageState: 'first_message_state',
-  lastError: 'last_error'
+  lastError: 'last_error',
+  hidden: 'hidden'
 }
 
 export type NewRemoteLaunch = Omit<RemoteLaunchRecord, 'remoteThreadId' | 'remoteRunId' | 'remoteMode' | 'state' | 'firstMessageState' | 'lastError' | 'stop' | 'createdAt' | 'updatedAt'>
@@ -154,9 +161,9 @@ export class RemoteLaunchRecords {
     this.store.db
       .statement(
         `INSERT INTO remote_launches(creation_key, launcher_thread_id, launcher_run_id, node, computer_name, title,
-           remote_project_id, worktree, instance_id, model, permission_mode, first_message, first_message_mode, mark,
+           remote_project_id, worktree, hidden, instance_id, model, permission_mode, first_message, first_message_mode, mark,
            state, first_message_state, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?)`
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?)`
       )
       .run(
         input.creationKey,
@@ -167,6 +174,7 @@ export class RemoteLaunchRecords {
         input.title,
         input.remoteProjectId,
         input.worktree ? 1 : 0,
+        input.hidden === null ? null : input.hidden ? 1 : 0,
         input.instanceId,
         input.model,
         input.permissionMode,
@@ -259,7 +267,7 @@ export class RemoteLaunchRecords {
       const value = patch[key]
       if (value === undefined) continue
       sets.push(`${column} = ?`)
-      values.push(value)
+      values.push(typeof value === 'boolean' ? (value ? 1 : 0) : value)
     }
     if (sets.length === 0) return this.get(creationKey)
     sets.push('updated_at = ?')

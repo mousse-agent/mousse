@@ -49,6 +49,7 @@ import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelP
 import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
 import {
   legacyProviderForInstance,
+  nextEntryName,
   piProviderIdOf,
   PROVIDER_INSTANCE_ERROR_CODES,
   type ProviderInstanceConfig
@@ -2949,6 +2950,16 @@ export class Harness implements HarnessGateway {
     return {}
   }
 
+  /** The name an entry shows (`displayName`), read from its stored config without building its runtime. */
+  private storedName(instanceId: string, entry: ProviderInstanceConfig): string {
+    const name = entry.config?.displayName
+    if (typeof name === 'string' && name.trim()) return name.trim()
+    const driver = this.drivers.get(entry.driver)
+    if (!driver || entry.driver === 'pi') return instanceId
+    if (isBuiltInInstance(instanceId, entry.driver)) return driver.label
+    return `${driver.label} (${instanceId.slice(instanceId.indexOf(':') + 1)})`
+  }
+
   private displayName(record: InstanceRecord): string {
     if (record.config.displayName) return record.config.displayName
     if (record.entry.driver === 'pi') {
@@ -3000,13 +3011,19 @@ export class Harness implements HarnessGateway {
       return harnessFail('unsupported', `${driver.label} on your own setup is already added. Add one Mousse manages for another account.`)
     const useOwnSetup = rule !== 'required' && ownSetup !== undefined && !hasOwnSetup && !Object.prototype.hasOwnProperty.call(entries, ownSetup)
     let instanceId = useOwnSetup ? ownSetup : ''
+    let named = patch
     if (!useOwnSetup) {
+      // A further entry the caller did not name is "<Label> 2", "<Label> 3", ... (the first name no entry has).
+      if (!patch.displayName?.trim()) {
+        const names = Object.entries(entries).map(([id, entry]) => this.storedName(id, entry))
+        named = { ...patch, displayName: nextEntryName(driver.label, names) }
+      }
       // An id whose state directory is still on disk (a removal that could not delete it) is taken.
       const taken = new Set(Object.keys(entries))
-      instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
+      instanceId = addedInstanceId(driver.kind, named.displayName ?? undefined, taken, input.slug)
       while (existsSync(instanceStateDir(this.options.profileHome, instanceId))) {
         taken.add(instanceId)
-        instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
+        instanceId = addedInstanceId(driver.kind, named.displayName ?? undefined, taken, input.slug)
       }
     }
     await this.removing.get(instanceId)
@@ -3018,7 +3035,7 @@ export class Harness implements HarnessGateway {
           ...(patch.args?.length ? { args: patch.args } : {}),
           ...(patch.env && Object.keys(patch.env).length ? { env: patch.env } : {})
         }, driver)
-      : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, patch, driver)
+      : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, named, driver)
     if (internal.profile && !useOwnSetup && config.home === 'private') config.profile = internal.profile
     const entry: ProviderInstanceConfig = { driver: driver.kind, enabled: true, config }
     // An instance with a vendor mirror starts signed in, takes the launch settings its vendor file

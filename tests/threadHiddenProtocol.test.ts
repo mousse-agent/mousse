@@ -38,7 +38,7 @@ describe('showing a hidden thread in the sidebar (threads.setHidden)', () => {
     delete process.env.MOUSSE_HOME
   })
 
-  it('clears the mark on disk and in the reply, hides again only a thread a bot started, and keeps its place in the list', async () => {
+  it('clears the mark on disk and in the reply, hides again only a thread a bot or an agent started, and keeps its place in the list', async () => {
     const started = mms.threads.createThread('Quick check', undefined, undefined, { started: true, startedByBot: { botId: 'b1', name: 'Alpha' }, hidden: true })
     const owners = mms.threads.createThread('My own work', undefined, undefined, { started: true })
     expect(mms.threads.threadOnDisk(started.id)?.hidden).toBe(true)
@@ -54,7 +54,13 @@ describe('showing a hidden thread in the sidebar (threads.setHidden)', () => {
     expect(hidden.thread.hidden).toBe(true)
     expect(mms.threads.threadOnDisk(started.id)?.hidden).toBe(true)
 
-    // The owner's own thread has no bot chat to list it, so it is never hidden.
+    // A thread an agent started is listed by the thread that started it, here or on another computer: it can be hidden.
+    const launched = mms.threads.createThread('Background check', undefined, undefined, { started: true, createdByThreadId: owners.id })
+    const fromAfar = mms.threads.createThread('Linux tests', undefined, undefined, { started: true })
+    mms.threads.updateThreadMeta(fromAfar.id, { startedFrom: { node: 'n1', agent: { thread: 'far', title: 'Yo', mode: 'auto' } } }, { touch: false })
+    for (const id of [launched.id, fromAfar.id]) expect((await gui.request<{ thread: Thread }>('threads.setHidden', { threadId: id, hidden: true })).thread.hidden).toBe(true)
+
+    // The owner's own thread has nothing else to list it, so it is never hidden.
     await expect(gui.request('threads.setHidden', { threadId: owners.id, hidden: true })).rejects.toMatchObject({ code: 'invalid_params' })
     expect(mms.threads.getThread(owners.id)!.hidden).toBeUndefined()
     await expect(gui.request('threads.setHidden', { threadId: 'missing', hidden: false })).rejects.toMatchObject({ code: 'thread_not_found' })
