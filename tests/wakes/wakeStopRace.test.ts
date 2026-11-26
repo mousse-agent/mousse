@@ -598,6 +598,27 @@ describe('a pull request read that never answers', () => {
   })
 })
 
+describe('a time wake while a pull request read hangs', () => {
+  it('fires on time: the next look is armed at once, not after the read', async () => {
+    threadWakes.start()
+    const setAt = f.clock.now
+    await threadWakes.add('t1', { brief: 'Ship it once merged.', event: { kind: 'pr', repo: 'acme/app', number: 12 } })
+    const time = await threadWakes.add('t3', { brief: 'Check the deploy.', dueAt: new Date(setAt + 6 * 60_000).toISOString() })
+    const count = reads({ 12: () => new Promise<PrRead>(() => {}) })
+    f.clock.now = setAt + 3 * 60_000
+    const look = tick!
+    tick = undefined
+    look()
+    await settle()
+    expect(count).toEqual({ 12: 1 })
+    expect(tick).toBeDefined()
+    f.clock.now = setAt + 6 * 60_000 + 1
+    tick!()
+    await settle()
+    expect(posts.map((post) => post.key)).toEqual([`thread-wake:${time.wakeId}`])
+  })
+})
+
 describe('a wake on a thread stored just after the run it waits for ended', () => {
   /**
    * The thread's runs, as the real `wakeThreadState` reads them. The first look at the thread (setting the wake) sees

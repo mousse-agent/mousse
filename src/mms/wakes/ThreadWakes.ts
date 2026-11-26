@@ -294,9 +294,15 @@ export class ThreadWakes {
     this.timer = timer
   }
 
+  /**
+   * Arms the next look as soon as this one has fired what was due, and again once its pull request reads end: a read
+   * still under way, or queued behind a slow one, never holds back a time wake.
+   */
   private tick(): void {
     this.timer = undefined
-    void this.pass().finally(() => this.arm())
+    const reads = this.pass()
+    this.arm()
+    void reads.finally(() => this.arm())
   }
 
   /**
