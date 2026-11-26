@@ -11,10 +11,10 @@ export interface ActionableTarget {
   point: BrowserPoint
   /**
    * Where pointer input for it goes when that is not `cdpSessionId`: the tab, with `point` in the tab's
-   * viewport (an image point in a frame from another site; Chromium routes it into the frame there).
+   * viewport (an image point; Chromium routes it into the frame there).
    */
   pointerSessionId?: string
-  /** The point in its own frame's viewport, where it was hit-tested, when `point` is in the tab's. */
+  /** The point in its own frame's viewport, where it was hit-tested, when `point` is in the tab's (an image point). */
   framePoint?: BrowserPoint
   bounds: BrowserBounds
   disabled: boolean
@@ -55,7 +55,11 @@ const TRUSTED_STATE = `function() {
   };
 }`
 
-const TRUSTED_HIT = `function(x, y) {
+/**
+ * Whether the element hit at a viewport point of its own frame (in its own shadow root, if any) is
+ * this element or inside it; run on the element (a text node stands for its parent element).
+ */
+export const TRUSTED_HIT = `function(x, y) {
   const el = this && this.nodeType === 3 ? this.parentElement : this;
   if (!el || el.nodeType !== 1) return { ok: false, occluded: true, hitTag: '', hitText: '' };
   const root = el.getRootNode && el.getRootNode();

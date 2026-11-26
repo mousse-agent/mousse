@@ -442,12 +442,33 @@ describe.skipIf(!chrome.ok)('image points in a frame from another site', () => {
     }
   }, 120_000)
 
+  it('fills and clicks in a frame from another site inside a frame from this site', async () => {
+    const frames = await openFrames('profile_nested_frame', 'frame-nested-parent.html')
+    try {
+      // From the fixtures: the same-site frame is at (100, 100) of the page, the frame from another site
+      // at (50, 50) of it, so its input (20, 20, 240x32) and button (20, 80, 240x32) are 150px further in.
+      // The element is found in the outer frame's own process, then carried into the inner frame.
+      const name = { x: 150 + 20 + 120, y: 150 + 20 + 16 }
+      const save = { x: 150 + 20 + 120, y: 150 + 80 + 16 }
+      let observation = await frames.observe()
+      const filled = await frames.act(observation, { type: 'fill', target: { kind: 'image-point', point: imagePointOf(observation, name) }, text: 'nested-value' }, 'nested_fill')
+      expect(filled.ok, JSON.stringify(filled.error)).toBe(true)
+      observation = await frames.observe()
+      const clicked = await frames.act(observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, save) } }, 'nested_click')
+      expect(clicked.ok, JSON.stringify(clicked.error)).toBe(true)
+      expect(JSON.stringify((clicked.result as BrowserActionResult).observation)).toContain('applicant-saved:nested-value')
+    } finally {
+      await frames.close()
+    }
+  }, 120_000)
+
   it('a press on a frame drawn over another reaches the frame on top, never the one behind', async () => {
     const frames = await openFrames('profile_overlap_frames', 'frame-overlap-parent.html')
     try {
       // From the fixture: a frame from another site covers (100, 100) to (900, 500), its button most of it.
       // Over that button, a frame from another site at (200, 150) and one from this site at (550, 150),
-      // each 250x150 with its own button over its top 100px.
+      // each 250x150 with its own button over its top 100px. The same-site frame's button is found in
+      // the page's own process and hit-tested at its own frame's point.
       let observation = await frames.observe()
       const cross = await frames.act(observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, { x: 200 + 125, y: 150 + 50 }) } }, 'overlap_cross')
       expect(cross.ok, JSON.stringify(cross.error)).toBe(true)

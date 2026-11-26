@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Nested frames</title>
+<style>
+  body { margin: 0; font: 16px sans-serif }
+  /* A frame from this site at (100, 100), 700x500; it holds a frame from another site at (50, 50) of
+     its own, so that frame's form is at (150, 150) of this page. */
+  #middle { position: absolute; left: 100px; top: 100px; width: 700px; height: 500px; border: 0 }
+</style></head>
+<body>
+  <iframe id="middle" title="Same-site wrapper" src="/frame-nested-middle.html"></iframe>
+</body>
+</html>
