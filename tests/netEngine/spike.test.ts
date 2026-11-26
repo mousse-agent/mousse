@@ -30,6 +30,7 @@ import type { DomainConnectionContext } from '../../src/mms/protocol/domainRegis
 import { dispatchMethod } from '../../src/mms/protocol/handlers'
 import { routedNetMethod } from '../../src/shared/bridge/routed'
 import { newId, type NodeId, type RpcId, type StoredRecord, type StreamDescriptor } from '../../src/shared/net'
+import { NetError } from '../../src/shared/net/errors'
 import { NET_LOCAL_CAPABILITY } from '../../src/shared/net/local'
 import { PROJECT_SHELL_AGENT_ID } from '../../src/shared/types'
 import { qualifyId } from '../../src/shared/threadRef'
@@ -606,8 +607,12 @@ describe('Bridge over an engine session, v1 off', () => {
   it('updates every computer from one click, keeps the rollout across a restart of the service, and verifies each version there', async () => {
     const version = process.env.MOUSSE_VERSION
     const poll = process.env.MOUSSE_NET_UPDATE_POLL_MS
+    const reconnect = process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS
+    const recheck = process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS
     process.env.MOUSSE_VERSION = '0.1.5'
     process.env.MOUSSE_NET_UPDATE_POLL_MS = '50'
+    process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS = '300'
+    process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS = '50'
     const target = '0.1.9'
     // The owner's desktop app: updates itself, downloads at once and installs when its countdown ends, then runs the
     // new version.
@@ -615,6 +620,21 @@ describe('Bridge over an engine session, v1 off', () => {
     const hub = remoteUpdatesFor(ownerHome)
     hub.attach('owner-app')
     const services = await caller.getProfileServices(caller.profileId)
+    // The network between the two: the reply to Install is lost (the install still runs there), and while the owner
+    // restarts it answers nothing at all.
+    const engine = services.netEngine as unknown as { updateThere: (params: any) => Promise<unknown> }
+    const reach = engine.updateThere
+    let silent = false
+    let lostInstalls = 0
+    engine.updateThere = async (params) => {
+      if (silent) throw new NetError('deadline_exceeded')
+      const answer = await reach.call(engine, params)
+      if (params.step === 'install') {
+        lostInstalls++
+        throw new NetError('deadline_exceeded')
+      }
+      return answer
+    }
     let installs = 0
     let savedAtRestart: any
     const app = setInterval(() => {
@@ -626,12 +646,18 @@ describe('Bridge over an engine session, v1 off', () => {
         services.updateRollouts().stop()
         ;(services as unknown as { updateRolloutsInstance?: unknown }).updateRolloutsInstance = undefined
         savedAtRestart = services.net.updateRolloutStore().read()
+        silent = true
         process.env.MOUSSE_VERSION = target
       }
     }, 20)
     cleanups.push(() => {
       clearInterval(app)
+      engine.updateThere = reach
       hub.detach('owner-app')
+      if (reconnect === undefined) delete process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS
+      else process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS = reconnect
+      if (recheck === undefined) delete process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS
+      else process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS = recheck
       if (version === undefined) delete process.env.MOUSSE_VERSION
       else process.env.MOUSSE_VERSION = version
       if (poll === undefined) delete process.env.MOUSSE_NET_UPDATE_POLL_MS
@@ -662,8 +688,18 @@ describe('Bridge over an engine session, v1 off', () => {
     await eventually(() => expect(installs).toBe(1), 30_000)
     expect(savedAtRestart).toMatchObject({ id: started.rollout.id, rows: [{ node: 'self', phase: 'manual' }, { node: ownerOnCaller, phase: 'installing' }] })
     expect(['installing', 'verifying']).toContain(savedAtRestart.step)
+    // Install's reply never came, yet the row went on to installing rather than failed.
+    expect(lostInstalls).toBe(1)
 
-    // The next service finds it in the profile's database and finishes it when a window reads it.
+    // The next service finds it in the profile's database when a window reads it. The owner says nothing past the
+    // reconnect deadline: "Couldn't verify", never failed.
+    await eventually(async () => {
+      const read = await dispatch('updates.rollout.get', {}, settings)
+      expect(read.rollout).toMatchObject({ id: started.rollout.id, step: 'done' })
+      expect(rows(read)[ownerOnCaller]).toMatchObject({ phase: 'unverified' })
+    }, 30_000)
+    // The owner answers again with the new version: reading the results corrects the row.
+    silent = false
     await eventually(async () => {
       const read = await dispatch('updates.rollout.get', {}, settings)
       expect(read.rollout).toMatchObject({ id: started.rollout.id, step: 'done' })
