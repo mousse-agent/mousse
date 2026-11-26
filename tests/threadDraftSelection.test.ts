@@ -59,8 +59,9 @@ describe('empty threads on another computer', () => {
     expect(findUnstartedThread([remote({}), local({})])?.id).toBe('l')
   })
 
-  it('are the new chat of a project of that computer', () => {
-    expect(findUnstartedThread([remote({ projectId: 'nod_a:p' }), local({ projectId: 'p' })], 'nod_a:p')?.id).toBe('nod_a:r')
+  it('are not the new chat of a project of that computer either: it starts fresh there', () => {
+    expect(findUnstartedThread([remote({ projectId: 'nod_a:p' })], 'nod_a:p')).toBeUndefined()
+    expect(findUnstartedThread([remote({ projectId: 'nod_a:p' }), local({ projectId: 'p' })], 'nod_a:p')).toBeUndefined()
     expect(findUnstartedThread([remote({ projectId: 'nod_a:p' })], 'p')).toBeUndefined()
   })
 })
