@@ -16,10 +16,13 @@ import {
   stepTarget,
   useThreadHistoryStore
 } from '../lib/threadHistory'
-import { hiddenSegmentCount, siblingThreads, threadPath, withProjectLead, type PathSegment } from '../lib/threadPath'
+import { hiddenSegmentCount, siblingThreads, threadPath, withNativeSubagent, withProjectLead, type PathSegment } from '../lib/threadPath'
 import { useThreadPathInTitleBar } from '../lib/threadPathSetting'
+import { cardTitle } from '../chat/components/agent-elements/tools/subagent-card-logic'
+import { useNativeSubagents } from '../hooks/useNativeSubagents'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
+import { useNativeSubagentViewStore } from '../stores/nativeSubagentViewStore'
 import './titleBarNav.css'
 
 const logFailure = (what: string) => (error: unknown) => console.error(`${what} failed`, error)
@@ -210,7 +213,7 @@ export function HistoryButtons() {
   )
 }
 
-type OpenMenu = { kind: 'siblings'; threadId: string } | { kind: 'hidden' } | null
+type OpenMenu = { kind: 'siblings'; threadId: string } | { kind: 'native' } | { kind: 'hidden' } | null
 
 interface ThreadPathViewProps {
   segments: PathSegment[]
@@ -227,7 +230,7 @@ interface ThreadPathViewProps {
 /**
  * The path's segments: "…" for the hidden ones, the ancestors (dim, each opening its thread or project,
  * its "/" a caret on hover that lists the threads beside it), then the current thread, brightest, whose
- * caret lists the threads beside it.
+ * caret lists the threads beside it, or the open native subagent, whose caret lists its thread's others.
  */
 export function ThreadPathView({ segments, hidden, squeezed = false, openMenu = null, onOpenSegment, onToggleMenu, measure = false }: ThreadPathViewProps) {
   const toggle = (menu: OpenMenu) => (event: { currentTarget: HTMLElement }) => onToggleMenu?.(menu, event.currentTarget.closest<HTMLElement>('.titlebar-path-anchor') ?? event.currentTarget)
@@ -244,6 +247,17 @@ export function ThreadPathView({ segments, hidden, squeezed = false, openMenu = 
       )}
       {segments.map((segment, index) => {
         if (!measure && index < hidden) return null
+        if (segment.kind === 'native') {
+          const open = openMenu?.kind === 'native'
+          return (
+            <span key={`native:${segment.id}`} className={`titlebar-path-anchor is-current${squeezed ? ' is-squeezed' : ''}${open ? ' is-open' : ''}`} data-segment="current">
+              <button type="button" tabIndex={tab} className="titlebar-path-seg" aria-current="page" aria-haspopup="menu" aria-expanded={open} title={segment.name} onClick={toggle({ kind: 'native' })}>
+                <span className="titlebar-path-name">{segment.name}</span>
+                <span className="titlebar-path-sep" aria-hidden="true"><ChevronDown size={10} strokeWidth={2.4} /></span>
+              </button>
+            </span>
+          )
+        }
         if (segment.kind === 'thread' && segment.current) {
           const open = openMenu?.kind === 'siblings' && openMenu.threadId === segment.id
           return (
@@ -309,9 +323,18 @@ export function ThreadPath() {
   const shown = useAppStore((s) => s.sidebarMode === 'projects' && !s.scheduledOpen && !s.usageOpen)
   const chats = useChatsStore((s) => s.snapshot.chats)
   const chatThreadIds = useMemo(() => new Set(chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : []))), [chats])
+  // A native subagent open on its own page is one step below its thread.
+  const nativeView = useNativeSubagentViewStore((s) => (s.open && s.open.threadId === activeThreadId ? s.open : null))
+  const showNative = useNativeSubagentViewStore((s) => s.show)
+  const closeNative = useNativeSubagentViewStore((s) => s.close)
+  const nativeCards = useNativeSubagents(nativeView ? activeThreadId : null)
+  const nativeCard = nativeView ? nativeCards.find((card) => card.toolCallId === nativeView.toolCallId) : undefined
+  const nativeName = nativeView ? (nativeCard ? cardTitle(nativeCard) : 'Subagent') : null
   const segments = useMemo(
-    () => (shown && activeThreadId && !chatThreadIds.has(activeThreadId) ? withProjectLead(threadPath(activeThreadId, threads, projects)) : []),
-    [shown, activeThreadId, chatThreadIds, threads, projects]
+    () => (shown && activeThreadId && !chatThreadIds.has(activeThreadId)
+      ? withNativeSubagent(withProjectLead(threadPath(activeThreadId, threads, projects)), nativeView && nativeName ? { id: nativeView.toolCallId, name: nativeName } : null)
+      : []),
+    [shown, activeThreadId, chatThreadIds, threads, projects, nativeView, nativeName]
   )
   const slotRef = useRef<HTMLDivElement>(null)
   const measureRef = useRef<HTMLDivElement>(null)
@@ -321,7 +344,7 @@ export function ThreadPath() {
   const closeMenu = useCallback(() => setMenu(null), [])
   const segmentsKey = segments.map((segment) => `${segment.kind}:${segment.id}:${segment.name}`).join('\n')
 
-  useEffect(() => setMenu(null), [activeThreadId])
+  useEffect(() => setMenu(null), [activeThreadId, nativeView?.toolCallId])
 
   useLayoutEffect(() => {
     const slot = slotRef.current
@@ -368,11 +391,13 @@ export function ThreadPath() {
     if (segment.kind === 'project') {
       if (!segment.none) showProjectInSidebar(segment.id)
     }
-    else void selectThread(segment.id).catch(logFailure('Opening a thread'))
+    // The open thread, above its native subagent's page: back to its chat.
+    else if (segment.kind === 'thread' && segment.id === activeThreadId) closeNative()
+    else if (segment.kind === 'thread') void selectThread(segment.id).catch(logFailure('Opening a thread'))
   }
 
   const toggleMenu = (next: OpenMenu, anchor: HTMLElement) => {
-    const same = menu && next && menu.kind === next.kind && (menu.kind === 'hidden' || (next.kind === 'siblings' && menu.threadId === next.threadId))
+    const same = menu && next && menu.kind === next.kind && (menu.kind !== 'siblings' || (next.kind === 'siblings' && menu.threadId === next.threadId))
     menuAnchor.current = anchor
     setMenu(same ? null : next)
   }
@@ -387,6 +412,15 @@ export function ThreadPath() {
       label: thread.name,
       checked: thread.id === menu.threadId,
       onSelect: () => void selectThread(thread.id).catch(logFailure('Opening a thread'))
+    }))
+  } else if (menu?.kind === 'native' && nativeView) {
+    const parent = threads.find((thread) => thread.id === nativeView.threadId)
+    label = `Native subagents of ${parent?.name.trim() || 'this thread'}`
+    rows = nativeCards.map((card) => ({
+      key: card.toolCallId,
+      label: cardTitle(card),
+      checked: card.toolCallId === nativeView.toolCallId,
+      onSelect: () => showNative({ threadId: nativeView.threadId, toolCallId: card.toolCallId })
     }))
   } else if (menu?.kind === 'hidden') {
     const hiddenSegments = segments.slice(0, fit.hidden).filter((segment) => !(segment.kind === 'project' && segment.none))

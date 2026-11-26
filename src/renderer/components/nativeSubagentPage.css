@@ -13,6 +13,32 @@
   background: var(--bg-primary);
 }
 
+.native-subagent-page:focus {
+  outline: none;
+}
+
+/* With the title bar's path off: project / thread / subagent, above the header. */
+.native-subagent-breadcrumb {
+  flex: 0 0 auto;
+  width: min(100%, var(--an-max-width, 784px));
+  margin: 0 auto;
+  padding: 10px 24px 0 18px;
+}
+
+.native-subagent-breadcrumb > .subagent-breadcrumb-name {
+  flex: 0 1 auto;
+  max-width: 30%;
+  padding: 2px 6px;
+}
+
+.native-subagent-breadcrumb > .subagent-breadcrumb-parent {
+  padding: 2px 6px;
+}
+
+.native-subagent-breadcrumb > .subagent-breadcrumb-current {
+  padding: 2px 6px;
+}
+
 .native-subagent-header {
   display: flex;
   flex: 0 0 auto;
@@ -26,33 +52,6 @@
 .native-subagent-header > .subagent-avatar.is-chip {
   width: 32px;
   height: 32px;
-}
-
-.native-subagent-back {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  margin-left: -6px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.native-subagent-back:hover {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
-.native-subagent-back:focus-visible {
-  outline: none;
-  background-image: var(--ui-focus-layer);
 }
 
 .native-subagent-heading {

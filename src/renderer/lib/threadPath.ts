@@ -3,10 +3,14 @@ import { sortSidebarThreads } from '../../shared/threadSidebarSort'
 import type { Project, Thread } from '../../shared/types'
 import { openableThread } from './threadHistory'
 
-/** One step of the title bar's path: the open thread's project, the threads above it, then the thread itself. */
+/**
+ * One step of the title bar's path: the open thread's project, the threads above it, the thread itself, and,
+ * while one of its native subagents is open on its own page, that subagent.
+ */
 export type PathSegment =
   | { kind: 'project'; id: string; name: string; none?: boolean }
   | { kind: 'thread'; id: string; name: string; current: boolean }
+  | { kind: 'native'; id: string; name: string }
 
 const threadName = (thread: Pick<Thread, 'name' | 'lineage'>): string =>
   thread.name.trim() || (isSubagentThread(thread) ? 'Subagent' : 'New thread')
@@ -46,6 +50,18 @@ export const NO_PROJECT_SEGMENT: PathSegment = { kind: 'project', id: '', name: 
 export function withProjectLead(segments: PathSegment[]): PathSegment[] {
   if (segments.length === 0 || segments[0]!.kind === 'project') return segments
   return [NO_PROJECT_SEGMENT, ...segments]
+}
+
+/**
+ * The path with the open native subagent (its call id and name) after the thread: the thread becomes a step
+ * above it, and the subagent is where the window is. Unchanged without one.
+ */
+export function withNativeSubagent(segments: PathSegment[], native: { id: string; name: string } | null): PathSegment[] {
+  if (!native || segments.length === 0) return segments
+  return [
+    ...segments.map((segment) => (segment.kind === 'thread' && segment.current ? { ...segment, current: false } : segment)),
+    { kind: 'native', id: native.id, name: native.name }
+  ]
 }
 
 export interface SiblingMenu {

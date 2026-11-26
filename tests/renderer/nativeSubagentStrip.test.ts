@@ -9,12 +9,14 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BackgroundWorkRow, backgroundLines, stripCounts } from '../../src/renderer/components/BackgroundWorkRow'
 import { NativeSubagentPage } from '../../src/renderer/components/NativeSubagentPage'
+import { TitleBarNav } from '../../src/renderer/components/TitleBarNav'
+import { setThreadPathInTitleBar } from '../../src/renderer/lib/threadPathSetting'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useNativeSubagentViewStore } from '../../src/renderer/stores/nativeSubagentViewStore'
 import { backgroundHeadline, type ThreadBackgroundWork } from '../../src/shared/backgroundWork'
 import type { SubagentCardModel } from '../../src/renderer/chat/adapters/subagentCards'
 import type { AgentActivityItem } from '../../src/shared/agentActivity'
-import type { ChatMessage } from '../../src/shared/types'
+import type { ChatMessage, Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -94,7 +96,14 @@ describe('the native subagent page', () => {
       orchestrator: { abort: vi.fn(), getMessages: async () => [] },
       threads: { stopBackground: vi.fn() }
     }
-    useAppStore.setState({ activeThreadId: 't1', messages, turnStates: { t1: { phase: 'streaming', turnId: RUN } } as never })
+    useAppStore.setState({
+      activeThreadId: 't1',
+      messages,
+      turnStates: { t1: { phase: 'streaming', turnId: RUN } } as never,
+      sidebarMode: 'projects',
+      threads: [{ id: 't1', name: 'Fix the picker', projectId: 'p1', createdAt: at(0), updatedAt: at(0), order: 0, startedAt: at(0) } as Thread],
+      projects: [{ id: 'p1', name: 'acme-web', path: '/work/acme-web', createdAt: at(0) } as Project]
+    })
     host = document.createElement('div')
     document.body.appendChild(host)
     root = createRoot(host)
@@ -105,16 +114,21 @@ describe('the native subagent page', () => {
     host.remove()
     useAppStore.setState(useAppStore.getInitialState())
     useNativeSubagentViewStore.setState({ open: null })
+    setThreadPathInTitleBar(true)
   })
 
   const click = (element: Element | null | undefined) => act(() => { (element as HTMLElement).click() })
 
-  it('opens from the strip on its task and calls, streams new calls, and goes back to the chat', async () => {
+  const pathNames = () => [...host.querySelectorAll('nav[aria-label="Thread path"] .titlebar-path-name')].map((name) => name.textContent)
+
+  it('opens from the strip on its task and calls, streams new calls, and goes back to the chat from its path', async () => {
     await act(async () => root.render(createElement(Fragment, null,
+      createElement(TitleBarNav),
       createElement(BackgroundWorkRow, { threadId: 't1', subagents: [], work: providerWork(true), onStopAll: () => undefined }),
       createElement(NativeSubagentPage, { threadId: 't1' }))))
     expect(host.textContent).toContain('Waiting on 1 subagent')
-    click(host.querySelector('[aria-expanded="false"]'))
+    expect(pathNames()).toEqual(['acme-web', 'Fix the picker'])
+    click(host.querySelector('.background-work-summary[aria-expanded="false"]'))
     click([...host.querySelectorAll('button')].find((button) => button.textContent?.includes('picker code')))
 
     const page = () => host.querySelector('section[aria-label="picker code, native subagent"]')
@@ -125,13 +139,38 @@ describe('the native subagent page', () => {
     expect(page()!.textContent).toContain('rg c2')
     expect(page()!.textContent).not.toContain('rg other')
     expect(page()!.querySelector('[role="note"]')!.textContent).toContain('only its agent can direct it')
+    // The title bar's path goes one step down to the subagent; the page has no back button or breadcrumb of its own.
+    expect(pathNames()).toEqual(['acme-web', 'Fix the picker', 'picker code'])
+    expect(host.querySelector('[data-segment="current"] [aria-current="page"]')!.textContent).toBe('picker code')
+    expect(page()!.querySelector('.native-subagent-breadcrumb')).toBeNull()
+    expect(page()!.querySelector('button[aria-label="Back to chat"]')).toBeNull()
 
     // A call the subagent makes next shows on the open page.
     act(() => useAppStore.setState({ messages: [...messages, call('c3', 5, 'a1')] }))
     expect(page()!.textContent).toContain('rg c3')
 
-    click(host.querySelector('button[aria-label="Back to chat"]'))
+    // Its thread, one step up the path, is the way back to the chat.
+    click([...host.querySelectorAll('nav[aria-label="Thread path"] button')].find((button) => button.textContent === 'Fix the picker'))
     expect(page()).toBeNull()
+    expect(pathNames()).toEqual(['acme-web', 'Fix the picker'])
+    expect(useAppStore.getState().activeThreadId).toBe('t1')
+  })
+
+  it('shows project / thread / subagent on the page when the title bar path is off, and Escape goes back', async () => {
+    setThreadPathInTitleBar(false)
+    useNativeSubagentViewStore.setState({ open: { threadId: 't1', toolCallId: 'a1' } })
+    await act(async () => root.render(createElement(NativeSubagentPage, { threadId: 't1' })))
+    const crumbs = host.querySelector('nav[aria-label="Subagent location"]')!
+    expect(crumbs.textContent).toBe('acme-web/Fix the picker/picker code')
+    expect(crumbs.querySelector('[aria-current="page"]')!.textContent).toBe('picker code')
+    click(crumbs.querySelector('button[title="Open Fix the picker"]'))
+    expect(host.querySelector('.native-subagent-page')).toBeNull()
+
+    act(() => useNativeSubagentViewStore.setState({ open: { threadId: 't1', toolCallId: 'a1' } }))
+    const page = host.querySelector<HTMLElement>('.native-subagent-page')!
+    expect(document.activeElement).toBe(page)
+    act(() => { page.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(host.querySelector('.native-subagent-page')).toBeNull()
   })
 
   it('closes when another thread is opened', async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { UIMessage } from 'ai'
-import { ArrowLeft, Lock } from '../lib/icons'
+import { Lock } from '../lib/icons'
 import type { ChatMessage } from '../../shared/types'
 import type { SubagentCardModel } from '../chat/adapters/subagentCards'
 import { chatStatusFromTurn, mousseToUIMessages } from '../chat/adapters/mousseToUI'
@@ -10,11 +10,14 @@ import { getToolStatus } from '../chat/components/agent-elements/utils/format-to
 import { Markdown } from '../chat/components/agent-elements/markdown'
 import { cardElapsedLabel, cardStatusLabel, cardTitle, isCardRunning } from '../chat/components/agent-elements/tools/subagent-card-logic'
 import { useNativeSubagents } from '../hooks/useNativeSubagents'
+import { threadPath, withProjectLead } from '../lib/threadPath'
+import { useThreadPathInTitleBar } from '../lib/threadPathSetting'
 import { useAppStore } from '../stores/appStore'
 import { useNativeSubagentViewStore } from '../stores/nativeSubagentViewStore'
 import { nativeSubagentLabel } from './sideCard/lineageLogic'
 import { SubagentAvatar, useThreadProviderId } from './SubagentAvatar'
 import { subagentBadgeTone, subagentIconId } from './subagentStatus'
+import './subagentParentBar.css'
 import './nativeSubagentPage.css'
 
 type ToolPart = { type: string; toolCallId?: string; state?: string; [key: string]: unknown }
@@ -73,6 +76,11 @@ interface NativeSubagentPageViewProps {
   chatStatus?: string
   inheritedProvider?: string | null
   now: number
+  /**
+   * Where the subagent sits, for the line above its header: its thread's project and the thread. Null while the
+   * title bar's path shows it instead.
+   */
+  path?: { project: string; thread: string } | null
   onBack: () => void
 }
 
@@ -81,8 +89,8 @@ interface NativeSubagentPageViewProps {
  * they stream in, and its report once it ends. It has no thread to write to, so where the composer was a pill says
  * only its agent directs it.
  */
-export function NativeSubagentPageView({ card, task, calls, chatStatus, inheritedProvider, now, onBack }: NativeSubagentPageViewProps) {
-  const backRef = useRef<HTMLButtonElement>(null)
+export function NativeSubagentPageView({ card, task, calls, chatStatus, inheritedProvider, now, path = null, onBack }: NativeSubagentPageViewProps) {
+  const pageRef = useRef<HTMLElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
   const title = card ? cardTitle(card) : 'Subagent'
@@ -93,7 +101,8 @@ export function NativeSubagentPageView({ card, task, calls, chatStatus, inherite
   const elapsed = card ? cardElapsedLabel(card, now) : null
   const report = card?.error ?? card?.native?.result ?? null
 
-  useEffect(() => { backRef.current?.focus() }, [])
+  // Focus on the page, so Escape goes back to the chat.
+  useEffect(() => { pageRef.current?.focus() }, [])
   // New calls keep the page at its end while the person reads there; scrolled up, it stays put.
   useLayoutEffect(() => {
     const scroller = scrollRef.current
@@ -102,6 +111,8 @@ export function NativeSubagentPageView({ card, task, calls, chatStatus, inherite
 
   return (
     <section
+      ref={pageRef}
+      tabIndex={-1}
       className="native-subagent-page"
       aria-label={`${title}, native subagent`}
       onKeyDown={(event) => {
@@ -111,10 +122,18 @@ export function NativeSubagentPageView({ card, task, calls, chatStatus, inherite
         }
       }}
     >
+      {path && (
+        <nav className="subagent-breadcrumb native-subagent-breadcrumb" aria-label="Subagent location">
+          <span className="subagent-breadcrumb-name">{path.project}</span>
+          <span className="subagent-breadcrumb-separator" aria-hidden="true">/</span>
+          <button type="button" className="subagent-breadcrumb-parent" title={`Open ${path.thread}`} onClick={onBack}>
+            <span className="subagent-breadcrumb-name">{path.thread}</span>
+          </button>
+          <span className="subagent-breadcrumb-separator" aria-hidden="true">/</span>
+          <span className="subagent-breadcrumb-current" aria-current="page" title={title}>{title}</span>
+        </nav>
+      )}
       <header className="native-subagent-header">
-        <button ref={backRef} type="button" className="native-subagent-back" aria-label="Back to chat" title="Back to chat" onClick={onBack}>
-          <ArrowLeft size={16} aria-hidden="true" />
-        </button>
         <SubagentAvatar providerId={subagentIconId(card?.provider, inheritedProvider)} tone={tone} size={15} chip />
         <div className="native-subagent-heading">
           <h2 className="native-subagent-title">{title}</h2>
@@ -196,6 +215,15 @@ export function NativeSubagentPage({ threadId }: { threadId: string | null }) {
   const turnState = useAppStore((s) => (shown ? s.turnStates[shown.threadId] : undefined))
   const cards = useNativeSubagents(shown?.threadId)
   const inheritedProvider = useThreadProviderId(shown?.threadId)
+  const pathInTitleBar = useThreadPathInTitleBar()
+  const threads = useAppStore((s) => s.threads)
+  const projects = useAppStore((s) => s.projects)
+  const path = useMemo(() => {
+    if (pathInTitleBar || !shown) return null
+    const segments = withProjectLead(threadPath(shown.threadId, threads, projects))
+    const thread = segments.at(-1)
+    return thread ? { project: segments[0]!.name, thread: thread.name } : null
+  }, [pathInTitleBar, shown, threads, projects])
   const rootId = shown?.toolCallId ?? ''
   const own = useMemo(() => (rootId ? nativeSubagentMessages(messages, rootId) : NO_MESSAGES), [messages, rootId])
   const calls = useMemo(() => (own.length ? nativeSubagentCalls(mousseToUIMessages(own), rootId) : []), [own, rootId])
@@ -217,6 +245,7 @@ export function NativeSubagentPage({ threadId }: { threadId: string | null }) {
       chatStatus={chatStatusFromTurn(turnState)}
       inheritedProvider={inheritedProvider}
       now={now}
+      path={path}
       onBack={close}
     />
   )
