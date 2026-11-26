@@ -10,12 +10,13 @@ import { readWindowCounters, registerWindowCache } from '../../src/renderer/lib/
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { PROFILER_TOOL_LABELS, PROFILER_TOOL_NAMES } from '../../src/shared/diagnostics/profiler'
+import { normalizeExperimentalSettings } from '../../src/shared/settings'
 import { SETTINGS_SEARCH_INDEX } from '../../src/renderer/lib/settingsSearch'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 /** The rows Labs always shows, in order. */
-const LABS_TOP = ['Mousse ID (legacy)', 'Performance', 'Sidebar animations', 'New chat animations', 'Shimmer animations', 'Profiler']
+const LABS_TOP = ['Mousse ID (legacy)', 'Performance', 'Sidebar animations', 'New chat animations', 'Shimmer animations', 'Hide permissions while running', 'Profiler']
 
 describe('Settings → Labs', () => {
   let root: Root
@@ -146,6 +147,23 @@ describe('Settings → Labs', () => {
     expect(store.get().experimental.plusLegacy).toBe(true)
   })
 
+  it('keeps Hide permissions while running on by default and persists turning it off and back on', () => {
+    expect(normalizeExperimentalSettings({}).hidePermissionsWhileRunning).toBe(true)
+    expect(normalizeExperimentalSettings({ hidePermissionsWhileRunning: false }).hidePermissionsWhileRunning).toBe(false)
+    show()
+    const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().experimental.hidePermissionsWhileRunning
+    expect(toggle('Hide permissions while running')!.getAttribute('aria-checked')).toBe('true')
+    expect(saved()).toBe(true)
+
+    act(() => toggle('Hide permissions while running')!.click())
+    expect(toggle('Hide permissions while running')!.getAttribute('aria-checked')).toBe('false')
+    expect(saved()).toBe(false)
+
+    act(() => toggle('Hide permissions while running')!.click())
+    expect(toggle('Hide permissions while running')!.getAttribute('aria-checked')).toBe('true')
+    expect(saved()).toBe(true)
+  })
+
   it('asks before writing a heap snapshot', async () => {
     store.set({ experimental: { ...store.get().experimental, profiler: { ...store.get().experimental.profiler, enabled: true } } })
     show()
@@ -162,9 +180,9 @@ describe('Settings → Labs', () => {
 
   it('the settings search finds Mousse ID (legacy) and the profiler on Labs, and the rows under the profiler once it is on', () => {
     const labs = SETTINGS_SEARCH_INDEX.filter((entry) => entry.section === 'labs')
-    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-plus-legacy', 'labs-hybrid-bot-faces', 'labs-sidebar-animations', 'labs-new-chat-animations', 'labs-shimmer-animations', 'labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents'])
-    for (const entry of labs.slice(0, 6)) expect(entry.needs).toBeUndefined()
-    for (const entry of labs.slice(6)) expect(entry.needs?.anchor).toBe('labs-profiler')
+    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-plus-legacy', 'labs-hybrid-bot-faces', 'labs-sidebar-animations', 'labs-new-chat-animations', 'labs-shimmer-animations', 'labs-hide-permissions-while-running', 'labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents'])
+    for (const entry of labs.slice(0, 7)) expect(entry.needs).toBeUndefined()
+    for (const entry of labs.slice(7)) expect(entry.needs?.anchor).toBe('labs-profiler')
     expect(SETTINGS_SEARCH_INDEX.some((entry) => entry.anchor.startsWith('general-memory'))).toBe(false)
   })
 })

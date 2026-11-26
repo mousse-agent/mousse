@@ -148,6 +148,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Sidebar animations', section: 'labs', anchor: 'labs-sidebar-animations', keywords: ['performance', 'gpu', 'motion', 'threads'] },
   { title: 'New chat animations', section: 'labs', anchor: 'labs-new-chat-animations', keywords: ['performance', 'gpu', 'motion', 'logo', 'wave'] },
   { title: 'Shimmer animations', section: 'labs', anchor: 'labs-shimmer-animations', keywords: ['performance', 'gpu', 'motion', 'loading', 'activity'] },
+  { title: 'Hide permissions while running', section: 'labs', anchor: 'labs-hide-permissions-while-running', keywords: ['composer', 'permissions', 'running', 'hide', 'toggle', 'experimental'] },
   { title: 'Profiler', section: 'labs', anchor: 'labs-profiler', keywords: ['memory', 'ram', 'cpu', 'diagnostics', 'leak', 'performance', 'experimental'] },
   { title: 'Memory', section: 'labs', anchor: 'labs-profiler-memory', keywords: ['ram', 'diagnostics', 'report', 'leak', 'processes'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Memory notices', section: 'labs', anchor: 'labs-memory-notices', keywords: ['ram', 'diagnostics', 'notification'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },

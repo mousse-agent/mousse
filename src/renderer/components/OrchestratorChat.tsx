@@ -2126,6 +2126,7 @@ export function OrchestratorChat() {
   // A thread whose transcript is still loading is not empty: it shows the plain chat (no headline, logo or glow) until it lands.
   // A subagent thread is never the new-chat empty screen either.
   const newChatAnimations = useAppStore((s) => s.newChatAnimations)
+  const hidePermissionsWhileRunning = useAppStore((s) => s.hidePermissionsWhileRunning)
   const emptyThread = !isSubagent && shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Archive after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
@@ -2324,7 +2325,7 @@ export function OrchestratorChat() {
               </>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
-              permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
+              permission={hidePermissionsWhileRunning && firstSendShown ? undefined : { mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
               sendModeThreadId={activeThreadId ?? undefined}
 
             />
