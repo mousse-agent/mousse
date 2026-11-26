@@ -38,6 +38,7 @@ import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '.
 import { BrowserReferenceStore, type ObservedNode, type ReferenceIdentity } from '../observation/ReferenceStore'
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
+import { framesInside, placeAttachedFrame, type FrameBounds, type FrameTreeEntry, type FrameTreeNode } from './frameTree'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
 import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readOpenedPageSigns, readPageSigns, readSelectedText, type DispatchedHumanInput, type NavigationOptions } from '../action/dispatch'
@@ -83,11 +84,14 @@ interface AttachedFrameState {
   url: string
   /** The session of the page (a tab or a page a site opened) this frame is in: it belongs to that page alone. */
   pageSessionId: string
+  /**
+   * The session whose document holds this frame's `<iframe>`, as Chromium attached it: the page's, or
+   * that of a frame from another site, whose `<iframe>` may sit in a same-site frame of its own (one
+   * with no session, so `parentFrameId` alone names no session to ask).
+   */
+  ownerSessionId: string
 }
 
-interface FrameTreeEntry { id?: string; parentId?: string; url?: string }
-interface FrameTreeNode { frame?: FrameTreeEntry; childFrames?: unknown }
-interface FrameBounds { x: number; y: number; width: number; height: number }
 /** The element an observation is narrowed to (`observe({ ref })`): an `<iframe>` brings the frame it shows. */
 interface ObserveScope { node: ObservedNode; sessionId: string; contentFrameId?: string }
 
@@ -2391,7 +2395,8 @@ export class ManagedSession {
         parentFrameId: info.parentFrameId,
         targetId: info.targetId,
         url: sanitizeUrl(info.url ?? ''),
-        pageSessionId: target.pageSessionId
+        pageSessionId: target.pageSessionId,
+        ownerSessionId: parentSessionId ?? target.pageSessionId
       })
       const work = this.enableFrame(sessionId)
       this.frameEnables.set(sessionId, work)
@@ -2559,73 +2564,74 @@ export class ManagedSession {
 
   /**
    * Where an attached frame from another site sits in its tab's viewport (CSS pixels), or null when
-   * it cannot be placed or is not laid out (a 0×0 or hidden `<iframe>`). Its `<iframe>` is found by
-   * the frame id it was attached with, then by the id its own frame tree gives; a tab's frame tree
-   * lists only frames of its own process, so it is a last resort, matched by URL then by origin
-   * among frames that are laid out, so a hidden helper frame from the same site is never taken for it.
+   * it cannot be placed or is not laid out (a 0×0 or hidden `<iframe>`). Its `<iframe>` is asked for
+   * in the session that attached it (`ownerSessionId`), placed inside where that session's own frame
+   * sits (`placeAttachedFrame`).
    */
   private async frameViewportBounds(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<FrameBounds | null> {
     try {
       if (frame.pageSessionId !== tab.cdpSessionId) return null
-      if (visited.has(frame.sessionId)) return null
-      visited.add(frame.sessionId)
-      const cdp = this.requireChrome().cdp
-      const siblings = this.framesOf(tab)
-      const place = async (entry: FrameTreeEntry): Promise<FrameBounds | null> => {
-        if (!entry.id) return null
-        const parent = entry.parentId ? siblings.find((other) => other !== frame && other.frameId === entry.parentId) : undefined
-        const parentBounds = parent ? await this.frameViewportBounds(tab, parent, new Set(visited)) : { x: 0, y: 0, width: 0, height: 0 }
-        if (!parentBounds) return null
-        const box = await this.frameOwnerBounds(parent?.sessionId ?? tab.cdpSessionId, entry.id)
-        return box ? { x: parentBounds.x + box.x, y: parentBounds.y + box.y, width: box.width, height: box.height } : null
+      const attached = (sessionId: string) => {
+        const owner = this.frames.get(sessionId)
+        return owner?.pageSessionId === tab.cdpSessionId ? owner : undefined
       }
-      // The ids it was attached with are the frame's own: its `<iframe>` is asked for directly.
-      const direct = await place({ id: frame.frameId, parentId: frame.parentFrameId })
-      if (direct) return direct
-      const own = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: frame.sessionId }).catch(() => undefined)
-      const root = own?.frameTree?.frame
-      const rootParentId = root?.parentId ?? frame.parentFrameId
-      if (root?.id && (root.id !== frame.frameId || rootParentId !== frame.parentFrameId)) {
-        const placed = await place({ id: root.id, parentId: rootParentId })
-        if (placed) {
-          frame.frameId = root.id
-          frame.parentFrameId = rootParentId
-          frame.url = sanitizeUrl(root.url ?? frame.url) || frame.url
-          return placed
-        }
-      }
-      // Last resort: the tab's own frame tree, by URL then by origin, among frames not claimed by another.
-      const url = frameUrlKey(root?.url ?? frame.url)
-      if (!url) return null
-      const candidates: FrameTreeEntry[] = []
-      const tree = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
-      const visit = (node: FrameTreeNode | undefined) => {
-        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) {
-          if (child.frame) candidates.push(child.frame)
-          visit(child)
-        }
-      }
-      visit(tree.frameTree)
-      const open = candidates.filter((entry) => entry.id && entry.id !== frame.frameId && entry.id !== root?.id && !siblings.some((other) => other !== frame && other.frameId === entry.id))
-      const blank = url === 'about:blank'
-      const byUrl = open.filter((entry) => {
-        const entryUrl = frameUrlKey(entry.url ?? '')
-        return entryUrl === url && (blank || entryUrl !== 'about:blank')
-      })
-      const origin = originOf(url)
-      const byOrigin = origin ? open.filter((entry) => !byUrl.includes(entry) && originOf(entry.url ?? '') === origin) : []
-      for (const entry of [...byUrl, ...byOrigin]) {
-        const placed = await place(entry)
-        if (!placed || !entry.id) continue
-        frame.frameId = entry.id
-        frame.parentFrameId = entry.parentId
-        frame.url = sanitizeUrl(root?.url ?? entry.url ?? frame.url) || frame.url
-        return placed
-      }
-      return null
+      return await placeAttachedFrame(frame, tab.cdpSessionId, attached, (placed, ownerSessionId) => this.frameBoxInOwner(tab, placed, ownerSessionId), visited)
     } catch {
       return null
     }
+  }
+
+  /**
+   * The box of an attached frame's `<iframe>` in the viewport of the session that attached it: by the
+   * frame id it was attached with, then by the id its own frame tree gives. For a frame the tab's own
+   * document holds, the tab's frame tree is a last resort, matched by URL then by origin among frames
+   * that are laid out, so a hidden helper frame from the same site is never taken for it; that only
+   * places it, and never gives it another frame's id.
+   */
+  private async frameBoxInOwner(tab: TabState, frame: AttachedFrameState, ownerSessionId: string): Promise<FrameBounds | null> {
+    const cdp = this.requireChrome().cdp
+    const place = async (id: string | undefined): Promise<FrameBounds | null> => id ? this.frameOwnerBounds(ownerSessionId, id) : null
+    // The id it was attached with is the frame's own: its `<iframe>` is asked for directly.
+    const direct = await place(frame.frameId)
+    if (direct) return direct
+    const own = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: frame.sessionId }).catch(() => undefined)
+    const root = own?.frameTree?.frame
+    if (root?.id && root.id !== frame.frameId) {
+      const placed = await place(root.id)
+      if (placed) {
+        frame.frameId = root.id
+        frame.parentFrameId = root.parentId ?? frame.parentFrameId
+        frame.url = sanitizeUrl(root.url ?? frame.url) || frame.url
+        return placed
+      }
+    }
+    // Last resort, for a frame the tab's own document holds: the tab's frame tree, by URL then by origin, among frames not claimed by another.
+    if (ownerSessionId !== tab.cdpSessionId) return null
+    const url = frameUrlKey(root?.url ?? frame.url)
+    if (!url) return null
+    const siblings = this.framesOf(tab)
+    const candidates: FrameTreeEntry[] = []
+    const tree = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
+    const visit = (node: FrameTreeNode | undefined) => {
+      for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) {
+        if (child.frame) candidates.push(child.frame)
+        visit(child)
+      }
+    }
+    visit(tree.frameTree)
+    const open = candidates.filter((entry) => entry.id && entry.id !== frame.frameId && entry.id !== root?.id && !siblings.some((other) => other !== frame && other.frameId === entry.id))
+    const blank = url === 'about:blank'
+    const byUrl = open.filter((entry) => {
+      const entryUrl = frameUrlKey(entry.url ?? '')
+      return entryUrl === url && (blank || entryUrl !== 'about:blank')
+    })
+    const origin = originOf(url)
+    const byOrigin = origin ? open.filter((entry) => !byUrl.includes(entry) && originOf(entry.url ?? '') === origin) : []
+    for (const entry of [...byUrl, ...byOrigin]) {
+      const placed = await place(entry.id)
+      if (placed) return placed
+    }
+    return null
   }
 
   /** The box of the `<iframe>` holding a frame, in the viewport of the session that holds that element; null when it has no area. */
@@ -2681,30 +2687,12 @@ export class ManagedSession {
     return { node: stored, sessionId, ...(contentFrameId ? { contentFrameId } : {}) }
   }
 
-  /** A frame of a tab and every frame inside it, by the tab's frame tree and the frames attached from other sites. */
+  /** A frame of a tab and every frame inside it (`framesInside`), from the frame trees of the tab and of every frame from another site attached in it. */
   private async framesWithin(tab: TabState, frameId: string): Promise<Set<string>> {
-    const parents = new Map<string, string | undefined>()
-    try {
-      const tree = await this.requireChrome().cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
-      const visit = (node: FrameTreeNode | undefined) => {
-        if (node?.frame?.id) parents.set(node.frame.id, node.frame.parentId)
-        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) visit(child)
-      }
-      visit(tree.frameTree)
-    } catch { /* the attached frames still say */ }
-    for (const frame of this.framesOf(tab)) if (!parents.has(frame.frameId)) parents.set(frame.frameId, frame.parentFrameId)
-    const within = new Set<string>([frameId])
-    for (const id of parents.keys()) {
-      const seen = new Set<string>()
-      for (let current: string | undefined = id; current && !seen.has(current); current = parents.get(current)) {
-        if (current === frameId) {
-          within.add(id)
-          break
-        }
-        seen.add(current)
-      }
-    }
-    return within
+    const attached = this.framesOf(tab)
+    const trees = await Promise.all([tab.cdpSessionId, ...attached.map((frame) => frame.sessionId)].map(async (sessionId) =>
+      (await this.requireChrome().cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId }).catch(() => undefined))?.frameTree))
+    return framesInside(frameId, trees, attached)
   }
 
   /** The box of a scope element in its tab's viewport, or null when it is not laid out. */
