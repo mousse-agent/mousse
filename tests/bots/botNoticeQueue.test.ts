@@ -264,6 +264,33 @@ describe('the related-jobs line', () => {
     expect(prompt(noticeOf(followUp).id)).toContain('Nothing else for that request is still going.')
   })
 
+  it('a job opened from a turn that took notices of two requests belongs to neither', async () => {
+    const a = await handOff([{ threadId: 't1', title: 'Page A1' }, { threadId: 't2', title: 'Page A2' }], 'm1')
+    const b = await handOff([{ threadId: 't3', title: 'Page B1' }, { threadId: 't4', title: 'Page B2' }], 'm2')
+    // A1 and B1 end within the settle: one notice turn takes both requests in.
+    await threadEnds('t1', 'Fixed A1.')
+    f.clock.now += 1_000
+    await threadEnds('t3', 'Fixed B1.')
+    await fireSettle()
+    const [leader] = running()
+    expect(prompt(leader!.id)).toContain('Fixed B1.')
+    // The bot opens a job from that turn (for B, say): nothing tells which request it carries on.
+    const turn = await start(f, leader!.id)
+    threads.set('t5', { status: 'running', title: 'Page B3' })
+    f.bots.openJob(botId, leader!.id, { threadId: 't5', title: 'Page B3', sent: 'Now page B3.' })
+    await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
+
+    f.host.noticeSettleMs = 0
+    const related = (id: string) => prompt(id).split('\n').find((line) => /^(Still going|Nothing else)/.test(line))
+    await threadEnds('t2', 'Fixed A2.')
+    const aNotice = noticeOf(a.jobIds[1]!).id
+    expect(related(aNotice)).toBe('Nothing else for that request is still going.')
+    const next = await start(f, aNotice)
+    await finish(f, next.payload, 'completed', { text: '[SILENT]' })
+    await threadEnds('t4', 'Fixed B2.')
+    expect(related(noticeOf(b.jobIds[1]!).id)).toBe('Nothing else for that request is still going.')
+  })
+
   it('names the bot\'s own work for the same request while it has not ended, never work for another request', async () => {
     f.host.noticeSettleMs = 0
     const related = (id: string) => prompt(id).split('\n').find((line) => /^(Still going|Nothing else)/.test(line))

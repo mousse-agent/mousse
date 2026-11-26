@@ -2245,10 +2245,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row) {
       // An owner's turn that took notices in as data is still a request of its own.
       const merged = unattendedChatTurn(row) ? this.store.dispatch(row.id, 1)?.prompt.merged ?? [] : []
-      const notice = [row.idempotencyKey, ...merged.map((id) => this.store.activation(id)?.idempotencyKey ?? '')].find((key) => key.startsWith('job:'))
-      const job = notice ? this.store.job(notice.slice(4).split(':')[0]!) : undefined
-      if (job?.activationId) root = this.jobRoot(job.activationId, memo, depth + 1)
-      else if (!job && row.trigger.kind === 'work' && row.trigger.from) root = this.jobRoot(row.trigger.from, memo, depth + 1)
+      const jobs = [row.idempotencyKey, ...merged.map((id) => this.store.activation(id)?.idempotencyKey ?? '')]
+        .filter((key) => key.startsWith('job:')).map((key) => this.store.job(key.slice(4).split(':')[0]!))
+      // A notice turn carries one request on only when every job notice it took in is of that request: one that took in
+      // notices of several requests says nothing of which one what it starts is for, so that is a request of its own.
+      const roots = new Set(jobs.flatMap((job) => job?.activationId ? [this.jobRoot(job.activationId, memo, depth + 1)] : []))
+      if (roots.size === 1) root = [...roots][0]!
+      else if (!jobs.some(Boolean) && row.trigger.kind === 'work' && row.trigger.from) root = this.jobRoot(row.trigger.from, memo, depth + 1)
     }
     memo.set(activationId, root)
     return root
