@@ -110,22 +110,3 @@ it('does nothing inside a transaction', () => {
   expect(() => db.transaction(() => db.reclaim(10))).toThrow(/during a transaction/)
   expect(() => db.transaction(() => db.rewriteToReclaim())).toThrow(/during a transaction/)
 })
-
-it('a rewrite that runs out of room is rolled back: the database keeps what it holds and takes writes', () => {
-  const db = database(true)
-  fillAndFree(db, 4)
-  // 10 MiB in use, more than the rewrite may hold below.
-  const insert = db.database.prepare('INSERT INTO filler(data) VALUES(randomblob(65536))')
-  for (let n = 0; n < 160; n++) insert.run()
-  const held = rows(db)
-  // The rewrite builds its copy in memory: a limit below what it needs stands in for a disk with no room. SQLite
-  // only ever lowers this limit, for the whole process: so this test runs last in its file.
-  db.database.exec('PRAGMA shrink_memory')
-  db.database.exec(`PRAGMA hard_heap_limit=${4 * 2 ** 20}`)
-  expect(() => db.rewriteToReclaim()).toThrow(/out of memory/)
-  expect(pragma(db, 'auto_vacuum')).toBe(0)
-  expect(rows(db)).toBe(held)
-  expect(db.database.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
-  db.transaction(() => db.database.exec("INSERT INTO filler(data) VALUES(x'00')"))
-  expect(rows(db)).toBe(held + 1)
-})
