@@ -117,6 +117,18 @@ describe('the Needs me group', () => {
   })
 })
 
+describe('a thread an agent keeps out of the sidebar', () => {
+  const launched = thread('l', 'Background check', { projectId: 'p1', updatedAt: at(6), hidden: true, createdByThreadId: 'a' })
+
+  it('is not in the thread list, but its question is in Needs me and the badge: it is the person\'s to answer', () => {
+    setStore({ projects, threads: [...threads, launched], threadActivity: {}, threadsSidebarView: 'threads' })
+    expect(titlesIn(sidebar())).not.toContain('Background check')
+    setStore({ projects, threads: [...threads, launched], threadActivity: { l: 'awaiting_input', a: 'awaiting_input' }, threadsSidebarView: 'threads', threadsSidebarOpen: false })
+    expect(titlesIn(needsMeSection(sidebar()))).toEqual(['Background check', 'Fix tests'])
+    expect(titleBar()).toContain('titlebar-attention-badge" aria-hidden="true">2<')
+  })
+})
+
 describe('a thread a bot keeps out of the sidebar', () => {
   const hidden = thread('h', 'Quick check', { projectId: 'p1', updatedAt: at(6), hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' } })
 

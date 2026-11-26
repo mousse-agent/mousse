@@ -2,7 +2,7 @@ import { ROUTED_AGENT_KEY } from '../../shared/bridge/routed'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
 import type { RemoteLaunchRecord, RemoteLaunchRecords } from '../run/delegation/remoteLaunches'
-import { REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId } from './remoteThreadStart'
+import { hiddenOnTheWire, REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId } from './remoteThreadStart'
 
 /**
  * Threads agents here launch on another of the user's computers (`thread_create` with `computer`, issue #1160). Each
@@ -165,11 +165,14 @@ export class RemoteThreadLaunches {
       const port = this.deps.port()
       if (!port) throw new DomainRpcError('bridge_off', 'Connecting to your other computers is turned off on this computer.')
       const mark = { [ROUTED_AGENT_KEY]: record.mark }
+      const hidden = await hiddenOnTheWire(port, record.node, record.hidden, remoteThreadId !== null,
+        () => this.deps.records.update(key, { hidden: null }), AbortSignal.timeout(CALL_TIMEOUT_MS))
       const started = await runRemoteThreadStart({
         key,
         name: record.title,
         projectId: record.remoteProjectId,
         worktree: record.worktree,
+        ...(hidden !== null ? { hidden } : {}),
         instanceId: record.instanceId,
         model: record.model,
         permissionMode: record.permissionMode,

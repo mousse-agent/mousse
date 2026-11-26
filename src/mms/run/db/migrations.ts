@@ -767,5 +767,16 @@ CREATE TABLE run_time_limits(
 -- the owner's own messages. That rule was removed: nothing writes or reads the column now; it is kept, unused.
 ALTER TABLE runs ADD COLUMN owner_proof TEXT;
 `
+  },
+  {
+    version: 26,
+    sql: `
+-- Whether the thread an agent launches on another computer stays out of that computer's sidebar (Thread.hidden), sent
+-- with every attempt of the create: 1 for an agent's thread unless it started it as independent (thread_create with
+-- hidden: false), 1 for a remote subagent's. NULL for a launch from before this column, and for a bot's: its attempts
+-- send no hidden, as they always did, so a retry repeats the very same create and that computer shows the thread.
+ALTER TABLE remote_launches ADD COLUMN hidden INTEGER CHECK(hidden IS NULL OR hidden IN (0,1));
+ALTER TABLE remote_subagents ADD COLUMN hidden INTEGER CHECK(hidden IS NULL OR hidden IN (0,1));
+`
   }
 ]

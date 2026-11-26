@@ -66,7 +66,7 @@ export function parseRoutedAgentMark(value: unknown): RoutedAgentMark & { mode: 
 
 /** The keys a marked call may carry besides the target and the mark; anything else a person's call takes is refused. */
 const MARKED_KEYS: Readonly<Record<string, readonly string[]>> = {
-  'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId'],
+  'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', 'hidden'],
   'threads.setModel': ['threadId', 'model', 'ifRevision'],
   'threads.setPermissionMode': ['threadId', 'mode', 'ifRevision'],
   'orchestrator.send': ['threadId', 'content', 'mode', 'clientRequestId', 'requestId', 'refuseWhilePaused', 'forceQueue', ROUTED_DEADLINE_KEY],

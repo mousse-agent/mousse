@@ -24,6 +24,9 @@ import { RemoteThreadLaunches } from '../../../../src/mms/orchestrator/RemoteThr
 import type { AppToolHost } from '../../../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn } from '../../../run/appToolsFixture'
 import { cleanups, cleanupAll, linked } from './routerFixture'
+import { launchedThreadsOf } from '../../../../src/renderer/components/sideCard/lineageLogic'
+import { threadInFilter } from '../../../../src/renderer/lib/threadFilter'
+import type { Thread } from '../../../../src/shared/types'
 
 type Loose = Record<string, any>
 let t: Awaited<ReturnType<typeof linked>>
@@ -125,6 +128,8 @@ describe('thread_create on another computer (issue #1160)', () => {
     // Auto narrowed to the limit that computer set for this one (Auto-accept edits).
     expect(far).toMatchObject({ name: 'Run the Linux tests', projectId: ownerProject, permissionMode: 'accept_edits', startedFrom: { node: t.callerNode, agent: { thread: thread.id, mode: 'accept_edits' } } })
     expect(far!.createdByThreadId).toBeUndefined()
+    // Out of that computer's sidebar: an agent started it, and not as an independent thread.
+    expect(far!.hidden).toBe(true)
     // The first message runs there as the agent's: source mcp, the sender stored, in the narrowed mode.
     const run = t.owner.runEngine.getRun(out.body.runId)!
     expect(run).toMatchObject({ threadId: far!.id, source: 'mcp', outcome: { sentByAgent: true } })
@@ -138,6 +143,19 @@ describe('thread_create on another computer (issue #1160)', () => {
       expect.objectContaining({ node: t.node, remoteThreadId: far!.id, state: 'launched', firstMessageState: 'sent', remoteMode: 'accept_edits' })
     ])
     expect(noteOf(thread.id)).toEqual([expect.objectContaining({ launchedThread: expect.objectContaining({ threadId: qualifyId(t.node, far!.id) }) })])
+    // Here too it reaches the window's list, marked hidden: the launcher's side panel (Started threads), All and search
+    // find it, and My threads in the sidebar leaves it out.
+    const lists = t.caller.bridge.lists
+    await lists.reconcile()
+    await vi.waitFor(() => expect(lists.threads().find((row) => row.id === qualifyId(t.node, far!.id))).toMatchObject({ hidden: true }), { timeout: 20_000 })
+    const rows = (await t.dispatch('threads.list', {})).threads as Thread[]
+    expect(launchedThreadsOf(rows, thread.id).map((row) => row.id)).toEqual([qualifyId(t.node, far!.id)])
+    const row = rows.find((entry) => entry.id === qualifyId(t.node, far!.id))!
+    const filter = { query: '', projectId: null, botId: null, computerIds: [], archived: false }
+    const context = { groupOf: (id: string) => id, projectName: () => undefined, botName: () => undefined }
+    expect(threadInFilter(row, { ...filter, show: 'mine' }, context)).toBe(false)
+    expect(threadInFilter(row, { ...filter, show: 'all' }, context)).toBe(true)
+    expect(threadInFilter(row, { ...filter, show: 'all', query: 'Linux tests' }, context)).toBe(true)
 
     // A retry with the same request id returns the same thread and sends nothing again.
     const again = await create({ computer: name, title: 'Run the Linux tests', firstMessage: 'Run the tests on Linux.', clientRequestId: 'launch-1' })
@@ -154,10 +172,12 @@ describe('thread_create on another computer (issue #1160)', () => {
   it('Full access is used there when both computers allow it: no fixed cap', async () => {
     policy.set(t.callerNode, { maxPermissionMode: 'full' })
     const { thread, create } = await caller({ mode: 'full' })
-    const out = await create({ computer: t.node, clientRequestId: 'full-1' })
+    // Started as independent: it shows in that computer's sidebar.
+    const out = await create({ computer: t.node, hidden: false, clientRequestId: 'full-1' })
     expect(out.isError, JSON.stringify(out.body)).toBeUndefined()
     expect(out.body).not.toHaveProperty('firstMessage')
     expect(launchedBy(thread.id)[0]).toMatchObject({ permissionMode: 'full' })
+    expect(launchedBy(thread.id)[0]!.hidden).toBeUndefined()
   }, 120_000)
 
   it('returns the thread when its first message is refused there, and a retry does not make a second one', async () => {
@@ -217,6 +237,103 @@ describe('thread_create on another computer (issue #1160)', () => {
     expect(t.owner.runEngine.listRuns(far!.id, { limit: 5 })).toHaveLength(1)
     fresh.close()
     launchesOf().start()
+  }, 120_000)
+
+  it('a launch from before hidden whose create reply was lost retries the very same create: no conflict, the thread shows', async () => {
+    const { thread, create } = await caller()
+    // A row written before the column reads hidden null: its first attempt sent no hidden.
+    const records = t.caller.runEngine.remoteLaunches
+    const write = records.create.bind(records)
+    vi.spyOn(records, 'create').mockImplementation((input) => write({ ...input, hidden: null }))
+    // The create goes through there, but its reply is lost.
+    const port = portOf()
+    const real = port.call.bind(port)
+    const sent: Array<Record<string, unknown>> = []
+    let lose = true
+    vi.spyOn(port, 'call').mockImplementation(async (node, method, params, options) => {
+      if (method === 'threads.create') sent.push(params as Record<string, unknown>)
+      const result = await real(node, method, params, options)
+      if (method === 'threads.create' && lose) {
+        lose = false
+        throw new DomainRpcError('computer_offline', 'The other computer is offline.')
+      }
+      return result
+    })
+    const out = await create({ computer: t.node, clientRequestId: 'before-hidden' })
+    expect(out.body.threadId).toBeUndefined()
+    expect(launchedBy(thread.id)).toHaveLength(1)
+    // The retry repeats it as it was: that computer answers with the thread it made, never a key conflict.
+    const again = await create({ computer: t.node, clientRequestId: 'before-hidden' })
+    expect(again.isError, JSON.stringify(again.body)).toBeUndefined()
+    const [far] = launchedBy(thread.id)
+    expect(again.body).toMatchObject({ threadId: qualifyId(t.node, far!.id) })
+    expect(launchedBy(thread.id)).toHaveLength(1)
+    expect(sent.length).toBeGreaterThanOrEqual(2)
+    for (const params of sent) expect(params).not.toHaveProperty('hidden')
+    // As before hidden existed, it shows in that computer's sidebar.
+    expect(far!.hidden).toBeUndefined()
+  }, 120_000)
+
+  it('a launch whose first create went to a computer from before hidden sends none on its retry after that computer is updated', async () => {
+    const { thread, create } = await caller()
+    // That computer runs the version of threads.create before hidden: the client sends the create without it.
+    const client = t.client()
+    const realVersions = client.versions.bind(client)
+    let older = true
+    vi.spyOn(client, 'versions').mockImplementation(async (node, session) => {
+      const versions = await realVersions(node, session)
+      return older ? { ...versions, 'threads.create': ROUTED_AGENT_METHODS['threads.create']! } : versions
+    })
+    // The create goes through there, but its reply is lost; then that computer is updated.
+    const port = portOf()
+    const real = port.call.bind(port)
+    const sent: Array<Record<string, unknown>> = []
+    vi.spyOn(port, 'call').mockImplementation(async (node, method, params, options) => {
+      if (method === 'threads.create') sent.push(params as Record<string, unknown>)
+      const result = await real(node, method, params, options)
+      if (method === 'threads.create' && older) {
+        older = false
+        throw new DomainRpcError('computer_offline', 'The other computer is offline.')
+      }
+      return result
+    })
+    const out = await create({ computer: t.node, clientRequestId: 'older-then-updated' })
+    expect(out.body.threadId).toBeUndefined()
+    const key = t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)[0]!.creationKey
+    // What the first attempt put on the wire is stored: no hidden.
+    expect(t.caller.runEngine.remoteLaunches.get(key)!.hidden).toBeNull()
+    // The retry, now to the updated computer, repeats that create: the same thread, never a key conflict.
+    const again = await create({ computer: t.node, clientRequestId: 'older-then-updated' })
+    expect(again.isError, JSON.stringify(again.body)).toBeUndefined()
+    const [far] = launchedBy(thread.id)
+    expect(again.body).toMatchObject({ threadId: qualifyId(t.node, far!.id) })
+    expect(launchedBy(thread.id)).toHaveLength(1)
+    expect(sent.length).toBeGreaterThanOrEqual(2)
+    for (const params of sent) expect(params).not.toHaveProperty('hidden')
+  }, 120_000)
+
+  it('a new launch sends hidden with every attempt of its create, the same each time', async () => {
+    const { thread, create } = await caller()
+    const port = portOf()
+    const real = port.call.bind(port)
+    const sent: Array<Record<string, unknown>> = []
+    let lose = true
+    vi.spyOn(port, 'call').mockImplementation(async (node, method, params, options) => {
+      if (method === 'threads.create') sent.push(params as Record<string, unknown>)
+      const result = await real(node, method, params, options)
+      if (method === 'threads.create' && lose) {
+        lose = false
+        throw new DomainRpcError('computer_offline', 'The other computer is offline.')
+      }
+      return result
+    })
+    await create({ computer: t.node, clientRequestId: 'new-hidden' })
+    const again = await create({ computer: t.node, clientRequestId: 'new-hidden' })
+    expect(again.isError, JSON.stringify(again.body)).toBeUndefined()
+    expect(sent.length).toBeGreaterThanOrEqual(2)
+    for (const params of sent) expect(params).toMatchObject({ hidden: true })
+    expect(launchedBy(thread.id)).toHaveLength(1)
+    expect(launchedBy(thread.id)[0]!.hidden).toBe(true)
   }, 120_000)
 
   describe('refusals name which they are, with the computer, and make nothing there', () => {
