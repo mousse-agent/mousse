@@ -17,6 +17,8 @@ export interface UpdateRequester {
   name: string
   /** Asked again right before installing: the requester still has Full control here and is not blocked. */
   stillAllowed(): boolean
+  /** This computer itself (Update everywhere): it installs as soon as asked, with no countdown toast. */
+  local?: boolean
 }
 
 interface Job extends RemoteUpdateJob {
@@ -142,6 +144,7 @@ export class RemoteUpdates {
       from: from.name,
       node: from.node,
       ...(rollout ? { rollout } : {}),
+      ...(from.local ? { local: true as const } : {}),
       phase: 'preparing',
       expiresAt: this.now() + this.limits.requestTtlMs,
       stillAllowed: from.stillAllowed
@@ -174,7 +177,7 @@ export class RemoteUpdates {
     if (!job || job.id !== id || job.node !== node) return this.refusal('unknown_job', id)
     // The service stops only when the countdown ends, long after this answer is saved and sent.
     if (job.phase === 'ready')
-      this.set(job, { phase: 'countdown', installAt: this.now() + this.limits.countdownMs, consentedTurns })
+      this.set(job, { phase: 'countdown', installAt: this.now() + (job.local ? 0 : this.limits.countdownMs), consentedTurns })
     return this.status(node, id)
   }
 
@@ -234,7 +237,8 @@ export class RemoteUpdates {
       ...(job.percent !== undefined ? { percent: job.percent } : {}),
       ...(job.error ? { error: job.error } : {}),
       ...(job.installAt !== undefined ? { installAt: job.installAt } : {}),
-      ...(job.consentedTurns !== undefined ? { consentedTurns: job.consentedTurns } : {})
+      ...(job.consentedTurns !== undefined ? { consentedTurns: job.consentedTurns } : {}),
+      ...(job.local ? { local: true as const } : {})
     }
   }
 }

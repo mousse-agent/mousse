@@ -22,11 +22,13 @@ import type { SecretMethod } from './secretRequests'
 import type { ComputerUseMethod } from './computerUse'
 import type { SourceControlMethod } from './sourceControl'
 import type { BugReportMethod } from './bugReports'
+import type { RolloutMethod } from './updateRollout'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | ChatNetworkMethod | NetLocalMethod | NetEngineLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
   | BotsPersonalV2Method | BotDeviceMethod | BotsBrowserMethod | BrowserViewMethod
   | AutomationsMethod
+  | RolloutMethod
   | SecretMethod
   | ComputerUseMethod
   | SourceControlMethod

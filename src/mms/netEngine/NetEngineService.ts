@@ -2265,9 +2265,10 @@ export class NetEngineService implements EngineDirectoryPort {
    * A pairing's client is up: note when, and ask the computer its version and whether it updates itself (`net.info`).
    * When it can't be asked, what it said before is dropped, so a computer updated since is never left called behind.
    */
-  private async askPeerInfo(node: NodeId): Promise<void> {
+  /** Asks `node` what it runs and keeps the answer; returns it, or undefined when there was none. */
+  private async askPeerInfo(node: NodeId): Promise<ReturnType<typeof parsePeerInfo>> {
     const started = this.started
-    if (!started) return
+    if (!started) return undefined
     this.notePeer((presence) => presence.opened(node, { direction: 'out' }))
     let info: ReturnType<typeof parsePeerInfo>
     try {
@@ -2279,9 +2280,10 @@ export class NetEngineService implements EngineDirectoryPort {
     } catch {
       info = undefined
     }
-    if (this.started !== started) return
+    if (this.started !== started) return undefined
     this.notePeer((presence) => (info ? presence.info(node, info) : presence.unknown(node)))
     this.changed()
+    return info
   }
   /**
    * `net.update.there` for a pairing: asks it again what it runs (`refresh`), or one step of updating it (`update.*`).
@@ -2289,9 +2291,12 @@ export class NetEngineService implements EngineDirectoryPort {
    */
   async updateThere(params: UpdateThereParams): Promise<unknown> {
     const node = params.node as NodeId
-    if (params.step === 'refresh') {
-      await this.askPeerInfo(node)
-      return { ok: true }
+    if (params.step === 'refresh' || params.step === 'version') {
+      const info = await this.askPeerInfo(node)
+      if (params.step === 'refresh') return { ok: true }
+      // What it answered just now, never what was kept from before: no answer is an error.
+      if (!info) throw new NetError('peer_offline')
+      return { version: info.version, ...(info.update ? { update: info.update } : {}) }
     }
     const client = this.client(node)
     return askUpdate((method, body, options) => client.rpc(method, body, options), params)

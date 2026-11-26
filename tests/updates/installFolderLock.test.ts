@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { installFolderLockPath, takeInstallFolderLock } from '../../src/main/updates/installFolderLock'
+import { clearGoneInstallFolderLock, installFolderLockPath, takeInstallFolderLock } from '../../src/main/updates/installFolderLock'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -54,4 +54,18 @@ it('keeps one lock per folder, whatever the home, and takes over an unreadable o
   expect(lock(2, 'download')).toBeTypeOf('function')
   // Another folder has its own lock.
   expect(installFolderLockPath(directory, '/Apps/Other')).not.toBe(installFolderLockPath(directory, '/Apps/Mousse'))
+})
+
+it('an app that starts from the folder clears an install lock whose process is gone, so a retry need not wait it out', () => {
+  const { directory, alive, lock } = setup()
+  alive.add(2).add(3)
+  const clear = (pid: number) => clearGoneInstallFolderLock({ folder: '/Apps/Mousse', directory, pid, alive: (p) => alive.has(p) })
+  // Process 1 quit for the installer; the installer finished and opened the app again (process 2).
+  expect(lock(1, 'install')).toBeTypeOf('function')
+  expect(lock(2, 'download')).toBeNull()
+  expect(clear(2)).toBe(true)
+  expect(lock(2, 'download')).toBeTypeOf('function')
+  // A lock whose process still runs (another home downloading) stays.
+  expect(clear(3)).toBe(false)
+  expect(lock(3, 'download')).toBeNull()
 })

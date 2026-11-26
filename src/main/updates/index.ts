@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { channelForVersion, UPDATE_IPC, type UpdateChannel, type UpdateState } from '../../shared/updates'
 import { REMOTE_UPDATE_IPC, remoteUpdateLimits, type RemoteUpdateToast } from '../../shared/remoteUpdates'
-import { takeInstallFolderLock } from './installFolderLock'
+import { clearGoneInstallFolderLock, takeInstallFolderLock } from './installFolderLock'
 import { RemoteUpdateAgent, type AgentService } from './remoteUpdateAgent'
 import { getAppIconPath } from '../appIcon'
 import { installAppImage, startAfterExit } from './appImageInstall'
@@ -190,6 +190,10 @@ export function startDesktopUpdates(hooks: {
     return updater.setChannel(channel)
   })
   app.on('browser-window-focus', () => updater.noteFocus())
+  // An install's lock outlives the app that quit for the installer; this app running from the folder means it finished.
+  // Cleared once the first window shows, so opening the app does no work for it.
+  if (app.isPackaged)
+    void firstWindowShown().then(() => clearGoneInstallFolderLock({ folder: dirname(process.execPath), directory: app.getPath('temp') }))
   updater.start()
   report?.(updater.getState())
   return updater

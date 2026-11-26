@@ -7,6 +7,7 @@ import { serviceFailureLine } from './errorText'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
 import { channelForVersion, type SelfUpdateReport } from '../../shared/updates'
+import { compareVersions, isDevBuild } from '../../shared/net/version'
 
 /** One route this computer knows for a device and how its last attempt went. */
 export interface DeviceRouteHealth {
@@ -222,15 +223,25 @@ export function versionTag(
 }
 
 /** The user's other computers that are online now and run an older Mousse than this one, each once. */
-export function computersBehind(devices: readonly Device[]): Device[] {
+export function computersBehind(devices: readonly Device[], target?: string): Device[] {
   const seen = new Set<string>()
   return devices.filter((device) => {
-    if (device.self || device.revoked || device.kind === 'phone' || device.state !== 'open' || !device.olderThanThis || device.otherChannel)
-      return false
+    if (device.self || device.revoked || device.kind === 'phone' || device.state !== 'open' || device.otherChannel) return false
+    if (!isBehind(device, target)) return false
     if (seen.has(device.node)) return false
     seen.add(device.node)
     return true
   })
+}
+
+/**
+ * Behind the version this computer updates to (the one offered to it, or its own when it is up to date), not only
+ * behind the version it runs now: a computer between the two is behind as well. One too old to report a version is
+ * behind when it is behind this one; a development build never is.
+ */
+export function isBehind(device: Pick<Device, 'version' | 'olderThanThis'>, target?: string): boolean {
+  if (!device.version || !target || isDevBuild(target)) return device.olderThanThis === true
+  return !isDevBuild(device.version) && compareVersions(device.version, target) === -1
 }
 
 /** The version as shown; a device too old to report one says so. */

@@ -27,3 +27,22 @@
 .update-error-text { display: flex; flex: 1; flex-direction: column; gap: var(--space-4); min-width: 0; font-size: var(--settings-fs-small); }
 .update-error-text strong { font-weight: 600; }
 .update-error-text span { color: var(--text-secondary); overflow-wrap: anywhere; }
+
+/* Update everywhere's confirmation: one compact row per computer. */
+.rollout-rows { display: flex; flex-direction: column; gap: 2px; margin: 0 0 12px; padding: 0; list-style: none; }
+.rollout-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 28px;
+  font-size: 12.5px;
+}
+.rollout-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.rollout-row-version { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.rollout-row-status { min-width: 96px; text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.rollout-row[data-tone='ok'] .rollout-row-status { color: var(--success); }
+.rollout-row[data-tone='bad'] .rollout-row-status { color: var(--danger); }
+.rollout-row[data-tone='warn'] .rollout-row-status { color: var(--warning); }
+.rollout-row[data-tone='muted'] { opacity: 0.6; }
+.rollout-error { color: var(--danger); }

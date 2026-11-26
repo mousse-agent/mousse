@@ -14,6 +14,8 @@ export interface UpdateThereParams {
   node: string
   step: UpdateThereStep
   version?: string
+  /** Update everywhere: the rollout a request belongs to, so asking again gets the same request. */
+  rollout?: string
   job?: string
   runningTurns?: number
 }
@@ -28,12 +30,14 @@ export function validateUpdateThere(params: Record<string, unknown>): UpdateTher
   if (!UPDATE_THERE_STEPS.includes(params.step as UpdateThereStep)) bad()
   const step = params.step as UpdateThereStep
   if (step === 'prepare' && !isReleaseVersion(params.version)) bad()
+  if (step === 'prepare' && params.rollout !== undefined && (typeof params.rollout !== 'string' || !JOB.test(params.rollout))) bad()
   if ((step === 'status' || step === 'install' || step === 'cancel') && (typeof params.job !== 'string' || !JOB.test(params.job))) bad()
   if (step === 'install' && (!Number.isSafeInteger(params.runningTurns) || (params.runningTurns as number) < 0)) bad()
   return {
     node: params.node as string,
     step,
     ...(step === 'prepare' ? { version: params.version as string } : {}),
+    ...(step === 'prepare' && params.rollout !== undefined ? { rollout: params.rollout as string } : {}),
     ...(step === 'status' || step === 'install' || step === 'cancel' ? { job: params.job as string } : {}),
     ...(step === 'install' ? { runningTurns: params.runningTurns as number } : {})
   }
@@ -47,10 +51,10 @@ type Rpc = (method: string, params: unknown, options: { id: ReturnType<typeof ne
  */
 export async function askUpdate(rpc: Rpc, params: UpdateThereParams): Promise<RemoteUpdateStatus> {
   const { step } = params
-  if (step === 'refresh') throw new NetError('bad_request')
+  if (step === 'refresh' || step === 'version') throw new NetError('bad_request')
   const body =
     step === 'prepare'
-      ? { version: params.version }
+      ? { version: params.version, ...(params.rollout ? { rollout: params.rollout } : {}) }
       : step === 'install'
         ? { job: params.job, runningTurns: params.runningTurns }
         : { job: params.job }

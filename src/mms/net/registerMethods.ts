@@ -105,7 +105,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.disconnect': ['node'],
   'bridge.allow': ['node'],
   'bridge.access.there': ['node'],
-  'net.update.there': ['node', 'step', 'version', 'job', 'runningTurns'],
+  'net.update.there': ['node', 'step', 'version', 'rollout', 'job', 'runningTurns'],
   'bridge.workOnThreads': ['enabled'],
   'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']

@@ -1754,21 +1754,21 @@ export class SshBootstrap {
    * unit follows it, restart, then wait for the new version to answer. On failure the launcher and
    * the unit go back to the previous install, which is kept until the new one is verified. The
    * target directory is journaled before the launcher switches, so a crash cannot strand it. A
-   * machine Mousse did not install gets the command to run instead.
+   * machine Mousse did not install gets the command to run instead. `version` is this computer's own unless named
+   * (Update everywhere installs the version offered to this computer before this computer restarts for it).
    */
-  async update(id: string): Promise<SshUpdateResult> {
+  async update(id: string, version = this.version()): Promise<SshUpdateResult> {
     if (!this.reserve()) throw new NetError('conflict')
     try {
-      return await this.updateReserved(id)
+      return await this.updateReserved(id, version)
     } finally {
       this.busy = false
     }
   }
 
-  private async updateReserved(id: string): Promise<SshUpdateResult> {
+  private async updateReserved(id: string, version: string): Promise<SshUpdateResult> {
     const m = await this.manifests.read(id)
     if (!m) throw new NetError('bad_request')
-    const version = this.version()
     if (m.cli.owner !== 'managed' || !m.cli.installDir)
       return {
         ok: false,

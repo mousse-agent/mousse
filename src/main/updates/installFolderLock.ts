@@ -89,3 +89,28 @@ export function takeInstallFolderLock(
   }
   return null
 }
+
+/**
+ * At an app's start: a lock whose process is gone goes. This app runs from the folder, so the installer that lock kept
+ * the folder for has finished; without this, a retry of Update everywhere, or this computer's own install, would wait
+ * out `staleMs`. Returns whether it removed one.
+ */
+export function clearGoneInstallFolderLock(options: Omit<InstallFolderLockOptions, 'staleMs' | 'now'>): boolean {
+  const path = installFolderLockPath(options.directory, options.folder)
+  const alive = options.alive ?? processAlive
+  let held: { pid?: unknown }
+  try {
+    held = JSON.parse(readFileSync(path, 'utf8')) as typeof held
+  } catch {
+    // None, or half written by a process that is taking it now.
+    return false
+  }
+  const holder = typeof held.pid === 'number' ? held.pid : undefined
+  if (holder === undefined || holder === (options.pid ?? process.pid) || alive(holder)) return false
+  try {
+    unlinkSync(path)
+    return true
+  } catch {
+    return false
+  }
+}

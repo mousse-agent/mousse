@@ -1,6 +1,8 @@
 import { workWaits } from './bots/store/BotStore'
 import { readSelfUpdateReport } from './updates/selfUpdateReport'
 import { remoteUpdatesFor } from './updates/remoteUpdates'
+import { UpdateRollouts } from './updates/rollout'
+import { ROLLOUT_NOTIFY_KIND } from '../shared/updateRollout'
 import { tellMeOf } from '../shared/types'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
@@ -131,6 +133,9 @@ import { AutomationRuns } from './automations/AutomationRuns'
 import type { AutomationInbox, InboxCounts } from '../shared/automationInbox'
 import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY, automationManagerWorkspace } from './automations/automationManager'
 import { computerNameIfKnown } from './computerName'
+import { mousseVersion } from './appVersion'
+import type { NodeId } from '../shared/net'
+import type { SshRecordView } from '../shared/net/local'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -363,6 +368,7 @@ export class MmsProfileServices {
   readonly netEngine: NetEngineService
   /** The other computers Bridge reaches, over v1 (while on) and engine pairings. */
   readonly peers: PeerDirectory
+  private updateRolloutsInstance?: UpdateRollouts
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
   private speechRelayInstance?: SpeechRelay
@@ -2536,6 +2542,28 @@ export class MmsProfileServices {
     }
   }
 
+  /** Update everywhere for this profile: made the first time a window reads it, never at startup. */
+  updateRollouts(): UpdateRollouts {
+    return (this.updateRolloutsInstance ??= new UpdateRollouts({
+      store: this.net.updateRolloutStore(),
+      peers: async () => (await this.peers.nodes()).nodes,
+      sshRecords: async () => ((await this.net.request('net.ssh.list', {})) as { records?: SshRecordView[] }).records ?? [],
+      ask: (params) =>
+        this.netEngine.isEngine(params.node as NodeId)
+          ? this.netEngine.updateThere(params)
+          : Promise.resolve(this.net.request('net.update.there', params as unknown as Record<string, unknown>)),
+      sshUpdate: (id, version) => this.net.sshUpdateTo(id, version),
+      hub: remoteUpdatesFor(this.installationHome),
+      selfName: () => computerNameIfKnown() || hostname(),
+      version: () => mousseVersion(),
+      changed: () =>
+        this.events.emit({
+          channel: 'protocol:event',
+          data: { type: 'ui.notify', data: { kind: ROLLOUT_NOTIFY_KIND, profileId: this.profileId } }
+        })
+    }))
+  }
+
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     // The start's deferred passes stop at their next step; what waits for the lifecycle pass goes on (and is refused).
@@ -2553,6 +2581,7 @@ export class MmsProfileServices {
     this.speechRelay.shutdown()
     this.mcpManager.beginShutdown()
     this.chatNetwork?.beginShutdown()
+    this.updateRolloutsInstance?.stop()
     this.net.beginShutdown()
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
