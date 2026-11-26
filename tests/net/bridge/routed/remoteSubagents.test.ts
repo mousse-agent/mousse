@@ -105,6 +105,13 @@ describe('remote subagents over Bridge (issue #469)', () => {
         result: { runStatus: 'completed', text: 'Everything passes there.' }
       })
       expect(t.caller.runEngine.remoteSubagents.get(accepted.delegationId)!.state).toBe('done')
+      // The notice the parent reads says where the subagent really worked: on the other computer, never in the parent's
+      // own folder (its task was \`shared\`) or with snapshots of this computer.
+      const where = (t.caller.orchestrator as unknown as { noticeContext(): { resultReport(payload: { delegationId: string }): string | undefined } })
+        .noticeContext().resultReport({ delegationId: accepted.delegationId })
+      const computer = t.caller.threads.getThread(accepted.childThreadId)!.runsOn!.computerName
+      expect(where).toContain(`Worked on ${computer}`)
+      expect(where).not.toMatch(/your own folder|Snapshots:/)
     } finally {
       vi.restoreAllMocks()
     }

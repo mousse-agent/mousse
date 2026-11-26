@@ -332,7 +332,7 @@ import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService, UNCAPTURED_START_FILE, UNRECORDED_END_FILE, type TurnStartCheck } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
-import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
+import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, remoteSubagentResultText, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -7453,6 +7453,9 @@ export class OrchestratorService extends EventEmitter {
       resultReport: (payload) => {
         const delegation = this.runEngine?.delegations.get(payload.delegationId)
         if (!delegation) return undefined
+        // A subagent on another computer worked there: its result names the branch, and nothing here holds its files.
+        const remote = this.remoteSubagentComputer(delegation)
+        if (remote) return remoteSubagentResultText(remote)
         const report = this.delegationResultReport(delegation)
         if (report) return formatSubagentResultReport(report)
         return delegation.workspace === 'shared' ? 'It worked in your own folder, shared with you; Mousse merged nothing.' : undefined
@@ -8695,11 +8698,12 @@ export class OrchestratorService extends EventEmitter {
     const reportResult = (ref: SubagentRef) => {
       const task = this.resolveTask(parentThreadId, ref, 'finished')
       if (!task.ok) return task.refusal
-      if (this.requireRunEngine().remoteSubagents.get(task.delegation.delegationId))
+      const remote = this.remoteSubagentComputer(task.delegation)
+      if (remote)
         return {
           delegationId: task.delegation.delegationId,
           merged: false,
-          note: 'This subagent worked on another computer; its result names the branch its work is on there. Fetch that branch to use it here.'
+          note: remoteSubagentResultText(remote)
         }
       const report = this.delegationResultReport(task.delegation)
       return {
@@ -9639,6 +9643,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The computer a delegated task ran on, when its subagent runs on another of the user's computers (its stand-in thread
+   * here has `runsOn`, or the task has a remote binding); undefined for a subagent on this computer.
+   */
+  private remoteSubagentComputer(delegation: DelegationRecord): string | undefined {
+    const runsOn = this.threadStore?.getThread(delegation.childThreadId)?.runsOn
+    if (runsOn) return runsOn.computerName || 'another computer'
+    const binding = this.runEngine?.remoteSubagents.get(delegation.delegationId)
+    return binding ? this.remoteSubagents?.computerName(binding.node) ?? 'another computer' : undefined
+  }
+
+  /**
    * The frozen result of a delegated task: the files its subagent started from and finished with, pinned under
    * `refs/mousse/delegations/<child>/<delegation>/`, where it worked and the Git state it left. Built once, from
    * snapshots already recorded (the subagent's task checkpoint, or for a shared folder the parent's own turn
@@ -9646,6 +9661,9 @@ export class OrchestratorService extends EventEmitter {
    * whatever the worktree does next. Nothing is merged. Undefined when the task left no recorded files.
    */
   private delegationResultReport(delegation: DelegationRecord): SubagentResultReport | undefined {
+    // A subagent on another computer left nothing in this computer's folders: any report from here would describe the
+    // parent's own folder (a shared task) or the stand-in thread, never where it worked.
+    if (this.remoteSubagentComputer(delegation)) return undefined
     const childDirectory = this.resolveThreadDir(delegation.childThreadId)
     if (!childDirectory) return undefined
     const path = join(childDirectory, SUBAGENT_RESULTS_FILE)
