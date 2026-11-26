@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Overlapping frames</title>
+<style>
+  body { margin: 0; font: 16px sans-serif }
+  iframe { position: absolute; border: 0 }
+  /* A frame from another site at (100, 100), 800x400, with two frames drawn over its button: one from
+     another site at (200, 150), one from this site at (550, 150), each 250x150. */
+  #covered { left: 100px; top: 100px; width: 800px; height: 400px; z-index: 1 }
+  #cross-overlay { left: 200px; top: 150px; width: 250px; height: 150px; z-index: 2 }
+  #same-overlay { left: 550px; top: 150px; width: 250px; height: 150px; z-index: 2 }
+</style></head>
+<body>
+  <p id="parent-state" style="position:absolute;left:10px;top:10px;margin:0">parent:idle</p>
+  <iframe id="covered" title="Covered form" src="__CHILD_ORIGIN__/frame-overlap-covered.html"></iframe>
+  <iframe id="cross-overlay" title="Cross-site overlay" src="__CHILD_ORIGIN__/frame-overlap-overlay.html?site=cross"></iframe>
+  <iframe id="same-overlay" title="Same-site overlay" src="/frame-overlap-overlay.html?site=same"></iframe>
+  <script>
+    window.addEventListener('message', (event) => {
+      document.getElementById('parent-state').textContent += ' ' + String(event.data)
+    })
+  </script>
+</body>
+</html>

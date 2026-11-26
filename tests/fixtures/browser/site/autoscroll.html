@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Scrolls by itself</title>
+<style>body { margin: 0; font: 16px sans-serif } #rest { height: 40000px } button { position: absolute; left: 100px; width: 200px; height: 40px }</style></head>
+<body>
+  <div id="rest"></div>
+  <script>
+    // Buttons every 60px, so whatever an image point lands on after a scroll is some other button.
+    for (let index = 0; index < 600; index += 1) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = 'Row ' + index
+      button.style.top = (index * 60) + 'px'
+      button.addEventListener('click', () => { document.title = 'pressed:' + button.textContent })
+      document.body.appendChild(button)
+    }
+    // A ticker that scrolls the page a little at a time, as a feed or a slideshow does.
+    setInterval(() => window.scrollBy(0, 3), 16)
+  </script>
+</body>
+</html>

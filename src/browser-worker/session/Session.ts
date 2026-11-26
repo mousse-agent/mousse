@@ -14,6 +14,7 @@ import {
   type BrowserMouseButton,
   type BrowserObservation,
   type BrowserPageDialog,
+  type BrowserPoint,
   type BrowserPictureHits,
   type BrowserPictureSpot,
   type BrowserSessionRecord,
@@ -34,15 +35,17 @@ import { fail } from '../errors'
 import { readWorkspaceLock, WorkspaceLock } from '../lifecycle/lock'
 import { isProcessAlive } from '../lifecycle/process'
 import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '../lifecycle/paths'
-import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/ReferenceStore'
-import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
+import { BrowserReferenceStore, type ObservedNode, type ReferenceIdentity } from '../observation/ReferenceStore'
+import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, readViewportScroll, type CollectedObservation, type ObservationCandidate, type ViewportScroll } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
+import { framesInside, placeAttachedFrame, type FrameBounds, type FrameTreeEntry, type FrameTreeNode } from './frameTree'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
-import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
+import { prepareActionableTarget, readControlValue, TRUSTED_HIT, type ActionableTarget } from '../action/actionability'
+import { frameStepAt, pointInFrame } from '../action/framePoint'
 import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readOpenedPageSigns, readPageSigns, readSelectedText, type DispatchedHumanInput, type NavigationOptions } from '../action/dispatch'
 import { BROWSER_PROBLEM_CODES, browserNoteForPerson, browserProblemMessage, classifyOpenedPage, hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
 import { ScopedActionJournal } from '../action/journal'
-import { CdpDisconnectedError } from '../cdp/connection'
+import { CdpDisconnectedError, isCdpTargetGoneError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep, workerWarning } from '../util'
 import { BrowserWorkerError, isBrowserWorkerError } from '../errors'
 import { browserWindowDisplay, type BrowserWindowDisplay, type BrowserWindowEnd, type BrowserWindowState } from '../../shared/browser/window'
@@ -82,6 +85,59 @@ interface AttachedFrameState {
   url: string
   /** The session of the page (a tab or a page a site opened) this frame is in: it belongs to that page alone. */
   pageSessionId: string
+  /**
+   * The session whose document holds this frame's `<iframe>`, as Chromium attached it: the page's, or
+   * that of a frame from another site, whose `<iframe>` may sit in a same-site frame of its own (one
+   * with no session, so `parentFrameId` alone names no session to ask).
+   */
+  ownerSessionId: string
+}
+
+/** The element an observation is narrowed to (`observe({ ref })`): an `<iframe>` brings the frame it shows. */
+interface ObserveScope { node: ObservedNode; sessionId: string; contentFrameId?: string }
+
+/** Chromium's answer to `DOM.getNodeForLocation` when nothing is at the point. */
+function isNoNodeAtLocation(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'cdpCode' in error && /no node found at given location/i.test(String((error as { message?: unknown }).message ?? ''))
+}
+
+/** A frame's URL as frame trees give it: without credentials or fragment. */
+function frameUrlKey(value: string): string {
+  const url = sanitizeUrl(value)
+  const hash = url.indexOf('#')
+  return hash >= 0 ? url.slice(0, hash) : url
+}
+
+/** Whether two scroll positions are the same, to the CSS pixel. */
+function sameScroll(a: ViewportScroll, b: ViewportScroll): boolean {
+  return Math.abs(a.scrollX - b.scrollX) <= 1 && Math.abs(a.scrollY - b.scrollY) <= 1
+}
+
+function boundsOverlap(a: FrameBounds, b: FrameBounds): boolean {
+  return a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y
+}
+
+/** Whether `outer` holds all of `inner` and more (half a pixel of rounding aside): a box around it, not on it. */
+function encloses(outer: FrameBounds, inner: FrameBounds): boolean {
+  return outer.x <= inner.x + 0.5 && outer.y <= inner.y + 0.5 && outer.x + outer.width >= inner.x + inner.width - 0.5
+    && outer.y + outer.height >= inner.y + inner.height - 0.5 && outer.width * outer.height > inner.width * inner.height + 1
+}
+
+/** How many frames from other sites, one inside the next, an image point is followed into. */
+const MAX_IMAGE_POINT_FRAME_DEPTH = 8
+
+/** A target that is only a viewport point (a wheel at a spot): no element stands behind it. */
+function pointTarget(cdpSessionId: string, point: { x: number; y: number }): ActionableTarget {
+  return { cdpSessionId, backendNodeId: 0, objectId: '', point, bounds: { x: point.x, y: point.y, width: 0, height: 0 }, disabled: false, hidden: false, readOnly: false, tag: '', type: '', secret: false }
+}
+
+function originOf(value: string): string | undefined {
+  try {
+    const origin = new URL(value).origin
+    return origin && origin !== 'null' ? origin : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -185,7 +241,8 @@ export class ManagedSession {
   private readonly ops = new Set<Promise<unknown>>()
   private readonly frameEnables = new Map<string, Promise<void>>()
   private userDataDir = ''
-  private observations = new Map<string, { tabId: string; generation: number; documentId: string; viewport: BrowserObservation['viewport']; sizeSeq: number; screenshot?: BrowserObservation['screenshot'] }>()
+  /** Observations still held, by id; `captureScroll` is where the page was scrolled as its screenshot was taken (unset when it moved meanwhile). */
+  private observations = new Map<string, { tabId: string; generation: number; documentId: string; viewport: BrowserObservation['viewport']; sizeSeq: number; screenshot?: BrowserObservation['screenshot']; captureScroll?: ViewportScroll }>()
   private lastActionFingerprint = ''
   private repeatedActionCount = 0
   private downloadDir = ''
@@ -1100,6 +1157,9 @@ export class ManagedSession {
   async observe(params: Record<string, unknown>): Promise<BrowserObservation> {
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
     const includeScreenshot = optionalBoolean(params.includeScreenshot) === true
+    // Narrowed to one element seen before: resolved first, as reading the page mints new refs.
+    const scopeRef = optionalString(params.ref, 160)
+    const scope = scopeRef ? await this.resolveObserveScope(tab, scopeRef, params.observationId) : undefined
     if (typeof params.deviceScaleFactor === 'number' && params.deviceScaleFactor > 0) {
       await this.requireChrome().cdp.send('Emulation.setDeviceMetricsOverride', {
         width: this.page.width,
@@ -1110,46 +1170,82 @@ export class ManagedSession {
     }
     const requestedMax = Math.min(MAX_OBSERVATION_ELEMENTS, Math.max(1,
       Math.floor(typeof params.maxElements === 'number' ? params.maxElements : MAX_OBSERVATION_ELEMENTS)))
+    // Narrowed to one element: what belongs to it is decided before the page is read, so nothing else
+    // on the page (an element, or a frame) spends the element budget or the frame cap.
+    const scopeFrames = scope ? await this.framesWithin(tab, scope.contentFrameId ?? scope.node.frameId ?? tab.frameId) : undefined
+    // A plain element keeps what lies on it; an `<iframe>` keeps all its frame shows.
+    const scopeBox = scope && !scope.contentFrameId ? await this.scopeViewportBounds(tab, scope) : undefined
+    const scopeWarnings = scope && !scope.contentFrameId && !scopeBox ? ['scope-not-laid-out'] : []
+    const inScope = (sessionId: string) => scope && scopeFrames
+      ? (node: ObservationCandidate) => {
+        if (node.backendNodeId === scope.node.backendNodeId && sessionId === scope.sessionId) return true
+        if (!scopeFrames.has(node.frameId)) return false
+        if (scope.contentFrameId) return true
+        // What lies on it, not what it lies in: the page, and the boxes around it, are not part of it.
+        return !!scopeBox && !!node.bounds && boundsOverlap(node.bounds, scopeBox) && !encloses(node.bounds, scopeBox)
+      }
+      : undefined
     const collected = await collectStructuredObservation(this.requireChrome().cdp, tab.cdpSessionId, {
       visibleOnly: optionalBoolean(params.visibleOnly),
       continuation: optionalString(params.continuation, 64),
-      maxElements: requestedMax
+      maxElements: requestedMax,
+      include: inScope(tab.cdpSessionId)
     })
     tab.url = collected.url
     tab.title = collected.title
     tab.documentId = collected.documentId
     tab.loaderId = collected.loaderId
     tab.frameId = collected.frameId
-    // Only this tab's frames: every page attaches its own, and one tab never reads another's.
-    const attachedFrames = this.framesOf(tab)
+    // Only this tab's frames: every page attaches its own, and one tab never reads another's. Narrowed
+    // to an element, only the frames inside it count toward the cap.
+    const attachedFrames = this.framesOf(tab).filter((frame) => !scopeFrames || scopeFrames.has(frame.frameId))
     const childCollections: CollectedObservation[] = []
     let remainingElements = requestedMax - collected.elements.length
     let childObservationTruncated = attachedFrames.length > MAX_ATTACHED_FRAMES_PER_OBSERVATION
+    // Frames read, and frames that could not be (not placed in the page, or gone meanwhile).
+    let observedFrames = 0
+    let skippedFrames = 0
     for (const frame of attachedFrames.slice(0, MAX_ATTACHED_FRAMES_PER_OBSERVATION)) {
       if (collected.truncated || remainingElements <= 0) {
-        childObservationTruncated ||= attachedFrames.length > 0
+        childObservationTruncated = true
         break
       }
+      // A frame still enabling its domains is read once they are on, not halfway.
+      await this.frameEnables.get(frame.sessionId)?.catch(() => undefined)
+      if (!this.frames.has(frame.sessionId)) {
+        skippedFrames += 1
+        continue
+      }
       const offset = await this.frameViewportOffset(tab, frame)
-      if (!offset) continue
+      if (!offset) {
+        skippedFrames += 1
+        continue
+      }
       try {
         const child = await collectStructuredObservation(this.requireChrome().cdp, frame.sessionId, {
           visibleOnly: optionalBoolean(params.visibleOnly),
           continuation: undefined,
           maxElements: remainingElements,
-          viewportOffset: offset
+          viewportOffset: offset,
+          include: inScope(frame.sessionId)
         })
         const previousLoader = this.frameLoaders.get(frame.sessionId)
         if (previousLoader && previousLoader !== child.loaderId) this.refs.invalidateFrame('frame_' + frame.frameId)
         this.frameLoaders.set(frame.sessionId, child.loaderId)
         childCollections.push(child)
+        observedFrames += 1
         remainingElements -= child.elements.length
         if (child.truncated) {
           childObservationTruncated = true
           break
         }
       } catch (error) {
-        if (error instanceof CdpDisconnectedError) continue
+        // The frame went away while it was read (removed from its page meanwhile): it is skipped and the
+        // reader told. A browser that is gone (the pipe closed) fails the observation.
+        if (isCdpTargetGoneError(error)) {
+          skippedFrames += 1
+          continue
+        }
         throw error
       }
     }
@@ -1168,14 +1264,25 @@ export class ManagedSession {
     const refs = this.refs.observe(identity, mergedObservedNodes)
     const elements: BrowserElement[] = mergedElements.map((element, index) => ({ ...element, ref: refs[index] }))
     let screenshot: BrowserObservation['screenshot']
+    let captureScroll: ViewportScroll | undefined
+    const captureWarnings: string[] = []
     if (includeScreenshot) {
+      const cdp = this.requireChrome().cdp
       const clip = params.clip && typeof params.clip === 'object' ? params.clip as { x: number; y: number; width: number; height: number } : undefined
+      // The scroll is read again as the picture is taken, not when the page was read: a page that
+      // scrolls by itself may have moved since, and the picture is of where it is now.
+      const before = await readViewportScroll(cdp, tab.cdpSessionId)
       // At the page's CSS size whatever its pixel ratio (a person's view may raise it): the model sees what it saw before.
-      const captured = await captureViewportScreenshot(this.requireChrome().cdp, tab.cdpSessionId, collected.viewport, clip, this.page.scale !== 1 ? { scale: 1 / this.page.scale } : {})
+      const captured = await captureViewportScreenshot(cdp, tab.cdpSessionId, { ...collected.viewport, ...before }, clip, this.page.scale !== 1 ? { scale: 1 / this.page.scale } : {})
+      const after = await readViewportScroll(cdp, tab.cdpSessionId)
+      // Still moving as it was taken: where its points are is not known, and image points on it are refused.
+      if (sameScroll(before, after)) captureScroll = before
+      else captureWarnings.push('viewport-moved-during-screenshot')
+      if (!sameScroll(before, collected.viewport)) captureWarnings.push('viewport-moved-during-observe')
       const written = this.artifacts.write(this.profileId, this.id, captured.bytes, 'image/png', 'png')
       screenshot = { artifactId: written.artifactId, ...captured.screenshot }
     }
-    this.observations.set(observationId, { tabId: tab.publicId, generation: this.generation, documentId: collected.documentId, viewport: collected.viewport, sizeSeq: this.sizeSeq, ...(screenshot ? { screenshot } : {}) })
+    this.observations.set(observationId, { tabId: tab.publicId, generation: this.generation, documentId: collected.documentId, viewport: collected.viewport, sizeSeq: this.sizeSeq, ...(screenshot ? { screenshot } : {}), ...(captureScroll ? { captureScroll } : {}) })
     this.touch()
     return {
       sessionId: this.id,
@@ -1192,7 +1299,7 @@ export class ManagedSession {
       ...(screenshot ? { screenshot } : {}),
       truncated: collected.truncated || childObservationTruncated,
       ...(collected.continuation ? { continuation: collected.continuation } : {}),
-      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(attachedFrames.length ? ['oopif-attached'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
+      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(observedFrames ? ['oopif-attached'] : []), ...(skippedFrames ? ['oopif-observation-skipped'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...scopeWarnings, ...captureWarnings, ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
       provenance: 'untrusted-page'
     }
   }
@@ -1214,10 +1321,10 @@ export class ManagedSession {
 
   async extract(params: Record<string, unknown>): Promise<{ provenance: 'untrusted-page'; text: string; truncated: boolean }> {
     const observation = await this.observe({ ...params, includeScreenshot: false })
-    const ref = optionalString(params.ref, 160)
-    const selected = ref ? observation.elements.filter((element) => element.ref === ref) : observation.elements
-    const text = boundText(selected.map((element) => [element.role, element.name, element.text].filter(Boolean).join(' ')).join('\n'), 8_000)
-    return { provenance: 'untrusted-page', text, truncated: text.length >= 8_000 }
+    // With a ref the observation is already narrowed to that element and what it holds.
+    const text = boundText(observation.elements.map((element) => [element.role, element.name, element.text].filter(Boolean).join(' ')).join('\n'), 8_000)
+    // Cut short either way: the page held more than the observation read, or the text more than it returns.
+    return { provenance: 'untrusted-page', text, truncated: observation.truncated || text.length >= 8_000 }
   }
 
   async wait(params: Record<string, unknown>, signal?: AbortSignal): Promise<BrowserObservation> {
@@ -1225,12 +1332,14 @@ export class ManagedSession {
     const timeoutMs = typeof params.timeoutMs === 'number' ? params.timeoutMs : 5_000
     const deadline = Date.now() + Math.min(timeoutMs, 30_000)
     const startedAt = Date.now()
-    let observation = await this.observe(params)
+    // An element condition's ref is what it waits for, not a narrowing of what it reads.
+    const observeParams = { ...params, ref: undefined }
+    let observation = await this.observe(observeParams)
     while (Date.now() < deadline) {
       if (signal?.aborted) fail('cancelled', 'Wait cancelled')
       if (this.matchWait(observation, condition)) return observation
       await new Promise((resolve) => setTimeout(resolve, 100))
-      observation = await this.observe(params)
+      observation = await this.observe(observeParams)
     }
     // A page that never stops loading (a stream, a script that keeps fetching) is still usable.
     if (observation.warnings.includes(PAGE_STILL_LOADING)) {
@@ -1292,6 +1401,8 @@ export class ManagedSession {
     if (request.generation !== this.generation) fail('stale_generation', 'Action generation is stale')
     if (request.controlLeaseId !== this.controlLeaseId) fail('human_controlled', 'Control lease was replaced')
     if (this.inFlight) fail('not_actionable', 'Another action is already in flight for this session')
+    // A wheel that moves nothing would be reported as done while nothing happened.
+    if (request.action.type === 'scroll' && request.action.deltaX === 0 && request.action.deltaY === 0) fail('invalid_action', 'Scroll needs a non-zero deltaX or deltaY')
     const tab = this.requireTab(request.tabId)
     await this.toFront(tab)
     // A person took the browser over while its tab came forward: the action never ran.
@@ -1321,6 +1432,9 @@ export class ManagedSession {
       const target = await this.resolveActionTarget(request, tab)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       if (!humanLease) await this.glideCursor(request, tab, target, abort.signal)
+      if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
+      // The page may have moved while the cursor glided: an image point is acted on only where it still lands.
+      await this.recheckImagePoints(request, tab, target, abort.signal)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       this.inFlight.dispatched = true
       dispatched = true
@@ -2311,7 +2425,8 @@ export class ManagedSession {
         parentFrameId: info.parentFrameId,
         targetId: info.targetId,
         url: sanitizeUrl(info.url ?? ''),
-        pageSessionId: target.pageSessionId
+        pageSessionId: target.pageSessionId,
+        ownerSessionId: parentSessionId ?? target.pageSessionId
       })
       const work = this.enableFrame(sessionId)
       this.frameEnables.set(sessionId, work)
@@ -2473,38 +2588,159 @@ export class ManagedSession {
   }
 
   private async frameViewportOffset(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<{ x: number; y: number } | null> {
+    const bounds = await this.frameViewportBounds(tab, frame, visited)
+    return bounds ? { x: bounds.x, y: bounds.y } : null
+  }
+
+  /**
+   * Where an attached frame from another site sits in its tab's viewport (CSS pixels), or null when
+   * it cannot be placed or is not laid out (a 0×0 or hidden `<iframe>`). Its `<iframe>` is asked for
+   * in the session that attached it (`ownerSessionId`), placed inside where that session's own frame
+   * sits (`placeAttachedFrame`).
+   */
+  private async frameViewportBounds(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<FrameBounds | null> {
     try {
       if (frame.pageSessionId !== tab.cdpSessionId) return null
-      if (visited.has(frame.sessionId)) return null
-      visited.add(frame.sessionId)
-      const siblings = this.framesOf(tab)
-      const candidates: Array<{ id?: string; parentId?: string; url?: string }> = []
-      const tree = await this.requireChrome().cdp.send<{ frameTree?: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown[] } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
-      const visit = (node: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown } | undefined) => {
-        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as Array<{ frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown }> : []) {
-          if (child.frame) candidates.push(child.frame)
-          visit(child)
-        }
+      const attached = (sessionId: string) => {
+        const owner = this.frames.get(sessionId)
+        return owner?.pageSessionId === tab.cdpSessionId ? owner : undefined
       }
-      visit(tree.frameTree)
-      const candidate = candidates.find((entry) => entry.id === frame.frameId)
-        ?? candidates.find((entry) => entry.id && !siblings.some((other) => other !== frame && other.frameId === entry.id))
-      if (candidate?.id) {
-        frame.frameId = candidate.id
-        frame.parentFrameId = candidate.parentId
-        frame.url = sanitizeUrl(candidate.url ?? frame.url)
+      return await placeAttachedFrame(frame, tab.cdpSessionId, attached, (placed, ownerSessionId) => this.frameBoxInOwner(tab, placed, ownerSessionId), visited)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The box of an attached frame's `<iframe>` in the viewport of the session that attached it: by the
+   * frame id it was attached with, then by the id its own frame tree gives. For a frame the tab's own
+   * document holds, the tab's frame tree is a last resort, matched by URL then by origin among frames
+   * that are laid out, so a hidden helper frame from the same site is never taken for it; that only
+   * places it, and never gives it another frame's id.
+   */
+  private async frameBoxInOwner(tab: TabState, frame: AttachedFrameState, ownerSessionId: string): Promise<FrameBounds | null> {
+    const cdp = this.requireChrome().cdp
+    const place = async (id: string | undefined): Promise<FrameBounds | null> => id ? this.frameOwnerBounds(ownerSessionId, id) : null
+    // The id it was attached with is the frame's own: its `<iframe>` is asked for directly.
+    const direct = await place(frame.frameId)
+    if (direct) return direct
+    const own = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: frame.sessionId }).catch(() => undefined)
+    const root = own?.frameTree?.frame
+    if (root?.id && root.id !== frame.frameId) {
+      const placed = await place(root.id)
+      if (placed) {
+        frame.frameId = root.id
+        frame.parentFrameId = root.parentId ?? frame.parentFrameId
+        frame.url = sanitizeUrl(root.url ?? frame.url) || frame.url
+        return placed
       }
-      if (!frame.frameId) return null
-      const parent = frame.parentFrameId ? siblings.find((entry) => entry.frameId === frame.parentFrameId) : undefined
-      const parentOffset = parent ? await this.frameViewportOffset(tab, parent, visited) : { x: 0, y: 0 }
-      if (!parentOffset) return null
-      const parentSessionId = parent?.sessionId ?? tab.cdpSessionId
-      const owner = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId: frame.frameId }, { sessionId: parentSessionId })
+    }
+    // Last resort, for a frame the tab's own document holds: the tab's frame tree, by URL then by origin, among frames not claimed by another.
+    if (ownerSessionId !== tab.cdpSessionId) return null
+    const url = frameUrlKey(root?.url ?? frame.url)
+    if (!url) return null
+    const siblings = this.framesOf(tab)
+    const candidates: FrameTreeEntry[] = []
+    const tree = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
+    const visit = (node: FrameTreeNode | undefined) => {
+      for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) {
+        if (child.frame) candidates.push(child.frame)
+        visit(child)
+      }
+    }
+    visit(tree.frameTree)
+    const open = candidates.filter((entry) => entry.id && entry.id !== frame.frameId && entry.id !== root?.id && !siblings.some((other) => other !== frame && other.frameId === entry.id))
+    const blank = url === 'about:blank'
+    const byUrl = open.filter((entry) => {
+      const entryUrl = frameUrlKey(entry.url ?? '')
+      return entryUrl === url && (blank || entryUrl !== 'about:blank')
+    })
+    const origin = originOf(url)
+    const byOrigin = origin ? open.filter((entry) => !byUrl.includes(entry) && originOf(entry.url ?? '') === origin) : []
+    for (const entry of [...byUrl, ...byOrigin]) {
+      const placed = await place(entry.id)
+      if (placed) return placed
+    }
+    return null
+  }
+
+  /** The box of the `<iframe>` holding a frame, in the viewport of the session that holds that element; null when it has no area. */
+  private async frameOwnerBounds(sessionId: string, frameId: string): Promise<FrameBounds | null> {
+    try {
+      const cdp = this.requireChrome().cdp
+      const owner = await cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId }, { sessionId })
       if (!owner.backendNodeId) return null
-      const quads = await this.requireChrome().cdp.send<{ quads?: number[][] }>('DOM.getContentQuads', { backendNodeId: owner.backendNodeId }, { sessionId: parentSessionId })
+      const quads = await cdp.send<{ quads?: number[][] }>('DOM.getContentQuads', { backendNodeId: owner.backendNodeId }, { sessionId })
       const quad = quads.quads?.[0]
       if (!quad || quad.length < 8) return null
-      return { x: parentOffset.x + Math.min(quad[0], quad[2], quad[4], quad[6]), y: parentOffset.y + Math.min(quad[1], quad[3], quad[5], quad[7]) }
+      const xs = [quad[0], quad[2], quad[4], quad[6]]
+      const ys = [quad[1], quad[3], quad[5], quad[7]]
+      const bounds = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }
+      // A 0×0 `<iframe>` shows nothing: its frame is not read, nor taken for another.
+      if (bounds.width <= 0 || bounds.height <= 0) return null
+      return bounds
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The element a ref names, from this tab's observations still held (the one given first, then the
+   * newest), checked to be still there. Refused as stale when no held observation knows it.
+   */
+  private async resolveObserveScope(tab: TabState, ref: string, observationId: unknown): Promise<ObserveScope> {
+    const ids = [...this.observations.keys()].reverse()
+    if (typeof observationId === 'string') ids.unshift(observationId)
+    let stored: ObservedNode | undefined
+    for (const id of ids) {
+      const entry = this.observations.get(id)
+      if (!entry || entry.tabId !== tab.publicId || entry.generation !== this.generation || !this.refs.hasObservation(id)) continue
+      try {
+        stored = this.refs.resolve({ profileId: this.profileId, sessionId: this.id, generation: this.generation, tabId: tab.publicId, documentId: entry.documentId, observationId: id }, ref)
+        break
+      } catch {
+        continue
+      }
+    }
+    if (!stored) fail('stale_ref', 'Observed ref is not valid for this session')
+    const sessionId = stored.cdpSessionId ?? tab.cdpSessionId
+    if (sessionId !== tab.cdpSessionId && this.frames.get(sessionId)?.pageSessionId !== tab.cdpSessionId) fail('stale_ref', 'Observed ref is not valid for this session')
+    type Described = { node?: { nodeName?: string; frameId?: string; contentDocument?: { frameId?: string } } }
+    let described: Described
+    try {
+      described = await this.requireChrome().cdp.send<Described>('DOM.describeNode', { backendNodeId: stored.backendNodeId }, { sessionId })
+    } catch {
+      fail('stale_ref', 'Observed ref is not valid for this session')
+    }
+    const nodeName = (described.node?.nodeName ?? '').toUpperCase()
+    const contentFrameId = nodeName === 'IFRAME' || nodeName === 'FRAME' ? described.node?.frameId ?? described.node?.contentDocument?.frameId : undefined
+    return { node: stored, sessionId, ...(contentFrameId ? { contentFrameId } : {}) }
+  }
+
+  /** A frame of a tab and every frame inside it (`framesInside`), from the frame trees of the tab and of every frame from another site attached in it. */
+  private async framesWithin(tab: TabState, frameId: string): Promise<Set<string>> {
+    const attached = this.framesOf(tab)
+    const trees = await Promise.all([tab.cdpSessionId, ...attached.map((frame) => frame.sessionId)].map(async (sessionId) =>
+      (await this.requireChrome().cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId }).catch(() => undefined))?.frameTree))
+    return framesInside(frameId, trees, attached)
+  }
+
+  /** The box of a scope element in its tab's viewport, or null when it is not laid out. */
+  private async scopeViewportBounds(tab: TabState, scope: ObserveScope): Promise<FrameBounds | null> {
+    try {
+      let offset = { x: 0, y: 0 }
+      if (scope.sessionId !== tab.cdpSessionId) {
+        const frame = this.frames.get(scope.sessionId)
+        const placed = frame ? await this.frameViewportOffset(tab, frame) : null
+        if (!placed) return null
+        offset = placed
+      }
+      const quads = await this.requireChrome().cdp.send<{ quads?: number[][] }>('DOM.getContentQuads', { backendNodeId: scope.node.backendNodeId }, { sessionId: scope.sessionId })
+      const points = (quads.quads ?? []).filter((quad) => quad.length >= 8)
+      if (!points.length) return null
+      const xs = points.flatMap((quad) => [quad[0], quad[2], quad[4], quad[6]])
+      const ys = points.flatMap((quad) => [quad[1], quad[3], quad[5], quad[7]])
+      return { x: offset.x + Math.min(...xs), y: offset.y + Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }
     } catch {
       return null
     }
@@ -2515,27 +2751,222 @@ export class ManagedSession {
     if (action.type === 'drag') return { from: await this.resolveOneTarget(request, tab, action.from), to: await this.resolveOneTarget(request, tab, action.to) }
     const target = 'target' in action ? action.target : undefined
     if (!target) return undefined
+    // A wheel goes to a point, whatever lies there: no element is looked up or made ready for it.
+    if (action.type === 'scroll' && target.kind === 'image-point') return pointTarget(tab.cdpSessionId, await this.imagePointNow(request, tab, target.point, this.inFlight?.abort.signal))
     return this.resolveOneTarget(request, tab, target)
+  }
+
+  /** Where a point on an observation's screenshot is in the tab's viewport now; refused when that geometry is gone. */
+  private imagePointInViewport(request: BrowserActionRequest, tab: TabState, point: BrowserPoint): BrowserPoint {
+    const observation = this.observations.get(request.observationId)
+    if (!observation || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId || observation.sizeSeq !== this.sizeSeq) fail('stale_observation', 'Image point geometry is stale')
+    if (!observation.screenshot) fail('stale_observation', 'Observation has no screenshot; take a screenshot before using image-point targeting')
+    return mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, point)
+  }
+
+  /** `imagePointInViewport`, checked against where the page is scrolled now. */
+  private async imagePointNow(request: BrowserActionRequest, tab: TabState, point: BrowserPoint, signal: AbortSignal | undefined): Promise<BrowserPoint> {
+    const mapped = this.imagePointInViewport(request, tab, point)
+    await this.assertImagePointScroll(request, tab, signal)
+    return mapped
+  }
+
+  /**
+   * An image point is where the screenshot showed it only while the page is scrolled as it was when
+   * that picture was taken: a page that scrolled since (by itself, or by a wheel) refuses it.
+   */
+  private async assertImagePointScroll(request: BrowserActionRequest, tab: TabState, signal: AbortSignal | undefined): Promise<void> {
+    const captured = this.observations.get(request.observationId)?.captureScroll
+    if (!captured) fail('stale_observation', 'The page was scrolling while its screenshot was taken; take a new screenshot before using image points')
+    const now = await readViewportScroll(this.requireChrome().cdp, tab.cdpSessionId, signal)
+    if (!sameScroll(now, captured)) fail('stale_observation', 'The page scrolled since its screenshot; take a new screenshot before using image points')
+  }
+
+  /**
+   * Checks, just before input is sent (after the agent cursor's glide), that each image point still
+   * lands where it did: the page is scrolled as in the screenshot, and the element found there is
+   * still the one hit at the point.
+   */
+  private async recheckImagePoints(request: BrowserActionRequest, tab: TabState, target: ActionableTarget | { from: ActionableTarget; to: ActionableTarget } | undefined, signal: AbortSignal): Promise<void> {
+    const action = request.action
+    const pairs: Array<[BrowserTarget | undefined, ActionableTarget | undefined]> = action.type === 'drag'
+      ? [[action.from, target && 'from' in target ? target.from : undefined], [action.to, target && 'from' in target ? target.to : undefined]]
+      : [['target' in action ? action.target : undefined, target && !('from' in target) ? target : undefined]]
+    const resolved = pairs.filter(([asked, found]) => asked?.kind === 'image-point' && found).map(([, found]) => found!)
+    if (!resolved.length) return
+    await this.assertImagePointScroll(request, tab, signal)
+    for (const found of resolved) if (found.objectId) await this.assertHitAt(found.cdpSessionId, found.objectId, found.framePoint ?? found.point, signal)
+  }
+
+  /**
+   * Refuses a target that is no longer what the point hits in its frame (an overlay came over it, or it
+   * moved). `point` is in the viewport of the target's own frame, as `prepareActionableTarget` checks it.
+   */
+  private async assertHitAt(sessionId: string, objectId: string, point: BrowserPoint, signal: AbortSignal | undefined): Promise<void> {
+    const hit = await this.requireChrome().cdp.send<{ result?: { value?: { ok?: boolean } } }>('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: TRUSTED_HIT,
+      arguments: [{ value: point.x }, { value: point.y }],
+      returnByValue: true
+    }, { sessionId, signal })
+    if (!hit.result?.value?.ok) fail('not_actionable', 'Image point is intercepted by an overlay')
+  }
+
+  /**
+   * The element at a point of a session's root viewport, and the frame it is in. Chromium looks the
+   * point up through that session's same-process frames too, so the element may be in one of them. It
+   * looks a point up in whole CSS pixels, so a half pixel (an odd screenshot pixel at a pixel ratio of
+   * 2) is rounded here, and the caller hit-tests the point itself before acting. Only Chromium's answer
+   * that nothing is there is the point's fault.
+   */
+  private async nodeAtPoint(sessionId: string, point: { x: number; y: number }, signal: AbortSignal | undefined): Promise<{ backendNodeId: number; frameId?: string }> {
+    let located: { backendNodeId?: number; frameId?: string }
+    try {
+      located = await this.requireChrome().cdp.send<{ backendNodeId?: number; frameId?: string }>('DOM.getNodeForLocation', { x: Math.round(point.x), y: Math.round(point.y), includeUserAgentShadowDOM: false }, { sessionId, signal })
+    } catch (error) {
+      if (isNoNodeAtLocation(error)) fail('not_actionable', 'No actionable DOM target exists at the image point')
+      throw error
+    }
+    if (!located.backendNodeId) fail('not_actionable', 'No actionable DOM target exists at the image point')
+    return { backendNodeId: located.backendNodeId, ...(located.frameId ? { frameId: located.frameId } : {}) }
+  }
+
+  /**
+   * A point of a session's root viewport (`rootPoint`) in the viewport of the frame of that session an
+   * element was found in (`frameId`): that frame's root as is, a same-process frame inside it through
+   * the content box of the `<iframe>` showing it. Chromium gives every box of a session in its root
+   * viewport, whatever frame of it the box is in, so the `<iframe>`'s box as drawn carries every
+   * transform and scroll between them.
+   */
+  private async pointInSessionFrame(sessionId: string, rootFrameId: string, frameId: string | undefined, rootPoint: BrowserPoint, signal: AbortSignal | undefined): Promise<{ frameId?: string; point: BrowserPoint }> {
+    if (!frameId || frameId === rootFrameId) return { point: rootPoint }
+    const cdp = this.requireChrome().cdp
+    const tree = await cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId, signal }).catch((error: unknown) => {
+      if (error && typeof error === 'object' && 'cdpCode' in error) return undefined
+      throw error
+    })
+    if (tree?.frameTree?.frame?.id === frameId) return { frameId, point: rootPoint }
+    const owner = await cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId }, { sessionId, signal }).catch((error: unknown) => {
+      if (error && typeof error === 'object' && 'cdpCode' in error) return undefined
+      throw error
+    })
+    if (!owner?.backendNodeId) fail('not_actionable', 'The frame at the image point could not be found in its page; observe again')
+    const inside = pointInFrame(await this.frameContentQuad(sessionId, owner.backendNodeId, signal), await this.frameViewportSize(sessionId, frameId, signal), rootPoint)
+    if (inside.kind === 'outside') fail('not_actionable', 'The image point is on the edge of a frame; take a new screenshot or act on it by ref')
+    return { frameId, point: inside.point }
+  }
+
+  /**
+   * The element at a tab's viewport point, in the innermost frame there. An `<iframe>` the point falls
+   * on is entered only when the attached frame it shows is known by its exact id, and the point is
+   * carried into that frame through the `<iframe>`'s content box (scaled or rotated as it is drawn).
+   * An element Chromium finds inside a same-process frame (a same-site overlay) is hit-tested at that
+   * frame's own point; an `<iframe>` whose frame cannot be matched is refused, so input never reaches
+   * a frame behind it.
+   */
+  private async elementAtPoint(tab: TabState, mapped: BrowserPoint, signal: AbortSignal | undefined): Promise<{ sessionId: string; frameId: string; point: BrowserPoint; backendNodeId: number }> {
+    // `rootPoint` is in the session's root viewport (where elements are looked up and boxes given);
+    // `point` is in the viewport of the frame the element was found in (where it is hit-tested).
+    let at = { sessionId: tab.cdpSessionId, frameId: tab.frameId, rootPoint: mapped, point: mapped }
+    /** Looks the element up at `at.rootPoint` (`at.frameId` is the session's root frame), and carries `at.point` into the same-process frame it is in. */
+    const locate = async () => {
+      const located = await this.nodeAtPoint(at.sessionId, at.rootPoint, signal)
+      const local = await this.pointInSessionFrame(at.sessionId, at.frameId, located.frameId, at.rootPoint, signal)
+      at = { ...at, frameId: local.frameId ?? at.frameId, point: local.point }
+      return located.backendNodeId
+    }
+    let backendNodeId = await locate()
+    const entered = new Set<string>([tab.cdpSessionId])
+    for (let depth = 0; depth < MAX_IMAGE_POINT_FRAME_DEPTH; depth += 1) {
+      const content = await this.contentFrameOf(at.sessionId, backendNodeId, signal)
+      if (!content) break
+      const attached = this.framesOf(tab).filter((frame) => !entered.has(frame.sessionId))
+      const step = frameStepAt(content, attached, await this.inProcessFrameIds(at.sessionId, signal))
+      if (step.kind === 'stay') break
+      if (step.kind === 'refuse') fail('not_actionable', 'The image point is on a frame from another site that could not be matched to its page; observe again, or act on it by ref')
+      const next = step.frame
+      await this.frameEnables.get(next.sessionId)?.catch(() => undefined)
+      if (!this.frames.has(next.sessionId)) fail('not_actionable', 'The frame at the image point is gone; observe again')
+      // The `<iframe>`'s box is in its session's root viewport, even inside a same-process frame there.
+      const inside = pointInFrame(await this.frameContentQuad(at.sessionId, backendNodeId, signal), await this.frameViewportSize(next.sessionId, next.frameId, signal), at.rootPoint)
+      // On the `<iframe>`'s own border or padding: that element is what the point is on.
+      if (inside.kind === 'outside') break
+      entered.add(next.sessionId)
+      at = { sessionId: next.sessionId, frameId: next.frameId, rootPoint: inside.point, point: inside.point }
+      backendNodeId = await locate()
+    }
+    return { sessionId: at.sessionId, frameId: at.frameId, point: at.point, backendNodeId }
+  }
+
+  /** The content box of an `<iframe>` element, as drawn (after transforms), in its session's root viewport. */
+  private async frameContentQuad(sessionId: string, backendNodeId: number, signal: AbortSignal | undefined): Promise<number[]> {
+    // Chromium's refusal (no box: not laid out, or gone) is the point's fault; a closed pipe or a cancel is not.
+    const model = await this.requireChrome().cdp.send<{ model?: { content?: number[] } }>('DOM.getBoxModel', { backendNodeId }, { sessionId, signal }).catch((error: unknown) => {
+      if (error && typeof error === 'object' && 'cdpCode' in error) return undefined
+      throw error
+    })
+    const quad = model?.model?.content
+    if (!quad || quad.length < 8) fail('invalid_geometry', 'The frame at the image point has no box to map the point through')
+    return quad
+  }
+
+  /** A frame's own viewport size in its CSS pixels, read in a world of its own (the page's scripts cannot change what it reads). */
+  private async frameViewportSize(sessionId: string, frameId: string, signal: AbortSignal | undefined): Promise<{ width: number; height: number }> {
+    const cdp = this.requireChrome().cdp
+    try {
+      const world = await cdp.send<{ executionContextId?: number }>('Page.createIsolatedWorld', { frameId, worldName: 'mousse-frame-size', grantUniveralAccess: false }, { sessionId, signal })
+      if (!world.executionContextId) fail('invalid_geometry', 'The frame at the image point could not be measured')
+      const read = await cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', { contextId: world.executionContextId, expression: '[innerWidth, innerHeight]', returnByValue: true }, { sessionId, signal })
+      const value = read.result?.value
+      if (Array.isArray(value) && typeof value[0] === 'number' && typeof value[1] === 'number' && value[0] > 0 && value[1] > 0) return { width: value[0], height: value[1] }
+    } catch (error) {
+      if (!(error && typeof error === 'object' && 'cdpCode' in error)) throw error
+    }
+    fail('invalid_geometry', 'The frame at the image point could not be measured')
+  }
+
+  /** The frames a session's own process holds (its frame tree lists no frame of another process); undefined when they could not be listed. */
+  private async inProcessFrameIds(sessionId: string, signal: AbortSignal | undefined): Promise<Set<string> | undefined> {
+    try {
+      const ids = new Set<string>()
+      const tree = await this.requireChrome().cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId, signal })
+      const visit = (node: FrameTreeNode | undefined) => {
+        if (node?.frame?.id) ids.add(node.frame.id)
+        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) visit(child)
+      }
+      visit(tree.frameTree)
+      return ids
+    } catch (error) {
+      if (!(error && typeof error === 'object' && 'cdpCode' in error)) throw error
+      return undefined
+    }
+  }
+
+  /** The frame an `<iframe>` (or `<frame>`) element shows, or undefined for any other element. */
+  private async contentFrameOf(sessionId: string, backendNodeId: number, signal: AbortSignal | undefined): Promise<string | undefined> {
+    try {
+      const described = await this.requireChrome().cdp.send<{ node?: { nodeName?: string; frameId?: string; contentDocument?: { frameId?: string } } }>('DOM.describeNode', { backendNodeId }, { sessionId, signal })
+      const nodeName = (described.node?.nodeName ?? '').toUpperCase()
+      return nodeName === 'IFRAME' || nodeName === 'FRAME' ? described.node?.frameId ?? described.node?.contentDocument?.frameId : undefined
+    } catch {
+      return undefined
+    }
   }
 
   private async resolveOneTarget(request: BrowserActionRequest, tab: TabState, target: BrowserTarget): Promise<ActionableTarget> {
     if (target.kind === 'image-point') {
-      const observation = this.observations.get(request.observationId)
-      if (!observation || !observation.screenshot || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId || observation.sizeSeq !== this.sizeSeq) fail('stale_observation', 'Image point geometry is stale')
-      const mapped = mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, target.point)
-      const located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: mapped.x, y: mapped.y, includeUserAgentShadowDOM: false }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
-      if (!located.backendNodeId) fail('not_actionable', 'No DOM target exists at the image point')
-      const prepared = await prepareActionableTarget(this.requireChrome().cdp, tab.cdpSessionId, {
-        backendNodeId: located.backendNodeId, frameRef: 'frame_' + tab.frameId, cdpSessionId: tab.cdpSessionId, frameId: tab.frameId, fingerprint: 'image-point'
-      }, this.inFlight?.abort.signal)
-      const hit = await this.requireChrome().cdp.send<{ result?: { value?: { ok?: boolean } } }>('Runtime.callFunctionOn', {
-        objectId: prepared.objectId,
-        functionDeclaration: 'function(x, y) { const hit = document.elementFromPoint(x, y); return { ok: this === hit || this.contains(hit) }; }',
-        arguments: [{ value: mapped.x }, { value: mapped.y }],
-        returnByValue: true
-      }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
-      if (!hit.result?.value?.ok) fail('not_actionable', 'Image point is intercepted by an overlay')
-      return { ...prepared, point: mapped }
+      const signal = this.inFlight?.abort.signal
+      const mapped = await this.imagePointNow(request, tab, target.point, signal)
+      const at = await this.elementAtPoint(tab, mapped, signal)
+      // Made ready and hit-tested at the point itself: a tall element's middle may be off screen.
+      const prepared = await prepareActionableTarget(this.requireChrome().cdp, at.sessionId, {
+        backendNodeId: at.backendNodeId, frameRef: 'frame_' + at.frameId, cdpSessionId: at.sessionId, frameId: at.frameId, fingerprint: 'image-point'
+      }, signal, { point: at.point })
+      // Checked at the point as asked, not the whole pixel it was looked up at.
+      await this.assertHitAt(at.sessionId, prepared.objectId, at.point, signal)
+      // Pointer input goes to the tab at the point the screenshot showed: Chromium carries it into the
+      // frame there. The element is hit-tested again, before input, at its own frame's point.
+      return { ...prepared, point: mapped, pointerSessionId: tab.cdpSessionId, framePoint: at.point }
     }
     if (!this.refs.hasObservation(request.observationId)) fail('stale_observation', 'Observation is not in the reference store')
     const identity: ReferenceIdentity = {
