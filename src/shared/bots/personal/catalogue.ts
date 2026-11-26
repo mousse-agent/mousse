@@ -67,7 +67,7 @@ const BROWSER_GUIDANCE = [
   "Your own browser, apart from the owner's tabs: open pages, click, type and read them. Use it when reading a page with web_fetch is not enough. The owner can watch it and take it over from your message.",
   'A page that is still loading is no failure: carry on with what is there, or wait for it. A cookie banner you may dismiss.',
   'You have no sign-ins of your own: when a page needs one, ask your owner to sign in (they can take over your browser), and it stays signed in for you. When a page shows a human check or a consent wall a person can get past, ask your owner to take over your browser and do it; don\'t retry it or work around it yourself. When a site refused your browser, don\'t retry it: say so in your report, and carry on with the rest.',
-  'browser_screenshot saves the picture in your files folder and shows it to your owner under your next message by itself: never save it again under a name of your own.',
+  'browser_screenshot saves the picture in your files folder and shows it to your owner by itself, under your next message or with the question you ask them; its result says where, or that it was not kept. Save another copy only when your owner asks for one by name.',
   'When a page needs your owner (to take it over, to check it before you submit, or for details you don\'t have), ask them with ask_owner when you have it: your work waits with the page open and carries on with their answer (a tap, or their own words with Other…).'
 ].join('\n')
 
