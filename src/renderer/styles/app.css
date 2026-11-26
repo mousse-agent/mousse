@@ -1508,12 +1508,15 @@ html[data-chat-width='full'] .chat {
   text-decoration: underline;
 }
 
+/* Pinned to the bottom of the scrolling list, so a long list never hides it. */
 .composer-mention-footer {
+  position: sticky;
+  bottom: calc(-1 * var(--ui-menu-pad, 4px));
   padding: 6px 8px 4px;
-  color: var(--text-secondary);
+  background-color: var(--ui-raised, var(--floating-surface));
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
   font-size: 11px;
   line-height: 1.4;
-  opacity: 0.8;
 }
 
 .composer-footer {
