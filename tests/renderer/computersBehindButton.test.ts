@@ -16,7 +16,8 @@ const { DownloadsIndicator } = await import('../../src/renderer/components/downl
 const { applyUpdateState, downloadsActions, receiveComputers, resetDownloadsStore, subscribeToDownloads, summarizeDownloads, useDownloadsStore } =
   await import('../../src/renderer/stores/downloadsStore')
 const { useUpdateStore } = await import('../../src/renderer/stores/updateStore')
-const { useComputersStore, NO_COMPUTERS, COMPUTERS_FIRST_READ_MS } = await import('../../src/renderer/lib/computers')
+const { useComputersStore, useComputers, NO_COMPUTERS, COMPUTERS_FIRST_READ_MS } = await import('../../src/renderer/lib/computers')
+const { ROLLOUT_FIRST_READ_MS } = await import('../../src/renderer/lib/updateRollout')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 type Device = import('../../src/renderer/lib/netDevices').Device
 
@@ -142,6 +143,26 @@ describe('the update button and the computers behind this one', () => {
     expect(computersRow()?.label).toBe('2 computers behind')
   })
 
+  it('a view showing other computers (a warm start’s rows) reads nothing before the profile is bound', async () => {
+    useAppStore.setState({ profileReady: false })
+    const request = vi.fn(async (method: string) => (method === 'net.status' ? { enabled: false } : undefined))
+    ;(window as unknown as { mousse: unknown }).mousse = { platformRequest: { request } }
+    function View() {
+      useComputers(true)
+      return null
+    }
+    try {
+      act(() => root.render(createElement(View)))
+      await act(async () => {})
+      expect(request).not.toHaveBeenCalled()
+      await act(async () => { useAppStore.setState({ profileReady: true }) })
+      expect(request).toHaveBeenCalledWith('net.status', {})
+    } finally {
+      act(() => root.render(createElement('div')))
+      useAppStore.setState({ profileReady: false })
+    }
+  })
+
   it('finds the computers already connected when the window opened, after it is idle once the profile is bound, and only the profile’s own', async () => {
     vi.useFakeTimers()
     try {
@@ -152,16 +173,36 @@ describe('the update button and the computers behind this one', () => {
       const request = vi.fn(async (method: string) =>
         method === 'netEngine.status' ? { on: true } : method === 'bridge.nodes' ? { nodes: nodes() } : { enabled: false }
       )
-      ;(window as unknown as { mousse: unknown }).mousse = { platformRequest: { request } }
+      let netChanged = () => {}
+      let rolloutChanged = (_change: { profileId?: string }) => {}
+      ;(window as unknown as { mousse: unknown }).mousse = {
+        platformRequest: { request },
+        net: { onUpdated: (listener: () => void) => { netChanged = listener; return () => {} } },
+        updates: {
+          onState: () => () => {},
+          getState: async () => useUpdateStore.getState(),
+          onRolloutChanged: (listener: typeof rolloutChanged) => { rolloutChanged = listener; return () => {} }
+        }
+      }
+      const reads = (method: string) => request.mock.calls.filter(([called]) => called === method).length
       subscribeToDownloads()
-      await vi.advanceTimersByTimeAsync(COMPUTERS_FIRST_READ_MS)
+      // Changes announced before the binding read nothing either.
+      netChanged()
+      rolloutChanged({})
+      await vi.advanceTimersByTimeAsync(Math.max(COMPUTERS_FIRST_READ_MS, ROLLOUT_FIRST_READ_MS))
       // Nothing is read before the binding, however long it takes.
       expect(request).not.toHaveBeenCalled()
       useAppStore.setState({ profileId: 'work', profileReady: true })
       await vi.advanceTimersByTimeAsync(0)
       // Nor as the bound window opens.
       expect(request).not.toHaveBeenCalled()
-      await vi.advanceTimersByTimeAsync(COMPUTERS_FIRST_READ_MS)
+      // A change before the window is idle reads at once, and is the first read: idle adds none.
+      netChanged()
+      rolloutChanged({})
+      await vi.advanceTimersByTimeAsync(0)
+      expect([reads('net.status'), reads('updates.rollout.get')]).toEqual([1, 1])
+      await vi.advanceTimersByTimeAsync(Math.max(COMPUTERS_FIRST_READ_MS, ROLLOUT_FIRST_READ_MS) * 3)
+      expect([reads('net.status'), reads('updates.rollout.get')]).toEqual([1, 1])
       expect(computersRow()?.label).toBe('1 computer behind')
       // Another profile: its own list, never the last one's.
       useAppStore.setState({ profileId: 'home' })

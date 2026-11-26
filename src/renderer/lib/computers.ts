@@ -196,7 +196,10 @@ export function followComputerChanges(): void {
     if (wait <= 0) read()
     else waiting = setTimeout(read, wait)
   }
-  readWhenIdleAfterBinding(refresh, COMPUTERS_FIRST_READ_MS)
+  // A change or a profile switch that read first already did the first read.
+  readWhenIdleAfterBinding(() => {
+    if (!last && !waiting) refresh()
+  }, COMPUTERS_FIRST_READ_MS)
   // Focus reads again only once other computers are known: networking's own changes found them.
   window.addEventListener?.('focus', () => {
     if (useComputersStore.getState().devices.some((device) => !device.self)) refresh()
@@ -216,11 +219,14 @@ export function followComputerChanges(): void {
 
 /**
  * The user's other computers, kept current while any view that uses them is mounted. A view with nothing
- * from another computer to show passes `enabled: false`, so a window of one computer never polls.
+ * from another computer to show passes `enabled: false`, so a window of one computer never polls. Nothing is read
+ * before the window's profile is bound (a warm start can show rows of other computers before it).
  */
 export function useComputers(enabled = true): ComputersState {
+  const bound = useAppStore((state) => state.profileReady)
+  const active = enabled && bound
   useEffect(() => {
-    if (!enabled) return
+    if (!active) return
     if (subscribers++ === 0) stop = start()
     return () => {
       if (--subscribers === 0) {
@@ -228,7 +234,7 @@ export function useComputers(enabled = true): ComputersState {
         stop = undefined
       }
     }
-  }, [enabled])
+  }, [active])
   return useComputersStore()
 }
 

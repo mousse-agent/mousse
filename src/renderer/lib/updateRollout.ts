@@ -32,7 +32,8 @@ export interface RolloutState {
 
 export const useRolloutStore = create<RolloutState>(() => ({ rollout: null }))
 
-const request = <T>(method: (typeof ROLLOUT_METHODS)[keyof typeof ROLLOUT_METHODS], params: unknown): Promise<T> =>
+// Async, so a window without the request bridge fails the read like any other error and the read in flight clears.
+const request = async <T>(method: (typeof ROLLOUT_METHODS)[keyof typeof ROLLOUT_METHODS], params: unknown): Promise<T> =>
   window.mousse.platformRequest.request<T>(method, params)
 
 /** The answer of a read or an action; a plan comes only with a read for a version, and is kept until the next one. */
@@ -43,6 +44,8 @@ function receive(answer: { rollout?: unknown; plan?: unknown }, target?: string)
 
 let reading: Promise<void> | undefined
 let wanted: string | undefined | null = null
+/** Whether this window has read the rollout yet: the first read after opening is not repeated. */
+let readOnce = false
 
 /** Reads the rollout again, and the plan for `target` when given; calls during a read share one more after it. */
 export function readRollout(target?: string): Promise<void> {
@@ -51,6 +54,7 @@ export function readRollout(target?: string): Promise<void> {
     return reading
   }
   const profile = useAppStore.getState().profileId
+  readOnce = true
   reading = (async () => {
     try {
       const answer = await request<{ rollout?: unknown; plan?: unknown }>(ROLLOUT_METHODS.get, target ? { version: target } : {})
@@ -165,7 +169,10 @@ export function followRollout(): void {
   following = true
   const read = () => void readRollout()
   // Nothing is read before the profile is bound; the first read after the binding catches up on changes before it.
-  readWhenIdleAfterBinding(read, ROLLOUT_FIRST_READ_MS)
+  readWhenIdleAfterBinding(() => {
+    // A change or a profile switch that read first already did the first read.
+    if (!readOnce) read()
+  }, ROLLOUT_FIRST_READ_MS)
   window.mousse.updates?.onRolloutChanged?.((change) => {
     if (!profileBound()) return
     if (!change.profileId || change.profileId === useAppStore.getState().profileId) void readRollout(useRolloutStore.getState().planFor)
@@ -179,5 +186,6 @@ export function followRollout(): void {
 
 /** Test hook. */
 export function resetRolloutStore(): void {
+  readOnce = false
   useRolloutStore.setState({ rollout: null, plan: undefined, planFor: undefined, error: undefined }, true)
 }
