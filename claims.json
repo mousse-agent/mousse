@@ -261,6 +261,18 @@
       "expiresAt": "2026-11-26T07:48:37.437Z"
     },
     {
+      "task": "thread-blank-until-scroll",
+      "session": "Animatrix-29e4c3",
+      "machine": "Animatrix",
+      "branch": "thread-blank-until-scroll",
+      "paths": [
+        "src/renderer/chat/components/agent-elements/virtual/end-follower.ts",
+        "src/renderer/chat/components/agent-elements/message-list.tsx"
+      ],
+      "claimedAt": "2026-11-26T09:31:29.445Z",
+      "expiresAt": "2026-11-26T11:31:29.445Z"
+    },
+    {
       "task": "title-models-every-provider",
       "session": "Animatrix-36f010",
       "machine": "Animatrix",
