@@ -59,7 +59,7 @@ export function appletDocument(
  const post=(type,payload)=>{try{const message=JSON.stringify({type,payload});if(message.length<=65536)log(${json(APPLET_EVENT_PREFIX)}+message)}catch{}};
  const send=(type,payload)=>{const now=clock();if(now-epoch>=1000){epoch=now;count=0}if(++count>30)return;post(type,payload)};
  const scrolls=(node,vertical,delta)=>{const style=styleOf(node),overflow=vertical?style.overflowY:style.overflowX,root=node===document.scrollingElement;if(root?/hidden|clip/.test(overflow):!/auto|scroll|overlay/.test(overflow))return 0;const max=vertical?node.scrollHeight-node.clientHeight:node.scrollWidth-node.clientWidth;if(max<1)return 0;const at=vertical?node.scrollTop:Math.abs(node.scrollLeft);if(delta<0?at>.5:at<max-.5)return 1;return (vertical?style.overscrollBehaviorY:style.overscrollBehaviorX)==='auto'?0:2};
- let wheelCount=0,wheelEpoch=-1e9,wheelCarry=0;const mac=/Mac/.test(navigator.platform);
+ let wheelCount=0,wheelEpoch=-1e9,wheelCarry=0;
  addEventListener('wheel',event=>{
   if(!event.isTrusted||event.defaultPrevented||event.ctrlKey)return;
   const scale=event.deltaMode===1?40:event.deltaMode===2?innerHeight:1,dy=event.deltaY*scale,dx=event.deltaX*scale;
@@ -67,7 +67,7 @@ export function appletDocument(
   let sideways=false;for(const node of event.composedPath()){if(!(node instanceof Element))continue;const own=scrolls(node,true,dy);if(own)return;if(dx&&!sideways&&scrolls(node,false,dx)===1)sideways=true}
   if(!sideways)event.preventDefault();
   wheelCarry=Math.max(-10000,Math.min(10000,wheelCarry+dy));const now=clock();if(now-wheelEpoch>=1000){wheelEpoch=now;wheelCount=0}if(++wheelCount>120)return;
-  post('wheel',{deltaY:Math.round(wheelCarry*100)/100,discrete:!mac&&(event.deltaMode!==0||event.wheelDeltaY!==0&&event.wheelDeltaY%120===0)});wheelCarry=0
+  post('wheel',{deltaY:Math.round(wheelCarry*100)/100,discrete:event.deltaMode!==0||event.wheelDeltaY!==0&&event.wheelDeltaY%120===0});wheelCarry=0
  },{passive:false});
  const appearanceTokens=${json(APPLET_APPEARANCE_TOKENS)},defaultAppearance=${json(DEFAULT_APPLET_APPEARANCE)};let currentAppearance;
  const applyAppearance=value=>{
