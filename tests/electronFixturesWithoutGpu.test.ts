@@ -344,16 +344,33 @@ function literalPath(node: ts.Expression): string | undefined {
 }
 
 /**
- * Every call a file hands the Electron binary to, with what it starts: the argument after the binary, or the first
- * element when that is an array of arguments. `target` is set when that is made of string literals only.
+ * An options argument whose `env` is written in place and sets `ELECTRON_RUN_AS_NODE: '1'` after every spread, so
+ * nothing can take it back: the binary then runs a script as plain Node, with no app, window or GPU.
  */
-function launchSites(source: string, fileName: string): Array<{ line: number; target?: string; text: string }> {
+function runsAsNode(node: ts.Expression): boolean {
+  const named = (property: ts.ObjectLiteralElementLike, name: string) =>
+    !ts.isSpreadAssignment(property) && (ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)) && property.name.text === name
+  const options = unwrapDown(node)
+  if (!ts.isObjectLiteralExpression(options)) return false
+  const env = options.properties.find((property) => named(property, 'env'))
+  const value = env && ts.isPropertyAssignment(env) ? unwrapDown(env.initializer) : undefined
+  if (!value || !ts.isObjectLiteralExpression(value)) return false
+  const flag = value.properties.findLast((property) => ts.isSpreadAssignment(property) || named(property, 'ELECTRON_RUN_AS_NODE'))
+  return Boolean(flag && ts.isPropertyAssignment(flag) && ts.isStringLiteralLike(flag.initializer) && flag.initializer.text === '1')
+}
+
+/**
+ * Every call a file hands the Electron binary to, with what it starts: the argument after the binary, or the first
+ * element when that is an array of arguments. `target` is set when that is made of string literals only; `asNode`
+ * when the call's options run the binary as plain Node (`runsAsNode`).
+ */
+function launchSites(source: string, fileName: string): Array<{ line: number; target?: string; text: string; asNode?: true }> {
   const file = parse(source, fileName)
   const binaries = new Set<string>()
   for (const statement of file.statements) {
     if (ts.isImportDeclaration(statement) && isElectronSpecifier(statement.moduleSpecifier) && statement.importClause?.name && !statement.importClause.isTypeOnly) binaries.add(statement.importClause.name.text)
   }
-  const sites: Array<{ line: number; target?: string; text: string }> = []
+  const sites: Array<{ line: number; target?: string; text: string; asNode?: true }> = []
   walk(file, (node) => {
     if (!ts.isCallExpression(node)) return
     const index = node.arguments.findIndex((argument) => { const inner = unwrapDown(argument); return ts.isIdentifier(inner) && binaries.has(inner.text) })
@@ -361,14 +378,19 @@ function launchSites(source: string, fileName: string): Array<{ line: number; ta
     const next = node.arguments[index + 1]
     const started = next && ts.isArrayLiteralExpression(unwrapDown(next)) ? (unwrapDown(next) as ts.ArrayLiteralExpression).elements[0] : next
     const target = started && !ts.isSpreadElement(started) ? literalPath(started) : undefined
-    sites.push({ line: lineOf(file, node), ...(target ? { target } : {}), text: started ? started.getText(file) : '(nothing)' })
+    const asNode = node.arguments.slice(index + 1).some(runsAsNode)
+    sites.push({ line: lineOf(file, node), ...(target ? { target } : {}), text: started ? started.getText(file) : '(nothing)', ...(asNode ? { asNode: true as const } : {}) })
   })
   return sites
 }
 
-/** Why the Electron launches in a file are not known to start a listed entry point; `audited` maps `file:line` of a computed launch to what it starts. */
+/**
+ * Why the Electron launches in a file are not known to start a listed entry point; `audited` maps `file:line` of a
+ * computed launch to what it starts. A launch that runs the binary as plain Node starts no Electron app.
+ */
 function launchProblems(source: string, fileName: string, audited: Record<string, { starts: string }>): string[] {
-  return launchSites(source, fileName).flatMap(({ line, target, text }) => {
+  return launchSites(source, fileName).flatMap(({ line, target, text, asNode }) => {
+    if (asNode) return []
     if (target !== undefined) return ENTRY_POINTS.includes(target) ? [] : [`${fileName}:${line} starts ${target}, which is not a listed entry point`]
     return audited[`${fileName}:${line}`] ? [] : [`${fileName}:${line} starts \`${text}\`, which is computed and not in COMPUTED_LAUNCHES`]
   })
@@ -554,6 +576,15 @@ describe('what a launch of the Electron binary starts', () => {
     expect(check(body)).toEqual([expect.stringMatching(/^t\.test\.ts:5 starts .join\(directory, 'main\.mjs'\)., which is computed and not in COMPUTED_LAUNCHES$/)])
     expect(check(body, { 't.test.ts:5': { starts: 'tests/fixtures/turn-window/main.ts' } })).toEqual([])
     expect(check(body, { 't.test.ts:4': { starts: 'tests/fixtures/turn-window/main.ts' } })).toHaveLength(1)
+  })
+
+  it('accepts a launch that runs the binary as plain Node, only when nothing in its env can take that back', () => {
+    const launch = (env: string) => check(`execFile(electron as unknown as string, [entry], { env: ${env}, windowsHide: true })`)
+    expect(launch("{ ...process.env, ELECTRON_RUN_AS_NODE: '1' }")).toEqual([])
+    expect(launch("{ ELECTRON_RUN_AS_NODE: '1', ...process.env }")).toHaveLength(1)
+    expect(launch("{ ...process.env, ELECTRON_RUN_AS_NODE: '0' }")).toHaveLength(1)
+    expect(launch("{ ...process.env, ELECTRON_RUN_AS_NODE: '1', ...more }")).toHaveLength(1)
+    expect(launch('nodeEnv')).toHaveLength(1)
   })
 })
 

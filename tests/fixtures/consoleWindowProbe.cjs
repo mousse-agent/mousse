@@ -1,8 +1,8 @@
 // A console program (run by node.exe) that reports whether it has a visible console window, then starts the same
 // probe as a child with ordinary defaults, as Git starts a hook, and reports that one too.
-// argv: koffi path, then "leaf" for the child.
+// argv: "leaf" for the child.
 const { spawn } = require('node:child_process')
-const ffi = require(process.argv[2])
+const ffi = require('koffi')
 const kernel = ffi.load('kernel32.dll')
 const user = ffi.load('user32.dll')
 const consoleWindow = kernel.func('void * __stdcall GetConsoleWindow()')
@@ -18,10 +18,10 @@ function window() {
 }
 
 const self = window()
-if (process.argv[3] === 'leaf') {
+if (process.argv[2] === 'leaf') {
   process.stdout.write(JSON.stringify(self))
 } else {
-  const child = spawn(process.execPath, [__filename, process.argv[2], 'leaf'])
+  const child = spawn(process.execPath, [__filename, 'leaf'])
   let out = ''
   child.stdout.on('data', (data) => { out += data })
   child.stderr.on('data', (data) => process.stderr.write(data))
