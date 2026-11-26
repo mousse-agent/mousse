@@ -4,7 +4,7 @@ import { createPortal, flushSync } from 'react-dom'
 import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, Folder, FolderOpen, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pin, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, Folder, FolderOpen, Layers, ListTree, Loader2, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 import { useThreadMessageMatches } from '../hooks/useThreadMessageMatches'
@@ -1640,8 +1640,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   /**
    * A group row carries its threads' state: how many finished that nobody has looked at yet, as a muted count after
-   * the name (the row then stays bright, threads-sidebar.css); and the worst state above that as a dot, with how many
-   * need the person while it is closed.
+   * the name (the row then stays bright, threads-sidebar.css); and, while it is closed, the worst state above that in
+   * the chevron's slot: a spinner while threads work, how many need the person, or a pause mark. Hover and focus give
+   * the slot back to the chevron; an open group shows its threads' own marks instead.
    */
   const renderGroupStatus = (groupThreads: Thread[], expanded: boolean) => {
     const levels = groupThreads.map((thread) => attentionOf(thread.id))
@@ -1652,20 +1653,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const title = attention === 'quiet' ? '' : attention === 'needs-me' ? needsMeLabel(needsMeCount) : PROJECT_ATTENTION_TITLE[attention]
     return (
       <>
+        {/* Right after the name (the name's :has(+ …) rule); the mark is placed in the chevron's slot, so its order is free. */}
         {finishedCount > 0 && (
           <span className="threads-sidebar-project-finished" role="img" aria-label={finishedLabel} title={finishedLabel}>{finishedCount}</span>
         )}
-        {attention !== 'quiet' && (
+        {!expanded && attention !== 'quiet' && (
           <span
-            className={`threads-sidebar-project-status threads-sidebar-project-status--${attention}`}
+            className={`threads-sidebar-project-mark threads-sidebar-project-status--${attention}`}
             role="img"
             aria-label={title}
-            title={title}
           >
-            <span className="threads-sidebar-status-dot" aria-hidden="true" />
-            {!expanded && needsMeCount > 0 && (
-              <span className="threads-sidebar-project-count" aria-hidden="true">{needsMeCount}</span>
-            )}
+            {attention === 'working' ? (
+              <Loader2 size={12} strokeWidth={2.2} className={sidebarAnimations ? 'icon-spin' : undefined} aria-hidden="true" />
+            ) : attention === 'paused' ? (
+              <Pause size={11} strokeWidth={2.2} aria-hidden="true" />
+            ) : needsMeCount}
           </span>
         )}
       </>
@@ -1987,18 +1989,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       {renderGroupStatus(projectThreads, expanded)}
 
-                      <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
-
-                      {/* A project this computer has too: the other computers that hold it are marked by icon. */}
-                      {alsoOn.map((node) => (
-                        <ThreadComputerBadge
-                          key={node}
-                          thread={group.members.find((member) => member.node === node) ?? { node }}
-                          of="also"
-                          className="threads-sidebar-project-also"
-                        />
-                      ))}
-
                     </button>
 
                     {/* Its automations' runs that need the person, on this computer's projects in the group. */}
@@ -2017,6 +2007,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                     >
                       <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
                     </button>
+
+                    {/* The computers that hold it, after the "…" so that showing it on hover moves neither these nor
+                        New thread. A click here opens and closes the project, as on the rest of the row. */}
+                    <span className="threads-sidebar-project-computers" onClick={() => { if (!isRenaming) toggleProject(project.id) }} onContextMenu={(event) => openContextMenu(event, menuTarget)}>
+                      <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
+                      {/* A project this computer has too: the other computers that hold it are marked by icon. */}
+                      {alsoOn.map((node) => (
+                        <ThreadComputerBadge
+                          key={node}
+                          thread={group.members.find((member) => member.node === node) ?? { node }}
+                          of="also"
+                          className="threads-sidebar-project-also"
+                        />
+                      ))}
+                    </span>
 
                     <button
                       type="button"
