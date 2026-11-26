@@ -1,6 +1,8 @@
-import type { ReactNode } from 'react'
-import { File, Folder, Sparkles } from '../lib/icons'
+import type { ComponentType, ReactNode } from 'react'
+import { File, Folder, Link2, Settings, User } from '../lib/icons'
 import type { MentionItem } from '../../shared/composerCommands'
+import type { SkillDescriptor } from '../../shared/integrations'
+import { isManagedSource, sourceLabel } from './integrations/integrationUi'
 
 export interface SuggestionRow {
   key: string
@@ -21,7 +23,7 @@ interface ComposerSuggestionListProps {
   registerRow?: (index: number, element: HTMLButtonElement | null) => void
 }
 
-/** The listbox every composer picker (slash commands, `/skills`, `@` mentions) renders. */
+/** The listbox every composer picker (`/` commands and skills, `/skills`, `@` mentions, a bot's own commands) renders. */
 export function ComposerSuggestionList({
   rows,
   selected,
@@ -98,33 +100,110 @@ export function MarkedText({ segments }: { segments: PathSegment[] }) {
   )
 }
 
-/** One `@` picker row: a skill (with a badge) or a file or folder with its parent folder dimmed. */
-export function MentionRowContent({ item }: { item: MentionItem }) {
-  if (item.kind === 'skill') {
-    return (
-      <span className="composer-mention-row">
-        <Sparkles size={14} className="composer-mention-icon" />
-        <span className="composer-command-suggestion-name">{item.skill.name}</span>
-        <span className="composer-mention-badge">Skill</span>
-        <span className="composer-command-suggestion-description composer-mention-description">
-          {item.skill.description || item.skill.id}
-        </span>
-      </span>
-    )
+/** Marks the first case-insensitive occurrence of `query` in `text`. */
+export function markQuery(text: string, query: string): PathSegment[] {
+  const at = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1
+  if (at < 0) return text ? [{ text, match: false }] : []
+  const parts: PathSegment[] = [
+    { text: text.slice(0, at), match: false },
+    { text: text.slice(at, at + query.length), match: true },
+    { text: text.slice(at + query.length), match: false }
+  ]
+  return parts.filter((part) => part.text.length > 0)
+}
+
+type SuggestionTone = 'command' | 'project' | 'personal' | 'other-app' | 'file'
+
+interface SuggestionSource {
+  tone: SuggestionTone
+  /** Names the source in the icon's tooltip and accessible name ("Claude Code · project"). */
+  label: string
+}
+
+/** Where a skill comes from: Mousse's own project or personal skills, or a copy from another app. */
+export function skillSource(skill: Pick<SkillDescriptor, 'scope' | 'source' | 'managed'>): SuggestionSource {
+  const scope = skill.scope === 'project' ? 'project' : 'personal'
+  if (!skill.source || isManagedSource(skill.source, skill.managed)) {
+    return scope === 'project' ? { tone: 'project', label: 'Project' } : { tone: 'personal', label: 'Personal' }
   }
-  const { name, dir } = splitMentionPath(item.path, item.positions)
-  const Icon = item.kind === 'directory' ? Folder : File
+  return { tone: 'other-app', label: `${sourceLabel(skill.source)} · ${scope}` }
+}
+
+const TONE_ICONS: Record<SuggestionTone, ComponentType<{ size?: number; strokeWidth?: number }>> = {
+  command: Settings,
+  project: Folder,
+  personal: User,
+  'other-app': Link2,
+  file: File
+}
+
+/**
+ * One compact picker row: a 14px source icon, the name with its matched characters marked,
+ * and an optional one-line description under it.
+ */
+export function SuggestionRowContent({
+  source,
+  icon,
+  name,
+  description
+}: {
+  source: SuggestionSource
+  icon?: ComponentType<{ size?: number; strokeWidth?: number }>
+  name: ReactNode
+  description?: ReactNode
+}) {
+  const Icon = icon ?? TONE_ICONS[source.tone]
   return (
-    <span className="composer-mention-row">
-      <Icon size={14} className="composer-mention-icon" />
-      <span className="composer-command-suggestion-name composer-mention-name">
-        <MarkedText segments={name} />
+    <span className="composer-suggestion-row">
+      <span
+        className={`composer-suggestion-icon composer-suggestion-icon-${source.tone}`}
+        role="img"
+        aria-label={source.label}
+        title={source.label}
+      >
+        <Icon size={14} strokeWidth={1.8} />
       </span>
-      {dir.length > 0 ? (
-        <span className="composer-mention-path">
-          <MarkedText segments={dir} />
-        </span>
-      ) : null}
+      <span className="composer-suggestion-text">
+        <span className="composer-command-suggestion-name">{name}</span>
+        {description ? <span className="composer-command-suggestion-description">{description}</span> : null}
+      </span>
     </span>
+  )
+}
+
+/** A skill row in any picker, its source shown by the icon. */
+export function SkillRowContent({ skill, query = '' }: { skill: SkillDescriptor; query?: string }) {
+  return (
+    <SuggestionRowContent
+      source={skillSource(skill)}
+      name={<MarkedText segments={markQuery(skill.name, query)} />}
+      description={skill.description || skill.id}
+    />
+  )
+}
+
+/** A command row (`/clear`, a bot's own command): the gear icon. */
+export function CommandRowContent({ label, description, query = '' }: { label: string; description?: string; query?: string }) {
+  return (
+    <SuggestionRowContent
+      source={{ tone: 'command', label: 'Command' }}
+      name={<MarkedText segments={markQuery(label, query)} />}
+      description={description}
+    />
+  )
+}
+
+/** One `@` picker row: a skill, or a file or folder with its parent folder on the second line. */
+export function MentionRowContent({ item, query = '' }: { item: MentionItem<SkillDescriptor>; query?: string }) {
+  if (item.kind === 'skill') return <SkillRowContent skill={item.skill} query={query} />
+  const { name, dir } = splitMentionPath(item.path, item.positions)
+  const isFolder = item.kind === 'directory'
+  return (
+    <SuggestionRowContent
+      source={{ tone: 'file', label: isFolder ? 'Folder' : 'File' }}
+      icon={isFolder ? Folder : File}
+      name={<MarkedText segments={name} />}
+      description={dir.length > 0 ? <MarkedText segments={dir} /> : null}
+    />
   )
 }
