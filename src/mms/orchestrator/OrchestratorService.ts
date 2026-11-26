@@ -6191,23 +6191,48 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Archives (`archived`) or unarchives a thread: the app's Archive (`threads.archive`) and a bot's `thread_archive` both
    * come here. Archiving is a Stop: what the thread still runs ends with it, and its pull request watch ends as archived
-   * (`thread-archived`). Nothing is deleted.
+   * (`thread-archived`). Nothing is deleted. It answers once the thread and its side chats are marked archived and their
+   * Stops have begun (no new turn or message can start in between); the Stops end in the background, which can take
+   * long on a slow drive (#1901). `waitForStop` waits for them too.
    */
-  async archiveThread(threadId: string, archived: boolean): Promise<Thread> {
+  async archiveThread(threadId: string, archived: boolean, options: { waitForStop?: boolean } = {}): Promise<Thread> {
     if (!this.threadStore) throw new Error('Thread store is not ready.')
     const thread = this.threadStore.setThreadArchived(threadId, archived)
     if (archived) {
-      // The watch ends as archived, not as stopped.
-      this.emit('thread-archived', { threadId })
-      await this.stopThread(threadId, 'archived').catch((error: unknown) => {
-        console.warn('archiving a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
-      })
-      // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
-      this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
-      // Its side chats end with it, and stay ended when it comes back.
-      for (const side of sideChatsOf(threadId, this.threadStore.listAllThreads())) await this.archiveThread(side.id, true)
+      const stopped = this.endArchivedThreadWork(threadId)
+      if (options.waitForStop) await stopped
     }
     return thread
+  }
+
+  /**
+   * Starts the Stop of a thread just marked archived, and marks and stops its side chats the same way; they end with
+   * it, and stay ended when it comes back. Everything up to each Stop's first wait runs now; the promise settles when
+   * all of them have ended, and never rejects: a failure is logged.
+   */
+  private endArchivedThreadWork(threadId: string): Promise<void> {
+    // The watch ends as archived, not as stopped.
+    this.emit('thread-archived', { threadId })
+    const stopped = this.stopThread(threadId, 'archived')
+      .catch((error: unknown) => {
+        console.warn('archiving a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
+      })
+      .then(() => {
+        // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
+        this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
+      })
+    const sides = sideChatsOf(threadId, this.threadStore?.listAllThreads() ?? []).map((side) => {
+      try {
+        this.threadStore?.setThreadArchived(side.id, true)
+        return this.endArchivedThreadWork(side.id)
+      } catch (error) {
+        console.warn('archiving a thread could not archive its side chat', { threadId, sideChatId: side.id, error: error instanceof Error ? error.message : String(error) })
+        return Promise.resolve()
+      }
+    })
+    return Promise.all([stopped, ...sides]).then(() => undefined, (error: unknown) => {
+      console.warn('archiving a thread could not end its work', { threadId, error: error instanceof Error ? error.message : String(error) })
+    })
   }
 
   /**
