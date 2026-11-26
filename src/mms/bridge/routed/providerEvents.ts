@@ -26,6 +26,19 @@ const NAMES_OPERATION = new Set(['providers.instances.cancelInstall', 'providers
 
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
 
+/** The settings of an entry that name what runs there: its program, its arguments and its variables. */
+const LAUNCH_SETTINGS = ['binaryPath', 'args', 'env'] as const
+
+/**
+ * Whether a routed call sets what an agent runs with (`add` with a `config`, `configure` with a `patch`, naming its
+ * program, arguments or variables). That runs a command of the caller's choosing on the owner, so it needs the same
+ * permission as a terminal there.
+ */
+export function setsLaunchSettings(method: string, params: Record<string, unknown>): boolean {
+  const settings = method === 'providers.instances.add' ? params.config : method === 'providers.instances.configure' ? params.patch : undefined
+  return isRecord(settings) && LAUNCH_SETTINGS.some((key) => settings[key] !== undefined)
+}
+
 interface Timers {
   now(): number
   setTimeout(run: () => void, ms: number): unknown

@@ -35,7 +35,7 @@ import {
 } from '../../../shared/bridge/routed'
 import { WORKFLOW_RUN_CAPABILITY } from '../../../shared/workflowRunPlatform'
 import { isProjectShellAgentId } from '../../../shared/types'
-import type { ProviderEventRelay } from './providerEvents'
+import { setsLaunchSettings, type ProviderEventRelay } from './providerEvents'
 import {
   AppError,
   errorDiagnostic,
@@ -613,7 +613,15 @@ export class OwnerRoutes {
         params = rest
       }
       await this.assertOwned(method, row, params)
-      if (method.startsWith('providers.')) this.options.providerEvents?.admit(node, method, params)
+      if (method.startsWith('providers.')) {
+        this.options.providerEvents?.admit(node, method, params)
+        // An agent's program, arguments and variables decide what runs here: as much as a terminal, so the same switch.
+        if (setsLaunchSettings(method, params) && !this.options.policy.get(node).terminal)
+          throw new DomainRpcError(
+            'forbidden',
+            "Changing an agent's program, arguments or variables there needs terminal access to that computer."
+          )
+      }
       // Terminals: a device types into, resizes and stops only the ones it opened, takes a slot before it starts one,
       // and each numbered input is applied once.
       if (method === 'pty.create') slot = this.terminals.claim(node, thread!, String(params.agentId))

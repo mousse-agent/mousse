@@ -158,6 +158,34 @@ describe("Settings → Providers of another computer", () => {
     expect(t.events.some((event) => event.type === 'providers.remote' && JSON.stringify(event.data).includes(operationId))).toBe(false)
   }, 60_000)
 
+  it("changes what an agent runs with there only while that computer lets this one use its terminal", async () => {
+    const configured = vi.spyOn(owner().instances, 'configure').mockResolvedValue(snapshot('claude'))
+    const added = vi.spyOn(owner().instances, 'add').mockResolvedValue({ snapshot: snapshot('acp:x') } as never)
+    // Its name, telemetry and the like need no more than working there.
+    await t.dispatch('providers.instances.configure', { node: t.node, instanceId: 'claude', patch: { displayName: 'Work' } })
+    expect(configured).toHaveBeenCalledTimes(1)
+    // A program, arguments or variables run a command of this computer's choosing there.
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
+    for (const [method, params] of [
+      ['providers.instances.configure', { instanceId: 'claude', patch: { binaryPath: '/bin/sh' } }],
+      ['providers.instances.configure', { instanceId: 'claude', patch: { args: ['-c', 'echo'] } }],
+      ['providers.instances.configure', { instanceId: 'claude', patch: { env: { NODE_OPTIONS: '--require x' } } }],
+      ['providers.instances.add', { driver: 'acp', config: { displayName: 'Mine', binaryPath: '/bin/sh' } }]
+    ] as const) {
+      const refused = await t.refused(t.dispatch(method, { node: t.node, ...params }))
+      expect(refused.message).toMatch(/terminal/)
+    }
+    expect(configured).toHaveBeenCalledTimes(1)
+    expect(added).not.toHaveBeenCalled()
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: true })
+    try {
+      await t.dispatch('providers.instances.configure', { node: t.node, instanceId: 'claude', patch: { binaryPath: '/bin/sh' } })
+      expect(configured).toHaveBeenLastCalledWith('claude', { binaryPath: '/bin/sh' })
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
+    }
+  }, 60_000)
+
   it("tells this computer's windows when the other computer's providers change, so its page reads them again", async () => {
     const before = t.events.filter((event) => event.type === 'providers.remote' && event.data.type === 'providers.changed').length
     vi.spyOn(owner().instances, 'snapshots').mockResolvedValue([snapshot('claude')])
