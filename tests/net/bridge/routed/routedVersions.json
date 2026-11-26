@@ -149,6 +149,11 @@
     "digest": "deeb1b534049ea69",
     "security": "4ad9001de2441ed0"
   },
+  "folders.browse": {
+    "version": 1,
+    "digest": "aaf24dee1b2f1da7",
+    "security": "b7307faace33096b"
+  },
   "git.abortInProgress": {
     "version": 1,
     "digest": "52d0d38816c25d26",
@@ -773,6 +778,31 @@
     "version": 1,
     "digest": "5539dc1c60cdd943",
     "security": "2455464eaace895f"
+  },
+  "sourceControl.cancel": {
+    "version": 1,
+    "digest": "a4b10ec84d73c4fe",
+    "security": "f6de1278fc74cc34"
+  },
+  "sourceControl.clone": {
+    "version": 1,
+    "digest": "1f9db127db196a15",
+    "security": "d75e0295e334e6db"
+  },
+  "sourceControl.connect": {
+    "version": 1,
+    "digest": "a4b10ec84d73c4fe",
+    "security": "f6de1278fc74cc34"
+  },
+  "sourceControl.repositories": {
+    "version": 1,
+    "digest": "d0865932a35a7c91",
+    "security": "412a1de3adf5afef"
+  },
+  "sourceControl.status": {
+    "version": 1,
+    "digest": "0ef81b69315c1e70",
+    "security": "412a1de3adf5afef"
   },
   "subagents.list": {
     "version": 1,

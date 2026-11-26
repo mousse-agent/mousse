@@ -169,6 +169,8 @@ const TERMINAL_KILL: Phrase = phrase('Closed a terminal', 'closed a terminal', '
 const CREATE: Phrase = phrase('Created a thread', 'created a thread', 'created {n} threads')
 const PROJECT: Phrase = phrase('Changed a project', 'changed a project', 'changed projects {n} times')
 const PROJECT_OPEN: Phrase = phrase('Opened a folder as a project', 'opened a folder as a project', 'opened {n} folders as projects')
+const CLONE: Phrase = phrase('Cloned a repository as a project', 'cloned a repository as a project', 'cloned {n} repositories as projects')
+const SOURCE_CONTROL: Phrase = phrase('Connected GitHub', 'connected GitHub', 'connected GitHub {n} times')
 const AUTOMATION: Phrase = phrase('Changed an automation', 'changed an automation', 'changed automations {n} times')
 const AUTOMATION_RUN: Phrase = phrase('Ran an automation', 'ran an automation', 'ran automations {n} times')
 const PROVIDER: Phrase = phrase('Changed a provider', 'changed a provider', 'changed providers {n} times')
@@ -297,6 +299,9 @@ const PHRASES: Record<string, Phrase> = {
   'projects.pin': PROJECT,
   'projects.remove': PROJECT,
   'projects.open': PROJECT_OPEN,
+  'sourceControl.clone': CLONE,
+  'sourceControl.connect': SOURCE_CONTROL,
+  'sourceControl.cancel': SOURCE_CONTROL,
   'scheduled.create': AUTOMATION,
   'scheduled.update': AUTOMATION,
   'scheduled.pause': AUTOMATION,

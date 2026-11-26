@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { githubRepository, joinFolder, newProjectRows, parentFolder, projectFolders, repositoryMatches, sameFolder, usualParent, withExisting, withRepositories } from '../../src/renderer/components/newProjectLogic'
+import { browseRows, githubRepository, joinFolder, newProjectRows, parentFolder, projectFolders, repositoryMatches, sameFolder, usualParent, withExisting, withRepositories } from '../../src/renderer/components/newProjectLogic'
 
 describe('githubRepository', () => {
   it.each([
@@ -69,12 +69,15 @@ describe('newProjectRows', () => {
     expect(newProjectRows('notes', { remote: false, parent: null })[0]!.rows[0]).toMatchObject({ kind: 'create', destination: null })
   })
 
-  it('on another computer, offers its project folders and adds only a full path', () => {
-    const there = { remote: true as const, computer: 'Mac mini', folders: ['/Users/me/dev/', '/srv/'] }
-    expect(kinds('', there)).toEqual(['suggest', 'suggest'])
+  it('on another computer, offers a clone and its project folders, and adds only a full path', () => {
+    const there = { remote: true as const, computer: 'Mac mini', folders: ['/Users/me/dev/', '/srv/'], parent: '/Users/me/dev' }
+    expect(kinds('', there)).toEqual(['clone-hint', 'suggest', 'suggest'])
     expect(kinds('/Users/me/dev/api', there)).toEqual(['add-path'])
     expect(kinds('/Users/', there)).toEqual(['add-path', 'suggest'])
-    expect(kinds('acme/web-app', there)).toEqual([])
+    expect(newProjectRows('acme/web-app', there).flatMap((group) => group.rows)).toEqual([{ kind: 'clone', repository: 'acme/web-app', name: 'web-app', destination: '/Users/me/dev/web-app' }])
+    // With no folder known there, the clone asks for one.
+    expect(newProjectRows('acme/web-app', { ...there, parent: null }).flatMap((group) => group.rows)).toEqual([{ kind: 'clone', repository: 'acme/web-app', name: 'web-app', destination: null }])
+    expect(kinds('notes', there)).toEqual([])
   })
 })
 
@@ -133,8 +136,9 @@ describe("the account's repositories", () => {
     ['api', true, true, ['Your repositories: acme/api', 'New: create']],
     // A path never lists repositories.
     ['C:\\dev\\api', true, true, ['Add: add-path']],
-    // Not connected: Clone a repository… offers to connect instead; typing offers nothing more.
-    ['', true, false, ['Your repositories: connect-github', 'Start from: open-folder, clone-hint, new-hint']],
+    // Not connected: Clone a repository… and a typed repository offer to connect; a name offers nothing more.
+    ['', true, false, ['GitHub: connect-github', 'Start from: open-folder, clone-hint, new-hint']],
+    ['acme/api', false, false, ['Clone: acme/api', 'Or: create', 'GitHub: connect-github']],
     ['api', true, false, ['New: create']],
     // Not known yet: nothing about it.
     ['', true, null, ['Your repositories: acme/website, me/web, acme/api, me/dotfiles', 'Start from: open-folder, clone-hint, new-hint']]
@@ -151,5 +155,23 @@ describe("the account's repositories", () => {
       { kind: 'clone', repository: 'acme/website', name: 'website', destination: 'C:\\dev\\website', owned: { private: false } },
       { kind: 'existing', projectId: 'w', name: 'web', path: 'C:\\dev\\web' }
     ])
+  })
+})
+
+describe('browsing folders on another computer', () => {
+  const view = { path: '/Users/me', parent: '/Users', folders: [{ name: 'dev', path: '/Users/me/dev' }, { name: 'Documents', path: '/Users/me/Documents' }] }
+  const rows = (text: string, shown = view) => browseRows(shown, text, 'Mac mini').flatMap((group) => group.rows.map((row) => row.kind === 'browse-open' ? row.name : row.kind))
+
+  it.each([
+    ['', ['browse-use', '..', 'dev', 'Documents']],
+    // Typing filters the folders; the way up is not one of them.
+    ['doc', ['browse-use', 'Documents']]
+  ])('%j → %j', (text, expected) => {
+    expect(rows(text)).toEqual(expected)
+  })
+
+  it('starts from the places there, with nothing to use yet', () => {
+    expect(rows('', { path: null, parent: null, folders: [{ name: 'Home', path: '/Users/me' }] })).toEqual(['Home'])
+    expect(browseRows({ path: null, parent: null, folders: [] }, '', 'Mac mini')[0]!.label).toBe('Folders on Mac mini')
   })
 })

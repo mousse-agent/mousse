@@ -218,7 +218,9 @@ describe('the walker', () => {
       'git.commit', 'git.discard', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.suggestCommitMessage',
       'actions.undoLatest', 'actions.redo', 'actions.revertCode', 'workspace.restore',
       // These read the installation's skills, accounts and models (they hold files in its home open), and carry no ids.
-      'skills.list', 'skills.read', 'github.status', 'composer.options'
+      'skills.list', 'skills.read', 'github.status', 'composer.options',
+      // The computer's GitHub account (installs and signs in gh, clones) and its folders, by absolute path; no ids.
+      'sourceControl.status', 'sourceControl.repositories', 'sourceControl.connect', 'sourceControl.cancel', 'sourceControl.clone', 'folders.browse'
     ])
     // Settings → Providers of the owner: they read and change its provider entries (installs, sign-ins) and carry no ids.
     const providerRow = (method: string) => method.startsWith('providers.')

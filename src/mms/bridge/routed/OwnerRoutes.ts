@@ -623,6 +623,10 @@ export class OwnerRoutes {
             "Choosing, installing or removing the program an agent runs there needs terminal access to that computer."
           )
       }
+      // Connecting GitHub here installs GitHub CLI and signs it in to an account every agent here then uses: as much as a
+      // terminal, so the same switch.
+      if (method === 'sourceControl.connect' && !this.options.policy.get(node).terminal)
+        throw new DomainRpcError('forbidden', 'Connecting GitHub on that computer needs terminal access to it.')
       // Terminals: a device types into, resizes and stops only the ones it opened, takes a slot before it starts one,
       // and each numbered input is applied once.
       if (method === 'pty.create') slot = this.terminals.claim(node, thread!, String(params.agentId))

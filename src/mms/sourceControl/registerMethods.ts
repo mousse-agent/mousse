@@ -1,17 +1,35 @@
 import { isSourceControlProvider, type SourceControlProviderStatus, type SourceControlStatus, type SourceRepositoryList } from '../../shared/sourceControl'
 import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../protocol/domainRegistry'
 import type { HandlerContext } from '../protocol/handlers'
-import { userAction } from '../git/gitPolicy'
+import { userAction, type UserAction } from '../git/gitPolicy'
 import type { GitHubAccount } from '../git/GitHubAccount'
+import { cloneHere, validBranch, type CloneHereResult } from './cloneHere'
+import { browseFolders, type FolderBrowseResult } from '../files/folderBrowse'
 
 const provider = (value: unknown) => {
   if (!isSourceControlProvider(value)) throw new DomainRpcError('invalid_params', 'provider must be github')
   return value
 }
 
-/** Connect and Sign out install software and change the computer's sign-in: a person at a window of this computer asks for them. */
+/** Sign out changes the computer's sign-in: a person at a window of this computer asks for it. */
 function requireWindow(context: HandlerContext, what: string): void {
   if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', `${what} from Settings → Source control in a Mousse window on this computer.`)
+}
+
+/**
+ * Connect installs software and signs the computer in: a person at a window of this computer, or at a window of another
+ * of their computers that this one lets work here with terminal access (checked where routed calls arrive).
+ */
+function requirePerson(context: HandlerContext, what: string): UserAction {
+  const type = context.connection?.clientType
+  if (type === 'gui') return userAction('button', what)
+  if (type === 'bridge' && context.connection?.bridgeCaller) return userAction('device', what)
+  throw new DomainRpcError('forbidden', `${what} from Settings → Source control in a Mousse window.`)
+}
+
+const absolutePath = (value: unknown, what: string): string => {
+  if (typeof value !== 'string' || !value || value.length > 4096) throw new DomainRpcError('invalid_params', `${what} is required`)
+  return value
 }
 
 /**
@@ -36,8 +54,7 @@ export function registerSourceControlMethods(domains: DomainHandlerRegistry, git
     scope: 'profile',
     validate: (params) => ({ provider: provider(domainObject(params ?? {}, ['profileId', 'provider']).provider) }),
     handle: async (context: HandlerContext): Promise<SourceControlProviderStatus> => {
-      requireWindow(context, 'Connect GitHub')
-      return await github().connect(userAction('button', 'Connect GitHub'))
+      return await github().connect(requirePerson(context, 'Connect GitHub'))
     }
   })
   domains.register({
@@ -45,7 +62,7 @@ export function registerSourceControlMethods(domains: DomainHandlerRegistry, git
     scope: 'profile',
     validate: (params) => ({ provider: provider(domainObject(params ?? {}, ['profileId', 'provider']).provider) }),
     handle: async (context: HandlerContext): Promise<SourceControlProviderStatus> => {
-      requireWindow(context, 'Cancel connecting GitHub')
+      requirePerson(context, 'Cancel connecting GitHub')
       return await github().cancel()
     }
   })
@@ -66,5 +83,38 @@ export function registerSourceControlMethods(domains: DomainHandlerRegistry, git
       return { provider: provider(raw.provider), refresh: raw.refresh === true }
     },
     handle: async (_context, params): Promise<SourceRepositoryList> => await github().listRepositories(params.refresh)
+  })
+  domains.register({
+    method: 'sourceControl.clone',
+    scope: 'profile',
+    validate: (params) => {
+      const raw = domainObject(params ?? {}, ['profileId', 'provider', 'repository', 'path', 'branch'])
+      const repository = raw.repository
+      if (typeof repository !== 'string' || !repository || repository.length > 512) throw new DomainRpcError('invalid_params', 'repository is required')
+      const branch = validBranch(raw.branch)
+      return { provider: provider(raw.provider), repository, path: absolutePath(raw.path, 'path'), ...(branch ? { branch } : {}) }
+    },
+    handle: async (context: HandlerContext, params): Promise<CloneHereResult> => {
+      const userRequested = requirePerson(context, 'Clone repository')
+      const mms = context.mms
+      const result = await cloneHere(params, {
+        clone: (input, action) => mms.gitService.github.cloneRepository(input, action),
+        openProject: (path) => mms.projects.openProject(path),
+        homes: [mms.getProfileHomeDir(), mms.getHomeDir()]
+      }, userRequested)
+      context.emitEvent?.('projects.updated', { projects: mms.projects.listProjects() })
+      return result
+    }
+  })
+  // Where a clone from another computer goes: the folders of this computer, by name, to pick one by browsing.
+  domains.register({
+    method: 'folders.browse',
+    scope: 'profile',
+    validate: (params) => {
+      const raw = domainObject(params ?? {}, ['profileId', 'path'])
+      return { path: raw.path === undefined ? undefined : absolutePath(raw.path, 'path') }
+    },
+    handle: async (context: HandlerContext, params): Promise<FolderBrowseResult> =>
+      await browseFolders(params.path, { homes: [context.mms.getProfileHomeDir(), context.mms.getHomeDir()] })
   })
 }
