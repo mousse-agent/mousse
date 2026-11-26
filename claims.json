@@ -116,6 +116,19 @@
       "expiresAt": "2026-11-26T06:44:02.483Z"
     },
     {
+      "task": "no-console-windows",
+      "session": "Animatrix-4d1091",
+      "machine": "Animatrix",
+      "branch": "no-console-windows",
+      "paths": [
+        "src/mms/git/windowsGitProcess.ts",
+        "src/main/notifications/completionSound.ts",
+        "eslint.config.js"
+      ],
+      "claimedAt": "2026-11-26T08:08:22.887Z",
+      "expiresAt": "2026-11-26T10:08:22.887Z"
+    },
+    {
       "task": "paste-image-names",
       "session": "Avarnics-Mac-mini.local-43e057",
       "machine": "Avarnics-Mac-mini.local",
