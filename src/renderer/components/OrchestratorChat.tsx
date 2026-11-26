@@ -69,6 +69,7 @@ import { findSubagentEntry, isSubagentStartingOptimistically } from './subagentS
 import { useSubagents } from '../hooks/useSubagents'
 import { useBackgroundWork } from '../hooks/useBackgroundWork'
 import { BackgroundWorkRow } from './BackgroundWorkRow'
+import { NativeSubagentPage } from './NativeSubagentPage'
 import { isRunningSubagent, isWorkingSubagent } from '../../shared/subagents'
 import { stopAllSubagents } from './sideCard/lineageLogic'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -2347,6 +2348,7 @@ export function OrchestratorChat() {
         )}
       />
       </SecretRequestActionsContext.Provider>
+      <NativeSubagentPage threadId={activeThreadId} />
     </div>
   )
 }

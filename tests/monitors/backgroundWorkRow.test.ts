@@ -71,7 +71,7 @@ describe('Details', () => {
 
 describe('the row', () => {
   const render = (props: Partial<Parameters<typeof BackgroundWorkRowView>[0]> = {}) => renderToStaticMarkup(createElement(BackgroundWorkRowView, {
-    headline: 'Waiting on 1 monitor', lines: [{ key: 'mon-1', title: 'CI for PR 12', kind: 'Monitor', tooltip: 'gh pr checks 12 --watch', stop: () => undefined }],
+    headline: 'Waiting on 1 monitor', lines: [{ key: 'mon-1', title: 'CI for PR 12', kind: 'Monitor', mark: { kind: 'monitor' }, tooltip: 'gh pr checks 12 --watch', stop: () => undefined }],
     open: false, onToggle: () => undefined, onStopAll: () => undefined, ...props
   }))
 
@@ -80,7 +80,7 @@ describe('the row', () => {
     expect(closed).toContain('Waiting on 1 monitor')
     expect(closed).toContain(' · build: pass')
     expect(closed).toContain('>Details<')
-    expect(closed).toContain('>Stop<')
+    expect(closed).toContain('aria-label="Stop"')
     expect(closed).toContain('aria-expanded="false"')
     expect(closed).not.toContain('CI for PR 12')
     const open = render({ open: true })
