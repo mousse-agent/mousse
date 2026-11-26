@@ -163,7 +163,7 @@ describe('the delegation tools models are offered', () => {
           "required": [],
         },
         {
-          "description": "List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and the computer a remote one runs on.",
+          "description": "List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and for one on another computer, that computer and remoteThreadId, its thread there (the id thread_read and the other thread tools take).",
           "name": "list_subagents",
           "parameters": [],
           "required": [],

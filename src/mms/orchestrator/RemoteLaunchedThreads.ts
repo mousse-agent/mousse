@@ -124,6 +124,11 @@ export interface RemoteLaunchedThreadsDeps {
    * started here never reaches a further computer (one computer deep).
    */
   startedElsewhere?: (threadId: string) => boolean
+  /**
+   * The thread on `node` that a subagent of this computer runs in, when `threadId` is that subagent's id here (the
+   * childThreadId its parent knows it by). Undefined for any other id.
+   */
+  remoteSubagentThread?: (node: string, threadId: string) => string | undefined
   /** A note in the launcher's transcript; skipped for a launcher that is gone. */
   note: (launcherThreadId: string, text: string) => void
   now?: () => number
@@ -224,8 +229,11 @@ export class RemoteLaunchedThreads {
    *   change there that computer decides at each marked call; what it reads is what that computer shares with this one.
    */
   reach(callerThreadId: string, threadId: string): RemoteReach {
-    const ref = parseQualifiedId(threadId)
-    if (!ref) return { ok: false, code: 'invalid_thread_id', message: `${threadId} does not name a thread on another computer.` }
+    const parsed = parseQualifiedId(threadId)
+    if (!parsed) return { ok: false, code: 'invalid_thread_id', message: `${threadId} does not name a thread on another computer.` }
+    // A remote subagent named by its id here (its childThreadId with that computer's id) means its thread there.
+    const there = this.deps.remoteSubagentThread?.(parsed.node, parsed.id)
+    const ref = there ? { ...parsed, id: there } : parsed
     const port = this.deps.port()
     const self = port?.self?.()
     if (self && ref.node === self) return { ok: false, code: 'invalid_thread_id', message: `That thread is on this computer: use its own id, ${ref.id}.` }

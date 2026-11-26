@@ -157,7 +157,7 @@ import { acknowledgeRows } from '../run/terminal'
 import { cancelQueuedWakes, deliverAtToolBoundary, pendingWakeEffects, releaseToolBoundary, wakeThreads } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
-import { qualifyId } from '../../shared/threadRef'
+import { parseQualifiedId, qualifyId } from '../../shared/threadRef'
 import { RemoteThreadLaunches, type RemoteLaunchOutcome } from './RemoteThreadLaunches'
 import { RemoteLaunchedThreads, RemoteThreadRefusal } from './RemoteLaunchedThreads'
 import type { RoutedAgentMark } from '../../shared/bridge/routed'
@@ -3125,6 +3125,11 @@ export class OrchestratorService extends EventEmitter {
       related: (callerThreadId, launcherThreadId) => callerThreadId === launcherThreadId || lineageRelation(engine, callerThreadId, launcherThreadId) !== null,
       localOnly: (threadId) => this.isLocalOnly(threadId),
       startedElsewhere: (threadId) => this.startedFromAnotherDevice(threadId),
+      remoteSubagentThread: (node, threadId) => {
+        const runsOn = this.threadStore?.getThread(threadId)?.runsOn
+        const there = runsOn?.node === node && runsOn.ref ? parseQualifiedId(runsOn.ref) : undefined
+        return there?.node === node ? there.id : undefined
+      },
       note: (launcherThreadId, text) => {
         // A launcher that is gone (deleted, expired) gets no note: nothing would show it.
         if (!this.threadStore?.getThread(launcherThreadId) || this.isExpired(launcherThreadId)) return
@@ -9538,6 +9543,8 @@ export class OrchestratorService extends EventEmitter {
     return {
       name: computer.name,
       online: computer.online,
+      // Its thread there, for thread_read and the other thread tools.
+      ...(computer.ref ? { threadId: computer.ref } : {}),
       ...(binding?.waitingInput ? { waitingForAnswer: true, note: `It waits for an answer on ${computer.name}; the user answers it there.` } : {}),
       ...(binding?.lastError && binding.state !== 'done' ? { lastError: binding.lastError } : {}),
       ...(binding?.lastSeenAt ? { lastSeenAt: binding.lastSeenAt } : {})
@@ -9626,7 +9633,9 @@ export class OrchestratorService extends EventEmitter {
       role: row.role,
       provider: row.provider,
       model: row.model,
-      ...(row.computer ? { computer: row.computer.name, computerOnline: row.computer.online } : { access: this.childAccess(row.childThreadId) })
+      ...(row.computer
+        ? { computer: row.computer.name, computerOnline: row.computer.online, ...(row.computer.ref ? { remoteThreadId: row.computer.ref } : {}) }
+        : { access: this.childAccess(row.childThreadId) })
     }))
   }
 
