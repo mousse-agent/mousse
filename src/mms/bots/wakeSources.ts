@@ -7,7 +7,8 @@ import { wakeCheckNames, type BotWakeEvent, type BotWakeFired } from '../../shar
  * wires the reads; these only decide.
  */
 
-export type WakeThreadState = { state: 'running' | 'idle' | 'archived' | 'deleted' | 'unreachable'; title?: string; lastRun?: { status: string; endedAt?: string } }
+/** `runId`: the run it works on now, when running; a wake set then waits for that run's end. */
+export type WakeThreadState = { state: 'running' | 'idle' | 'archived' | 'deleted' | 'unreachable'; title?: string; runId?: string; lastRun?: { status: string; endedAt?: string } }
 
 export interface WakeThreadDeps {
   /** The thread's record; undefined when it is gone. */
@@ -20,16 +21,30 @@ export interface WakeThreadDeps {
   working(threadId: string): boolean
   /** The thread's newest run. */
   lastRun(threadId: string): { status: string; endedAt?: string | null } | undefined
+  /** The run the thread works on now (live, paused, or the first waiting its turn); undefined when none. */
+  currentRun?(threadId: string): string | undefined
+  /** One run of the thread, and whether it has ended; undefined when it is unknown. */
+  run?(threadId: string, runId: string): { status: string; endedAt?: string | null; ended: boolean } | undefined
 }
 
-/** A thread as a wake sees it. Deleted (or trashed) and archived come before reach: a gone thread is gone for anyone. */
-export function wakeThreadState(deps: WakeThreadDeps, from: string, threadId: string): WakeThreadState {
+/**
+ * A thread as a wake sees it. Deleted (or trashed) and archived come before reach: a gone thread is gone for anyone.
+ * `runId`: the run a wake waits for. Once it has ended the thread is done for that wake, with that run's outcome, though
+ * a later run works now; while it works the thread is running, though another run of it just ended.
+ */
+export function wakeThreadState(deps: WakeThreadDeps, from: string, threadId: string, runId?: string): WakeThreadState {
   const thread = deps.thread(threadId)
   if (!thread || deps.trashed(threadId)) return { state: 'deleted' }
   if (!deps.reachable(from, threadId)) return { state: 'unreachable' }
   const title = thread.name?.trim() || undefined
   if (thread.archivedAt) return { state: 'archived', ...(title ? { title } : {}) }
-  if (deps.working(threadId)) return { state: 'running', ...(title ? { title } : {}) }
+  const awaited = runId ? deps.run?.(threadId, runId) : undefined
+  if (awaited?.ended) return { state: 'idle', ...(title ? { title } : {}), lastRun: { status: awaited.status, ...(awaited.endedAt ? { endedAt: awaited.endedAt } : {}) } }
+  if (awaited) return { state: 'running', ...(title ? { title } : {}), runId: runId! }
+  if (deps.working(threadId)) {
+    const current = deps.currentRun?.(threadId)
+    return { state: 'running', ...(title ? { title } : {}), ...(current ? { runId: current } : {}) }
+  }
   const last = deps.lastRun(threadId)
   return { state: 'idle', ...(title ? { title } : {}), ...(last ? { lastRun: { status: last.status, ...(last.endedAt ? { endedAt: last.endedAt } : {}) } } : {}) }
 }
@@ -99,7 +114,7 @@ export function threadWakeEvent(event: Pick<ThreadWakeEvent, 'threadId'>, seen: 
   if (seen.state === 'unreachable') return { problem: `Thread ${event.threadId} is not available to you.` }
   if (seen.state === 'archived' || seen.state === 'deleted') return { problem: `Thread ${event.threadId} is ${seen.state}.` }
   if (seen.state === 'idle') return { problem: `Thread ${event.threadId} isn't working now${seen.lastRun ? `: its last turn ended ${seen.lastRun.status}${seen.lastRun.endedAt ? ` at ${clock(seen.lastRun.endedAt)}` : ''}` : ''}. Read it instead of waiting for it.` }
-  return { kind: 'thread', threadId: event.threadId, ...(seen.title ? { title: seen.title.slice(0, 120) } : {}) }
+  return { kind: 'thread', threadId: event.threadId, ...(seen.title ? { title: seen.title.slice(0, 120) } : {}), ...(seen.runId ? { runId: seen.runId } : {}) }
 }
 
 /**
@@ -148,10 +163,26 @@ export function pullRequestWakeHappened(event: PullRequestWakeEvent, read: WakeP
     const at = iso ? Date.parse(iso) : Number.NaN
     return Number.isFinite(at) ? { fired, at } : { fired }
   }
-  if (read.state === 'merged' && event.on && event.on !== 'merged') return timed({ kind: 'ended', reason: 'pr_merged' }, read.mergedAt)
-  if (read.state === 'merged') return timed({ kind: 'pr', repo: event.repo, number: event.number, state: 'merged', ...(read.title ? { title: read.title.slice(0, 120) } : {}) }, read.mergedAt)
-  if (read.state === 'closed') return timed({ kind: 'ended', reason: 'pr_closed' }, read.closedAt)
   const pr = { kind: 'pr' as const, repo: event.repo, number: event.number, ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
+  const ending = read.state === 'merged'
+    ? timed(event.on && event.on !== 'merged' ? { kind: 'ended', reason: 'pr_merged' } : { ...pr, state: 'merged' }, read.mergedAt)
+    : read.state === 'closed' ? timed({ kind: 'ended', reason: 'pr_closed' }, read.closedAt) : undefined
+  if (!event.on || event.on === 'merged') return ending
+  const awaited = awaitedPullRequestEvent(event, read, setAt, pr, timed)
+  // The checks or the review, and the merge or the close: the one that happened first by the host's own times wins, so a
+  // review submitted before a merge both seen in one read still counts. One with no time comes after one with a time.
+  if (!ending || !awaited) return ending ?? awaited
+  return (awaited.at ?? Number.POSITIVE_INFINITY) < (ending.at ?? Number.POSITIVE_INFINITY) ? awaited : ending
+}
+
+/** The finished checks of a checks wake, or the first review after its cutoff of a review wake, whatever the state. */
+function awaitedPullRequestEvent(
+  event: PullRequestWakeEvent,
+  read: WakePullRequestState,
+  setAt: string,
+  pr: { kind: 'pr'; repo: string; number: number; title?: string },
+  timed: (fired: BotWakeFired, iso: string | null | undefined) => { fired: BotWakeFired; at?: number }
+): { fired: BotWakeFired; at?: number } | undefined {
   if (event.on === 'checks') {
     const checks = read.checkRuns
     // Missing/unknown checks cannot prove completion; skipped checks are complete but neither passed nor failed.

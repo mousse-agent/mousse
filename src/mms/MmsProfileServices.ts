@@ -825,7 +825,7 @@ export class MmsProfileServices {
       },
       runs: () => this.runEngine,
       // What a bot's wakes wait on: one of the owner's threads it may see, and a pull request of one of their projects.
-      wakeThread: (from, threadId) => wakeThreadState(this.wakeThreadDeps((caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id))), from, threadId),
+      wakeThread: (from, threadId, runId) => wakeThreadState(this.wakeThreadDeps((caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id))), from, threadId, runId),
       pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works. Of
       // those done, only the ones not archived and updated in the last six hours ("Recent").
@@ -1068,10 +1068,10 @@ export class MmsProfileServices {
       file: join(this.homeDir, 'thread-wakes.json'),
       post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
       changed: (threadId) => this.orchestrator.backgroundWorkChanged(threadId),
-      threadState: (from, threadId) => wakeThreadState(this.wakeThreadDeps((caller, id) => {
+      threadState: (from, threadId, runId) => wakeThreadState(this.wakeThreadDeps((caller, id) => {
         if (this.orchestrator.mcpToolHost().botRole?.(id)) return false
         return !(this.threads.getThread(id)?.localOnly && !this.threads.getThread(caller)?.localOnly)
-      }), from, threadId),
+      }), from, threadId, runId),
       pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
       personLastWroteAt: (threadId) => [...this.orchestrator.visibleMessagesWithoutLoading(threadId)].reverse().find((message) => !message.hidden && isPersonMessage(message))?.timestamp,
       threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
@@ -1689,7 +1689,7 @@ export class MmsProfileServices {
     this.orchestrator.on('run-event', (event: ThreadEvent) => {
       const run = event.payload as RunRecord
       if (event.type !== 'run.status' || !TERMINAL_RUN_STATUSES.has(run.status)) return
-      const ended = { status: run.status, ...(run.completedAt ? { endedAt: run.completedAt } : {}) }
+      const ended = { status: run.status, runId: run.runId, ...(run.completedAt ? { endedAt: run.completedAt } : {}) }
       this.personalBots?.threadRunEnded(event.threadId, ended)
       this.threadWakes.threadRunEnded(event.threadId, ended)
     })
@@ -1788,6 +1788,11 @@ export class MmsProfileServices {
       lastRun: (id) => {
         const run = this.runEngine.listRuns(id, { limit: 1 })[0]
         return run ? { status: run.status, endedAt: run.completedAt } : undefined
+      },
+      currentRun: (id) => (this.runEngine.getActiveRun(id) ?? this.runEngine.store.getPausedRun(id) ?? this.runEngine.store.listQueuedRuns(id)[0])?.runId,
+      run: (id, runId) => {
+        const run = this.runEngine.store.getRun(runId)
+        return run && run.threadId === id ? { status: run.status, endedAt: run.completedAt, ended: TERMINAL_RUN_STATUSES.has(run.status) } : undefined
       }
     }
   }
