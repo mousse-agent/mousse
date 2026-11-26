@@ -15,6 +15,9 @@ it('provisions first-use task PTY in its owned checkout and fences other writers
     const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'first terminal', projectId: project.id })
     const directory = f.services.threads.getThreadDir(thread.id), manager = new ThreadWorkspaceManager(directory)
     expect(manager.load()).toBeUndefined()
+    // Work starts on the thread (provisioning its owned worktree checkout) before a task PTY takes the lease;
+    // a terminal opened on an empty chat with no work started stays in the project folder without taking a lease.
+    await f.rpc.request('files.write', { threadId: thread.id, path: 'workspace-seed.txt', content: 'seed\n' })
     const script = join(f.root, 'terminal-writer.cjs')
     writeFileSync(script, 'require("node:fs").writeFileSync("terminal-owned.txt", "terminal result\\n");setInterval(()=>{},1000)')
     const quote = (value: string) => process.platform === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, `'"'"'`)}'`

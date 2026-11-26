@@ -30,6 +30,12 @@ export type ClaudeSubscriptionMetrics = {
   quota?: PlanWindowUse[]
   /** Claude Code was asked to resume a session and ran the turn in another one (`ProviderMetrics.resumeLost`). */
   resumeLost?: true
+  /**
+   * How many model requests the turn's main conversation made: its distinct assistant messages (one response may arrive
+   * as several, one per content block, under the same message id). A subagent's are its own, as Claude Code's turn limit
+   * reads them. Absent: no response named its id.
+   */
+  requests?: number
 }
 export type ClaudeUsageBaseline = {
   sessionId: string
@@ -104,6 +110,8 @@ export class ClaudeMetricsCollector {
   private readonly requestStarts = new Map<string, number>()
   private cacheTtlMs?: number
   private realModelName?: string
+  /** The model requests of this turn, by the message id each response carries. */
+  private readonly requestIds = new Set<string>()
   constructor(resume?: string, baseline?: ClaudeUsageBaseline) {
     this.beginQuery(resume, baseline)
   }
@@ -113,6 +121,8 @@ export class ClaudeMetricsCollector {
     this.baseline = resume && baseline?.sessionId === resume ? structuredClone(baseline) : undefined
   }
   observe(message: SDKMessage): void {
+    if (message.type === 'assistant' && !message.parent_tool_use_id && typeof message.message?.id === 'string' && message.message.id)
+      this.requestIds.add(message.message.id)
     if (message.type === 'stream_event' && !message.parent_tool_use_id && message.event.type === 'message_start') {
       // Read defensively: a frame without its message only leaves the clock at the answer.
       const id = (message.event as { message?: { id?: unknown } }).message?.id
@@ -272,7 +282,8 @@ export class ClaudeMetricsCollector {
       ...(this.latestContext ? { context: { ...this.latestContext } } : {}),
       ...(this.lastRequestAt
         ? { promptCache: { at: this.lastRequestAt, ...(this.cacheTtlMs ? { ttlMs: this.cacheTtlMs } : {}) } }
-        : {})
+        : {}),
+      ...(this.requestIds.size ? { requests: this.requestIds.size } : {})
     }
   }
 }

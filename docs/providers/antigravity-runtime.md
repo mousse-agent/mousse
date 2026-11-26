@@ -55,6 +55,29 @@ profile share it. Mousse never reads the credentials itself.
 - The 1.1.1 server keeps its own sign-in in a file in the profile (`AGY_ACP_FORCE_FILE_STORAGE=1`).
   After a switch between the two runtimes, the card reads the sign-in again.
 
+## More than one account
+
+The first Antigravity entry is the one above, on this computer's `agy` sign-in. Each entry added after it
+("Antigravity 2", "Antigravity 3", ...) is another Google account with a home of its own:
+
+- Its settings, models and saved sessions are in `<profile>/harness/<id>/`, and `agy`'s folders, its Google
+  sign-in included, in `<profile>/harness/<id>/home` (`gemini-home`, `bot-gemini-home`). Every `agy` it starts
+  (turns, sign-in, the model list, the Usage page's `/usage`) gets `--gemini-dir` there and
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1`, set over the entry's own variables.
+- That variable makes `agy` keep the sign-in in a file under `--gemini-dir` instead of the system keyring.
+  Checked on agy 1.5.17 on Windows without signing in: with it, `agy acp` logged "Using file-based token storage
+  because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set" and a new home answered `Authentication required` while the
+  keyring held a sign-in; without it, the same new home signed in from the keyring
+  (`tests/live/antigravityAgy.test.ts`, `MOUSSE_LIVE_AGY=1`). A sign-in on an added entry was not run.
+- A home that never signed in but opens a session anyway is read as an `agy` that ignores the variable: the
+  entry refuses that sign-in and says to update `agy`, so it never runs on another entry's account.
+- Sign out deletes `gemini-home` and `bot-gemini-home` in the entry's home (the sign-in file with them) and does
+  not run `agy`'s own sign-out, which may also clear the keyring, the first entry's sign-in. Removing the entry
+  deletes its home. The links to the user's `~/.gemini` skills in it are removed, never followed. Neither touches
+  the first entry, another entry or this computer's `agy`.
+- Not separate: what `agy` keeps outside `--gemini-dir`, such as plugin secrets (`plugin-secrets.json` in the
+  user's config folder) and its user-wide keyring timeout marker. Mousse does not set these per entry.
+
 ## Limits on the Usage page
 
 The Usage page shows each quota pool's five-hour and weekly windows (Gemini; Claude and GPT; Gemini 4

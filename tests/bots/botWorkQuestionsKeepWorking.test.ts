@@ -80,7 +80,7 @@ async function workThatAsks(steers: boolean) {
   const answer = await tool('ask_owner', work.prepared, work.payload.threadId, FLATS)
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
   const questionId = bubble.question!.questionId
-  expect(JSON.parse(answer.text)).toEqual({ asked: true, note: questionWorkKeepsWorkingText(questionId) })
+  expect(JSON.parse(answer.text)).toEqual({ asked: true, questionId, note: questionWorkKeepsWorkingText(questionId) })
   return { workId, work, asked, bubble, questionId }
 }
 
@@ -166,7 +166,7 @@ describe('work that asks without waiting', () => {
 
   it('in a chat turn, wait false changes nothing: the question is shown under the reply and the turn ends', async () => {
     const turn = await chat('Find me a flat', 'c1')
-    expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text)).toEqual({ asked: true, note: QUESTION_ASKED_TEXT })
+    expect(JSON.parse((await tool('ask_owner', turn.prepared, turn.payload.threadId, FLATS)).text)).toEqual({ asked: true, questionId: expect.stringMatching(/^q_/), note: QUESTION_ASKED_TEXT })
     const asked = f.store.activationQuestions(turn.activation.id)[0]!
     expect(asked.spec.wait).toBeUndefined()
   })

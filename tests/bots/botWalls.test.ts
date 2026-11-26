@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_CHAT_WEB_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -25,6 +25,7 @@ import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../sr
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
 import { type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
+import { askText } from '../../src/shared/bots/personal/askText'
 import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
@@ -200,7 +201,7 @@ const gateWall = (prepared: { authority: BotAuthority }) => prepared.authority.c
 
 /** `escalate` in a chat turn: recorded now; the turn finishes and then waits with its card. */
 async function askAndFinish(prepared: { authority: { escalate?: (request: { permission: unknown; reason: string }) => string } }, payload: BotTurnPayload, permission: BotPermissionRequest = { tool: 'web_fetch' }) {
-  expect(prepared.authority.escalate!({ permission, reason: 'docs' })).toBe(BOT_ASK_DEFERRED_TEXT)
+  expect(prepared.authority.escalate!({ permission, reason: 'docs' })).toBe(botAskedText(askText(permission).title, BOT_ASK_DEFERRED_TEXT))
   end(payload.runId, 'completed')
   bots.settle(payload, { text: 'I need to read the changelog.' })
   await tick()
@@ -236,7 +237,7 @@ describe('walls', () => {
     const { activation, prepared, payload } = await running()
     expect(prepared.authority.escalate!({ permission: { shell: true }, reason: 'x' })).toContain('not one a bot can ask for')
     expect(bots.getActivation(activation.id).status).toBe('running')
-    expect(prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'I need the changelog.', toolCallId: 'call-1' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'I need the changelog.', toolCallId: 'call-1' })).toBe(botAskedText('read web pages', BOT_ASK_DEFERRED_TEXT))
     expect(store.escalations({ activationId: activation.id })[0]).toMatchObject({ kind: 'escalate', mode: 'wall', toolCallId: 'call-1', reason: 'I need the changelog.', status: 'open' })
     // The turn goes on: it is not aborted, and the activation waits only once its text is complete.
     expect(prepared.authority.time.signal.aborted).toBe(false)
@@ -247,11 +248,80 @@ describe('walls', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'escalate' } })
   })
 
-  it('the sixth wall of an activation ends it blocked', async () => {
+  it('walls are not counted: an activation that hit many still asks', async () => {
     const { activation } = await running()
-    for (let index = 0; index < 5; index += 1) pastWall(activation.id, index)
-    expect(bots.raiseWall(activation.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'again' })).toEqual({ kind: 'ended' })
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'asked_too_often' })
+    for (let index = 0; index < 8; index += 1) pastWall(activation.id, index)
+    expect(bots.raiseWall(activation.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'again' })).toEqual({ kind: 'escalated', permission: expect.any(String) })
+    expect(bots.getActivation(activation.id).status).toBe('waiting_grant')
+  })
+
+  describe('a repeated ask (issue #1363)', () => {
+    /** The chat asks for the owner's threads, the owner says Not now, and the chat's continuation is prepared. */
+    async function deniedThreads() {
+      const { activation, prepared, payload } = await running()
+      await askAndFinish(prepared, payload, { tool: 'threads' })
+      await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'deny' })
+      clock += 1000
+      const next = bots.prepare(payloadOf(store.dispatch(activation.id, 2)!.runId!))
+      if ('refused' in next) throw new Error(next.refused)
+      start(store.dispatch(activation.id, 2)!.runId!)
+      return { activation, next }
+    }
+
+    it('reworded, or reached through another of its tools, it is refused as duplicate_ask with no new card', async () => {
+      const { activation, next } = await deniedThreads()
+      // Another tool of the same permission, with other words: the same ask.
+      expect(next.authority.escalate!({ permission: { tool: 'thread_create' }, reason: 'I really do need to start a thread for this.' })).toBe(BOT_ASK_DUPLICATE_TEXT)
+      // A call that needs it is refused the same way, instead of walling again.
+      expect(next.authority.check(threadCall)).toEqual({ ok: false, refused: { text: BOT_ASK_DUPLICATE_TEXT, askId: '' } })
+      expect(bots.getActivation(activation.id).status).toBe('running')
+      expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
+      // Another permission is not a repeat.
+      expect(next.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(botAskedText('run commands', BOT_ASK_DEFERRED_TEXT))
+    })
+
+    it('may be asked again once the owner writes', async () => {
+      const { activation, next } = await deniedThreads()
+      bots.chat.post({ botId: 'site-editor', author: 'owner', kind: 'text', text: 'ok, you can ask again', activationId: activation.id, lane: 'chat' })
+      expect(next.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Now?' })).toBe(botAskedText('use your threads', BOT_ASK_DEFERRED_TEXT))
+    })
+
+    it('may be asked again once the grant changes', async () => {
+      await deniedThreads()
+      const entry = bots.get('site-editor')
+      const saved = bots.save({ ...entry.draft, permissions: manifest({ tools: ['read', 'edit', 'write'] }) }, entry.draftHash)
+      bots.publish('site-editor', saved.draftHash)
+      bots.approve('site-editor', botManifestDigest(bots.get('site-editor').published!.permissions))
+      // The owner has not written, but the grant is another one now: the bot's work may ask.
+      const later = await running('Another job', 'r2', 'run')
+      expect(later.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
+    })
+
+    /** The owner publishes and approves `tools` as the bot's permissions. */
+    function approveTools(tools: string[]) {
+      const entry = bots.get('site-editor')
+      const saved = bots.save({ ...entry.draft, permissions: manifest({ tools: tools as never }) }, entry.draftHash)
+      bots.publish('site-editor', saved.draftHash)
+      bots.approve('site-editor', botManifestDigest(bots.get('site-editor').published!.permissions))
+    }
+
+    it('may be asked again after a grant change in the same millisecond as the Not now', async () => {
+      await deniedThreads()
+      clock -= 1000
+      approveTools(['read', 'edit', 'write'])
+      const later = await running('Another job', 'r2', 'run')
+      expect(later.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
+    })
+
+    it('is a repeat again once the grant is changed back to the one it was refused under', async () => {
+      const held = [...bots.get('site-editor').published!.permissions.tools]
+      await deniedThreads()
+      approveTools(['read', 'edit', 'write'])
+      clock += 1000
+      approveTools(held)
+      const later = await running('Another job', 'r2', 'run')
+      expect(later.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Again.' })).toBe(BOT_ASK_DUPLICATE_TEXT)
+    })
   })
 
   it('an unanswered ask never expires: the chat waits, and the answer still continues it days later', async () => {
@@ -299,8 +369,9 @@ describe('answers and continuations', () => {
     expect(store.activation(activation.id)!.grantDigest).toBe(grant.digest)
     const next = bots.prepare(payloadOf(store.dispatch(activation.id, 2)!.runId!))
     if ('refused' in next) throw new Error(next.refused)
-    // The chat is the front desk: the web is its work's now, with no new card.
-    expect(next.authority.check({ kind: 'builtin', tool: 'web_fetch', nativeName: 'web_fetch', args: {} })).toEqual({ ok: false, refused: { text: BOT_WORK_HAS_TEXT, askId: '' } })
+    // The chat's web is Mousse's own web tools, with no new card: never the runtime's.
+    expect(next.authority.check({ kind: 'builtin', tool: 'web_fetch', nativeName: 'web_fetch', args: {} })).toEqual({ ok: false, refused: { text: BOT_CHAT_WEB_TEXT, askId: '' } })
+    expect(next.authority.check({ kind: 'app', tool: 'web_fetch', args: {} })).toEqual({ ok: true })
     const run = await running('Fetch the footer page', 'r-web', 'run')
     expect(run.prepared.authority.check({ kind: 'builtin', tool: 'web_fetch', nativeName: 'web_fetch', args: {} })).toEqual({ ok: true })
   })
@@ -895,14 +966,6 @@ describe('round 1: every way out of a wait starts the next activation', () => {
     expect(bots.getActivation(next.id).status).toBe('running')
   })
 
-  it('the sixth wall', async () => {
-    const { activation } = await running()
-    const next = await bots.enqueueChat('site-editor', 'chat:c2', 'two')
-    for (let index = 0; index < 5; index += 1) pastWall(activation.id, index, false)
-    bots.raiseWall(activation.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'again' })
-    await tick()
-    expect(bots.getActivation(next.id).status).toBe('running')
-  })
 })
 
 describe('round 1: smaller fixes', () => {

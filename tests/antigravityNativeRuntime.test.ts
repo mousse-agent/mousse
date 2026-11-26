@@ -12,6 +12,7 @@ import { antigravityConnectionFactory } from '../src/mms/harness/acp/presets/ant
 import { antigravityDriver } from '../src/mms/harness/drivers/antigravity'
 import { NATIVE_AGENT_NAME } from '../src/mms/harness/acp/presets/antigravity/nativeRelease'
 import { CliVersionCache } from '../src/mms/harness/cliConfig'
+import { LoginSession } from '../src/mms/providers/LoginSession'
 import type { DriverContext } from '../src/mms/harness/driver'
 
 // An earlier 1.1.1 install is recognised by its real sizes; here a test names where one is.
@@ -344,6 +345,32 @@ describe('launching each runtime', () => {
     stderr.write('Docs: https://example.com/help\n')
     await flush()
     expect(onAuthUrl.mock.calls).toEqual([[link]])
+  })
+
+  it('starts an added entry on its own home, its sign-in kept there over the user\'s variables; the first entry\'s launch is unchanged', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-agy-launch-'))
+    homes.push(dir)
+    const agy = join(dir, 'agy.exe')
+    writeFileSync(agy, 'agy')
+    const stateDir = join(dir, 'harness', 'antigravity_antigravity-2')
+    // Through the driver, as the gateway builds an added entry: its own service, on its own home.
+    const runtime = antigravityDriver({ builtIn: () => { throw new Error('an added entry never runs on the first entry\'s service') } }).create({
+      instanceId: 'antigravity:antigravity-2', builtIn: false, stateDir, profileHome: dir, installationHome: dir,
+      config: { home: 'private', binaryPath: agy, env: { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: '' } },
+      env: { home: join(stateDir, 'home') }, questions: new UserQuestionService(),
+      findBinary: () => agy, changed: () => {}, signedOut: () => false, saveLaunch: async () => {}
+    } as unknown as DriverContext)
+    const session = new LoginSession('one')
+    const signingIn = runtime.signIn!(session, dir)
+    await vi.waitFor(() => expect(spawned.calls).toHaveLength(1))
+    session.abort.abort()
+    await signingIn
+    await runtime.stop()
+    const call = spawned.calls[0]!
+    expect(call.args.slice(0, 3)).toEqual(['acp', '--gemini-dir', join(stateDir, 'home', 'gemini-home')])
+    expect(call.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBe('1')
+    // The first entry keeps this computer's agy sign-in.
+    expect(start('native', agy, dir).env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBeUndefined()
   })
 
   it('starts the 1.1.1 server as before', () => {

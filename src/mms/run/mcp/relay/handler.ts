@@ -78,7 +78,8 @@ export class RelayHandler {
   list(credential: CredentialRecord): RelayListedTool[] {
     if (!credential.relay || this.host.readOnlyThread?.(credential.threadId)) return []
     const bot = this.host.botOf?.(credential)
-    if (bot) return (bot.mcpTools ?? []).map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
+    // A bot's chat on a runtime with `use_tool` reaches them through its catalogue: its listed tools never change with them.
+    if (bot) return bot.lane === 'chat' && bot.catalogue === 'use_tool' ? [] : (bot.mcpTools ?? []).map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
     return this.host.catalog
       .listing(this.host.projectPathFor(credential.threadId))
       .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
@@ -149,7 +150,7 @@ export class RelayHandler {
     const offered = bot.mcpTools?.find((tool) => tool.name === name)
     const ledger = offered ? this.host.toolLedger?.(active) : undefined
     const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: bot.maskMcpArguments?.(args) ?? args } as ToolCall)
-    const outcome = await callForBot({ bot, name, args, toolCallId: request.toolCallId, signal: request.signal, mcp, ...(mcp.known ? { known: (relayed: string) => mcp.known!(relayed) } : {}), images })
+    const outcome = await callForBot({ bot, name, args, toolCallId: request.toolCallId, ...(ledgerId ? { invocationId: ledgerId } : {}), signal: request.signal, mcp, ...(mcp.known ? { known: (relayed: string) => mcp.known!(relayed) } : {}), images })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

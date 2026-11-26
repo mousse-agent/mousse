@@ -48,3 +48,15 @@ export function withHeldModelPicks(incoming: Thread[]): Thread[] {
   })
   return out ?? incoming
 }
+
+/**
+ * The row as it is now, with the model the daemon saved and the settings revision it answered with. Nothing else
+ * comes from the reply: a list pushed since may have changed the rest of the row, and the reply of another computer
+ * may not say what this one lists for the thread (which computer runs it, its place).
+ */
+export function withSavedModel(row: Thread, saved: Pick<Thread, 'modelOverride' | 'settingsRevision'>): Thread {
+  const { modelOverride: _previous, ...rest } = row
+  const next: Thread = saved.modelOverride ? { ...rest, modelOverride: saved.modelOverride } : rest
+  if (typeof saved.settingsRevision === 'number') next.settingsRevision = saved.settingsRevision
+  return next
+}

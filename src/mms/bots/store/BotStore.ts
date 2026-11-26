@@ -929,7 +929,8 @@ export interface BotDispatchRow {
     workActionIds?: string[]
     workRefusalIds?: string[]
     /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
-    workDelivery?: { answers: string[]; notes: number[]; question?: string }
+    /** `question`: one question's answer, as an older build carried it; `questions`: every answer the dispatch carried. */
+    workDelivery?: { answers: string[]; notes: number[]; question?: string; questions?: string[] }
     /**
      * A chat turn's first dispatch: the queued notices it took in with its own input (`BotEngine.noticeBatchInTx`). They
      * stay queued while it runs, and end as `merged` when it ends done (`moveActivation`); else they run after it.
@@ -1108,15 +1109,20 @@ const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN (
 
 const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
   prompt.workRefusalIds?.length || prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
-  prompt.workDelivery?.answers.length || prompt.workDelivery?.question
+  prompt.workDelivery?.answers.length || prompt.workDelivery?.question || prompt.workDelivery?.questions?.length
 )
 
-/** Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. */
-const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question'): string => `
-  EXISTS (SELECT 1 FROM bot_dispatches carried, json_each(carried.prompt_json, '$.workDelivery.${member}') item
-    WHERE carried.activation_id = ${table}.activation_id AND item.value = ${table}.id)
-  AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') item
-    WHERE d.activation_id = ${table}.activation_id AND item.value = ${table}.id AND ${WORK_TOLD})`
+/**
+ * Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. A row carried under
+ * any of `members` and confirmed under none of them is unconfirmed: a question an older build carried as its single
+ * `question` and a newer one confirmed in `questions` was told once.
+ */
+const unconfirmedDelivery = (table: string, ...members: Array<'notes' | 'answers' | 'question' | 'questions'>): string => {
+  const items = (dispatch: string) => members.map((member) => `SELECT value FROM json_each(${dispatch}.prompt_json, '$.workDelivery.${member}')`).join(' UNION ALL ')
+  return `
+  EXISTS (SELECT 1 FROM bot_dispatches carried WHERE carried.activation_id = ${table}.activation_id AND ${table}.id IN (${items('carried')}))
+  AND NOT EXISTS (SELECT 1 FROM bot_dispatches d WHERE d.activation_id = ${table}.activation_id AND ${table}.id IN (${items('d')}) AND ${WORK_TOLD})`
+}
 
 type Row = Record<string, unknown>
 
@@ -1411,6 +1417,12 @@ export class BotStore {
     return row ? { botId, digest: row.digest as string, manifest: JSON.parse(row.manifest_json as string) as BotManifest, approvedAt: row.approved_at as string } : undefined
   }
 
+  /** The grant approved with `digest`, active or replaced since (its latest approval), or undefined. */
+  grantByDigest(botId: string, digest: string): Pick<BotGrantRow, 'digest' | 'manifest'> | undefined {
+    const row = this.get("SELECT digest, manifest_json FROM bot_grants WHERE bot_id = ? AND digest = ? AND (revoked_at IS NULL OR revoked_at NOT LIKE 'off:%') ORDER BY grant_id DESC LIMIT 1", botId, digest)
+    return row ? { digest: row.digest as string, manifest: JSON.parse(row.manifest_json as string) as BotManifest } : undefined
+  }
+
   /** Inactive grant snapshots: older builds exclude these through their existing revoked_at check. */
   disabledPermissions(botId: string): Array<{ id: string; manifest: BotManifest }> {
     return this.all("SELECT revoked_at, manifest_json FROM bot_grants WHERE bot_id = ? AND revoked_at LIKE 'off:%'", botId)
@@ -1596,7 +1608,7 @@ export class BotStore {
       if (moved && to === 'done') for (const merged of this.dispatch(id, 1)?.prompt.merged ?? []) this.moveActivation(merged, ['queued'], 'cancelled', { endReason: MERGED_END_REASON })
       if (moved) {
         this.withdrawWorkQuestions(id)
-        heldCalls(this.db)?.endWork(id)
+        heldCalls(this.db)?.endWork(id, to)
         const refusalPrefix = `cursor:action-refusal:${id}:`
         this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?) OR substr(key, 1, ?) = ?', `cursor:action-note:${id}`, `cursor:action-owner:${id}`, refusalPrefix.length, refusalPrefix)
         this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
@@ -1700,6 +1712,39 @@ export class BotStore {
       activeMs: num(row.active_ms) ?? 0,
       limits: JSON.parse(row.limits_json as string) as Record<string, number>
     }
+  }
+
+  /**
+   * What a runtime that reserves nothing reported its requests used (Claude Code, Codex, Antigravity): `requests` more
+   * model requests, and their tokens and cost, added to the activation's counters and spend. A measurement only: it
+   * checks no limit and never refuses, and a runtime that counts or settles through the scopes is never mirrored here.
+   */
+  recordObservedUsage(activationId: string, usage: { requests: number; input: number; output: number; usdMicros?: number }): void {
+    const whole = (value: number | undefined): number => (value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
+    const input = whole(usage.input)
+    const output = whole(usage.output)
+    const usd = whole(usage.usdMicros)
+    const requests = whole(usage.requests)
+    if (!requests && !input && !output && !usd) return
+    this.db.transaction(() => {
+      this.run(
+        'UPDATE bot_counters SET requests = requests + ?, input_tokens = input_tokens + ?, output_tokens = output_tokens + ? WHERE activation_id = ?',
+        requests, input, output, activationId
+      )
+      if (input || output || usd)
+        this.run(
+          'UPDATE bot_spend SET committed_input = committed_input + ?, committed_output = committed_output + ?, committed_usd_micros = committed_usd_micros + ? WHERE activation_id = ?',
+          input, output, usd, activationId
+        )
+    })
+  }
+
+  /**
+   * One Mousse app or MCP tool call a runtime that counts none itself made (Claude Code, Codex, Antigravity), added to
+   * the activation's tool calls. A measurement only: it checks no limit and never refuses.
+   */
+  recordObservedToolCall(activationId: string): void {
+    this.run('UPDATE bot_counters SET tool_calls = tool_calls + 1 WHERE activation_id = ?', activationId)
   }
 
   // -- Turn usage (v12): what each main turn cost and carried ----------------------------------
@@ -1897,15 +1942,15 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, rowid`, ...params).map(escalationOf)
   }
 
-  /** The walls an activation hit (a run's refused asks never count: they don't stop it). */
-  /** The run asks (`mode = 'ask'`) a bot wrote: of one activation, or since a time. */
-  countNewAsks(botId: string, input: { activationId?: string; since?: string }): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE bot_id = ? AND mode = 'ask' AND (? IS NULL OR activation_id = ?) AND created_at >= ?",
-      botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
-  }
-
-  countEscalations(activationId: string): number {
-    return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'", activationId)?.n ?? 0)
+  /**
+   * The bot's Not nows to a fingerprint since the owner last allowed it, newest first: the asks the repeat guard reads.
+   * Only those answered since the owner last wrote (`ownerLastWroteAt`; all of them when they never have): an older one
+   * holds nothing, however few or many came after it.
+   */
+  deniedSinceAllowed(botId: string, fingerprint: string): BotEscalationRow[] {
+    const rows = this.all("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND answered_at IS NOT NULL AND answered_at >= ? ORDER BY answered_at DESC, rowid DESC", botId, fingerprint, this.ownerLastWroteAt(botId)).map(escalationOf)
+    const allowed = rows.findIndex((row) => row.status !== 'denied')
+    return allowed < 0 ? rows : rows.slice(0, allowed)
   }
 
   /**
@@ -1959,9 +2004,19 @@ export class BotStore {
     return this.run('UPDATE bot_escalations SET permission_json = ?, fingerprint = ?, title = ?, note = ? WHERE id = ?', JSON.stringify(ask.permission), ask.fingerprint, ask.title, ask.note, id) > 0
   }
 
-  /** Compare-and-set from `open`: false when it was already answered, expired or cancelled. */
-  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string): boolean {
-    return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
+  /**
+   * Compare-and-set from `open`: false when it was already answered, expired or cancelled. A Not now keeps where the
+   * owner had last written then, the grant it was said under and `given`, the key of what that grant gave (`denialOf`),
+   * so a repeat of the ask is told apart from one they wrote about, or one under a grant that gives something else.
+   */
+  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string, given?: string): boolean {
+    const moved = this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
+    const botId = moved && status === 'denied' ? this.get('SELECT bot_id FROM bot_escalations WHERE id = ?', id)?.bot_id : undefined
+    if (typeof botId === 'string') {
+      const denial = { seq: this.ownerLastWroteSeq(botId), grant: this.activeGrant(botId)?.digest ?? '', ...(given !== undefined ? { given } : {}) }
+      this.run('INSERT OR REPLACE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `ask-denied:${id}`, JSON.stringify(denial))
+    }
+    return moved
   }
 
   /**
@@ -2119,12 +2174,15 @@ export class BotStore {
     this.run('UPDATE bot_counters SET limits_json = ? WHERE activation_id = ?', JSON.stringify(limits), activationId)
   }
 
-  /** Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"). */
-  regrant(botId: string, fromDigest: string, toDigest: string, revision: string): void {
+  /**
+   * Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"); with `only`, just
+   * that activation, and the others on the old grant stay where they are.
+   */
+  regrant(botId: string, fromDigest: string, toDigest: string, revision: string, only?: string): void {
     // Their dispatches that have not started move too: `prepare` checks the dispatch's digest.
     this.run(`UPDATE bot_dispatches SET policy_digest = ? WHERE policy_digest = ? AND started_at IS NULL AND activation_id IN
-      (SELECT id FROM bot_activations WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled'))`, toDigest, fromDigest, botId, fromDigest)
-    this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
+      (SELECT id FROM bot_activations WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled') AND (? IS NULL OR id = ?))`, toDigest, fromDigest, botId, fromDigest, only ?? null, only ?? null)
+    this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled') AND (? IS NULL OR id = ?)", toDigest, revision, botId, fromDigest, only ?? null, only ?? null)
     this.changedLaunch(botId)
   }
 
@@ -2340,9 +2398,14 @@ export class BotStore {
       JSON.stringify(answer), messageId, this.now(), id, ...from) > 0
   }
 
-  /** The owner wrote something else: the bot's open, shown chat questions (but `except`) are moved on; the ones moved. */
-  moveOnQuestions(botId: string, byMessage: string, except?: string): BotQuestionRow[] {
-    const open = this.openChatQuestions(botId).filter((question) => question.id !== except)
+  /**
+   * The owner wrote something else: the bot's open, shown chat questions are moved on; the ones moved. Not `answering`,
+   * nor the questions the same turn asked with it (one batch, shown together): answering one leaves the others open, with
+   * their follow-ups and defaults.
+   */
+  moveOnQuestions(botId: string, byMessage: string, answering?: Pick<BotQuestionRow, 'id' | 'activationId' | 'dispatchN'>): BotQuestionRow[] {
+    const open = this.openChatQuestions(botId).filter((question) => !answering ||
+      (question.id !== answering.id && !(question.activationId === answering.activationId && question.dispatchN === answering.dispatchN)))
     const at = this.now()
     return open.filter((question) => this.run("UPDATE bot_questions SET status = 'moved_on', answer_message = ?, answered_at = ?, next_at = NULL WHERE id = ? AND status = 'open'", byMessage, at, question.id) > 0)
   }
@@ -2350,6 +2413,18 @@ export class BotStore {
   /** An activation's questions it never posted are withdrawn (it ended without a reply, or stopped at a wall). */
   withdrawUnpostedQuestions(activationId: string): number {
     return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, next_at = NULL WHERE activation_id = ? AND status = 'open' AND message_id IS NULL", this.now(), activationId)
+  }
+
+  /**
+   * The bot takes back its own open question (`question_withdraw`, issue #1446): compare-and-set on the question, the bot
+   * and the activation that asked it, so no other bot's or other work's question is touched, and an answer that came
+   * first is kept. Read at once: it is not one the owner forgot, and no continuation says to ask it again. False when it
+   * was not this caller's open question.
+   */
+  withdrawOwnQuestion(id: string, botId: string, activationId: string): boolean {
+    const at = this.now()
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, read_at = ?, next_at = NULL WHERE id = ? AND bot_id = ? AND activation_id = ? AND status = 'open'",
+      at, at, id, botId, activationId) > 0
   }
 
   /** Every open or moved-on question of a bot is withdrawn (it was deleted). */
@@ -2389,12 +2464,18 @@ export class BotStore {
 
   /**
    * The question work asked and has not carried on from yet: open, or answered (by the owner, or with its default) with
-   * the answer not yet sent to it (`read_at`). At most one (`MAX_OPEN_QUESTIONS_PER_WORK`); the newest when an older build
-   * left more.
+   * the answer not yet sent to it (`read_at`). Work may ask several (issue #1363): an open one it waits on comes first,
+   * then any other open one, then the newest answered one, so work never goes on while a question it waits on is open.
    */
   workQuestion(activationId: string): BotQuestionRow | undefined {
-    const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered', 'defaulted') ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
+    const row = this.get(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered', 'defaulted')
+      ORDER BY CASE WHEN status = 'open' AND json_extract(spec_json, '$.wait') IS NOT 0 THEN 0 WHEN status = 'open' THEN 1 ELSE 2 END, created_at DESC, rowid DESC LIMIT 1`, activationId)
     return row ? questionOf(row) : undefined
+  }
+
+  /** Whether work still has a question open, whose answer it has not had (it waits for every one before it goes on). */
+  workQuestionOpen(activationId: string): boolean {
+    return Boolean(this.get("SELECT 1 FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND status = 'open' LIMIT 1", activationId))
   }
 
   /**
@@ -2507,11 +2588,14 @@ export class BotStore {
       AND status IN ('allowed_bot', 'allowed_once', 'denied') AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_escalations', 'answers')}))
       ORDER BY created_at, rowid`, activationId).map(escalationOf)
   }
-  unreadWorkQuestion(activationId: string): BotQuestionRow | undefined {
-    const row = this.get(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
-      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question')}))
-      ORDER BY created_at DESC, rowid DESC LIMIT 1`, activationId)
-    return row ? questionOf(row) : undefined
+  /**
+   * Work's answered questions whose answers it has not had yet, oldest first: unread, or carried by a dispatch that never
+   * confirmed it told the model (`workDelivery.questions`, or an older build's single `question`).
+   */
+  unreadWorkQuestions(activationId: string): BotQuestionRow[] {
+    return this.all(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
+      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question', 'questions')}))
+      ORDER BY created_at, rowid`, activationId).map(questionOf)
   }
   /** Notes in a started prompt may have reached the model even without confirmed output. */
   carriedWorkNoteIds(activationId: string): Set<number> {
@@ -2544,6 +2628,39 @@ export class BotStore {
    */
   ownerLastWroteSeq(botId: string): number {
     return num(this.get("SELECT MAX(seq) AS seq FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.seq) ?? 0
+  }
+
+  /**
+   * Whether the owner wrote to a bot (a message, or a tapped answer) after they said Not now to `ask`: their newest row
+   * comes after the one they had written last then (`answerEscalation`). An ask denied by an older build kept no row, so
+   * its answer's time is compared instead. The repeat guard for asks (issue #1363).
+   */
+  ownerWroteSinceDenial(ask: Pick<BotEscalationRow, 'id' | 'botId' | 'answeredAt'>): boolean {
+    const last = this.ownerLastWroteSeq(ask.botId)
+    const kept = this.denialOf(ask)
+    if (kept) return last > kept.seq
+    return Boolean(ask.answeredAt && this.get("SELECT 1 FROM bot_messages WHERE bot_id = ? AND author = 'owner' AND seq = ? AND at > ?", ask.botId, last, ask.answeredAt))
+  }
+
+  /**
+   * What a Not now to `ask` kept (`answerEscalation`): the `seq` of the owner's newest row then, the digest of the
+   * grant it was said under (absent: kept by a build that wrote only the `seq`), and the key of what that grant gave
+   * (absent: kept before it was written). Undefined when it kept nothing.
+   */
+  denialOf(ask: Pick<BotEscalationRow, 'id' | 'botId'>): { seq: number; grant?: string; given?: string } | undefined {
+    const value = this.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', ask.botId, `ask-denied:${ask.id}`)?.value
+    if (typeof value !== 'string') return undefined
+    try {
+      const kept = JSON.parse(value) as unknown
+      if (typeof kept === 'number') return { seq: kept }
+      if (kept && typeof kept === 'object' && typeof (kept as { seq?: unknown }).seq === 'number')
+        return {
+          seq: (kept as { seq: number }).seq,
+          ...(typeof (kept as { grant?: unknown }).grant === 'string' ? { grant: (kept as { grant: string }).grant } : {}),
+          ...(typeof (kept as { given?: unknown }).given === 'string' ? { given: (kept as { given: string }).given } : {})
+        }
+    } catch { /* unreadable: kept nothing */ }
+    return undefined
   }
 
   /** How many messages from other bots reached bot `botId`'s chat after row `afterSeq` (the ping-pong guard). */

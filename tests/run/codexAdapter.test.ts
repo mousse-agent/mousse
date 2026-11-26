@@ -289,6 +289,34 @@ describe('CodexAdapter', () => {
     expect(result.drain).toEqual({ mousseCalls: 2, toolsSettled: false })
   })
 
+  it('one usage report names each model request of the turn; a repeated total is no new request', async () => {
+    const tokens = (total: number, last: number) => note('thread/tokenUsage/updated', {
+      threadId: T,
+      turnId: 'turn-1',
+      tokenUsage: {
+        total: { totalTokens: total, inputTokens: total, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+        last: { totalTokens: last, inputTokens: last, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+        modelContextWindow: 272000
+      }
+    })
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      // A tool round, then the answer: two responses. A rate-limit update between them sends the same total again.
+      tokens(1000, 1000),
+      tokens(1000, 1000),
+      ...message('msg-1', ['Done']),
+      tokens(2500, 1500),
+      completed('completed')
+    ])
+    const sink = recordingSink()
+    await new CodexAdapter(() => service(replay)).startTurn(input(), sink, control(), host())
+    replay.assertDone()
+    const reports = sink.calls.filter(([name]) => name === 'usage').map(([, usage]) => usage)
+    expect(reports).toEqual([{ input: 2500, output: 0, cacheRead: 0, cacheWrite: 0, requests: 2 }])
+  })
+
   it('runs a turn: text, thinking, tools, edits, usage and the thread reference', async () => {
     const replay = transport([
       ...handshake(),
@@ -354,7 +382,7 @@ describe('CodexAdapter', () => {
       'Hello',
       'Hello'
     ])
-    expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 400, output: 30, cacheRead: 800, cacheWrite: 0 })
+    expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 400, output: 30, cacheRead: 800, cacheWrite: 0, requests: 1 })
     expect(sink.calls.find(([name]) => name === 'providerMetrics')?.[1]).toMatchObject({
       totalTokensUsed: 1230,
       usage: { input: 400, output: 30, cacheRead: 800, cacheWrite: 0, reasoning: 10, totalTokens: 1230 },
@@ -2096,6 +2124,57 @@ describe('CodexAdapter', () => {
     replay.assertDone()
     expect(sink.calls.filter(([name]) => name === 'retry').map(([, attempt]) => attempt)).toEqual([1])
   })
+
+  it('a turn that fails after the model answered still reports what it used, once', async () => {
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      note('thread/tokenUsage/updated', {
+        threadId: T,
+        turnId: 'turn-1',
+        tokenUsage: {
+          total: { totalTokens: 1230, inputTokens: 1200, cachedInputTokens: 800, cacheWriteInputTokens: 0, outputTokens: 30, reasoningOutputTokens: 0 },
+          last: { totalTokens: 1230, inputTokens: 1200, cachedInputTokens: 800, cacheWriteInputTokens: 0, outputTokens: 30, reasoningOutputTokens: 0 },
+          modelContextWindow: 272000
+        }
+      }),
+      completed('failed', 'turn-1', { message: 'Upstream overloaded', codexErrorInfo: null })
+    ])
+    const sink = recordingSink()
+    await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, control(), host())).rejects.toThrow('Upstream overloaded')
+    replay.assertDone()
+    const reports = sink.calls.filter(([name]) => name === 'usage').map(([, usage]) => usage)
+    expect(reports).toEqual([{ input: 400, output: 30, cacheRead: 800, cacheWrite: 0, requests: 1 }])
+  })
+
+  it('an attempt retried after a context overflow reports what it used, and the retry its own', async () => {
+    const used = (input: number) => ({ input, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: input + 5, reasoning: 0, requests: 1 })
+    let attempts = 0
+    const client = {
+      configured: () => true,
+      commitConversation: () => {},
+      chat: async (chatInput: { onUnreturnedUsage?: (usage: ReturnType<typeof used>) => void }) => {
+        attempts += 1
+        if (attempts === 1) {
+          // The service reports a failed attempt's usage just before it throws.
+          chatInput.onUnreturnedUsage?.(used(900))
+          throw new Error('maximum context length exceeded')
+        }
+        return { text: 'ok', codexThreadId: 'codex-thread', turnId: 'turn-2', model: 'gpt-x', usage: used(300) }
+      }
+    } as unknown as CodexProviderService
+    const base = host()
+    const recovering: AdapterHost = { ...base, context: { ...base.context, recoverOverflow: () => ({ messages: [], nativeHistory: 'compacted' }) } }
+    const sink = recordingSink()
+    await new CodexAdapter(() => client).startTurn(input(), sink, control(), recovering)
+    expect(attempts).toBe(2)
+    const reports = sink.calls.filter(([name]) => name === 'usage').map(([, usage]) => usage)
+    expect(reports).toEqual([
+      { input: 900, output: 5, cacheRead: 0, cacheWrite: 0, requests: 1 },
+      { input: 300, output: 5, cacheRead: 0, cacheWrite: 0, requests: 1 }
+    ])
+  })
 })
 
 describe('a bot turn on Codex', () => {
@@ -2119,6 +2198,25 @@ describe('a bot turn on Codex', () => {
     }
     return { bot, calls }
   }
+
+  // A bot that holds the web keeps Codex's hosted web search in work; its chat never has it, so every web call there goes
+  // through Mousse's own web tools and their deadlines (`codexBotWebOff`).
+  it.each([['run', false], ['chat', true]] as const)('a bot holding the web, in its %s lane: hosted web search off is %s', async (lane, off) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const { web_search: _hosted, ...withWeb } = NO_COMMANDS
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: {} }, layers: [] } }),
+      ...threadStart(5, threadParams({ config: { ...(off ? NO_COMMANDS : withWeb), model_provider: 'openai' } })),
+      ...turnStart(6, 'go'),
+      completed('completed')
+    ])
+    await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: { ...bot, lane, appTools: new Set(['web_search', 'web_fetch']) } as never })
+    replay.assertDone()
+  })
 
   it.each(['mousse', 'mousse-relay'])('switches off the owner server %s without an attachment', async (name) => {
     const files = join(home, 'files')

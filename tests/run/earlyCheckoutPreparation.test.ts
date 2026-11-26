@@ -460,30 +460,16 @@ describe('the first turn in a new worktree', () => {
     expect(readFileSync(join(prepared.worktreePath, request.path), 'utf8')).toBe('keep')
   }, 90_000)
 
-  it.each(['editor', 'terminal'] as const)('claims the checkout for a checkpointed %s before writing', async (writer) => {
+  // A terminal on such a draft opens in the project folder and claims nothing (`emptyThreadCheckoutSwitch.test.ts`).
+  it('claims the checkout for a checkpointed editor before writing', async () => {
     const w = world()
     const draft = w.thread()
     await w.focus(draft.id)
     await settledPreparation(draft.directory)
     const prepared = draft.manager.load()!
     await w.focus(draft.id, false)
-    if (writer === 'editor') {
-      await expect(w.call('files.write', { threadId: draft.id, path: 'added.txt', content: 'written' }))
-        .resolves.toMatchObject({ receiptId: expect.any(String) })
-    } else {
-      const command = process.platform === 'win32'
-        ? 'Set-Content -NoNewline -LiteralPath added.txt -Value written; exit'
-        : 'printf written > added.txt; exit'
-      const output: string[] = []
-      pty!.on('data', ({ data }: { data: string }) => output.push(data))
-      const exited = once(pty!, 'exit')
-      const opened = await w.call('pty.create', { threadId: draft.id, agentId: 'main', command }) as { ptyId: string }
-      await waitFor(() => existsSync(join(prepared.worktreePath, 'added.txt')) || !pty!.isAlive(opened.ptyId), 'the terminal command to finish', 30_000)
-      expect(existsSync(join(prepared.worktreePath, 'added.txt')), output.join('')).toBe(true)
-      await exited
-      await pty!.shutdown()
-      pty = undefined
-    }
+    await expect(w.call('files.write', { threadId: draft.id, path: 'added.txt', content: 'written' }))
+      .resolves.toMatchObject({ receiptId: expect.any(String) })
     expect(draft.manager.load()?.prepared).toBeUndefined()
     await w.d.orch.sweepAbandonedPreparedWorkspaces(Date.now() + PREPARED_WORKTREE_MAX_AGE_MS + 1_000)
     expect(readFileSync(join(prepared.worktreePath, 'added.txt'), 'utf8')).toBe('written')

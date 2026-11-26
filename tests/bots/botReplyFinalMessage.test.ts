@@ -46,11 +46,11 @@ type Chat = ClaudeSubscriptionProviderService['chat']
  * Runs one bot dispatch whose runtime does `script`, through the profile's effect worker as any bot dispatch runs.
  * Returns what the dispatch settled with (the bot's reply) and the thread's reply rows.
  */
-async function botTurn(script: (input: Parameters<Chat>[0], time: AbortController) => Promise<string>): Promise<{ settled: { text?: string }; rows: string[] }> {
+async function botTurn(script: (input: Parameters<Chat>[0], time: AbortController) => Promise<string>): Promise<{ settled: { text?: string; messageId?: string }; rows: string[]; ids: string[] }> {
   const thread = main.threads.createThread('Bot run')
   const scratch = mkdtempSync(join(home, 'scratch-'))
   const time = new AbortController()
-  const settled: Array<{ text?: string }> = []
+  const settled: Array<{ text?: string; messageId?: string }> = []
   const dispatcher: BotTurnDispatcher = {
     prepare: (payload) => ({
       activationId: payload.activationId,
@@ -82,8 +82,8 @@ async function botTurn(script: (input: Parameters<Chat>[0], time: AbortControlle
     settleRun.mockRestore()
     chat.mockRestore()
   }
-  const rows = (main.threads.loadThreadData(thread.id).messages ?? []).filter((message) => message.role === 'assistant' && !message.kind).map((message) => message.content)
-  return { settled: settled[0]!, rows }
+  const replies = (main.threads.loadThreadData(thread.id).messages ?? []).filter((message) => message.role === 'assistant' && !message.kind)
+  return { settled: settled[0]!, rows: replies.map((message) => message.content), ids: replies.map((message) => message.id) }
 }
 
 const NOTE = 'Bash ate the $ signs; using a heredoc.'
@@ -104,12 +104,13 @@ function notesThenCalls(input: Parameters<Chat>[0]): string {
 }
 
 it('a bot turn with notes between its tool calls replies with its final message only', async () => {
-  const { settled, rows } = await botTurn(async (input) => {
+  const { settled, rows, ids } = await botTurn(async (input) => {
     const whole = `${notesThenCalls(input)}\n\n${REPORT}`
     input.onText(whole)
     return whole
   })
-  expect(settled).toEqual({ text: REPORT })
+  // It names the thread's row that holds it, so the bot's journal keeps the reply once.
+  expect(settled).toEqual({ text: REPORT, messageId: ids[2] })
   // The notes stay in the bot's thread, each in a row of its own above its call.
   expect(rows).toEqual(['Checking the system.', NOTE, REPORT])
 }, 60_000)

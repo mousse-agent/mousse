@@ -233,7 +233,7 @@ it.each(['note', 'answer'] as const)('an owner %s resets the work wait chain', a
   const next = await start(f, workId, 2)
   if (input === 'note') f.bots.tools.work.note(botId, workId, 'Check the changelog too.', chat.id)
   else {
-    f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+    f.bots.askOwner(botId, workId, [{ spec: { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] } }])
     await finish(f, next.payload, 'completed', { text: '' })
     await f.bots.service.answerQuestion({ botId, questionId: f.store.workQuestion(workId)!.id, choice: 'A', clientRequestId: 'chain-answer' })
     await flush()
@@ -385,7 +385,7 @@ it.each(['allow', 'not_now'] as const)('carries a permission wall %s and its wai
 
 it('keeps notes and question answers unread until the wait continuation starts', async () => {
   const { workId, turn, chat } = await work()
-  f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+  f.bots.askOwner(botId, workId, [{ spec: { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] } }])
   const questionId = f.store.workQuestion(workId)!.id
   await wait(workId)
   await finish(f, turn.payload, 'completed', { text: '' })
@@ -431,7 +431,7 @@ it('tells an earlier wall answer before the later wait event', async () => {
 
 it('keeps wait additions through a usage hold before the dispatch starts and a restart', async () => {
   const { workId, turn, chat } = await work()
-  f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+  f.bots.askOwner(botId, workId, [{ spec: { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] } }])
   const questionId = f.store.workQuestion(workId)!.id
   await wait(workId)
   await finish(f, turn.payload, 'completed', { text: '' })
@@ -555,7 +555,7 @@ it.each(['question', 'wall'] as const)('uses the master opening when an owner %s
   await flush()
   const next = await start(f, workId, 2)
   if (kind === 'question') {
-    f.bots.askOwner(botId, workId, { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }] })
+    f.bots.askOwner(botId, workId, [{ spec: { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }] } }])
     const questionId = f.store.workQuestion(workId)!.id
     await finish(f, next.payload, 'completed', { text: '' })
     await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'after-wait-question' })
@@ -569,9 +569,28 @@ it.each(['question', 'wall'] as const)('uses the master opening when an owner %s
   expect(f.store.dispatch(workId, 3)?.prompt.text).toBe(golden.prompts[key])
 })
 
+it('N2 tells an answer once when an older build carried it as its single question and a newer one confirmed it', async () => {
+  const { workId, turn } = await work()
+  f.bots.askOwner(botId, workId, [{ spec: { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] } }])
+  const questionId = f.store.workQuestion(workId)!.id
+  await finish(f, turn.payload)
+  await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'old-field' })
+  await flush()
+  const next = await start(f, workId, 2)
+  await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+  // The dispatch that carried it and never confirmed is an older build's: its single `question`, no `questions`.
+  f.store.run("UPDATE bot_dispatches SET prompt_json = json_remove(json_set(prompt_json, '$.workDelivery.question', ?), '$.workDelivery.questions') WHERE activation_id = ? AND n = 2", questionId, workId)
+  await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+  await flush()
+  const retry = f.store.lastMainDispatch(workId)!
+  expect(retry.prompt.workDelivery?.questions).toContain(questionId)
+  ;((await start(f, workId, retry.n)).prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkQuestions(workId)).toEqual([])
+})
+
 it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note and answer after %s until output confirms them', async failure => {
   const { workId, turn, chat } = await work()
-  f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+  f.bots.askOwner(botId, workId, [{ spec: { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] } }])
   const questionId = f.store.workQuestion(workId)!.id
   await wait(workId)
   await finish(f, turn.payload)
@@ -583,7 +602,7 @@ it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note
   const next = await start(f, workId, 2)
   expect(f.store.unreadWorkWaits(workId)).toHaveLength(1)
   expect(f.store.unreadWorkNotes(workId)).toHaveLength(1)
-  expect(f.store.unreadWorkQuestion(workId)?.id).toBe(questionId)
+  expect(f.store.unreadWorkQuestions(workId).at(-1)?.id).toBe(questionId)
   if (failure === 'restart') {
     // Simulate the previous build's eager read markers as well as a fresh interrupted dispatch.
     f.store.run('UPDATE bot_work_notes SET applied_at = ? WHERE activation_id = ?', f.store.now(), workId)
@@ -608,7 +627,7 @@ it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note
   ;(running.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
   expect(f.store.unreadWorkNotes(workId)).toEqual([])
-  expect(f.store.unreadWorkQuestion(workId)).toBeUndefined()
+  expect(f.store.unreadWorkQuestions(workId)).toEqual([])
   await finish(f, running.payload, 'failed', { outcome: { error: 'network_error' } })
   await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
   const later = f.store.lastMainDispatch(workId)!.prompt.text

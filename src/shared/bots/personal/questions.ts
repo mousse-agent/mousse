@@ -107,17 +107,23 @@ export const MAX_QUESTION_CHOICES = 5
 export const MAX_CHOICE_LABEL_CHARS = 40
 export const MAX_CHOICE_DETAIL_CHARS = 120
 
-/** At most one question per chat turn (its activation), however many dispatches it takes. */
-export const MAX_QUESTIONS_PER_CHAT_TURN = 1
-/** A piece of work asks one question at a time: it waits on it, and may ask another once it carries on with the answer. */
-export const MAX_OPEN_QUESTIONS_PER_WORK = 1
-/** At most this many of a bot's questions are open at once. */
-export const MAX_OPEN_QUESTIONS_PER_BOT = 6
-/** At most this many new questions per bot in any 24 hours. */
-export const MAX_NEW_QUESTIONS_PER_DAY = 20
+/** The most questions one `ask_owner` call may ask together (`questions`). */
+export const MAX_QUESTIONS_PER_CALL = 4
 
-/** The tool's answer over any cap. */
-export const QUESTIONS_ENOUGH_TEXT = "You've asked enough for now. Decide yourself and say what you assumed."
+/**
+ * What `ask_owner` is refused with when it repeats a question the owner has not answered or written about since:
+ * there is no count of questions, but asking the same thing again is a loop (`questionIdentity`).
+ */
+export const QUESTION_DUPLICATE_TEXT = "duplicate_ask: You already asked this and your owner hasn't written since. Don't ask it again; decide yourself and say what you assumed, or wait for them to write."
+
+/**
+ * A question's identity for repeat checks: its words (case and spacing ignored, without a trailing question mark) and
+ * its answers, sorted. Two calls that ask the same thing with the answers in another order are the same question.
+ */
+export function questionIdentity(spec: Pick<BotQuestionSpec, 'question' | 'choices'>): string {
+  const words = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase()
+  return JSON.stringify([words(spec.question).replace(/[?？]+$/, '').trim(), spec.choices.map((choice) => words(choice.label)).sort()])
+}
 
 /** `ask_owner`'s answer once the question is kept: it shows under the reply. */
 export const QUESTION_ASKED_TEXT = "The owner sees it under your reply, with its buttons. Don't repeat it in your reply; end your turn."
@@ -312,4 +318,41 @@ export function questionSpecOf(args: Record<string, unknown>): BotQuestionSpec |
     choices.push({ label, ...(detail ? { detail } : {}) })
   }
   return { question, choices, other, ...carded }
+}
+
+/** One question of an `ask_owner` call, as Mousse keeps it: what it asks, and what happens if the owner doesn't answer. */
+export interface BotQuestionAsk {
+  spec: BotQuestionSpec
+  /** Absent: nothing follows it up (as an earlier build kept it). `ask_owner` always names one. */
+  follow?: BotQuestionFollow
+}
+
+/**
+ * `ask_owner`'s arguments as the questions it asks, or why not: one question (`question` and its answers), or up to
+ * `MAX_QUESTIONS_PER_CALL` together (`questions`, each with its own answers and follow-up). `wait` is the call's, for
+ * every question in it. The same question twice in one call is refused.
+ */
+export function questionAsksOf(args: Record<string, unknown>): BotQuestionAsk[] | { problem: string } {
+  if (args.questions === undefined) {
+    const spec = questionSpecOf(args)
+    if ('problem' in spec) return spec
+    const follow = questionFollowOf(args, spec)
+    return 'problem' in follow ? follow : [{ spec, follow }]
+  }
+  if (args.question !== undefined) return { problem: 'Give question or questions, not both.' }
+  if (!Array.isArray(args.questions) || args.questions.length === 0) return { problem: 'questions is a list of questions, each with question and its choices or yesNo.' }
+  if (args.questions.length > MAX_QUESTIONS_PER_CALL) return { problem: `Ask at most ${MAX_QUESTIONS_PER_CALL} questions at once. Ask the ones that matter most now.` }
+  const asks: BotQuestionAsk[] = []
+  for (const [index, item] of args.questions.entries()) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { problem: `questions[${index}] is a question: { question, choices or yesNo }.` }
+    if ('wait' in item) return { problem: 'wait goes beside questions, for all of them.' }
+    const given = { ...(item as Record<string, unknown>), ...(args.wait !== undefined ? { wait: args.wait } : {}) }
+    const spec = questionSpecOf(given)
+    if ('problem' in spec) return { problem: `questions[${index}]: ${spec.problem}` }
+    const follow = questionFollowOf(given, spec)
+    if ('problem' in follow) return { problem: `questions[${index}]: ${follow.problem}` }
+    if (asks.some((ask) => questionIdentity(ask.spec) === questionIdentity(spec))) return { problem: 'Ask each question once.' }
+    asks.push({ spec, follow })
+  }
+  return asks
 }

@@ -290,6 +290,9 @@ interface CallSite {
   narrowed: boolean
 }
 
+/** The app tools a bot's chat calls within its quick-call budgets: they only read, and may take a while. */
+const BOT_CHAT_QUICK_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch', 'secret_fetch'])
+
 function notLive(message: string): McpToolError {
   return new McpToolError('mousse_caller_not_live', message)
 }
@@ -456,8 +459,10 @@ export class ToolRegistry {
     // Where the turn's tools come from is the authority compiler's to say (`userMcpSource`).
     const source = userMcpSource(turn, this.options.botMcp !== undefined)
     if (source === 'none') return []
-    // A bot's turn: only the granted tools it was offered (none in a chat turn), each held to its grant when called.
+    // A bot's turn: only the granted tools it was offered, each held to its grant when called.
     if (source === 'bot') {
+      // A chat turn reaches them through its catalogue (`use_tool`), so its listed tools stay the same whatever it holds.
+      if (turn.bot!.lane === 'chat' && turn.bot!.catalogue === 'use_tool') return []
       return (turn.bot!.mcpTools ?? []).filter((tool) => !this.tools.has(tool.providerName)).map((tool) => ({
         id: `${tool.server}:${tool.tool}`, serverId: tool.server, installationId: tool.server, serverName: tool.serverName, toolName: tool.tool,
         providerName: tool.providerName, description: tool.description, inputSchema: tool.inputSchema
@@ -627,9 +632,16 @@ export class ToolRegistry {
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
+    // A bot's call runs now: its activation counts it here, once (`BotAuthority.callRuns`).
+    turn.bot?.callRuns?.()
     let outcome: ToolOutcome
     try {
-      outcome = await this.runHandler(tool, args, ctx, turn.toolAccess)
+      // A bot chat's call of the web or a bound service runs within the chat's budgets (`BotQuickCalls`): it only reads,
+      // so it stops at its deadline or when the owner writes.
+      const quick = BOT_CHAT_QUICK_TOOLS.has(name) ? turn.bot?.quickCalls : undefined
+      outcome = quick
+        ? await quick.run({ tool: name, readOnly: true, signal: ctx.signal, call: (signal) => this.runHandler(tool, args, { ...ctx, signal }, turn.toolAccess) })
+        : await this.runHandler(tool, args, ctx, turn.toolAccess)
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
       if (error instanceof McpToolError) throw error
@@ -880,7 +892,7 @@ export class ToolRegistry {
     const checked = withoutTransportFields(args)
     const ledger = this.options.toolLedger?.(at.active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: at.request.toolCallId, name, arguments: bot.maskMcpArguments?.(checked) ?? checked } as ToolCall)
-    const outcome = await callForBot({ bot, name, args: checked, toolCallId: at.request.toolCallId, signal: at.request.signal, mcp, images: at.turn.toolImages === true })
+    const outcome = await callForBot({ bot, name, args: checked, toolCallId: at.request.toolCallId, ...(ledgerId ? { invocationId: ledgerId } : {}), signal: at.request.signal, mcp, images: at.turn.toolImages === true })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

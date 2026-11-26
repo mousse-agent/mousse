@@ -301,9 +301,11 @@ function codexBotSandboxOnly(sandbox: CodexBotSandbox): Record<string, CodexConf
 
 /**
  * Whether a bot's turn has Codex's hosted web search switched off: when its grant holds no web (`web_search` or
- * `web_fetch`, Mousse's own web tools), the thread's config sets `web_search = "disabled"`, which every checked version
- * honours (`tests/harness/codexBotTools.test.ts`). A bot with the web keeps it beside Mousse's web tools.
+ * `web_fetch`, Mousse's own web tools), or the turn is the bot's chat, the thread's config sets
+ * `web_search = "disabled"`, which every checked version honours (`tests/harness/codexBotTools.test.ts`). The chat's web
+ * goes through Mousse's own tools only, which keep to the chat's deadlines (`BotQuickCalls`); work with the web keeps
+ * Codex's beside them.
  */
-export function codexBotWebOff(bot: Partial<Pick<BotAuthority, 'appTools'>>): boolean {
-  return !(bot.appTools?.has('web_search') || bot.appTools?.has('web_fetch'))
+export function codexBotWebOff(bot: Partial<Pick<BotAuthority, 'appTools' | 'lane'>>): boolean {
+  return bot.lane === 'chat' || !(bot.appTools?.has('web_search') || bot.appTools?.has('web_fetch'))
 }

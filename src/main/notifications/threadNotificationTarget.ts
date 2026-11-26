@@ -2,7 +2,7 @@ import type { Thread } from '../../shared/types'
 import { hiddenFromOwner, isSideChatThread, isSubagentThread, nearestVisibleAncestor } from '../../shared/threadLineage'
 import type { ThreadNotificationKind } from './threadNotification'
 
-type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId' | 'hidden'>
+type NotificationThread = Pick<Thread, 'id' | 'name' | 'lineage' | 'projectId' | 'hidden' | 'startedByBot'>
 
 /** What a notification is about once subagents are folded under their parents. */
 export interface ThreadNotificationTarget {
@@ -65,7 +65,7 @@ export class NotificationThreadIndex {
     const next = new Map<string, NotificationThread>()
     for (const row of rows as NotificationThread[]) {
       if (row && typeof row.id === 'string') {
-        next.set(row.id, { id: row.id, name: row.name, lineage: row.lineage, projectId: row.projectId, ...(row.hidden ? { hidden: true as const } : {}) })
+        next.set(row.id, { id: row.id, name: row.name, lineage: row.lineage, projectId: row.projectId, ...(row.hidden ? { hidden: true as const } : {}), ...(row.startedByBot ? { startedByBot: row.startedByBot } : {}) })
       }
     }
     this.byProfile.set(profileId, next)
@@ -78,7 +78,7 @@ export class NotificationThreadIndex {
     if (!threads) return
     const thread = row?.thread
     if (thread && typeof thread.id === 'string') {
-      threads.set(thread.id, { id: thread.id, name: thread.name, lineage: thread.lineage, projectId: thread.projectId, ...(thread.hidden ? { hidden: true as const } : {}) })
+      threads.set(thread.id, { id: thread.id, name: thread.name, lineage: thread.lineage, projectId: thread.projectId, ...(thread.hidden ? { hidden: true as const } : {}), ...(thread.startedByBot ? { startedByBot: thread.startedByBot } : {}) })
     } else if (typeof row?.removed === 'string') {
       threads.delete(row.removed)
     }

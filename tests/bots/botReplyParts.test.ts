@@ -56,7 +56,7 @@ describe('a bot\'s applet', () => {
     const { payload } = await start(f, firstActivation)
     // The bot published Budget, and wrote an Other applet its thread never published.
     const other = { ...budget, title: 'Other', js: '' }
-    await finish(f, payload, 'completed', { text: `Here is your budget.\n\n${fence(budget)}\n\n${fence(other)}` })
+    await finish(f, payload, 'completed', { text: `Here is your budget.\n\n${fence(budget)}\n\n${fence(other)}`, messageId: 'msg-1' })
 
     const reply = chatOf(f, botId).filter((message) => message.author === 'bot').at(-1)!
     expect(asked).toEqual([payload.threadId])
@@ -68,6 +68,8 @@ describe('a bot\'s applet', () => {
     const journaled = f.journal.find((row) => row.sourceKey === `bm:${reply.id}`)!
     expect(journaled.text).toContain('[Applet: Budget]')
     expect(journaled.text).not.toContain('textContent')
+    // It is that thread message, whose capture copy holds the fences: the chat row stands for it.
+    expect(journaled.standsFor).toBe(`${payload.threadId}:msg-1`)
   })
 
   it('can be replied to: the reply quotes it by name, and the bot is told which applet the owner means', async () => {
@@ -118,7 +120,12 @@ describe('a picture an MCP tool hands a bot', () => {
     const { botId, firstActivation } = await createBot(f)
     const { payload, prepared } = await start(f, firstActivation)
     const manager = { callTool: vi.fn(async () => ({ content: [{ type: 'text', text: 'Rendered.' }, { type: 'image', data: PNG, mimeType: 'image/png' }, { type: 'image', data: SVG, mimeType: 'image/svg+xml' }] }) as never) }
-    const mcp = new BotMcp({ catalog: { ensure: async () => undefined, servers: () => [], listing: () => [] }, manager, enabled: () => true })
+    const descriptor = { id: 'srv-charts:render', serverId: 'srv-charts', installationId: 'srv-charts', serverName: 'Charts', toolName: 'render', providerName: chart.providerName, inputSchema: { type: 'object' }, configRevision: 'revision-1' }
+    const mcp = new BotMcp({ catalog: {
+      ensure: async () => undefined,
+      servers: () => [{ installationId: 'srv-charts', serverName: 'Charts', failing: false, starting: false, tools: [descriptor] }],
+      listing: () => [{ name: chart.name, description: '', inputSchema: { type: 'object' }, installationId: 'srv-charts', serverName: 'Charts', toolName: 'render', providerName: chart.providerName }]
+    }, manager, enabled: () => true })
     // The grant's decision is another test's: here the call is allowed.
     const bot = { ...prepared.authority, mcpTools: [chart], check: () => ({ ok: true as const }) }
     const outcome = await callForBot({ bot, name: chart.name, args: {}, signal: new AbortController().signal, mcp })

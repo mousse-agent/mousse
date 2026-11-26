@@ -408,6 +408,29 @@ export class ThreadWorkspaceManager {
   }
 
   /**
+   * Removes the project-folder record {@link ensureProjectFolder} made for a thread that never ran there (a terminal,
+   * branch switch or file write on an empty chat makes one), and its pin, so the thread can take a worktree instead.
+   * Only the caller knows that nothing ran: it holds the thread's lease and has checked the thread has no messages
+   * and no recorded actions. Nothing in the person's folder is touched. False when the pin cannot be removed; the
+   * record then stays.
+   */
+  async dropUnusedProjectFolder(threadId: string, heldThreadLease: ThreadLeaseHandle): Promise<boolean> {
+    assertHeldThreadLease(this.threadDirectory, heldThreadLease)
+    const path = join(this.threadDirectory, PROJECT_FOLDER_RECORD)
+    const metadata = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as ThreadWorkspaceMetadata : undefined
+    if (!metadata || !isProjectFolderWorkspace(metadata) || metadata.prepared || metadata.threadId !== threadId) return false
+    const ref = metadata.retainedRef
+    // A repository without a commit got no pin.
+    if (ref && metadata.baseSha && ref.startsWith(`refs/mousse/threads/${threadId}/`)) {
+      // Only the pin as it was made; a pin that moved since is kept, and so is the record.
+      const removed = await tryGit(metadata.worktreePath, ['update-ref', '--no-deref', '-d', ref, metadata.baseSha])
+      if (!removed.ok) return false
+    }
+    await rm(path, { force: true })
+    return true
+  }
+
+  /**
    * The thread's worktree record, or, for a thread whose folder has no Git of its own, the snapshot workspace's as the
    * same shape (`snapshotOnly`). For the code that Undoes, reviews and releases snapshots; every rule about worktrees
    * (retirement, cleanup, rebuilding, Publish) reads `load()` and never sees a folder that is the person's.

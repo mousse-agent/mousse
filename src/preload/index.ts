@@ -1118,8 +1118,11 @@ const api = {
     get: (threadId: string): Promise<Thread | null> => ipcRenderer.invoke('threads:get', threadId),
     /** The new chat a window goes to after its thread was deleted; windows asking at once share one. */
     newChatAfterDelete: (): Promise<Thread> => ipcRenderer.invoke('threads:newChatAfterDelete'),
-    /** `picked`: the person chose this checkout, so it is remembered for the project's next new threads. */
-    setWorktreeEnabled: (threadId: string, enabled: boolean, picked?: boolean): Promise<Thread> =>
+    /**
+     * `picked`: the person chose this checkout, so it is remembered for the project's next new threads. `worktree_locked`:
+     * the thread already has a workspace of the other kind, so the checkout cannot change.
+     */
+    setWorktreeEnabled: (threadId: string, enabled: boolean, picked?: boolean): Promise<Thread | { ok: false; code: 'worktree_locked'; message: string }> =>
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled, picked),
     /**
      * Sets a new chat's thread's model and then its permission mode, each only while its settings revision is

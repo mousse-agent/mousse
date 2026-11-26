@@ -701,17 +701,32 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   color: var(--text-secondary);
 }
 
-/* A project row's state: the worst of its threads above finished as a dot, and while it is closed how many need
-   the person. */
-.threads-sidebar-project-status {
+/* A closed project row's state, the worst of its threads above finished, in the chevron's slot (centred where the
+   chevron sits): a spinner, how many need the person, or a pause mark. The chevron takes the slot back whenever it
+   shows. */
+.threads-sidebar-project-mark {
+  position: absolute;
+  top: 50%;
+  left: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
+  justify-content: center;
+  min-width: 12px;
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.threads-sidebar-project-row:hover .threads-sidebar-project-mark,
+.threads-sidebar-project-toggle:focus-visible .threads-sidebar-project-mark {
+  visibility: hidden;
+}
+
+.threads-sidebar.menu-open .threads-sidebar-project-row:not([data-menu-open]) .threads-sidebar-project-mark {
+  visibility: visible;
 }
 
 .threads-sidebar-project-status--needs-me { color: var(--status-input); }
@@ -723,18 +738,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   height: 7px;
   border-radius: 50%;
   background: currentColor;
-}
-
-.threads-sidebar-project-status--working .threads-sidebar-status-dot {
-  animation: threads-sidebar-dot-pulse 1.6s steps(12, jump-none) infinite;
-}
-
-@keyframes threads-sidebar-dot-pulse {
-  50% { opacity: 0.35; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .threads-sidebar-project-status--working .threads-sidebar-status-dot { animation: none; }
 }
 
 /* Threads that wait for the person, from every project, above the list. */
@@ -970,7 +973,8 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   white-space: nowrap;
 }
 
-/* A project's "New thread" is always there, faint at rest; its "…" shows on hover or focus. */
+/* A project's "New thread" is always there, faint at rest. Its "…" takes no room until hover or focus, so the row
+   leaves no empty gap for it; it then shows left of the computer badges, and they and New thread stay put. */
 .threads-sidebar-project-new-chat,
 .threads-sidebar-project-more {
   flex-shrink: 0;
@@ -981,15 +985,14 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   opacity: 0.55;
 }
 
-.threads-sidebar-project-more {
-  opacity: 0;
+.threads-sidebar-project-row:hover .threads-sidebar-project-new-chat,
+.threads-sidebar-project-row:focus-within .threads-sidebar-project-new-chat,
+.threads-sidebar-project-row.expanded.empty .threads-sidebar-project-new-chat {
+  opacity: 1;
 }
 
-.threads-sidebar-project-row:hover :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
-.threads-sidebar-project-row:focus-within :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
-.threads-sidebar-project-row.expanded.empty .threads-sidebar-project-new-chat,
-.threads-sidebar-project-more[aria-expanded="true"] {
-  opacity: 1;
+.threads-sidebar-project-row:not(:hover, :focus-within) > .threads-sidebar-project-more:not([aria-expanded="true"]) {
+  display: none;
 }
 
 /* While a menu is open, project rows under the pointer go back to rest, except the one whose "…" opened it. */
@@ -997,8 +1000,26 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   opacity: 0.55;
 }
 
-.threads-sidebar.menu-open .threads-sidebar-project-row:not(:has([aria-expanded="true"])) :is(.threads-sidebar-project-more, .threads-sidebar-project-chevron) {
+.threads-sidebar.menu-open .threads-sidebar-project-row:not(:has([aria-expanded="true"])) > .threads-sidebar-project-more {
+  display: none;
+}
+
+.threads-sidebar.menu-open .threads-sidebar-project-row:not(:has([aria-expanded="true"])) .threads-sidebar-project-chevron {
   opacity: 0;
+}
+
+/* The computers that hold a project, between its "…" and New thread. */
+.threads-sidebar-project-computers {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  margin: 0 2px;
+}
+
+.threads-sidebar-project-computers:empty {
+  display: none;
 }
 
 .threads-sidebar-empty {
@@ -1445,7 +1466,14 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   color: var(--text-primary);
 }
 
-/* Where a row dragged in the Threads tab will land. */
+/* Where a dragged project or thread will land. */
+.threads-sidebar-project.drop-before,
+.threads-sidebar-project.drop-after {
+  position: relative;
+}
+
+.threads-sidebar-project.drop-before::before,
+.threads-sidebar-project.drop-after::before,
 .threads-sidebar-thread-container.drop-before::before,
 .threads-sidebar-thread-container.drop-after::before {
   content: "";
@@ -1459,10 +1487,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   z-index: 1;
 }
 
+.threads-sidebar-project.drop-before::before,
 .threads-sidebar-thread-container.drop-before::before {
   top: -2px;
 }
 
+.threads-sidebar-project.drop-after::before,
 .threads-sidebar-thread-container.drop-after::before {
   bottom: -2px;
 }
@@ -1511,9 +1541,19 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 /* One opacity on the row's content; the selected and hover backgrounds of the row itself are untouched. A collapsed
    project's icon divides its own fade by the row's (project-icons.css), so the two do not stack. */
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:not(:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input))) > .threads-sidebar-thread,
-:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:not(:has(.threads-sidebar-project-status--needs-me)) > .threads-sidebar-project-toggle {
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:not(:has(.threads-sidebar-project-status--needs-me, .threads-sidebar-project-status--working)) > .threads-sidebar-project-toggle {
   opacity: var(--sidebar-row-dim);
   --sidebar-icon-fade: var(--sidebar-row-dim);
+}
+
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row > .threads-sidebar-project-computers {
+  opacity: var(--sidebar-row-dim);
+}
+
+/* A closed project whose spinner turns fades its parts, as a turning thread row does (below), and the spinner
+   takes the fade as its own opacity. */
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-status--working > * {
+  opacity: var(--sidebar-row-dim);
 }
 
 /* A row whose spinner turns (Turning, lib/turning.tsx) fades its parts instead of itself. An opacity on the row
@@ -1538,7 +1578,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)),
-:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) {
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me, .threads-sidebar-project-status--working) {
   --sidebar-needs-fade: opacity(var(--sidebar-row-dim));
 }
 
@@ -1559,7 +1599,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card > :not(.threads-sidebar-card-body),
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card-body > :not(.threads-sidebar-card-meta),
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card-meta > :not(.threads-sidebar-card-status-input),
-:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .threads-sidebar-project-status--working, .project-icon) {
   filter: var(--sidebar-needs-fade, none);
 }
 

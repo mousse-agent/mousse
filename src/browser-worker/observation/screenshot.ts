@@ -23,11 +23,15 @@ export async function captureViewportScreenshot(
   if (region.x < 0 || region.y < 0 || region.x + region.width > viewport.cssWidth + 0.5 || region.y + region.height > viewport.cssHeight + 0.5) {
     fail('invalid_geometry', 'Screenshot clip is outside the current viewport')
   }
+  // `region` (and the returned `cropOriginCss`) is in viewport CSS pixels; the CDP clip is in page
+  // coordinates, so a scrolled page needs its scroll offset added or the picture starts above the viewport.
+  const scrollX = Number.isFinite(viewport.scrollX) ? viewport.scrollX : 0
+  const scrollY = Number.isFinite(viewport.scrollY) ? viewport.scrollY : 0
   const result = await cdp.send<{ data: string }>('Page.captureScreenshot', {
     format: 'png',
     fromSurface: options.fromSurface !== false,
     captureBeyondViewport: false,
-    clip: { x: region.x, y: region.y, width: region.width, height: region.height, scale: options.scale ?? 1 }
+    clip: { x: region.x + scrollX, y: region.y + scrollY, width: region.width, height: region.height, scale: options.scale ?? 1 }
   }, { sessionId: cdpSessionId, timeoutMs: options.timeoutMs ?? 15_000 })
   const bytes = Buffer.from(result.data, 'base64')
   const { width, height } = pngDimensions(bytes)

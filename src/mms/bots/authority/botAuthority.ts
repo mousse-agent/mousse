@@ -144,6 +144,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
         }
       }
       return decided
+    },
+    allows(call: NormalisedCall): boolean {
+      return decide(call).ok
     }
   }
   return authority

@@ -332,7 +332,7 @@ import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService, UNCAPTURED_START_FILE, UNRECORDED_END_FILE, type TurnStartCheck } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
-import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
+import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, remoteSubagentResultText, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -5747,8 +5747,9 @@ export class OrchestratorService extends EventEmitter {
       createdByThreadId: intent.createdByThreadId,
       // The bot that started it, by its name then: the thread says so after the bot is renamed or deleted.
       ...(intent.bot ? { startedByBot: intent.bot } : {}),
-      // A bot's thread starts out of the owner's sidebar, its chat lists it; a bot that asks shows it there from the start.
-      ...(intent.bot && intent.request.hidden !== false ? { hidden: true } : {}),
+      // An agent's thread starts out of the person's sidebar: a bot's chat lists it, and so does the side panel of the
+      // thread that launched it. One the agent starts as independent (hidden: false) shows there from the start.
+      ...(intent.request.hidden !== false ? { hidden: true } : {}),
       localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
@@ -5929,6 +5930,8 @@ export class OrchestratorService extends EventEmitter {
         title,
         remoteProjectId: project.projectId,
         worktree: input.workspace === 'new_worktree',
+        // A bot's thread sends none, as before, and shows there; an agent's is hidden unless it asked otherwise.
+        hidden: bot ? null : input.hidden !== false,
         instanceId: input.instanceId ?? null,
         // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
         model: input.model ? agentModelId(input.model, input.effort) : null,
@@ -6335,18 +6338,23 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_hide`: the owner's bot hides a thread it started from the owner's sidebar, or shows it there again
-   * (`Thread.hidden`), only from its chat in a chat turn its owner's message started (`botSenderOf`). Only a thread this
-   * bot started (`Thread.startedByBot`), since its chat is where the owner finds a hidden one. Nothing stops or changes in
-   * the thread. The change is recorded as an `agent.action` of the thread.
+   * `thread_hide`: an agent hides a thread it started from the person's sidebar, or shows it there again
+   * (`Thread.hidden`). The owner's bot does so only from its chat in a chat turn its owner's message started
+   * (`botSenderOf`), and only for a thread this bot started (`Thread.startedByBot`), since its chat lists it. Any other
+   * agent only for a thread its own thread launched (`Thread.createdByThreadId`), which that thread's side panel lists.
+   * Nothing stops or changes in the thread. The change is recorded as an `agent.action` of the thread.
    */
   private setThreadHiddenAsAgent(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean } {
     const engine = this.requireRunEngine()
-    const bot = this.botSenderOf(options.actor, 'thread_hide')
-    if (!bot) throw new McpToolError('mousse_scope_denied', 'Only a bot\'s chat hides threads this way.')
     const thread = this.threadStore?.getThread(threadId)
-    if (!thread || thread.startedByBot?.botId !== bot.botId)
-      throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
+    // A bot's thread that may not make the call is refused here; any other thread is no bot's.
+    const bot = this.botSenderOf(options.actor, 'thread_hide')
+    if (bot) {
+      if (!thread || thread.startedByBot?.botId !== bot.botId)
+        throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
+    } else if (!thread || thread.startedByBot || thread.createdByThreadId !== options.actor.threadId) {
+      throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started with thread_create.`)
+    }
     if (Boolean(thread.hidden) === hidden) return { hidden, changed: false }
     this.threadStore!.setThreadHidden(threadId, hidden)
     engine.store.appendEvent({
@@ -6938,6 +6946,7 @@ export class OrchestratorService extends EventEmitter {
     const fresh = session.messages.length === 0 && cleared
     if (busy() || (prepared.history === 'cleared' ? !cleared : prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
+    let messageId: string | undefined
     let unanswered = false
     try {
       const response = await this.runTurnOnSession(
@@ -6958,12 +6967,13 @@ export class OrchestratorService extends EventEmitter {
       )
       // A failed turn's message is its error, never the bot's words; a turn its work goes on from hands back what it said.
       text = response.error ? response.partial : response.message
+      if (!response.error && response.messageId) messageId = response.messageId
       unanswered = !response.error && Boolean(response.steerUnanswered)
     } catch (error) {
       const settled = engine.getRun(payload.runId)
       if (!settled || (!TERMINAL_RUN_STATUSES.has(settled.status) && settled.status !== 'queued')) throw error
     } finally {
-      dispatcher.settle(payload, { ...(text !== undefined ? { text } : {}), ...(unanswered ? { unanswered: true } : {}) })
+      dispatcher.settle(payload, { ...(text !== undefined ? { text } : {}), ...(messageId ? { messageId } : {}), ...(unanswered ? { unanswered: true } : {}) })
     }
   }
 
@@ -7451,6 +7461,9 @@ export class OrchestratorService extends EventEmitter {
       resultReport: (payload) => {
         const delegation = this.runEngine?.delegations.get(payload.delegationId)
         if (!delegation) return undefined
+        // A subagent on another computer worked there: its result names the branch, and nothing here holds its files.
+        const remote = this.remoteSubagentComputer(delegation)
+        if (remote) return remoteSubagentResultText(remote)
         const report = this.delegationResultReport(delegation)
         if (report) return formatSubagentResultReport(report)
         return delegation.workspace === 'shared' ? 'It worked in your own folder, shared with you; Mousse merged nothing.' : undefined
@@ -8693,11 +8706,12 @@ export class OrchestratorService extends EventEmitter {
     const reportResult = (ref: SubagentRef) => {
       const task = this.resolveTask(parentThreadId, ref, 'finished')
       if (!task.ok) return task.refusal
-      if (this.requireRunEngine().remoteSubagents.get(task.delegation.delegationId))
+      const remote = this.remoteSubagentComputer(task.delegation)
+      if (remote)
         return {
           delegationId: task.delegation.delegationId,
           merged: false,
-          note: 'This subagent worked on another computer; its result names the branch its work is on there. Fetch that branch to use it here.'
+          note: remoteSubagentResultText(remote)
         }
       const report = this.delegationResultReport(task.delegation)
       return {
@@ -8965,7 +8979,7 @@ export class OrchestratorService extends EventEmitter {
     // Its thread there expires with this thread's root (issue #685).
     this.trackRemoteExpiry(accepted.childThreadId, computer.node)
     if (accepted.replayed) return { ...value, replayed: true, note: 'Started. Mousse sends you the result when it finishes; end your turn.' }
-    this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt)
+    this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt, this.parentOrigin(parentThreadId, parentRunId))
     const launched = await remote.launch(accepted.delegationId)
     if (launched.ok === false) {
       // Nothing runs there: the task ends here without a notice, and its title is free again.
@@ -9326,7 +9340,7 @@ export class OrchestratorService extends EventEmitter {
     if (!delegation) throw new Error('The follow-up was not recorded as a task')
     if (base?.node) this.trackRemoteExpiry(target.childThreadId, base.node)
     if (accepted.replayed) return this.followUpValue(delegation, target.title, { replayed: true })
-    this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt)
+    this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt, this.parentOrigin(parentThreadId, parentRunId))
     const launched = await remote!.launch(accepted.delegationId)
     if (launched.ok === false) {
       await engine.cancelDelegation(accepted.delegationId).catch(() => [])
@@ -9376,14 +9390,37 @@ export class OrchestratorService extends EventEmitter {
     await this.stopThread(threadId, 'time_limit', { runId, clientRequestId: `time-limit:${runId}`, byAgent: true })
   }
 
-  /** A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a model. */
-  private recordRemoteSubagentMessage(threadId: string, role: 'user' | 'assistant', content: string): void {
+  /** The parent thread as the sender of its subagent's task (`AgentOrigin`), with its title now. */
+  private parentOrigin(parentThreadId: string, parentRunId: string, body?: AgentOrigin['body']): AgentOrigin {
+    const title = this.titleOf(parentThreadId)?.trim().slice(0, AGENT_TITLE_MAX_CHARS)
+    return { kind: 'agent', threadId: parentThreadId, runId: parentRunId, ...(body ? { body } : {}), ...(title ? { title } : {}) }
+  }
+
+  /**
+   * The origin a subagent's task is stored with: its parent thread, so the chat shows the task as that agent's words
+   * ("Agent · <parent>", which opens the parent) and never as a message a person typed. Only for a turn its delegation
+   * started (`source` 'delegation': the first task, or a follow-up the parent sent, queued or not); a person's own message
+   * on a subagent's thread stays theirs. The words shown are the task, without the guidance Mousse puts before a first
+   * task; the model still reads the whole text.
+   */
+  private delegatedOrigin(source: string | undefined, runId: string | undefined, content: string): AgentOrigin | undefined {
+    if (source !== 'delegation' || !runId) return undefined
+    const delegation = this.runEngine?.delegations.getByChildRun(runId)
+    if (!delegation) return undefined
+    return this.parentOrigin(delegation.parentThreadId, delegation.parentRunId, { head: content.length - withoutSubagentPreamble(content).length, tail: 0 })
+  }
+
+  /**
+   * A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a
+   * model. What it was asked is stored as its parent agent's (`origin`), never as something a person typed.
+   */
+  private recordRemoteSubagentMessage(threadId: string, role: 'user' | 'assistant', content: string, origin?: AgentOrigin): void {
     const text = content.trim()
     if (!text || (this.threadStore && !this.threadStore.getThread(threadId))) return
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) return
     this.sessionAls.run(session, () => {
-      const msg: ChatMessage = { id: uuidv4(), role, content: text, timestamp: new Date().toISOString() }
+      const msg: ChatMessage = { id: uuidv4(), role, content: text, timestamp: new Date().toISOString(), ...(role === 'user' && origin ? { origin } : {}) }
       this.messages.push(msg)
       this.emitMessageAdded(msg)
       this.persist(true)
@@ -9637,6 +9674,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The computer a delegated task ran on, when its subagent runs on another of the user's computers (its stand-in thread
+   * here has `runsOn`, or the task has a remote binding); undefined for a subagent on this computer.
+   */
+  private remoteSubagentComputer(delegation: DelegationRecord): string | undefined {
+    const runsOn = this.threadStore?.getThread(delegation.childThreadId)?.runsOn
+    if (runsOn) return runsOn.computerName || 'another computer'
+    const binding = this.runEngine?.remoteSubagents.get(delegation.delegationId)
+    return binding ? this.remoteSubagents?.computerName(binding.node) ?? 'another computer' : undefined
+  }
+
+  /**
    * The frozen result of a delegated task: the files its subagent started from and finished with, pinned under
    * `refs/mousse/delegations/<child>/<delegation>/`, where it worked and the Git state it left. Built once, from
    * snapshots already recorded (the subagent's task checkpoint, or for a shared folder the parent's own turn
@@ -9644,6 +9692,9 @@ export class OrchestratorService extends EventEmitter {
    * whatever the worktree does next. Nothing is merged. Undefined when the task left no recorded files.
    */
   private delegationResultReport(delegation: DelegationRecord): SubagentResultReport | undefined {
+    // A subagent on another computer left nothing in this computer's folders: any report from here would describe the
+    // parent's own folder (a shared task) or the stand-in thread, never where it worked.
+    if (this.remoteSubagentComputer(delegation)) return undefined
     const childDirectory = this.resolveThreadDir(delegation.childThreadId)
     if (!childDirectory) return undefined
     const path = join(childDirectory, SUBAGENT_RESULTS_FILE)
@@ -9823,8 +9874,23 @@ export class OrchestratorService extends EventEmitter {
     try {
       const continued = engine.getRun(runId)?.outcome?.continuationOf
       const source = continued ? engine.getRun(continued) : null
-      // A bot's work that reached its runtime's step cap goes on in a fresh turn: no restart happened.
-      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : isProviderTurnCap(source.outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.` : `Continuing run ${source.ordinal} after a restart.`)
+      if (!source) return
+      const outcome = source.outcome
+      // Only a run the daemon's stop cut off (interrupted, or uncertain with a tool in flight) was continued after a
+      // restart. A bot's work that reached its runtime's step cap, met a permission wall or goes on after its owner
+      // answered continues in a fresh turn with no restart.
+      const restarted = outcome?.interruptedBy === 'daemon_restart' || outcome?.uncertainReason === 'non_idempotent_tool_in_flight'
+      // The limit has reset only when the timer resumed the run, or a person did once the reset time passed. Resume now
+      // before it, or a run continued after its pause was cancelled, says no more than which run it continues.
+      const resumed = engine.getRun(runId)?.outcome?.resumedFromPause
+      const pause = outcome?.pause
+      const afterReset = !!pause && (resumed === 'auto' || (resumed === 'user' && Date.parse(pause.until) <= Date.now()))
+      this.addSystemMessage(
+        afterReset ? `Continuing run ${source.ordinal} after the usage limit reset.`
+          : isProviderTurnCap(outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.`
+            : restarted ? `Continuing run ${source.ordinal} after a restart.`
+              : `Continuing run ${source.ordinal}.`
+      )
     } catch (error) {
       console.warn('run engine continuation note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -15368,7 +15434,7 @@ export class OrchestratorService extends EventEmitter {
             turnPermission,
             opts?.schedule,
             approvalNote,
-            opts?.agent,
+            opts?.agent ?? this.delegatedOrigin(opts?.source, opts?.runId, userContent),
             opts?.backgroundNotice,
             this.runEngine ? opts?.runId : undefined,
             opts?.settleNotice
@@ -16051,8 +16117,9 @@ export class OrchestratorService extends EventEmitter {
             model, input: usage.input, output: usage.output,
             cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
           })
-          // A bot's turn keeps what it cost with its dispatch (`bot_turn_usage`).
-          try { opts?.bot?.usage?.({ input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite }) }
+          // A bot's turn keeps what it cost with its dispatch (`bot_turn_usage`), and its activation's counts and spend
+          // where its runtime records none of it itself.
+          try { opts?.bot?.usage?.({ input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}), ...(usage.requests !== undefined ? { requests: usage.requests } : {}) }) }
           catch (error) { logDebug('OrchestratorService', 'bot turn usage could not be recorded', error, { threadId: session.threadId }) }
         },
         providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),
@@ -16302,7 +16369,7 @@ export class OrchestratorService extends EventEmitter {
             ...(app ? { app } : {}),
             // A bot turn: the activation's shared counts and spend (its instructions are in the preamble).
             ...(opts?.bot ? {
-              counters: opts.bot.authority.counters,
+              counters: opts.bot.runtimeCounters ?? opts.bot.authority.counters,
               ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
             } : {})
           }).result
@@ -16594,11 +16661,14 @@ export class OrchestratorService extends EventEmitter {
     let resultText = redactAppletFences(displayText)
     const finalText = unshownReplyText(displayText, earlierReplies)
 
+    // The transcript row the reply ends on: a bot's chat message names it, so its journal holds the reply once.
+    let finalMessageId: string | undefined
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
     // again, comes next. "Done." would read as if the turn had finished with nothing to say.
     if (noReply && !finalText) {
       this.transcript.abandonAssistant('', true)
     } else if (this.activeAssistantMessageId) {
+      finalMessageId = this.activeAssistantMessageId
       this.updateStreamingAssistantMessage(
         this.activeAssistantMessageId,
         finalText || 'Done.',
@@ -16615,6 +16685,7 @@ export class OrchestratorService extends EventEmitter {
       // A raw === stripped comparison fails on whitespace alone, and a match
       // that counted the applet fences never succeeds; either appends a
       // visually identical twin message.
+      finalMessageId = this.lastCompletedAssistantMessageId
       this.updateStreamingAssistantMessage(
         this.lastCompletedAssistantMessageId,
         finalText,
@@ -16622,7 +16693,7 @@ export class OrchestratorService extends EventEmitter {
         responseMetadata
       )
     } else {
-      this.addMessage('assistant', finalText || 'Done.', undefined, responseMetadata)
+      finalMessageId = this.addMessage('assistant', finalText || 'Done.', undefined, responseMetadata).id
     }
 
     // No reply row (a Send now cut): an earlier turn's "Done." is not this turn's.
@@ -16724,7 +16795,8 @@ export class OrchestratorService extends EventEmitter {
     const response: OrchestratorResponse = {
       message: opts?.bot && steerUnanswered ? finalText : (opts?.bot ? finalText : displayText) || 'Done.',
       actions,
-      ...(opts?.bot && steerUnanswered ? { steerUnanswered: true } : {})
+      ...(opts?.bot && steerUnanswered ? { steerUnanswered: true } : {}),
+      ...(opts?.bot && finalMessageId ? { messageId: finalMessageId } : {})
     }
     if (executionFailed) {
       this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })

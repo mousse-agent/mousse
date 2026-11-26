@@ -31,6 +31,13 @@ export interface BotManifest {
   budget: BotBudget
   /** Personal bots work for their owner only; bots for other people are not available yet. */
   audience: 'owner'
+  /**
+   * "Allow everything" (issue #1363), a bot's Full access: every capability a personal bot can be granted
+   * (`withFullTrust`), without asking. Only `true` is ever stored, so a grant without it hashes as before. It never
+   * passes the owner's switches, Settings and Labs, what each kind of turn may do, a subagent's narrower set, or asks
+   * first; limits stay as they are.
+   */
+  fullTrust?: true
 }
 
 export interface BotWorkspace {
@@ -327,9 +334,10 @@ export type BotActivationTrigger =
   /**
    * `fromBot`: the turn was started by a message from another of the owner's bots (`bot_send`), never by the owner: who
    * sent it and which turn in a row without the owner it is. `fast`: a notice that starts without waiting for others to
-   * settle (a thread the bot started waits on it, `NOTICE_SETTLE_MS`).
+   * settle (a thread the bot started waits on it, `NOTICE_SETTLE_MS`). `threadsReadOnly`: a held call's result
+   * (`action_result`) whose call a turn held that could only read the owner's threads: its own turn reads them only too.
    */
-  | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender; fast?: true }
+  | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender; fast?: true; threadsReadOnly?: 'not_owner' }
   | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string; missed?: ScheduledMissedRuns; removedTelling?: { tellMe: TellMe }; completed?: { why: string; name: string; tellMe?: TellMe; removed?: true } }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
@@ -464,7 +472,7 @@ export interface BotApprovalView {
 
 /** A permission of a manifest, as the approval dialog states it. */
 export interface BotPermissionLine {
-  kind: 'tool' | 'app_tool' | 'mcp' | 'skill' | 'workspace' | 'budget'
+  kind: 'tool' | 'app_tool' | 'mcp' | 'skill' | 'workspace' | 'budget' | 'full_trust'
   text: string
 }
 

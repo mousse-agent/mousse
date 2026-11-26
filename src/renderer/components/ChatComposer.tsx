@@ -836,7 +836,12 @@ export function ChatComposer({
   // Pasted files (images, videos, any file) are attached; a paste without files pastes its text, unless the text is
   // long (`LONG_PASTE_BYTES`): then it goes on the message as a text file, which the chip can put back as text.
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = collectFilesFromDataTransfer(event.clipboardData)
+    // Pasted screenshots are numbered after the message's images, never taking a name still here or kept for an undo.
+    const held = [...attachedFiles, ...[...removedRef.current.values()].flatMap((entry) => ('file' in entry ? [entry.file] : []))]
+    const files = collectFilesFromDataTransfer(event.clipboardData, {
+      images: attachedFiles.filter((attached) => attached.file.type.startsWith('image/') && !attached.pastedText).length,
+      names: held.map(attachedFileName)
+    })
     const node = event.currentTarget
     if (files.length === 0) {
       // Text copied from this composer with chips in it goes back with its chips, while their attachments are here.

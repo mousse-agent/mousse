@@ -147,7 +147,7 @@ export function FileAttachment({
   const iconName = getFileIconName(filename, isImage);
   // Image attachments with a renderable preview (pasted screenshots, dragged
   // images) render as a bare thumbnail — the auto-generated filename
-  // ("paste-*.png", "Screenshot …") is noise. The real filename stays
+  // ("image-1.png", "Screenshot …") is noise. The real filename stays
   // discoverable via the hover tooltip on the chip.
   const isImageOnly = isImage && !!url;
   const canPreview = Boolean(enableImagePreview && isImage && url);

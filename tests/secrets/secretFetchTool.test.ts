@@ -47,7 +47,7 @@ it('offers a bound read only to work with a ledger and hands it to the home vaul
   expect(fetch).toHaveBeenCalledTimes(1)
 })
 
-it.each(['ordinary thread', 'manual run', 'chat', 'read only'])(
+it.each(['ordinary thread', 'manual run', 'read only'])(
   'explains why a service read is unavailable in %s',
   async (kind) => {
     const send = vi.fn(async () => ({ text: 'data' }))
@@ -67,7 +67,6 @@ it.each(['ordinary thread', 'manual run', 'chat', 'read only'])(
         : {
             role: 'activation',
             workspace: { scratch: '/run' },
-            ...(kind === 'chat' ? { warm: 'chat:activation:digest' } : {}),
             ...(kind === 'read only' ? { secretFetch: record } : {})
           }
     const turn = appTurn({
@@ -83,10 +82,9 @@ it.each(['ordinary thread', 'manual run', 'chat', 'read only'])(
       signal: new AbortController().signal
     } as ToolCallContext)
     expect(outcome.isError).toBe(true)
-    if (kind === 'chat') expect(outcome.text).toContain('Hand this service read to your work')
-    else if (kind === 'read only') expect(outcome.text).toContain('read-only')
+    if (kind === 'read only') expect(outcome.text).toContain('read-only')
     else {
-      expect(outcome.text).toContain('only to bots in work and scheduled runs')
+      expect(outcome.text).toContain('only to bots, in their chat, work and scheduled runs')
       expect(outcome.text).not.toContain('Hand')
     }
     expect(record).not.toHaveBeenCalled()

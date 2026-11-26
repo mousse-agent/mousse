@@ -160,10 +160,10 @@ export class ThreadRouter implements ThreadRouterPort {
   }
 
   /** The merged lists of the other computers, told what a person does here (opens, sends). */
-  setLists(lists: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata'> | undefined): void {
+  setLists(lists: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata' | 'row'> | undefined): void {
     this.lists = lists
   }
-  private lists?: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata'>
+  private lists?: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata' | 'row'>
 
   /**
    * The other computers of the user whose threads are listed (see `PeerDirectory.computers`). `undefined` when
@@ -270,7 +270,7 @@ export class ThreadRouter implements ThreadRouterPort {
     // A person's send from here moves the thread to the front of its group, as it does on its own computer.
     if (SENDS.has(method) && typeof params.threadId === 'string') this.lists?.noteSent(params.threadId)
     let result = qualifyRoutedResult(method, raw, context)
-    if (isRecord(result)) result = this.withLocalLists(ctx, method, result)
+    if (isRecord(result)) result = this.withListedThreads(node, this.withLocalLists(ctx, method, result))
     // The automation a change answers with is named the way this computer names it.
     if (method.startsWith('scheduled.') && isRecord(result) && isRecord(result.job) && typeof result.job.id === 'string')
       result = { ...result, job: { ...result.job, id: qualifyId(node, result.job.id) } }
@@ -373,6 +373,29 @@ export class ThreadRouter implements ThreadRouterPort {
       out.version = version
     }
     if (RESULT_WITH_PROJECTS.has(method)) out.projects = listedProjectsFor(ctx, services.projects.listProjects())
+    return out
+  }
+
+  /**
+   * The threads a result carries (`thread`, and the new one of a fork) as this computer lists them: the owner's copy
+   * says nothing of which computer runs it, of its place here, or of whether that computer can be reached, so a window
+   * that stores it would show the thread as one of its own. A thread the merged lists hold keeps its row's place;
+   * one they do not hold yet (just made) still names its computer. The answer itself shows that computer can be reached
+   * and still shares the thread, so neither the row's offline nor its not-shared mark carries over (a row read from the
+   * cache would otherwise show the thread offline until the next list arrives).
+   */
+  private withListedThreads(node: NodeId, result: Record<string, unknown>): Record<string, unknown> {
+    let out = result
+    for (const key of ['thread', 'fork'] as const) {
+      const thread = out[key]
+      if (!isRecord(thread) || typeof thread.id !== 'string') continue
+      const ref = parseQualifiedId(thread.id)
+      if (ref?.node !== node) continue
+      const { offline: _offline, notShared: _notShared, ...rest } = thread
+      const row = this.lists?.row(thread.id)
+      const listed = row ? { ...rest, node, order: row.order } : { ...rest, node }
+      out = { ...out, [key]: listed }
+    }
     return out
   }
 

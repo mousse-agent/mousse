@@ -8,7 +8,9 @@ import { imageFileStem, imageTypeOf, saveBotPicture } from '../images/pictures'
  * link out of the folder), and the next message of that activation carries it as a file, so the chat shows it inline and
  * in the preview, and a phone can open it. Only PNG, JPEG, GIF and WebP, checked by their first bytes (never SVG); at
  * most `MAX_BOT_IMAGE_BYTES` each and `MAX_IMAGES_PER_MESSAGE` per message. Kept in memory until a message takes them:
- * after a restart the files stay in the folder, and the bot was told where.
+ * after a restart the files stay in the folder, and the bot was told where. A picture that is not kept for its owner (too
+ * large, no room left in the message, or not saved) is named in what the bot is told, so it never promises one its owner
+ * never sees.
  */
 
 /** Pictures one message shows, leaving room among its files (`MAX_BOT_CHAT_ATTACHMENTS`). */
@@ -25,7 +27,8 @@ const waiting = new Map<string, KeptImage[]>()
 
 /**
  * Keeps the pictures one tool call returned for `activationId`'s next message, saved in `filesFolder`. Returns the line
- * the bot is told (that its owner sees them, and where they are), or undefined when nothing was kept.
+ * the bot is told (that its owner sees them, and where they are; which ones they don't, and why), or undefined when there
+ * is nothing to tell (no picture the chat shows).
  */
 export function keepToolImages(input: {
   activationId: string | undefined
@@ -40,25 +43,43 @@ export function keepToolImages(input: {
   const held = waiting.get(activationId) ?? []
   const room = MAX_IMAGES_PER_MESSAGE - held.length
   const kept: KeptImage[] = []
+  const skipped = { large: 0, room: 0, unsaved: 0 }
   for (const image of input.images) {
-    if (kept.length >= room) break
     const bytes = Buffer.from(image.data, 'base64')
     const type = imageTypeOf(bytes)
-    if (!type || bytes.length > MAX_BOT_IMAGE_BYTES) continue
-    try {
-      const path = saveBotPicture(filesFolder, imageFileStem(input.source), type, bytes, input.now ?? new Date())
-      kept.push({ name: basename(path), path })
-    } catch {
-      // Not saved (a link out of the folder, a full disk): the bot still sees it; the owner doesn't.
+    // Not a picture the chat shows (an SVG): never one, so nothing to tell.
+    if (!type) continue
+    if (bytes.length > MAX_BOT_IMAGE_BYTES) skipped.large += 1
+    else if (kept.length >= room) skipped.room += 1
+    else {
+      try {
+        const path = saveBotPicture(filesFolder, imageFileStem(input.source), type, bytes, input.now ?? new Date())
+        kept.push({ name: basename(path), path })
+      } catch {
+        // Not saved (a link out of the folder, a full disk): the bot still sees it; the owner doesn't.
+        skipped.unsaved += 1
+      }
     }
   }
-  if (!kept.length) return undefined
-  waiting.delete(activationId)
-  waiting.set(activationId, [...held, ...kept])
-  while (waiting.size > MAX_WAITING_ACTIVATIONS) waiting.delete(waiting.keys().next().value as string)
+  if (kept.length) {
+    waiting.delete(activationId)
+    waiting.set(activationId, [...held, ...kept])
+    while (waiting.size > MAX_WAITING_ACTIVATIONS) waiting.delete(waiting.keys().next().value as string)
+  }
   const one = kept.length === 1
-  return `[Your owner sees ${one ? 'this picture' : `these ${kept.length} pictures`} under your next message, so don't add ${one ? 'it' : 'them'} to it. Saved in your files folder: ${kept.map((image) => image.path).join(', ')}]`
+  const lines = kept.length
+    ? [`[Your owner sees ${one ? 'this picture' : `these ${kept.length} pictures`} under your next message, so don't add ${one ? 'it' : 'them'} to it. Saved in your files folder: ${kept.map((image) => image.path).join(', ')}]`]
+    : []
+  const why = [
+    ...(skipped.large ? [`${count(skipped.large)} over ${MAX_BOT_IMAGE_BYTES / (1024 * 1024)} MB`] : []),
+    ...(skipped.room ? [`${count(skipped.room)} past the ${MAX_IMAGES_PER_MESSAGE} one message shows`] : []),
+    ...(skipped.unsaved ? [`${count(skipped.unsaved)} that could not be saved in your files folder`] : [])
+  ]
+  if (why.length) lines.push(`[Not saved or shown to your owner: ${why.join('; ')}. Tell them in words what they need from ${skipped.large + skipped.room + skipped.unsaved === 1 ? 'it' : 'them'}.]`)
+  return lines.length ? lines.join('\n') : undefined
 }
+
+const count = (n: number): string => (n === 1 ? '1 picture' : `${n} pictures`)
 
 /** Whether a reply must carry pictures, even when no tool ledger was recorded. */
 export function hasToolImages(activationId: string): boolean {

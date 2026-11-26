@@ -117,6 +117,18 @@ describe('the Needs me group', () => {
   })
 })
 
+describe('a thread an agent keeps out of the sidebar', () => {
+  const launched = thread('l', 'Background check', { projectId: 'p1', updatedAt: at(6), hidden: true, createdByThreadId: 'a' })
+
+  it('is not in the thread list, but its question is in Needs me and the badge: it is the person\'s to answer', () => {
+    setStore({ projects, threads: [...threads, launched], threadActivity: {}, threadsSidebarView: 'threads' })
+    expect(titlesIn(sidebar())).not.toContain('Background check')
+    setStore({ projects, threads: [...threads, launched], threadActivity: { l: 'awaiting_input', a: 'awaiting_input' }, threadsSidebarView: 'threads', threadsSidebarOpen: false })
+    expect(titlesIn(needsMeSection(sidebar()))).toEqual(['Background check', 'Fix tests'])
+    expect(titleBar()).toContain('titlebar-attention-badge" aria-hidden="true">2<')
+  })
+})
+
 describe('a thread a bot keeps out of the sidebar', () => {
   const hidden = thread('h', 'Quick check', { projectId: 'p1', updatedAt: at(6), hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' } })
 
@@ -155,11 +167,9 @@ describe('a thread a bot keeps out of the sidebar', () => {
 })
 
 describe('the project row', () => {
-  it('shows a dot for the worst thread state and, while closed, how many threads need the person', () => {
+  it('marks a closed project with how many threads need the person', () => {
     setStore({ projects, threads, threadActivity: { a: 'awaiting_input', c: 'awaiting_input' }, threadsSidebarView: 'projects' })
-    const html = sidebar()
-    expect(html).toContain('class="threads-sidebar-project-status threads-sidebar-project-status--needs-me" role="img" aria-label="2 threads need you"')
-    expect(html).toContain('class="threads-sidebar-project-count" aria-hidden="true">2<')
+    expect(sidebar()).toMatch(/role="img" aria-label="2 threads need you">2<\/span>/)
   })
 
   it('shows a working state, and nothing for a quiet project', () => {
@@ -170,7 +180,7 @@ describe('the project row', () => {
     expect(sidebar()).not.toContain('threads-sidebar-project-finished')
   })
 
-  it('counts the threads that finished unseen after the name, with no dot', () => {
+  it('counts the threads that finished unseen after the name, with no state mark', () => {
     setStore({ projects, threads, threadActivity: { a: 'completed', c: 'completed', b: 'completed' }, threadsSidebarView: 'projects' })
     const html = sidebar()
     expect(html).toContain('Mousse</span><span class="threads-sidebar-project-finished" role="img" aria-label="2 finished" title="2 finished">2</span>')
@@ -178,10 +188,11 @@ describe('the project row', () => {
     expect(html).not.toContain('threads-sidebar-project-status')
   })
 
-  it('keeps the needs-me dot beside the finished count', () => {
+  it('keeps the needs-me mark along with the finished count', () => {
     setStore({ projects, threads, threadActivity: { a: 'completed', c: 'awaiting_input' }, threadsSidebarView: 'projects' })
     const html = sidebar()
-    expect(html).toContain('aria-label="1 finished" title="1 finished">1</span><span class="threads-sidebar-project-status threads-sidebar-project-status--needs-me"')
+    expect(html).toContain('aria-label="1 finished" title="1 finished">1</span>')
+    expect(html).toContain('aria-label="1 thread needs you"')
   })
 
   it('stays bright while it counts finished threads, as do those rows, until they are seen', () => {

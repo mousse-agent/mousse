@@ -22,7 +22,7 @@ import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
 import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
 import { archivedAtOf } from '../../../../shared/archivedAt'
 import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
-import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
+import { cutEnd, messageRows, nextAfterIndexOf, textOffsetProblem, type MessageRow } from './messageRows'
 import { lastCompletedAt, modelOf, pullRequestOf, recentTurns, RECENT_ANSWER_CHARS, RECENT_PROMPT_CHARS, RECENT_REMOTE_LOOKBACK, RECENT_REMOTE_MESSAGES, RECENT_STEP_CHARS, RECENT_TURNS_DEFAULT, RECENT_TURNS_MAX, SUMMARY_NEXT, type ViewRow } from './threadViews'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
@@ -91,6 +91,9 @@ export const BOT_NOTIFY_NEXT = 'You wake here in your chat when that thread fini
  * §16): it is told in its chat when the thread finishes or waits for a person, so `notify` is not needed.
  */
 export const BOT_JOB_NEXT = 'This job is in your ledger: you are told here in your chat when that thread finishes or waits for a person, with its report and link. Do not call thread_wait to check: tell your owner in one line what you started, with the link, and end your turn.'
+
+/** What an agent (not a bot) is told of a thread it started out of the person's sidebar. */
+const AGENT_HIDDEN_NOTE = 'It is out of the person\'s sidebar: the side panel of your thread lists it, and so does All in the sidebar; it notifies them like any thread when it needs them, and shows in the sidebar once they write in it. thread_update with hidden: false shows it there.'
 
 /**
  * The rule for where a bot's work goes, in its thread tools: a job in a project goes to a thread there, the bot's own
@@ -455,15 +458,17 @@ function boundedEvent(event: ThreadEvent): ThreadEvent {
 function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageRow>, afterIndex: number): Record<string, unknown> {
   const { taken: messages, capped } = fitPage(rows, envelope)
   const truncated = messages.some((message) => 'truncated' in message)
+  // Rows keep their transcript index and empty system rows are left out (`messageRows`): the next page starts after the last row.
+  const nextAfterIndex = nextAfterIndexOf(messages, afterIndex, typeof envelope.total === 'number' ? envelope.total : undefined)
   return {
     ...envelope,
     messages,
-    nextAfterIndex: afterIndex + messages.length,
+    nextAfterIndex,
     ...(capped ? { capped: true } : {}),
     ...(capped || truncated
       ? {
           hint: [
-            capped ? `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterIndex ${afterIndex + messages.length}.` : '',
+            capped ? `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterIndex ${nextAfterIndex}.` : '',
             truncated ? 'A message marked truncated continues: pass its index as afterIndex and its nextTextOffset as textOffset.' : ''
           ].filter(Boolean).join(' ')
         }
@@ -932,21 +937,23 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     })
   }
   /**
-   * Hides a thread the calling bot started from its owner's sidebar, or shows it again: `thread_hide`, and
-   * `thread_update hidden` (docs/plans/tool-api.md §1.5), which the thread family's switch makes its only name.
+   * Hides a thread the caller started from the person's sidebar, or shows it again: `thread_hide`, and
+   * `thread_update hidden` (docs/plans/tool-api.md §1.5), which the thread family's switch makes its only name. A bot
+   * hides the threads it started (its chat lists them); any other agent the threads it launched with `thread_create`
+   * (the side panel of its thread lists them). The host holds the caller to that.
    */
   const hideThread = (threadId: string, hidden: boolean, ctx: ToolCallContext, name: 'thread_hide' | 'thread_update'): ToolOutcome => {
     const bot = botThreadCall(bots, ctx)
-    if (!bot) throw new McpToolError('mousse_scope_denied', `${name === 'thread_hide' ? 'thread_hide' : 'thread_update hidden'} is for personal bots: a thread an agent starts always shows in the sidebar.`)
     if (!host.setThreadHidden) return notAvailable(name)
-    requireBotReach(host, engine, ctx.caller.threadId, threadId)
+    if (parseQualifiedId(threadId)) throw new Error('A thread on another computer is hidden or shown in that computer\'s sidebar, not from here.')
+    if (bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
     assertNotBotThread(host, threadId, name)
     const actor = actorOf(ctx)
     const result = host.setThreadHidden(threadId, hidden, { actor })
     const title = titleOf(threadId)
     if (result.changed) {
       showAction(host, threadId, actor, hidden ? 'hid this thread from the sidebar' : 'showed this thread in the sidebar again')
-      botChip(bot, 'thread_hide', threadId, title, undefined, { hidden })
+      if (bot) botChip(bot, 'thread_hide', threadId, title, undefined, { hidden })
     }
     return json({
       threadId,
@@ -954,7 +961,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       title: title ?? null,
       hidden,
       changed: result.changed,
-      note: hidden ? 'It is out of your owner\'s sidebar; your chat lists it.' : 'It is in your owner\'s sidebar again.'
+      note: bot
+        ? hidden ? 'It is out of your owner\'s sidebar; your chat lists it.' : 'It is in your owner\'s sidebar again.'
+        : hidden ? AGENT_HIDDEN_NOTE : 'It is in the person\'s sidebar again.'
     })
   }
   /**
@@ -1208,8 +1217,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       throw new Error(`firstMessage to another computer must be at most ${THREAD_REMOTE_FIRST_MESSAGE_MAX_CHARS} characters`)
     if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
     if (args.mode !== undefined && args.firstMessage === undefined) throw new Error('mode is the mode of firstMessage: give a firstMessage, or leave mode out.')
-    if (args.hidden !== undefined)
-      throw new Error(bot ? 'hidden is for threads here: a thread on another computer shows in that computer\'s sidebar.' : 'hidden is for personal bots: a thread an agent starts always shows in the sidebar.')
+    if (bot && args.hidden !== undefined) throw new Error('hidden is for threads here: a thread on another computer shows in that computer\'s sidebar.')
+    if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
     const notify = notifyArg(args)
     if (notify && args.firstMessage === undefined) throw new Error('notify tells you when the work of firstMessage settles: give a firstMessage, or leave notify out.')
     // A bot hears of a thread here in its chat; one there it waits on with thread_wait.
@@ -1231,7 +1240,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         ...(typeof args.instanceId === 'string' ? { instanceId: args.instanceId.trim() } : {}),
         ...(typeof args.model === 'string' ? { model: args.model.trim() } : {}),
         ...(typeof args.effort === 'string' ? { effort: args.effort.trim() } : {}),
-        ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {})
+        ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {}),
+        // A bot's thread shows in that computer's sidebar and its request names no hidden, so a key it stored before keeps
+        // its fingerprint; an agent's is hidden there unless it asks otherwise.
+        ...(!bot && typeof args.hidden === 'boolean' ? { hidden: args.hidden } : {})
       }, { clientRequestId: requestKey, actor })
     } catch (error) {
       throw sendConflict(error) ?? error
@@ -1255,7 +1267,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         ? `The thread exists on ${launched.computer}, but its first message was not delivered: ${launched.firstMessageReason ?? 'refused'}.`
         : launched.firstMessage === 'uncertain'
           ? `The thread exists on ${launched.computer}; ${launched.computer} has not confirmed the first message yet. Mousse keeps trying under the same key, so do not send it again: call thread_create again with the same clientRequestId to learn what became of it.`
-          : `Started on ${launched.computer}. Its questions and approvals wait on that computer.`
+          : `Started on ${launched.computer}. Its questions and approvals wait on that computer.${bot ? '' : args.hidden === false ? ' It shows in that computer\'s sidebar.' : ' It is out of that computer\'s sidebar: the side panel of your thread lists it here, and All in the sidebar there.'}`
     })
   }
   /**
@@ -1326,13 +1338,16 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
         return out
       }
-      // The newest messages, to find the turns in; a turn longer than that is read back to its prompt, so far.
-      let rows = await readSpan(Math.max(0, total - RECENT_REMOTE_MESSAGES), total)
+      // The newest messages, to find the turns in; a turn longer than that is read back to its prompt, so far. The reach
+      // counts transcript indices, not rows: a computer there leaves out system rows with no text (`messageRows`), so a
+      // span of tool markers reads as no rows, and the reading goes on before it.
+      let start = Math.max(0, total - RECENT_REMOTE_MESSAGES)
+      let rows = await readSpan(start, total)
       const prompts = () => rows.filter((row) => row.role === 'user').length
-      while (rows.length && rows[0]!.index > 0 && prompts() < turns && total - rows[0]!.index < RECENT_REMOTE_LOOKBACK) {
-        const earlier = await readSpan(Math.max(0, rows[0]!.index - RECENT_REMOTE_MESSAGES), rows[0]!.index)
-        if (!earlier.length) break
-        rows = [...earlier, ...rows]
+      while (start > 0 && prompts() < turns && total - start < RECENT_REMOTE_LOOKBACK) {
+        const from = Math.max(0, start - RECENT_REMOTE_MESSAGES)
+        rows = [...await readSpan(from, start), ...rows]
+        start = from
       }
       // Then the prompt and the answer of each of those turns, as far as the view shows them.
       const shown = recentTurns(rows, turns).turns.flatMap((turn) => [
@@ -2460,12 +2475,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_update',
-      description: 'Change a thread. One change per call. hidden (personal bots only, threads you started): hide one from your owner\'s sidebar or show it there again with hidden: false, as thread_hide does. access (your own subagent only): access {readOnly: false} lifts the read-only narrowing you gave a subagent that works in your folder, so it edits files and runs commands there with your tools, never more than you hold; you need to hold that yourself (not read-only, not under Plan). apply next_turn (the default) takes effect at its next turn; apply now stops its running turn and continues it on the same thread, with its history, under the new access (a follow-up task, as continue_subagent starts, whose result Mousse sends you). apply now is refused while the subagent waits on a person or has subagents of its own working. Returns its access and revision; pass that revision as expectedRevision to refuse a change if its access changed meanwhile.',
+      description: 'Change a thread. One change per call. hidden (threads you started with thread_create, on this computer): hide one from the person\'s sidebar or show it there again with hidden: false; a personal bot\'s thread_hide does the same. A thread you start is hidden by default; show it when it becomes work the person will follow, answer or continue themselves. Nothing in the thread changes. access (your own subagent only): access {readOnly: false} lifts the read-only narrowing you gave a subagent that works in your folder, so it edits files and runs commands there with your tools, never more than you hold; you need to hold that yourself (not read-only, not under Plan). apply next_turn (the default) takes effect at its next turn; apply now stops its running turn and continues it on the same thread, with its history, under the new access (a follow-up task, as continue_subagent starts, whose result Mousse sends you). apply now is refused while the subagent waits on a person or has subagents of its own working. Returns its access and revision; pass that revision as expectedRevision to refuse a change if its access changed meanwhile.',
       inputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string' },
-          hidden: { type: 'boolean', description: 'Personal bots only: true hides a thread you started from your owner\'s sidebar, false shows it again.' },
+          hidden: { type: 'boolean', description: 'Threads you started with thread_create: true hides one from the person\'s sidebar, false shows it there again.' },
           access: {
             type: 'object',
             properties: { readOnly: { type: 'boolean', description: 'false lifts the read-only narrowing of your own subagent.' } },
@@ -2614,7 +2629,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_create',
-      description: `Start a new thread in a project. Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; set notify with a firstMessage when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. computer starts the thread on another of the user's computers instead (a name from list_computers; the user must allow agents to work there): in its project that is this thread's repository (projectId, optional, chooses among several there; a refusal lists them; nothing is cloned), in your permission mode narrowed to the limit that computer set for this one, on that computer's default model unless you pass instanceId and model from list_models with computer. It is recorded as started by you there, cannot start work on a third computer, and its questions and approvals wait on that computer. The result's threadId is qualified (<computer id>:<thread id>); firstMessage is sent, failed (the thread is still returned) or uncertain (that computer did not confirm it: call again with the same clientRequestId, which continues the same launch and never sends twice). A refusal names its reason: computer_offline, computer_not_shared, computer_outdated, computer_not_allowed, no_matching_project or several_matching_projects. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
+      description: `Start a new thread in a project. Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. It starts out of the person's sidebar (hidden defaults to true), so the threads agents start do not crowd theirs: your thread's side panel lists it, and it notifies them when it needs them; pass hidden: false only for an independent thread the person will follow there themselves. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; set notify with a firstMessage when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. computer starts the thread on another of the user's computers instead (a name from list_computers; the user must allow agents to work there): in its project that is this thread's repository (projectId, optional, chooses among several there; a refusal lists them; nothing is cloned), in your permission mode narrowed to the limit that computer set for this one, on that computer's default model unless you pass instanceId and model from list_models with computer. It is recorded as started by you there, is out of that computer's sidebar unless hidden is false, cannot start work on a third computer, and its questions and approvals wait on that computer. The result's threadId is qualified (<computer id>:<thread id>); firstMessage is sent, failed (the thread is still returned) or uncertain (that computer did not confirm it: call again with the same clientRequestId, which continues the same launch and never sends twice). A refusal names its reason: computer_offline, computer_not_shared, computer_outdated, computer_not_allowed, no_matching_project or several_matching_projects. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
       botDescription: `Start a new thread in one of your owner's projects, with a title and a firstMessage (mode agent or plan) that starts its work at once, as a message from you. ${BOT_WORK_IN_THREADS} Each thread you start is a job in your ledger: you are told here in your chat when it finishes or waits for a person, with its report and link, and you know later which thread did what. On a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which); workspace "new_worktree" records it as a worktree thread and needs a Git project. Name its model with instanceId and model (and maybe effort) from thread_list's models; without them it uses the profile's default, never your own model. A model that is not offered, or an agent that is signed out, is refused with the reason and no thread is made: tell your owner, never pick another yourself. The thread runs in Full access (or the limit of the device your owner wrote from): it runs commands and changes files without asking, and its questions and approvals come to you (approval_respond). hidden keeps it out of your owner's sidebar; your chat lists it. Start as many threads as the work needs: there is no count per turn, per run or per day, no limit on how many work at once, and its first message is never refused as one agent message too many. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one. End your turn after starting it instead of waiting. computer starts it on another of your owner's computers that lets agents work there (a name from list_computers) instead, in that computer's checkout of the repository of fromProjectId (a project here), with a firstMessage; it runs there in Full access narrowed to the limit that computer set, its questions and approvals wait on that computer, and you follow it with thread_read and thread_wait (no notify). Its threadId is qualified (<computer id>:<thread id>).`,
       inputSchema: {
         type: 'object',
@@ -2629,7 +2644,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           effort: { type: 'string', description: 'The reasoning level of the model, one of its efforts in list_models; needs model.' },
           firstMessage: { type: 'string', description: 'Sent to the new thread as your message, so it starts working.' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'The mode of firstMessage; defaults to agent.' },
-          hidden: { type: 'boolean', description: 'Personal bots only. A thread you start is out of your owner\'s sidebar: your chat lists it, and your owner opens it or shows it in the sidebar from there; it shows there once your owner writes in it. false shows it in the sidebar from the start: for work your owner asked to follow, answer or continue there. thread_hide changes it later. Defaults to true.' },
+          hidden: { type: 'boolean', description: 'Defaults to true: the thread is out of the person\'s sidebar (with computer, that computer\'s), where it would crowd their own threads. Your thread\'s side panel lists it (a personal bot\'s chat), the person opens or shows it from there, and it shows in the sidebar once they write in it; it still notifies them when it needs them. false starts an independent thread that shows in the sidebar from the start: work the person asked to follow, answer or continue there themselves, or that you will not follow. thread_update hidden (thread_hide for a personal bot) changes it later.' },
           notify: { ...NOTIFY_SCHEMA, description: `${NOTIFY_SCHEMA.description} Needs a firstMessage.` },
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         }
@@ -2676,9 +2691,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
         if (args.mode !== undefined && args.firstMessage === undefined) throw new Error('mode is the mode of firstMessage: give a firstMessage, or leave mode out.')
         if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
-        // Only a bot's chat lists the threads it started, so only a bot's thread can be hidden and still be found. A bot's
-        // starts hidden unless it asks otherwise.
-        if (args.hidden === true && !bot) throw new Error('hidden is for personal bots: a thread an agent starts always shows in the sidebar.')
+        // A thread an agent starts is out of the sidebar unless the agent asks otherwise: a bot's chat lists it, and so does
+        // the side panel of the thread that launched it. Given only when asked, so a retry's request is the same as before.
         const notify = notifyArg(args)
         if (notify && args.firstMessage === undefined) throw new Error('notify tells you when the work of firstMessage settles: give a firstMessage, or leave notify out.')
         if (notify && !bot && !host.watchSettle) return notAvailable('thread_create with notify')
@@ -2690,7 +2704,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
           ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {}),
-          ...(bot && typeof args.hidden === 'boolean' ? { hidden: args.hidden } : {})
+          ...(typeof args.hidden === 'boolean' ? { hidden: args.hidden } : {})
         }
         const actor = actorOf(ctx)
         // A bot's key names its chat turn. A key that already has a stored creation is a retry of that one thread: the
@@ -2748,7 +2762,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         // The first message's work is watched once it was sent; one that was not sent has nothing to watch yet (a retry sends it).
         const watched = notify && created.firstMessage?.sent === true ? watchSent(created.threadId, requestKey, actor, created.firstMessage.runId, ctx) : {}
         const setup = !created.replayed && created.firstMessage?.sent === true ? await setupOf(host, created.threadId, created.firstMessage) : {}
-        return json({ ...created, link: threadLink(created.threadId), ...watched, ...setup })
+        // As the thread is now: a retry reports the thread the first call made.
+        const hidden = host.threadMeta?.(created.threadId)?.hidden === true
+        return json({ ...created, link: threadLink(created.threadId), ...watched, ...setup, hidden, note: hidden ? AGENT_HIDDEN_NOTE : 'It shows in the person\'s sidebar: an independent thread they follow there.' })
       }
     },
     {

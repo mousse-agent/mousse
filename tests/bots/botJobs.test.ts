@@ -9,8 +9,9 @@ import { getDefaultSettings } from '../../src/shared/settings'
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { threadsActOf } from '../../src/mms/bots/activation/BotEngine'
-import { jobAskerOf, jobStateOf, jobStep, type JobThreadView } from '../../src/mms/bots/jobs'
-import { BOT_REPORT_MAX_CHARS } from '../../src/shared/bots/personal/jobs'
+import { jobAskerOf, jobResultOf, jobStateOf, jobStep, resultLine, type JobThreadView } from '../../src/mms/bots/jobs'
+import { BOT_JOB_LINE_CHARS, BOT_REPORT_MAX_CHARS, jobLine } from '../../src/shared/bots/personal/jobs'
+import type { ChatMessage } from '../../src/shared/types'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 describe('a thread\'s standing as a job', () => {
@@ -33,12 +34,99 @@ describe('a thread\'s standing as a job', () => {
   })
 
   it.each([
-    ['the owner\'s chat message', { lane: 'chat', idempotencyKey: 'chat:r1', trigger: { kind: 'manual', input: 'x' } }, 'Fix X in Y', { askedBy: 'owner', request: 'Fix X in Y' }],
+    ['the owner\'s chat message', { lane: 'chat', idempotencyKey: 'chat:r1', trigger: { kind: 'manual', input: 'x' } }, 'Fix X in Y', { askedBy: 'owner', request: 'Do the thing' }],
     ['a schedule', { lane: 'run', idempotencyKey: 'sched:b:s:t', trigger: { kind: 'schedule', input: 'Nightly check' } }, undefined, { askedBy: 'schedule', request: 'Nightly check' }],
     ['another bot', { lane: 'chat', idempotencyKey: 'botmsg:m1', trigger: { kind: 'manual', input: 'Please look', fromBot: { botId: 'o', name: 'O' } } }, undefined, { askedBy: 'bot', request: 'Please look' }],
     ['a wake, its own', { lane: 'chat', idempotencyKey: 'wake:w1', trigger: { kind: 'manual', input: 'woke' } }, undefined, { askedBy: 'self', request: 'Do the thing' }]
   ] as const)('who asked, from %s', (_name, row, ownerText, expected) => {
     expect(jobAskerOf(row as never, ownerText, 'Do the thing')).toEqual(expected)
+  })
+
+  describe('what the owner asked: the part their thread was handed, or their whole message', () => {
+    const chat = { lane: 'chat', idempotencyKey: 'chat:r1', trigger: { kind: 'manual', input: 'x' } } as never
+    const long = `Fix the login page in Web, ${'then tidy the settings page and the docs, '.repeat(5)}and tell me.`
+
+    it.each([
+      // A message may ask for several things: each job names the part its thread was handed.
+      ['a long message', long, 'Fix the login redirect in Web.', 'Fix the login redirect in Web.'],
+      ['a short message of two things', 'Fix the login and the docs', 'Fix the login redirect in Web.', 'Fix the login redirect in Web.'],
+      ['a message of two lines', 'Fix the login in Web\nUpdate the docs', 'Update the setup docs in Docs.', 'Update the setup docs in Docs.'],
+      // Handed nothing to name: the whole message, every line of it, cut to the line.
+      ['a long message, nothing handed', long, '  ', jobLine(long)],
+      ['a message of two lines, nothing handed', 'Fix the login in Web\nUpdate the docs', '', 'Fix the login in Web Update the docs'],
+      ['a message long only in its spacing, nothing handed', `Fix X in Y${' '.repeat(BOT_JOB_LINE_CHARS)}`, '', 'Fix X in Y']
+    ])('%s', (_name, ownerText, sent, request) => {
+      expect(jobAskerOf(chat, ownerText, sent)).toEqual({ askedBy: 'owner', request })
+    })
+  })
+})
+
+describe('a job\'s answer and its one line', () => {
+  const row = (role: ChatMessage['role'], content: string, turnId?: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id: `${role}:${content}`, role, content, timestamp: '', ...(turnId ? { turnId } : {}), ...extra })
+  // An earlier turn r0 whose reply opens with words the new run's progress line repeats.
+  const earlier = [row('user', 'Fix page A', 'r0'), row('assistant', 'Looking at the logs now. Fixed page A: the redirect was wrong.', 'r0')]
+
+  it.each([
+    // The run wrote a progress line, then its final reply (the one carrying its id): the final reply is the answer.
+    ['a progress line, then the reply', [...earlier, row('user', 'Fix page B', 'r1'), row('assistant', 'Looking at the logs now.'), row('assistant', 'Fixed page B.', 'r1')], 'Looking at the logs now.\n\nFixed page B.', 'Fixed page B.'],
+    // The final reply carries no id: the last reply after the message that opened the run.
+    ['a reply without the run\'s id', [...earlier, row('user', 'Fix page B', 'r1'), row('assistant', 'Looking now.'), row('assistant', 'Fixed page B.')], undefined, 'Fixed page B.'],
+    // Stopped after a progress line that opens the earlier turn's reply: its own line, never the earlier reply.
+    ['a stopped run whose line opens an earlier reply', [...earlier, row('user', 'Fix page B', 'r1'), row('assistant', 'Looking at the logs now.'), row('system', 'Turn stopped.')], 'Looking at the logs now.', 'Looking at the logs now.'],
+    // Stopped before it wrote anything: no answer, never the earlier turn's.
+    ['a stopped run with no reply', [...earlier, row('user', 'Fix page B', 'r1'), row('system', 'Turn stopped.')], undefined, undefined],
+    // The next run's messages are not this run's.
+    ['a later run\'s reply', [row('user', 'Fix page B', 'r1'), row('user', 'And C', 'r2'), row('assistant', 'Fixed C.', 'r2')], undefined, undefined],
+    // A run that left no message of its own: what it kept, or nothing; never the thread's last reply.
+    ['no message of the run, a kept result', earlier, 'Fixed page B.', 'Fixed page B.'],
+    ['no message of the run, nothing kept', earlier, '  ', undefined]
+  ] as const)('the answer: %s', (_name, messages, recorded, answer) => {
+    expect(jobResultOf(recorded, messages as readonly ChatMessage[], 'r1')).toBe(answer)
+  })
+
+  it('an applet in the reply reaches the answer as its name, never its source, even after 200 characters of prose', () => {
+    const source = { schemaVersion: 1, title: 'Price chart', description: 'Prices.', html: '<main id="secret-markup"></main>', css: '', js: 'drawChart()' }
+    const reply = `${'The prices over the year, as asked. '.repeat(8)}\n\n\u0060\u0060\u0060mousse-applet\n${JSON.stringify(source)}\n\u0060\u0060\u0060`
+    const reference = { appletId: 'ap1', revisionId: 'rev1', sourceHash: 'h', title: 'Price chart', description: 'Prices.' }
+    const published = row('assistant', reply, 'r1', { presentationParts: [{ type: 'text', text: reply.slice(0, reply.indexOf('\u0060')) }, { type: 'applet', reference }] })
+    for (const message of [published, row('assistant', reply, 'r1')]) {
+      const answer = jobResultOf('The prices over the year.', [row('user', 'Chart prices', 'r1'), message], 'r1')!
+      expect(answer).toContain('The prices over the year, as asked.')
+      expect(answer).toContain('[Applet: Price chart')
+      expect(answer).not.toContain('mousse-applet')
+      expect(answer).not.toContain('secret-markup')
+      expect(answer).not.toContain('drawChart')
+    }
+  })
+
+  it.each([
+    ['the first line', 'Fixed the redirect.\nDetails.', 'Fixed the redirect.'],
+    ['past blank lines', '\n  \nFixed the redirect.', 'Fixed the redirect.'],
+    ['past a heading', '## Summary\n\nFixed the redirect.', 'Fixed the redirect.'],
+    ['past rules and a code fence', '---\n* * *\n___\n```ts\nconst fixed = true\n```', 'const fixed = true'],
+    ['past a setext underline', '=====\nFixed the redirect.', 'Fixed the redirect.'],
+    // A heading's words when the answer has nothing else.
+    ['only headings', '# Done\n\n## Nothing else', 'Done'],
+    // Words that start with layout characters are words.
+    ['an issue number', '#1873 is merged.', '#1873 is merged.'],
+    ['a bold line', '**Fixed** the redirect.', '**Fixed** the redirect.'],
+    ['a list item', '- Fixed the redirect.', '- Fixed the redirect.'],
+    ['only headings, closed', '## Done ##', 'Done'],
+    // Layout and nothing else: no line, never a delimiter for one.
+    ['only a rule', '---', undefined],
+    ['only rules', '***\n\n___\n===', undefined],
+    ['only an empty code fence', '```\n```', undefined],
+    ['only an empty fence with a language', '~~~ts\n~~~', undefined],
+    ['only bare heading marks', '#\n##', undefined],
+    ['a heading that is a rule', '## ---', undefined],
+    ['nothing', '\n  \n', undefined],
+    ['no answer', undefined, undefined]
+  ])('the line: %s', (_name, result, line) => {
+    expect(resultLine(result)).toBe(line)
+  })
+
+  it('the line is held to one ledger line', () => {
+    expect(resultLine(`## Report\n${'word '.repeat(100)}`)).toBe(jobLine('word '.repeat(100)))
   })
 })
 
@@ -59,11 +147,11 @@ describe('the ledger in the bot engine', () => {
   afterEach(() => f.close())
 
   /** The owner asks in the chat; the turn hands the job to `threadId` as thread_create does, and ends. */
-  async function handOff(text: string, threadId: string, clientRequestId: string) {
+  async function handOff(text: string, threadId: string, clientRequestId: string, sent = 'Fix the login redirect in Web.') {
     await f.bots.service.chatSend({ botId, text, clientRequestId })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const { payload } = await start(f, activation.id)
-    const { jobId } = f.bots.openJob(botId, activation.id, { threadId, title: 'Fix the login page', project: 'Web', sent: 'Fix the login redirect in Web.' })
+    const { jobId } = f.bots.openJob(botId, activation.id, { threadId, title: 'Fix the login page', project: 'Web', sent })
     threads.set(threadId, { status: 'running', title: 'Fix the login page' })
     await finish(f, payload, 'completed', { text: 'Started a thread for it.' })
     return jobId
@@ -71,7 +159,7 @@ describe('the ledger in the bot engine', () => {
 
   it('"fix X in project Y" becomes a job; the thread\'s end is one notice turn with the capped report and link, and the row is still there days later', async () => {
     const jobId = await handOff('Fix the login page in project Web', 't1', 'm1')
-    expect(f.store.job(jobId)).toMatchObject({ threadId: 't1', project: 'Web', askedBy: 'owner', request: 'Fix the login page in project Web', state: 'running' })
+    expect(f.store.job(jobId)).toMatchObject({ threadId: 't1', project: 'Web', askedBy: 'owner', request: 'Fix the login redirect in Web.', state: 'running' })
     // Still working: nothing to say.
     f.bots.checkJobs('t1')
     await flush()
@@ -89,7 +177,7 @@ describe('the ledger in the bot engine', () => {
     const input = (turn!.trigger as { input: string }).input
     expect(input).toContain('mousse://thread/t1')
     expect(input).toContain('Who asked: your owner.')
-    expect(input).toContain('Fix the login page in project Web')
+    expect(input).toContain('Fix the login redirect in Web.')
     // One Mousse block about this thread that may end with no reply; the thread's words are quoted inside it.
     expect(input.startsWith('<mousse_notice kind="job_update" reply="if-needed" ref="t1">\n')).toBe(true)
     expect(input.endsWith('\n</mousse_notice>')).toBe(true)
@@ -111,6 +199,40 @@ describe('the ledger in the bot engine', () => {
     // Three days later the ledger still names the thread that did it.
     f.clock.now += 3 * 24 * 60 * 60 * 1000
     expect(f.store.recentJobs(botId, 6)).toEqual([expect.objectContaining({ id: jobId, threadId: 't1', state: 'done', line: 'Fixed the login redirect.' })])
+  })
+
+  it('a long message names on its job what that thread was handed; the ledger line skips the answer\'s heading', async () => {
+    const jobId = await handOff(`Fix the login page in project Web, ${'then tidy the settings page and the docs, '.repeat(5)}and tell me.`, 't9', 'm9')
+    // handOff hands the thread "Fix the login redirect in Web."
+    expect(f.store.job(jobId)).toMatchObject({ askedBy: 'owner', request: 'Fix the login redirect in Web.' })
+    threads.set('t9', { status: 'done', title: 'Fix the login page', result: '## Summary\n\n---\nFixed the login redirect.\nDetails below.' })
+    f.bots.threadRunEnded('t9')
+    await flush()
+    expect(f.store.job(jobId)).toMatchObject({ state: 'done', line: 'Fixed the login redirect.' })
+  })
+
+  it('one message of two lines handed to two threads: each job, and its notice, names the part its thread was handed', async () => {
+    await f.bots.service.chatSend({ botId, text: 'Fix the login page in Web.\nUpdate the setup docs too.', clientRequestId: 'm10' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload } = await start(f, activation.id)
+    const login = f.bots.openJob(botId, activation.id, { threadId: 't10', title: 'Fix the login page', project: 'Web', sent: 'Fix the login redirect in Web.' }).jobId
+    const docs = f.bots.openJob(botId, activation.id, { threadId: 't11', title: 'Update the docs', project: 'Docs', sent: 'Update the setup guide in Docs.' }).jobId
+    threads.set('t10', { status: 'running', title: 'Fix the login page' })
+    threads.set('t11', { status: 'running', title: 'Update the docs' })
+    await finish(f, payload, 'completed', { text: 'Started two threads.' })
+
+    expect(f.store.job(login)).toMatchObject({ askedBy: 'owner', request: 'Fix the login redirect in Web.' })
+    expect(f.store.job(docs)).toMatchObject({ askedBy: 'owner', request: 'Update the setup guide in Docs.' })
+
+    threads.set('t11', { status: 'done', title: 'Update the docs', result: 'Updated the setup guide.' })
+    f.bots.threadRunEnded('t11')
+    await flush()
+    const [turn, ...more] = noticeTurns()
+    expect(more).toEqual([])
+    const input = (turn!.trigger as { input: string }).input
+    expect(input).toContain('<quoted from="the request">\nUpdate the setup guide in Docs.\n</quoted>')
+    expect(input).not.toContain('Fix the login redirect in Web.')
+    expect(input).not.toContain('Fix the login page in Web.')
   })
 
   it('a thread waiting for a person is a notice; an answer moves it back quietly; its end is a second notice', async () => {
@@ -180,7 +302,7 @@ describe('the ledger in the bot engine', () => {
     f.bots.launchedThreadChanged(home, 't4')
     const [followUp, ...more] = f.store.openJobsOn('t4')
     expect(more).toEqual([])
-    expect(followUp).toMatchObject({ botId, askedBy: 'owner', state: 'running', request: 'More work after "Fix the login page in project Web"' })
+    expect(followUp).toMatchObject({ botId, askedBy: 'owner', state: 'running', request: 'More work after "Fix the login redirect in Web."' })
     expect(followUp!.id).not.toBe(jobId)
     // Seen again while it works: still the one follow-up.
     f.bots.launchedThreadChanged(home, 't4')
@@ -198,7 +320,7 @@ describe('the ledger in the bot engine', () => {
     // It works again: the next follow-up keeps the first request's line, never quoting it twice.
     threads.set('t4', { status: 'running', title: 'Fix the login page' })
     f.bots.launchedThreadChanged(home, 't4')
-    expect(f.store.openJobsOn('t4')).toMatchObject([{ request: 'More work after "Fix the login page in project Web"' }])
+    expect(f.store.openJobsOn('t4')).toMatchObject([{ request: 'More work after "Fix the login redirect in Web."' }])
   })
 
   it('a message the bot sends to a thread whose follow-up is open takes the follow-up over: its turn, request and asker', async () => {

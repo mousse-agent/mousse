@@ -29,7 +29,7 @@ export interface BotTurnRights {
   remind: boolean
   /** `question_answer`: passes on to work an answer the owner gave in the chat. */
   relayAnswer: boolean
-  /** `ask_owner` (and later `question_withdraw`). In a run, the question parks the run until it is answered. */
+  /** `ask_owner` and `question_withdraw`. In a run, a question it waits on parks the run until it is answered. */
   asksOwner: boolean
   /** `work_wait`: the run parks on a time or an event, holding no slot. */
   workWait: boolean
@@ -41,7 +41,10 @@ export interface BotTurnRights {
   subagents: boolean
 }
 
-/** A chat turn the owner did not start that may still act: the bot's first message, a wake, a question's default, a thread's notice or message. */
+/**
+ * A chat turn the owner did not start that may still act: the bot's first message, a wake, a question's default, a
+ * thread's notice or message, a held call's result.
+ */
 const CHAT_ACTING: BotTurnRights = {
   lane: 'chat', ownerWords: false, memoryLane: 'run', threadsAct: true,
   watchStart: true, remind: true, relayAnswer: false, asksOwner: true, workWait: false, botSend: true, workStart: true, subagents: false
@@ -51,8 +54,8 @@ const CHAT_ACTING: BotTurnRights = {
  * The table. Reasons for each "no":
  * - `memoryLane: 'run'` outside the owner's message or tap: only the owner says what the bot keeps about them.
  * - `relayAnswer` only for the owner's message or tap: an answer passed on to work must be the owner's.
- * - `threadsAct` never for another bot's message, a held call's result or an unknown start: text the owner never saw
- *   would steer their threads.
+ * - `threadsAct` never for another bot's message or an unknown start: text the owner never saw would steer their
+ *   threads. A held call's result acts only as far as the turn that held the call did.
  * - `workWait` only in a run: the chat has one slot (`slotFree`) and nothing may hold it while it waits; it sets a wake.
  * - `workStart` never in a run: work does the job itself, splitting it among subagents; it does not hand it on.
  * - `subagents` never in the chat: it hands long jobs to work.
@@ -70,8 +73,9 @@ export const BOT_TURN_KINDS: Readonly<Record<BotActivationProvenance, BotTurnRig
   job: CHAT_ACTING,
   threadmsg: CHAT_ACTING,
   botmsg: { ...CHAT_ACTING, threadsAct: false },
-  // Its own turn arrives in a later change; until then it is held as another bot's message is.
-  action_result: { ...CHAT_ACTING, threadsAct: false },
+  // A held call's result: acts as a chat turn the owner did not start, its threads held to the turn that held the call
+  // (`threadsActOf` reads the trigger's `threadsReadOnly`) and its device's limit (`ownerTurn`).
+  action_result: CHAT_ACTING,
   work: {
     lane: 'run', ownerWords: false, memoryLane: 'run', threadsAct: true,
     watchStart: true, remind: true, relayAnswer: false, asksOwner: true, workWait: true, botSend: true, workStart: false, subagents: true
@@ -103,7 +107,7 @@ export function runProvenance(kind: string | undefined): BotActivationProvenance
 
 /** The tools whose cell a chat turn's start decides at the call (`BotAuthority.turnRefusals`), and the cell. */
 const TURN_TOOLS: ReadonlyArray<readonly [string, keyof BotTurnRights]> = [
-  ['watch_start', 'watchStart'], ['remind', 'remind'], ['question_answer', 'relayAnswer'], ['ask_owner', 'asksOwner'],
+  ['watch_start', 'watchStart'], ['remind', 'remind'], ['question_answer', 'relayAnswer'], ['ask_owner', 'asksOwner'], ['question_withdraw', 'asksOwner'],
   ['bot_send', 'botSend'], ['work_start', 'workStart'], ['work_wait', 'workWait'], ['subagent_start', 'subagents']
 ]
 

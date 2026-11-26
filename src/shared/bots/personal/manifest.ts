@@ -1,7 +1,7 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
 import { COMPUTER_TOOL_NAMES, COMPUTER_USE_REQUEST_TOOL } from '../../computerUse'
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
-import { isNeutralTool, type NeutralTool } from '../../harness/tools'
+import { isNeutralTool, NEUTRAL_TOOLS, type NeutralTool } from '../../harness/tools'
 import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
@@ -53,10 +53,18 @@ export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagen
 export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser', 'computer', 'threads']
 
 /**
- * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
- * commands, using the computer), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
+ * What a chat turn never does itself, though the grant may hold it, with the browser (docs/bots.md, "Quick calls in the
+ * chat"): running commands keeps the runtime's own sandbox and time in work, and the browser and the computer never
+ * collide with work that uses them, so the chat hands them to work and stays free to talk. Work runs with the whole grant.
+ * The chat calls the web, a bound service and the owner's MCP tools itself, within its budgets (`BotQuickCalls`).
  */
-export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch', 'computer']
+export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'computer']
+
+/**
+ * The runtime's own web (Claude Code's WebSearch and WebFetch): never in a chat turn, whose web is Mousse's `web_search`
+ * and `web_fetch` alone, which keep to the chat's deadlines.
+ */
+export const BOT_CHAT_NATIVE_OFF: readonly string[] = ['web_search', 'web_fetch']
 
 /**
  * The bot's listing of its owner's MCP servers (`mcp_servers`): each server set up for the whole profile, by name and a
@@ -101,6 +109,12 @@ export const BOT_QUESTION_TOOL = 'ask_owner'
  * A chat turn their own message started gets it with `ask_owner`; it grants nothing either.
  */
 export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
+
+/**
+ * Taking back a question the bot asked and no longer needs (`question_withdraw`, issue #1446). Held with `ask_owner`,
+ * wherever a turn may ask; it grants nothing either.
+ */
+export const BOT_QUESTION_WITHDRAW_TOOL = 'question_withdraw'
 
 /**
  * Attaching a small card to the turn's next message (`show_card`, issue #1123): facts, a checklist, progress or a
@@ -310,6 +324,9 @@ export const BOT_MCP_SERVER_SWITCH = 'default:mcp:'
 export const BOT_SKILLS_SWITCH = 'default:skills'
 export const BOT_AUTOMATIONS_SWITCH = 'default:automations'
 
+/** About's switch for "Allow everything" (`BotManifest.fullTrust`), as `bots.permissions.set` names it. */
+export const BOT_FULL_TRUST_PERMISSION = 'full_trust'
+
 /** Whether `id` is one of the switches of what every bot has by default. */
 export function isBotDefaultSwitch(id: string): boolean {
   return id === BOT_MCP_SWITCH || id === BOT_SKILLS_SWITCH || id === BOT_AUTOMATIONS_SWITCH || (id.startsWith(BOT_MCP_SERVER_SWITCH) && id.length > BOT_MCP_SERVER_SWITCH.length)
@@ -345,6 +362,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_APPLET_TOOL,
   BOT_QUESTION_TOOL,
   BOT_QUESTION_ANSWER_TOOL,
+  BOT_QUESTION_WITHDRAW_TOOL,
   BOT_CARD_TOOL,
   BOT_REPORT_BUG_TOOL,
   ...BOT_MESSAGE_TOOLS,
@@ -452,7 +470,23 @@ export function canonicalManifest(manifest: BotManifest): BotManifest {
     skills: sorted(manifest.skills, (skill) => skill),
     workspace: workspaceOf(foldersOf(manifest.workspace)),
     budget,
-    audience: manifest.audience
+    audience: manifest.audience,
+    // Only when true: a grant without it keeps the digest it was approved under.
+    ...(manifest.fullTrust === true ? { fullTrust: true as const } : {})
+  }
+}
+
+/**
+ * What "Allow everything" (`fullTrust`) gives: every built-in tool and every Mousse app tool a bot can be granted, added
+ * to `manifest`. Its MCP tools, skills and limits stay as they are: MCP and skills come to every bot unless switched off
+ * (`BotEngine.withDefaults`), and a tool that asks first still asks. A manifest without it is returned as it is.
+ */
+export function withFullTrust(manifest: BotManifest): BotManifest {
+  if (manifest.fullTrust !== true) return manifest
+  return {
+    ...manifest,
+    tools: [...new Set<NeutralTool>([...manifest.tools, ...NEUTRAL_TOOLS])],
+    appTools: [...new Set([...manifest.appTools, ...BOT_APP_TOOLS])]
   }
 }
 
@@ -489,6 +523,7 @@ export function manifestProblem(value: unknown): string | undefined {
     if (key !== 'maxUsd' && !Number.isSafeInteger(limit)) return `The limit ${key} must be a whole number.`
   }
   if (manifest.audience !== 'owner') return 'Bots for other people are not available yet.'
+  if (manifest.fullTrust !== undefined && manifest.fullTrust !== true) return 'Allow everything is on, or left out.'
   return undefined
 }
 
@@ -512,7 +547,8 @@ function currentPlatform(): string {
 
 /**
  * Whether `wanted` asks for nothing beyond `granted`: every tool, app tool, MCP tool and skill is
- * granted, and every limit is at most the granted one (a limit the grant has and `wanted` drops is
+ * granted, no MCP tool goes without asking first where the grant asks first, "Allow everything" only where the grant
+ * has it, and every limit is at most the granted one (a limit the grant has and `wanted` drops is
  * wider, so it is not a subset). A stored `workspace` grants nothing, so it is never asked about.
  */
 export function manifestSubset(wanted: BotManifest, granted: BotManifest): boolean {
@@ -526,12 +562,18 @@ export function manifestSubset(wanted: BotManifest, granted: BotManifest): boole
 export function addedPermissions(wanted: BotManifest, granted: BotManifest | null): BotPermissionLine[] {
   if (!granted) return describeManifest(wanted)
   const lines: BotPermissionLine[] = []
-  const tools = new Set(granted.tools)
+  if (wanted.fullTrust === true && granted.fullTrust !== true) lines.push(FULL_TRUST_LINE)
+  // What the grant gives, not what it lists: with "Allow everything", a tool it leaves out is still given.
+  const given = withFullTrust(granted)
+  const tools = new Set(given.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
-  const appTools = new Set(granted.appTools)
+  const appTools = new Set(given.appTools)
   for (const tool of wanted.appTools) if (!appTools.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
+  // A tool the grant holds as asking first, wanted without asking: a looser hold is more, as a new tool is.
+  const asksFirst = new Set(granted.mcp.filter((pair) => pair.level === 'asks_first').map(mcpIdentity))
+  for (const pair of wanted.mcp) if (pair.level !== 'asks_first' && asksFirst.has(mcpIdentity(pair))) lines.push({ kind: 'mcp', text: `Use the MCP tool \`${pair.tool}\` without asking first` })
   const skills = new Set(granted.skills)
   for (const skill of wanted.skills) if (!skills.has(skill)) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
   for (const key of BUDGET_KEYS) {
@@ -545,7 +587,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
 
 /** Every permission of a manifest, in plain words. */
 export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
-  const lines: BotPermissionLine[] = []
+  const lines: BotPermissionLine[] = manifest.fullTrust === true ? [FULL_TRUST_LINE] : []
   for (const tool of manifest.tools) lines.push(toolLine(tool))
   for (const tool of manifest.appTools) if (!BOT_RETIRED_APP_TOOLS.has(tool)) lines.push(appToolLine(tool))
   for (const pair of manifest.mcp) lines.push(mcpLine(pair))
@@ -559,6 +601,9 @@ function unique(lines: BotPermissionLine[]): BotPermissionLine[] {
   const seen = new Set<string>()
   return lines.filter((line) => !seen.has(line.text) && Boolean(seen.add(line.text)))
 }
+
+/** "Allow everything" in the approval's words. */
+const FULL_TRUST_LINE: BotPermissionLine = { kind: 'full_trust', text: 'Allow everything: every tool and permission a bot can be given, without asking' }
 
 const TOOL_WORDS: Record<NeutralTool, string> = {
   read: 'Read files',
@@ -648,6 +693,8 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
     skills: within(wanted.skills, granted.skills, (skill) => skill),
     workspace: null,
     budget,
-    audience: 'owner'
+    audience: 'owner',
+    // Only what both give: the revision asks for it and the grant holds it.
+    ...(wanted.fullTrust === true && granted.fullTrust === true ? { fullTrust: true as const } : {})
   }
 }

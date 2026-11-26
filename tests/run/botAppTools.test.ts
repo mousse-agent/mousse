@@ -7,7 +7,8 @@ import { describe, expect, it } from 'vitest'
 import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
 import type { BotModelChange, BotToolHost } from '../../src/mms/bots/seams'
 import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
-import { botTools, USE_MODEL_REFUSED, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
+import { botTools, USE_MODEL_REFUSED, workNoteAnswer, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
+import { SILENT_REPLY } from '../../src/shared/bots/personal/wakes'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotLane, BotModelSlots, BotSchedule } from '../../src/shared/bots/personal/definition'
@@ -334,6 +335,51 @@ describe('the bot speaks of its work as its own', () => {
     expect(bots.activity.drain('d1')).toEqual([])
   })
 
+  it('a note passed on from a turn the owner did not start: no promise to the owner, and silence unless they need to know now', async () => {
+    const asked: string[] = []
+    const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now', fromOwner: (_botId, from) => { asked.push(from); return false } } })
+    const noted = await bots.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })
+    // Asked about the turn the tool runs in.
+    expect(asked).toEqual(['a1'])
+    expect(noted.value).toMatchObject({ result: 'noted', reaches: 'now' })
+    expect(noted.value.note).toContain('"SSD search"')
+    expect(noted.value.note).toContain(SILENT_REPLY)
+    expect(noted.value.note).toMatch(/don't tell them they did/)
+    expect(noted.value.note).not.toContain('I\'ll')
+    // Wherever the work takes it in, the answer is the same.
+    for (const reach of ['after_compaction', 'step_end', 'start'] as const) {
+      const answer = workNoteAnswer(reach, 'Prices changed since you started.', 'SSD search', { fromOwner: false })
+      expect(answer).toContain(SILENT_REPLY)
+      expect(answer).not.toContain('I\'ll')
+    }
+
+    // The owner's own turn: the bot still says, as itself, what it does from now on.
+    for (const fromOwner of [() => true, undefined]) {
+      const owner = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now', ...(fromOwner ? { fromOwner } : {}) } })
+      const answer = (await owner.call('work_note', { workId: 'w1', note: 'Use the open tab.' })).value.note
+      expect(answer).toContain('I\'ll … from here on')
+      expect(answer).not.toContain(SILENT_REPLY)
+    }
+  })
+
+  it('a note passed on from a turn the owner did not start, to work that ended or cannot take it: never the owner\'s words, never a rerun offer', async () => {
+    // The race: a wake passes an update on just as the work finishes.
+    const ended = fakeBots('chat', { work: { list: () => ({ now: [], recent: [{ workId: 'w1', title: 'SSD search', status: 'done' as const, endedAt: '2026-11-13T10:05:00.000Z' }] }), note: () => 'ended' as const, fromOwner: () => false } })
+    const late = await ended.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })
+    expect(late.value).toMatchObject({ result: 'ended' })
+    expect(late.value.note).toContain('"SSD search" had already finished')
+    expect(late.value.note).toContain(SILENT_REPLY)
+    expect(late.value.note).not.toMatch(/offer to do it again|before the owner said this|Tell them so/)
+    // Every other refusal: the same, and a question's is never passed on as the owner's answer.
+    for (const outcome of ['held', 'approval', 'question', 'waiting'] as const) {
+      const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, note: () => outcome, fromOwner: () => false } })
+      const answer = (await bots.call('work_note', { workId: 'w1', note: 'Prices changed since you started.' })).value.note
+      expect(answer, outcome).toContain(SILENT_REPLY)
+      expect(answer, outcome).toMatch(/don't tell them they did/)
+      expect(answer, outcome).not.toMatch(/Tell (the owner|them) (so|their)|offer to stop it|pass them on with question_answer/)
+    }
+  })
+
   it('stopping a job: the chip names it, as "started" does', async () => {
     const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH } })
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_stop', input: { workId: 'w1' } })
@@ -360,7 +406,7 @@ describe('ask_owner (#1123)', () => {
   function asking(lane: BotLane) {
     const bots = fakeBots(lane)
     const asked: unknown[] = []
-    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
+    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined), questions: { ask: (_botId: string, _activationId: string, asks: ReadonlyArray<{ spec: unknown }>) => { asked.push(...asks.map((ask) => ask.spec)); return { asked: true, text: 'Shown under your reply.', questionIds: asks.map((_, n) => `q_${n}`) } } } } as BotToolHost }
     const tool = botTools(() => deps).find((entry) => entry.name === 'ask_owner')!
     return { asked, call: (args: Record<string, unknown>) => tool.handler(args, bots.ctx()) }
   }
@@ -395,7 +441,7 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'question_withdraw', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
     // With `botMemory`, WP6's memory tools and the open items' tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)

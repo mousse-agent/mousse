@@ -2,6 +2,7 @@ import type { NodeId } from '../../shared/net'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { Thread } from '../../shared/types'
+import { errorCodeOf } from './threadSetup'
 
 /** Keep an asynchronous blank-composer creation from overriding later navigation. */
 export async function createComposerThread(deps: {
@@ -83,8 +84,8 @@ export async function prepareComposerThread(deps: {
   const expiry = expiresAt ? { expiresAt, ...(workspace.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}
   const baseBranch = composerBaseBranch(workspace)
   const pickedOnCreate: Array<'model' | 'permissionMode' | 'worktreeEnabled'> = [...(deps.picked ?? []), ...(workspace.worktreePicked ? ['worktreeEnabled' as const] : [])]
-  if (!thread || composerCreatesThread(thread, workspace)) {
-    return createComposerThread({
+  const createThread = () =>
+    createComposerThread({
       ...deps,
       create: () =>
         deps.create(workspace.projectId, {
@@ -99,11 +100,19 @@ export async function prepareComposerThread(deps: {
           ...(deps.rememberedChoices && !workspace.node ? { rememberedChoices: true } : {})
         })
     })
-  }
+  if (!thread || composerCreatesThread(thread, workspace)) return createThread()
   // An unset choice is recorded too, so the thread keeps the one it was sent with. A pick is sent even when the composer
   // already gave it to the thread (to prepare its worktree), so the project remembers it.
   if (thread.worktreeEnabled !== enabled || workspace.worktreePicked) {
-    const updated = workspace.worktreePicked ? await deps.setWorktreeEnabled(thread.id, enabled, true) : await deps.setWorktreeEnabled(thread.id, enabled)
+    let updated: Thread
+    try {
+      updated = workspace.worktreePicked ? await deps.setWorktreeEnabled(thread.id, enabled, true) : await deps.setWorktreeEnabled(thread.id, enabled)
+    } catch (error) {
+      // The empty thread already has a workspace of the other kind (a worktree, or its project folder with a terminal
+      // open in it): a new thread carries the checkout the composer shows.
+      if (errorCodeOf(error) !== 'worktree_locked') throw error
+      return deps.stillVisible() ? createThread() : null
+    }
     if (!deps.stillVisible()) return null
     deps.update(updated)
   }

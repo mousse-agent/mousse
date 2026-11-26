@@ -482,7 +482,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.setThreadHidden).not.toHaveBeenCalled()
   })
 
-  it('a thread it starts is created as it asks, hidden or not, and says so to the bot and in its chip; thread_hide hides or shows one later; an ordinary agent hides nothing', async () => {
+  it('a thread it starts is created as it asks, hidden or not, and says so to the bot and in its chip; thread_hide hides or shows one later; an ordinary agent asks the host the same way', async () => {
     const { text, host, onAppResult, runId, threads } = await world({ threads: 'all' })
     // The service makes a bot's thread hidden unless asked not to; the tool reads it back as it is.
     vi.mocked(host.createThread!).mockImplementationOnce(async (request) => {
@@ -522,18 +522,18 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.showAgentAction).not.toHaveBeenCalled()
     expect(onAppResult).not.toHaveBeenCalled()
 
-    // An ordinary thread's agent: no hidden start and no thread_hide, even if it names them.
+    // An ordinary thread's agent starts threads hidden or not too, and thread_update hidden reaches the host, which holds it
+    // to the threads it started (threadCreateDaemon.test.ts).
     fx?.dispose()
     fx = undefined
     const fresh = await world({ threads: 'all' })
     const agent = await fx!.runningRun('mine')
     fresh.turns.register(appTurn({ threadId: 'mine', runId: agent.runId }))
     const asAgent = (name: string, args: Record<string, unknown>) => fresh.registry.call(name, args, fresh.request({ threadId: 'mine', runId: agent.runId })).catch((error: Error) => ({ isError: true, text: error.message }))
-    expect(await asAgent('thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y', hidden: true })).toMatchObject({ isError: true, text: expect.stringContaining('hidden is for personal bots') })
-    expect(await asAgent('thread_hide', { threadId: 'archived' })).toMatchObject({ isError: true, text: expect.stringContaining('thread_hide is for personal bots') })
-    expect(await asAgent('thread_update', { threadId: 'archived', hidden: true })).toMatchObject({ isError: true, text: expect.stringContaining('thread_update hidden is for personal bots') })
-    expect(fresh.host.createThread).not.toHaveBeenCalled()
-    expect(fresh.host.setThreadHidden).not.toHaveBeenCalled()
+    await asAgent('thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y', hidden: false })
+    expect(fresh.host.createThread).toHaveBeenCalledWith(expect.objectContaining({ hidden: false }), expect.anything())
+    await asAgent('thread_update', { threadId: 'archived', hidden: true })
+    expect(fresh.host.setThreadHidden).toHaveBeenCalledWith('archived', true, expect.anything())
   })
 
   it('a chat turn the owner started starts a thread, with a title and a first message, and its chat gets a chip with the thread', async () => {

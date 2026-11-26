@@ -35,7 +35,7 @@ describe('a chat turn whose start no build names', () => {
 
     expect(() => f.bots.tools.reminders.add(botId, activation.id, { dueAt: due(), text: 'Check the oven.' })).toThrow(/can't set a reminder/)
     expect(() => f.bots.tools.watchers!.start(botId, activation.id, { command: 'echo hi', brief: 'Tell me.' })).toThrow(/can't start a background command/)
-    expect(f.bots.askOwner(botId, activation.id, { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: true })).toEqual({ asked: false, text: QUESTION_NOT_OFFERED_TEXT })
+    expect(f.bots.askOwner(botId, activation.id, [{ spec: { question: 'Which?', choices: [{ label: 'A' }, { label: 'B' }], other: true } }])).toEqual({ asked: false, text: QUESTION_NOT_OFFERED_TEXT })
     await expect(f.bots.tools.bots!.send(botId, activation.id, { to: 'Beta', message: 'Hello.' })).rejects.toThrow(/Only your chat/)
     await expect(f.bots.tools.work.start(botId, activation.id, { title: 'Research', brief: 'Look it up.', key: 'k1' })).rejects.toThrow(/hand out work/)
 

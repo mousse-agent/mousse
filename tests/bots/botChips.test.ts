@@ -11,6 +11,13 @@ import { chipForCall, rollUpChips, type BotChipCall } from '../../src/shared/bot
 const ctx = { home: '/home/me', filesFolder: '/home/me/.mousse/profiles/p1/bots/files/b1', scratch: '/home/me/.mousse/profiles/p1/bots/scratch/a1' }
 const search = (query: string): BotChipCall => ({ tool: 'web_search', input: { query } })
 const fetch = (url: string): BotChipCall => ({ tool: 'web_fetch', input: { url } })
+// Claude Code's saved tool outputs: where its gate finds them (`NormalisedCall.own`), nested or with Windows casing.
+const spill = '/home/me/.claude/projects/-home-me--mousse-profiles-p1-bots-scratch-a1/0f6c2d1e-sess/tool-results/mcp-mousse-browser_observe-123.txt'
+const nestedSpill = '/home/me/.claude/projects/-home-me--mousse-profiles-p1-bots-scratch-a1/0f6c2d1e-sess/subagents/agent-1/tool-results/toolu_1.txt'
+const windowsSpill = 'C:\\Users\\Me\\.Claude\\Projects\\C--Users-Me-scratch\\s1\\Tool-Results\\toolu_2.txt'
+// An owner's folder of the same shape, granted to the bot: its work, not Claude Code's.
+const ordinary = '/work/projects/acme/session/tool-results/report.txt'
+const ownRead = (path: string): BotChipCall => ({ tool: 'read', input: { file_path: path }, own: true })
 
 describe('chipForCall: live chips, worded as attempts', () => {
   it('follows the wording table', () => {
@@ -38,6 +45,14 @@ describe('chipForCall: live chips, worded as attempts', () => {
     expect(chipForCall('read', { path: `${ctx.filesFolder}/a.md` }, ctx)).toMatchObject({ highlight: 'saved files' })
     expect(chipForCall('read', { path: `${ctx.scratch}/a.md` }, ctx)).not.toHaveProperty('highlight')
   })
+  it('a granted file in a projects/…/tool-results folder shows like any other: the path alone never hides a call', () => {
+    expect(chipForCall('read', { file_path: ordinary }, ctx)).toEqual({ icon: 'read', text: 'reading files', highlight: 'tool-results', live: true })
+    expect(chipForCall('write', { file_path: ordinary }, ctx)).toEqual({ icon: 'edit', text: 'changing files', highlight: 'tool-results', live: true })
+    expect(chipForCall('list', { path: '/work/projects/acme/session/tool-results' }, ctx)).toMatchObject({ text: 'reading files', highlight: 'tool-results' })
+    expect(chipForCall('read', { path: `${ctx.filesFolder}/tool-results/a.txt` }, ctx)).toMatchObject({ text: 'reading files', highlight: 'saved files' })
+    expect(chipForCall('write', { path: `${ctx.filesFolder}/tool-results/a.txt` }, ctx)).toMatchObject({ text: 'saving a file', highlight: 'a.txt' })
+    expect(chipForCall('read', { path: '/home/me/Documents/tool-results/a.txt' }, ctx)).toMatchObject({ text: 'reading files', highlight: 'tool-results' })
+  })
 })
 
 describe('rollUpChips: settled chips', () => {
@@ -58,6 +73,64 @@ describe('rollUpChips: settled chips', () => {
     ], ctx)).toEqual([{ icon: 'read', text: 'read files', highlight: 'Invoices, Notes' }])
     expect(rollUpChips([{ tool: 'write', input: { path: `${ctx.filesFolder}/a.md` } }, { tool: 'write', input: { path: `${ctx.filesFolder}/b.md` } }], ctx))
       .toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a.md, b.md' }])
+  })
+
+  it('a tool output Claude Code read back (its gate\'s `own`) settles to no chip, beside the files the bot really read', () => {
+    expect(rollUpChips([ownRead(spill), ownRead(nestedSpill), ownRead(windowsSpill)], ctx)).toEqual([])
+    expect(rollUpChips([
+      ownRead(spill),
+      { tool: 'read', input: { file_path: ordinary } },
+      ownRead(windowsSpill),
+      { tool: 'read', input: { path: '/home/me/Documents/Invoices/a.pdf' } },
+      ownRead(nestedSpill)
+    ], ctx)).toEqual([{ icon: 'read', text: 'read files', highlight: 'tool-results, Invoices' }])
+  })
+
+  it('counts saved files, not saves: a file written then edited is one; two files are two, even with one name', () => {
+    const save = (tool: string, path: string, key = 'path'): BotChipCall => ({ tool, input: { [key]: `${ctx.filesFolder}/${path}` } })
+    expect(rollUpChips([save('write', 'draft.md'), save('edit', 'draft.md', 'file_path'), save('edit', 'draft.md', 'file_path')], ctx))
+      .toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'draft.md' }])
+    expect(rollUpChips([save('write', 'trips/notes.md'), save('write', 'work/notes.md')], ctx)).toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'notes.md' }])
+    expect(rollUpChips([save('write', 'a.md'), save('edit', 'b.md'), save('edit', 'a.md')], ctx)).toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a.md, b.md' }])
+  })
+
+  it('counts a file once however its path is spelled: `.`, `..`, doubled or trailing separators, or relative to the scratch folder', () => {
+    const files = ctx.filesFolder
+    expect(rollUpChips([
+      { tool: 'write', input: { path: `${files}/a.md` } },
+      { tool: 'edit', input: { file_path: `${files}/./a.md` } },
+      { tool: 'edit', input: { file_path: `${files}/notes/../a.md` } },
+      { tool: 'edit', input: { file_path: `${files}//a.md/` } },
+      // The bot works in its scratch folder: a relative path resolves there.
+      { tool: 'edit', input: { file_path: '../../files/b1/a.md' } }
+    ], ctx)).toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'a.md' }])
+    expect(chipForCall('write', { path: '../../files/b1/a.md' }, ctx)).toEqual({ icon: 'edit', text: 'saving a file', highlight: 'a.md', live: true })
+    expect(chipForCall('write', { path: 'a.md' }, ctx)).toMatchObject({ text: 'working on a draft' })
+  })
+
+  it('on Windows, a drive or UNC path is one file in either separator and any case, named as first written', () => {
+    const windows = { home: 'C:\\Users\\Me', filesFolder: 'C:\\Users\\Me\\Mousse\\files\\b1' }
+    expect(chipForCall('write', { path: 'c:/users/me/MOUSSE/Files/B1/Notes.md' }, windows)).toEqual({ icon: 'edit', text: 'saving a file', highlight: 'Notes.md', live: true })
+    expect(rollUpChips([
+      { tool: 'write', input: { path: 'C:\\Users\\Me\\Mousse\\files\\b1\\Notes.md' } },
+      { tool: 'edit', input: { file_path: 'c:/users/me/mousse/files/b1/notes.md' } },
+      { tool: 'edit', input: { file_path: 'C:\\Users\\Me\\Mousse\\files\\b1\\.\\sub\\..\\NOTES.MD' } }
+    ], windows)).toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'Notes.md' }])
+    const share = { filesFolder: '\\\\NAS\\Home\\files\\b1' }
+    expect(rollUpChips([
+      { tool: 'write', input: { path: '\\\\nas\\home\\files\\b1\\a.md' } },
+      { tool: 'edit', input: { file_path: '\\\\NAS\\Home/Files/B1/A.md' } }
+    ], share)).toEqual([{ icon: 'edit', text: 'saved a file', highlight: 'a.md' }])
+  })
+
+  it('on Linux, a backslash is part of a file name: never a folder, nor a way into the files folder', () => {
+    const files = ctx.filesFolder
+    expect(rollUpChips([
+      { tool: 'write', input: { path: `${files}/a\\b.md` } },
+      { tool: 'write', input: { path: `${files}/a/b.md` } }
+    ], ctx)).toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a\\b.md, b.md' }])
+    // A file named `b1\x.md` beside the files folder, not in it.
+    expect(chipForCall('write', { path: `${files}\\x.md` }, ctx)).toMatchObject({ text: 'changing files' })
   })
 
   it('work\'s subagents settle to one chip with their titles; waiting on them and reading them show none', () => {
@@ -174,6 +247,17 @@ describe('BotActivitySink', () => {
     expect(activity.drain('d1')).toEqual([{ icon: 'search', text: 'searched the web', highlight: 'a' }])
   })
 
+  it('reading back a tool output Claude Code saved shows "working", never "tool-results", and settles to no chip', () => {
+    const { activity, events, advance } = sink()
+    activity.onAllowed(at, { tool: 'web_search', input: { query: 'a' } })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    activity.onAllowed(at, ownRead(spill))
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    expect(events.at(-1)?.chip).toEqual({ icon: 'think', text: 'working', live: true })
+    expect(JSON.stringify(events)).not.toContain('tool-results')
+    expect(activity.drain('d1')).toEqual([{ icon: 'search', text: 'searched the web', highlight: 'a' }])
+  })
+
   it('takes app-tool results for the activation\'s current dispatch, for outcome chips', () => {
     const { activity } = sink()
     activity.onAllowed(at, { tool: 'memory_save', input: { text: 'Invoices go to ~/Documents/Invoices', kind: 'note' } })
@@ -226,5 +310,22 @@ describe('BotActivitySink', () => {
     authority.check({ kind: 'app', tool: 'delegate_task', args: {} })
     expect(events.map((event) => event.chip?.text)).toEqual(['searching the web'])
     expect(activity.drain('d1')).toEqual([{ icon: 'search', text: 'searched the web', highlight: 'rules' }])
+  })
+
+  it('carries the gate\'s `own` from the authority to the chips: Claude Code\'s saved output, read with no file access, settles to none', () => {
+    const { activity } = sink()
+    const authority = createBotAuthority({
+      activationId: 'a1',
+      role: 'activation',
+      permissions: { tools: ['read'], appTools: [], mcp: [], skills: [], workspace: null },
+      waiting: () => false,
+      counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => 0, signal: new AbortController().signal },
+      spend: null,
+      onAllowed: activity.observer(at)
+    })
+    for (const path of [spill, nestedSpill, windowsSpill])
+      expect(authority.check({ kind: 'builtin', tool: 'read', nativeName: 'Read', args: { file_path: path }, own: true })).toEqual({ ok: true })
+    expect(activity.drain('d1')).toEqual([])
   })
 })

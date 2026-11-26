@@ -1620,7 +1620,7 @@ describe('the composer', () => {
     expect(send[4]).toEqual([
       { name: 'march.pdf', path: '/home/me/Desktop/march.pdf' },
       { name: 'sheet.csv', path: '/home/me/Desktop/sheet.csv' },
-      { name: expect.stringMatching(/^paste-.*\.png$/), path: expect.stringMatching(/^\/tmp\/mousse-bot-attachments\/1\/paste-.*\.png$/) }
+      { name: 'image-1.png', path: '/tmp/mousse-bot-attachments/1/image-1.png' }
     ])
     expect(vi.mocked(fake.events.attachmentPath!).mock.calls.map(([file]) => file)).toEqual([picked, dropped, expect.objectContaining({ type: 'image/png' })])
     expect(composer().querySelector('.composer-attachments')).toBeNull()
@@ -1630,7 +1630,7 @@ describe('the composer', () => {
       '/home/me/.mousse/bots/files/inbox/attachments/2026-11-08/sheet.csv'
     ])
     // The pasted screenshot shows as a picture, named on hover.
-    expect([...sent.querySelectorAll('.bot-images .bot-image')].map((tile) => tile.getAttribute('title'))).toEqual([expect.stringMatching(/^paste-.*\.png$/)])
+    expect([...sent.querySelectorAll('.bot-images .bot-image')].map((tile) => tile.getAttribute('title'))).toEqual(['image-1.png'])
   })
 
   it('sends a long text paste as a text file, which the composer names by its lines', async () => {

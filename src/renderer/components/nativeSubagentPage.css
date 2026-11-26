@@ -1,0 +1,210 @@
+/*
+ * A native subagent's live page, over its thread's chat: a header with who it is and how it is doing, one column of
+ * its task, calls and report, and a pill where the composer was.
+ */
+
+.native-subagent-page {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+
+.native-subagent-page:focus {
+  outline: none;
+}
+
+/* With the title bar's path off: project / thread / subagent, above the header. */
+.native-subagent-breadcrumb {
+  flex: 0 0 auto;
+  width: min(100%, var(--an-max-width, 784px));
+  margin: 0 auto;
+  padding: 10px 24px 0 18px;
+}
+
+.native-subagent-breadcrumb > .subagent-breadcrumb-name {
+  flex: 0 1 auto;
+  max-width: 30%;
+  padding: 2px 6px;
+}
+
+.native-subagent-breadcrumb > .subagent-breadcrumb-parent {
+  padding: 2px 6px;
+}
+
+.native-subagent-breadcrumb > .subagent-breadcrumb-current {
+  padding: 2px 6px;
+}
+
+.native-subagent-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, var(--an-max-width, 784px));
+  margin: 0 auto;
+  padding: 14px 24px 12px;
+}
+
+.native-subagent-header > .subagent-avatar.is-chip {
+  width: 32px;
+  height: 32px;
+}
+
+.native-subagent-heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.native-subagent-title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-subagent-meta {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-subagent-status[data-tone="running"] {
+  color: var(--accent);
+}
+
+.native-subagent-status[data-tone="attention"] {
+  color: var(--warning);
+}
+
+.native-subagent-status[data-tone="done"] {
+  color: var(--success);
+}
+
+.native-subagent-status[data-tone="failed"] {
+  color: var(--danger);
+}
+
+.native-subagent-elapsed {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.native-subagent-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--ui-line);
+}
+
+.native-subagent-column {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  width: min(100%, var(--an-max-width, 784px));
+  margin: 0 auto;
+  /* Room under the last line for the pill. */
+  padding: 20px 24px 96px;
+}
+
+.native-subagent-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.native-subagent-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.native-subagent-count {
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.native-subagent-task {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--ui-raised);
+  background-image: var(--ui-sheen);
+  color: var(--text-primary);
+  font-size: 13.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.native-subagent-calls {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.native-subagent-empty {
+  margin: 0;
+  color: var(--ui-faint);
+  font-size: 12.5px;
+}
+
+.native-subagent-report {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13.5px;
+}
+
+.native-subagent-report[data-tone="failed"] {
+  color: var(--danger);
+}
+
+/* Where the composer was: a pill that says who directs this subagent. */
+.native-subagent-pill {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 48px);
+  padding: 7px 14px 7px 12px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.16);
+  border-radius: 999px;
+  background: rgb(var(--surface-strong-rgb));
+  background-image: var(--ui-sheen);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.native-subagent-pill > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.native-subagent-pill > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}

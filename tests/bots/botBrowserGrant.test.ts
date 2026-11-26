@@ -4,7 +4,7 @@
  * one ask whatever browser tool it names; other Mousse tools that reach other threads stay refused.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { compileBotThread } from '../../src/mms/bots/grants/compile'
@@ -72,7 +72,7 @@ describe('the browser permission, in plain words', () => {
 describe('a bot asking for and using the browser', () => {
   let f: BotFixture
   let botId: string
-  let turns: Array<{ botId: string; activationId: string; lane: string; homeThreadId: string }>
+  let turns: Array<{ botId: string; activationId: string; lane: string; homeThreadId: string; filesFolder?: string }>
   let ended: string[]
 
   beforeEach(async () => {
@@ -81,7 +81,7 @@ describe('a bot asking for and using the browser', () => {
     ended = []
     const browser: BotBrowserHost = {
       turn: (input) => {
-        turns.push({ botId: input.botId, activationId: input.activationId, lane: input.lane, homeThreadId: input.homeThreadId })
+        turns.push({ botId: input.botId, activationId: input.activationId, lane: input.lane, homeThreadId: input.homeThreadId, filesFolder: input.filesFolder })
         return { binding: { mode: 'structured' } as never, runtime: { resolveTarget: () => ({ backend: 'managed-chromium' }), dispatch: async () => ({}) } }
       },
       activationEnded: (input) => { ended.push(input.activationId) }
@@ -107,7 +107,7 @@ describe('a bot asking for and using the browser', () => {
     expect(first.prepared.browser).toBeUndefined()
     expect(first.prepared.authority.appTools.has('browser_act')).toBe(false)
     // The bot asks for the tool it saw named: it is the browser as a whole.
-    expect(first.prepared.authority.escalate!({ permission: { tool: 'browser_act' }, reason: 'To click through the page.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(first.prepared.authority.escalate!({ permission: { tool: 'browser_act' }, reason: 'To click through the page.' })).toBe(botAskedText('use the browser', BOT_ASK_DEFERRED_TEXT))
     await finish(f, first.payload, 'completed', { text: 'I\'ve asked to use the browser.' })
     const reply = chatOf(f, botId).at(-1)!
     expect(reply.ask).toMatchObject({ status: 'open', title: 'use the browser' })
@@ -132,6 +132,8 @@ describe('a bot asking for and using the browser', () => {
     // Every run has the browser, with no new ask.
     const scheduled = await run('r1')
     expect(scheduled.prepared.browser).toBeDefined()
+    // Its browser saves its screenshots in its files folder, for its owner to see.
+    expect(turns.at(-1)).toMatchObject({ activationId: scheduled.activation.id, filesFolder: f.bots.filesFolder(botId) })
     expect(scheduled.prepared.authority.check(act)).toEqual({ ok: true })
     for (const tool of BOT_BROWSER_TOOLS) expect(scheduled.prepared.policy.tools!.allow).toContain(tool)
     await finish(f, scheduled.payload, 'completed', { text: 'Report.' })
@@ -145,12 +147,18 @@ describe('a bot asking for and using the browser', () => {
     expect(ended).toEqual(expect.arrayContaining([scheduled.activation.id]))
   })
 
-  it('a browser call without the grant is a wall in the chat and one ask in a run, both "use the browser"', async () => {
+  it('a browser call without the grant is a wall in the chat and one ask in a run, both "use the browser"; after Not now, none until the owner writes', async () => {
     const chatTurn = await chat('Open the site', 'm1')
     expect(chatTurn.prepared.authority.check(act)).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'use the browser' } })
     await finish(f, chatTurn.payload, 'interrupted', { text: 'May I use the browser?', outcome: { interruptedBy: 'bot_wall' } })
     expect(chatOf(f, botId).at(-1)!.ask).toMatchObject({ title: 'use the browser' })
     await f.bots.service.answer(botId, chatOf(f, botId).at(-1)!.ask!.askId, 'not_now')
+    // Right after Not now, asking again is a repeat (#1363): refused, no card.
+    const early = await run('r0')
+    expect(early.prepared.authority.check(act)).toMatchObject({ ok: false, refused: { text: BOT_ASK_DUPLICATE_TEXT, askId: '' } })
+    await finish(f, early.payload, 'completed', { text: 'Report: skipped the site.' })
+    expect(f.store.openAsks(botId)).toEqual([])
+    await f.bots.service.chatSend({ botId, text: 'Try the site again later', clientRequestId: 'm2' })
     const runTurn = await run('r1')
     expect(runTurn.prepared.authority.check(act)).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
     expect(runTurn.prepared.authority.check({ kind: 'app', tool: 'browser_observe', args: {} })).toMatchObject({ ok: false, refused: { askId: f.store.openAsks(botId)[0]!.id } })

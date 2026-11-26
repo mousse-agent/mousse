@@ -12,6 +12,10 @@ const MAX_TEXT = 240
 const CHAR_BUDGET = 12_000
 const SKIP_ROLES = new Set(['none', 'presentation', 'InlineTextBox', 'generic'])
 const SECRET_TYPES = new Set(['password'])
+/** Controls kept without a layout box when the page gave no layout at all: dropping them would hide the form. */
+const INTERACTIVE_ROLES = new Set(['textbox', 'button', 'combobox', 'checkbox', 'radio', 'link', 'listbox', 'menuitem', 'tab', 'switch', 'searchbox', 'spinbutton', 'slider'])
+/** Controls a person types into: one may be a password field, which only its layout box (its input type) tells. */
+const TEXT_ENTRY_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton'])
 
 interface AxNode {
   nodeId: string
@@ -123,10 +127,32 @@ function translateBounds(bounds: BrowserBounds, offset?: BrowserPoint): BrowserB
   return { ...bounds, x: bounds.x + (offset?.x ?? 0), y: bounds.y + (offset?.y ?? 0) }
 }
 
+/** An element `collectStructuredObservation` would offer, as its `include` sees it (bounds in the tab's viewport). */
+export interface ObservationCandidate { backendNodeId: number; frameId: string; bounds?: BrowserBounds }
+
+/** Where a page's layout viewport is scrolled, in CSS pixels. */
+export interface ViewportScroll { scrollX: number; scrollY: number }
+
+/** Where a page is scrolled now (its layout viewport, as `collectStructuredObservation` reads it). */
+export async function readViewportScroll(cdp: CdpTransport, cdpSessionId: string, signal?: AbortSignal): Promise<ViewportScroll> {
+  const metrics = await cdp.send<Record<string, unknown>>('Page.getLayoutMetrics', {}, { sessionId: cdpSessionId, signal })
+  const css = (metrics.cssLayoutViewport ?? metrics.layoutViewport) as { pageX?: number; pageY?: number } | undefined
+  const scrollX = Number(css?.pageX)
+  const scrollY = Number(css?.pageY)
+  return { scrollX: Number.isFinite(scrollX) ? scrollX : 0, scrollY: Number.isFinite(scrollY) ? scrollY : 0 }
+}
+
 export async function collectStructuredObservation(
   cdp: CdpTransport,
   cdpSessionId: string,
-  options: { visibleOnly?: boolean; continuation?: string; maxElements?: number; viewportOffset?: BrowserPoint }
+  options: {
+    visibleOnly?: boolean
+    continuation?: string
+    maxElements?: number
+    viewportOffset?: BrowserPoint
+    /** Keeps only the elements it accepts (an observation narrowed to one element): no other is counted, budgeted or given a ref. */
+    include?: (node: ObservationCandidate) => boolean
+  }
 ): Promise<CollectedObservation> {
   const warnings: string[] = []
   const visibleOnly = options.visibleOnly !== false
@@ -192,8 +218,15 @@ export async function collectStructuredObservation(
   let emitted = 0
   const counts = new Map<string, number>()
   const axById = new Map(ax.nodes.map((node) => [node.nodeId, node]))
+  const axRole = (node: AxNode) => boundText(axString(node.role) || axString(node.chromeRole), MAX_ROLE)
+  // No layout boxes at all (the snapshot failed, or came back empty): controls are kept and the reader is told.
+  const layoutMissing = layout.size === 0
+  if (layoutMissing && !warnings.includes('layout-snapshot-unavailable')
+    && ax.nodes.some((node) => node.backendDOMNodeId && !node.ignored && INTERACTIVE_ROLES.has(axRole(node)))) {
+    warnings.push('layout-snapshot-unavailable')
+  }
   for (const node of ax.nodes) {
-    const role = boundText(axString(node.role) || axString(node.chromeRole), MAX_ROLE)
+    const role = axRole(node)
     if (!node.backendDOMNodeId) continue
     if (node.ignored && SKIP_ROLES.has(role) && !axString(node.name) && !axString(node.value)) continue
     const name = boundText(axString(node.name), MAX_NAME)
@@ -207,13 +240,19 @@ export async function collectStructuredObservation(
     const checked = axProperty(node, 'checked')
     const localBounds = box ? toViewportBounds(box.bounds, viewport) : undefined
     if (visibleOnly && (hiddenProp || (localBounds && !intersectsViewport(localBounds, viewport)))) continue
-    if (visibleOnly && !localBounds && !['dialog', 'alert', 'heading'].includes(role)) continue
+    if (visibleOnly && !localBounds && !['dialog', 'alert', 'heading'].includes(role) && !(layoutMissing && INTERACTIVE_ROLES.has(role))) continue
     const bounds = localBounds ? translateBounds(localBounds, options.viewportOffset) : undefined
+    if (options.include && !options.include({ backendNodeId: node.backendDOMNodeId, frameId: node.frameId || main.id, ...(bounds ? { bounds } : {}) })) continue
     seen += 1
     if (seen <= offset) continue
-    const text = isPassword ? undefined : boundText(axString(node.value) || axString(node.description), MAX_TEXT)
+    // A text control with no layout box has no known input type: it may be a password field whatever
+    // its name says, so its value and description are never read out.
+    const typeUnknown = !box && TEXT_ENTRY_ROLES.has(role)
+    const text = isPassword || typeUnknown ? undefined : boundText(axString(node.value) || axString(node.description), MAX_TEXT)
     const states: string[] = []
-    states.push(hiddenProp ? 'hidden' : 'visible')
+    // Without any layout, nothing says a control is on screen: it is not called visible, only hidden when it is.
+    if (hiddenProp) states.push('hidden')
+    else if (box || !layoutMissing) states.push('visible')
     states.push(disabled ? 'disabled' : 'enabled')
     if (readonly) states.push('readonly')
     if (focused) states.push('focused')

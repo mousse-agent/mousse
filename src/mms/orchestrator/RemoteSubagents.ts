@@ -8,7 +8,7 @@ import type { RemoteSubagentOverlay, RemoteSubagentRecord } from '../run/delegat
 import type { RunEngine } from '../run/RunEngine'
 import type { RunTerminalStatus } from '../run/terminal'
 import { TERMINAL_RUN_STATUSES, type RunOutcome, type RunStatus } from '../run/types'
-import { REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId } from './remoteThreadStart'
+import { hiddenOnTheWire, REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId } from './remoteThreadStart'
 
 /**
  * Remote subagents (issue #469): a subagent an agent starts on another of the user's computers. That
@@ -385,11 +385,21 @@ export class RemoteSubagents {
     try {
       await this.markedForm(record)
       const deadlineMinutes = await this.runningLimitThere(record)
+      const port = this.deps.port()
+      const hidden = port
+        ? await hiddenOnTheWire(port, record.node, record.hidden, record.remoteThreadId !== null, () => {
+          this.records.update(record.delegationId, { hidden: null })
+          record.hidden = null
+        }, AbortSignal.timeout(CALL_TIMEOUT_MS))
+        : record.hidden
       const started = await runRemoteThreadStart({
         key: `remote-subagent:${record.delegationId}`,
         name: this.deps.titleOf(record.childThreadId) ?? 'Subagent',
         projectId: record.projectId,
         worktree: record.worktree,
+        // Out of that computer's sidebar; none for a task from before this, or for a computer that does not take it when
+        // the first attempt goes out: every retry sends what that attempt did.
+        ...(hidden !== null ? { hidden } : {}),
         instanceId: record.instanceId,
         model: record.model,
         permissionMode: record.permissionMode,

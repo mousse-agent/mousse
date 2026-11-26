@@ -258,3 +258,15 @@ export function seedProviderInstances(
   for (const providerId of credentialedPiProviders) if (providerId) seed(piInstanceId(providerId), { driver: 'pi', enabled: true })
   return { instances, added, upgraded, seedVersion: Math.max(version, current) }
 }
+
+/**
+ * The name of a further entry of a provider: `<base> 2`, `<base> 3`, ..., the first number no entry is called yet
+ * (names compared without case or surrounding spaces).
+ */
+export function nextEntryName(base: string, taken: Iterable<string>): string {
+  const names = new Set([...taken].map((name) => name.trim().toLowerCase()))
+  for (let n = 2; ; n += 1) {
+    const name = `${base} ${n}`
+    if (!names.has(name.toLowerCase())) return name
+  }
+}

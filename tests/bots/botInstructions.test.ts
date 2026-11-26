@@ -29,6 +29,9 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
 
   it('asks straight away instead of asking whether to ask, and knows it can ask to run commands', () => {
     expect(BOT_BASE_INSTRUCTIONS).toContain('call escalate straight away, then tell them you\'ve asked')
+    // It names what it asked for as escalate's answer quotes the card, never by an example that may not apply here.
+    expect(BOT_BASE_INSTRUCTIONS).toContain('by the exact name escalate returns in quotes (what their card says)')
+    expect(BOT_BASE_INSTRUCTIONS).not.toContain('by its quoted name ("use your threads")')
     expect(BOT_BASE_INSTRUCTIONS).toContain('Never ask the owner whether you should ask')
     expect(BOT_BASE_INSTRUCTIONS).toContain('"run commands" (escalate with the tool shell)')
     // Commands are no longer something that "comes later".

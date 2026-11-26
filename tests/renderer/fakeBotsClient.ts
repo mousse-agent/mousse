@@ -59,7 +59,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       onMessage: (cb) => { listeners.message.add(cb); return () => listeners.message.delete(cb) },
       onActivity: (cb) => { listeners.activity.add(cb); return () => listeners.activity.delete(cb) },
       // The preload's path for a composer file: a picked or dropped file's own, a temporary copy of a pasted one.
-      attachmentPath: vi.fn(async (file: File) => (file.name.startsWith('paste-') ? `/tmp/mousse-bot-attachments/1/${file.name}` : `/home/me/Desktop/${file.name}`))
+      attachmentPath: vi.fn(async (file: File) => (file.name.startsWith('image-') ? `/tmp/mousse-bot-attachments/1/${file.name}` : `/home/me/Desktop/${file.name}`))
     },
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
@@ -134,7 +134,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       return { message: reply, question: next }
     })),
     setPermission: vi.fn((botId, permissionId, enabled) => record('setPermission', [botId, permissionId, enabled], () => {
-      const next = { ...detail(botId), permissions: detail(botId).permissions.map((item) => item.id === permissionId ? { ...item, enabled } : item) }
+      const next = permissionId === 'full_trust' ? { ...detail(botId), fullTrust: enabled } : { ...detail(botId), permissions: detail(botId).permissions.map((item) => item.id === permissionId ? { ...item, enabled } : item) }
       fake.details[botId] = next
       return next
     })),

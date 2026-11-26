@@ -46,6 +46,15 @@ import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens, zonedDay
  * reader and writer of the memory tables; each write runs in one `bots.db` transaction.
  */
 
+/**
+ * A bot's chat reply is one of its thread's messages too, which capture copies (`<threadId>:<messageId>`). Its chat row
+ * (`bm:<id>`) names that message (`BotJournalInput.standsFor`) and stands for it: the copy is never journaled, whichever
+ * of the two is written first. The state key below records the pairing; it outlives a Forget of the chat row, so a
+ * transcript copied again never brings the forgotten words back. Only that message is paired: the lines a turn said
+ * between its steps are messages of their own, whatever their words.
+ */
+const REPLY_COPY_KEY = 'reply_copy:'
+
 /** The `bots.db` connection the store works on (`BotStore.db`). */
 export type BotMemoryDb = Pick<ProfileDatabase, 'statement' | 'inTransaction' | 'transaction' | 'database'>
 
@@ -278,6 +287,12 @@ export class BotMemoryStore {
         AND (instr(text, '[output]') > 0 OR instr(text, '[data from ') > 0 OR instr(text, '[Message from the bot "') > 0)`)
       this.setState('', key, true)
     })
+    this.write(() => {
+      const key = 'reply_copies_v1'
+      if (this.getState('', key)) return
+      this.pairLegacyReplies()
+      this.setState('', key, true)
+    })
     if (options.checkIndexes !== false) this.checkIndexes()
   }
 
@@ -340,10 +355,40 @@ export class BotMemoryStore {
       if (inserted && row.kind === 'owner_msg')
         tx.statement(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, 'last_owner_msg_at', ?)
           ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value WHERE excluded.value > bot_memory_state.value`).run(row.botId, when)
+      // A chat reply that is a thread's message: the chat row stands for it from now on, and a copy capture already
+      // wrote goes, so the history, search and an export hold the reply once.
+      if (inserted && row.standsFor) this.pairReplyInTx(tx, row.botId, row.sourceKey, row.standsFor)
       return inserted ? num(inserted.seq)! : undefined
     } catch (error) {
       throw new BotJournalError(error)
     }
+  }
+
+  /**
+   * Journals written before chat rows named their message hold each chat reply twice: its chat row, and the copy of its
+   * thread's message. Once per profile, each chat row is paired with an unpaired copy of exactly its words in its own
+   * activation (an indexed lookup each), as if it had named it. A chat row holding more than the copy's words (the cards
+   * it carries) is left with its copy: a line said between steps may begin the same way, and is a message of its own.
+   */
+  private pairLegacyReplies(): void {
+    const paired = new Set<number>()
+    const replies = this.all(`SELECT bot_id, activation_id, source_key, text FROM bot_journal
+      WHERE kind = 'bot_msg' AND lane = 'chat' AND substr(source_key, 1, 3) = 'bm:' AND activation_id IS NOT NULL AND redacted_at IS NULL ORDER BY seq`)
+    for (const reply of replies) {
+      const copy = this.all(`SELECT seq, source_key FROM bot_journal WHERE activation_id = ? AND bot_id = ? AND kind = 'bot_msg' AND lane = 'chat'
+        AND substr(source_key, 1, 3) <> 'bm:' AND redacted_at IS NULL AND text = ? ORDER BY seq`, reply.activation_id as string, reply.bot_id as string, reply.text as string)
+        .find((row) => !paired.has(num(row.seq)!))
+      if (!copy) continue
+      paired.add(num(copy.seq)!)
+      this.pairReplyInTx(this.db, reply.bot_id as string, reply.source_key as string, copy.source_key as string)
+    }
+  }
+
+  /** `standsFor`'s copy is the chat row `reply`: recorded for capture (`putCaptured`), and an unredacted copy goes. */
+  private pairReplyInTx(tx: BotStoreTx, botId: string, reply: string, standsFor: string): void {
+    tx.statement('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO NOTHING')
+      .run(botId, `${REPLY_COPY_KEY}${standsFor}`, JSON.stringify(reply))
+    tx.statement('DELETE FROM bot_journal WHERE bot_id = ? AND source_key = ? AND redacted_at IS NULL').run(botId, standsFor)
   }
 
   /** Writes one journal row in its own transaction. */
@@ -360,6 +405,8 @@ export class BotMemoryStore {
     const existing = this.get('SELECT seq, json, redacted_at FROM bot_journal WHERE bot_id = ? AND source_key = ?', row.botId, row.sourceKey)
     const json = { ...((row.json as Record<string, unknown> | undefined) ?? {}), sha256: sha256(row.text), ...(partial ? { partial: true } : {}) }
     if (!existing) {
+      // A chat reply's message: its chat row stands for it (`REPLY_COPY_KEY`), forgotten or not.
+      if (row.kind === 'bot_msg' && this.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `${REPLY_COPY_KEY}${row.sourceKey}`)) return
       for (const part of row.kind === 'notice' ? requestJournalRows({ ...row, json }) : [{ ...row, json }])
         this.appendInTx(this.db, part, row.at)
       return

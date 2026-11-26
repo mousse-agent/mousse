@@ -617,34 +617,49 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
-/* A browser tab names its page (its title, else its host), cut short with an ellipsis, even where other tabs show
-   only their icons. */
+/* A browser tab names its page (its title, else its host), cut short with an ellipsis. */
 .main-view-tab.is-browser .main-view-tab-label {
   max-width: 22ch;
 }
 
+/* A narrow panel (the side pane opens at 440px) keeps every tab's name, cut short; only a terminal's folder goes. */
 @container main-area (max-width: 520px) {
-  .main-view-tab-label,
   .main-view-tab-detail {
     display: none;
   }
 
+  .main-view-tab-label,
   .main-view-tab.is-browser .main-view-tab-label {
-    display: block;
     max-width: 12ch;
   }
 
+  /* Tabs cut their names shorter before the strip has to scroll, so the add button stays in view; each keeps its
+     icon and a letter or two. Only the selected tab (or one reached from the keyboard) keeps a close button, so the
+     others' names get its room; middle-click still closes any tab. */
   .main-view-tab {
-    gap: 0;
-    padding: 6px 9px;
+    flex-shrink: 1;
+    min-width: 52px;
+  }
+
+  .main-view-tab.active {
+    min-width: 76px;
+  }
+
+  .main-view-tab-select {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .main-view-tab-close {
+    flex-shrink: 0;
+  }
+
+  .main-view-tab:not(.active):not(:focus-within) .main-view-tab-close {
+    display: none;
   }
 }
 
 @container main-area (max-width: 360px) {
-  .main-view-tab {
-    padding: 6px 7px;
-  }
-
   .main-view-tabs {
     gap: 1px;
   }
@@ -924,6 +939,30 @@ html.platform-darwin .titlebar-left {
   white-space: nowrap;
   color: var(--text-secondary);
   font-size: 12.5px;
+}
+
+/* A file the turn deleted, or that is gone from its path now: its name struck through, the row quieter. */
+.turn-edits-file[data-gone] {
+  color: var(--text-secondary);
+}
+
+.turn-edits-file[data-gone] .turn-edits-file-name {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.turn-edits-file[data-gone] .turn-edits-file-icon,
+.turn-edits-file[data-gone] .turn-edits-stat {
+  opacity: 0.6;
+}
+
+/* An empty mark under a turn whose calls named no file: its time on screen reads the turn's recorded changes. Out of
+   the flow, so it adds no gap. */
+.turn-edits-probe {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
 }
 
 .placeholder-view {
@@ -4140,7 +4179,7 @@ html[data-theme='high-contrast'] {
 
 .browser-activity-icon { flex-shrink: 0; }
 .browser-activity-agent-busy .browser-activity-icon { color: var(--accent); }
-.browser-activity-agent-waiting .browser-activity-icon { opacity: 0.6; animation: browser-activity-pulse 1.6s ease-in-out infinite; }
+.browser-activity-agent-waiting .browser-activity-icon { opacity: 0.6; animation: browser-activity-pulse 1.6s steps(12, jump-none) infinite; }
 @keyframes browser-activity-pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) {
   .browser-activity-agent-waiting .browser-activity-icon { animation: none; }

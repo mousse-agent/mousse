@@ -4,7 +4,7 @@ import type { BotChip } from '../../shared/bots/personal/chat'
 import type { BotChipCall, BotChipContext } from '../../shared/bots/personal/chips'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
-import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
+import type { BotQuestionAsk, BotQuestionStatus } from '../../shared/bots/personal/questions'
 import type { BotCard } from '../../shared/bots/personal/cards'
 import type { BotWakeEvent } from '../../shared/bots/personal/wakes'
 import type { BotJournalKind, BotJournalWho, BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
@@ -115,17 +115,27 @@ export interface BotToolHost {
      * notes while it runs), or `start` (when it starts or goes on).
      */
     reach?(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start'
+    /**
+     * Whether a note chat activation `from` passes on carries the owner's own message: false on a turn no owner message
+     * started (a job notice, a wake), whose note is the bot's own update and is never credited to the owner.
+     */
+    fromOwner?(botId: string, from: string): boolean
   }
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
   /**
    * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
-   * from work, which then waits for the answer. `asked` is false, with why, when it was not kept (a cap, a permission
+   * from work, which then waits for the answers. `asked` is false, with why, when it was not kept (a repeat, a permission
    * asked first, a turn never offered it). Absent: no questions here.
    */
   questions?: {
     /** `follow`: what happens if the owner doesn't answer (absent: nothing, as an earlier build kept it). */
-    ask(botId: string, activationId: string, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string }
+    ask(botId: string, activationId: string, asks: readonly BotQuestionAsk[]): { asked: boolean; text: string; questionIds?: string[] }
+    /**
+     * `question_withdraw` (issue #1446): the activation takes back an open question it asked. `withdrawn: false` with the
+     * question's status (and the owner's answer) when it was no longer open; `refused` when it is not this activation's.
+     */
+    withdraw?(botId: string, activationId: string, questionId: string): { withdrawn: true } | { withdrawn: false; status: BotQuestionStatus; answer?: string } | { refused: string }
     /**
      * `question_answer`: a chat turn the owner's own message started passes on to work the answer they gave in the chat
      * to the question it waits on; `title` is the work's.
@@ -252,8 +262,11 @@ export interface BotActivityContext {
 
 /** Activity chips (§5.8). WP3 implements; WP2's engine wires it into the authority and drains it at settle. */
 export interface BotActivitySink {
-  /** Every call the authority allowed: a live chip, emitted as `bots.activity` at most 4 a second. */
-  onAllowed(ctx: BotActivityContext, call: { tool: string; input: unknown }): void
+  /**
+   * Every call the authority allowed: a live chip, emitted as `bots.activity` at most 4 a second. `own`: the provider's
+   * own storage (`BotChipCall.own`), which shows no chip of its own.
+   */
+  onAllowed(ctx: BotActivityContext, call: { tool: string; input: unknown; own?: true }): void
   /** An app tool returned: its outcome chip, if it has one. */
   onAppResult(ctx: BotActivityContext, tool: string, result: unknown): void
   /** The dispatch settled: its rolled-up chips for the message row, and the list is cleared. */
@@ -316,6 +329,11 @@ export interface BotJournalInput {
   threadId?: string
   /** Idempotence key, unique per bot: `bm:<bot_messages.id>`, `<threadId>:<messageId>`, `act:<id>:start` … */
   sourceKey: string
+  /**
+   * A chat row (`bm:<id>`) that is a thread's message too: that message's capture key (`<threadId>:<messageId>`). The
+   * row stands for it, so capture never journals the message apart (`BotMemoryStore.appendInTx`).
+   */
+  standsFor?: string
   who: BotJournalWho
   /** The content came from outside (a web page, tool output). */
   external?: boolean

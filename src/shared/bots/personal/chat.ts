@@ -354,6 +354,8 @@ export interface BotPermissionItem {
   needsFullAccess?: true
   /** Every bot has it by default (MCP and each server, skills, automation tools): it can be switched off, not removed. */
   builtIn?: true
+  /** "Allow everything" is on and gives it: it can be switched off, not removed. Absent from older services. */
+  fromFullTrust?: true
   /** The id of the row it belongs under (one MCP server under MCP): shown inset below it. */
   under?: string
   id: string
@@ -408,6 +410,8 @@ export interface BotReminderItem {
 export interface BotDetail {
   summary: BotSummary
   permissions: BotPermissionItem[]
+  /** "Allow everything" is on (`BotManifest.fullTrust`). Absent from older services, which have no such switch. */
+  fullTrust?: boolean
   runs: BotRunItem[]
   /** Waiting reminders, soonest first; absent from older services. */
   reminders?: BotReminderItem[]

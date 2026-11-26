@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Scrolled fixture</title>
+<style>
+  html, body { margin: 0; background: #fff }
+  #spacer { height: 4000px }
+  /* Red above the fold, green below it, a blue mark 30px under the fold's top: scrolled to 700, the viewport shows green with the blue mark at (40, 30). */
+  #top { position: absolute; left: 0; top: 0; width: 800px; height: 200px; background: #f00 }
+  #below { position: absolute; left: 0; top: 700px; width: 800px; height: 2000px; background: #0f0 }
+  #marker { position: absolute; left: 40px; top: 730px; width: 120px; height: 80px; background: #00f }
+</style></head>
+<body>
+  <div id="spacer"></div><div id="top"></div><div id="below"></div><div id="marker"></div>
+  <script>window.scrollTo(0, 700)</script>
+</body>
+</html>

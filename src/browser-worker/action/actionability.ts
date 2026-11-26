@@ -9,6 +9,13 @@ export interface ActionableTarget {
   backendNodeId: number
   objectId: string
   point: BrowserPoint
+  /**
+   * Where pointer input for it goes when that is not `cdpSessionId`: the tab, with `point` in the tab's
+   * viewport (an image point; Chromium routes it into the frame there).
+   */
+  pointerSessionId?: string
+  /** The point in its own frame's viewport, where it was hit-tested, when `point` is in the tab's (an image point). */
+  framePoint?: BrowserPoint
   bounds: BrowserBounds
   disabled: boolean
   hidden: boolean
@@ -48,7 +55,11 @@ const TRUSTED_STATE = `function() {
   };
 }`
 
-const TRUSTED_HIT = `function(x, y) {
+/**
+ * Whether the element hit at a viewport point of its own frame (in its own shadow root, if any) is
+ * this element or inside it; run on the element (a text node stands for its parent element).
+ */
+export const TRUSTED_HIT = `function(x, y) {
   const el = this && this.nodeType === 3 ? this.parentElement : this;
   if (!el || el.nodeType !== 1) return { ok: false, occluded: true, hitTag: '', hitText: '' };
   const root = el.getRootNode && el.getRootNode();
@@ -86,18 +97,24 @@ export async function prepareActionableTarget(
   cdp: CdpTransport,
   cdpSessionId: string,
   node: ObservedNode,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** `point`: a viewport CSS point the caller chose (an image point); hit-tested as is, without scrolling the target. */
+  options?: { point?: BrowserPoint }
 ): Promise<ActionableTarget> {
+  const requestedPoint = options?.point
   await cdp.send('DOM.enable', {}, { sessionId: cdpSessionId, signal })
   try {
     await cdp.send('DOM.describeNode', { backendNodeId: node.backendNodeId }, { sessionId: cdpSessionId, signal })
   } catch {
     fail('stale_ref', 'Observed node is detached')
   }
-  try {
-    await cdp.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: node.backendNodeId }, { sessionId: cdpSessionId, signal })
-  } catch {
-    fail('not_actionable', 'Target could not be scrolled into view')
+  // A requested point is already in viewport coordinates; scrolling would move the target out from under it.
+  if (!requestedPoint) {
+    try {
+      await cdp.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: node.backendNodeId }, { sessionId: cdpSessionId, signal })
+    } catch {
+      fail('not_actionable', 'Target could not be scrolled into view')
+    }
   }
   const first = await quads(cdp, cdpSessionId, node.backendNodeId, signal)
   await sleep(50, signal)
@@ -112,7 +129,9 @@ export async function prepareActionableTarget(
   const value = state.result?.value
   if (!value) fail('stale_ref', 'Observed node could not be resolved')
   if (value.hidden) fail('not_actionable', 'Target is hidden')
-  const point = { x: second.x + second.width / 2, y: second.y + second.height / 2 }
+  const point = requestedPoint
+    ? { x: requestedPoint.x, y: requestedPoint.y }
+    : { x: second.x + second.width / 2, y: second.y + second.height / 2 }
   const hit = await cdp.send<{ result: { value?: { ok?: boolean; occluded?: boolean; hitTag?: string; hitText?: string } } }>('Runtime.callFunctionOn', {
     objectId,
     functionDeclaration: TRUSTED_HIT,

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { PROFILER_TOOL_LABELS, PROFILER_TOOL_NAMES, type ProfilerSettings } from '../../../shared/diagnostics/profiler'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
-import { Cloud, Cpu, Gauge } from '../../lib/icons'
+import { Cloud, Cpu, Gauge, MessageSquare } from '../../lib/icons'
 import { showToast } from '../ui/Toast'
 import { MemoryRows } from './MemoryRows'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
@@ -99,6 +99,22 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
               label="Shimmer animations"
               checked={settings.experimental.shimmerAnimations}
               onChange={(shimmerAnimations) => void onUpdate({ experimental: { shimmerAnimations } })}
+            />
+          }
+        />
+      </SettingsGroup>
+      <SettingsGroup title="Composer" icon={MessageSquare}>
+        <SettingsRow
+          title="Hide permissions while running"
+          anchor="labs-hide-permissions-while-running"
+          htmlFor="labs-hide-permissions-while-running"
+          description="Hide the composer's permissions button while a thread runs; show it again once it stops."
+          control={
+            <Switch
+              id="labs-hide-permissions-while-running"
+              label="Hide permissions while running"
+              checked={settings.experimental.hidePermissionsWhileRunning}
+              onChange={(hidePermissionsWhileRunning) => void onUpdate({ experimental: { hidePermissionsWhileRunning } })}
             />
           }
         />

@@ -2,9 +2,13 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { AppletStore } from '../../../src/mms/applets/AppletStore'
+import { BotChatProjection } from '../../../src/mms/bots/chat/projection'
 import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
 import { BotJournalError, BotMemoryStore } from '../../../src/mms/bots/memory/BotMemoryStore'
 import { botThreadsForCatchUp, createBotJournal, type BotThreadRef } from '../../../src/mms/bots/memory/capture'
+import { BotStore } from '../../../src/mms/bots/store/BotStore'
+import type { AppletSubmission } from '../../../src/shared/applets'
 import type { ChatMessage } from '../../../src/shared/types'
 import { disposeFixtures, memoryFixture, type MemoryFixture } from './memoryFixture'
 
@@ -127,6 +131,128 @@ describe('syncThread', () => {
     const journal = createBotJournal({ store: full, readThread: () => ({ messages: [assistant('a1', 'done')] }), listThreads: () => [] })
     await expect(journal.syncThread({ botId: 'ada', threadId: 'home', lane: 'chat', activationId: 'act' })).rejects.toBeInstanceOf(BotJournalError)
     expect(fx.store.getState('ada', 'cursor:home')).toBeUndefined()
+  })
+})
+
+describe('a chat reply is journaled once', () => {
+  // A dispatch's reply is its chat row (`bm:<id>`) and one message of its thread, which capture copies too. The chat
+  // row names that message (`standsFor`) and stands for it. Inputs: the order of the two writes; a Forget of the chat
+  // row, then the thread copied again from its start (a rewritten transcript resets the cursor); a line said between
+  // steps whose words begin the reply; an applet reply, whose chat row names the applet where the message holds its
+  // fence; a chat row that names no message; the same words in another activation.
+  const home = { botId: 'ada', threadId: 'home', lane: 'chat' as const, activationId: 'act-1' }
+  const STATUS = 'Checking the invoice.'
+  const REPLY = 'Checking the invoice.\n\nIt was paid on Tuesday.'
+  const replies = (fx: MemoryFixture) => fx.store.journal('ada').filter((row) => row.kind === 'bot_msg')
+    .map((row) => [row.sourceKey, row.text]).sort(([a], [b]) => a!.localeCompare(b!))
+  const reply = (fx: MemoryFixture, text = REPLY) => fx.message({ botId: 'ada', id: 'r1', author: 'bot', text, activationId: 'act-1', standsFor: 'home:a1' })
+  /** FTS5's own check of the index against the journal: it throws when they disagree. */
+  const indexChecked = (fx: MemoryFixture) => fx.db.statement("INSERT INTO bot_journal_fts(bot_journal_fts, rank) VALUES('integrity-check', 1)").run()
+  const indexed = (fx: MemoryFixture, word: string) => Number((fx.db.statement('SELECT count(*) AS n FROM bot_journal_fts WHERE bot_journal_fts MATCH ?').get(word) as { n: number }).n)
+  const orders = ['captured first', 'chat row first'] as const
+  const write = (fx: MemoryFixture, journal: ReturnType<typeof setup>['journal'], order: typeof orders[number], text = REPLY) => {
+    if (order === 'captured first') journal.syncNow(home)
+    const seq = reply(fx, text)
+    if (order === 'chat row first') journal.syncNow(home)
+    return seq
+  }
+
+  it.each(orders)('%s: the journal, its index, the history count and search hold the reply once, and the line said before it', (order) => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    t.data.set('home', [assistant('s1', STATUS, 1), assistant('a1', REPLY, 2)])
+    const seq = write(fx, journal, order)
+    // The status line is another message, though the reply begins with its words.
+    expect(replies(fx)).toEqual([['bm:r1', REPLY], ['home:s1', STATUS]])
+    expect(() => indexChecked(fx)).not.toThrow()
+    expect(indexed(fx, 'tuesday')).toBe(1)
+    expect(fx.store.messageHistory('ada').count).toBe(2)
+    expect(fx.store.search('ada', { query: 'tuesday', kinds: ['chat'] }).map((hit) => hit.ref)).toEqual([`j${seq}`])
+    // A later pass over the thread copies only what is new.
+    t.data.set('home', [assistant('s1', STATUS, 1), assistant('a1', REPLY, 2), user('u2', 'Thanks', 3)])
+    journal.syncNow(home)
+    expect(replies(fx)).toEqual([['bm:r1', REPLY], ['home:s1', STATUS]])
+  })
+
+  it.each(orders)('%s, then forgotten: copying the rewritten thread again from its start never brings the words back', (order) => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    t.data.set('home', [assistant('s1', STATUS, 1), assistant('a1', REPLY, 2)])
+    const seq = write(fx, journal, order)
+    expect(fx.store.forget('ada', { refs: [`j${seq}`], by: 'owner_ui' })).not.toHaveProperty('error')
+    // The transcript was rewritten: the cursor no longer matches it, so capture reads every message again.
+    t.data.set('home', [user('u0', 'Is the invoice paid?', 0), assistant('s1', STATUS, 1), assistant('a1', REPLY, 2)])
+    journal.syncNow(home)
+    expect(fx.store.journal('ada').filter((row) => row.text.includes('Tuesday'))).toEqual([])
+    expect(indexed(fx, 'tuesday')).toBe(0)
+    expect(() => indexChecked(fx)).not.toThrow()
+    expect(replies(fx).map(([key]) => key)).toEqual(['bm:r1', 'home:s1'])
+  })
+
+  it('keeps a captured reply whose chat row names no message, and the same words posted in another activation', () => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    fx.message({ botId: 'ada', id: 'r0', author: 'bot', text: 'Done.', activationId: 'act-0', standsFor: 'home:a0' })
+    fx.message({ botId: 'ada', id: 'r1', author: 'bot', text: 'Done.', activationId: 'act-1' })
+    t.data.set('home', [assistant('a1', 'Done.', 2)])
+    journal.syncNow(home)
+    expect(replies(fx)).toEqual([['bm:r0', 'Done.'], ['bm:r1', 'Done.'], ['home:a1', 'Done.']])
+  })
+
+  it('an applet reply posted through the chat projection: its chat row names the applet, its message holds the fence, and the journal holds it once', () => {
+    const profile = mkdtempSync(join(tmpdir(), 'bot-reply-applet-'))
+    const bots = new BotStore({ profileHome: profile, clock: () => Date.parse(at(5)) })
+    try {
+      const memory = new BotMemoryStore({ db: bots.db, clock: () => Date.parse(at(5)) })
+      const t = threads()
+      const journal = createBotJournal({ store: memory, readThread: t.readThread, listThreads: () => [] })
+      const chat = new BotChatProjection({ store: bots, journal, emit: () => {} })
+      const budget: AppletSubmission = { schemaVersion: 1, title: 'Budget', description: 'Monthly budget.', html: '<output id="t"></output>', css: '', js: 'document.getElementById("t").textContent = "4000"', stateVersion: 1 }
+      const applets = new AppletStore(profile, (threadId) => join(profile, 'threads', threadId))
+      const bundle = applets.publish({ threadId: 'home', messageId: 'a1', turnId: 'turn-1', submission: budget })
+      chat.setReplyParts({ published: () => [{ appletId: bundle.appletId, revisionId: bundle.revisionId, sourceHash: bundle.sourceHash, title: bundle.title, description: bundle.description }] })
+      const text = `Here is your budget.\n\n\`\`\`mousse-applet\n${JSON.stringify(budget)}\n\`\`\``
+      t.data.set('home', [assistant('a1', text, 1)])
+      journal.syncNow(home)
+      const posted = chat.post({ id: 'r1', botId: 'ada', author: 'bot', kind: 'text', text, activationId: 'act-1', lane: 'chat', threadId: 'home', transcriptMessageId: 'a1' })
+      expect(posted.applets).toHaveLength(1)
+      const rows = memory.journal('ada').filter((row) => row.kind === 'bot_msg')
+      expect(rows.map((row) => row.sourceKey)).toEqual(['bm:r1'])
+      expect(rows[0]!.text).toContain('[Applet: Budget]')
+      expect(rows[0]!.text).not.toContain('mousse-applet')
+      expect(() => bots.db.statement("INSERT INTO bot_journal_fts(bot_journal_fts, rank) VALUES('integrity-check', 1)").run()).not.toThrow()
+    } finally {
+      bots.close()
+      rmSync(profile, { recursive: true, force: true })
+    }
+  })
+
+  it('a journal from before chat rows named their message: on open, each chat row takes one copy of exactly its words in its activation', () => {
+    const fx = memoryFixture()
+    const copy = (key: string, text: string, activationId: string) =>
+      fx.store.append({ botId: 'ada', kind: 'bot_msg', lane: 'chat', activationId, threadId: 'home', sourceKey: `home:${key}`, who: 'bot', text })
+    fx.message({ botId: 'ada', id: 'o1', author: 'owner', text: 'Plan my week', activationId: 'act-1' })
+    copy('s1', 'Your week is planned.', 'act-1')
+    copy('a1', 'Your week is planned.', 'act-1')
+    fx.message({ botId: 'ada', id: 'r1', author: 'bot', text: 'Your week is planned.', activationId: 'act-1' })
+    // A status line the reply begins with, and a reply with its cards after the copy's words: each a message of its own.
+    copy('s2', STATUS, 'act-2')
+    fx.message({ botId: 'ada', id: 'r2', author: 'bot', text: REPLY, activationId: 'act-2' })
+    copy('a3', 'Here it is.', 'act-3')
+    fx.message({ botId: 'ada', id: 'r3', author: 'bot', text: 'Here it is.\n\n[file] week.md', activationId: 'act-3' })
+    // The same words in another activation.
+    copy('a4', 'Your week is planned.', 'act-4')
+    fx.db.statement("DELETE FROM bot_memory_state WHERE bot_id = '' AND key = 'reply_copies_v1'").run()
+    const store = fx.reopen()
+    const keys = store.journal('ada').map((row) => row.sourceKey)
+    expect(keys).toEqual(['bm:o1', 'home:a1', 'bm:r1', 'home:s2', 'bm:r2', 'home:a3', 'bm:r3', 'home:a4'])
+    expect(store.messageHistory('ada').count).toBe(8)
+    expect(() => indexChecked(fx)).not.toThrow()
+    // Paired as a named copy is: capture does not copy it again.
+    const t = threads()
+    t.data.set('home', [assistant('s1', 'Your week is planned.', 1)])
+    createBotJournal({ store, readThread: t.readThread, listThreads: () => [] }).syncNow(home)
+    expect(store.journal('ada').map((row) => row.sourceKey)).toEqual(keys)
   })
 })
 

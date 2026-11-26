@@ -83,7 +83,7 @@ beforeEach(async () => {
   defaultMode = 'accept_edits'
   stubBridge()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
-  useAppStore.setState({ profileId: 'prf_test', profileReady: true, workspaceReady: true })
+  useAppStore.setState({ profileId: 'prf_test', profileReady: true, workspaceReady: true, hidePermissionsWhileRunning: true })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -317,6 +317,31 @@ describe('the first send of a new chat runs with what the composer shows', () =>
     await act(async () => { worktree!.click() })
     expect(setWorktreeEnabled).toHaveBeenCalledWith('draft', true)
     expect(useAppStore.getState().messages).toEqual([])
+  })
+
+  it('an empty thread whose checkout can no longer change: the send makes a new thread in the picked worktree', async () => {
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    // A terminal or a worktree on the empty chat fixed its checkout; the person then picked a new worktree.
+    useAppStore.setState({
+      projects: [project('remembers')],
+      threads: [threadRow('draft', { worktreeEnabled: false, modelOverride: OPUS })],
+      activeThreadId: 'draft',
+      messages: [],
+      composerWorkspaceDrafts: { draft: { projectId: 'remembers', worktreeEnabled: true, worktreePicked: true } }
+    })
+    const daemon = daemonForSend(threadRow('made', { worktreeEnabled: true, modelOverride: OPUS }))
+    // As main answers the service's refusal, so the window gets its code.
+    const setWorktreeEnabled = vi.fn(async () => ({ ok: false, code: 'worktree_locked', message: 'Worktree mode is locked once a workspace is provisioned.' }))
+    bridge.threads.setWorktreeEnabled = setWorktreeEnabled
+    await mountComposer()
+
+    await send('Fix the parser')
+    expect(setWorktreeEnabled).toHaveBeenCalledWith('draft', true, true)
+    const create = daemon.calls.find((call) => call[0] === 'create')
+    expect(create?.[3]).toMatchObject({ worktreeEnabled: true })
+    expect(daemon.sentWith()).toBeDefined()
+    expect(useAppStore.getState().activeThreadId).toBe('made')
   })
 
   it('a worktree from another branch makes a new thread, so an older empty Ask thread shows and runs in the project mode', async () => {
@@ -640,6 +665,62 @@ describe('a new chat on another computer gets its settings in the same send, or 
     expect(daemon.calls.find((call) => call[0] === 'applySettings')?.[3]).toBe(0)
     expect(daemon.calls.some((call) => call[0] === 'setPermissionMode')).toBe(false)
     expect(daemon.calls.find((call) => call[0] === 'send')).toBeUndefined()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+  })
+})
+
+describe('permission chip visibility during a run', () => {
+  it('hides the permission chip while the thread is running or awaiting input, and shows it again when stopped or finished', async () => {
+    const abort = vi.fn(async () => true)
+    bridge.orchestrator = { abort }
+    stubBridge()
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const started = threadRow('run-1', { permissionMode: 'ask', worktreeEnabled: true, modelOverride: OPUS })
+    useAppStore.setState({
+      projects: [project('remembers', { permissionMode: 'ask' })],
+      threads: [started],
+      activeThreadId: 'run-1',
+      messages: [{ id: 'u1', role: 'user', content: 'Check the build', timestamp: '2026-11-10T00:00:01Z' }],
+      turnStates: {},
+      threadActivity: {}
+    })
+    await mountComposer()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    // Turn running: permission chip hides and Stop shows.
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't1', phase: 'streaming', updatedAt: '2026-11-10T00:00:02Z' } }
+    }))
+    expect(permissionChip()).toBeUndefined()
+    const stopButton = host.querySelector<HTMLButtonElement>('button[aria-label="Stop run"]')
+    expect(stopButton).not.toBeNull()
+
+    // Waiting on an approval or question: still stoppable, still hidden.
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't1', phase: 'awaiting_input', updatedAt: '2026-11-10T00:00:03Z' } }
+    }))
+    expect(permissionChip()).toBeUndefined()
+
+    // Stopping the agent brings the permission chip back right away.
+    await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Stop run"]')!.click() })
+    await settle()
+    expect(abort).toHaveBeenCalledWith('run-1')
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    // A later turn that finishes normally also restores the permission chip.
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't2', phase: 'thinking', updatedAt: '2026-11-10T00:00:04Z' } }
+    }))
+    expect(permissionChip()).toBeUndefined()
+    // Disabling the Labs setting shows the chip again while still running.
+    act(() => useAppStore.setState({ hidePermissionsWhileRunning: false }))
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+    act(() => useAppStore.setState({ hidePermissionsWhileRunning: true }))
+    expect(permissionChip()).toBeUndefined()
+    act(() => useAppStore.setState({
+      turnStates: { 'run-1': { threadId: 'run-1', turnId: 't2', phase: 'completed', updatedAt: '2026-11-10T00:00:05Z' } }
+    }))
     expect(permissionChip()).toBe('Permissions: Ask before acting')
   })
 })

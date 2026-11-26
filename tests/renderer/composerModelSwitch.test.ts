@@ -211,3 +211,45 @@ describe('the model picker keeps the model that was picked', () => {
     expect(useAppStore.getState().threads[0].modelOverride?.model).toBe('haiku')
   })
 })
+
+describe('a pick on a thread of another computer', () => {
+  const remote = (model: string): Thread => ({ ...withModel(model), id: 'node-studio:thread-a', node: 'node-studio', order: 7 }) as Thread
+
+  it('keeps the thread on that computer in the side card when the reply does not name the computer', async () => {
+    stubBridge()
+    // That computer's models, which the composer of its thread offers.
+    const bridge = window.mousse as unknown as Record<string, unknown>
+    bridge.platformRequest = {
+      request: (method: string) => method === 'bridge.hub.composerOptions'
+        ? Promise.resolve({ providers: catalog(), defaultModel: null })
+        : new Promise(() => undefined)
+    }
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false, settingsOpen: false,
+      activeThreadId: 'node-studio:thread-a', threads: [remote('opus')],
+      messages: [{ id: 'm-1', role: 'user', content: 'First message', timestamp: now }]
+    })
+    const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
+    const { DeviceSection } = await import('../../src/renderer/components/sideCard/DeviceSection')
+    await act(async () => root.render(createElement('div', null,
+      createElement(OrchestratorChat),
+      createElement(DeviceSection, { threadId: 'node-studio:thread-a', projectId: null })
+    )))
+    await settle()
+    const header = () => host.querySelector('section[aria-label="Computer"] .side-card-header-name')?.textContent
+    expect(header()).toBe('Another computer')
+
+    // The owner's copy of the thread: its model and revision, and nothing of where this computer lists it.
+    setModel.mockResolvedValue({ ...withModel('sonnet'), id: 'node-studio:thread-a', order: 0, settingsRevision: 4 })
+    await pick('Sonnet 5')
+    await settle()
+
+    const row = useAppStore.getState().threads[0]
+    expect(row.node).toBe('node-studio')
+    expect(row.order).toBe(7)
+    expect(row.modelOverride?.model).toBe('sonnet')
+    expect(row.settingsRevision).toBe(4)
+    expect(header()).toBe('Another computer')
+  })
+})

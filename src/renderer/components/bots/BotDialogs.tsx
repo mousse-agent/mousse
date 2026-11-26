@@ -6,6 +6,7 @@ import { useBotsStore, type BotConfirmCommand } from '../../stores/botsStore'
 import { runConfirmed } from './runBotCommand'
 import { useChatsStore } from '../../stores/chatsStore'
 import { BotLookPicker } from './face/BotLookPicker'
+import { BOT_FULL_TRUST_PERMISSION } from '../../../shared/bots/personal/manifest'
 
 /**
  * A small dialog in the Chats style (`chat-dialog`): focus inside, Escape and the backdrop close it.
@@ -113,7 +114,26 @@ function CommandConfirmDialog({ bot, command }: { bot: BotSummary; command: BotC
   </BotDialogFrame>
 }
 
-/** Whichever of Rename, Change look, the Delete confirm or a command's confirm is open. */
+/**
+ * The approval before "Allow everything" turns on: what it grants and what still holds, then Allow. Turning it off needs
+ * no approval (About's switch narrows at once).
+ */
+function FullTrustDialog({ bot }: { bot: BotSummary }) {
+  const busy = useBotsStore((s) => s.busy)
+  const error = useBotsStore((s) => s.error)
+  return <BotDialogFrame title={`Allow ${bot.name} everything?`} onClose={close} busy={busy}>
+    <p className="bot-dialog-text">It can use every tool without asking. Your switches, Settings and Labs still apply.</p>
+    {error && <p role="alert" className="chat-error">{error}</p>}
+    <div className="bot-new-foot">
+      <button type="button" className="bot-ghost-button" disabled={busy} onClick={close}>Cancel</button>
+      <button type="button" className="chat-primary-button" disabled={busy} onClick={() => {
+        void useBotsStore.getState().setPermission(bot.id, BOT_FULL_TRUST_PERMISSION, true).then(() => { if (!useBotsStore.getState().error) close() })
+      }}>Allow everything</button>
+    </div>
+  </BotDialogFrame>
+}
+
+/** Whichever of Rename, Change look, the Delete confirm, a command's confirm or Allow everything is open. */
 export function BotDialogs() {
   const dialog = useBotsStore((s) => s.dialog)
   const bots = useBotsStore((s) => s.bots)
@@ -121,6 +141,7 @@ export function BotDialogs() {
   if (!dialog || !bot) return null
   if (dialog.kind === 'confirm') return <CommandConfirmDialog key={`${bot.id}:${dialog.command}`} bot={bot} command={dialog.command} />
   if (dialog.kind === 'rename') return <RenameDialog key={bot.id} bot={bot} />
+  if (dialog.kind === 'fullTrust') return <FullTrustDialog key={bot.id} bot={bot} />
   if (dialog.kind === 'look') return <LookDialog key={bot.id} bot={bot} others={bots.filter((entry) => entry.id !== bot.id).map((entry) => entry.look)} />
   return <DeleteDialog key={bot.id} bot={bot} />
 }

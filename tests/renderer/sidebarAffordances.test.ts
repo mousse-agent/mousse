@@ -416,6 +416,30 @@ describe('row marks', () => {
     width.mockRestore()
     visible.mockRestore()
   })
+
+  it("marks a closed project with its threads' state, and drops the mark once it is open", () => {
+    show([thread('a', 'Fix tests'), thread('b', 'Ship docs')])
+    act(() => useAppStore.setState({ threadActivity: { a: 'awaiting_input', b: 'awaiting_input' } }))
+    const mark = () => projectRow().querySelector('[role="img"][aria-label="2 threads need you"]')
+    expect(mark()?.textContent).toBe('2')
+    click(projectRow())
+    expect(projectRow().getAttribute('aria-expanded')).toBe('true')
+    expect(mark()).toBeNull()
+    // The open project's threads carry their own marks.
+    expect(row('a')).not.toBeNull()
+    click(projectRow())
+    act(() => useAppStore.setState({ threadActivity: { a: 'processing' } }))
+    expect(projectRow().querySelector('[role="img"][aria-label="Working"]')).not.toBeNull()
+  })
+
+  it("opens and closes a project from its computer badges, which sit after the project's toggle", () => {
+    show([thread('a', 'Fix tests')], { projects: [{ ...project('p1', 'Mousse'), node: 'studio' }] })
+    const badges = host.querySelector('.threads-sidebar-project-computers')!
+    expect(badges.querySelector('.computer-badge')).not.toBeNull()
+    expect(projectRow().contains(badges)).toBe(false)
+    click(badges)
+    expect(projectRow().getAttribute('aria-expanded')).toBe('true')
+  })
 })
 
 describe('unsent drafts', () => {

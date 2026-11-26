@@ -1,7 +1,7 @@
 /**
  * The tool API contract of the thread and bot tool APIs (docs: Thread API & Bot API unification). PR 1a recorded the
- * default branch's behaviour; PR 1b-i (#1360) changed the cells marked Δ below, the rows of `BOT_TURN_KINDS`. Any other
- * change to a row is a decision the change names, never an accident.
+ * default branch's behaviour; PR 1b-i (#1360) changed the cells marked Δ below, the rows of `BOT_TURN_KINDS`, and PR
+ * 1b-iii (#1361) those marked Δ #1361. Any other change to a row is a decision the change names, never an accident.
  *
  * What started a bot's turn (its provenance) decides what the turn may do. Every start the engine writes is a row:
  * the owner's message and its continuation, a tapped answer, the bot's first message (also when Resume retried it), a
@@ -46,7 +46,9 @@ describe('what started a turn, and the rules that read it', () => {
     ['threadmsg:t1', 'chat', manual, 'threadmsg', false, 'run', undefined, true],
     ['botmsg:b1:m1', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
     ['resume:act1', 'chat', manual, 'botmsg', false, 'run', 'not_owner', true],
-    ['action:a1', 'chat', manual, 'action_result', false, 'run', 'not_owner', true],
+    // Δ #1361: a held call's result is a turn of its own, which acts as far as the turn that held the call did.
+    ['action:a1', 'chat', manual, 'action_result', false, 'run', undefined, true],
+    ['action:a2', 'chat', { ...manual, threadsReadOnly: 'not_owner' }, 'action_result', false, 'run', 'not_owner', true],
     // Δ #1360: a start no build names asks nobody.
     ['future:start', 'chat', manual, 'unknown', false, 'run', 'not_owner', false],
     // No build writes these (the owner's retries are `chat:resume:`, `answer:resume:`): behind a `resume:`, never the owner's.
@@ -96,16 +98,18 @@ const CALLS: Array<[string, string, Record<string, unknown>]> = [
   ['ask_owner', 'ask_owner', { question: 'Which flat?', choices: ['The first', 'The second'], wait: false }],
   ['question_answer', 'question_answer', { questionId: 'q-missing', answer: 'The second' }],
   ['bot_list', 'bot_list', {}],
+  // #1446: held and refused wherever ask_owner is; past the turn's rule, the made-up question is not found.
+  ['question_withdraw', 'question_withdraw', { questionId: 'q-missing' }],
   ['bot_send', 'bot_send', { bot: 'Beta', message: 'The login page returns a 500.' }],
   ['work_start', 'work_start', { title: 'Research', brief: 'Look up flats near the station.' }],
   ['subagent_start', 'subagent_start', { title: 'Look', brief: 'List the folder.' }],
   // Last: work that waits is parked, which ends what its turn may do.
   ['work_wait', 'work_wait', { why: 'Check again.', inMinutes: 30 }]
 ]
-const HELD = ['bot_schedule_add', 'remind', 'watch_start', 'ask_owner', 'question_answer', 'bot_list', 'bot_send', 'work_wait', 'work_start', 'subagent_start'] as const
+const HELD = ['bot_schedule_add', 'remind', 'watch_start', 'ask_owner', 'question_answer', 'question_withdraw', 'bot_list', 'bot_send', 'work_wait', 'work_start', 'subagent_start'] as const
 
 type Start = 'chat:msg' | 'chat:after:msg' | 'answer:q' | 'create:bot' | 'resume:create:bot' | 'wake:w1' | 'resume:wake:w1' | 'question:q:default' | 'job:j1'
-  | 'resume:resume:job:j1' | 'threadmsg:t1' | 'botmsg:b1:m1' | 'resume:act1' | 'future:start' | 'work' | 'schedule' | 'manual'
+  | 'resume:resume:job:j1' | 'threadmsg:t1' | 'botmsg:b1:m1' | 'resume:act1' | 'action:a1' | 'future:start' | 'work' | 'schedule' | 'manual'
   | StoredStart | 'sched stored as owner_voice'
 
 /**
@@ -142,7 +146,7 @@ interface Observed {
  * answers: its reminders, background commands, questions, messages to bots and work are refused at the call
  * (`turnRefusals`); listing the other bots is reading, so it stays.
  */
-const CHAT_HELD = ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'question_answer', 'remind', 'watch_start', 'work_start']
+const CHAT_HELD = ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'question_answer', 'question_withdraw', 'remind', 'watch_start', 'work_start']
 function chatTurn(provenance: BotActivationProvenance, memoryLane: BotLane, threadsReadOnly: 'not_owner' | null): Observed {
   const owner = provenance === 'owner_message' || provenance === 'owner_tap'
   const acts = provenance === 'unknown' ? 'refused:not_granted' : 'ok'
@@ -150,7 +154,7 @@ function chatTurn(provenance: BotActivationProvenance, memoryLane: BotLane, thre
     provenance, memoryLane, threadsReadOnly, held: CHAT_HELD, subagents: false,
     calls: {
       thread_change: threadsReadOnly ? 'refused:not_granted' : 'ok',
-      say: memoryLane === 'chat' ? 'ok' : 'refused:failed', remind: acts, watch_start: acts, ask_owner: acts,
+      say: memoryLane === 'chat' ? 'ok' : 'refused:failed', remind: acts, watch_start: acts, ask_owner: acts, question_withdraw: acts === 'ok' ? 'refused:failed' : acts,
       question_answer: owner ? 'refused:failed' : 'refused:not_granted (owner only)', bot_list: 'ok', bot_send: acts, work_start: acts, subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
     }
   }
@@ -164,10 +168,10 @@ function runTurn(provenance: 'work' | 'schedule' | 'manual'): Observed {
   const asks = provenance !== 'manual'
   return {
     provenance, memoryLane: 'run', threadsReadOnly: null,
-    held: asks ? ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'remind', 'subagent_start', 'watch_start', 'work_wait'] : ['bot_schedule_add', 'remind', 'subagent_start', 'watch_start'], subagents: true,
+    held: asks ? ['ask_owner', 'bot_list', 'bot_schedule_add', 'bot_send', 'question_withdraw', 'remind', 'subagent_start', 'watch_start', 'work_wait'] : ['bot_schedule_add', 'remind', 'subagent_start', 'watch_start'], subagents: true,
     calls: {
       thread_change: 'ok',
-      say: 'refused:failed', remind: 'ok', watch_start: 'ok', ask_owner: asks ? 'ok' : 'refused:unavailable', question_answer: 'refused:unavailable',
+      say: 'refused:failed', remind: 'ok', watch_start: 'ok', ask_owner: asks ? 'ok' : 'refused:unavailable', question_withdraw: asks ? 'refused:failed' : 'refused:unavailable', question_answer: 'refused:unavailable',
       bot_list: asks ? 'ok' : 'refused:unavailable', bot_send: asks ? 'ok' : 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'ok', work_wait: asks ? 'ok' : 'refused:not_granted'
     }
   }
@@ -188,6 +192,8 @@ const EXPECTED: Record<Start, Observed> = {
   'threadmsg:t1': chatTurn('threadmsg', 'run', null),
   'botmsg:b1:m1': chatTurn('botmsg', 'run', 'not_owner'),
   'resume:act1': chatTurn('botmsg', 'run', 'not_owner'),
+  // Δ #1361: a held call's result (master: held as another bot's message is, reading the owner's threads only).
+  'action:a1': chatTurn('action_result', 'run', null),
   'future:start': chatTurn('unknown', 'run', 'not_owner'),
   'future:start as owner_message': chatTurn('owner_message', 'chat', null),
   'chat:other as botmsg': chatTurn('botmsg', 'run', 'not_owner'),
@@ -200,7 +206,7 @@ const EXPECTED: Record<Start, Observed> = {
   'sched stored as owner_voice': {
     provenance: 'unknown', memoryLane: 'run', threadsReadOnly: 'not_owner', held: ['bot_schedule_add'], subagents: false,
     calls: {
-      thread_change: 'refused:not_granted', say: 'refused:failed', remind: 'refused:not_granted', watch_start: 'refused:not_granted', ask_owner: 'refused:unavailable',
+      thread_change: 'refused:not_granted', say: 'refused:failed', remind: 'refused:not_granted', watch_start: 'refused:not_granted', ask_owner: 'refused:unavailable', question_withdraw: 'refused:unavailable',
       question_answer: 'refused:unavailable', bot_list: 'refused:unavailable', bot_send: 'refused:unavailable', work_start: 'refused:not_granted', subagent_start: 'refused:unavailable', work_wait: 'refused:not_granted'
     }
   }
@@ -315,7 +321,7 @@ describe('the turn-kind matrix through registered dispatch', () => {
   }
 
   const STARTS: Start[] = ['chat:msg', 'chat:after:msg', 'answer:q', 'create:bot', 'resume:create:bot', 'wake:w1', 'resume:wake:w1', 'question:q:default', 'job:j1',
-    'resume:resume:job:j1', 'threadmsg:t1', 'botmsg:b1:m1', 'resume:act1', 'future:start', 'future:start as owner_message', 'chat:other as botmsg', 'work', 'schedule', 'manual', 'sched stored as owner_voice']
+    'resume:resume:job:j1', 'threadmsg:t1', 'botmsg:b1:m1', 'resume:act1', 'action:a1', 'future:start', 'future:start as owner_message', 'chat:other as botmsg', 'work', 'schedule', 'manual', 'sched stored as owner_voice']
   it.each(STARTS)('%s', async (which) => {
     expect(await observe(which)).toEqual(EXPECTED[which])
   })
