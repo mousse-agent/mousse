@@ -10,7 +10,7 @@ import { connect as netConnect, createServer as createNetServer, type Socket } f
 import { hostname, networkInterfaces } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { NetError } from '../../shared/net/errors'
-import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
+import { newId, type BlobId, type NodeCapability, type NodeId, type StoredRecord, type StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../shared/netEngine/allowlist'
 import {
@@ -40,6 +40,14 @@ import type { EngineDirectoryPort, PeerRow } from '../bridge/peers'
 import { checkNodePolicy } from '../net/checkNodePolicy'
 import type { EngineCaller, RpcMethod } from '../net/contracts'
 import type { NetRuntime, NetService } from '../net/NetService'
+import {
+  ENGINE_PRESENCE_TABLE,
+  ensurePresenceTable,
+  parsePeerInfo,
+  PeerPresence,
+  versionStanding
+} from '../net/presence'
+import { mousseVersion } from '../appVersion'
 import type { NodePolicy, NodePolicyChange } from '../net/store/nodePolicy'
 import {
   engineControl,
@@ -1625,6 +1633,7 @@ export class NetEngineService implements EngineDirectoryPort {
       hooks: {
         onClientReady: (node) => {
           this.options.bridge()?.peerOnline(node)
+          void this.askPeerInfo(node)
           pairing.clientReady(node)
           access.ensure(node)
           // A: its first live connection to B confirms an SSH add (1b §3.4 step 6).
@@ -1635,6 +1644,7 @@ export class NetEngineService implements EngineDirectoryPort {
         },
         onClientClosed: (node) => {
           this.options.bridge()?.peerOffline(node)
+          this.notePeer((presence) => presence.seen(node))
           this.changed()
         },
         onServingChanged: (node) => {
@@ -2181,23 +2191,90 @@ export class NetEngineService implements EngineDirectoryPort {
   rows(): PeerRow[] {
     const started = this.started
     if (!started) return []
+    const current = mousseVersion()
     return started.peers
       .all()
       .filter((row) => row.state !== 'removing' && row.state !== 'removed')
-      .map((row) => ({
-        node: row.localId,
-        name: row.name,
-        caps: ['read', 'chat', 'write', 'terminal', 'settings'],
-        kind: 'computer',
-        policy: policyView(started.rt.policy.get(row.localId)),
-        self: false,
-        keeper: false,
-        connection: started.sessions.online(row.localId) ? 'connected' : 'disconnected',
-        routeHeld: false,
-        revoked: false,
-        state: started.sessions.online(row.localId) ? 'open' : 'closed',
-        source: 'engine'
-      }))
+      .map((row) => {
+        const online = started.sessions.online(row.localId)
+        let seen: ReturnType<PeerPresence['get']>
+        try {
+          seen = this.presence(started).get(row.localId)
+        } catch {
+          // Presence is a convenience; the list works without it.
+        }
+        const standing = versionStanding(seen, current)
+        const lastSeenAt = online ? Date.now() : seen?.lastSeenAt
+        return {
+          node: row.localId,
+          name: row.name,
+          caps: ['read', 'chat', 'write', 'terminal', 'settings'],
+          kind: 'computer',
+          policy: policyView(started.rt.policy.get(row.localId)),
+          self: false,
+          keeper: false,
+          connection: online ? 'connected' : 'disconnected',
+          routeHeld: false,
+          revoked: false,
+          state: online ? 'open' : 'closed',
+          source: 'engine',
+          // What the computer said of itself when it last connected. One that said nothing (an older build, or
+          // one this computer does not use) has no version and is never called behind.
+          ...(seen?.version ? { version: seen.version } : {}),
+          ...(seen?.platform ? { platform: seen.platform } : {}),
+          ...(seen?.arch ? { arch: seen.arch } : {}),
+          ...(seen?.update ? { update: seen.update } : {}),
+          ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+          olderThanThis: standing === 'behind',
+          newerThanThis: standing === 'newer'
+        }
+      })
+  }
+
+  /** The pairings' last version and time seen, in the profile's net database; its table is made on first use. */
+  private presenceStore?: PeerPresence
+  private presence(started: Started): PeerPresence {
+    if (this.presenceStore?.db !== started.rt.db) {
+      ensurePresenceTable(started.rt.db, ENGINE_PRESENCE_TABLE)
+      this.presenceStore = new PeerPresence(started.rt.db, { now: () => Date.now() }, ENGINE_PRESENCE_TABLE)
+    }
+    return this.presenceStore
+  }
+  /** Writes what was seen of a pairing; best effort, never affecting a session. */
+  private notePeer(write: (presence: PeerPresence) => void): void {
+    const started = this.started
+    if (!started || started.ending) return
+    try {
+      write(this.presence(started))
+    } catch {
+      // Stopping, or the database is busy: written again at the next connection.
+    }
+  }
+  /**
+   * A pairing's client is up: note when, and ask the computer its version and whether it updates itself (`net.info`).
+   * A computer that can't be asked, or answers without a field, keeps what was known; nothing is assumed of it.
+   */
+  private async askPeerInfo(node: NodeId): Promise<void> {
+    const started = this.started
+    if (!started) return
+    this.notePeer((presence) => presence.opened(node, { direction: 'out' }))
+    let info: ReturnType<typeof parsePeerInfo>
+    try {
+      info = parsePeerInfo(
+        await started.sessions
+          .client(node)
+          .rpc('net.info', {}, { id: newId('rpc'), deadlineMs: engineLimits().peerInfoDeadlineMs })
+      )
+    } catch {
+      return
+    }
+    if (!info || this.started !== started) return
+    this.notePeer((presence) => {
+      presence.info(node, info)
+      // A removed pairing's row goes; a re-pair gets a new id.
+      presence.prune(new Set(started.peers.all().map((row) => row.localId)))
+    })
+    this.changed()
   }
   isEngine(node: NodeId): boolean {
     return !!this.started?.peers.get(node)

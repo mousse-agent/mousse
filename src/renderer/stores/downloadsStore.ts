@@ -6,6 +6,9 @@ import type { UpdateState } from '../../shared/updates'
 import type { InstanceSnapshot } from '../../shared/harness/status'
 import type { HarnessDriverKind, ProviderOperationEvent } from '../../shared/harness/types'
 import { useProviderSnapshotsStore, watchDeviceSnapshots } from '../lib/providerSnapshots'
+import { followComputerChanges, useComputersStore } from '../lib/computers'
+import { computersBehind } from '../lib/netDevices'
+import { useAppStore } from './appStore'
 import { ipcErrorLine } from '../lib/errorText'
 import { subscribeToUpdates, updateActions, useUpdateStore } from './updateStore'
 
@@ -17,7 +20,8 @@ import { subscribeToUpdates, updateActions, useUpdateStore } from './updateStore
  * dialog started a download and whether or not it is still open.
  */
 
-export type DownloadKind = 'update' | 'dictation-model' | 'voice-model' | 'agent'
+/** `computers`: the user's other computers that are online and behind this one, as one row. */
+export type DownloadKind = 'update' | 'dictation-model' | 'voice-model' | 'agent' | 'computers'
 
 /** The local speech model kinds, each with its own IPC group. */
 type LocalModelKind = 'dictation-model' | 'voice-model'
@@ -57,6 +61,8 @@ export interface DownloadEntry {
   operation?: 'install' | 'update'
   /** The agent CLI's update: driver for the icon, and the note and command it carries. */
   offer?: ProviderUpdateOffer
+  /** The computers row: each computer behind, by name, with the version it runs. */
+  computers?: Array<{ node: string; name: string; version?: string }>
 }
 
 /** An agent CLI on this computer with a newer version published (`InstanceSnapshot.update`). */
@@ -249,8 +255,45 @@ export interface DownloadsSummary {
   label: string
 }
 
-/** One line for the indicator: the most urgent state across all entries. */
+/** "1 computer behind", "3 computers behind". */
+export function behindLabel(count: number): string {
+  return count === 1 ? '1 computer behind' : `${count} computers behind`
+}
+
+/**
+ * What dismissing the computers row remembers: the release this computer runs or is offered, and the computers that
+ * were behind. A newer release, or another computer falling behind, shows the row again.
+ */
+export interface BehindDismissal {
+  release: string
+  nodes: string[]
+}
+
+/** The computers row, or null when none is behind or the row was dismissed for these computers and this release. */
+export function computersEntry(
+  behind: ReadonlyArray<{ node: string; name: string; version?: string }>,
+  release: string,
+  dismissed?: BehindDismissal
+): DownloadEntry | null {
+  if (!behind.length) return null
+  if (dismissed && dismissed.release === release && behind.every((computer) => dismissed.nodes.includes(computer.node)))
+    return null
+  return {
+    id: 'computers', kind: 'computers', sourceId: release, label: behindLabel(behind.length), phase: 'available',
+    computers: behind.map(({ node, name, version }) => ({ node, name, ...(version ? { version } : {}) }))
+  }
+}
+
+/** One line for the indicator: the most urgent state across all entries, with the computers behind added to it. */
 export function summarizeDownloads(entries: readonly DownloadEntry[]): DownloadsSummary {
+  const computers = entries.find((entry) => entry.kind === 'computers')
+  if (!computers) return summarizeOwn(entries)
+  const own = summarizeOwn(entries.filter((entry) => entry !== computers))
+  if (own.status === 'idle') return { status: 'available', active: 0, label: computers.label }
+  return { ...own, label: `${own.label} · ${computers.label}` }
+}
+
+function summarizeOwn(entries: readonly DownloadEntry[]): DownloadsSummary {
   const active = entries.filter(isActiveDownload)
   if (active.length > 0) {
     // Weighted by bytes when every running download knows its size, else the plain average.
@@ -412,6 +455,37 @@ export function receiveUpdateState(state: UpdateState): void {
   setEntries((entries) => applyUpdateState(entries, state))
 }
 
+const dismissalKey = (): string => `mousse-profile-${useAppStore.getState().profileId}-computers-behind`
+
+function readDismissal(): BehindDismissal | undefined {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(dismissalKey()) ?? 'null') as Partial<BehindDismissal> | null
+    if (typeof saved?.release === 'string' && Array.isArray(saved.nodes) && saved.nodes.every((node) => typeof node === 'string'))
+      return { release: saved.release, nodes: saved.nodes }
+  } catch {
+    // A window without storage shows the row each time.
+  }
+  return undefined
+}
+
+function saveDismissal(dismissal: BehindDismissal): void {
+  try {
+    window.localStorage.setItem(dismissalKey(), JSON.stringify(dismissal))
+  } catch {
+    // Shown again next time.
+  }
+}
+
+/** Recomputes the computers row from the computers list, this computer's release and the last dismissal. */
+export function receiveComputers(): void {
+  const { currentVersion, availableVersion } = useUpdateStore.getState()
+  const release = availableVersion ?? currentVersion
+  const next = computersEntry(computersBehind(useComputersStore.getState().devices), release, readDismissal())
+  const current = useDownloadsStore.getState().entries.find((entry) => entry.id === 'computers')
+  if (JSON.stringify(next ?? null) === JSON.stringify(current ?? null)) return
+  setEntries((entries) => (next ? [...without(entries, 'computers'), next] : without(entries, 'computers')))
+}
+
 let subscribed = false
 
 /** Starts mirroring every download source into this window. Safe to call more than once. */
@@ -420,7 +494,18 @@ export function subscribeToDownloads(): void {
   subscribed = true
   subscribeToUpdates()
   receiveUpdateState(useUpdateStore.getState())
-  useUpdateStore.subscribe((state) => receiveUpdateState(state))
+  useUpdateStore.subscribe((state) => {
+    receiveUpdateState(state)
+    receiveComputers()
+  })
+  // The other computers behind this one join the list. Their list is read when a computer connects or drops, or the
+  // window gains focus, never on a timer: a window of one computer reads nothing.
+  followComputerChanges()
+  useComputersStore.subscribe(() => receiveComputers())
+  useAppStore.subscribe((state, previous) => {
+    if (state.profileId !== previous.profileId) receiveComputers()
+  })
+  receiveComputers()
   window.mousse.providers?.onOperation?.((event) => receiveProviderOperation(event))
   // Only this computer's agents: remote computers keep their own.
   if (window.mousse.providers) watchDeviceSnapshots((snapshots) => receiveProviderOffers(providerUpdateOffers(snapshots)))
@@ -441,7 +526,7 @@ export function subscribeToDownloads(): void {
 }
 
 const modelIpc = (entry: DownloadEntry): LocalModelIpc | undefined =>
-  entry.kind === 'update' || entry.kind === 'agent' ? undefined : MODEL_SOURCES[entry.kind].ipc()
+  entry.kind === 'update' || entry.kind === 'agent' || entry.kind === 'computers' ? undefined : MODEL_SOURCES[entry.kind].ipc()
 
 const agentInstanceId = (entry: DownloadEntry): string => entry.id.slice('agent:'.length)
 
@@ -470,6 +555,7 @@ export const downloadsActions = {
       return
     }
     const kind = entry.kind
+    if (kind === 'computers') return
     void modelIpc(entry)?.downloadLocalModel(entry.sourceId).catch((cause: unknown) => {
       receiveLocalModelStatus(kind, { modelId: entry.sourceId, state: { status: 'error', message: cause instanceof Error ? cause.message : String(cause) } })
     })
@@ -486,6 +572,10 @@ export const downloadsActions = {
   },
   dismiss(id: string): void {
     if (id === 'update') return
+    if (id === 'computers') {
+      const entry = useDownloadsStore.getState().entries.find((item) => item.id === id)
+      if (entry) saveDismissal({ release: entry.sourceId, nodes: (entry.computers ?? []).map((computer) => computer.node) })
+    }
     setEntries((entries) => without(entries, id))
   },
   /** The popover opened or closed. Closing clears every finished entry. */

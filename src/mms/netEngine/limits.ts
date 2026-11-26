@@ -21,6 +21,8 @@ export interface EngineLimits {
   maxCallDeadlineMs: number
   /** How long a pairing's client waits for `mousse.hello` to be answered. */
   helloDeadlineMs: number
+  /** How long this computer waits for a pairing that just connected to say its version (`net.info`). */
+  peerInfoDeadlineMs: number
   /** How long a cancel waits. */
   cancelDeadlineMs: number
   /** How long a blob fetch or store waits. */
@@ -196,6 +198,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   maxBlobBytes: DEFAULT_MAX_BLOB_BYTES,
   maxCallDeadlineMs: 24 * 60 * 60_000,
   helloDeadlineMs: 15_000,
+  peerInfoDeadlineMs: 10_000,
   cancelDeadlineMs: 15_000,
   blobDeadlineMs: 120_000,
   appendDeadlineMs: 60_000,
@@ -267,6 +270,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   maxBlobBytes: 'MOUSSE_NET_ENGINE_MAX_BLOB_BYTES',
   maxCallDeadlineMs: 'MOUSSE_NET_ENGINE_MAX_CALL_DEADLINE_MS',
   helloDeadlineMs: 'MOUSSE_NET_ENGINE_HELLO_DEADLINE_MS',
+  peerInfoDeadlineMs: 'MOUSSE_NET_ENGINE_PEER_INFO_DEADLINE_MS',
   cancelDeadlineMs: 'MOUSSE_NET_ENGINE_CANCEL_DEADLINE_MS',
   blobDeadlineMs: 'MOUSSE_NET_ENGINE_BLOB_DEADLINE_MS',
   appendDeadlineMs: 'MOUSSE_NET_ENGINE_APPEND_DEADLINE_MS',

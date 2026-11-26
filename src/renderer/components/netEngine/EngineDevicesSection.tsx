@@ -18,6 +18,7 @@ import {
   joinErrorWords,
   passLapsed,
   sshRecordFor,
+  versionTag,
   workOnThreadsDisclosure,
   worksOnThreads,
   WORKS_ON_THREADS,
@@ -26,6 +27,7 @@ import {
 import { phonesBlocked } from '../../lib/plusEnrollment'
 import { takePendingDevice } from '../../lib/settingsNavigation'
 import { useAppStore } from '../../stores/appStore'
+import { useUpdateStore } from '../../stores/updateStore'
 import { useMousseIdAvailable, useMousseIdStore } from '../../stores/mousseIdStore'
 import { DeviceLimitsDialog } from '../devices/DeviceLimitsDialog'
 import { EditorSshSettings } from '../devices/EditorSshSettings'
@@ -118,6 +120,8 @@ type RowView = {
   how?: string
   howDetail?: string
   access?: string
+  /** "Behind" or "Newer" when its Mousse differs from this computer's; the versions are its tooltip. */
+  tag?: { label: string; detail: string }
   /** Relay notes after the line. */
   extra?: ReactNode
   items: RowMenuItem[]
@@ -140,6 +144,7 @@ export function EngineDevicesSection() {
   const v1On = legacyOn(v1)
   const v1Ready = v1On && !!v1?.self && v1?.keystore === 'unlocked'
   const { devices: nodes } = useComputers(!!status?.on || v1Ready)
+  const current = useUpdateStore((s) => s.currentVersion) || undefined
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // Which add dialog is open: `in`, Let a device in; `out`, Use another computer.
@@ -375,6 +380,7 @@ export function EngineDevicesSection() {
       how: connected ? engineWhere(device) : undefined,
       howDetail: engineAddresses(device),
       access,
+      tag: node ? versionTag({ ...node, name: device.name }, current) : undefined,
       extra:
         side === 'out' ? (
           <>
@@ -415,7 +421,7 @@ export function EngineDevicesSection() {
             }
           ]
         : []),
-      ...(side === 'out' && record?.owner === 'managed'
+      ...(side === 'out' && record?.owner === 'managed' && !device.olderThanThis
         ? [
             {
               label: 'Update…',
@@ -447,6 +453,7 @@ export function EngineDevicesSection() {
       detail: state.detail,
       warn: state.warn,
       access: side === 'in' && !state.warn ? accessShort(device, switches) : undefined,
+      tag: versionTag(device, current),
       items,
       // Signed out, devices that are not nearby are quiet.
       quiet: signedOut && device.state !== 'open'
@@ -482,12 +489,52 @@ export function EngineDevicesSection() {
                 <span title={view.howDetail}>{view.how}</span>
               </>
             )}
+            {view.tag && (
+              <>
+                {' · '}
+                <span
+                  className={view.tag.label === 'Behind' ? 'settings-status-warn' : undefined}
+                  title={view.tag.detail}
+                >
+                  {view.tag.label}
+                </span>
+              </>
+            )}
             {view.extra}
           </span>
         }
         control={
           view.items.length ? (
             <RowMenu label={`Actions for ${view.name}`} items={view.items} disabled={busy} />
+          ) : undefined
+        }
+      />
+    )
+  }
+
+  /**
+   * Under a computer that is behind: how it gets updated. One this computer installed over SSH is updated from here;
+   * any other is updated on itself, and the tooltip says why and what it runs.
+   */
+  const updateRow = (key: string, name: string, device: Device | undefined, record?: SshRecordView) => {
+    const tag = device ? versionTag({ ...device, name }, current) : undefined
+    if (tag?.label !== 'Behind') return null
+    const fromHere = record?.owner === 'managed' ? record : undefined
+    return (
+      <SettingsRow
+        key={`${key}-update`}
+        indent
+        title={<span title={tag.detail}>{fromHere ? `Update ${name} from here` : `Update on ${name}`}</span>}
+        control={
+          fromHere ? (
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              onClick={() => setRecordDialog({ kind: 'update', record: fromHere, name })}
+            >
+              Update…
+            </button>
           ) : undefined
         }
       />
@@ -512,6 +559,7 @@ export function EngineDevicesSection() {
     const view = engineView(device, 'out')
     return [
       row(view, `Id ${device.shortId}`),
+      updateRow(view.key, device.name, nodes.find((item) => item.node === device.node)),
       device.olderApp && (
         <SettingsRow
           key={`${device.node}-older`}
@@ -600,6 +648,7 @@ export function EngineDevicesSection() {
     const asked = askedLine(device)
     return [
       row(view, `Id ${device.shortId}`),
+      !engineSides(device).includes('out') && updateRow(view.key, device.name, node),
       asked && (
         <SettingsRow
           key={`${device.node}-asked`}
@@ -650,7 +699,10 @@ export function EngineDevicesSection() {
   })
   const oldOutRows = oldDevices
     .filter((device) => oldSides(device).includes('out'))
-    .map((device) => row(legacyView(device, 'out')))
+    .flatMap((device) => {
+      const view = legacyView(device, 'out')
+      return [row(view), updateRow(view.key, device.name, device, sshRecordFor(device, legacy.ssh))]
+    })
   const oldInRows = oldDevices.flatMap((device) => [
     row(legacyView(device, 'in')),
     selected === sideKey(device.node, 'in') && (

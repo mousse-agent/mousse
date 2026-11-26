@@ -166,6 +166,40 @@ function start(): () => void {
   }
 }
 
+let following = false
+
+/**
+ * Reads the computers again when one connects or drops, or the window gains focus while there are some, at most once per
+ * `COMPUTERS_REFRESH_MS` (a later change waits for the end of that time). It reads nothing on its own: no timer and no
+ * read at start, so a window with no other computers does no work. The update button follows the computers behind
+ * this one with it. Safe to call more than once.
+ */
+export function followComputerChanges(): void {
+  if (following || typeof window === 'undefined' || !window.mousse) return
+  following = true
+  let last = 0
+  let waiting: ReturnType<typeof setTimeout> | undefined
+  const refresh = () => {
+    if (waiting) return
+    const wait = last + COMPUTERS_REFRESH_MS - Date.now()
+    const read = () => {
+      waiting = undefined
+      last = Date.now()
+      void refreshComputers()
+    }
+    if (wait <= 0) read()
+    else waiting = setTimeout(read, wait)
+  }
+  // Focus reads again only once other computers are known: networking's own changes found them.
+  window.addEventListener?.('focus', () => {
+    if (useComputersStore.getState().devices.some((device) => !device.self)) refresh()
+  })
+  window.mousse.net?.onUpdated?.(refresh)
+  window.mousse.netEngine?.onChanged?.((change) => {
+    if (!change.profileId || change.profileId === useAppStore.getState().profileId) refresh()
+  })
+}
+
 /**
  * The user's other computers, kept current while any view that uses them is mounted. A view with nothing
  * from another computer to show passes `enabled: false`, so a window of one computer never polls.
