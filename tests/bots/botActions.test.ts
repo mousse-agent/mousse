@@ -52,7 +52,8 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   const descriptor = { configRevision: 'revision-1', toolName, readOnlyHint: hint, providerName: `mail_${toolName}`, inputSchema: { type: 'object', properties: Object.fromEntries(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key', 'pin_password'].map(key => [key, { type: 'string' }])) }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
   const server = { installationId: 'mail', serverName: 'Mail', configDigest: 'config-1', failing: false, tools: [descriptor] }
   if (secondTool) server.tools.push({ ...descriptor, toolName: 'other', providerName: 'mail_other' })
-  let manager: Pick<McpManager, 'callTool'> = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => { calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
+  // As `McpManager` does: the pin's last check runs right before the call is sent (`assertDispatchActive`).
+  let manager: Pick<McpManager, 'callTool'> = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>, _project?: string, _signal?: AbortSignal, _actor?: unknown, pin?: { assertDispatchActive?: () => void }) => { pin?.assertDispatchActive?.(); calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
   if (realServer) {
     const config = testServerConfig({ id: 'mousse:mail', installationId: 'mail', name: 'Mail' })
     const store = settingsStore(settings => {
@@ -123,6 +124,14 @@ function legacyMailAsk(t: { botId: string; workId: string }, tools: string[]) {
   const permission = { mcp: { serverId: 'mail', name: 'Mail', tools } }
   f.store.insertEscalation({ id: 'esc_mail', botId: t.botId, activationId: t.workId, dispatchN: 1, toolCallId: null, kind: 'escalate', permission, reason: 'To send mail', createdAt: f.store.now(), expiresAt: null, mode: 'ask', fingerprint: askFingerprintOf(permission), title: 'use your Mail tools', note: '', messageId: null })
   return f.store.escalation('esc_mail')!
+}
+/**
+ * A manager that sends the call, then `then` says what came back: the pin's last check passes first, as `McpManager`
+ * runs it right before the call reaches its server. A failure after it is one the server may have seen.
+ */
+const afterSend = (then: () => unknown) => async (...args: Parameters<McpManager['callTool']>) => {
+  args[5]?.assertDispatchActive?.()
+  return await then() as never
 }
 async function legacyExpired(action: { id: string }): Promise<void> {
   f.bots.actions.transition(action.id, 'open', 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })
@@ -231,6 +240,16 @@ it('a held call on Pi, whose budget counted it when the model made it, counts no
   await flush()
   expect(t.calls).toEqual([t.args])
   expect(f.store.counters(t.workId)).toMatchObject({ requests: 1, toolCalls: 0 })
+})
+it.each([false, true])('a chat card held on Pi and sent after its turn ended counts nothing more; on another runtime, once (Pi: %s)', async pi => {
+  const t = await setup(true)
+  const { row, talk, action } = await chatHold(t, { pi })
+  await finish(f, talk.payload)
+  expect(f.store.activation(row.id)!.status).toBe('done')
+  await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  await flush()
+  expect(t.calls).toEqual([t.args])
+  expect(f.store.counters(row.id).toolCalls).toBe(pi ? 0 : 1)
 })
 it.each(['send', 'not_now'] as const)('Send racing Not now, %s arriving first, never calls twice', async first => {
   const t = await setup(true)
@@ -963,7 +982,7 @@ it('an ambiguous transport failure settles uncertain and never logs executable a
   await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   const logs: string[] = []
-  const attempt = vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(new Error('private-call-secret'))
+  const attempt = vi.spyOn(t.manager, 'callTool').mockImplementationOnce(afterSend(() => { throw new Error('private-call-secret') }))
   setDiagSink((_level, line) => logs.push(line))
   try {
     await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
@@ -1012,7 +1031,8 @@ it.each(['not_dispatched', 'tool_error', 'timeout', 'dropped'] as const)('R3 dis
   await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   if (kind === 'tool_error') vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ content: [{ type: 'text', text: 'Recipient does not exist' }], isError: true } as never)
-  else vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(Object.assign(new Error('failed'), { category: kind === 'timeout' ? 'timeout' : kind === 'not_dispatched' ? 'unreachable' : 'connection-lost', ...(kind === 'not_dispatched' ? { mcpNotDispatched: true } : {}) }))
+  else if (kind === 'not_dispatched') vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(Object.assign(new Error('failed'), { category: 'unreachable', mcpNotDispatched: true }))
+  else vi.spyOn(t.manager, 'callTool').mockImplementationOnce(afterSend(() => { throw Object.assign(new Error('failed'), { category: kind === 'timeout' ? 'timeout' : 'connection-lost' }) }))
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
   const status = kind === 'tool_error' || kind === 'not_dispatched' ? 'failed' : 'uncertain'
@@ -2555,7 +2575,7 @@ it('R4-1 forgetting a sent card permits a different call of the same tool', asyn
 it.each(['done', 'declined', 'tool_error', 'uncertain'] as const)('R4-1 forgetting untold %s content preserves the outcome', async outcome => {
   const t = await setup(true)
   if (outcome === 'tool_error') vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'private tool answer' }] } as never)
-  if (outcome === 'uncertain') vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(new Error('connection lost'))
+  if (outcome === 'uncertain') vi.spyOn(t.manager, 'callTool').mockImplementationOnce(afterSend(() => { throw new Error('connection lost') }))
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: outcome === 'declined' ? 'not_now' : 'send' })
@@ -3680,7 +3700,7 @@ it.each([true, false])('C6 call-time hint true reads directly; hint false holds,
  * outlives that turn, runs once when Sent (after newer messages and a restart too) under a 60-second timer, and its
  * result reaches the chat once as a turn of its own (`action_result`) held to the rules of the turn that held it.
  */
-async function chatHold(t: Awaited<ReturnType<typeof setup>>, from: { key?: string; owner?: { limit: 'ask' | 'accept_edits' | 'auto' | 'full' } } = {}) {
+async function chatHold(t: Awaited<ReturnType<typeof setup>>, from: { key?: string; owner?: { limit: 'ask' | 'accept_edits' | 'auto' | 'full' }; pi?: boolean } = {}) {
   await finish(f, t.work.payload)
   let row
   if (from.key) row = f.store.activation((await f.bots.enqueueChat(t.botId, from.key, 'Send it now.', undefined, from.owner)).id)!
@@ -3690,6 +3710,8 @@ async function chatHold(t: Awaited<ReturnType<typeof setup>>, from: { key?: stri
   }
   await flush()
   const talk = await start(f, row.id)
+  // Pi charges each model request through its own budget, the first before any call: it counts its calls itself.
+  if (from.pi) talk.prepared.runtimeCounters!.charge('request')
   const outcome = await callForBot({ bot: talk.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'chat-call', signal: new AbortController().signal })
   const action = f.bots.actions.forWork(row.id)!
   return { row, talk, outcome, action }
@@ -3766,7 +3788,7 @@ it("a held call's result turn keeps the threads rule and device limit of the tur
 it('a chat card that runs past its 60-second timer settles uncertain, and its result still reaches the chat once', async () => {
   const t = await setup(true)
   f.host.chatCallLimits = { actionMs: 100 }
-  vi.mocked(t.manager.callTool).mockImplementation((_name, _args, _project, signal) => new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })))
+  vi.mocked(t.manager.callTool).mockImplementation((_name, _args, _project, signal, _actor, pin) => { pin?.assertDispatchActive?.(); return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) })
   const { talk, action } = await chatHold(t)
   await finish(f, talk.payload)
   await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
@@ -3896,6 +3918,42 @@ it.each(['its stored level', 'its server dropping the read-only hint'] as const)
   expect(t.calls).toEqual([])
 })
 
+it('a chat turn that started with Asks First off, which is turned on while its call connects, sends nothing then or later in the turn', async () => {
+  const t = await setup(false, true)
+  await finish(f, t.work.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send it from here.', clientRequestId: 'chat-quick' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const talk = await start(f, row.id)
+  const gate = connecting(t.manager)
+  const sending = callForBot({ bot: talk.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'quick-1', signal: new AbortController().signal })
+  await gate.reached
+  f.host.settings!.get().experimental.botAsksFirstOff = false
+  gate.release()
+  expect(await sending).toMatchObject({ isError: true, text: expect.stringContaining("now asks your owner first, so nothing was sent. It can't be held in this turn") })
+  // The turn holds nothing (it started without Asks First): called again, it is refused again, never sent unheld.
+  expect(await callForBot({ bot: talk.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'quick-2', signal: new AbortController().signal })).toMatchObject({ isError: true })
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork(row.id)).toBeUndefined()
+})
+
+it.each(['its deadline alone', 'a pause, then its deadline'] as const)("a chat card's call still connecting at %s, before its last check, settles failed: nothing was sent", async path => {
+  const t = await setup(true, true)
+  f.host.chatCallLimits = { actionMs: 50 }
+  const { talk, action } = await chatHold(t)
+  await finish(f, talk.payload)
+  const gate = connecting(t.manager)
+  const sending = f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  await gate.reached
+  if (path === 'a pause, then its deadline') f.bots.pauseBot(t.botId)
+  // The deadline comes while it still connects: the call settles then, before the manager reaches its last check.
+  await sending
+  expect(f.bots.actions.get(action.id)!.status).toBe('failed')
+  gate.release()
+  await flush()
+  expect(t.calls).toEqual([])
+  expect(f.store.message(action.message_id)!.text).toBe('Not sent')
+})
+
 it.each(['paused', 'paused, then resumed'] as const)('a bot %s after Send marked its call running, before it reached the server, sends nothing and settles failed', async path => {
   const t = await setup(true, true)
   await t.call()
@@ -3984,7 +4042,7 @@ it('a chat turn a restart cut off once it held a call ends done, keeps its card,
 
 // The crash comes after the hold wrote its card, before the relay settled the call's ledger row (it stays started, and the
 // run is uncertain). Only that call unsettled is a known outcome; any other call left unsettled still pauses the turn.
-it.each(['only the held call', 'another call too'] as const)('a chat turn a crash cut off with %s unsettled in the ledger', async unsettled => {
+it.each(['only the held call', 'another call too', 'only another call with its arguments, its own row settled'] as const)('a chat turn a crash cut off with %s unsettled in the ledger', async unsettled => {
   const t = await setup(true)
   Object.assign(t.args, { token: 'private-call-secret' })
   await finish(f, t.work.payload)
@@ -3996,7 +4054,8 @@ it.each(['only the held call', 'another call too'] as const)('a chat turn a cras
   const started = (id: string, tool: string, args: unknown) => f.runs.tools.start({ invocationId: id, runId, attemptId: f.runs.getRun(runId)!.activeAttemptId!, tool, argsDigest: toolArgsDigest(args), now: f.store.now(), idempotent: false }).invocationId
   // The relay's ledger as Mousse writes it (`toolLedgerFor`), and never settled.
   let n = 0
-  const ledger = { start: (call: { name: string; arguments: unknown }) => started(`call-${++n}`, call.name, call.arguments), commit: () => undefined, failed: () => undefined }
+  const recorded: Array<{ name: string; arguments: unknown }> = []
+  const ledger = { start: (call: { name: string; arguments: unknown }) => { recorded.push(call); return started(`call-${++n}`, call.name, call.arguments) }, commit: () => undefined, failed: () => undefined }
   const bot = talk.prepared.authority
   const turn = appTurn({ threadId, runId, turnToken: 'tt', bot })
   const handler = new RelayHandler({
@@ -4007,10 +4066,16 @@ it.each(['only the held call', 'another call too'] as const)('a chat turn a cras
   const action = f.bots.actions.forWork(row.id)!
   expect(action).toMatchObject({ lane: 'chat', status: 'open' })
   if (unsettled === 'another call too') started('edit-call', 'Edit', { file_path: 'notes.md' })
+  if (unsettled === 'only another call with its arguments, its own row settled') {
+    // The held call's own row settled; a second call of the same tool, with the same arguments as the ledger keeps them,
+    // was still in flight: its outcome is unknown, so it is never taken for the held call.
+    f.runs.tools.commit('call-1', f.store.now())
+    started('other-call', recorded[0]!.name, recorded[0]!.arguments)
+  }
   f.runs.markTerminal(runId, 'uncertain', { uncertainReason: 'non_idempotent_tool_in_flight' })
   f.bots.close(); f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup(); await flush()
-  if (unsettled === 'another call too') {
+  if (unsettled !== 'only the held call') {
     expect(f.store.activation(row.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
     return
   }
@@ -4033,7 +4098,9 @@ it.each([
   const { talk, action } = await chatHold(t)
   await finish(f, talk.payload)
   const grant = f.store.activeGrant(t.botId)!
-  vi.mocked(t.manager.callTool).mockImplementationOnce(async () => {
+  vi.mocked(t.manager.callTool).mockImplementationOnce(async (...args) => {
+    // Revoked once it was sent (past its last check); one refused before it never passed that check.
+    if (status !== 'failed' || !says.source.includes('not sent')) args[5]?.assertDispatchActive?.()
     f.bots.revoke(t.botId)
     return await answer() as never
   })
@@ -4049,6 +4116,27 @@ it.each([
   await flush()
   expect(resultTurns(t.botId)).toEqual([])
   expect(notices()).toHaveLength(1)
+})
+
+it('a chat card forgotten while its call runs, its grant revoked too, still says it was sent when the tool reported an error', async () => {
+  const t = await setup(true)
+  const { talk, action } = await chatHold(t)
+  await finish(f, talk.payload)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => {
+    // Sent: the owner forgets the card's history, and revokes the bot, while the server works on it.
+    const seq = memory.append({ botId: t.botId, sourceKey: `bm:${action.message_id}`, kind: 'notice', who: 'bot', text: 'the card' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+    f.bots.revoke(t.botId)
+    return { content: [{ type: 'text', text: 'private half done' }], isError: true }
+  }))
+  await f.bots.actions.answer({ actionId: action.id, digest: action.args_digest, answer: 'send' })
+  const settled = f.bots.actions.get(action.id)!
+  expect(settled.status).toBe('failed')
+  expect(settled.args_json).toBe('"[forgotten]"')
+  const notice = String(f.store.message(`bm_${action.id}_result`)!.text)
+  expect(notice).toMatch(/ was sent; the tool reported an error\. /)
+  expect(notice).not.toContain('private half done')
 })
 
 it('C6 introduction and first card commit together or neither is kept', async () => {
@@ -4841,7 +4929,7 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
     f.clock.now += 60_000
     id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
     turn = await start(f, id)
-    vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(() => {}))
+    vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => new Promise(() => {})))
     void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'r2-interrupted', signal: new AbortController().signal })
     await flush()
     f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
@@ -4849,7 +4937,7 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
     await f.bots.reconcileOnStartup(); await flush()
     turn = await start(f, id, 2)
   } else {
-    vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+    vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => { throw new Error('Connection closed after dispatch') }))
     if (kind === 'sent-card') vi.spyOn(f.bots.alone, 'match').mockReturnValueOnce(undefined)
     const next = await aloneNext(t)
     id = next.id; turn = next.turn
@@ -4928,7 +5016,7 @@ it('E1 r2 restoring a changed binding never revives consent', async () => {
 })
 it('E1 r2 an uncertain stored outcome never claims the call did not run', async () => {
   const t = await aloneAsk()
-  vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+  vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => { throw new Error('Connection closed after dispatch') }))
   const next = await aloneNext(t)
   expect(next.action.status).toBe('uncertain')
   expect(JSON.parse(next.action.result_json!).text).toContain('could not be confirmed whether this went through')
@@ -5190,7 +5278,7 @@ it.each([['body', 256, true], ['body', 257, false], ['split', 257, false], ['rep
 it.each(['declined', 'failed', 'quiet'] as const)(
   'E1 r3 the final report preserves uncertainty after a %s retry', async outcome => {
     const t = await aloneAsk()
-    vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+    vi.mocked(t.manager.callTool).mockImplementationOnce(afterSend(() => { throw new Error('Connection closed after dispatch') }))
     const next = await aloneNext(t)
     expect(next.action.status).toBe('uncertain')
     await callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'A reworded retry' }, toolCallId: 'r3-retry', signal: new AbortController().signal })

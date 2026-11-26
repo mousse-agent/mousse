@@ -271,7 +271,8 @@ export class BotActions {
       card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0),
         'withdrawalCode', json_extract(card_json, '$.withdrawalCode'),
         'toolReportedError', COALESCE(json_extract(result_json, '$.toolReportedError'), json_extract(card_json, '$.toolReportedError')),
-        'ownerRemoved', json_extract(card_json, '$.ownerRemoved'), 'removedOwnerSeq', json_extract(card_json, '$.removedOwnerSeq'), 'removedNoteSeq', json_extract(card_json, '$.removedNoteSeq')),
+        'ownerRemoved', json_extract(card_json, '$.ownerRemoved'), 'removedOwnerSeq', json_extract(card_json, '$.removedOwnerSeq'), 'removedNoteSeq', json_extract(card_json, '$.removedNoteSeq'),
+        'invocationId', json_extract(card_json, '$.invocationId')),
       place_json = NULL, bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
     '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
   }
@@ -367,7 +368,7 @@ export class BotActions {
     this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner chose Not now') ? 'repeat' : 'loop'}`, text)
     return { text, isError: true }
   }
-  hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome | Promise<ToolOutcome> {
+  hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string, invocationId?: string): ToolOutcome | Promise<ToolOutcome> {
     if (!this.host.enabled()) return { text: 'This tool cannot be used now. Carry on without it.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
@@ -426,7 +427,7 @@ export class BotActions {
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, place_json, bot_note, card_json, status, message_id, expires_at, created_at, answered_at, answered_device)
         VALUES(?, ?, ?, ?, ?, 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, callKey, row.botId, row.id, row.lane, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, null, alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), actionTitle: readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
+      id, callKey, row.botId, row.id, row.lane, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, null, alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), actionTitle: readableActionTitle(tool.tool), serverName: tool.serverName, ...(invocationId ? { invocationId } : {}) }), alone ? 'approved' : 'open', messageId,
       // expires_at is retained for older settled rows; open rows have no deadline.
       '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? exception : null)
       if (alone) return
@@ -441,11 +442,14 @@ export class BotActions {
   /** The only status writer. Settlement clears executable arguments in the same statement. */
   transition(id: string, from: string, to: string, result?: BotMcpCallOutcome, withdrawalReason?: BotActionRefusalCode): boolean {
     if (to === 'uncertain') result = { ...result, text: 'It could not be confirmed whether this went through: check before trying again.' }
+    // Forgotten while it ran: its words go, never that the tool reported an error (so it was sent), so the result turn or
+    // notice still tells the truth (`actionResultNoticeInTx`).
+    const forgotten = JSON.stringify({ text: '[forgotten]', ...(result?.toolReportedError ? { toolReportedError: true } : {}) })
     return this.host.store.db.transaction(() => {
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
-        result_json = CASE WHEN args_json = '"[forgotten]"' THEN '{"text":"[forgotten]"}' ELSE ? END, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
+        result_json = CASE WHEN args_json = '"[forgotten]"' THEN ? ELSE ? END, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
         ran_at = CASE WHEN ? IN ('running', 'done') THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
-      to, pending.has(to) ? 1 : 0, result ? JSON.stringify(boundedActionResult(result)) : null,
+      to, pending.has(to) ? 1 : 0, forgotten, result ? JSON.stringify(boundedActionResult(result)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
       if (moved && to === 'withdrawn' && this.get(id)?.card_json !== null) this.host.store.run("UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.withdrawalCode', ?) WHERE id = ?", withdrawalReason ?? withdrawalCode({ card_json: null, result_json: JSON.stringify(result ?? {}) }), id)
       if (moved && result?.notSentInTime) this.host.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.settledAt', ?) WHERE id = ?", this.host.store.now(), id)

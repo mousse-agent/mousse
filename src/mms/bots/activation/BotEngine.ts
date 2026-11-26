@@ -9,7 +9,6 @@ import { PageChecks, pageSetting, type PageSetting } from '../pageChecks'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { BOT_RELAY_OWNER_ONLY_TEXT, BOT_TURN_KINDS, turnRefusals, turnRights, type BotTurnRights } from './turnKinds'
 import { fastNotice, noticeClass, unattendedChatTurn, type NoticeClass } from './unattended'
-import { toolArgsDigest } from '../../run/tools/argsDigest'
 import { BOT_CHAT_ACTION_MS, BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle, type ActionRow } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { settingCompactionPoint } from '../../../shared/settings'
@@ -772,7 +771,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A held action's card carries the screenshots the work took for it, so its owner sees them before approving.
     post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : { toolImages: true as const }), activationId: row.id, lane: row.lane, ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     sentAlone: () => this.scheduledCallChecks.clear(),
-    settled: (row) => { const action = this.actions.forWork(row.id); if (action?.card_json !== null) this.chat.republish(action!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
+    settled: (row) => { this.pruneSelfCountedHolds(row.id); const action = this.actions.forWork(row.id); if (action?.card_json !== null) this.chat.republish(action!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args, action) => {
       const mcp = this.host.mcp
       const tool = mcp?.offered(new Set([`${target.server}::${target.tool}`]))[0]
@@ -808,8 +807,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly service: BotChatService
   /**
    * Held MCP calls (`call_key`) whose runtime counted them already when the model made them (Pi's budget), by activation:
-   * sending one counts nothing more. Kept in memory only, so after a restart a sent call of Pi's may count twice: the
-   * count is a measurement, and an extra one never lets a call through.
+   * sending one counts nothing more. A mark stays until its call is sent or settles, after its turn ended too (a chat
+   * card outlives its turn). Kept in memory only, so after a restart a sent call of Pi's may count twice: the count is a
+   * measurement, and an extra one never lets a call through.
    */
   private readonly selfCountedHolds = new Map<string, Set<string>>()
   /** Pi file versions, shared by the activation's dispatches and discarded when it ends. */
@@ -4252,10 +4252,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(row.lane === 'chat' && input.role === 'activation' ? { warm: `chat:${input.role}:${input.grantDigest}${this.defaultsKey(row.botId)}` } : {}),
       // Work its owner asked for in the chat: only its main turn may ask the owner to set up computer use.
       ...(input.role === 'activation' && ownerRequestedWork(row, (id) => this.store.activation(id)) ? { ownerRequested: true } : {}),
+      // The tool's level read as it is now, right before every MCP call is sent, whatever the turn started with: Asks
+      // First turned on, or a tool that came to ask first, while the call connected stops it (`callForBot`).
+      mcpHeldNow: (tool: import('../../../shared/bots/personal/authority').BotMcpTool) => this.mcpAsksFirstNow(row.botId, tool),
       ...(botAsksFirst(this.host.settings?.get()) ? {
         maskMcpArguments: (args: Record<string, unknown>) => maskedActionData(args) as Record<string, unknown>,
-        mcpHeldNow: (tool: import('../../../shared/bots/personal/authority').BotMcpTool) => this.mcpAsksFirstNow(row.botId, tool),
-        holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
+        holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string, invocationId?: string) => {
           if (!this.mcpAsksFirstNow(row.botId, tool)) return undefined
           if (row.lane === 'run' && row.trigger.kind !== 'work' && row.trigger.kind !== 'schedule') return { text: "A run started by hand can't wait for your owner. Say in your report what you would have sent.", isError: true }
           if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
@@ -4269,7 +4271,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // A runtime that counts its own tool calls (Pi) counted this one when the model made it; any other has it
           // counted when it is sent (`execute`), never while it waits for the owner's answer.
           if (toolCallId && !input.countsAppCalls?.()) this.selfCountedHold(row.id, JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]), true)
-          const outcome = this.actions.hold(row, input.callDispatchId ?? input.dispatchId, tool, args, toolCallId)
+          const outcome = this.actions.hold(row, input.callDispatchId ?? input.dispatchId, tool, args, toolCallId, invocationId)
           if (outcome instanceof Promise) return outcome
           // The turn ends: work waits for the answer holding no slot, and a chat turn ends done, its card left open.
           if (!outcome.isError && this.actions.forWork(row.id)?.status === 'open') { this.askedIn.set(row.id, input.mainN); if (row.lane === 'run') this.releaseParked(this.store.activation(row.id) ?? row, 'approval') }
@@ -4431,6 +4433,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const had = keys?.delete(callKey) ?? false
     if (keys && !keys.size) this.selfCountedHolds.delete(activationId)
     return had
+  }
+
+  /** Takes the marks off the activation's held calls that can no longer be sent (`selfCountedHold`). */
+  private pruneSelfCountedHolds(activationId: string): void {
+    const keys = this.selfCountedHolds.get(activationId)
+    if (!keys) return
+    const pending = new Set(this.store.all("SELECT call_key FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved', 'running')", activationId).map((action) => String(action.call_key)))
+    for (const key of keys) if (!pending.has(key)) keys.delete(key)
+    if (!keys.size) this.selfCountedHolds.delete(activationId)
   }
 
   /** The activation's counter: a refused count is a budget wall. */
@@ -7800,7 +7811,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.fileReads.delete(row.id)
-    this.selfCountedHolds.delete(row.id)
+    // A chat turn's card outlives it: the mark of a call its runtime counted stays until the call is sent or settles.
+    this.pruneSelfCountedHolds(row.id)
     this.postChatDraft(row)
     for (const key of this.replyEffects.keys()) if (key.startsWith(`${row.id}:`)) this.replyEffects.delete(key)
     this.refusedAsks.delete(row.id)
@@ -8170,20 +8182,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Whether the only calls of chat turn `row` whose outcome is unknown are its held call (`mainN`'s card, written and
-   * still pending): the hold wrote the card and sent nothing, so that call's ledger row is dropped from the unknown ones.
-   * Matched by the arguments the ledger recorded (masked as `maskMcpArguments` masks them).
+   * Whether the only call of chat turn `row` whose outcome is unknown is its held call (`mainN`'s card, written and still
+   * pending): the hold wrote the card and sent nothing, so that call's ledger row is dropped from the unknown ones. Matched
+   * strictly: exactly one call unsettled, and it is the very ledger row the hold kept with its card (`invocationId`), still
+   * unsettled. A card that kept no row, or any other call unsettled (one with the same arguments too), is
+   * not matched: the turn is paused at its unknown calls, as any is.
    */
   private onlyHeldCallUnsettled(row: BotActivationRow, mainN: number, runs: RunEngine): boolean {
     const action = this.actions.pendingInTurn(row.id, mainN)
-    if (!action || action.card_json === null || !action.exec_args) return false
-    let digest: string
-    try { digest = toolArgsDigest(maskedActionData(JSON.parse(action.exec_args))) } catch { return false }
+    if (!action || action.card_json === null) return false
+    let invocationId: unknown
+    try { invocationId = JSON.parse(action.card_json).invocationId } catch { return false }
+    if (typeof invocationId !== 'string' || !invocationId) return false
     const unknown = this.store.unknownCalls(row.id).filter((call) => !call.acknowledged)
-    if (!unknown.length || unknown.length > 1) return false
-    const [call] = unknown
-    if (runs.tools.listForRun(call!.runId).find((entry) => entry.invocationId === call!.invocationId)?.argsDigest !== digest) return false
-    this.store.dropUnknownCall(row.id, call!.invocationId)
+    if (unknown.length !== 1 || unknown[0]!.invocationId !== invocationId) return false
+    const entry = runs.tools.listForRun(unknown[0]!.runId).find((call) => call.invocationId === invocationId)
+    if (!entry || (entry.status !== 'started' && entry.status !== 'outcome_unknown')) return false
+    this.store.dropUnknownCall(row.id, invocationId)
     return true
   }
 

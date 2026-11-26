@@ -392,6 +392,9 @@ export class BotMcp implements BotMcpHost {
     // still one a bot can be offered (a valid schema, relayed), and the caller's own fence (`assertDispatchActive`: the
     // bot's grant and switches, the tool's level, a held call still running). A tool with no such listing now, or no
     // installed revision to pin, is never sent: the manager could still call it, past every one of those checks.
+    // Whether the call passed its last check (the pin's `assertDispatchActive`): only then may the server have seen it.
+    // A held call stopped before that (retired, refused, or its deadline first) settles `failed`, whatever stopped it.
+    let passedLastCheck = false
     const listedNow = (): boolean => this.offered(new Set([`${tool.server}::${tool.tool}`])).some(t => t.providerName === tool.providerName)
     const descriptor = this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool)
     const pin: McpToolExecutionPin | undefined = descriptor?.configRevision && listedNow() ? {
@@ -401,6 +404,7 @@ export class BotMcp implements BotMcpHost {
         if (!this.deps.enabled()) throw Object.assign(new Error('MCP is turned off in Settings.'), { category: 'disabled', code: 'bot_mcp_off' })
         if (!listedNow()) throw Object.assign(new Error(`${tool.serverName} doesn't offer this tool as it did, so nothing was sent. Carry on without it, and say so in your report.`), { category: 'disabled', code: 'bot_mcp_unlisted' })
         options.assertDispatchActive?.()
+        passedLastCheck = true
       }
     } : undefined
     if (!pin) return { ...certainty, text: options.heldAction ? 'This tool has no installed revision to bind the approved call to. Nothing was sent.' : `${tool.serverName} doesn't offer this tool as it did, so nothing was sent. Carry on without it, and say so in your report.`, isError: true }
@@ -436,7 +440,8 @@ ${kept}` } : { ...certainty, ...framed }
         : fenced ? code === 'bot_mcp_off' ? `MCP is turned off in Mousse's Settings now, so nothing was sent to ${tool.serverName}. Carry on without it, and say so in your report.` : String((failure as Error).message)
           : !options.heldAction && code === 'stale_revision' ? `${tool.serverName} was changed in Mousse a moment ago, so this call didn't run. Carry on without it, and say so in your report.`
             : failureText(tool.serverName, failure, signal)
-      return { ...(options.heldAction ? { callState: (failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched ? 'failed' as const : 'uncertain' as const } : {}), text, isError: true }
+      const notSent = !passedLastCheck || Boolean((failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched)
+      return { ...(options.heldAction ? { callState: notSent ? 'failed' as const : 'uncertain' as const } : {}), text, isError: true }
     } finally {
       clearTimeout(timer)
     }
@@ -522,6 +527,8 @@ export async function callForBot(input: {
   /** The turn's model can see images: a result's images reach it (within limits); otherwise a plain note does. */
   images?: boolean
   toolCallId?: string
+  /** The call's row in the run's tool ledger, when one was written (`holdMcp` keeps it with a held card). */
+  invocationId?: string
   heldAction?: boolean
   assertDispatchActive?: () => void
   sanitizeResult?: (result: ToolOutcome) => ToolOutcome
@@ -529,13 +536,14 @@ export async function callForBot(input: {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
   if (!target) return { text: `There is no tool called ${input.name} for you.`, isError: true }
-  const held = offered && await input.bot.holdMcp?.(offered, input.args, input.toolCallId)
+  const held = offered && await input.bot.holdMcp?.(offered, input.args, input.toolCallId, input.invocationId)
   if (held) return held
   const decided = input.bot.check({ kind: 'mcp', server: target.server, tool: target.tool, serverName: target.serverName, args: input.args })
   if (!decided.ok) return { ...(input.heldAction ? { callState: 'failed' as const } : {}), text: checkMessage(decided), isError: true }
   if (!offered) return { text: `${target.serverName}'s tools are allowed now, but this turn started without them: you get them when it ends.`, isError: true }
   const { activationId, workspace } = input.bot
   const asked = { kind: 'mcp' as const, server: target.server, tool: target.tool, serverName: target.serverName, args: input.args }
+  let counted = false
   const fence = (): void => {
     if (input.heldAction) input.assertDispatchActive?.()
     // The grant and the bot's switches, again once the connection is ready (no ask, no chip): one turned off while it
@@ -543,11 +551,16 @@ export async function callForBot(input: {
     else if (input.bot.allows && !input.bot.allows(asked)) throw Object.assign(new Error(`Your permission for ${target.serverName}'s ${target.tool} changed before it was sent, so nothing was sent. Carry on without it.`), { code: 'bot_permission_changed' })
     // The tool's level, read again as it is now: one that started to ask the owner first while it connected (its stored
     // level, or its server or schema changed) is not sent unheld. The bot calls it again, and that call is held.
-    else if (input.bot.mcpHeldNow?.(offered)) throw Object.assign(new Error(`${target.serverName}'s ${target.tool} now asks your owner first, so nothing was sent. Call it again to hold it for your owner.`), { code: 'bot_permission_changed' })
+    // A turn that started before Asks First was on cannot hold it: it is refused for the rest of the turn.
+    else if (input.bot.mcpHeldNow?.(offered)) throw Object.assign(new Error(`${target.serverName}'s ${target.tool} now asks your owner first, so nothing was sent. ${input.bot.holdMcp ? 'Call it again to hold it for your owner.' : "It can't be held in this turn: carry on without it, and say in your report what you would have sent."}`), { code: 'bot_permission_changed' })
+    // Past its last check: the call goes to its server now, and is counted once, here (a held call only once its owner
+    // sent it). One refused at any check, at admission or while it connected, counts nothing.
+    if (!counted) {
+      counted = true
+      input.bot.callRuns?.()
+    }
   }
-  // The call goes to its server now (counted once, here): a held call only once its owner sent it.
   const call = (signal: AbortSignal) => {
-    input.bot.callRuns?.()
     return input.mcp.call(offered, input.args, signal, {
       images: input.images === true,
       assertDispatchActive: fence,

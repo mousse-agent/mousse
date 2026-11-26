@@ -206,11 +206,15 @@ export interface BotAuthority {
    * reaches them through its catalogue (`tool_catalogue`, `use_tool`).
    */
   mcpTools?: readonly BotMcpTool[]
-  /** Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. */
-  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | Promise<{ text: string; isError?: boolean }> | undefined
   /**
-   * Whether `holdMcp` would hold a call of `tool` now (its level read as it stands now), without side effects: checked
-   * again right before an unheld call is sent, so one that started to ask first while it connected is not sent.
+   * Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. `invocationId`: the call's
+   * row in the run's tool ledger, kept with a held card so crash recovery knows that row as this call's.
+   */
+  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string, invocationId?: string): { text: string; isError?: boolean } | Promise<{ text: string; isError?: boolean }> | undefined
+  /**
+   * Whether a call of `tool` asks the owner first now (Asks First and the tool's level read as they stand now), without
+   * side effects: checked right before every unheld call is sent, so one that started to ask first while it connected
+   * is not sent. Present on every bot turn, whether or not Asks First was on when it started (`holdMcp` may be absent).
    */
   mcpHeldNow?(tool: BotMcpTool): boolean
   maskMcpArguments?(args: Record<string, unknown>): Record<string, unknown>
