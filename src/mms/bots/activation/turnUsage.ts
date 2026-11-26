@@ -26,8 +26,42 @@ export interface TurnMeterInput {
   prompt: string
 }
 
+/** One usage report of a runtime, as its turn sink hands it on (`PreparedBotTurn.usage`). */
+export interface ReportedUsage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  costUsd?: number
+  requests?: number
+}
+
+/** What of a runtime's usage the activation's counts and spend take (`recordObservedUsage`): what it records none of. */
+export interface UsageMirror {
+  /** The runtime counted no model request itself (only Pi's budget does). */
+  requests: boolean
+  /** The runtime settled no reservation for its tokens and cost (only Pi, under a spend limit, does). */
+  tokens: boolean
+}
+
+/**
+ * Adds one usage report to the activation's counts and spend, as far as `mirror` says the runtime records none of it
+ * itself. A report covers the requests it names (`requests`); one that names none (ACP's sum of a prompt) counts as
+ * one, the least it covers.
+ */
+export function mirrorUsage(store: Pick<BotStore, 'recordObservedUsage'>, activationId: string, usage: ReportedUsage, mirror: UsageMirror): void {
+  if (!mirror.requests && !mirror.tokens) return
+  const { costUsd, requests } = usage
+  store.recordObservedUsage(activationId, {
+    requests: mirror.requests ? (requests !== undefined && Number.isFinite(requests) ? Math.max(0, Math.round(requests)) : 1) : 0,
+    input: mirror.tokens ? usage.input + usage.cacheRead + usage.cacheWrite : 0,
+    output: mirror.tokens ? usage.output : 0,
+    ...(mirror.tokens && costUsd !== undefined && Number.isFinite(costUsd) && costUsd > 0 ? { usdMicros: Math.max(0, Math.round(costUsd * 1_000_000)) } : {})
+  })
+}
+
 export interface TurnMeter {
-  usage(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number; requests?: number }): void
+  usage(usage: ReportedUsage): void
   metrics(metrics: ProviderMetrics): void
   compacted(): void
 }
@@ -35,16 +69,13 @@ export interface TurnMeter {
 /**
  * Starts a turn's row and returns what the runtime's reports feed. `tools` measures the Mousse tools the turn's runtime
  * is offered; it is asked once, at the first report, when the turn is registered and its tools are known. `mirror`,
- * asked at each usage report, says what of it the activation's counters and spend take too (`recordObservedUsage`):
- * the requests where the runtime counted none itself, the tokens and cost where it settled no reservation. A report
- * covers the requests it names (`requests`); one that names none (ACP's sum of a prompt) counts as one, the least it
- * covers.
+ * asked at each usage report, says what of it the activation's counters and spend take too (`mirrorUsage`).
  */
 export function startTurnMeter(input: TurnMeterInput, deps: {
   store: BotStore
   now: () => number
   tools?: () => { count: number; chars: number } | undefined
-  mirror?: () => { requests: boolean; tokens: boolean }
+  mirror?: () => UsageMirror
   warn?: (message: string, error: unknown) => void
 }): TurnMeter {
   const { row, n } = input
@@ -86,18 +117,9 @@ export function startTurnMeter(input: TurnMeterInput, deps: {
   return {
     usage: (usage) => {
       askTools()
-      const { costUsd, requests, ...tokens } = usage
-      safely('a bot turn\'s usage could not be recorded', () => deps.store.addTurnUsage(row.id, n, { ...tokens, at: deps.now() }))
-      if (deps.mirror) safely('a bot turn\'s usage could not be counted', () => {
-        const mirror = deps.mirror!()
-        if (!mirror.requests && !mirror.tokens) return
-        deps.store.recordObservedUsage(row.id, {
-          requests: mirror.requests ? (requests !== undefined && Number.isFinite(requests) ? Math.max(0, Math.round(requests)) : 1) : 0,
-          input: mirror.tokens ? usage.input + usage.cacheRead + usage.cacheWrite : 0,
-          output: mirror.tokens ? usage.output : 0,
-          ...(mirror.tokens && costUsd !== undefined && Number.isFinite(costUsd) && costUsd > 0 ? { usdMicros: Math.max(0, Math.round(costUsd * 1_000_000)) } : {})
-        })
-      })
+      const { input, output, cacheRead, cacheWrite } = usage
+      safely('a bot turn\'s usage could not be recorded', () => deps.store.addTurnUsage(row.id, n, { input, output, cacheRead, cacheWrite, at: deps.now() }))
+      if (deps.mirror) safely('a bot turn\'s usage could not be counted', () => mirrorUsage(deps.store, row.id, usage, deps.mirror!()))
     },
     metrics: (metrics) => {
       askTools()

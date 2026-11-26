@@ -14,7 +14,7 @@ import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { botFilesFolder } from '../../src/mms/bots/grants/compile'
 import type { McpToolDescriptor } from '../../src/shared/integrations'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { botFixture, createBot, start, type BotFixture } from './botFixture'
+import { botFixture, createBot, flush, payloadOf, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
@@ -85,6 +85,52 @@ describe('what a turn\'s runtime reports is counted for it, once', () => {
     // A measurement: the turn goes on, and nothing is asked of the owner.
     expect(f.store.activation(turn.activation.id)).toMatchObject({ status: 'running' })
     expect(f.store.openAsks(botId)).toEqual([])
+  })
+})
+
+describe('a consult\'s and a subagent\'s usage and calls are their activation\'s', () => {
+  // One report of a turn on Claude Code: two requests, 10,200 tokens in, 50 out, $0.0123.
+  const report = { input: 1_000, output: 50, cacheRead: 9_000, cacheWrite: 200, costUsd: 0.0123, requests: 2 }
+  const once = { requests: 2, toolCalls: 1, inputTokens: 10_200, outputTokens: 50 }
+
+  it('a consult: what its runtime reported and ran is counted on its activation; what Pi\'s budget counted, not again', async () => {
+    const definitions = f.host.definitions
+    const current = definitions.revision(botId, f.store.registry(botId)!.revision!)!
+    const published = definitions.publishRevision({ ...current, context: [{ key: 'docs', title: 'Docs expert', agent: { instructions: 'You know the docs.' }, model: { mode: 'auto', depth: 'normal' } }] })
+    f.store.setPublished(botId, published.revision!)
+    const turn = await chatTurn('What does the doc say?', 'u1')
+    const asked = turn.prepared.authority.consult!({ context: 'docs', question: 'What does it say?' })
+    await flush()
+    const consultN = f.store.dispatches(turn.activation.id).find((dispatch) => dispatch.kind === 'consult')!.n
+    const consult = f.bots.prepare(payloadOf(f, turn.activation.id, consultN))
+    if ('refused' in consult) throw new Error(consult.refused)
+    consult.usage!(report)
+    consult.authority.callRuns!()
+    expect(f.store.counters(turn.activation.id)).toMatchObject(once)
+    expect(spent(turn.activation.id)).toEqual({ committed_input: 10_200, committed_output: 50, committed_usd_micros: 12_300 })
+    // On Pi its budget charges the activation's counts itself: its request and call are not counted again.
+    consult.runtimeCounters!.charge('request')
+    consult.usage!(report)
+    consult.authority.callRuns!()
+    expect(f.store.counters(turn.activation.id)).toMatchObject({ requests: 3, toolCalls: 1 })
+    void asked.catch(() => undefined)
+  })
+
+  it('a subagent: what its runtime reported and ran is counted on its work', async () => {
+    const activation = await f.bots.activate({ botId, input: 'Compare three vacuum cleaners.', clientRequestId: 'w1' })
+    const job = await start(f, activation.id)
+    await job.prepared.authority.subagents!.start({ title: 'Prices', brief: 'Find the prices.' })
+    const n = f.store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'subagent')!.n
+    const child = await start(f, activation.id, n)
+    child.prepared.usage!(report)
+    child.prepared.authority.callRuns!()
+    expect(f.store.counters(activation.id)).toMatchObject(once)
+    expect(spent(activation.id)).toEqual({ committed_input: 10_200, committed_output: 50, committed_usd_micros: 12_300 })
+    // On Pi its budget charges the work's counts itself: its request and call are not counted again.
+    child.prepared.runtimeCounters!.charge('request')
+    child.prepared.usage!(report)
+    child.prepared.authority.callRuns!()
+    expect(f.store.counters(activation.id)).toMatchObject({ requests: 3, toolCalls: 1 })
   })
 })
 

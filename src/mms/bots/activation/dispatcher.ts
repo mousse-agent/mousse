@@ -55,8 +55,10 @@ export interface PreparedBotTurn {
   modelOutput?(): void
   /**
    * The turn's runtime reported token usage (`TurnSink.usage`): one request, or the whole turn where the runtime sums
-   * them. Kept as a measurement in `bots.db` (`bot_turn_usage`); it never changes the turn. `costUsd`: what the runtime
-   * says it cost, when it says.
+   * them. A main turn keeps it as a measurement in `bots.db` (`bot_turn_usage`); every turn (a consult's and a
+   * subagent's too) adds what its runtime records none of itself to its activation's counts and spend. It never changes
+   * the turn. `costUsd`: what the runtime says it cost, when it says; `requests`: how many requests it covers, when it
+   * says.
    */
   usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number; requests?: number }): void
   /** The turn's runtime reported its measurements (`TurnSink.providerMetrics`): context size, window, cache and plan use. */

@@ -21,7 +21,7 @@ import { PR_WAKE_READ_MS, pullRequestWakeEvent, pullRequestWakeOutcome, threadWa
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
-import { startTurnMeter } from './turnUsage'
+import { mirrorUsage, startTurnMeter, type ReportedUsage, type UsageMirror } from './turnUsage'
 import { turnTimingBind, turnTimingBotMark } from '../../diagnostics/turnTiming'
 import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
@@ -3134,18 +3134,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('the bot supervisor could not be armed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
     const counterScope = this.wallingCounters(new BotCounterScope(this.store, row.id), row.id, dispatch.n)
-    // Whether the turn's runtime counts its model requests itself (Pi's budget charges each one): if not, the requests
-    // its usage reports name are counted for it (`recordObservedUsage`). Only the runtime's own charges say so; a tool
-    // that makes a request (an image) charges the authority's scope.
-    let runtimeCountsRequests = false
-    const runtimeCounters: CounterScope = {
-      charge: (kind, limit) => {
-        if (kind === 'request') runtimeCountsRequests = true
-        return counterScope.charge(kind, limit)
-      }
-    }
     const spendLimited = spendLimits(effective)
     const spendScope = Object.keys(spendLimited).length ? this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId), row.id, dispatch.n) : null
+    const accounting = this.runtimeAccounting(counterScope, spendScope)
     const startedMono = this.monotonic()
     this.live.set(row.id, {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
@@ -3162,8 +3153,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       contexts: definition.context.map((thread) => ({ key: thread.key, title: thread.title })),
       dispatchId: dispatch.clientRequestId,
       mcpTools: this.offeredMcp(compiled.permissions.mcp),
-      // Pi counts every tool call through its budget, and its first model request (counted too) comes before any.
-      countsAppCalls: () => !runtimeCountsRequests,
+      countsAppCalls: accounting.countsAppCalls,
       permissionsNow: (now) => {
         const recompiled = compileWith(this.effectiveManifest(row, definition.permissions, now.manifest), now.digest)
         return recompiled.ok ? recompiled.permissions : undefined
@@ -3194,9 +3184,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(told.instructions ? { instructions: told.instructions } : {}), ...(preamble ? { preamble } : {})
     }, {
       store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}),
-      // A spend limit runs only where each request is reserved and settled on the activation's ledger (Pi), which
-      // keeps its tokens and cost already; with none, nothing else records them.
-      mirror: () => ({ requests: !runtimeCountsRequests, tokens: !spendScope })
+      mirror: accounting.mirror
     })
     // Where the reply's time goes, marked from here on the bot's thread (`turnTiming`).
     if (row.lane === 'chat') turnTimingBind(row.botId, payload.threadId)
@@ -3222,7 +3210,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       selection: { ...selection },
       policy: compiled.policy,
       authority,
-      runtimeCounters,
+      runtimeCounters: accounting.runtimeCounters,
       scratch,
       skills: compiled.permissions.skills,
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : epoch ? 'thread' : 'none') : 'thread',
@@ -3544,11 +3532,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.liveRuns.set(payload.runId, row.id)
     // What the consult holds for the whole of its turn, recorded like its main dispatch's: a switch turned off stops it.
     main.consultPowers.set(dispatch.n, powersOf(compiled.permissions))
+    // Its requests, tokens, cost and calls are its activation's, on the main dispatch's counters and ledger.
+    const accounting = this.runtimeAccounting(main.counters, main.spend)
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'context', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
       // A consult's calls are chips of its main dispatch's message.
       dispatchId: main.dispatchId,
+      countsAppCalls: accounting.countsAppCalls,
       permissionsNow: (now) => {
         const recompiled = compileWith(this.effectiveManifest(row, definition.permissions, now.manifest), now.digest)
         return recompiled.ok ? recompiled.permissions : undefined
@@ -3563,6 +3554,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       selection: { ...selection },
       policy: compiled.policy,
       authority,
+      runtimeCounters: accounting.runtimeCounters,
+      usage: (usage) => this.observeUsage(row.id, usage, accounting),
       scratch,
       skills: compiled.permissions.skills,
       history: 'thread',
@@ -4182,6 +4175,38 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (input.role === 'activation' && row.lane === 'run' && turnRightsOf(row).subagents)
       authority.subagents = this.subagentHandle({ row, mainN: input.mainN, controller })
     return authority
+  }
+
+  /**
+   * What a turn's runtime counts and settles itself, read from what it charges (`PreparedBotTurn.runtimeCounters`, which
+   * the orchestrator hands its budget), and so what the activation counts for it. Pi's budget charges each model request
+   * and tool call, and its first request comes before any call; under a spend limit it reserves and settles each request
+   * on `spend`. Any other runtime does neither: its usage reports' requests, tokens and cost (`mirror`) and its app and
+   * MCP calls (`countsAppCalls`) are counted for it. A tool that makes a request (an image) charges the authority's
+   * scope, never this one, so it says nothing about the runtime.
+   */
+  private runtimeAccounting(counters: CounterScope, spend: SpendScope | null): { runtimeCounters: CounterScope; countsAppCalls(): boolean; mirror(): UsageMirror } {
+    let runtimeCountsRequests = false
+    return {
+      runtimeCounters: {
+        charge: (kind, limit) => {
+          if (kind === 'request') runtimeCountsRequests = true
+          return counters.charge(kind, limit)
+        }
+      },
+      countsAppCalls: () => !runtimeCountsRequests,
+      mirror: () => ({ requests: !runtimeCountsRequests, tokens: !spend })
+    }
+  }
+
+  /** A consult's or subagent's usage report, on its activation's counts and spend (`runtimeAccounting`). */
+  private observeUsage(activationId: string, usage: ReportedUsage, accounting: { mirror(): UsageMirror }): void {
+    try {
+      mirrorUsage(this.store, activationId, usage, accounting.mirror())
+    } catch (error) {
+      // A measurement: it never touches the turn.
+      console.warn('a bot turn\'s usage could not be counted', { activationId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** One Mousse app or MCP call of the activation ran where its runtime counts none itself (`BotAuthority.callRuns`). */
@@ -6967,12 +6992,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     main.consultPowers.set(dispatch.n, powersOf(compiled.permissions))
     // Its running time is counted in the work's from now.
     main.subagentStarts.set(dispatch.n, this.monotonic())
+    // Its requests, tokens, cost and calls are the work's, on the work's counters and ledger.
+    const accounting = this.runtimeAccounting(main.counters, main.spend)
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'subagent', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
       // Its calls are chips of the work's message.
       dispatchId: main.dispatchId, callDispatchId: dispatch.clientRequestId,
       mcpTools: this.offeredMcp(compiled.permissions.mcp),
+      countsAppCalls: accounting.countsAppCalls,
       // Compiled as it started, against the grant now (`compileSubagent` reads it).
       permissionsNow: () => {
         const now = this.compileSubagent(row, spec.selection, main.deadline)
@@ -6994,6 +7022,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       selection: { ...spec.selection },
       policy: compiled.policy,
       authority,
+      runtimeCounters: accounting.runtimeCounters,
+      usage: (usage) => this.observeUsage(row.id, usage, accounting),
       scratch: row.scratch ?? join(this.store.directory, 'scratch', row.id),
       skills: compiled.permissions.skills,
       history: first ? 'none' : 'thread',
