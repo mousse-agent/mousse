@@ -118,6 +118,22 @@
       "expiresAt": "2026-11-25T17:27:21.463Z"
     },
     {
+      "task": "issue-476-update-everywhere",
+      "session": "Avarnics-Mac-mini.local-30b300",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "issue-476-update-everywhere",
+      "paths": [
+        "src/mms/updates",
+        "src/renderer/components/downloads",
+        "src/renderer/stores/updateStore.ts",
+        "src/renderer/stores/downloadsStore.ts",
+        "src/renderer/lib/netDevices.ts",
+        "src/main/updates"
+      ],
+      "claimedAt": "2026-11-26T15:03:14.144Z",
+      "expiresAt": "2026-11-26T17:03:14.144Z"
+    },
+    {
       "task": "lan-first-paths",
       "session": "Avarnics-Mac-mini.local-8600b4",
       "machine": "Avarnics-Mac-mini.local",
