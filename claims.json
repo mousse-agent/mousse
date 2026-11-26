@@ -31,23 +31,6 @@
       "expiresAt": "2026-11-26T08:12:52.524Z"
     },
     {
-      "task": "bot-asks-and-questions",
-      "session": "Animatrix-949070",
-      "machine": "Animatrix",
-      "branch": "bot-asks-and-questions",
-      "paths": [
-        "src/mms/bots/activation/BotEngine.ts",
-        "src/shared/bots/personal/questions.ts",
-        "src/shared/bots/personal/escalation.ts",
-        "src/shared/bots/personal/manifest.ts",
-        "src/mms/bots/store/BotStore.ts",
-        "docs/bots.md",
-        "src/renderer/components/bots"
-      ],
-      "claimedAt": "2026-11-25T03:38:14.615Z",
-      "expiresAt": "2026-11-25T06:39:27.496Z"
-    },
-    {
       "task": "bot-chat-quick-tools",
       "session": "Animatrix-7dc63c",
       "machine": "Animatrix",
@@ -120,20 +103,6 @@
       ],
       "claimedAt": "2026-11-25T18:09:20.891Z",
       "expiresAt": "2026-11-25T20:09:20.891Z"
-    },
-    {
-      "task": "multi-instance-provider-entries",
-      "session": "Animatrix-0d359d",
-      "machine": "Animatrix",
-      "branch": "multi-instance-provider-entries",
-      "paths": [
-        "src/mms/harness/drivers/antigravity.ts",
-        "src/mms/harness/acp/presets/antigravity",
-        "src/renderer/components/providers/AddProviderDialog.tsx",
-        "src/mms/harness/gateway.ts"
-      ],
-      "claimedAt": "2026-11-26T06:14:35.082Z",
-      "expiresAt": "2026-11-26T08:14:35.082Z"
     },
     {
       "task": "net-helper-key-files",
