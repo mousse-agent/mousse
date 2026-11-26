@@ -78,6 +78,19 @@
       "expiresAt": "2026-11-26T16:24:04.008Z"
     },
     {
+      "task": "composer-slash-skills-compact-picker",
+      "session": "Avarnics-Mac-mini.local-e9b6d4",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "composer-slash-skills-compact-picker",
+      "paths": [
+        "src/renderer/components/ChatComposer.tsx",
+        "src/renderer/components/ComposerSuggestionList.tsx",
+        "src/shared/composerCommands.ts"
+      ],
+      "claimedAt": "2026-11-26T14:35:59.876Z",
+      "expiresAt": "2026-11-26T16:35:59.876Z"
+    },
+    {
       "task": "fix-windows-update-install-path",
       "session": "Animatrix-ccfd0b",
       "machine": "Animatrix",
