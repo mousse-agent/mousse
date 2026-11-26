@@ -69,8 +69,13 @@ function setup(options: {
   providers?: Providers
   scope?: ProviderScope
   mode?: 'off'
+  /** The thread runs on a local server's `phi3:medium` (stored split, as the picker stores it), in memory or not. */
+  local?: { resident: boolean | undefined }
 } = {}): Harness {
-  let thread: Thread = { id: 't1', name: options.name ?? 'New Chat', createdAt: '', updatedAt: '', ...(options.localOnly ? { localOnly: true as const } : {}) }
+  let thread: Thread = {
+    id: 't1', name: options.name ?? 'New Chat', createdAt: '', updatedAt: '', ...(options.localOnly ? { localOnly: true as const } : {}),
+    ...(options.local ? { modelOverride: { instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3', effort: 'medium' } } : {})
+  }
   const answers = [...(options.answers ?? [])]
   const oneShot = vi.fn(async (request: OneShotRequest) => {
     const next = options.answer ? options.answer(request) : answers.shift() ?? 'Unexpected call'
@@ -105,10 +110,22 @@ function setup(options: {
       }
     : { oneShot }
   const limits = new UsageLimitTracker()
+  const local = options.local
   const orch = Object.assign(Object.create(OrchestratorService.prototype), {
     threadStore,
     settingsStore: { get: () => settings },
-    harness,
+    harness: local ? { ...harness, instanceMap: { migrate: (selection: unknown) => selection } } : harness,
+    ...(local
+      ? {
+          providerAuth: {
+            local: {
+              has: (id: string) => id === 'local-ollama',
+              facts: (_id: string, modelId: string) => (modelId === 'phi3:medium' ? { tools: 'reported', images: false } : undefined),
+              resident: async () => local.resident
+            }
+          }
+        }
+      : {}),
     titleWork: new Map(),
     threadScope: () => options.scope,
     getMessages: () => messages
@@ -407,6 +424,21 @@ describe('Automatic naming', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('a thread on a local server is named by its own model only while it is in memory; cold, it keeps its first line and no other model is asked', async () => {
+    for (const resident of [false, undefined]) {
+      const cold = setup({ providers: connected(), local: { resident }, answers: ['Cloud title'] })
+      cold.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+      await cold.settle()
+      expect(cold.oneShot).not.toHaveBeenCalled()
+      expect(cold.thread().name).not.toBe('Cloud title')
+    }
+    const warm = setup({ providers: connected(), local: { resident: true }, answers: ['OAuth callback loop'] })
+    warm.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await warm.settle()
+    expect(warm.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+    expect(picked(warm)).toEqual(['pi:local-ollama/phi3:medium'])
   })
 
   it('Regenerate falls back to the title from the first message when every model fails, or none is connected', async () => {

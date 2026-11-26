@@ -55,6 +55,12 @@ export interface SetupOptions {
   credentialKind?: PiRpcEngineOptions['credentialKind']
   /** Variables added to the instance's environment (the user's own, which a bot turn never gets). */
   baseEnv?: NodeJS.ProcessEnv
+  /** The key the factory's catalogue answers (default `fake-mock-key`). */
+  apiKey?: string
+  /** A local server's pin on the mock provider (`url`: the recorder's). */
+  pin?: (url: string) => { origin: string; keyless: boolean; extraBody?: Record<string, unknown> }
+  /** A local server's model facts (`PiRpcEngineOptions.localModel`). */
+  localModel?: PiRpcEngineOptions['localModel']
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -84,10 +90,12 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
       revision: catalogRevision.value,
       provider: {
         id: 'mock', builtin: false, name: 'Mock',
+        ...(options.pin ? { pin: options.pin(recorder.url) } : {}),
         models: (options.models?.(recorder.url) ?? [{ id: 'mock-model', name: 'Mock model', api: 'openai-completions', provider: 'mock', baseUrl: `${recorder.url}/v1`, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096, compat: { supportsStore: false, supportsDeveloperRole: false } }]) as never
       }
     }),
-    apiKey: () => 'fake-mock-key',
+    apiKey: () => options.apiKey ?? 'fake-mock-key',
+    ...(options.localModel ? { localModel: options.localModel } : {}),
     onCommand: (type) => commands.push(type),
     onSpawn: (pid) => void spawned.push(pid),
     readyDeadlineMs: 15_000,

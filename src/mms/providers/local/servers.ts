@@ -77,13 +77,16 @@ const get = (root: string, path: string, options: ReadOptions) => localRequest(r
 
 /**
  * What answers at `root` (the server's address, with any reverse-proxy prefix and without `/v1`). Native endpoints
- * first, the most specific first; then a plain OpenAI model list. A 401 or 403 on every probe is `needs_key`.
+ * first, the most specific first; then a plain OpenAI model list. A 401 or 403 on every probe is `needs_key`. Throws
+ * when nothing answers at all.
  */
 export async function identifyServer(root: string, options: ReadOptions): Promise<IdentifyOutcome> {
   let lockedSeen = false
+  let answered = false
   const json = async (path: string): Promise<unknown> => {
     const reply = await get(root, path, options).catch(() => undefined)
     if (!reply) return undefined
+    answered = true
     if (locked(reply)) lockedSeen = true
     return reply.status >= 200 && reply.status < 300 ? reply.json : undefined
   }
@@ -101,6 +104,8 @@ export async function identifyServer(root: string, options: ReadOptions): Promis
   if (kobold && /kobold/i.test(text(kobold.result) ?? '')) return { ok: true, kind: 'koboldcpp' }
   if (record(await json('/.well-known/localai.json'))) return { ok: true, kind: 'localai' }
   const modelsReply = await get(root, '/v1/models', options).catch(() => undefined)
+  // Nothing answered at all: not running there (the caller tells it from a server that is no model server).
+  if (!modelsReply && !answered) throw new Error(`Nothing answers at ${root}.`)
   if (!modelsReply) return { ok: false, problem: 'not_a_model_server' }
   if (locked(modelsReply)) return { ok: false, problem: 'needs_key' }
   const rows = modelsReply.status >= 200 && modelsReply.status < 300 ? openAiRows(modelsReply.json) : undefined

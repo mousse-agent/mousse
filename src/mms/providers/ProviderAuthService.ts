@@ -255,6 +255,11 @@ export class ProviderAuthService {
     })))
   }
 
+  /** A local connection was added, read again or changed: listeners see its catalogue at once. */
+  localChanged(): void {
+    if (!this.stopped) this.notifyIfCatalogChanged()
+  }
+
   private notifyIfCatalogChanged(): void {
     const signature = this.computeCatalogSignature()
     if (signature === this.catalogSignature) return

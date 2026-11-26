@@ -11,7 +11,7 @@ import { runPiOneShot } from './oneShot'
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
   'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName' | 'storedApiKey' | 'models'
-  | 'setApiKey' | 'verifyAmbientProvider' | 'getLoginOptions' | 'getAmbientProviderInfo'
+  | 'setApiKey' | 'verifyAmbientProvider' | 'getLoginOptions' | 'getAmbientProviderInfo' | 'local' | 'localChanged'
 >>
 
 /**
@@ -58,7 +58,15 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       if (!signedIn()) return { state: 'signed_out', methodLabel: 'API key or sign-in' }
       return { state: 'signed_in', methodLabel: provider?.authType === 'api_key' ? 'API key' : provider?.source ?? 'Sign-in', credential: piCredential(provider) }
     },
-    refreshModels: async () => void (await credentials()?.refreshDynamicModels?.()),
+    // A local server's list is read from that server only, never with the shared catalogue's refresh.
+    refreshModels: async () => {
+      const auth = credentials()
+      if (auth?.local?.has(providerId)) {
+        if (await auth.local.refresh(providerId)) auth.localChanged?.()
+        return
+      }
+      await auth?.refreshDynamicModels?.()
+    },
     signIn: async (session, _cwd, method) => {
       const auth = credentials()
       // The environment's cloud credentials, checked and saved as the provider's credential.
@@ -78,6 +86,10 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       const auth = credentials()
       if (!auth?.setApiKey) throw new Error('Mousse has no provider credentials loaded yet.')
       await auth.setApiKey(providerId, value)
+      if (auth.local?.has(providerId)) {
+        if (await auth.local.refresh(providerId).catch(() => false)) auth.localChanged?.()
+        return
+      }
       await auth.refreshDynamicModels?.().catch(() => undefined)
     },
     exportApiKey: async () => credentials()?.storedApiKey?.(providerId),

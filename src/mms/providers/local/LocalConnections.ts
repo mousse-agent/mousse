@@ -142,10 +142,14 @@ export class LocalConnections {
 
   /** The key pi-ai resolves for a connection: its saved key, else the in-memory placeholder. */
   apiKey(providerId: string): string | undefined {
-    const record = this.get(providerId)
-    if (!record) return undefined
+    if (!this.get(providerId)) return undefined
+    return this.savedKey(providerId) ?? LOCAL_PLACEHOLDER_KEY
+  }
+
+  /** The server's own key in the credential store (saved at connect, or later in the entry's editor). */
+  private savedKey(providerId: string): string | undefined {
     const stored = this.credentials.get(providerId)
-    return record.keyed && stored?.type === 'api_key' && stored.key ? stored.key : LOCAL_PLACEHOLDER_KEY
+    return stored?.type === 'api_key' && stored.key ? stored.key : undefined
   }
 
   /** How the connection's requests are pinned, for the Pi child (`PiCatalogProvider.pin`). */
@@ -157,7 +161,7 @@ export class LocalConnections {
   private pinOf(record: LocalConnectionRecord): LocalPin {
     return {
       origin: new URL(record.root).origin,
-      keyless: !record.keyed,
+      keyless: this.savedKey(record.id) === undefined,
       // Unsloth Studio runs its own Python, terminal and web tools unless a request turns them off.
       ...(record.kind === 'unsloth' ? { extraBody: { enable_tools: false } } : {})
     }
@@ -233,7 +237,7 @@ export class LocalConnections {
   async refresh(providerId: string, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<boolean> {
     const record = this.get(providerId)
     if (!record) return false
-    const apiKey = record.keyed ? this.apiKey(providerId) : undefined
+    const apiKey = this.savedKey(providerId)
     const listed = await readServer(record.root, record.kind, {
       timeoutMs: options.timeoutMs ?? REFRESH_TIMEOUT_MS,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -275,7 +279,7 @@ export class LocalConnections {
   async resident(providerId: string, modelId: string, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<boolean | undefined> {
     const record = this.get(providerId)
     if (!record) return undefined
-    const apiKey = record.keyed ? this.apiKey(providerId) : undefined
+    const apiKey = this.savedKey(providerId)
     return readResidency(record.root, record.kind, modelId, {
       timeoutMs: options.timeoutMs ?? 600,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -364,7 +368,8 @@ export class LocalConnections {
   /** The pi-ai provider of a record: its models, its key (or the placeholder), and the pinned transport. */
   provider(record: LocalConnectionRecord): Provider {
     const stock = openAICompletionsApi()
-    const fetch = pinnedFetch(this.pinOf(record), this.fetchImpl)
+    // The pin is read at each request: a key saved later in the entry's editor is sent from then on.
+    const fetch: LocalFetch = (input, init) => pinnedFetch(this.pinOf(this.records.get(record.id) ?? record), this.fetchImpl)(input, init)
     const pinned: ProviderStreams = {
       stream: ((model, context, options) => stock.stream(model, context, { ...(options ?? {}), fetch } as never)) as ProviderStreams['stream'],
       streamSimple: ((model, context, options) => stock.streamSimple(model, context, { ...(options ?? {}), fetch } as never)) as ProviderStreams['streamSimple']

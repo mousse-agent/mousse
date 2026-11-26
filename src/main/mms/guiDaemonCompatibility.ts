@@ -27,6 +27,7 @@ export const GUI_REQUIRED_METHODS = [
   'providers.instances.signOut', 'providers.instances.allowKnownProblem', 'providers.instances.recheck', 'providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.refreshModels', 'providers.instances.refreshAllModels',
   'providers.instances.setModelPrefs', 'providers.instances.move', 'providers.instances.removeInstall',
   'providers.registry.search',
+  'providers.local.detect', 'providers.local.connect', 'providers.local.setModel', 'providers.local.checkTools',
   // The Files panel and composer search through the daemon; an older service lacks it.
   'files.search',
   'files.grep',

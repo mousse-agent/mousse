@@ -4350,6 +4350,36 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       throw new DomainRpcError('invalid_params', 'providers.events names another computer.')
     case 'providers.catalog.addOptions':
       return { options: harnessGateway(ctx).catalog.addOptions() }
+    // Local model servers on this computer (Add provider → Local models). Detection runs only on this call.
+    case 'providers.local.detect':
+      await ctx.mms.providerAuth.init()
+      return { rows: await ctx.mms.providerAuth.local.detect() }
+    case 'providers.local.connect': {
+      const p = isObject(params) ? params : {}
+      await ctx.mms.providerAuth.init()
+      const apiKey = asOptionalString(p.apiKey, 8192)?.trim()
+      const result = await ctx.mms.providerAuth.local.connect({
+        address: asString(p.address, 'address', 2048),
+        ...(apiKey ? { apiKey } : {}),
+        ...(p.allowCleartext === true ? { allowCleartext: true } : {})
+      })
+      if (result.ok) ctx.mms.providerAuth.localChanged()
+      return result
+    }
+    case 'providers.local.setModel': {
+      const p = isObject(params) ? params : {}
+      const window = p.window === null ? null : typeof p.window === 'number' && Number.isSafeInteger(p.window) && p.window > 0 ? p.window : undefined
+      if (window === undefined) throw new DomainRpcError('invalid_params', 'window must be a positive integer or null')
+      const ok = ctx.mms.providerAuth.local.setWindow(asString(p.providerId, 'providerId', 128), asString(p.modelId, 'modelId', 512), window)
+      if (ok) ctx.mms.providerAuth.localChanged()
+      return { ok }
+    }
+    case 'providers.local.checkTools': {
+      const p = isObject(params) ? params : {}
+      const result = await ctx.mms.providerAuth.local.checkTools(asString(p.providerId, 'providerId', 128), asString(p.modelId, 'modelId', 512))
+      if (result.ok) ctx.mms.providerAuth.localChanged()
+      return result
+    }
     case 'providers.instances.add': {
       // A fixed-id entry that exists already comes back unchanged (`existed`), so adding is idempotent.
       const { snapshot, existed } = await harnessGateway(ctx).instances.addInstance(asAddInstanceInput(params))
