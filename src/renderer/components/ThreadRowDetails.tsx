@@ -2,7 +2,7 @@ import { useRef, type ReactNode, type RefObject } from 'react'
 import { Folder, GitBranch, Monitor, Server } from '../lib/icons'
 import { ProviderIcon } from '../lib/providerIcons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import { UNKNOWN_COMPUTER_NAME, useComputer } from '../lib/computers'
+import { UNKNOWN_COMPUTER_NAME, offlineLabel, threadComputerState, useComputer } from '../lib/computers'
 import { ThreadComputerBadge } from './ComputerBadge'
 import { useThreadBranch } from '../hooks/useThreadBranch'
 import { useAppStore } from '../stores/appStore'
@@ -73,7 +73,7 @@ export function ThreadBranchLine({ thread, threadId, pullRequests, end, wordy = 
     <span className={className} data-single={single || undefined}>
       {!single && (
         <span className="threads-sidebar-branch">
-          <ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />
+          <ThreadComputerBadge thread={thread} withName tooltip={false} className="threads-sidebar-card-device" />
           {branch?.worktree && <GitBranch size={11} strokeWidth={2} className="threads-sidebar-branch-icon" aria-label="Own worktree" />}
           {branch?.branch && <span className="threads-sidebar-branch-name">{branch.branch}</span>}
         </span>
@@ -90,7 +90,7 @@ export function ThreadBranchLine({ thread, threadId, pullRequests, end, wordy = 
  * title, its project, the computer it runs on, its branch and its model. It only shows; the pointer passes through it.
  */
 export function ThreadHoverCard({ thread, project, anchorRef }: {
-  thread: Pick<Thread, 'id' | 'name' | 'projectId' | 'node' | 'worktreeEnabled' | 'modelOverride'>
+  thread: Pick<Thread, 'id' | 'name' | 'projectId' | 'node' | 'offline' | 'notShared' | 'worktreeEnabled' | 'modelOverride'>
   project?: Project
   anchorRef: RefObject<HTMLElement | null>
 }) {
@@ -101,6 +101,9 @@ export function ThreadHoverCard({ thread, project, anchorRef }: {
   const branch = useThreadBranch(thread, thread.id)
   const model = useThreadModel(thread)
   const computerName = thread.node ? computer?.name ?? UNKNOWN_COMPUTER_NAME : deviceName || 'This computer'
+  // The row's computer badge has no tooltip of its own: a computer it cannot reach says why here.
+  const computerState = thread.node ? threadComputerState(thread, computer) : 'online'
+  const computerNote = computerState === 'not-shared' ? 'not sharing' : computerState === 'offline' ? offlineLabel(computer, Date.now()) : null
   return (
     <FloatingPortal>
       <div ref={content} role="tooltip" className="threads-sidebar-hover-card" style={style}>
@@ -112,6 +115,7 @@ export function ThreadHoverCard({ thread, project, anchorRef }: {
         <span className="threads-sidebar-hover-card-item">
           {thread.node ? <Server size={14} strokeWidth={1.8} /> : <Monitor size={14} strokeWidth={1.8} />}
           {computerName}
+          {computerNote && <span className="threads-sidebar-hover-card-note">{computerNote}</span>}
         </span>
         {branch?.branch && (
           <span className="threads-sidebar-hover-card-item">
