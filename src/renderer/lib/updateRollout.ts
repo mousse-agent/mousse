@@ -44,8 +44,6 @@ function receive(answer: { rollout?: unknown; plan?: unknown }, target?: string)
 
 let reading: Promise<void> | undefined
 let wanted: string | undefined | null = null
-/** Whether this window has read the rollout yet: the first read after opening is not repeated. */
-let readOnce = false
 
 /** Reads the rollout again, and the plan for `target` when given; calls during a read share one more after it. */
 export function readRollout(target?: string): Promise<void> {
@@ -54,7 +52,6 @@ export function readRollout(target?: string): Promise<void> {
     return reading
   }
   const profile = useAppStore.getState().profileId
-  readOnce = true
   reading = (async () => {
     try {
       const answer = await request<{ rollout?: unknown; plan?: unknown }>(ROLLOUT_METHODS.get, target ? { version: target } : {})
@@ -169,10 +166,7 @@ export function followRollout(): void {
   following = true
   const read = () => void readRollout()
   // Nothing is read before the profile is bound; the first read after the binding catches up on changes before it.
-  readWhenIdleAfterBinding(() => {
-    // A change or a profile switch that read first already did the first read.
-    if (!readOnce) read()
-  }, ROLLOUT_FIRST_READ_MS)
+  readWhenIdleAfterBinding(read, ROLLOUT_FIRST_READ_MS)
   window.mousse.updates?.onRolloutChanged?.((change) => {
     if (!profileBound()) return
     if (!change.profileId || change.profileId === useAppStore.getState().profileId) void readRollout(useRolloutStore.getState().planFor)
@@ -186,6 +180,5 @@ export function followRollout(): void {
 
 /** Test hook. */
 export function resetRolloutStore(): void {
-  readOnce = false
   useRolloutStore.setState({ rollout: null, plan: undefined, planFor: undefined, error: undefined }, true)
 }

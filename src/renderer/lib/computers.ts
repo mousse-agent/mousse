@@ -196,10 +196,7 @@ export function followComputerChanges(): void {
     if (wait <= 0) read()
     else waiting = setTimeout(read, wait)
   }
-  // A change or a profile switch that read first already did the first read.
-  readWhenIdleAfterBinding(() => {
-    if (!last && !waiting) refresh()
-  }, COMPUTERS_FIRST_READ_MS)
+  readWhenIdleAfterBinding(refresh, COMPUTERS_FIRST_READ_MS)
   // Focus reads again only once other computers are known: networking's own changes found them.
   window.addEventListener?.('focus', () => {
     if (useComputersStore.getState().devices.some((device) => !device.self)) refresh()

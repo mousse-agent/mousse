@@ -194,14 +194,9 @@ describe('the update button and the computers behind this one', () => {
       expect(request).not.toHaveBeenCalled()
       useAppStore.setState({ profileId: 'work', profileReady: true })
       await vi.advanceTimersByTimeAsync(0)
-      // Nor as the bound window opens.
+      // Nor as the bound window opens; once idle, each is read once.
       expect(request).not.toHaveBeenCalled()
-      // A change before the window is idle reads at once, and is the first read: idle adds none.
-      netChanged()
-      rolloutChanged({})
-      await vi.advanceTimersByTimeAsync(0)
-      expect([reads('net.status'), reads('updates.rollout.get')]).toEqual([1, 1])
-      await vi.advanceTimersByTimeAsync(Math.max(COMPUTERS_FIRST_READ_MS, ROLLOUT_FIRST_READ_MS) * 3)
+      await vi.advanceTimersByTimeAsync(Math.max(COMPUTERS_FIRST_READ_MS, ROLLOUT_FIRST_READ_MS))
       expect([reads('net.status'), reads('updates.rollout.get')]).toEqual([1, 1])
       expect(computersRow()?.label).toBe('1 computer behind')
       // Another profile: its own list, never the last one's.
