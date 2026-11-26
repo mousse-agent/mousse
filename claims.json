@@ -74,17 +74,6 @@
       "expiresAt": "2026-11-25T17:27:21.463Z"
     },
     {
-      "task": "fix/bot-browser-handoff",
-      "session": "agibook-bfb046",
-      "machine": "agibook",
-      "branch": "fix/bot-browser-handoff",
-      "paths": [
-        "src/mms/bots/browser/BotBrowsers.ts"
-      ],
-      "claimedAt": "2026-11-25T19:33:04.096Z",
-      "expiresAt": "2026-11-25T21:33:04.096Z"
-    },
-    {
       "task": "fix/bot-sandbox-chips-diagnostics",
       "session": "agibook-c04301",
       "machine": "agibook",
