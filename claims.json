@@ -213,6 +213,17 @@
       ],
       "claimedAt": "2026-11-26T05:48:37.437Z",
       "expiresAt": "2026-11-26T07:48:37.437Z"
+    },
+    {
+      "task": "title-models-every-provider",
+      "session": "Animatrix-36f010",
+      "machine": "Animatrix",
+      "branch": "title-models-every-provider",
+      "paths": [
+        "src/mms/harness/acp"
+      ],
+      "claimedAt": "2026-11-26T08:30:54.870Z",
+      "expiresAt": "2026-11-26T10:30:54.870Z"
     }
   ]
 }
