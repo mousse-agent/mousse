@@ -70,11 +70,11 @@ function setup(options: {
   scope?: ProviderScope
   mode?: 'off'
   /** The thread runs on a local server's `phi3:medium` (stored split, as the picker stores it), in memory or not. */
-  local?: { resident: boolean | undefined }
+  local?: { resident: boolean | undefined; via?: 'override' | 'default' }
 } = {}): Harness {
   let thread: Thread = {
     id: 't1', name: options.name ?? 'New Chat', createdAt: '', updatedAt: '', ...(options.localOnly ? { localOnly: true as const } : {}),
-    ...(options.local ? { modelOverride: { instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3', effort: 'medium' } } : {})
+    ...(options.local && options.local.via !== 'default' ? { modelOverride: { instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3', effort: 'medium' } } : {})
   }
   const answers = [...(options.answers ?? [])]
   const oneShot = vi.fn(async (request: OneShotRequest) => {
@@ -84,7 +84,12 @@ function setup(options: {
   })
   const messages: ChatMessage[] = []
   const explicit = options.model ?? !options.providers
-  const settings = { ...getDefaultSettings(), title: explicit ? { ...MODEL } : { ...getDefaultSettings().title, ...(options.mode ? { mode: options.mode } : {}) } } as MousseSettings
+  const settings = {
+    ...getDefaultSettings(),
+    title: explicit ? { ...MODEL } : { ...getDefaultSettings().title, ...(options.mode ? { mode: options.mode } : {}) },
+    // A thread with no model of its own runs the default: here a local server's model.
+    ...(options.local?.via === 'default' ? { provider: { ...getDefaultSettings().provider, instanceId: 'pi:local-ollama', llmProvider: 'local-ollama', model: 'phi3:medium' } } : {})
+  } as MousseSettings
   const threadStore = {
     getThread: (id: string) => (id === thread.id ? { ...thread } : null),
     updateThreadMeta: (_id: string, partial: Partial<Thread>) => {
@@ -385,6 +390,15 @@ describe('Automatic naming', () => {
     expect(h.limits.isLimited('claude')).toBe(false)
   })
 
+  it.each(['one_shot_tool_refused', 'wont_run'] as const)('an entry whose single request is refused (%s) gives way to another entry', async (code) => {
+    const refused = harnessAppError({ code, message: 'Refused.' })
+    const h = setup({ providers: connected(), answer: (request) => request.selection.instanceId === 'claude' ? refused : 'OAuth callback loop' })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+    expect(picked(h).slice(0, 2)).toEqual(['claude/haiku', 'codex/gpt-6-luna'])
+  })
+
   it.each(['provider_timeout', 'timeout', 'provider_cancelled', 'aborted', 'policy_unenforceable'])('%s ends the naming with no other model asked', async (code) => {
     const error = Object.assign(new Error(code), { code })
     const h = setup({ providers: connected(), answer: () => error })
@@ -435,6 +449,23 @@ describe('Automatic naming', () => {
       expect(cold.thread().name).not.toBe('Cloud title')
     }
     const warm = setup({ providers: connected(), local: { resident: true }, answers: ['OAuth callback loop'] })
+    warm.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await warm.settle()
+    expect(warm.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+    expect(picked(warm)).toEqual(['pi:local-ollama/phi3:medium'])
+  })
+
+  it('a local thread is never named by a cloud model: not by a chosen title model, and not when it runs the default model', async () => {
+    for (const local of [{ resident: false }, { resident: false, via: 'default' as const }]) {
+      for (const model of [true, false]) {
+        const h = setup({ model, ...(model ? {} : { providers: connected() }), local, answers: ['Cloud title'] })
+        h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+        await h.settle()
+        expect(h.oneShot).not.toHaveBeenCalled()
+        expect(h.thread().name).not.toBe('Cloud title')
+      }
+    }
+    const warm = setup({ model: true, local: { resident: true }, answers: ['OAuth callback loop'] })
     warm.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
     await warm.settle()
     expect(warm.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })

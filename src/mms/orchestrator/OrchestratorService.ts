@@ -1054,7 +1054,7 @@ type TitleNamingAvailability = 'off' | 'explicit' | 'automatic_ready' | 'automat
 interface TitleRequestOptions {
   task: OneShotTask
   scope: ProviderScope | undefined
-  /** The thread named: one on a local server is named only by its own warm model (`localTitleModel`). */
+  /** The thread named or quoted: one on a local server is served only by its own warm model (`localTitleModel`). */
   threadId?: string
   sessionKey: string
   maxChars: number
@@ -12405,6 +12405,9 @@ export class OrchestratorService extends EventEmitter {
   private async titleModelText(system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
     // The title prompt is the title's own instruction (`generateTitleText`) and the mode its Automatic switch: neither is part of the selection.
     const { prompt: _titlePrompt, mode: _mode, ...selection } = this.settingsStore.get().title
+    // A local thread's text stays on its own server, whatever title model is chosen.
+    const local = options.threadId ? this.localTitleModel(options.threadId) : undefined
+    if (local) return this.localTitleText(local, system, prompt, options)
     const explicit = Boolean(selection.llmProvider?.trim() && selection.model?.trim())
     if (!explicit && (options.task === 'title' || options.task === 'branch_name')) return this.automaticTitleText(system, prompt, options)
     try {
@@ -12435,8 +12438,6 @@ export class OrchestratorService extends EventEmitter {
    * {@link AUTOMATIC_TITLE_DEADLINE_MS} in all, whatever each request does; a branch's caller bounds its own wait.
    */
   private async automaticTitleText(system: string, prompt: string, options: TitleRequestOptions): Promise<string> {
-    const local = options.threadId ? this.localTitleModel(options.threadId) : undefined
-    if (local) return this.localTitleText(local, system, prompt, options)
     const scope = options.scope ?? DEVICE_SCOPE
     const deadline = new AbortController()
     const timer = options.task === 'title' ? setTimeout(() => deadline.abort(new DOMException('The title took too long.', 'TimeoutError')), AUTOMATIC_TITLE_DEADLINE_MS) : undefined
@@ -12504,7 +12505,13 @@ export class OrchestratorService extends EventEmitter {
     if (!local) return undefined
     let selection: ModelOverride | undefined
     try {
-      selection = this.harness.instanceMap.migrate(this.threadStore?.getThread(threadId)?.modelOverride) ?? undefined
+      // The model the thread's next turn runs: its own choice, else the default (a cleared override included).
+      const session = this.boundSession?.threadId === threadId ? this.boundSession : this.sessions?.get(threadId)
+      const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
+      selection = this.harness.instanceMap.migrate(explicit ?? resolveModelForMode(this.settingsStore.get(), 'agent', [
+        ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+        ...(this.harness.configuredProviderIds?.() ?? [])
+      ])) ?? undefined
     } catch {
       return undefined
     }
@@ -12602,6 +12609,8 @@ export class OrchestratorService extends EventEmitter {
       const text = await this.titleModelText(PULL_REQUEST_DRAFT_SYSTEM, prompt, {
         task: 'pull_request',
         scope: params.projectId ? { kind: 'project', projectId: params.projectId } : params.originThreadId ? this.threadScope(params.originThreadId) : { kind: 'device' },
+        // The draft quotes the thread: a local thread's draft is written by its own warm model or by the heuristic.
+        ...(params.originThreadId ? { threadId: params.originThreadId } : {}),
         sessionKey: `pull-request-draft:${params.originThreadId ?? prompt.slice(0, 200)}`,
         maxChars: 40_000
       })

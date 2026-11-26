@@ -136,8 +136,8 @@ export interface PiRpcEngineOptions {
    * tool-free and never for bots, agent definitions or delegated work; an agent turn needs a known window.
    */
   localModel?: (modelId: string) => LocalModelFacts | undefined
-  /** Reads a local server's models again at dispatch; bounded, its failure ignored. */
-  refreshLocal?: () => Promise<unknown>
+  /** Reads a local server's models again at dispatch; `signal` ends its reads at the bound, its failure ignored. */
+  refreshLocal?: (signal: AbortSignal) => Promise<unknown>
   /** The stored key of the instance; it reaches Pi only in the factory's catalogue answer. */
   apiKey?: () => string | undefined
   /**
@@ -327,10 +327,10 @@ function linesOf(text: unknown): number {
   return typeof text === 'string' && text ? text.split('\n').length : 0
 }
 
-/** Resolves after `promise` settles or `ms` passes, whichever is first. */
 /** How long a dispatch waits for a local server's list (one loopback read). */
 const LOCAL_DISPATCH_REFRESH_MS = 400
 
+/** Resolves after `promise` settles or `ms` passes, whichever is first. */
 function within(promise: Promise<unknown>, ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, ms)
@@ -1214,22 +1214,24 @@ export class PiRpcEngine implements ProviderAdapter {
    */
   private async checkLocalTurn(input: TurnInput, host: AdapterHost): Promise<void> {
     if (!this.options.localModel) return
-    if (this.options.refreshLocal) await within(this.options.refreshLocal(), LOCAL_DISPATCH_REFRESH_MS)
+    // The bound stops the reads too, not only the wait: a slow server gets no more requests after it.
+    if (this.options.refreshLocal) await within(this.options.refreshLocal(AbortSignal.timeout(LOCAL_DISPATCH_REFRESH_MS)), LOCAL_DISPATCH_REFRESH_MS)
     const model = this.parseModel(input.model).baseId
     const facts = this.options.localModel(model)
-    if (!facts) return
     const refuse = (message: string): never => {
       throw harnessAppError({ code: 'unsupported', message, instanceId: this.options.instanceId })
     }
+    // Only what the server lists runs: an unlisted id (a custom model) has no checked tools and no known window.
+    if (!facts) refuse(`${this.options.label} does not list ${model}. Load it on the server, then refresh in Settings → Providers.`)
     const unattended = Boolean(host.bot || host.definition || input.child)
     const who = host.bot ? 'Bots' : host.definition ? 'Agent definitions' : 'Delegated work'
-    if (localChatOnly(facts)) {
+    if (localChatOnly(facts!)) {
       if (unattended) refuse(`${model} is Chat only: it cannot call tools. ${who} need a model that can. Choose another model.`)
       return
     }
-    if (unattended && !localToolsUnattended(facts.tools))
+    if (unattended && !localToolsUnattended(facts!.tools))
       refuse(`${who} need a model whose tools passed a check. Run Check tools on ${model} in Settings → Providers → ${this.options.label}.`)
-    const window = localEffectiveWindow(facts)
+    const window = localEffectiveWindow(facts!)
     if (!window) refuse(`${model}'s window is unknown. Set it in Settings → Providers → ${this.options.label} before agent turns.`)
     if (window! < LOCAL_AGENT_MIN_WINDOW)
       refuse(`${model} runs with a ${Math.round(window! / 1024)}K window; agent turns need at least ${LOCAL_AGENT_MIN_WINDOW / 1024}K. Raise it in the server's settings, then refresh.`)

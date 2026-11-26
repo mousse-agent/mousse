@@ -262,7 +262,7 @@ describe('send mode button and shortcut', () => {
     setProfileSendMode(PROFILE, 'steer')
     render({ loading: false })
     expect(modeButton()).toBeNull()
-    expect(box().placeholder).toBe('Ask anything · @ files · / commands')
+    expect(box().placeholder).toBe('Ask anything · / commands and skills · @ files')
     // A bot's chat never steers: its composer is given no thread for the mode.
     let { onSend } = rerender({ thread: undefined })
     expect(modeButton()).toBeNull()

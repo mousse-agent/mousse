@@ -50,7 +50,8 @@ import {
   registerWindowForResumeRecovery
 } from './windowResume'
 import { attachContextMenu } from './contextMenu'
-import { startDesktopUpdates } from './updates'
+import { startDesktopUpdates, startRemoteUpdateAgent } from './updates'
+import type { RemoteUpdateAgent } from './updates/remoteUpdateAgent'
 import { freeInstallFolder, listInstallFolderProcesses } from './updates/installFolder'
 import { INSTALL_QUIT_DEADLINE_MS } from './updates/installGate'
 import { prepareUpdateInstall, recoverUpdateInstall } from './updates/installHandoff'
@@ -175,6 +176,7 @@ function startGuiApp(): void {
   let resumeRecoveryAttached = false
   let devGuiPollerStop: (() => void) | null = null
   let desktopUpdater: DesktopUpdater | null = null
+  let remoteUpdateAgent: RemoteUpdateAgent | null = null
   let serviceTray: import('electron').Tray | null = null
   let mousseHome: string | null = null
   /** What each profile's window last showed; read once here, written in the background (see WarmStartCache). */
@@ -521,6 +523,8 @@ function startGuiApp(): void {
             }
           }
         })
+        // Update requests from the user's other computers: only while this app runs and can install them.
+        if (desktopUpdater && guiMms && !remoteUpdateAgent) remoteUpdateAgent = startRemoteUpdateAgent(guiMms, desktopUpdater)
       } catch (error) {
         console.error('In-app updates could not start:', error instanceof Error ? error.message : String(error))
       }

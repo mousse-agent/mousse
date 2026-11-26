@@ -90,4 +90,11 @@ describe('a local model server in the real Pi child', () => {
     await expect(engine.startTurn(child.input, child.sink, child.ctl, child.host)).rejects.toMatchObject({ message: expect.stringMatching(/Check tools/) })
     expect([spawned.length, recorder.connections()]).toEqual([0, 0])
   }, 90_000)
+
+  it('refuses a model the server does not list (a custom id) before anything starts', async () => {
+    const { engine, recorder, project, spawned } = await setup({ models, apiKey: LOCAL_PLACEHOLDER_KEY, pin: (url) => ({ origin: url, keyless: true }), localModel: (id) => (id === 'phi3:medium' ? facts() : undefined) })
+    const turn = harness(project, { model: 'my-custom-model' })
+    await expect(engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)).rejects.toMatchObject({ code: 'unsupported', message: expect.stringMatching(/does not list my-custom-model/) })
+    expect([spawned.length, recorder.connections()]).toEqual([0, 0])
+  }, 90_000)
 })

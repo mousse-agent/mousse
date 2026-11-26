@@ -37,6 +37,8 @@ export function isInstallationMethod(method: string): boolean {
   if (PROFILE_PROVIDER_METHODS.has(method)) return false
   if (INSTALLATION_METHODS.has(method)) return true
   if (method.startsWith('profiles.')) return true
+  // The desktop app's update requests belong to the whole service (`registerRemoteUpdateMethods`).
+  if (method.startsWith('updates.remote.')) return true
   if (method.startsWith('providers.')) return true
   return false
 }

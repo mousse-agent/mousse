@@ -134,3 +134,8 @@ export type LocalCheckToolsResult =
 
 /** The smallest window an agent turn (tools on) may plan with. Below it, Mousse's prompt and tools do not fit. */
 export const LOCAL_AGENT_MIN_WINDOW = 16_384
+
+/** Whether an agent instance is a connected local server (`pi:local-<slug>`). */
+export function isLocalInstanceId(instanceId: string): boolean {
+  return instanceId.startsWith('pi:local-')
+}

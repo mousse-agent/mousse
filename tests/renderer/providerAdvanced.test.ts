@@ -9,6 +9,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentEditor } from '../../src/renderer/components/providers/ProviderEditor'
 import type { InstanceActions } from '../../src/renderer/components/providers/CliSections'
+import { agentInfoRows } from '../../src/renderer/components/providers/ProviderInfo'
 import { describeStatus, type InstanceSnapshot } from '../../src/shared/harness/status'
 import type { VendorSettingsView } from '../../src/shared/harness/vendorSettings'
 import { snapshot } from '../providerSnapshotFixture'
@@ -174,5 +175,15 @@ describe('Advanced of a Claude Code entry', () => {
     await settle()
     expect(advanced().textContent).toContain('Enter a full URL')
     expect(setVendorSetting).not.toHaveBeenCalled()
+  })
+})
+
+describe("an agent entry's Info facts", () => {
+  it("says Antigravity's thread titles are best-effort, with why in the tooltip, and says nothing of it for other agents", () => {
+    const titles = (entry: InstanceSnapshot) => agentInfoRows(entry).find((row) => row.label === 'Thread titles')
+    expect(titles(snapshot({ instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity' }))).toEqual({
+      label: 'Thread titles', value: 'Best-effort', full: expect.stringContaining('could still run')
+    })
+    expect(titles(snapshot())).toBeUndefined()
   })
 })

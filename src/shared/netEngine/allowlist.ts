@@ -1,4 +1,5 @@
 import { ROUTED_METHODS, routedNetMethod } from '../bridge/routed'
+import { UPDATE_NET_METHODS } from '../remoteUpdates'
 
 /**
  * The daemon methods an engine pairing with the `owner` role may call on this computer: the routed thread,
@@ -17,5 +18,7 @@ export const ENGINE_OWNER_METHODS: ReadonlySet<string> = new Set([
   'net.info',
   // What this computer lets the pairing do here (its Devices summary), and a dispatched agent task (§9.1).
   'bridge.access.mine',
-  'bridge.dispatch'
+  'bridge.dispatch',
+  // Updating this computer from a paired one; held to Full control by `checkNodePolicy`.
+  ...UPDATE_NET_METHODS
 ])

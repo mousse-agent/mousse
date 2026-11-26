@@ -29,7 +29,11 @@ export function selfUpdateReportOf(state: Pick<UpdateState, 'phase' | 'channel' 
 export function readSelfUpdateReport(home: string, version = mousseVersion()): SelfUpdateReport {
   try {
     const report = parseSelfUpdateReport(JSON.parse(readFileSync(selfUpdateReportPath(home), 'utf8')))
-    if (report) return report
+    // Whether it takes requests now is the app's live registration's to say, never a file's.
+    if (report) {
+      delete report.requests
+      return report
+    }
   } catch {
     // No desktop app has written one here.
   }

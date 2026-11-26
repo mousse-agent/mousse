@@ -172,6 +172,33 @@ describe('local model servers', () => {
     expect([chats(a).length, chats(b).length]).toEqual([1, 1])
   })
 
+  it("gives two connects at once their own ids, and never gives a removed connection's id to another server", async () => {
+    const a = await server(ollamaRoutes())
+    const b = await server(ollamaRoutes())
+    const c = await server(ollamaRoutes())
+    const { service, home } = await auth()
+    const [first, second] = await Promise.all([service.local.connect({ address: a.root }), service.local.connect({ address: b.root })])
+    const ids = [first.ok && first.providerId, second.ok && second.providerId]
+    expect(new Set(ids).size).toBe(2)
+    await service.local.remove('local-ollama')
+    const third = await service.local.connect({ address: c.root })
+    expect(third.ok && third.providerId).not.toBe('local-ollama')
+    // Still true after a restart: the removed id is recorded.
+    const again = await auth(home)
+    const fourth = await again.service.local.connect({ address: a.root })
+    expect([third.ok && third.providerId, second.ok && second.providerId, first.ok && first.providerId]).not.toContain(fourth.ok && fourth.providerId)
+    expect(fourth.ok && fourth.providerId).not.toBe('local-ollama')
+  })
+
+  it('keeps the saved facts when a refresh is stopped part-way', async () => {
+    const ollama = await server(ollamaRoutes())
+    const { service } = await auth()
+    await service.local.connect({ address: ollama.root })
+    ollama.route('/api/show', () => undefined)
+    expect(await service.local.refresh('local-ollama', { signal: AbortSignal.timeout(200) })).toBe(false)
+    expect(service.local.facts('local-ollama', 'phi3:medium')?.tools).toBe('reported')
+  })
+
   it('sends a model id with a colon as it is, never as a model at an effort', async () => {
     const ollama = await server(ollamaRoutes())
     const { service } = await auth()
@@ -264,6 +291,11 @@ describe('local model servers', () => {
     // gpt-oss:120b-cloud is not in /api/ps: the check never loads it.
     expect(await service.local.checkTools('local-ollama', 'gpt-oss:120b-cloud')).toMatchObject({ ok: false, problem: 'cold' })
     expect(chats(ollama)).toHaveLength(0)
+    // A server that cannot say what is in memory may load the model to answer: no check either.
+    ollama.route('/api/ps', (_r, res) => json(res, 500, {}))
+    expect(await service.local.checkTools('local-ollama', 'phi3:medium')).toMatchObject({ ok: false, problem: 'cold' })
+    expect(chats(ollama)).toHaveLength(0)
+    ollama.route('/api/ps', ollamaRoutes()['/api/ps']!)
     let step = 0
     ollama.route('/v1/chat/completions', (r, res) => {
       step += 1

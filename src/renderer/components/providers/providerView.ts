@@ -45,6 +45,8 @@ export interface DriverInfo {
   addHint?: string
   /** The Sign out tooltip, when signing out reaches beyond Mousse. */
   signOutHint?: string
+  /** Its thread titles and other single requests are best-effort: why, as a tooltip. */
+  bestEffortNaming?: string
   /** Also added from the ACP registry: the Add dialog offers it as its own choice ("More ACP agents…"). */
   registry?: { addLabel: string; description: string }
   /**
@@ -96,7 +98,8 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     executableHint: "agy, or Google's 1.1.1 ACP server",
     addHint: 'Mousse uses agy on this computer, or installs it after adding.',
     // The first entry only: an entry with a home of its own signs out of that home alone.
-    signOutHint: 'Also signs out agy on this computer'
+    signOutHint: 'Also signs out agy on this computer',
+    bestEffortNaming: 'Antigravity is told not to use tools; a few native actions could still run before Mousse stops them.'
   },
   cursor: {
     label: 'Cursor',

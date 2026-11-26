@@ -29,6 +29,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { NewProjectDialog } from './components/NewProjectDialog'
 import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
+import { RemoteUpdateToast } from './components/updates/RemoteUpdateToast'
 import { PairLinkHost } from './components/netEngine/PairLinkHost'
 import { BugReportDialogHost } from './components/bugReports/BugReportDialog'
 import { useBugReportStore } from './stores/bugReportStore'
@@ -779,6 +780,7 @@ export default function App() {
       {/* A `mousse://pair` link that opened Mousse: the profile that joins, then Enter link. */}
       {profileReady && <PairLinkHost />}
       <ToastHost />
+      <RemoteUpdateToast />
       <BugReportDialogHost />
 
     </div>

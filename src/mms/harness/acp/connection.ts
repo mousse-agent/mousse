@@ -1,17 +1,20 @@
 import type { ChildProcess, ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Readable, Writable, type Transform } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
 import { killTree } from '../spawn'
 import {
   client,
   methods,
   ndJsonStream,
   type ClientConnection,
+  type AnyMessage,
   type CreateElicitationRequest,
   type CreateElicitationResponse,
   type ReadTextFileRequest,
   type ReadTextFileResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type Stream,
   type WriteTextFileRequest,
   type WriteTextFileResponse
 } from '@agentclientprotocol/sdk'
@@ -51,6 +54,34 @@ export interface AcpClientHandlers {
   extRequests?: Record<string, (params: unknown) => Promise<unknown>>
   /** A preset's own extension notifications (`_x.ai/session/prompt_complete`), by method. */
   extNotifications?: Record<string, (params: unknown) => void>
+  /**
+   * A one-shot's refusal of every other request: the terminal methods, and any request no handler above takes (an
+   * unknown extension). Set, such a request is refused and ends the one-shot; unset, it answers "method not found",
+   * as the SDK does.
+   */
+  refuseRequest?(method: string): Promise<never>
+  /**
+   * A one-shot's view of every message the agent writes, read from its output beside the SDK: a message sent while
+   * the process ends is still seen after the SDK's connection has closed. Set, the process counts as ended
+   * (`AcpWiring.onExit`) only once its output has closed too, or {@link ACP_DRAIN_MS} after it exited.
+   */
+  observe?(message: unknown): void
+}
+
+/** How long an observed process's output may stay open after it exits (`AcpClientHandlers.observe`). */
+export const ACP_DRAIN_MS = 2_000
+
+/** The terminal requests an agent may send. Mousse offers no terminal; a one-shot refuses them (`refuseRequest`). */
+export const ACP_TERMINAL_METHODS: readonly string[] = Object.values(methods.client.terminal)
+
+/** The request methods `handlers` answer themselves. */
+function handledRequestMethods(handlers: AcpClientHandlers): Set<string> {
+  const handled = new Set<string>([methods.client.session.requestPermission, ...Object.keys(handlers.extRequests ?? {})])
+  if (handlers.readTextFile) handled.add(methods.client.fs.readTextFile)
+  if (handlers.writeTextFile) handled.add(methods.client.fs.writeTextFile)
+  if (handlers.createElicitation) handled.add(methods.client.elicitation.create)
+  if (handlers.refuseRequest) for (const method of ACP_TERMINAL_METHODS) handled.add(method)
+  return handled
 }
 
 /** Why a connection opens. */
@@ -60,6 +91,8 @@ export interface AcpLaunchRequest {
   purpose: AcpPurpose
   /** A personal bot turn needs a launch without the owner’s tool settings. */
   bot?: true
+  /** A one-shot's own empty folder: the agent process starts there, as its ACP session does. */
+  cwd?: string
   handlers: AcpClientHandlers
   /** A sign-in link the agent announced outside the protocol (on stdout or through a helper). */
   onAuthUrl?: (url: string) => void
@@ -88,7 +121,7 @@ export function connectAcpProcess(child: ChildProcessWithoutNullStreams, handler
   const app = acpClientApp(handlers, active)
   const output = wiring.stdout ? child.stdout.pipe(wiring.stdout) : child.stdout
   const stream = ndJsonStream(Writable.toWeb(child.stdin) as WritableStream<Uint8Array>, Readable.toWeb(output) as ReadableStream<Uint8Array>)
-  const connection: ClientConnection = app.connect(stream)
+  const connection: ClientConnection = app.connect(handlers.refuseRequest ? refusingUnknownRequests(stream, handlers) : stream)
   active.connection = connection
   child.stderr.setEncoding('utf8')
   let stderrPending = ''
@@ -99,12 +132,38 @@ export function connectAcpProcess(child: ChildProcessWithoutNullStreams, handler
     if (!wiring.stderrLine) return
     for (const raw of lines) wiring.stderrLine(raw.trimEnd())
   })
-  child.on('exit', () => {
+  let ended = false
+  const end = () => {
+    if (ended) return
+    ended = true
     connection.close()
     wiring.onExit?.()
+  }
+  if (handlers.observe) observeOutput(output, handlers.observe)
+  // Observed, the connection stays open until the output has been read: closing it would end the output early.
+  child.on('exit', () => {
+    if (!handlers.observe) end()
+    else setTimeout(end, ACP_DRAIN_MS).unref?.()
   })
+  // Every line the observer could see has been read once the output has closed.
+  if (handlers.observe) child.on('close', end)
   child.on('error', (error) => connection.close(error))
   return active
+}
+
+/** Each complete NDJSON message of `output` to `observe`, as it is read; a line that is not JSON is skipped. */
+function observeOutput(output: NodeJS.ReadableStream, observe: (message: unknown) => void): void {
+  let pending = ''
+  const decoder = new StringDecoder('utf8')
+  output.on('data', (chunk: Buffer | string) => {
+    const lines = `${pending}${typeof chunk === 'string' ? chunk : decoder.write(chunk)}`.split('\n')
+    pending = lines.pop() ?? ''
+    if (pending.length > 16 * 1024 * 1024) pending = ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try { observe(JSON.parse(line)) } catch { /* not a message */ }
+    }
+  })
 }
 
 /** Mousse's side of an ACP connection: `handlers` answer the agent; updates go to `active.onUpdate`. */
@@ -123,6 +182,11 @@ export function acpClientApp(handlers: AcpClientHandlers, active: Pick<AcpConnec
     const elicit = handlers.createElicitation
     app.onRequest(methods.client.elicitation.create, async ({ params }) => elicit(params))
   }
+  if (handlers.refuseRequest) {
+    const refuse = handlers.refuseRequest
+    const params = (value: unknown): unknown => value
+    for (const method of ACP_TERMINAL_METHODS) app.onRequest<unknown, never>(method, params, async () => refuse(method))
+  }
   app.onNotification(methods.client.session.update, ({ params }) => active.onUpdate?.(params.update, params.sessionId))
   const raw = (params: unknown): unknown => params
   for (const [method, handle] of Object.entries(handlers.extRequests ?? {}))
@@ -130,6 +194,23 @@ export function acpClientApp(handlers: AcpClientHandlers, active: Pick<AcpConnec
   for (const [method, handle] of Object.entries(handlers.extNotifications ?? {}))
     app.onNotification<unknown>(method, raw, ({ params }) => handle(params))
   return app
+}
+
+/**
+ * `stream`, with every incoming request no handler takes also passed to `handlers.refuseRequest`. The SDK has no
+ * handler for an unknown method, so it still answers "method not found"; the one-shot ends either way.
+ */
+function refusingUnknownRequests(stream: Stream, handlers: AcpClientHandlers): Stream {
+  const handled = handledRequestMethods(handlers)
+  const watch = new TransformStream<AnyMessage, AnyMessage>({
+    transform(message, controller) {
+      const request = message as { method?: unknown; id?: unknown }
+      if (typeof request.method === 'string' && request.id !== undefined && !handled.has(request.method))
+        void handlers.refuseRequest!(request.method).catch(() => undefined)
+      controller.enqueue(message)
+    }
+  })
+  return { writable: stream.writable, readable: stream.readable.pipeThrough(watch) }
 }
 
 /**
