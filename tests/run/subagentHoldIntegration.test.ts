@@ -342,6 +342,8 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
         return 'Verify passed: 812 tests.'
       })
       monitors = new ThreadMonitors({
+        // A command runs only with the environment its caller gives; the profile gives the daemon's plus the shell PATH.
+        env: () => ({ PATH: '/usr/bin' }),
         post: (threadId, payload, key) => { postNote(w.d.engine, key, payload, threadId) },
         changed: (threadId) => w.d.orch.backgroundWorkChanged(threadId),
         spawn: () => {
