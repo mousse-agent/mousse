@@ -44,7 +44,7 @@ beforeEach(() => {
     }
   }
   const thread = { id: 't1', name: 'Sync the local repository', projectId: 'p1', worktreeEnabled: true, startedAt: '2026-11-10T09:51:00.000Z', createdAt: '2026-11-10T09:51:00.000Z', updatedAt: '2026-11-10T09:51:00.000Z' } as unknown as Thread
-  useAppStore.setState({ activeThreadId: 't1', profileId: 'prf', projects: [{ id: 'p1', name: 'repo', path: PROJECT, createdAt: '', order: 0 }], threads: [thread], messages: [], turnStates: {} })
+  useAppStore.setState({ activeThreadId: 't1', profileId: 'prf', profileReady: true, projects: [{ id: 'p1', name: 'repo', path: PROJECT, createdAt: '', order: 0 }], threads: [thread], messages: [], turnStates: {} })
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)

@@ -16,6 +16,7 @@ import { accessPreset } from '../../src/shared/net/accessPresets'
 const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 const { AccessAskHost } = await import('../../src/renderer/components/netEngine/AccessAskHost')
 const { UseComputerDialog } = await import('../../src/renderer/components/netEngine/UseComputerDialog')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { engineRow, engineSideRow, engineSides, clockMessage, SHARED_ACCOUNT_LINE } = await import(
   '../../src/renderer/components/netEngine/engineRows'
 )
@@ -171,6 +172,8 @@ function daemon(
 let root: Root
 let host: HTMLElement
 beforeEach(() => {
+  // Settings shows only once the window's profile is bound; before that nothing reads the computers.
+  useAppStore.setState({ profileReady: true })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)

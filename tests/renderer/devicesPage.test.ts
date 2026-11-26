@@ -13,6 +13,7 @@ const { EngineDevicesSection } = await import('../../src/renderer/components/net
 const { MousseIdAccount } = await import('../../src/renderer/components/MousseIdAccount')
 const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')
 const { SERVICE_ANSWERED_LATE, SERVICE_STOPPED_ANSWERING } = await import('../../src/shared/errors')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
 const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true }
 /** A set-up computer that manages its devices, with one other computer and a phone. */
@@ -68,6 +69,8 @@ beforeEach(() => {
   daemon.enabled = true
   daemon.initError = undefined
   useMousseIdStore.setState({ runtimeOrigin: '' })
+  // Settings shows only once the window's profile is bound; before that nothing reads the computers.
+  useAppStore.setState({ profileReady: true })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
