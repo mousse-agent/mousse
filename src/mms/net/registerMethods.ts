@@ -12,6 +12,7 @@ import {
 import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError, type NodeId } from '../../shared/net'
 import type { NodePolicyChange } from './store/nodePolicy'
 import { isJoinVia } from '../../shared/net/via'
+import { validateUpdateThere, type UpdateThereParams } from '../updates/askUpdate'
 import { AppError } from '../../shared/errors'
 import { isPermissionMode } from '../../shared/permissionMode'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
@@ -30,6 +31,7 @@ export interface NetBridgeRoutes {
   engine: {
     isEngine(node: NodeId): boolean
     setPolicy(node: NodeId, change: NodePolicyChange): unknown
+    updateThere(params: UpdateThereParams): Promise<unknown>
   }
 }
 const keys: Record<NetLocalMethod, readonly string[]> = {
@@ -103,6 +105,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.disconnect': ['node'],
   'bridge.allow': ['node'],
   'bridge.access.there': ['node'],
+  'net.update.there': ['node', 'step', 'version', 'job', 'runningTurns'],
   'bridge.workOnThreads': ['enabled'],
   'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
@@ -277,6 +280,7 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'bridge.disconnect',
       'bridge.allow',
       'bridge.access.there',
+      'net.update.there',
       'net.editor.probe',
       'net.authority.transfer'
     ].includes(method) &&
@@ -526,6 +530,11 @@ export function registerNetMethods(
       async handle(_context, params, binding) {
         try {
           if (routes && method === 'bridge.nodes') return await (await routes(binding!.profileId)).peers.nodes()
+          if (routes && method === 'net.update.there') {
+            const { engine } = await routes(binding!.profileId)
+            const p = validateUpdateThere(params as Record<string, unknown>)
+            if (engine.isEngine(p.node as NodeId)) return await engine.updateThere(p)
+          }
           if (routes && method === 'bridge.policy') {
             const { engine } = await routes(binding!.profileId)
             const { node, ...change } = params as { node: NodeId } & NodePolicyChange

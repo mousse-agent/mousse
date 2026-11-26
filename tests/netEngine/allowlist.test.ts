@@ -12,6 +12,7 @@ import {
 import { NET_LOCAL_METHODS } from '../../src/shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../src/shared/netEngine/allowlist'
 import { NET_ENGINE_LOCAL_METHODS } from '../../src/shared/netEngine/local'
+import { UPDATE_NET_METHODS } from '../../src/shared/remoteUpdates'
 
 describe('the engine allow-lists', () => {
   it('lets a window call every local method of the new networking', () => {
@@ -24,7 +25,7 @@ describe('the engine allow-lists', () => {
       expect(ENGINE_OWNER_METHODS.has(method), method).toBe(false)
   })
 
-  it('lets a paired computer call the routed rows, three transport calls, staging, net.info, its access and dispatch, and nothing else', () => {
+  it('lets a paired computer call the routed rows, three transport calls, staging, net.info, its access, dispatch and updates, and nothing else', () => {
     const expected = new Set([
       // The editor rows included (Phase 1b §9.1).
       ...Object.keys(ROUTED_METHODS).map(routedNetMethod),
@@ -35,7 +36,9 @@ describe('the engine allow-lists', () => {
       'bridge.artifacts.open',
       'net.info',
       'bridge.access.mine',
-      'bridge.dispatch'
+      'bridge.dispatch',
+      // Held to Full control by the per-device policy (`checkNodePolicy`).
+      ...UPDATE_NET_METHODS
     ])
     expect([...ENGINE_OWNER_METHODS].sort()).toEqual([...expected].sort())
     // The transport calls it takes are routed ones; the local tunnel methods and Spaces are not on it.

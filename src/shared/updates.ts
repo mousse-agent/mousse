@@ -73,6 +73,11 @@ export interface SelfUpdateReport {
   self: boolean
   /** Why it can't, in plain words; only when `self` is false. */
   reason?: string
+  /**
+   * Its desktop app is running and takes update requests from the user's other computers now (`update.*`). Only
+   * `net.info` says so, from the app's live registration with its service; the file the app keeps never does.
+   */
+  requests?: true
 }
 
 const REASON_MAX_CHARS = 200
@@ -84,5 +89,10 @@ export function parseSelfUpdateReport(value: unknown): SelfUpdateReport | undefi
   if ((row.channel !== 'stable' && row.channel !== 'nightly') || typeof row.self !== 'boolean') return undefined
   const reason =
     !row.self && typeof row.reason === 'string' ? row.reason.replace(/\s+/g, ' ').trim().slice(0, REASON_MAX_CHARS) : ''
-  return { channel: row.channel, self: row.self, ...(reason ? { reason } : {}) }
+  return {
+    channel: row.channel,
+    self: row.self,
+    ...(reason ? { reason } : {}),
+    ...(row.self && row.requests === true ? { requests: true as const } : {})
+  }
 }

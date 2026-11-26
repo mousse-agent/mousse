@@ -74,6 +74,8 @@ export const NET_LOCAL_METHODS = [
   'bridge.disconnect',
   'bridge.allow',
   'bridge.access.there',
+  // One step of updating another computer (#476): `update.*` asked of it, or its version asked again.
+  'net.update.there',
   'bridge.workOnThreads',
   'bridge.shareBots',
   'bridge.editorServer',

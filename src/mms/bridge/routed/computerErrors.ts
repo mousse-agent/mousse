@@ -35,6 +35,7 @@ const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string>
   terminal_off: terminalOffMessage,
   not_connected: (name) => `${name} hasn't connected this computer.`,
   work_off: (name) => `${name} lets this computer view threads and chat with bots only.`,
+  full_control_needed: (name) => `Only a computer with Full control on ${name} can update it.`,
   unknown: (name) => `${name} refused this request.`
 }
 
