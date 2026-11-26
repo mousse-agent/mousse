@@ -727,7 +727,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // there. A key or a pasted sign-in answer travels in this call only and is saved on the owner; the caller keeps
   // nothing of it. The caller's page reads with `providers.events` what happened to the operations it started
   // (progress, sign-in prompts) and whether the entries changed: answered from memory, never written to disk on either
-  // computer. A provider's own settings file and moving an entry stay with a window of the computer itself.
+  // computer. A provider's own settings file and moving an entry stay with a window of the computer itself. Checking an
+  // entry again keeps nothing in the ledger but starts its agent, so it needs the work grant (`METHOD_ACCESS`); what
+  // picks the program an agent runs, or removes its install, needs terminal access too (`choosesProgram`).
   'providers.events': read('computer', ['after']),
   'providers.catalog.addOptions': read('computer', []),
   'providers.registry.search': read('computer', ['query']),
