@@ -14,7 +14,7 @@ import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { botFilesFolder } from '../../src/mms/bots/grants/compile'
 import type { McpToolDescriptor } from '../../src/shared/integrations'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { botFixture, createBot, flush, payloadOf, start, type BotFixture } from './botFixture'
+import { botFixture, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
@@ -219,5 +219,54 @@ describe('a turn\'s app and MCP calls are counted for it, once each', () => {
     turn.prepared.authority.callRuns!()
     expect((await relayed(turn.prepared.authority, { name: 'today' })).isError).toBeFalsy()
     expect(f.store.counters(turn.activation.id)).toMatchObject({ requests: 1, toolCalls: 0 })
+  })
+})
+
+describe('what was counted from a runtime\'s reports narrows only what the bot may still do later', () => {
+  /** A run's error when its turn reached the runtime's cap on steps (Claude Code's `maxTurns`). */
+  const TURN_CAP = { error: '[provider_turn_cap] Claude Code reached the most steps one turn may take.' }
+  // One report of a turn on Claude Code: its requests, 10,200 tokens in, 50 out, $0.0123.
+  const report = (requests: number) => ({ input: 1_000, output: 50, cacheRead: 9_000, cacheWrite: 200, costUsd: 0.0123, requests })
+
+  async function work(id: string) {
+    const activation = await f.bots.activate({ botId, input: 'Research vacuums under £250.', clientRequestId: id })
+    return { activation, ...(await start(f, activation.id)) }
+  }
+
+  it('at the runtime\'s step cap, work whose reported requests are below its limit goes on; at the limit it stops there with its ask', async () => {
+    f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxTurns: 3 } }))
+    const first = await work('w1')
+    first.prepared.usage!(report(2))
+    // The report alone raised nothing: the turn goes on.
+    expect(f.store.openAsks(botId)).toEqual([])
+    await finish(f, first.payload, 'failed', { outcome: TURN_CAP })
+    // Two of three: the work carries on in a fresh turn.
+    expect(f.store.dispatch(first.activation.id, 2)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
+    const second = await start(f, first.activation.id, 2)
+    second.prepared.usage!(report(1))
+    expect(f.store.counters(first.activation.id).requests).toBe(3)
+    await finish(f, second.payload, 'failed', { outcome: TURN_CAP })
+    // Three of three: no fresh turn, and the owner is asked for more.
+    expect(f.store.dispatch(first.activation.id, 3)).toBeUndefined()
+    expect(f.store.openAsks(botId)).toMatchObject([{ kind: 'budget', permission: { budget: { key: 'maxTurns', amount: 3 } } }])
+  })
+
+  it('a later request or call charged on the activation\'s counts (an image tool, a Pi consult) has only what the reports left', async () => {
+    f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxTurns: 3, maxToolCalls: 1 } }))
+    const turn = await work('w1')
+    turn.prepared.usage!(report(2))
+    turn.prepared.authority.callRuns!()
+    expect(turn.prepared.authority.counters.charge('request')).toMatchObject({ ok: true, count: 3 })
+    expect(turn.prepared.authority.counters.charge('request')).toMatchObject({ ok: false, limit: 3 })
+    expect(turn.prepared.authority.counters.charge('toolCall')).toMatchObject({ ok: false, limit: 1 })
+    expect(f.store.openAsks(botId).map((ask) => ask.permission)).toContainEqual({ budget: { key: 'maxTurns', amount: 3 } })
+  })
+
+  it('reported tokens and cost, with no spend limit, never stop the work', async () => {
+    const first = await work('w1')
+    first.prepared.usage!({ ...report(1), input: 50_000_000, output: 5_000_000, costUsd: 500 })
+    await finish(f, first.payload, 'failed', { outcome: TURN_CAP })
+    expect(f.store.dispatch(first.activation.id, 2)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
+    expect(f.store.openAsks(botId)).toEqual([])
   })
 })
