@@ -170,6 +170,12 @@ describe('ACP agent logos', () => {
     expect(makerLabelOf(providerId, providerId.slice(4), { brandId: brand, brandLabel })).toBe(brandLabel)
   })
 
+  // A local server's id is its runtime or address: "ollama" is not Meta's llama, "local-mistral-box" not Mistral.
+  it.each(['pi:local-ollama', 'pi:local-mistral-box', 'pi:local-192-168-1-20-8000'])('a local server %s shows the generic mark', (providerId) => {
+    expect(render(providerId)).toBe(generic())
+    expect(providerIconKey(providerId)).toBe('generic')
+  })
+
   it('takes the agent an entry runs from this computer first, and from other scopes only when they agree', () => {
     const project = (projectId: string) => ({ kind: 'project' as const, projectId })
     applySnapshotsEvent({ scope: project('a'), snapshots: [acpEntry('acp:work', 'opencode'), acpEntry('acp:shared', 'goose', { iconDataUrl: INK, iconMonochrome: true })] })

@@ -4,6 +4,7 @@ import type { CustomModel, InstanceModel, ModelCapabilities, ModelPrefsPatch } f
 import { EFFORT_LEVELS, formatEffortLabel } from '../../../shared/modelVariants'
 import { ArrowDown, ArrowUp, ChevronRight, Eye, EyeOff, Pencil, Plus, Star, X } from '../../lib/icons'
 import { Switch } from '../settings/SettingsRow'
+import { LocalModelChips } from './LocalModelChips'
 import { RefreshButton, useAsyncAction } from './parts'
 
 const FILTER_THRESHOLD = 8
@@ -212,13 +213,17 @@ export function ProviderModelsSection({
           <span className="prov-model-name">{model.label}</span>
           {custom && <span className="prov-model-chip">Custom</span>}
         </span>
-        <span className="prov-model-caps" title={describeCapabilities(model.capabilities) || undefined}>
-          {capabilityChips(model.capabilities).map((chip) => (
-            <span key={chip.title} className="prov-model-chip" title={chip.title}>
-              {chip.text}
-            </span>
-          ))}
-        </span>
+        {model.local ? (
+          <LocalModelChips model={model} local={model.local} snapshot={snapshot} onChanged={onRefresh} />
+        ) : (
+          <span className="prov-model-caps" title={describeCapabilities(model.capabilities) || undefined}>
+            {capabilityChips(model.capabilities).map((chip) => (
+              <span key={chip.title} className="prov-model-chip" title={chip.title}>
+                {chip.text}
+              </span>
+            ))}
+          </span>
+        )}
         <span className="prov-model-actions">
           {movable && (
             <>

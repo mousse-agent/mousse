@@ -12,6 +12,7 @@ import type {
   RemoveInstallResult,
   SignInResponse
 } from '../../shared/harness/types'
+import type { LocalCheckToolsInput, LocalCheckToolsResult, LocalConnectInput, LocalConnectResult, LocalServerRow, LocalSetModelInput } from '../../shared/localServers'
 
 /**
  * The calls of Settings → Providers, on this computer or on another one. Another computer takes the same calls
@@ -40,6 +41,13 @@ export interface ProvidersApi {
     refreshAllModels(): Promise<ModelRefreshResult[]>
     setModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot>
   }
+  /** Model servers running on that computer (Add provider → Local models). Detection runs only when called. */
+  local: {
+    detect(): Promise<LocalServerRow[]>
+    connect(input: LocalConnectInput): Promise<LocalConnectResult>
+    setModel(input: LocalSetModelInput): Promise<boolean>
+    checkTools(input: LocalCheckToolsInput): Promise<LocalCheckToolsResult>
+  }
 }
 
 /** This computer's calls, looked up when made (a page renders before, and without, a window bridge). */
@@ -50,7 +58,13 @@ const LOCAL: ProvidersApi = {
   instances: new Proxy({} as ProvidersApi['instances'], {
     get: (_target, key) => (...args: unknown[]) =>
       (window.mousse.providers.instances as unknown as Record<PropertyKey, (...args: unknown[]) => unknown>)[key]!(...args)
-  })
+  }),
+  local: {
+    detect: () => window.mousse.providers.local.detect(),
+    connect: (input) => window.mousse.providers.local.connect(input),
+    setModel: (input) => window.mousse.providers.local.setModel(input),
+    checkTools: (input) => window.mousse.providers.local.checkTools(input)
+  }
 }
 
 /**
@@ -92,6 +106,13 @@ export function providersApi(node?: string): ProvidersApi {
       refreshModels: (instanceId) => call('instances.refreshModels', { instanceId }),
       refreshAllModels: () => call('instances.refreshAllModels'),
       setModelPrefs: (instanceId, patch) => call('instances.setModelPrefs', { instanceId, patch })
+    },
+    // Found on that computer's own loopback; a server's key goes there in `connect` and nowhere else.
+    local: {
+      detect: () => call('local.detect'),
+      connect: (input) => call('local.connect', { ...input }),
+      setModel: (input) => call('local.setModel', { ...input }),
+      checkTools: (input) => call('local.checkTools', { ...input })
     }
   }
 }

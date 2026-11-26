@@ -358,7 +358,8 @@ describe('Add provider choices', () => {
       ['new', 'Grok'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…'],
-      ['new', 'Claude Code (API key)']
+      ['new', 'Claude Code (API key)'],
+      ['local', 'Local models']
     ])
     expect(choices.filter((choice) => choice.kind === 'new' && choice.another).map((choice) => choice.key)).toEqual(['new:claude', 'new:codex', 'new:antigravity'])
   })
@@ -406,9 +407,10 @@ describe('Add provider choices', () => {
       ['new', 'OpenCode'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…'],
-      ['new', 'Claude Code (API key)']
+      ['new', 'Claude Code (API key)'],
+      ['local', 'Local models']
     ])
-    expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && (choice.driver === 'codex' || choice.existing === undefined)))).toBe(true)
+    expect(choices.every((choice) => choice.kind === 'registry' || choice.kind === 'local' || (choice.kind === 'new' && (choice.driver === 'codex' || choice.existing === undefined)))).toBe(true)
   })
 
   it('offers OpenCode as an agent once, and keeps the OpenCode Zen and Go model APIs offered beside it', () => {

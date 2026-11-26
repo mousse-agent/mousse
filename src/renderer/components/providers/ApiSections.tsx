@@ -18,6 +18,7 @@ export function ApiSetupRow({
   ambientInstructions,
   status,
   retired,
+  local,
   onReplaceKey,
   onSignIn
 }: {
@@ -31,6 +32,8 @@ export function ApiSetupRow({
   status: StatusDescription
   /** Its sign-in is going away (the entry has a Move banner): no sign-in or key to set here. */
   retired?: boolean
+  /** A local model server: it is reached at its address, with no account to sign in to here. */
+  local?: boolean
   /** Blank runs the guided key sign-in. */
   onReplaceKey: (apiKey: string) => Promise<void>
   onSignIn: () => Promise<void>
@@ -42,6 +45,10 @@ export function ApiSetupRow({
 
   if (method === 'ambient') {
     return <SettingsRow title="Cloud credentials" description={errorLine ?? (ambientInstructions?.join(' ') || statusLine)} />
+  }
+
+  if (local) {
+    return <SettingsRow title="Server" description={status.tone === 'ready' ? 'Connected' : statusLine} />
   }
 
   // A retired entry: its sign-in stays until it moves, nothing runs on it, and there is no signing in to it again.

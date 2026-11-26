@@ -11,6 +11,7 @@ import { WizardSteps } from '../ui/WizardSteps'
 import { Segmented, SettingsGroup, SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, useAsyncAction } from './parts'
 import { commandLabel, DRIVER_INFO, isApiInstance, nextInstanceLabel, parseArgs, parseEnvLines, registrySourceOf } from './providerView'
+import { LocalModelsStep } from './LocalModelsStep'
 import { RegistryAgentList, RegistryConfirmStep } from './RegistryAgents'
 
 type ConnectKind = 'subscription' | 'api_key' | 'cloud'
@@ -60,8 +61,13 @@ export type AddChoice =
   | { kind: 'api'; key: string; label: string; iconId: string; group: string; option: ProviderAddOption; methods: AddOptionMethod[] }
   /** An agent picked from the ACP registry, installed by Mousse as an entry of `driver`. */
   | { kind: 'registry'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind }
+  /** Model servers running on the computer (Ollama, LM Studio, ...), or one at an address: found when its step opens. */
+  | { kind: 'local'; key: string; label: string; iconId: string; group: string }
 
-const GROUP_ORDER = ['Agents', 'Subscriptions', 'API keys', 'Cloud credentials']
+/** The one Local models choice: always offered, since each server it connects is an entry of its own. */
+const LOCAL_CHOICE: AddChoice = { kind: 'local', key: 'local', label: 'Local models', iconId: 'local', group: 'Local' }
+
+const GROUP_ORDER = ['Agents', 'Subscriptions', 'API keys', 'Cloud credentials', 'Local']
 const API_GROUP: Record<ConnectKind, string> = { subscription: 'Subscriptions', api_key: 'API keys', cloud: 'Cloud credentials' }
 /** Methods in the order they are offered; the first decides the provider's group. */
 const KIND_ORDER: ConnectKind[] = ['subscription', 'api_key', 'cloud']
@@ -142,6 +148,7 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], addOptions: r
     const methods = [...option.methods].sort((a, b) => KIND_ORDER.indexOf(CONNECT_KIND[a]) - KIND_ORDER.indexOf(CONNECT_KIND[b]))
     choices.push({ kind: 'api', key: `api:${option.id}`, label: option.label, iconId: option.id, group: API_GROUP[CONNECT_KIND[methods[0]!]], option, methods })
   }
+  choices.push(LOCAL_CHOICE)
   return choices
 }
 
@@ -149,6 +156,7 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], addOptions: r
 function choiceHint(choice: AddChoice): string | undefined {
   if (choice.kind === 'api') return choice.option.description
   if (choice.kind === 'registry') return DRIVER_INFO[choice.driver].registry?.description
+  if (choice.kind === 'local') return 'Ollama, LM Studio and other model servers on this computer or your network'
   return DRIVER_INFO[choice.driver].description
 }
 
@@ -167,6 +175,8 @@ export interface AddProviderHandlers {
   connectApi: (option: ProviderAddOption, method: AddOptionMethod, apiKey: string) => Promise<string>
   /** Starts the sign-in of an entry just added, in the sign-in dialog. */
   signIn: (instanceId: string, name: string) => void
+  /** Adds the entry of a local server already connected (`pi:<providerId>`) and turns it on; resolves with its id. */
+  connectLocal: (providerId: string) => Promise<string>
 }
 
 /**
@@ -283,7 +293,7 @@ export function AddProviderDialog({
   const signInStep = apiMethod !== undefined && CONNECT_KIND[apiMethod] === 'subscription'
   /** A middle step only when there is a real choice to make: the sign-in method of a model API. */
   const methodStep = selected?.kind === 'api' && selected.methods.length > 1
-  const lastStep = signInStep ? 'Sign in' : selected?.kind === 'api' ? 'Connect' : selected?.kind === 'registry' ? 'Agent' : 'Add'
+  const lastStep = signInStep ? 'Sign in' : selected?.kind === 'api' || selected?.kind === 'local' ? 'Connect' : selected?.kind === 'registry' ? 'Agent' : 'Add'
   const steps = methodStep ? ['Provider', 'Sign-in method', lastStep] : ['Provider', lastStep]
   const last = steps.length - 1
   const summaries = [selected?.label ?? null, ...(methodStep && apiMethod ? [METHOD_LABEL[CONNECT_KIND[apiMethod]]] : []), null]
@@ -572,6 +582,16 @@ export function AddProviderDialog({
                 }
               />
             </SettingsGroup>
+          </div>
+        )}
+
+        {step === last && selected?.kind === 'local' && (
+          <div className="prov-wizard-panel">
+            <LocalModelsStep
+              snapshots={snapshots}
+              disabled={busy !== null}
+              onConnected={async (providerId) => finish(await handlers.connectLocal(providerId))}
+            />
           </div>
         )}
 
