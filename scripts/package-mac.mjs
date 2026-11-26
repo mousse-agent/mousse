@@ -197,7 +197,9 @@ function runChecked(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: 'inherit', ...options })
   if (result.error) throw result.error
   if (result.status !== 0) {
-    process.exit(result.status ?? 1)
+    const error = new Error(`${command} exited with status ${result.status ?? 'unknown'}`)
+    error.exitCode = result.status ?? 1
+    throw error
   }
 }
 
@@ -251,5 +253,10 @@ async function main(argv) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  await main(process.argv.slice(2))
+  try {
+    await main(process.argv.slice(2))
+  } catch (error) {
+    console.error(`[package-mac] ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = typeof error?.exitCode === 'number' ? error.exitCode : 1
+  }
 }
