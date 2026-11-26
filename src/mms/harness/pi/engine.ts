@@ -1533,11 +1533,10 @@ export class PiRpcEngine implements ProviderAdapter {
         missing: ['toolControl'],
         instanceId: this.options.instanceId
       })
-    // The turn emits its ref and registers itself in the same tick as the dispatch, so a Stop sent right after it
-    // reaches the starting turn, also while a local server's list is read again below.
+    // The turn registers itself in the same tick as the dispatch, so a Stop sent right after it reaches the starting
+    // turn, also while a local server's list is read again below.
     const key = randomUUID()
     const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
-    sink.providerRef(ref)
     const starting: StartingTurn = { threadId: input.threadId, cancelled: false }
     this.turns.set(key, starting)
     const startedAt = Date.now()
@@ -1563,6 +1562,9 @@ export class PiRpcEngine implements ProviderAdapter {
         throw refused
       }
     }
+    // The ref is published once the turn may run: a refused turn leaves none on its attempt, so a later switch never
+    // plans a handoff from it. For any other instance this is still the dispatch's tick.
+    sink.providerRef(ref)
     if (definitionTurn || host.bot) {
       try {
         return await this.ephemeralTurn(key, ref, starting, startedAt, input, sink, ctl, host)

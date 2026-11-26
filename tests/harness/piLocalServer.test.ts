@@ -109,7 +109,11 @@ describe('a local model server in the real Pi child', () => {
   it('refuses a model the server does not list (a custom id) before anything starts', async () => {
     const { engine, recorder, project, spawned } = await setup({ models, apiKey: LOCAL_PLACEHOLDER_KEY, pin: (url) => ({ origin: url, keyless: true }), localModel: (id) => (id === 'phi3:medium' ? facts() : undefined) })
     const turn = harness(project, { model: 'my-custom-model' })
+    const refs: unknown[] = []
+    turn.sink.providerRef = (ref) => void refs.push(ref)
     await expect(engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)).rejects.toMatchObject({ code: 'unsupported', message: expect.stringMatching(/does not list my-custom-model/) })
     expect([spawned.length, recorder.connections()]).toEqual([0, 0])
+    // The refused attempt names no native turn: a later switch never plans a handoff from it.
+    expect(refs).toEqual([])
   }, 90_000)
 })
