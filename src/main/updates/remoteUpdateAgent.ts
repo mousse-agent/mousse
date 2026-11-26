@@ -57,6 +57,7 @@ export class RemoteUpdateAgent {
 
   /** Starts taking requests; the service may already be ready. */
   start(ready: boolean): void {
+    if (this.stopped) return
     this.opts.service.on('event', this.onEvent)
     this.opts.service.on('state', this.onState)
     if (ready) void this.attach()

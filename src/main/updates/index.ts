@@ -208,7 +208,7 @@ export function remoteUpdatesRefusal(updater: Pick<DesktopUpdater, 'getState'>, 
 
 /**
  * Takes update requests from the user's other computers while the service is connected, and shows their countdown
- * in every window (`REMOTE_UPDATE_IPC`). Returns null when this app does not take them.
+ * in every window (`REMOTE_UPDATE_IPC`), from when its first window shows. Returns null when this app does not take them.
  */
 export function startRemoteUpdateAgent(
   service: AgentService & { connectionState: string },
@@ -233,6 +233,7 @@ export function startRemoteUpdateAgent(
     if (typeof job === 'string' && job === current?.job) return agent.cancel(job)
     return undefined
   })
-  agent.start(service.connectionState === 'ready')
+  // Registered once the first window shows, so opening the app does no work for it.
+  void firstWindowShown().then(() => agent.start(service.connectionState === 'ready'))
   return agent
 }

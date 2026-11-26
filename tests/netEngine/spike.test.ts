@@ -37,7 +37,9 @@ import { fakeShells, type Spawned } from '../net/bridge/routed/terminalFixture'
 import { cleanupAll as cleanupV1, linked } from '../net/bridge/routed/routerFixture'
 import { fakeLink, type CrossedMessage } from './fakeLink'
 import { mousseVersion } from '../../src/mms/appVersion'
-import { NO_DESKTOP_APP_REASON } from '../../src/mms/updates/selfUpdateReport'
+import { remoteUpdatesFor } from '../../src/mms/updates/remoteUpdates'
+import { accessPreset } from '../../src/shared/net/accessPresets'
+import { NO_DESKTOP_APP_REASON, selfUpdateReportPath } from '../../src/mms/updates/selfUpdateReport'
 import { channelForVersion } from '../../src/shared/updates'
 
 const DAY = 24 * 60 * 60_000
@@ -81,6 +83,7 @@ describe('Bridge over an engine session, v1 off', () => {
   const before = { ownerDb: true, callerDb: true }
   let shells: Spawned[]
   let listedId: string
+  let ownerHome: string
 
   async function connect(): Promise<void> {
     link = fakeLink({ ownerOnCaller, callerOnOwner, grant, endpoint: 'caller.test:7000', crossed })
@@ -159,6 +162,7 @@ describe('Bridge over an engine session, v1 off', () => {
       c = await profile()
     owner = o.mms
     caller = c.mms
+    ownerHome = o.home
     before.ownerDb = existsSync(join(o.home, 'net', 'net.db'))
     before.callerDb = existsSync(join(c.home, 'net', 'net.db'))
     await owner.netEngine.enable()
@@ -559,6 +563,43 @@ describe('Bridge over an engine session, v1 off', () => {
       'owner mousse.sub records <part> = ownerSelf',
       'owner mousse.sub snapshot <part> = ownerSelf'
     ])
+  })
+
+  it('updates the owner from the caller only with Full control there, checked again before it installs', async () => {
+    // The owner's desktop app updates itself (its report) and takes update requests (its registration on its service).
+    writeFileSync(selfUpdateReportPath(ownerHome), JSON.stringify({ channel: 'stable', self: true }))
+    const hub = remoteUpdatesFor(ownerHome)
+    hub.attach('owner-app')
+    cleanups.push(() => hub.detach('owner-app'))
+    const ask = (params: Record<string, unknown>) =>
+      dispatch('net.update.there', { node: ownerOnCaller, ...params }, window('settings', true))
+    // The level is saved; with no helper here, the grant's role stays pending, which this check does not read.
+    const level = (id: 'full' | 'work') =>
+      ownerLocal('bridge.policy', { node: callerOnOwner, ...accessPreset(id).fields }).catch((error) => {
+        if (error?.details?.reason !== 'role_pending') throw error
+      })
+    // The pairing's owner grant alone is not Full control: refused before anything is kept.
+    expect(await ask({ step: 'prepare', version: '9.9.9' })).toMatchObject({ phase: 'failed', error: 'forbidden' })
+    expect(hub.current()).toBeNull()
+
+    await level('full')
+    // Asked again, the owner says it takes requests now (what shows Update in Devices).
+    await ask({ step: 'refresh' })
+    const row = (await dispatch('bridge.nodes', {}, window('settings', true))).nodes.find(
+      (node: { node: string }) => node.node === ownerOnCaller
+    )
+    expect(row.update).toMatchObject({ requests: true })
+
+    const prepared = await ask({ step: 'prepare', version: '9.9.9' })
+    expect(prepared.phase).toBe('preparing')
+    expect(hub.current()).toMatchObject({ version: '9.9.9', from: 'Caller computer' })
+    hub.progress('owner-app', prepared.job, { phase: 'ready' })
+    expect(await ask({ step: 'install', job: prepared.job, runningTurns: 0 })).toMatchObject({ phase: 'countdown' })
+
+    // Lowered to Work on threads during the countdown: the status is refused, and the install never starts.
+    await level('work')
+    expect(await ask({ step: 'status', job: prepared.job })).toMatchObject({ phase: 'failed', error: 'forbidden' })
+    expect(hub.begin('owner-app', prepared.job)).toMatchObject({ go: false, wait: false, job: { error: 'forbidden' } })
   })
 })
 
