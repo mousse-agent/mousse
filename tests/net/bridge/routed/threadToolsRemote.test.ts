@@ -14,7 +14,8 @@
  * - stopping: an agent-started run, a run a person there started, a person's Stop of the launcher with the link up and
  *   with the link down (kept, delivered after a restart), the launcher deleted;
  * - the working count of thread_create's cap: a run going there, a thread idle there, a computer that cannot be asked;
- * - reachability: offline (tried twice, named), a qualified id of a thread nobody here launched, approval_respond.
+ * - reachability: offline (tried twice, named), a qualified id of a thread nobody here launched, approval_respond;
+ * - a subagent there: named by its id here with that computer's id, and by the id there the delegation tools give.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -26,6 +27,7 @@ import { DomainRpcError } from '../../../../src/mms/protocol/domainRegistry'
 import type { RemoteComputersPort } from '../../../../src/mms/protocol/remoteComputersPort'
 import type { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
 import { localized, RemoteLaunchedThreads, remoteReachRefusal } from '../../../../src/mms/orchestrator/RemoteLaunchedThreads'
+import type { RemoteSubagents } from '../../../../src/mms/orchestrator/RemoteSubagents'
 import type { AppToolHost } from '../../../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn, refusalOf, type ReadRefusal } from '../../../run/appToolsFixture'
 import { cleanups, cleanupAll, linked } from './routerFixture'
@@ -693,6 +695,35 @@ describe('thread_list, thread_search and any thread of an allowed computer (issu
     } finally {
       await t.owner.net.request('bridge.workOnThreads', { enabled: true })
     }
+  }, 120_000)
+})
+
+describe('a subagent on another computer, named the way its parent knows it', () => {
+  // Its parent knows it by its id here (delegate_task's childThreadId); its thread there has another id. Rows: that id
+  // here with the computer's id (the id a parent builds), the id there that list_subagents and task_status give.
+  it('reads its thread there, and list_subagents and task_status name that thread', async () => {
+    standInForTurns()
+    // A remote task starts no turn here: the delegation tools only need the engine to say it can record one.
+    vi.spyOn(t.caller.orchestrator as unknown as { effectsEnabled(): boolean }, 'effectsEnabled').mockReturnValue(true)
+    const service = (t.caller.orchestrator as unknown as { remoteSubagents: RemoteSubagents }).remoteSubagents
+    service.pause()
+    const { tool } = await launcher()
+    const started = await tool('delegate_task', { title: `Far fixer ${++seq}`, prompt: 'Fix it there', workspace: 'isolated', computer: nameOf(), clientRequestId: `far-${seq}` })
+    expect(started.isError, JSON.stringify(started.body)).toBeUndefined()
+    const launched = await service.launch(started.body.delegationId)
+    if (launched.ok !== true) throw new Error(JSON.stringify(launched))
+    const there = qualifyId(t.node, launched.remoteThreadId)
+    expect(launched.remoteThreadId).not.toBe(started.body.childThreadId)
+
+    const read = await tool('thread_read', { threadId: qualifyId(t.node, started.body.childThreadId), view: 'summary' })
+    expect(read.isError, JSON.stringify(read.body)).toBeUndefined()
+    expect(read.body).toMatchObject({ threadId: there, computer: nameOf(), view: 'summary' })
+
+    const listed = await tool('list_subagents', {})
+    expect(JSON.parse(listed.text)).toEqual(expect.arrayContaining([expect.objectContaining({ childThreadId: started.body.childThreadId, computer: nameOf(), remoteThreadId: there })]))
+    const status = await tool('task_status', { delegationId: started.body.delegationId })
+    expect(status.body).toMatchObject({ computer: { name: nameOf(), threadId: there } })
+    expect((await tool('thread_read', { threadId: there, view: 'summary' })).body).toMatchObject({ threadId: there })
   }, 120_000)
 })
 
