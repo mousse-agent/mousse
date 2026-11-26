@@ -2,6 +2,7 @@ import { Delegations, DELEGATION_RESULT_MAX_CHARS, childResult } from '../Delega
 import { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
 import {
+  isQuietNoteRow,
   stoppedByPerson,
   TERMINAL_RUN_STATUSES,
   type DelegationRecord,
@@ -30,6 +31,12 @@ export interface ChildBusyInputs {
   inFlightEffects?: boolean
   /** The provider reports background work for the child that a run does not cover. */
   providerBackgroundWork?: boolean
+  /**
+   * The child's agent left work running that will tell it when it ends: a monitor, a background command or a
+   * `keep_working` hold (`ThreadMonitors`). Its end notice wakes the child, and the task publishes from the turn that
+   * answers it; one that ends without a notice (stopped) lets the task publish with the last answer.
+   */
+  threadBackgroundWork?: boolean
   /** The child's live turn holds steers it has not read: they become a follow-up turn once the turn settles (`RunStore.setUnreadSteers`). */
   unreadSteers?: boolean
 }
@@ -42,6 +49,7 @@ export function isChildBusy(runs: readonly Pick<RunRecord, 'status'>[], inputs: 
     inputs.unconsumedInbox ||
     inputs.inFlightEffects === true ||
     inputs.providerBackgroundWork === true ||
+    inputs.threadBackgroundWork === true ||
     inputs.unreadSteers === true
   )
 }
@@ -60,8 +68,8 @@ export function hasLiveRun(store: RunStore, threadId: string): boolean {
 
 /**
  * Whether an inbox row of a child still has to be consumed before the child's task may publish.
- * `pending` and `delivered` rows count, with two exceptions that would otherwise hold a task for
- * ever: a row whose delivery gave up (`payload.deliveryFailed`, exhausted; the owner has its Retry
+ * `pending` and `delivered` rows count, with exceptions that would otherwise hold a task for
+ * ever: a pending note that never starts a turn (`attention: none`), a row whose delivery gave up (`payload.deliveryFailed`, exhausted; the owner has its Retry
  * notice), a delivered row whose delivery the user stopped (the run that carried it was stopped, or
  * the row was detached from its queue item, so nothing will deliver or acknowledge it), and a
  * legacy steer row (`isLegacySteerRow`).
@@ -69,6 +77,10 @@ export function hasLiveRun(store: RunStore, threadId: string): boolean {
 export function isActionableRow(store: RunStore, row: InboxRecord): boolean {
   if (row.status === 'acknowledged') return false
   if (isExhaustedRow(row)) return false
+  // A pending note sent with `attention: none` never starts a turn (`isQuietNoteRow`): it rides with the thread's next
+  // turn, whenever that comes. Waiting for it would hold the task until something else woke the child, maybe never
+  // (the end notice of a background command the person stopped).
+  if (row.status === 'pending') return !isQuietNoteRow(row)
   if (row.status !== 'delivered') return true
   // A delivered row with no owner belongs to nothing: a delivery the user stopped was detached from
   // its queue item (`Inbox.detachDelivery`), and rows delivered before owners were recorded have none.
@@ -137,9 +149,11 @@ export function childBusyInputs(store: RunStore, threadId: string): ChildBusyInp
   const unconsumedInbox = actionableInbox(store, threadId)
   const inFlightEffects = hasInFlightDeliveryEffect(store, threadId)
   const unreadSteers = runningOutboundDelegation || unconsumedInbox || inFlightEffects ? false : store.hasUnreadSteers(threadId)
+  const threadBackgroundWork =
+    runningOutboundDelegation || unconsumedInbox || inFlightEffects || unreadSteers ? false : store.threadBackgroundWork(threadId)
   const providerBackgroundWork =
-    runningOutboundDelegation || unconsumedInbox || inFlightEffects || unreadSteers ? false : store.providerBackgroundWork(threadId)
-  return { runningOutboundDelegation, unconsumedInbox, inFlightEffects, providerBackgroundWork, unreadSteers }
+    runningOutboundDelegation || unconsumedInbox || inFlightEffects || unreadSteers || threadBackgroundWork ? false : store.providerBackgroundWork(threadId)
+  return { runningOutboundDelegation, unconsumedInbox, inFlightEffects, providerBackgroundWork, threadBackgroundWork, unreadSteers }
 }
 
 /** Whether `threadId` is busy now: the hold of every delegation that waits on it. */

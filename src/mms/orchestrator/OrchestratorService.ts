@@ -93,7 +93,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
 import { nativeHelperRules } from '../run/adapters/nativeHelperRuntimes'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
-import { deleteRunResults, readRunResultText } from '../run/delegation/hold'
+import { childBusy, deleteRunResults, readRunResultText } from '../run/delegation/hold'
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
@@ -2064,12 +2064,33 @@ export class OrchestratorService extends EventEmitter {
       startedAt: wake.setAt,
       until: wake.dueAt
     }))
-    return { threadId, items: [...items, ...wakes], providerWork: this.providerBackground.has(threadId), ...(latest ? { latest } : {}) }
+    return {
+      threadId,
+      items: [...items, ...wakes],
+      providerWork: this.providerBackground.has(threadId),
+      ...(latest ? { latest } : {}),
+      ...(this.runEngine ? { busy: this.threadBusy(this.runEngine, threadId) } : {})
+    }
+  }
+
+  /** `childBusy`, never throwing: a thread whose state cannot be read is not held for it. */
+  private threadBusy(engine: RunEngine, threadId: string): boolean {
+    try {
+      return childBusy(engine.store, threadId)
+    } catch {
+      return false
+    }
   }
 
   /** What the thread runs in the background changed: the app is told (`thread.backgroundWork`). */
   backgroundWorkChanged(threadId: string): void {
     this.emit('background-work', { threadId })
+    // What the thread runs holds its tasks (`threadBackgroundWork`): one that ended may let them publish.
+    try {
+      this.runEngine?.store.settleHold(threadId)
+    } catch (error) {
+      console.warn('tasks waiting on background work could not be settled', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
@@ -3070,6 +3091,7 @@ export class OrchestratorService extends EventEmitter {
     this.runEngine?.setDelegationHost(null)
     this.runEngine?.setInFlightCanceller(null)
     this.runEngine?.store.setProviderBackgroundWork(null)
+    this.runEngine?.store.setThreadBackgroundWork(null)
     this.runEngine?.store.setUnreadSteers(null)
     this.questionRouterOff?.()
     this.questionRouterOff = null
@@ -3137,6 +3159,9 @@ export class OrchestratorService extends EventEmitter {
     this.attachInFlightCanceller()
     // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
     engine.store.setProviderBackgroundWork((threadId) => this.providerBackground.has(threadId))
+    // Input (6): what the thread's agent left running (monitors, background commands, holds); each end tells it, and that
+    // turn's answer is the task's result.
+    engine.store.setThreadBackgroundWork((threadId) => this.monitors?.has(threadId) === true)
     // Input (5): steers a live turn has not read yet become a follow-up turn only after its terminal write.
     engine.store.setUnreadSteers((threadId) => this.hasUnreadSteers(threadId))
     this.questionRouterOff = this.routeSubagentQuestions(engine)

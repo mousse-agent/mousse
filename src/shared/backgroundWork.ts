@@ -49,6 +49,13 @@ export interface ThreadBackgroundWork {
   providerWork: boolean
   /** The latest line any item reported. */
   latest?: { id: string; line: string; at: string }
+  /**
+   * The thread's work is not done: a run is live, a notice waits to start or join its next turn, or something it left
+   * (the items above, the provider's work, its own subagents) will tell it when it ends. The rule a subagent's task
+   * waits by before it publishes (`childBusy`); another computer that sent the thread a task reads it the same way.
+   * Absent from older versions.
+   */
+  busy?: boolean
 }
 
 /** The id `threads.stopBackground` takes for the provider's own background work. */
