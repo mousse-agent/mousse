@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { botFilesFolder } from '../../src/mms/bots/grants/compile'
+import { BOT_MCP_SERVER_SWITCH } from '../../src/shared/bots/personal/manifest'
 import type { McpToolDescriptor } from '../../src/shared/integrations'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
@@ -139,7 +140,8 @@ describe('a turn\'s app and MCP calls are counted for it, once each', () => {
     // The owner's one MCP server, as `BotMcp` reads it from the relay's catalogue.
     const readNote: McpToolDescriptor = {
       id: 'srv-notes:read_note', serverId: 'mousse:srv-notes', installationId: 'srv-notes', serverName: 'Notes', toolName: 'read_note',
-      providerName: 'mcp__Notes__read_note__otes', description: 'read_note of Notes', inputSchema: { type: 'object', properties: {} }, readOnlyHint: true
+      providerName: 'mcp__Notes__read_note__otes', description: 'read_note of Notes', inputSchema: { type: 'object', properties: {} }, readOnlyHint: true,
+      configRevision: 'revision-1'
     }
     f.host.mcp = new BotMcp({
       catalog: {
@@ -150,10 +152,15 @@ describe('a turn\'s app and MCP calls are counted for it, once each', () => {
           installationId: 'srv-notes', serverName: 'Notes', toolName: 'read_note', providerName: readNote.providerName
         }]
       },
-      manager: { callTool: async () => ({ content: [] }) as never },
+      // As `McpManager` does: it connects (`connecting`), then the pin's last check runs right before the call is sent.
+      manager: { callTool: async (_name, _args, _project, _signal, _actor, pin) => { connecting?.(); pin?.assertDispatchActive?.(); return { content: [] } as never } },
       enabled: () => true
     })
   })
+
+  /** What changes while the next call connects, before its last check. */
+  let connecting: (() => void) | undefined
+  afterEach(() => { connecting = undefined })
 
   async function work(id: string) {
     const activation = await f.bots.activate({ botId, input: 'Read my notes.', clientRequestId: id })
@@ -204,11 +211,14 @@ describe('a turn\'s app and MCP calls are counted for it, once each', () => {
     expect(f.store.counters(turn.activation.id).toolCalls).toBe(1)
   })
 
-  it('a refused call is not counted', async () => {
+  it.each(['at the relay', 'at its last check, while it connects'] as const)('a call refused %s is not counted', async (where) => {
     await f.bots.service.chatSend({ botId, text: 'What is in my notes?', clientRequestId: 'm1' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const talk = await start(f, activation.id)
-    // A chat turn hands MCP work on to work: the relay's check refuses the call before it reaches the server.
+    // The owner switched the server off: before the call was checked, or once its connection was ready.
+    const off = () => f.bots.service.setPermission(botId, `${BOT_MCP_SERVER_SWITCH}srv-notes`, false)
+    if (where === 'at the relay') off()
+    else connecting = off
     expect((await relayed(talk.prepared.authority, { name: 'today' })).isError).toBe(true)
     expect(f.store.counters(activation.id).toolCalls).toBe(0)
   })

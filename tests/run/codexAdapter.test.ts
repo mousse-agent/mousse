@@ -2199,6 +2199,25 @@ describe('a bot turn on Codex', () => {
     return { bot, calls }
   }
 
+  // A bot that holds the web keeps Codex's hosted web search in work; its chat never has it, so every web call there goes
+  // through Mousse's own web tools and their deadlines (`codexBotWebOff`).
+  it.each([['run', false], ['chat', true]] as const)('a bot holding the web, in its %s lane: hosted web search off is %s', async (lane, off) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const { web_search: _hosted, ...withWeb } = NO_COMMANDS
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: {} }, layers: [] } }),
+      ...threadStart(5, threadParams({ config: { ...(off ? NO_COMMANDS : withWeb), model_provider: 'openai' } })),
+      ...turnStart(6, 'go'),
+      completed('completed')
+    ])
+    await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: { ...bot, lane, appTools: new Set(['web_search', 'web_fetch']) } as never })
+    replay.assertDone()
+  })
+
   it.each(['mousse', 'mousse-relay'])('switches off the owner server %s without an attachment', async (name) => {
     const files = join(home, 'files')
     mkdirSync(files)

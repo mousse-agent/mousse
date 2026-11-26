@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_QUESTION_WITHDRAW_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_REQUEST_TOOL, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_CHAT_NATIVE_OFF, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
@@ -100,9 +100,9 @@ export interface CompileInput {
    * `consult` on the activation thread of a bot with context threads. `memory`: the five
    * `memory_*` tools (Bot Phase 1 §5.10) and the listing of the owner's MCP servers (`mcp_servers`), always on and
    * never grantable, so a bot whose stored grant predates them has them too. `frontDesk`: a chat turn
-   * (docs/plans/bot-always-free.md): it gets the work and reminder tools (`BOT_WORK_TOOLS`), and not what can take long
-   * (`BOT_WORK_ONLY_TOOLS`, the browser, the owner's MCP tools), which its work runs with instead. The grant and its
-   * digest stay the same: only what this turn is offered narrows.
+   * (docs/plans/bot-always-free.md): it gets the work and reminder tools (`BOT_WORK_TOOLS`), and not commands, the
+   * computer or the browser (`BOT_WORK_ONLY_TOOLS`), which its work runs with instead. The grant and its digest stay the
+   * same: only what this turn is offered narrows.
    */
   botTools?: {
     escalate: boolean
@@ -227,7 +227,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // The owner's MCP tools (every server set up now unless switched off for the bot, `BotEngine.effectiveManifest`, and any
   // an older grant names per tool) reach every runtime through Mousse, which checks each
   // call against these pairs before the server sees it: the MCP relay on Claude Code and Codex, the user MCP proxy on
-  // Pi. Each turn is offered only the granted tools of servers set up now (`BotMcp.offered`); a chat turn none.
+  // Pi. Each turn is offered only the granted tools of servers set up now (`BotMcp.offered`); a chat turn through its
+  // catalogue.
   // `shell` ("run commands") is one permission, granted as a whole: each runtime runs its commands
   // from the bot's files folder, in its own sandbox where it has one (bot-architecture.md §3.5).
   const scratch = real(input.scratch)
@@ -275,8 +276,9 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(threads === 'all' ? BOT_THREAD_ACT_TOOLS : []),
     ...(schedules ? BOT_SCHEDULE_READ_TOOLS : []),
     ...(schedules === 'all' ? BOT_SCHEDULE_ACT_TOOLS : []),
-    // A secret's command is a command: only where the turn runs commands (work with "run commands"; never the chat).
-    ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => (tool !== 'secret_run' || manifest.tools.includes('shell')) && (tool !== 'secret_fetch' || own?.frontDesk !== true)) : []),
+    // A secret's command is a command: only where the turn runs commands (work with "run commands"; never the chat). A
+    // bound service's read is a quick call: the chat makes it too, within its budgets.
+    ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => tool !== 'secret_run' || manifest.tools.includes('shell')) : []),
     ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
     ...(shared?.tasks ? BOT_TASK_TOOLS : []),
     ...(skills.length || allSkills ? ['list_skills', 'load_skill'] : []),
@@ -344,16 +346,21 @@ export function subagentManifest(manifest: BotManifest): BotManifest {
 }
 
 const WORK_ONLY: ReadonlySet<string> = new Set(BOT_WORK_ONLY_TOOLS)
+const NATIVE_OFF: ReadonlySet<string> = new Set([...BOT_WORK_ONLY_TOOLS, ...BOT_CHAT_NATIVE_OFF])
 
 /**
- * What a chat turn is offered of a grant: everything but what can take long, which its work does (`BOT_WORK_ONLY_TOOLS`,
- * the browser, and the owner's MCP tools).
+ * What a chat turn is offered of a grant: everything but commands, the computer and the browser, which its work does
+ * (`BOT_WORK_ONLY_TOOLS`). Its web is Mousse's own web tools, never the runtime's (`BOT_CHAT_NATIVE_OFF`), and it keeps
+ * the owner's MCP tools, which it reaches through its catalogue. Its quick calls keep to its budgets (`BotQuickCalls`).
  */
 export function frontDeskManifest(manifest: BotManifest): BotManifest {
   return {
     ...manifest,
-    tools: manifest.tools.filter((tool) => !WORK_ONLY.has(tool)),
-    appTools: manifest.appTools.filter((tool) => !WORK_ONLY.has(tool) && tool !== BOT_BROWSER_PERMISSION),
-    mcp: []
+    tools: manifest.tools.filter((tool) => !NATIVE_OFF.has(tool)),
+    // A grant may hold the web as a built-in only: in the chat that is Mousse's web tool of the same name.
+    appTools: [...new Set([
+      ...manifest.appTools.filter((tool) => !WORK_ONLY.has(tool) && tool !== BOT_BROWSER_PERMISSION),
+      ...BOT_CHAT_NATIVE_OFF.filter((tool) => (manifest.tools as readonly string[]).includes(tool))
+    ])]
   }
 }

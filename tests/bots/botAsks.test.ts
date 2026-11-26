@@ -430,10 +430,10 @@ describe('asks nobody needs', () => {
     expect(f.store.activation(first.id)).toMatchObject({ status: 'done' })
   })
 
-  it('the web tools the starter grant holds are no ask: the chat hands the work off, and work has them', async () => {
+  it('the web tools the starter grant holds are no ask: the chat and work both have them', async () => {
     const { prepared, payload } = await chat('look something up', 'm-web')
     for (const tool of ['web_fetch', 'web_search'])
-      expect(prepared.authority.escalate!({ permission: { tool }, reason: 'To read pages.' })).toBe(BOT_WORK_HAS_TEXT)
+      expect(prepared.authority.escalate!({ permission: { tool }, reason: 'To read pages.' })).toMatch(/^The owner already allowed this/)
     await finish(f, payload, 'completed', { text: 'On it.' })
     const work = await run('r-web')
     for (const tool of ['web_fetch', 'web_search'])

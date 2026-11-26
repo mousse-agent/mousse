@@ -124,14 +124,14 @@ describe('compileBotThread', () => {
       expect(compile({ grant: manifest({ appTools: [tool] }) }), tool).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', reason: expect.stringContaining(tool) } })
   })
 
-  it('compiles the owner\'s MCP tools for work, and none for a chat turn', () => {
+  it('compiles the owner\'s MCP tools for work and for a chat turn, which calls them within its budgets', () => {
     const grant = manifest({ mcp: [{ serverId: 'srv-1', tool: 'create_issue' }, { serverId: 'srv-1', tool: 'list_issues' }] })
     const work = compile({ grant })
     if (!work.ok) throw new Error(work.error.message)
     expect(work.permissions.mcp).toEqual(['srv-1::create_issue', 'srv-1::list_issues'])
     const chat = compile({ grant, botTools: { escalate: true, consult: false, memory: true, frontDesk: true } })
     if (!chat.ok) throw new Error(chat.error.message)
-    expect(chat.permissions.mcp).toEqual([])
+    expect(chat.permissions.mcp).toEqual(['srv-1::create_issue', 'srv-1::list_issues'])
     // The listing of the owner's servers is always on, in both lanes, and never in the grant.
     expect(chat.permissions.appTools).toContain('mcp_servers')
   })
@@ -151,12 +151,12 @@ describe('compileBotThread', () => {
     expect(off.permissions).toMatchObject({ skills: [], appTools: expect.not.arrayContaining(['list_skills']) })
   })
 
-  it('offers secret_fetch in work with no grant, never in the chat', () => {
+  it('offers secret_fetch with no grant, in work and in the chat', () => {
     const grant = manifest()
     for (const frontDesk of [false, true]) {
       const compiled = compile({ grant, botTools: { escalate: true, consult: false, memory: true, owner: true, frontDesk } })
       if (!compiled.ok) throw new Error(compiled.error.message)
-      expect(compiled.permissions.appTools.includes('secret_fetch')).toBe(!frontDesk)
+      expect(compiled.permissions.appTools.includes('secret_fetch')).toBe(true)
     }
   })
 

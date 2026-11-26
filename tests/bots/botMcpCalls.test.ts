@@ -56,7 +56,9 @@ function connection(answer: (signal: AbortSignal) => Promise<unknown> = async ()
   return {
     calls,
     manager: {
-      callTool: vi.fn(async (providerName: string, _args: Record<string, unknown>, _project: string | undefined, signal: AbortSignal | undefined, _actor: unknown, _expected: undefined, options: unknown) => {
+      callTool: vi.fn(async (providerName: string, _args: Record<string, unknown>, _project: string | undefined, signal: AbortSignal | undefined, _actor: unknown, expected: { assertDispatchActive?: () => void } | undefined, options: unknown) => {
+        // As the manager does once connected: the pin's last check, right before the server sees the call.
+        expected?.assertDispatchActive?.()
         calls.push({ providerName, options })
         return answer(signal!) as never
       })
@@ -64,8 +66,17 @@ function connection(answer: (signal: AbortSignal) => Promise<unknown> = async ()
   }
 }
 
+/** The owner's GitHub server as the catalogue lists it now, with `listIssues` at an installed revision. */
+const githubListing = () => {
+  const descriptor = { id: 'srv-github:list_issues', serverId: 'srv-github', installationId: 'srv-github', serverName: 'GitHub', toolName: 'list_issues', providerName: listIssues.providerName, description: 'Lists issues.', inputSchema: { type: 'object' }, configRevision: 'revision-1' }
+  return {
+    ensure: async () => undefined,
+    servers: () => [{ installationId: 'srv-github', serverName: 'GitHub', failing: false, starting: false, tools: [descriptor] }],
+    listing: () => [{ name: listIssues.name, description: '', inputSchema: { type: 'object' }, installationId: 'srv-github', serverName: 'GitHub', toolName: 'list_issues', providerName: listIssues.providerName }]
+  }
+}
 const mcpOver = (manager: ReturnType<typeof connection>['manager'], callMs?: number) => new BotMcp({
-  catalog: { ensure: async () => undefined, servers: () => [], listing: () => [] },
+  catalog: githubListing(),
   manager,
   enabled: () => true,
   ...(callMs ? { callMs } : {})
@@ -97,6 +108,36 @@ describe('callForBot: the grant decides before the server sees anything', () => 
     expect(await callForBot({ bot: other.authority, name: 'GitHub__delete_repo', args: {}, signal: new AbortController().signal, mcp: mcpOver(manager), known })).toMatchObject({ isError: true })
     expect(other.checks).toEqual([{ kind: 'mcp', server: 'srv-github', tool: 'delete_repo', serverName: 'GitHub', args: {} }])
     expect(manager.callTool).not.toHaveBeenCalled()
+  })
+
+  // How the tool the turn was offered stands when its call goes out: before it connects, or once connected (`connecting`).
+  // The manager could still call it in each case; only a current, valid listing at an installed revision sends it.
+  it.each([
+    ['relisted with an unusable schema', false], ['no longer listed', false], ['listed with no installed revision', false],
+    ['relisted with an unusable schema', true], ['no longer listed', true]
+  ] as const)('a call whose tool is %s (while it connects: %s) is never sent', async (change, connecting) => {
+    const { authority } = bot(['srv-github::list_issues'], [listIssues])
+    const catalog = githubListing()
+    const listed = catalog.servers()
+    let current = listed
+    const apply = () => {
+      const [server] = listed
+      const [tool] = server!.tools
+      if (change === 'no longer listed') current = [{ ...server!, tools: [] }]
+      else if (change === 'listed with no installed revision') current = [{ ...server!, tools: [{ ...tool!, configRevision: undefined as never }] }]
+      else current = [{ ...server!, tools: [{ ...tool!, schemaError: 'not an object schema' } as never] }]
+    }
+    if (!connecting) apply()
+    const { manager, calls } = connection()
+    const callTool = manager.callTool.getMockImplementation()!
+    manager.callTool.mockImplementation(async (...args) => {
+      if (connecting) apply()
+      return callTool(...args)
+    })
+    const mcp = new BotMcp({ catalog: { ...catalog, servers: () => current }, manager, enabled: () => true })
+    const outcome = await callForBot({ bot: authority, name: 'GitHub__list_issues', args: {}, signal: new AbortController().signal, mcp })
+    expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('nothing was sent') })
+    expect(calls).toEqual([])
   })
 
   it('a stopped activation runs nothing', async () => {

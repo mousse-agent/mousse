@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost, botAskedText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_DUPLICATE_TEXT, BOT_CHAT_WEB_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -369,8 +369,9 @@ describe('answers and continuations', () => {
     expect(store.activation(activation.id)!.grantDigest).toBe(grant.digest)
     const next = bots.prepare(payloadOf(store.dispatch(activation.id, 2)!.runId!))
     if ('refused' in next) throw new Error(next.refused)
-    // The chat is the front desk: the web is its work's now, with no new card.
-    expect(next.authority.check({ kind: 'builtin', tool: 'web_fetch', nativeName: 'web_fetch', args: {} })).toEqual({ ok: false, refused: { text: BOT_WORK_HAS_TEXT, askId: '' } })
+    // The chat's web is Mousse's own web tools, with no new card: never the runtime's.
+    expect(next.authority.check({ kind: 'builtin', tool: 'web_fetch', nativeName: 'web_fetch', args: {} })).toEqual({ ok: false, refused: { text: BOT_CHAT_WEB_TEXT, askId: '' } })
+    expect(next.authority.check({ kind: 'app', tool: 'web_fetch', args: {} })).toEqual({ ok: true })
     const run = await running('Fetch the footer page', 'r-web', 'run')
     expect(run.prepared.authority.check({ kind: 'builtin', tool: 'web_fetch', nativeName: 'web_fetch', args: {} })).toEqual({ ok: true })
   })
