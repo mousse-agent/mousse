@@ -18,7 +18,7 @@ import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
-import { pullRequestWakeEvent, threadWakeEvent, type WakePullRequestState } from '../wakeSources'
+import { pullRequestWakeEvent, threadWakeEvent, type WakePullRequestState, type WakeThreadState } from '../wakeSources'
 import { WakeDetector, type WakeCheckOnly } from '../../wakes/wakeDetector'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
@@ -213,9 +213,10 @@ export interface BotEngineHost {
   /**
    * A thread a bot's wake waits on, as it stands now, seen from the bot's home thread `from`: `unreachable` when the bot
    * may not see it (a bot's or a private thread, a subagent); `running` while a run of it works, waits or is paused by a
-   * usage limit; its last run when idle. Absent: no wakes on threads here.
+   * usage limit; its last run when idle. `runId`: the run a wake waits for (`wakeThreadState`). Absent: no wakes on
+   * threads here.
    */
-  wakeThread?(from: string, threadId: string): { state: 'running' | 'idle' | 'archived' | 'deleted' | 'unreachable'; title?: string; lastRun?: { status: string; endedAt?: string } }
+  wakeThread?(from: string, threadId: string, runId?: string): WakeThreadState
   /**
    * A pull request's state, read through a project of the owner's whose repository is `repo` ("owner/name"). `none` when
    * no project is; `problem` when it could not be read. Absent: no wakes on pull requests here.
@@ -948,9 +949,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     host.store.launchChanged = (botId) => this.releaseChatProcess(botId)
     this.wakeEvents = new WakeDetector<BotReminderRow & { setAt: string }>({
       waiting: () => this.store.waitingEventWakes().map((wake) => ({ ...wake, setAt: wake.createdAt })),
-      threadState: (wake, threadId) => {
+      threadState: (wake, threadId, runId) => {
         const home = this.store.registry(wake.botId)?.homeThreadId
-        return home ? this.host.wakeThread?.(home, threadId) : undefined
+        return home ? this.host.wakeThread?.(home, threadId, runId) : undefined
       },
       pullRequestState: (_wake, repo, number) => this.host.pullRequestState?.(repo, number),
       // A watcher fires from its process (`watcherEnded`); one that no longer runs here was ended by a restart.
@@ -963,8 +964,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         try { this.changed({ botId: wake.botId }) } finally { this.armDue() }
         return true
       },
-      // Read past its deadline with nothing that happened by then: delivered now as given up (`deliverWake`).
-      expire: (wake) => { this.reminderRetryAt.delete(wake.id); this.armDue(); return true },
+      // Read past its deadline with nothing that happened by then: delivered now as given up (`deliverWake`), saying so
+      // when the last read failed.
+      expire: (wake, at, why) => {
+        if (why.reason !== 'expired' && !this.store.fireWake(wake.id, why, new Date(at).toISOString())) return false
+        this.reminderRetryAt.delete(wake.id)
+        this.armDue()
+        return true
+      },
       now: () => this.now()
     })
     this.watchers = new BotWatchers({
@@ -10281,8 +10288,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
         for (const reminder of this.store.dueReminders(now.toISOString())) {
           if ((this.reminderRetryAt.get(reminder.id) ?? 0) > now.getTime()) continue
-          // A wake whose pull request is being read waits for the read: what it shows may have happened by the deadline.
-          if (this.wakeEvents.isReading(reminder.id)) { this.reminderRetryAt.set(reminder.id, now.getTime() + REMINDER_RETRY_MS); continue }
+          // A wake on a pull request is read once more at its deadline: what it shows may have happened by then.
+          if (reminder.wake && !reminder.fired && this.wakeEvents.atDeadline({ ...reminder, setAt: reminder.createdAt })) { this.reminderRetryAt.set(reminder.id, now.getTime() + REMINDER_RETRY_MS); continue }
           try {
             await this.deliverReminder(reminder, now)
             this.reminderRetryAt.delete(reminder.id)

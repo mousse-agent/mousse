@@ -14,6 +14,7 @@ import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
 import { isThreadWakeRow, type ThreadWakePayload } from '../../src/mms/run/types'
+import { wakeFiredLabel } from '../../src/shared/bots/personal/wakes'
 
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
@@ -72,5 +73,30 @@ describe('a wake on a thread whose run ends while its turn still holds the threa
     // A bot's wakes on the thread are told the same outcome.
     expect(bots).toBeDefined()
     expect(bots).toHaveBeenCalledWith(worker.id, expect.objectContaining({ status: 'failed' }))
+  }, 60_000)
+
+  it('waits for the run that worked when it was set: a queued message taken back does not wake it, and that run\'s end does', async () => {
+    const services = profile()
+    const watcher = services.threads.createThread('Reviewer')
+    const worker = services.threads.createThread('Port the parser')
+    const first = await running(services, worker.id, 'first')
+    services.threadWakes.start()
+    const set = await services.threadWakes.add(watcher.id, { brief: 'Review what the parser port wrote.', event: { kind: 'thread', threadId: worker.id } })
+    const settle = async () => { for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve)) }
+    const wakeRows = () => services.runEngine.inbox.listForThread(watcher.id).filter(isThreadWakeRow)
+
+    // A message queued behind the run, then taken back: its queued run ends cancelled (`removeQueuedItem`).
+    const queued = await services.runEngine.dispatch({ kind: 'send', threadId: worker.id, clientRequestId: 'queued', source: 'gui' })
+    if (queued.status !== 'accepted') throw new Error('send rejected')
+    expect(services.runEngine.getRun(queued.runId)?.status).toBe('queued')
+    services.runEngine.markTerminal(queued.runId, 'cancelled', { interruptedBy: 'user' })
+    await settle()
+    expect(wakeRows()).toEqual([])
+    expect(services.threadWakes.list(watcher.id).map((wake) => wake.wakeId)).toEqual([set.wakeId])
+
+    services.runEngine.markTerminal(first, 'completed')
+    await settle()
+    expect(wakeRows().map((row) => [(row.payload as ThreadWakePayload).wakeId, (row.payload as ThreadWakePayload).label]))
+      .toEqual([[set.wakeId, wakeFiredLabel({ kind: 'thread', threadId: worker.id, status: 'completed', title: 'Port the parser' })]])
   }, 60_000)
 })

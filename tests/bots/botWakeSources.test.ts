@@ -26,6 +26,21 @@ describe('a thread as a wake sees it', () => {
   ])('%s', (_name, over, expected) => {
     expect(wakeThreadState(deps(over as Partial<WakeThreadDeps>), 'home', 't1')).toEqual(expected)
   })
+
+  /** A wake waits for the run that worked when it was set; the thread's other runs don't end it. */
+  const runs: Record<string, { status: string; endedAt?: string; ended: boolean }> = {
+    r1: { status: 'failed', endedAt: '2026-11-15T10:00:00.000Z', ended: true },
+    r2: { status: 'running', ended: false }
+  }
+  it.each([
+    ['working, as the run it works on now', undefined, { working: () => true }, { state: 'running', title: 'Fix login', runId: 'r2' }],
+    ['its run ended, though the next one works now: that run\'s outcome', 'r1', { working: () => true }, { state: 'idle', title: 'Fix login', lastRun: { status: 'failed', endedAt: '2026-11-15T10:00:00.000Z' } }],
+    ['its run works, though another run of the thread just ended', 'r2', { lastRun: () => ({ status: 'cancelled' }) }, { state: 'running', title: 'Fix login', runId: 'r2' }],
+    ['its run unknown: as the thread stands', 'gone', { working: () => true }, { state: 'running', title: 'Fix login', runId: 'r2' }]
+  ])('a wake on one run: %s', (_name, runId, over, expected) => {
+    const seen = wakeThreadState(deps({ currentRun: () => 'r2', run: (_thread, id) => runs[id], ...(over as Partial<WakeThreadDeps>) }), 'home', 't1', runId)
+    expect(seen).toEqual(expected)
+  })
 })
 
 describe('a pull request through the owner\'s projects', () => {
@@ -66,6 +81,21 @@ describe('when what a pull request wake waits for happened, by the host clock', 
     const happened = pullRequestWakeHappened({ kind: 'pr', repo: 'acme/app', number: 12, ...(on ? { on } : {}), ...(on === 'review' ? { reviewAfter: { at: null, ids: [] } } : {}) }, read, '2026-11-20T10:00:00Z')
     expect(happened).toBeDefined()
     expect(happened!.at).toBe(expected)
+  })
+
+  /** One read shows what the wake waits for and the merge or close: the one that came first, by its own time, wins. */
+  const review = (submittedAt?: string) => ({ id: 'r1', state: 'approved' as const, author: 'kim', ...(submittedAt ? { submittedAt } : {}) })
+  it.each<[string, 'checks' | 'review', WakePullRequestState, string]>([
+    ['a review, then the merge: the review', 'review', { state: 'merged', mergedAt: '2026-11-20T10:07:00Z', reviews: [review('2026-11-20T10:05:00Z')] }, 'review'],
+    ['the merge, then a review: the merge', 'review', { state: 'merged', mergedAt: '2026-11-20T10:05:00Z', reviews: [review('2026-11-20T10:07:00Z')] }, 'pr_merged'],
+    ['a review, then the close: the review', 'review', { state: 'closed', closedAt: '2026-11-20T10:07:00Z', reviews: [review('2026-11-20T10:05:00Z')] }, 'review'],
+    ['a review, and a merge with no time: the review', 'review', { state: 'merged', reviews: [review('2026-11-20T10:05:00Z')] }, 'review'],
+    ['checks finished, then the merge: the checks', 'checks', { state: 'merged', mergedAt: '2026-11-20T10:07:00Z', headSha: 'abc1234', checkRuns: checks('2026-11-20T10:05:00Z') }, 'checks'],
+    ['checks with no time, and the merge: the merge', 'checks', { state: 'merged', mergedAt: '2026-11-20T10:07:00Z', headSha: 'abc1234', checkRuns: checks(undefined) }, 'pr_merged']
+  ])('%s', (_name, on, read, expected) => {
+    const happened = pullRequestWakeHappened({ kind: 'pr', repo: 'acme/app', number: 12, on, ...(on === 'review' ? { reviewAfter: { at: null, ids: [] } } : {}) }, read, '2026-11-20T10:00:00Z')
+    const fired = happened!.fired
+    expect(fired.kind === 'ended' ? fired.reason : fired.kind === 'pr' ? fired.state : fired.kind).toBe(expected)
   })
 })
 
