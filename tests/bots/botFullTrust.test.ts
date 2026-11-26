@@ -213,6 +213,23 @@ describe('Allow everything, row by row', () => {
     f.bots.service.setPermission(botId, shell()!.id, true)
     expect((await start(f, await activate('on'))).prepared.authority.check(command)).toEqual({ ok: true })
   })
+
+  it.each([
+    ['only Allow everything gave it: it goes with Allow everything', () => {}, false],
+    ['the grant named it too: it stays after Allow everything', () => { approve((held) => ({ ...held, tools: [...held.tools, 'shell'] })) }, true]
+  ] as const)('switched off and on again, Run commands is as it was: %s', async (_name, setup, stays) => {
+    setup()
+    f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, true)
+    const shell = () => f.bots.service.get(botId).permissions.find((item) => /run commands/i.test(item.title))!
+    f.bots.service.setPermission(botId, shell().id, false)
+    f.bots.service.setPermission(botId, shell().id, true)
+    const on = await start(f, await activate('on'))
+    expect(on.prepared.authority.check(command)).toEqual({ ok: true })
+    await finish(f, on.payload, 'completed', { text: 'Done.' })
+    f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, false)
+    expect((await start(f, await activate('after'))).prepared.authority.check(command)).toMatchObject({ ok: stays })
+    expect(f.bots.service.get(botId).permissions.some((item) => /run commands/i.test(item.title))).toBe(stays)
+  })
 })
 
 describe('approval and the runtime read Allow everything the same way', () => {
@@ -246,6 +263,24 @@ describe('approval and the runtime read Allow everything the same way', () => {
     await f.bots.service.answer(botId, exportAsk.id, 'allow')
     expect(f.store.escalation(card.id)!.status).toBe('open')
   })
+
+  it("an open card is marked Allowed only for what the bot's revision gets, not all an Allow everything grant gives", async () => {
+    f.bots.setFullTrust(botId, true)
+    // A narrower revision, published with no approval: Allow everything left out, so the bot gets only what it names.
+    const entry = f.bots.get(botId)
+    const { fullTrust: _on, ...rest } = entry.published!.permissions
+    f.bots.publish(botId, f.bots.save({ ...entry.draft, permissions: rest }, entry.draftHash).draftHash)
+    const asking = await start(f, await activate('ask'))
+    expect(asking.prepared.authority.check(command)).toMatchObject({ ok: false })
+    asking.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })
+    asking.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads.' })
+    await finish(f, asking.payload, 'completed', { text: 'Asked.' })
+    const card = (tool: string) => f.store.escalations({ botId }).find((ask) => 'tool' in ask.permission && ask.permission.tool === tool)!
+    // Allow on the threads card settles every open card the bot now gets: not commands, which its revision leaves out.
+    await f.bots.service.answer(botId, card('threads').id, 'allow')
+    expect(card('shell').status).toBe('open')
+    expect((await start(f, await activate('after'))).prepared.authority.check(command)).toMatchObject({ ok: false })
+  })
 })
 
 describe('a chat turn waiting at a card ends at every narrowing', () => {
@@ -266,6 +301,51 @@ describe('a chat turn waiting at a card ends at every narrowing', () => {
     await flush()
     expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
     expect(f.store.escalation(ask!.id)!.status).toBe('withdrawn')
+    await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
+    await flush()
+    expect(f.store.activationByKey('chat:next')!.status).toBe('running')
+  })
+
+  const withShell = () => { approve((held) => ({ ...held, tools: [...held.tools, 'shell'] })) }
+  const removeShell = () => { f.bots.service.revokePermission(botId, shellRow().id) }
+  /** A run asks to use the owner's threads and the owner allows it: a grant change that has nothing to do with the chat. */
+  const allowThreads = async () => {
+    const run = await start(f, await activate('threads'))
+    run.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To read your threads.' })
+    await finish(f, run.payload, 'completed', { text: 'Asked.' })
+    const ask = f.store.openAsks(botId).find((open) => 'tool' in open.permission && open.permission.tool === 'threads')!
+    await f.bots.service.answer(botId, ask.id, 'allow')
+  }
+  // What the grant is when the turn reaches its cards, after it changed while the turn was still writing its reply.
+  it.each([
+    ['Allow everything off', 'ends', () => { f.bots.setFullTrust(botId, true) }, () => { f.bots.service.setPermission(botId, BOT_FULL_TRUST_PERMISSION, false) }],
+    ['Remove', 'ends', withShell, removeShell],
+    ['Remove, then an Allow of something else', 'ends', withShell, async () => { removeShell(); await allowThreads() }],
+    ['Remove, then Allow everything on, which gives it all again', 'waits', withShell, () => { removeShell(); f.bots.setFullTrust(botId, true) }]
+  ] as const)('%s while the turn that asked is still finishing: it %s at its card', async (_name, outcome, setup, change) => {
+    setup()
+    await f.bots.service.chatSend({ botId, text: 'Export your memory', clientRequestId: 'wall' })
+    const turn = await start(f, f.store.activationByKey('chat:wall')!.id)
+    turn.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'You asked.' })
+    const ask = f.store.openAsks(botId).find((open) => 'ask' in open.permission)!
+    // The card is recorded and the turn is still writing its reply when the grant changes.
+    await change()
+    await flush()
+    const id = turn.payload.activationId
+    expect(f.store.activation(id)!.status).toBe('running')
+    await finish(f, turn.payload, 'completed', { text: 'Pick a folder.' })
+    if (outcome === 'waits') {
+      // It waits under the grant in place, so the owner's answer continues it there.
+      expect(f.store.activation(id)).toMatchObject({ status: 'waiting_grant', grantDigest: f.store.activeGrant(botId)!.digest })
+      await f.bots.service.answer(botId, ask.id, 'not_now')
+      await runDispatch(f, id, 2, { text: 'All right.' })
+      expect(f.store.activation(id)!.status).toBe('done')
+      return
+    }
+    expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
+    expect(f.store.escalation(ask.id)!.status).toBe('withdrawn')
+    expect(chatOf(f, botId).some((message) => message.kind === 'notice' && message.text === 'I stopped there: my permissions changed.')).toBe(true)
+    // Its slot is free: the owner's next message runs at once.
     await f.bots.service.chatSend({ botId, text: 'never mind', clientRequestId: 'next' })
     await flush()
     expect(f.store.activationByKey('chat:next')!.status).toBe('running')
@@ -309,5 +389,31 @@ describe('the repeat guard compares what grants give', () => {
     approve((held) => ({ ...held, tools: [...held.tools, 'shell'] }))
     expect(f.store.activeGrant(botId)!.digest).not.toBe(before)
     expect(await asksAgain('t2')).toBe(BOT_ASK_DUPLICATE_TEXT)
+  })
+
+  it('holds when the grant drops an older work time, which nothing reads', async () => {
+    approve((held) => ({ ...held, budget: { ...held.budget, maxActiveMs: 3_600_000 } }))
+    expect(await deniedExport('w1')).not.toBe(BOT_ASK_DUPLICATE_TEXT)
+    const before = f.store.activeGrant(botId)!.digest
+    approve((held) => { const { maxActiveMs: _gone, ...budget } = held.budget; return { ...held, budget } })
+    expect(f.store.activeGrant(botId)!.digest).not.toBe(before)
+    expect(await asksAgain('w2')).toBe(BOT_ASK_DUPLICATE_TEXT)
+  })
+
+  it('holds however many Not nows under other grants came since the owner last wrote', async () => {
+    const first = f.bots.get(botId).published!.permissions
+    expect(await deniedExport('a1')).not.toBe(BOT_ASK_DUPLICATE_TEXT)
+    // A run's Not now under each of many other grants (a different turn limit each), with no owner message between.
+    for (let turns = 1; turns <= 51; turns += 1) {
+      approve(withLimits({ maxTurns: turns }))
+      f.clock.now += 25 * 60 * 60_000
+      const run = await start(f, await activate(`b${turns}`))
+      expect(run.prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
+      await finish(f, run.payload, 'completed', { text: 'Asked.' })
+      for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'not_now')
+    }
+    approve(() => first)
+    f.clock.now += 25 * 60 * 60_000
+    expect(await asksAgain('a2')).toBe(BOT_ASK_DUPLICATE_TEXT)
   })
 })

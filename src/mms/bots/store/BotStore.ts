@@ -1417,6 +1417,12 @@ export class BotStore {
     return row ? { botId, digest: row.digest as string, manifest: JSON.parse(row.manifest_json as string) as BotManifest, approvedAt: row.approved_at as string } : undefined
   }
 
+  /** The grant approved with `digest`, active or replaced since (its latest approval), or undefined. */
+  grantByDigest(botId: string, digest: string): Pick<BotGrantRow, 'digest' | 'manifest'> | undefined {
+    const row = this.get("SELECT digest, manifest_json FROM bot_grants WHERE bot_id = ? AND digest = ? AND (revoked_at IS NULL OR revoked_at NOT LIKE 'off:%') ORDER BY grant_id DESC LIMIT 1", botId, digest)
+    return row ? { digest: row.digest as string, manifest: JSON.parse(row.manifest_json as string) as BotManifest } : undefined
+  }
+
   /** Inactive grant snapshots: older builds exclude these through their existing revoked_at check. */
   disabledPermissions(botId: string): Array<{ id: string; manifest: BotManifest }> {
     return this.all("SELECT revoked_at, manifest_json FROM bot_grants WHERE bot_id = ? AND revoked_at LIKE 'off:%'", botId)
@@ -1904,11 +1910,12 @@ export class BotStore {
   }
 
   /**
-   * The bot's Not nows to a fingerprint since the owner last allowed it, newest first (at most `limit`): the asks the repeat
-   * guard reads.
+   * The bot's Not nows to a fingerprint since the owner last allowed it, newest first: the asks the repeat guard reads.
+   * Only those answered since the owner last wrote (`ownerLastWroteAt`; all of them when they never have): an older one
+   * holds nothing, however few or many came after it.
    */
-  deniedSinceAllowed(botId: string, fingerprint: string, limit = 50): BotEscalationRow[] {
-    const rows = this.all("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC LIMIT ?", botId, fingerprint, limit).map(escalationOf)
+  deniedSinceAllowed(botId: string, fingerprint: string): BotEscalationRow[] {
+    const rows = this.all("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND answered_at IS NOT NULL AND answered_at >= ? ORDER BY answered_at DESC, rowid DESC", botId, fingerprint, this.ownerLastWroteAt(botId)).map(escalationOf)
     const allowed = rows.findIndex((row) => row.status !== 'denied')
     return allowed < 0 ? rows : rows.slice(0, allowed)
   }
