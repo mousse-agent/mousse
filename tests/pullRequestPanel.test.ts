@@ -10,7 +10,9 @@ import {
   commentFileLink,
   commentFileTarget,
   groupPullRequestComments,
-  htmlImagesToLinks,
+  htmlImagesToMarkdown,
+  inlineImageUrl,
+  checkSummary,
   prepareCommentBody,
   pullRequestBadge,
   pullRequestPanelState,
@@ -89,8 +91,9 @@ const detail = (patch: Partial<PullRequestDetail> = {}): PullRequestDetail => ({
 })
 
 const NOW = Date.parse('2026-10-26T10:00:00Z')
+// Comments drawn, as after Load comments; the tests that are about Load comments pass false.
 const render = (state: PullRequestPanelState, props: Record<string, unknown> = {}) =>
-  renderToStaticMarkup(createElement(PullRequestPanelView, { state, now: NOW, ...props }))
+  renderToStaticMarkup(createElement(PullRequestPanelView, { state, now: NOW, initiallyShowComments: true, ...props }))
 const ready = (value: PullRequestDetail, staleError: string | null = null): PullRequestPanelState => ({ kind: 'ready', detail: value, staleError })
 const count = (html: string, needle: string) => html.split(needle).length - 1
 
@@ -367,37 +370,64 @@ describe('what the panel shows', () => {
     expect(html).not.toContain('pr-panel-section-title')
   })
 
-  it('shows the header: state, decision, branches, short head commit, refresh and the link to the host', () => {
+  it('shows the header: state, decision, branches, and icon buttons to refresh and open it on GitHub', () => {
     const html = render(ready(detail({ isDraft: true, reviewDecision: 'changes_requested' })))
     expect(html).toContain('data-tone="neutral">Draft<')
     expect(html).toContain('data-tone="failing">Changes requested<')
     expect(html).toContain('feature/retry → main')
-    expect(html).toContain('>abc1234</code>')
-    expect(html).toContain('Refresh')
-    expect(html).toContain('Open on GitHub')
+    expect(html).toMatch(/aria-label="Refresh"[^>]*><svg/)
+    expect(html).toMatch(/aria-label="Open on GitHub"[^>]*><svg/)
+    expect(html).not.toContain('>Refresh<')
+    expect(html).not.toContain('>Open on GitHub<')
     expect(render(ready(detail({ state: 'merged', reviewDecision: 'approved' })))).not.toContain('>Approved<')
     expect(pullRequestBadge({ state: 'merged', isDraft: false }).label).toBe('Merged')
     expect(pullRequestBadge({ state: 'closed', isDraft: false }).label).toBe('Closed')
   })
 
   it('says a refresh is running, and that a refresh failed while keeping the pull request on screen', () => {
-    expect(render(ready(detail()), { refreshing: true })).toMatch(/aria-busy="true"[^>]*>.*Refreshing…/)
+    expect(render(ready(detail()), { refreshing: true })).toMatch(/aria-busy="true"[^>]*title="Refreshing…"/)
     const stale = render(ready(detail({ title: 'Kept on screen' }), 'rate limit exceeded'))
     expect(stale).toContain('Kept on screen')
     expect(stale).toContain('Could not refresh: rate limit exceeded')
   })
 
-  it('lists checks, worst first, each with its state', () => {
+  it('sums checks up in one line and lists only those that need a look, worst first', () => {
     const html = render(ready(detail({
       checkRuns: [
         { name: 'build', state: 'passing', url: 'https://ci.example.test/build' },
+        { name: 'lint', state: 'passing', url: null },
         { name: 'test', state: 'failing', url: 'https://ci.example.test/test' },
         { name: 'deploy', state: 'waiting', url: null }
       ]
     })))
-    expect(html.indexOf('>test<')).toBeLessThan(html.indexOf('>build<'))
-    expect(html).toMatch(/data-tone="failing"[^>]*>.*?test.*?title="Open this check"[^>]*>Failed/)
-    expect(html).toMatch(/data-tone="waiting"[^>]*>.*?deploy.*?<span class="pr-panel-check-state">Waiting for approval/)
+    expect(html).toMatch(/data-tone="failing">1 failed<.*data-tone="waiting">1 waiting<.*data-tone="passing">2 passed</)
+    expect(html.indexOf('>test<')).toBeLessThan(html.indexOf('>deploy<'))
+    expect(html).toMatch(/title="Open test"[^>]*>.*?Failed/)
+    expect(html).toContain('>Waiting for approval<')
+    // Passed checks wait behind the summary line, which says it can open.
+    expect(html).not.toContain('>build<')
+    expect(html).toMatch(/aria-expanded="false"[^>]*>Checks/)
+    expect(checkSummary([{ tone: 'passing' }, { tone: 'pending' }, { tone: 'passing' }]).map((part) => part.text)).toEqual(['1 running', '2 passed'])
+  })
+
+  it('has nothing to open when every check needs a look', () => {
+    const html = render(ready(detail({ checkRuns: [{ name: 'test', state: 'failing', url: null }] })))
+    expect(html).toContain('>test<')
+    expect(html).not.toContain('aria-expanded')
+  })
+
+  it('keeps reviews and comments behind Load comments until asked', () => {
+    const html = render(ready(detail({
+      body: 'Adds a retry button.',
+      comments: [conversation('c1', { body: 'Ship it' }), comment('l1', { path: 'src/z.ts', body: 'Rename' })]
+    })), { initiallyShowComments: false })
+    expect(html).toContain('Adds a retry button.')
+    expect(html).toMatch(/>Load comments<span class="pr-panel-count">2</)
+    expect(html).not.toContain('Ship it')
+    expect(html).not.toContain('src/z.ts')
+    // A thread picked to show opens them.
+    expect(render(ready(detail({ comments: [comment('l1', { path: 'src/z.ts' })] })), { initiallyShowComments: false, initialSelectedKey: 'x' }))
+      .toContain('src/z.ts')
   })
 
   it('draws the description, the conversation and the comments per file', () => {
@@ -568,24 +598,48 @@ describe('comment text is rendered safely', () => {
     expect(count(html, '<a ')).toBe(1)
   })
 
-  it('shows images as links and fetches nothing', () => {
+  it('draws images from GitHub inline and leaves every other image a link', () => {
     const html = renderToStaticMarkup(createElement(PullRequestMarkdown, {
-      text: '![screenshot](https://example.test/a.png)\n\n![x](data:image/png;base64,AAAA)\n\n<img src="https://example.test/b.png" onerror="x()">'
+      text: [
+        '![before](https://github.com/user-attachments/assets/abc)',
+        '![raw](https://raw.githubusercontent.com/o/r/main/a.png)',
+        '![tracker](https://example.test/a.png)',
+        '![plain](http://github.com/user-attachments/assets/abc)',
+        '![x](data:image/png;base64,AAAA)',
+        '<img src="https://example.test/b.png" onerror="x()">'
+      ].join('\n\n')
     }))
-    expect(html).not.toContain('<img')
-    expect(html).toContain('>Image: screenshot</a>')
-    expect(html).toContain('href="https://example.test/a.png"')
+    expect(count(html, '<img ')).toBe(2)
+    expect(html).toContain('src="https://github.com/user-attachments/assets/abc"')
+    expect(html).toContain('src="https://raw.githubusercontent.com/o/r/main/a.png"')
+    expect(html).toContain('>Image: tracker</a>')
+    expect(html).toContain('>Image: plain</a>')
+    expect(html).not.toContain('src="https://example.test')
+    expect(html).not.toContain('onerror')
     expect(html).not.toContain('data:image')
     expect(html).toContain('(not shown)')
   })
 
-  it('turns pasted HTML images into links, whatever else the tag carries', () => {
-    expect(htmlImagesToLinks('<img width="300" alt="the [bug]" src="https://example.test/a(1).png" />'))
-      .toBe('[Image: the bug](https://example.test/a%281%29.png)')
-    expect(htmlImagesToLinks("<img src='https://example.test/b.png'>")).toBe('[Image](https://example.test/b.png)')
-    expect(htmlImagesToLinks('<img src="javascript:alert(1)">x')).toBe('x')
-    expect(htmlImagesToLinks('<img src="file:///etc/passwd">')).toBe('')
-    expect(htmlImagesToLinks('no images')).toBe('no images')
+  it.each([
+    ['https://github.com/user-attachments/assets/abc', true],
+    ['https://github.com/owner/repo/assets/12/abc', true],
+    ['https://private-user-images.githubusercontent.com/1/a.png?jwt=x', true],
+    ['https://github.com/owner/repo/blob/main/a.png', false],
+    ['https://evilgithubusercontent.com/a.png', false],
+    ['https://githubusercontent.com.example.test/a.png', false],
+    ['http://raw.githubusercontent.com/a.png', false],
+    ['javascript:alert(1)', false]
+  ])('draws %s inline: %s', (url, inline) => {
+    expect(inlineImageUrl(url) !== null).toBe(inline)
+  })
+
+  it('turns pasted HTML images into markdown images, whatever else the tag carries', () => {
+    expect(htmlImagesToMarkdown('<img width="300" alt="the [bug]" src="https://example.test/a(1).png" />'))
+      .toBe('![the bug](https://example.test/a%281%29.png)')
+    expect(htmlImagesToMarkdown("<img src='https://example.test/b.png'>")).toBe('![](https://example.test/b.png)')
+    expect(htmlImagesToMarkdown('<img src="javascript:alert(1)">x')).toBe('x')
+    expect(htmlImagesToMarkdown('<img src="file:///etc/passwd">')).toBe('')
+    expect(htmlImagesToMarkdown('no images')).toBe('no images')
   })
 
   it('removes HTML comments, but not inside code', () => {
