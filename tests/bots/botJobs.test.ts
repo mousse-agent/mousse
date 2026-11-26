@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { threadsActOf } from '../../src/mms/bots/activation/BotEngine'
 import { jobAskerOf, jobResultOf, jobStateOf, jobStep, resultLine, type JobThreadView } from '../../src/mms/bots/jobs'
 import { BOT_JOB_LINE_CHARS, BOT_REPORT_MAX_CHARS, jobLine } from '../../src/shared/bots/personal/jobs'
+import type { ChatMessage } from '../../src/shared/types'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 describe('a thread\'s standing as a job', () => {
@@ -59,21 +60,41 @@ describe('a thread\'s standing as a job', () => {
 })
 
 describe('a job\'s answer and its one line', () => {
-  const longReply = `Fixed the login redirect. ${'The detail of what changed. '.repeat(20)}`
+  const row = (role: ChatMessage['role'], content: string, turnId?: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id: `${role}:${content}`, role, content, timestamp: '', ...(turnId ? { turnId } : {}), ...extra })
+  // An earlier turn r0 whose reply opens with words the new run's progress line repeats.
+  const earlier = [row('user', 'Fix page A', 'r0'), row('assistant', 'Looking at the logs now. Fixed page A: the redirect was wrong.', 'r0')]
 
   it.each([
-    // The run kept a progress message and then its final reply: the final reply is the answer.
-    ['a progress message, then the reply', 'Looking at the logs now.\n\nFixed the login redirect.', 'Fixed the login redirect.', 'Fixed the login redirect.'],
-    // The run's kept text is capped: the start of the reply is enough to know it is this run's.
-    ['a reply the kept text holds only the start of', `Looking now.\n\n${longReply.slice(0, BOT_JOB_LINE_CHARS + 10)}`, longReply, longReply.trim()],
-    // The last reply is an earlier turn's: what the run kept stands.
-    ['a last reply from another turn', 'Fixed page B.', 'Fixed page A.', 'Fixed page B.'],
-    ['no last reply', 'Fixed page B.', undefined, 'Fixed page B.'],
-    // A turn the owner started keeps no run result: the thread's last reply.
-    ['nothing kept', undefined, 'Fixed page A.', 'Fixed page A.'],
-    ['nothing kept, a blank reply', '  ', '  ', undefined]
-  ])('the answer: %s', (_name, recorded, lastReply, answer) => {
-    expect(jobResultOf(recorded, lastReply)).toBe(answer)
+    // The run wrote a progress line, then its final reply (the one carrying its id): the final reply is the answer.
+    ['a progress line, then the reply', [...earlier, row('user', 'Fix page B', 'r1'), row('assistant', 'Looking at the logs now.'), row('assistant', 'Fixed page B.', 'r1')], 'Looking at the logs now.\n\nFixed page B.', 'Fixed page B.'],
+    // The final reply carries no id: the last reply after the message that opened the run.
+    ['a reply without the run\'s id', [...earlier, row('user', 'Fix page B', 'r1'), row('assistant', 'Looking now.'), row('assistant', 'Fixed page B.')], undefined, 'Fixed page B.'],
+    // Stopped after a progress line that opens the earlier turn's reply: its own line, never the earlier reply.
+    ['a stopped run whose line opens an earlier reply', [...earlier, row('user', 'Fix page B', 'r1'), row('assistant', 'Looking at the logs now.'), row('system', 'Turn stopped.')], 'Looking at the logs now.', 'Looking at the logs now.'],
+    // Stopped before it wrote anything: no answer, never the earlier turn's.
+    ['a stopped run with no reply', [...earlier, row('user', 'Fix page B', 'r1'), row('system', 'Turn stopped.')], undefined, undefined],
+    // The next run's messages are not this run's.
+    ['a later run\'s reply', [row('user', 'Fix page B', 'r1'), row('user', 'And C', 'r2'), row('assistant', 'Fixed C.', 'r2')], undefined, undefined],
+    // A run that left no message of its own: what it kept, or nothing; never the thread's last reply.
+    ['no message of the run, a kept result', earlier, 'Fixed page B.', 'Fixed page B.'],
+    ['no message of the run, nothing kept', earlier, '  ', undefined]
+  ] as const)('the answer: %s', (_name, messages, recorded, answer) => {
+    expect(jobResultOf(recorded, messages as readonly ChatMessage[], 'r1')).toBe(answer)
+  })
+
+  it('an applet in the reply reaches the answer as its name, never its source, even after 200 characters of prose', () => {
+    const source = { schemaVersion: 1, title: 'Price chart', description: 'Prices.', html: '<main id="secret-markup"></main>', css: '', js: 'drawChart()' }
+    const reply = `${'The prices over the year, as asked. '.repeat(8)}\n\n\u0060\u0060\u0060mousse-applet\n${JSON.stringify(source)}\n\u0060\u0060\u0060`
+    const reference = { appletId: 'ap1', revisionId: 'rev1', sourceHash: 'h', title: 'Price chart', description: 'Prices.' }
+    const published = row('assistant', reply, 'r1', { presentationParts: [{ type: 'text', text: reply.slice(0, reply.indexOf('\u0060')) }, { type: 'applet', reference }] })
+    for (const message of [published, row('assistant', reply, 'r1')]) {
+      const answer = jobResultOf('The prices over the year.', [row('user', 'Chart prices', 'r1'), message], 'r1')!
+      expect(answer).toContain('The prices over the year, as asked.')
+      expect(answer).toContain('[Applet: Price chart')
+      expect(answer).not.toContain('mousse-applet')
+      expect(answer).not.toContain('secret-markup')
+      expect(answer).not.toContain('drawChart')
+    }
   })
 
   it.each([

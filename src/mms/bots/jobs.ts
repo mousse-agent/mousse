@@ -1,5 +1,7 @@
 import type { BotLaunchedThread } from '../../shared/bots/personal/chat'
 import { BOT_JOB_LINE_CHARS, jobLine, type BotJob, type BotJobAsker, type BotJobState, type BotThreadAsk } from '../../shared/bots/personal/jobs'
+import { modelFacingReplyText } from '../../shared/applets'
+import type { ChatMessage } from '../../shared/types'
 import type { BotActivationRow } from './store/BotStore'
 
 /**
@@ -61,17 +63,45 @@ export function resultLine(result: string | undefined): string | undefined {
   return line ? jobLine(line) : undefined
 }
 
+/** A reply a reader reads: the assistant's own words, not a tool row, a progress note or a hidden row. */
+function isReply(message: ChatMessage): boolean {
+  return message.role === 'assistant' && (!message.kind || message.kind === 'message') && !message.hidden && typeof message.content === 'string' && message.content.trim().length > 0
+}
+
 /**
- * A job thread's answer for its last run (`JobThreadView.result`): the thread's last reply (`lastReply`, its newest
- * assistant message) when it is part of what the run kept (`recorded`, every message of the turn), so a progress
- * message earlier in the turn never stands for its answer; else what the run kept, or the last reply when the run kept
- * nothing (a turn the owner started).
+ * The reply run `runId` ended on, found by the run's own id in a thread's transcript (`messages`), never by its text:
+ * the reply that carries the run's id (`turnId`, set on a turn's final reply), else the last reply between the message
+ * that opened the run (it carries the id too) and the next run's first message. A run that wrote no reply, or left no
+ * message of its own, has none: an earlier turn's reply is never its.
  */
-export function jobResultOf(recorded: string | undefined, lastReply: string | undefined): string | undefined {
-  const reply = lastReply?.trim()
-  if (!recorded?.trim()) return reply || undefined
-  // The run's kept text is capped: the reply's start is enough to know it is this run's.
-  return reply && recorded.includes(reply.slice(0, BOT_JOB_LINE_CHARS)) ? reply : recorded
+export function runReplyOf(messages: readonly ChatMessage[], runId: string): ChatMessage | undefined {
+  let opened = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (message.turnId !== runId) continue
+    if (isReply(message)) return message
+    opened = index
+  }
+  if (opened === -1) return undefined
+  let last: ChatMessage | undefined
+  for (let index = opened + 1; index < messages.length; index += 1) {
+    const message = messages[index]!
+    if (message.turnId !== undefined && message.turnId !== runId) break
+    if (isReply(message)) last = message
+  }
+  return last
+}
+
+/**
+ * A job thread's answer for run `runId` (`JobThreadView.result`): the reply the run ended on (`runReplyOf`), so a
+ * progress message earlier in the turn never stands for it, as a model reads it (`modelFacingReplyText`: applet fences
+ * cut, each published applet named by its reference line, never its source). A run with no reply of its own has what
+ * it kept (`recorded`, already read that way), or nothing.
+ */
+export function jobResultOf(recorded: string | undefined, messages: readonly ChatMessage[], runId: string): string | undefined {
+  const reply = runReplyOf(messages, runId)
+  const text = reply ? modelFacingReplyText(reply).trim() : ''
+  return text || (recorded?.trim() ? recorded : undefined)
 }
 
 /**
