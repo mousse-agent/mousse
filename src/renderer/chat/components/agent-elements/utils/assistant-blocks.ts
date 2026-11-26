@@ -492,8 +492,8 @@ export type FoldRow = {
   /** A person's message steered into the turn. */
   steer?: boolean;
   /**
-   * Stays in view whatever the fold: an error, a question, an approval, a notice, a marker of Mousse's own, or calls
-   * holding a failure the agent did not get past.
+   * Stays in view whatever the fold: an error, a question, an approval, a notice, a marker of Mousse's own, calls
+   * holding a failure the agent did not get past, or subagent cards still going or failed without being continued.
    */
   keep?: boolean;
 };
@@ -517,10 +517,10 @@ export function turnFoldParts(rows: ReadonlyArray<Pick<FoldRow, "steer">>): Arra
 
 /**
  * Which rows of a finished turn fold behind their part's line (see `turnFoldParts`): the work (thoughts, tool groups,
- * narration). Each part's last reply row stays below its line, whether it is the answer, a reply to a steered message
- * or the last thing a stopped turn said: what was said to the person is never hidden. What needs the person stays in
- * view too: errors and failures the agent did not get past, questions, approvals, notices, Mousse's own markers,
- * steered messages, and subagent cards, finished or not, so every subagent shows where it was started.
+ * narration, settled subagent cards). Each part's last reply row stays below its line, whether it is the answer, a
+ * reply to a steered message or the last thing a stopped turn said: what was said to the person is never hidden. What
+ * needs the person stays in view too: errors and failures the agent did not get past, questions, approvals, notices,
+ * Mousse's own markers, steered messages, and subagent cards still running or failed without being continued (`keep`).
  */
 export function foldTurnWork(rows: FoldRow[]): boolean[] {
   const folded = rows.map(() => false);
@@ -535,7 +535,7 @@ export function foldTurnWork(rows: FoldRow[]): boolean[] {
     }
     for (let index = from; index < to; index += 1) {
       const row = rows[index]!;
-      if (row.kind === "cards" || row.steer || row.keep || index === reply) continue;
+      if (row.steer || row.keep || index === reply) continue;
       folded[index] = true;
     }
   }

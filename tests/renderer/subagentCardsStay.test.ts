@@ -101,6 +101,13 @@ async function open(messages: UIMessage[]) {
   await act(async () => {})
 }
 
+/** Opens every folded "Worked for" section in the list so settled subagent cards inside can be inspected. */
+async function openFolds() {
+  for (const toggle of host.querySelectorAll<HTMLButtonElement>('.turn-work-toggle[aria-expanded="false"]')) {
+    await act(async () => toggle.click())
+  }
+}
+
 const cardRows = () =>
   [...host.querySelectorAll<HTMLButtonElement>('button.subagent-card')].map((button) => ({
     title: button.querySelector('.subagent-card-title')?.textContent,
@@ -109,15 +116,18 @@ const cardRows = () =>
   }))
 
 describe('a subagent whose thread was deleted', () => {
-  it('keeps its card after a reload, with its name, outcome and the start of its result, and opens nothing', async () => {
+  it('keeps its card inside Worked for after a reload, with its name, outcome and the start of its result, and opens nothing', async () => {
     listed = [row(CHILD, '', [task('d1', 2, { summary: 'Found two bugs: the retry loop and the cache key.' })], { removed: true })]
     await open([user('u1', 0, 'Review the module'), delegate('a1', 2, 'API reviewer', 'd1', CHILD), reply('a2', 3, 'The reviewer is on it.')])
+    expect(cardRows()).toEqual([])
+    expect(host.querySelector('.turn-work-toggle [title="1 subagent inside"]')).not.toBeNull()
+    await openFolds()
     expect(cardRows()).toEqual([{ title: 'API reviewer', line: 'Found two bugs: the retry loop and the cache key.', opens: false }])
     // Nest and the other lists never see it.
     expect(useAppStore.getState().subagentsByParent[PARENT]).toEqual([])
   })
 
-  it('shows a failed task as failed, with why', async () => {
+  it('shows a failed task outside Worked for as failed, with why', async () => {
     listed = [row(CHILD, '', [task('d1', 2, { outcome: 'failed', error: 'The provider refused the request.' })], { removed: true, state: 'failed' })]
     await open([user('u1', 0, 'Review the module'), delegate('a1', 2, 'API reviewer', 'd1', CHILD)])
     const [card] = cardRows()
@@ -139,8 +149,9 @@ describe('a subagent whose thread was deleted', () => {
       notice('w1', 10, { delegationId: 'd1', childThreadId: CHILD, title: 'Tests  reviewer', runStatus: 'completed', fullyShown: true }),
       reply('a2', 11, 'It finished.')
     ])
-    expect(cardRows()).toEqual([{ title: 'Tests reviewer', line: 'Found two bugs.', opens: false }])
     expect(host.querySelectorAll('.subagent-notice')).toHaveLength(0)
+    await openFolds()
+    expect(cardRows()).toEqual([{ title: 'Tests reviewer', line: 'Found two bugs.', opens: false }])
   })
 
   it('keeps a notice that names no task out of sight, as the card shows that subagent', async () => {
@@ -152,8 +163,9 @@ describe('a subagent whose thread was deleted', () => {
       notice('w1', 10, { delegationId: '', childThreadId: CHILD, title: 'API reviewer', runStatus: 'cancelled', fullyShown: true, event: 'stopped' }),
       reply('a2', 11, 'It was stopped.')
     ])
-    expect(cardRows()).toHaveLength(1)
     expect(host.querySelectorAll('.subagent-notice')).toHaveLength(0)
+    await openFolds()
+    expect(cardRows()).toHaveLength(1)
   })
 })
 
@@ -161,7 +173,7 @@ describe('a follow-up task given with a thread tool', () => {
   const first = [user('u1', 0, 'Review the module'), delegate('a1', 2, 'API reviewer', 'd1', CHILD), reply('a2', 3, 'The reviewer is on it.')]
   const reviewer = (tasks: SubagentTaskSummary[]) => [row(CHILD, 'API reviewer', tasks)]
 
-  it('thread_send to the caller’s own subagent shows as that task’s card', async () => {
+  it('thread_send to the caller’s own subagent shows as that task’s card inside Worked for', async () => {
     listed = reviewer([task('d1', 2, { continued: true }), task('d2', 101)])
     await open([
       ...first,
@@ -169,11 +181,12 @@ describe('a follow-up task given with a thread tool', () => {
       threadTool('s1', 101, 'thread_send', { threadId: CHILD, runId: 'run-d2', queued: false, delivery: 'started', delegationId: 'd2', title: 'API reviewer', subagent: true }),
       reply('a3', 102, 'Sent.')
     ])
+    await openFolds()
     expect(cardRows().map((card) => card.title)).toEqual(['API reviewer', 'API reviewer'])
     expect(cardRows().every((card) => card.opens)).toBe(true)
   })
 
-  it('thread_update that restarted the subagent now shows as the new task’s card', async () => {
+  it('thread_update that restarted the subagent now shows as the new task’s card inside Worked for', async () => {
     listed = reviewer([task('d1', 2, { continued: true, outcome: 'interrupted' }), task('d2', 101)])
     await open([
       ...first,
@@ -181,12 +194,14 @@ describe('a follow-up task given with a thread tool', () => {
       threadTool('s1', 101, 'thread_update', { threadId: CHILD, title: 'API reviewer', access: { readOnly: false }, changed: true, applied: 'now', stoppedRunId: 'run-d1', runId: 'run-d2', delegationId: 'd2' }),
       reply('a3', 102, 'Lifted.')
     ])
+    await openFolds()
     expect(cardRows().map((card) => card.title)).toEqual(['API reviewer', 'API reviewer'])
   })
 
   it('a thread_send to any other thread keeps its plain row', async () => {
     listed = reviewer([task('d1', 2)])
     await open([...first, user('u2', 100, 'Tell the other thread'), threadTool('s1', 101, 'thread_send', { threadId: 'someone-else', runId: 'r', queued: false, delivery: 'started' })])
+    await openFolds()
     expect(cardRows()).toHaveLength(1)
   })
 
