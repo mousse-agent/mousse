@@ -115,6 +115,14 @@ export function recordedFilesAt(actions: ReadonlyArray<Pick<ThreadAction, 'creat
 
 const short = (sha: string): string => sha.slice(0, 12)
 
+/**
+ * What the parent reads about where a subagent on another computer worked, in place of a report from this computer's
+ * folders: it ran there, in that computer's copy of the repository, and its result names the branch its work is on.
+ */
+export function remoteSubagentResultText(computer: string): string {
+  return `Worked on ${computer}, in its copy of this repository; nothing it did is in your files or snapshots here. Its result names the branch its work is on there: fetch that branch to use it here. Mousse merged nothing.`
+}
+
 /** The report as the plain text the parent agent reads, with how to bring the result in with Git. */
 export function formatSubagentResultReport(report: SubagentResultReport): string {
   const lines: string[] = []
