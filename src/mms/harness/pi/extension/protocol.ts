@@ -26,6 +26,11 @@ export interface PiCatalogProvider {
   headers?: Record<string, string>
   /** The full Mousse catalogue of the provider (live lists, overlays, custom models). */
   models: Model<Api>[]
+  /**
+   * A local server (`pi:local-<slug>`): every request goes only to `origin`, never follows a redirect, carries no
+   * `Authorization` when `keyless`, and gets `extraBody` merged into its chat body (`providers/local/http.ts`).
+   */
+  pin?: { origin: string; keyless: boolean; extraBody?: Record<string, unknown> }
 }
 
 /** `/pi/catalog`. */

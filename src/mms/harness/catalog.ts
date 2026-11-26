@@ -210,14 +210,16 @@ export function modelsWithPrefs(listed: readonly LlmModelOption[], prefs: ModelP
     seen.add(model.id)
     entries.push({
       id: model.id,
-      label: canonicalModelName(model.label, model.id),
+      // A local server's model keeps the name it serves under (`phi3:medium` is not a level of `phi3`).
+      label: model.local ? model.label : canonicalModelName(model.label, model.id),
       source: 'catalog',
       capabilities: listedCapabilities(model),
       hidden: hidden.has(model.id),
       favorite: favorites.has(model.id),
       ...(model.older ? { older: true as const } : {}),
       ...(model.oneShot === false ? { oneShot: false as const } : {}),
-      ...(model.resolvedId && model.resolvedId !== model.id ? { resolvedId: model.resolvedId } : {})
+      ...(model.resolvedId && model.resolvedId !== model.id ? { resolvedId: model.resolvedId } : {}),
+      ...(model.local ? { local: model.local } : {})
     })
   }
   // A custom model runs on the transport of the provider's first listed model, so it runs one-shots

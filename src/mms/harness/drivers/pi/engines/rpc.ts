@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { HarnessCaps } from '../../../../../shared/harness/types'
+import type { LocalModelFacts } from '../../../../../shared/localServers'
 import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, PI_RPC_NO_SHELL_ITEMS, type ContainmentEvidence } from '../../../compatibility'
 import type { DriverContext, DriverRuntime, LiveProcessHost } from '../../../driver'
 import { PiRpcEngine, type PiEngineCatalog, type PiMousseTool, type PiRpcEngineOptions } from '../../../pi/engine'
@@ -129,6 +130,12 @@ export interface PiRpcDriverOptions {
   catalog(providerId: string): PiEngineCatalog
   /** The stored key of a provider, if it has one. */
   apiKey?(providerId: string): string | undefined
+  /** Local servers: a model's facts for the turn policy, and a bounded read of the list at dispatch (`PiRpcEngineOptions.localModel`). */
+  local?: {
+    facts(providerId: string, modelId: string): LocalModelFacts | undefined
+    has(providerId: string): boolean
+    refresh(providerId: string): Promise<unknown>
+  }
   /** Mousse's tools for a thread, with their class; as `runId`'s turn is offered them when given (`ToolRegistry.listForTurn`). */
   mousseTools?(threadId: string, runId?: string): PiMousseTool[]
   /** The user's own MCP tools a turn is offered, proxied through Mousse's MCP server (`userMcp: 'proxy'`). */
@@ -192,6 +199,9 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     stateDir: context.stateDir,
     runtime: () => options.runtime(),
     catalog: () => options.catalog(providerId),
+    ...(options.local?.has(providerId)
+      ? { localModel: (modelId: string) => options.local!.facts(providerId, modelId), refreshLocal: () => options.local!.refresh(providerId) }
+      : {}),
     ...(options.apiKey ? { apiKey: () => options.apiKey!(providerId) } : {}),
     ...(options.oauth ? { oauth: options.oauth } : {}),
     extraEnv: () => ({ ...(options.credentialEnv?.(providerId) ?? {}), ...(context.config.env ?? {}) }),

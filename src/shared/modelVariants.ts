@@ -73,6 +73,15 @@ export function parseThinkingSuffixFromModelId(modelId: string): {
   return { baseId: modelId }
 }
 
+/**
+ * `parseThinkingSuffixFromModelId`, except that an id the agent lists as it is never loses its last part: a local
+ * server's `phi3:medium` is that model, not `phi3` at medium effort. Exact ids resolve before effort parsing.
+ */
+export function parseListedModelId(modelId: string, listed: (id: string) => boolean): { baseId: string; effort?: string } {
+  if (listed(modelId)) return { baseId: modelId }
+  return parseThinkingSuffixFromModelId(modelId)
+}
+
 export function extractFamilyLabel(label: string): string {
   let text = label.trim()
   text = text.replace(/\s+\((fast|slow)\)\s*$/i, '')

@@ -34,6 +34,7 @@ import { piOneShotRunsOn } from '../harness/drivers/pi/oneShotApis'
 import { FileCredentialStore } from './FileCredentialStore'
 import { FileModelsStore } from './FileModelsStore'
 import { LoginSession } from './LoginSession'
+import { LocalConnections } from './local/LocalConnections'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
 import { PiCatalogOverlay } from './piCatalogOverlay'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
@@ -121,6 +122,8 @@ export class ProviderAuthService {
 
   readonly credentials: FileCredentialStore
   readonly models: MutableModels
+  /** Local model servers (`pi:local-<slug>`): registered from their saved records, read again only when asked. */
+  readonly local: LocalConnections
   private readonly modelsStore: FileModelsStore
   private readonly catalogOverlay: PiCatalogOverlay
   private readonly catalogListeners = new Set<() => void>()
@@ -148,6 +151,8 @@ export class ProviderAuthService {
       // Anthropic is replaced by the Claude SDK provider, whose catalog is live; a retired one fetches nothing.
       if (provider.id !== CLAUDE_PROVIDER_ID && !piRetiredOf(provider.id)) this.catalogOverlay.attach(provider)
     }
+    // Registered after the overlay: a local server's list is its own, never the published catalog's.
+    this.local = new LocalConnections(join(home, 'local-connections.json'), this.models, this.credentials)
   }
 
   /**
@@ -162,6 +167,11 @@ export class ProviderAuthService {
         allowNetwork: false,
         cached: cachedClaude?.models
       })
+      try {
+        this.local.load()
+      } catch {
+        // An unreadable record file leaves no local connection; the others still load.
+      }
       try {
         await this.models.refresh({ allowNetwork: false })
       } catch {
@@ -278,6 +288,7 @@ export class ProviderAuthService {
   }
 
   has(providerId: string): boolean {
+    if (this.local.has(providerId)) return true
     if (providerId === 'anthropic') {
       const credential = this.credentials.get(providerId)
       return credential?.type === 'api_key' && Boolean(credential.key) && !isClaudeSubscriptionToken(credential.key)
@@ -311,8 +322,7 @@ export class ProviderAuthService {
   }
 
   getConfiguredProviders(): ConfiguredProvider[] {
-    return this.credentials
-      .listProviderIds()
+    return this.configuredIds()
       .filter((id) => !id.startsWith('web-tool:'))
       .map((id) => {
         const credential = this.credentials.get(id)
@@ -337,7 +347,10 @@ export class ProviderAuthService {
   }
 
   private toLlmProviderOption(id: string): LlmProviderOption | null {
+    const isLocal = this.local.has(id)
     const models = this.models.getModels(id).map((model) => {
+      // A local model's window is the one the server runs it at; unknown is shown as unknown, not as the 4K plan.
+      const local = isLocal ? this.local.facts(id, model.id) : undefined
       const efforts =
         getModelEffortLevels(model) ??
         (model.reasoning ? getSupportedThinkingLevels(model).filter((level) => level !== 'off') : undefined)
@@ -347,7 +360,8 @@ export class ProviderAuthService {
         ...(efforts && efforts.length > 0 ? { efforts } : {}),
         ...(piOneShotRunsOn(model.api) ? {} : { oneShot: false as const }),
         ...(model.input.includes('image') ? { images: true as const } : {}),
-        ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {})
+        ...(model.contextWindow > 0 && !(local && !local.loadedWindow && !local.windowOverride) ? { contextWindow: model.contextWindow } : {}),
+        ...(local ? { local } : {})
       }
     })
     if (models.length === 0) return null
@@ -370,9 +384,15 @@ export class ProviderAuthService {
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
+  /** Every provider with a saved credential, and every local connection (a keyless one has none). */
+  private configuredIds(): string[] {
+    const ids = this.credentials.listProviderIds()
+    return [...ids, ...this.local.ids().filter((id) => !ids.includes(id))]
+  }
+
   getConfiguredLlmProviders(): LlmProviderOption[] {
     // A retired provider stays configured (Settings, Move) but offers no model to choose.
-    const configuredIds = this.credentials.listProviderIds().filter((id) => this.has(id) && !piRetiredOf(id))
+    const configuredIds = this.configuredIds().filter((id) => this.has(id) && !piRetiredOf(id))
     if (configuredIds.length === 0) return []
 
     this.ensureCatalogInitialized()
@@ -397,6 +417,8 @@ export class ProviderAuthService {
     // Every registered Models provider — include dual-auth as separate options.
     for (const provider of this.models.getProviders()) {
       const id = provider.id
+      // Local servers are added through Add provider → Local models, never as an API key.
+      if (this.local.has(id)) continue
       const configured = this.has(id)
       const label = this.getProviderDisplayName(id)
       const apiKeyAuth = provider.auth?.apiKey
@@ -561,6 +583,7 @@ export class ProviderAuthService {
   }
 
   async logout(providerId: string): Promise<void> {
+    if (this.local.has(providerId)) return this.local.remove(providerId)
     await this.credentials.delete(providerId)
   }
 

@@ -25,6 +25,8 @@ import type { PiRpcDriverOptions } from './engines/rpc'
 export type PiProfileAuth = Pick<ProviderAuthService, 'has' | 'storedApiKey'> & {
   models: Pick<ProviderAuthService['models'], 'getModels'>
   credentials: Pick<ProviderAuthService['credentials'], 'get'> & Partial<Pick<ProviderAuthService['credentials'], 'modify'>>
+  /** Local servers (`pi:local-<slug>`): their pinned transport and their key, or the in-memory placeholder. */
+  local?: Pick<ProviderAuthService['local'], 'has' | 'apiKey' | 'pin' | 'get' | 'facts' | 'refresh'>
 }
 
 export interface PiProfileInputs {
@@ -123,13 +125,26 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
       const previous = revisions.get(providerId)
       const revision = !previous ? 1 : previous.signature === signature ? previous.revision : previous.revision + 1
       revisions.set(providerId, { signature, revision })
+      const local = inputs.auth()?.local
+      const pin = local?.has(providerId) ? local.pin(providerId) : undefined
+      if (pin) {
+        const record = local!.get(providerId)
+        return { provider: { id: providerId, builtin: false, models, pin, ...(record ? { name: record.label, baseUrl: `${record.root}/v1` } : {}) }, revision }
+      }
       return { provider: { id: providerId, builtin: BUILTIN_IDS.has(providerId), models }, revision }
     },
     apiKey: (providerId) => {
       const auth = inputs.auth()
+      // A local server's own key, or the placeholder pi-ai needs (the pinned transport never sends it).
+      if (auth?.local?.has(providerId)) return auth.local.apiKey(providerId)
       // `has` refuses a Claude subscription token stored as an Anthropic key.
       const key = auth?.has(providerId) ? auth.storedApiKey(providerId) : undefined
       return key === PI_AMBIENT_MARKER ? undefined : key
+    },
+    local: {
+      has: (providerId) => Boolean(inputs.auth()?.local?.has(providerId)),
+      facts: (providerId, modelId) => inputs.auth()?.local?.facts(providerId, modelId),
+      refresh: async (providerId) => inputs.auth()?.local?.refresh(providerId, { timeoutMs: 400 })
     },
     credentialEnv: (providerId) => {
       const stored = credential(providerId)
