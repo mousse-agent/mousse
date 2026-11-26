@@ -1,5 +1,6 @@
+import { join } from 'node:path'
 import type { HarnessCaps } from '../../../shared/harness/types'
-import type { AntigravityProviderService } from '../acp/presets/antigravity/AntigravityProviderService'
+import { AntigravityProviderService, type AntigravityEntry } from '../acp/presets/antigravity/AntigravityProviderService'
 import { manualAntigravityRuntime } from '../acp/presets/antigravity/installation'
 import { AcpAdapter, type AcpTurnClient } from './acp/adapter'
 import { ANTIGRAVITY_CAPABILITIES, ANTIGRAVITY_LABEL } from '../acp/presets/antigravity'
@@ -11,7 +12,8 @@ import { ACP_NATIVE_TOOLS } from '../acp/botApprovals'
 
 /**
  * The account a recorded sign-in stands for. Mousse never reads the Google account itself, so a
- * sign-in or sign-out (which move the account generation on) is what changes it.
+ * sign-in or sign-out (which move the account generation on) is what changes it. An entry with a
+ * home of its own stands for its own account (`<subject>:<instanceId>`), never "the same account".
  */
 const SIGN_IN_SUBJECT = 'mousse-google-sign-in'
 
@@ -33,11 +35,34 @@ export function antigravityAdapter(client: () => AcpTurnClient | null): AcpAdapt
 }
 
 /**
+ * The service of an entry added after the first: its settings in its state folder and the agent's folders, Google
+ * sign-in included, in its own home (`AntigravityEntry`). Its launch settings are its own config's.
+ */
+function entryService(context: DriverContext, entry: AntigravityEntry): AntigravityProviderService {
+  const service = new AntigravityProviderService(context.profileHome, context.installationHome, context.questions, undefined, {
+    entry,
+    launch: () => ({
+      ...(context.config.binaryPath ? { binaryPath: context.config.binaryPath } : {}),
+      ...(context.config.args?.length ? { args: [...context.config.args] } : {}),
+      ...(context.config.env && Object.keys(context.config.env).length ? { env: { ...context.config.env } } : {})
+    }),
+    saveLaunch: (patch) => context.saveLaunch(patch)
+  })
+  service.hooks.changed = () => context.changed()
+  return service
+}
+
+/**
  * Google's Antigravity, run as `agy acp`: a manual path in Settings, else the user's own `agy`
  * (found on PATH or in Google's install folder), else Mousse's own install of the release Google's
- * update feed names. Its Google sign-in is the one this computer's `agy` keeps.
+ * update feed names. The first entry's Google sign-in is the one this computer's `agy` keeps; each
+ * entry added after it signs in to its own account, kept in its own home.
  */
-export function antigravityDriver(options: { builtIn: () => AntigravityProviderService }): HarnessDriver {
+export function antigravityDriver(options: {
+  builtIn: () => AntigravityProviderService
+  /** Test seam: the service of an added entry (`entryService` otherwise). */
+  entry?: (context: DriverContext, entry: AntigravityEntry) => AntigravityProviderService
+}): HarnessDriver {
   return {
     kind: 'antigravity',
     label: 'Google Antigravity',
@@ -50,8 +75,11 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
       const version = options.builtIn().latestVersion()
       return version ? { kind: 'pinned' as const, version } : undefined
     },
-    multiInstance: false,
-    privateHome: false,
+    // A further entry is another Google account, in a home of its own (`AGY_FILE_TOKEN_ENV`).
+    multiInstance: true,
+    privateHome: true,
+    // The first entry runs on this computer's `agy` sign-in; an added one never moves onto it.
+    privateHomeFor: (config) => (config.home === 'private' ? 'required' : 'allowed'),
     canInstall: true,
     // The agent offers the models of the signed-in account only.
     customModels: false,
@@ -70,11 +98,16 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     botAuthority: () => options.builtIn().supportsBotTurns(),
     botApprovals: () => true,
     nativeToolNames: (neutral) => ACP_NATIVE_TOOLS[neutral] ?? [],
-    decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
+    decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,
     create(context: DriverContext): DriverRuntime {
-      const service = options.builtIn()
+      // Only the gateway's built-in entry runs on the profile's service; every added one has its own.
+      const own = context.builtIn === false
+      const service = own
+        ? (options.entry ?? entryService)(context, { instanceId: context.instanceId, stateDir: context.stateDir, home: context.env.home ?? join(context.stateDir, 'home') })
+        : options.builtIn()
+      const subject = own ? `${SIGN_IN_SUBJECT}:${context.instanceId}` : SIGN_IN_SUBJECT
       service.useAgyFinder(() => context.findBinary())
       return {
         adapter: antigravityAdapter(() => service),
@@ -83,8 +116,9 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
         modelsRefreshedAt: () => service.modelsRefreshedAt(),
-        // Launch settings only: Antigravity's `signedIn` is its real sign-in, not a Mousse sign-out.
-        vendorMirror: service.vendorMirror(LAUNCH_MIRROR_FIELDS),
+        // Launch settings only: Antigravity's `signedIn` is its real sign-in, not a Mousse sign-out. An older Mousse
+        // knows only the first entry, so an added one keeps no copy.
+        ...(own ? {} : { vendorMirror: service.vendorMirror(LAUNCH_MIRROR_FIELDS) }),
         validateLaunch: (patch) => service.validateLaunch(patch),
         launchChanged: () => service.launchChanged(),
         // The sign-in the profile recorded. An explicit check (Add, Check again, after install) also
@@ -95,18 +129,21 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
           const problem = service.settingsProblem()
           if (problem) return { state: 'unknown', methodLabel: 'Google sign-in', message: problem }
           const signedIn = service.signedIn() || (force && await service.checkSignedIn())
+          const shared = service.isolationProblem()
           return signedIn
-            ? { state: 'signed_in', methodLabel: 'Google sign-in', subject: SIGN_IN_SUBJECT }
-            : { state: 'signed_out', methodLabel: 'Google sign-in' }
+            ? { state: 'signed_in', methodLabel: 'Google sign-in', subject }
+            : { state: 'signed_out', methodLabel: 'Google sign-in', ...(shared ? { message: shared } : {}) }
         },
         // Turn admission reads the recorded sign-in only: it never starts the agent.
-        identity: async () => (service.signedIn() ? SIGN_IN_SUBJECT : undefined),
+        identity: async () => (service.signedIn() ? subject : undefined),
         // The plan limits, read by `agy` itself when the usage page asks; never in the background.
         usage: (signal) => service.usage(signal),
         usageOnRequest: true,
         refreshModels: async (cwd) => void (await service.refreshModels(cwd)),
         signIn: (session, cwd) => service.login(session, cwd),
         signOut: () => service.logout(),
+        // Removing an added entry deletes its own home and the sign-in in it; the first entry's removal deletes nothing.
+        ...(own ? { deleteCredentials: () => service.deleteHome() } : {}),
         install: async (onProgress) => void (await service.install((message, fraction, bytes) =>
           onProgress({ message, ...(fraction !== undefined ? { fraction } : {}), ...(bytes ?? {}) }))),
         cancelInstall: () => service.cancelInstall(),
@@ -120,7 +157,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
         discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
-        stop: () => {}
+        // The profile's service outlives its runtime; an added entry's ends with it.
+        stop: () => { if (own) service.stop() }
       }
     }
   }

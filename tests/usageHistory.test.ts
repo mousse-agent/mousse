@@ -196,6 +196,15 @@ describe('usage history from the agents\' own logs', () => {
     expect(sourceOf(second, 'antigravity').readFiles).toBe(1)
   })
 
+  it('reads the transcripts of an Antigravity entry added after the first, in its own home', async () => {
+    const entryHome = join(home, '.mousse', 'profiles', 'prf_1', 'harness', 'antigravity_antigravity-2', 'home')
+    write(join(entryHome, 'gemini-home', 'antigravity-acp', 'brain', 'agy-second', '.system_generated', 'logs', 'transcript.jsonl'), [
+      antigravityLine(1, 2, { model: 'gemini-4-neon-high', input_tokens: 300, cache_read_tokens: 0, output_tokens: 30 })
+    ])
+    const history = await scanner().history({ range: '24h', timeZone: 'UTC', agent: 'antigravity' })
+    expect(history.topSessions.map((row) => row.session)).toContain('agy-second')
+  })
+
   it('ranks unpriced Antigravity sessions by token count when their list cost is zero', async () => {
     const cliDir = join(home, '.gemini', 'antigravity-cli')
     write(join(cliDir, 'brain', 'agy-small', '.system_generated', 'logs', 'transcript.jsonl'), [

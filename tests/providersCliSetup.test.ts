@@ -390,18 +390,30 @@ describe('Add provider choices', () => {
   const codex = snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex' })
   const antigravity = snapshot({ instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity', enabled: { device: false, effective: false, setBy: 'device' } })
 
-  it('offers a second Claude Code account and skips single-instance agents already in the list, on or off', () => {
-    const choices = addChoices([claude, codex, antigravity], [])
+  it('offers a further account of each agent added, on or off, as "<Label> 2", and skips single-instance agents already in the list', () => {
+    const opencode = snapshot({ instanceId: 'opencode', driver: 'opencode', displayName: 'OpenCode' })
+    const choices = addChoices([claude, codex, antigravity, opencode], [])
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
-      ['new', 'Claude Code · another account'],
-      ['new', 'ChatGPT subscription'],
+      ['new', 'Claude Code 2'],
+      ['new', 'ChatGPT subscription 2'],
+      ['new', 'Antigravity 2'],
       ['new', 'Cursor'],
       ['new', 'Grok'],
-      ['new', 'OpenCode'],
       ['new', 'Custom command'],
       ['registry', 'More ACP agents…'],
       ['new', 'Claude Code (API key)']
     ])
+    expect(choices.filter((choice) => choice.kind === 'new' && choice.another).map((choice) => choice.key)).toEqual(['new:claude', 'new:codex', 'new:antigravity'])
+  })
+
+  it('names a further entry with the first number no entry has', () => {
+    const named = (...names: string[]) => names.map((displayName, index) => snapshot({ instanceId: index ? `antigravity:${index}` : 'antigravity', driver: 'antigravity', displayName }))
+    const label = (snapshots: ReturnType<typeof named>) => addChoices(snapshots, []).find((choice) => choice.key === 'new:antigravity')?.label
+    expect(label(named('Antigravity'))).toBe('Antigravity 2')
+    expect(label(named('Antigravity', 'Antigravity 2'))).toBe('Antigravity 3')
+    // A gap (a removed or renamed entry) is used first; names compare without case.
+    expect(label(named('Antigravity', 'antigravity 3'))).toBe('Antigravity 2')
+    expect(label(named('Work'))).toBe('Antigravity 2')
   })
 
   it('offers ChatGPT subscription managed or on the user’s Codex CLI, and the CLI again as another account once theirs is added', () => {
@@ -411,10 +423,11 @@ describe('Add provider choices', () => {
     // The first entry on the CLI is the user's own setup; any further one is another account.
     expect(pick([claude])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed', 'existing'] })
     expect(pick([claude])).not.toHaveProperty('ownSetup')
-    expect(pick([claude, codex])).toMatchObject({ label: 'ChatGPT subscription', setups: ['managed', 'existing'], ownSetup: true })
-    expect(pick([claude, managed])).toMatchObject({ label: 'ChatGPT subscription · another account', setups: ['managed', 'existing'] })
+    expect(pick([claude])).not.toHaveProperty('another')
+    expect(pick([claude, codex])).toMatchObject({ label: 'ChatGPT subscription 2', setups: ['managed', 'existing'], ownSetup: true, another: true })
+    expect(pick([claude, managed])).toMatchObject({ label: 'ChatGPT subscription 2', setups: ['managed', 'existing'], another: true })
     expect(pick([claude, managed])).not.toHaveProperty('ownSetup')
-    expect(pick([claude, codex, managed])).toMatchObject({ label: 'ChatGPT subscription · another account', setups: ['managed', 'existing'], ownSetup: true })
+    expect(pick([claude, codex, managed])).toMatchObject({ label: 'ChatGPT subscription 2', setups: ['managed', 'existing'], ownSetup: true })
     expect(pick([claude, codex, another])).toMatchObject({ setups: ['managed', 'existing'], ownSetup: true })
   })
 
@@ -422,13 +435,14 @@ describe('Add provider choices', () => {
     const custom = snapshot({ instanceId: 'acp:grok', driver: 'acp', displayName: 'grok' })
     const choices = addChoices([claude, codex, antigravity, custom], [])
     expect(choices.find((choice) => choice.key === 'new:acp')).toMatchObject({ label: 'Custom command', group: 'Agents' })
+    expect(choices.find((choice) => choice.key === 'new:acp')).not.toHaveProperty('another')
   })
 
   it('offers a deleted agent again as a new provider on the user’s own setup', () => {
     const choices = addChoices([codex], [])
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
       ['new', 'Claude Code'],
-      ['new', 'ChatGPT subscription'],
+      ['new', 'ChatGPT subscription 2'],
       ['new', 'Antigravity'],
       ['new', 'Cursor'],
       ['new', 'Grok'],

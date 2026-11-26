@@ -48,6 +48,11 @@ export type AddChoice =
       setups?: CodexSetup[]
       /** The user's own CLI is already added: a further entry on it is another account, with a home of its own. */
       ownSetup?: boolean
+      /**
+       * A further entry of an agent already added: another account, named `label` ("Antigravity 2"). Adding it starts
+       * its sign-in at once; an agent with setups adds it as managed.
+       */
+      another?: boolean
       /** The agent on a model API's key (`FOLDED_TARGETS`): Claude Code with an Anthropic API key. */
       target?: FoldedTarget
     }
@@ -75,30 +80,34 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], addOptions: r
     // Every agent is an entry like any other: offered when there is none yet, or as another account.
     // An entry on a model API's key (`claude:api`) is not the agent's own setup.
     const existing = snapshots.find((snapshot) => snapshot.driver === driver && !onFoldedKey(snapshot))
+    // A further entry is named "<Label> 2", "<Label> 3", ... (the first free number), and is another account.
+    const another = Boolean(existing && !info.customCommand)
+    const label = info.addLabel ?? (another ? nextInstanceLabel(info.label, snapshots) : info.label)
     if (info.setups) {
       // The user's own CLI is added once on their home; a further entry is managed, or their CLI as another account with its own home.
       const ownSetup = snapshots.some((snapshot) => snapshot.driver === driver && snapshot.config?.setup !== 'managed')
-      const managed = snapshots.some((snapshot) => snapshot.driver === driver && snapshot.config?.setup === 'managed')
       choices.push({
         kind: 'new',
         key: `new:${driver}`,
-        label: managed ? `${info.label} · another account` : info.label,
+        label,
         iconId: info.iconId,
         group: 'Agents',
         driver,
         existing,
         setups: ['managed', 'existing'],
-        ...(ownSetup ? { ownSetup } : {})
+        ...(ownSetup ? { ownSetup } : {}),
+        ...(another ? { another } : {})
       })
     } else if (!existing || info.multiInstance) {
       choices.push({
         kind: 'new',
         key: `new:${driver}`,
-        label: info.addLabel ?? (existing ? `${info.label} · another account` : info.label),
+        label,
         iconId: info.iconId,
         group: 'Agents',
         driver,
-        existing
+        existing,
+        ...(another ? { another } : {})
       })
     }
     // A registry agent is always a new entry, so this choice stays whatever is already added.
@@ -155,6 +164,8 @@ export interface AddProviderHandlers {
    * (nothing when a credential is saved on this device already); resolves with the entry's id.
    */
   connectApi: (option: ProviderAddOption, method: AddOptionMethod, apiKey: string) => Promise<string>
+  /** Starts the sign-in of an entry just added, in the sign-in dialog. */
+  signIn: (instanceId: string, name: string) => void
 }
 
 /**
@@ -231,10 +242,39 @@ export function AddProviderDialog({
       const base = choice.target.displayName
       setLabel(snapshots.some((snapshot) => snapshot.displayName.trim().toLowerCase() === base.toLowerCase()) ? nextInstanceLabel(base, snapshots) : base)
     } else if (choice.kind === 'new') {
-      const base = DRIVER_INFO[choice.driver].label
-      setLabel(choice.existing && !DRIVER_INFO[choice.driver].customCommand ? nextInstanceLabel(base, snapshots) : base)
+      setLabel(choice.another ? choice.label : DRIVER_INFO[choice.driver].label)
     }
   }
+
+  /**
+   * Adds a further entry of an agent (`another`) under its name and starts its sign-in, with no step in between. An
+   * agent with setups adds it as managed (its own download, started now). It takes the executable the first entry was
+   * set to; when that entry is not installed, the install starts instead and the sign-in waits for it.
+   */
+  const addAnother = (choice: Extract<AddChoice, { kind: 'new' }>) =>
+    void run(choice.key, async () => {
+      const { instances } = window.mousse.providers
+      const name = choice.label
+      const known = choice.existing
+      if (choice.setups) {
+        const instanceId = await handlers.add(choice.driver, { displayName: name, setup: 'managed' })
+        // Mousse signs a managed entry in itself: the sign-in does not wait for the download.
+        await instances.install(instanceId)
+        finish(instanceId)
+        handlers.signIn(instanceId, name)
+        return
+      }
+      const binaryPath = known?.binary?.source === 'override' ? known.config?.binaryPath : undefined
+      const instanceId = await handlers.add(choice.driver, {
+        displayName: name,
+        home: 'private',
+        ...(binaryPath ? { binaryPath } : {})
+      })
+      const missing = known?.install.state === 'not_installed'
+      if (missing && known?.install.canInstall) await instances.install(instanceId)
+      finish(instanceId)
+      if (!missing) handlers.signIn(instanceId, name)
+    })
 
   const signInStep = apiMethod !== undefined && CONNECT_KIND[apiMethod] === 'subscription'
   /** A middle step only when there is a real choice to make: the sign-in method of a model API. */
@@ -287,14 +327,22 @@ export function AddProviderDialog({
 
   if (!open) return null
 
+  /** A further entry picked on the first step: Add adds it and starts its sign-in. */
+  const quick = step === 0 && selected?.kind === 'new' && selected.another ? selected : null
+
   const footer = (
     <>
       <button type="button" className="btn" disabled={busy !== null} onClick={back}>
         {step === 0 ? 'Cancel' : 'Back'}
       </button>
-      {step < last && (
-        <button type="button" className="btn btn-primary" disabled={!selected} onClick={() => goTo(step + 1)}>
-          Next
+      {step < last && (!quick || quick.setups) && (
+        <button type="button" className={quick ? 'btn' : 'btn btn-primary'} disabled={!selected || busy !== null} onClick={() => goTo(step + 1)}>
+          {quick ? 'Choose setup' : 'Next'}
+        </button>
+      )}
+      {quick && (
+        <button type="button" className="btn btn-primary" disabled={busy !== null} onClick={() => addAnother(quick)}>
+          {busy === quick.key ? 'Adding…' : 'Add'}
         </button>
       )}
     </>
@@ -338,7 +386,8 @@ export function AddProviderDialog({
                         onClick={() => choose(choice)}
                         onDoubleClick={() => {
                           choose(choice)
-                          setStep(1)
+                          if (choice.kind === 'new' && choice.another) addAnother(choice)
+                          else setStep(1)
                         }}
                       >
                         <ProviderIcon providerId={choice.iconId} size={16} />
@@ -438,13 +487,6 @@ export function AddProviderDialog({
                   }
                 />
               )}
-              {selected.existing && (setup === 'managed' || selected.ownSetup) && (
-                <SettingsRow
-                  title="Name"
-                  description="A separate account, with its own sign-in. Shown in the provider list and the model picker."
-                  control={<input className="settings-input" value={label} aria-label="Name" onChange={(event) => setLabel(event.target.value)} />}
-                />
-              )}
               {setup === 'managed' ? (
                 <ManagedSetupStep
                   busy={busy === selected.key}
@@ -452,8 +494,8 @@ export function AddProviderDialog({
                   error={error}
                   description={selected.setups.length > 1 ? undefined : SETUP_INFO.managed.description}
                   onAdd={() =>
-                    void run(selected.key, async () => {
-                      const instanceId = await handlers.add(selected.driver, { displayName: label.trim() || DRIVER_INFO[selected.driver].label, setup: 'managed' })
+                    selected.another ? addAnother(selected) : void run(selected.key, async () => {
+                      const instanceId = await handlers.add(selected.driver, { displayName: DRIVER_INFO[selected.driver].label, setup: 'managed' })
                       // The download starts at once; it shows in the downloads indicator and the editor.
                       await window.mousse.providers.instances.install(instanceId)
                       finish(instanceId)
@@ -471,14 +513,15 @@ export function AddProviderDialog({
                     void run(selected.key, async () => {
                       // Another account on the user's CLI gets a home of its own, and is signed in from Mousse.
                       const another = selected.ownSetup === true
-                      finish(
-                        await handlers.add(selected.driver, {
-                          displayName: (another ? label.trim() : '') || DRIVER_INFO[selected.driver].label,
-                          setup: 'existing',
-                          home: another ? 'private' : 'default',
-                          ...(binaryPath ? { binaryPath } : {})
-                        })
-                      )
+                      const name = another ? label : DRIVER_INFO[selected.driver].label
+                      const instanceId = await handlers.add(selected.driver, {
+                        displayName: name,
+                        setup: 'existing',
+                        home: another ? 'private' : 'default',
+                        ...(binaryPath ? { binaryPath } : {})
+                      })
+                      finish(instanceId)
+                      if (another) handlers.signIn(instanceId, name)
                     })
                   }
                 />
@@ -494,13 +537,6 @@ export function AddProviderDialog({
                 <SettingsRow
                   title="API key"
                   description={`${DRIVER_INFO[selected.driver].label} runs on your API key, in a home of its own. Your own ${DRIVER_INFO[selected.driver].label} setup stays as it is. Paste the key after adding.`}
-                />
-              )}
-              {selected.kind === 'new' && selected.existing && !selected.target && (
-                <SettingsRow
-                  title="Name"
-                  description="A separate account, with its own sign-in. Shown in the provider list and the model picker."
-                  control={<input className="settings-input" value={label} aria-label="Name" onChange={(event) => setLabel(event.target.value)} />}
                 />
               )}
               <AgentConnectStep
@@ -525,7 +561,9 @@ export function AddProviderDialog({
                     }
                     // A second instance of an agent is another account, so it gets its own home.
                     if (DRIVER_INFO[selected.driver].multiInstance) config.home = selected.existing ? 'private' : 'default'
-                    finish(await handlers.add(selected.driver, config))
+                    const instanceId = await handlers.add(selected.driver, config)
+                    finish(instanceId)
+                    if (selected.another) handlers.signIn(instanceId, config.displayName ?? selected.label)
                   })
                 }
               />
