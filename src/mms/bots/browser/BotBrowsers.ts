@@ -26,6 +26,7 @@ import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import { snapshotBrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import { browserToolCapability } from '../../orchestrator/browser/tools'
 import type { BotBrowserHost, BotTurnBrowser } from '../activation/dispatcher'
+import { keepToolImages } from '../chat/toolImages'
 import type { BrowserWindowDisplay } from '../../../shared/browser/window'
 
 /**
@@ -48,6 +49,11 @@ import type { BrowserWindowDisplay } from '../../../shared/browser/window'
  *   general browser methods, another thread's agent, a group chat or a workflow are refused.
  */
 
+/** How long a bot's browser stays open after its last run ends, for the owner to look at what it left. */
+export const BOT_BROWSER_IDLE_MS = 10 * 60_000
+/** How long it stays open when that run's work waits for its owner (a question, an action to approve): to take over or check the page. */
+export const BOT_BROWSER_HANDOFF_IDLE_MS = 30 * 60_000
+
 /** The browser surface `BotBrowsers` uses: the profile's sessions, tool dispatcher and artifacts. */
 export type BotBrowserService = Pick<MmsBrowserService, 'sessions' | 'tools' | 'artifacts' | 'workspaceDataDir'>
 
@@ -57,8 +63,13 @@ export interface BotBrowsersOptions {
   browser(): BotBrowserService | undefined
   /** The bot's home thread, which owns its browser session; undefined for an unknown or deleted bot. */
   homeThread(botId: string): string | undefined
-  /** How long a browser no activation uses stays open while nobody watches (default 2 minutes). */
+  /** How long a browser no activation uses stays open while nobody watches (default `BOT_BROWSER_IDLE_MS`). */
   idleMs?: number
+  /**
+   * The same when the last activation let go of it to wait for its owner (default `BOT_BROWSER_HANDOFF_IDLE_MS`, or three
+   * times a given `idleMs`).
+   */
+  handoffIdleMs?: number
   now?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
   /** How often a first-use install is checked on (default 1 second). */
@@ -89,6 +100,20 @@ interface ActivationTabs {
   /** The tab it used last: where an observation without a tab looks. */
   current?: string
   ended: boolean
+  /**
+   * It went on after waiting for its owner, with the tabs it left them: its first call drops those the owner (or anything
+   * else) closed meanwhile.
+   */
+  resumed?: boolean
+}
+
+/**
+ * Work that let go of the browser to wait for its owner's answer (a question, an action to approve): its tabs stay open
+ * and its own (`ActivationTabs.tabs`, kept), whatever other activations do, for the owner to check or take over and for
+ * the work when it goes on; the browser stays open until `deadline` at least.
+ */
+interface Handoff {
+  deadline: number
 }
 
 /** One view that watches a bot's browser, on one connection. */
@@ -115,6 +140,15 @@ interface BotBrowserState {
    */
   followed?: string
   idle?: { clear(): void }
+  /** When the armed `idle` ends. */
+  idleAt?: number
+  /** When the browser may close after the last activation that ended as usual (or the owner opened it): `BOT_BROWSER_IDLE_MS` later. */
+  idleUntil?: number
+  /**
+   * Work waiting for its owner, by activation: until each goes on or ends, its tabs stay and the browser stays open until
+   * its deadline, so another activation's end never closes them or cuts its wait short.
+   */
+  handoffs: Map<string, Handoff>
   /** The owner's views of it: pictures, the followed tab, holds and their input (`WatchedBrowser`). */
   viewer: WatchedBrowser
 }
@@ -189,13 +223,15 @@ export class BotBrowsers implements BotBrowserHost {
   private installing: { percent?: number } | undefined
   private readonly now: () => number
   private readonly idleMs: number
+  private readonly handoffIdleMs: number
   private readonly setTimer: (fn: () => void, ms: number) => { clear(): void }
   private readonly computer: string
   private notice: BotBrowserNotice | undefined
 
   constructor(private readonly options: BotBrowsersOptions) {
     this.now = options.now ?? Date.now
-    this.idleMs = options.idleMs ?? 2 * 60_000
+    this.idleMs = options.idleMs ?? BOT_BROWSER_IDLE_MS
+    this.handoffIdleMs = options.handoffIdleMs ?? (options.idleMs !== undefined ? options.idleMs * 3 : BOT_BROWSER_HANDOFF_IDLE_MS)
     this.setTimer = options.setTimer ?? defaultTimer
     this.computer = options.computerName ?? (hostname().replace(/\.local\.?$/i, '').trim() || 'this computer')
   }
@@ -210,13 +246,20 @@ export class BotBrowsers implements BotBrowserHost {
     this.notice = notice
   }
 
-  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined {
+  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal; filesFolder?: string }): BotTurnBrowser | undefined {
     if (!this.options.browser()) return undefined
     const state = this.state(input.botId, input.homeThreadId)
-    // Work that let go of the browser while it waited (for room, or a usage limit's reset) opens fresh tabs when it goes on.
+    // Work that let go of the browser while it waited (for room, or a usage limit's reset) opens fresh tabs when it goes on;
+    // work that waited for its owner goes on with the tabs it left them, and its longer wait is over.
     const known = state.activations.get(input.activationId)
+    const handedOff = known?.ended && state.handoffs.delete(input.activationId)
+    if (known && handedOff) {
+      known.ended = false
+      known.resumed = known.tabs.size > 0
+    }
     const activation = known && !known.ended ? known : { tabs: new Set<string>(), ended: false }
     state.activations.set(input.activationId, activation)
+    if (handedOff) this.refollow(state)
     const policy = this.policy(500)
     const execution: ExecutionContext = {
       profileId: this.options.profileId,
@@ -234,20 +277,42 @@ export class BotBrowsers implements BotBrowserHost {
       // The owner's grant is the bot's access: there is no tab-access prompt for its own browser.
       requestAccess: async () => 'already-allowed',
       capabilities: () => state.viewer.record()?.capabilities,
-      readScreenshot: (context, sessionId, artifactId) => this.readScreenshot(state, context, sessionId, artifactId),
+      readScreenshot: (context, sessionId, artifactId) => this.readScreenshot(state, context, sessionId, artifactId, { activationId: input.activationId, filesFolder: input.filesFolder }),
       dispatch: (context, name, args) => this.dispatch(state, input.activationId, input.signal, context, name, args)
     }
     return { binding, runtime }
   }
 
-  activationEnded(input: { botId: string; activationId: string }): void {
+  activationEnded(input: { botId: string; activationId: string; waitingForOwner?: boolean }): void {
     const state = this.bots.get(input.botId)
     const activation = state?.activations.get(input.activationId)
-    if (!state || !activation || activation.ended) return
+    if (!state || !activation) return
+    if (activation.ended) {
+      // Work that waited for its owner ended without going on (stopped, its question withdrawn): its page and its longer
+      // wait go as an ordinary end's would.
+      if (!input.waitingForOwner && state.handoffs.delete(input.activationId)) this.letGo(state, activation)
+      return
+    }
     activation.ended = true
-    const others = [...state.activations.values()].some((entry) => !entry.ended)
-    if (others && state.sessionId) {
-      // Another activation still works in the browser: only this one's tabs go.
+    activation.resumed = undefined
+    if (input.waitingForOwner && state.sessionId) {
+      // It waits for its owner, who may check its page or take it over: its tabs stay open and its own, whatever other
+      // activations do, and the browser stays open until its deadline at least.
+      state.handoffs.set(input.activationId, { deadline: this.now() + this.handoffIdleMs })
+      if (!this.anyLive(state)) this.armIdle(state)
+      return
+    }
+    this.letGo(state, activation)
+  }
+
+  /**
+   * An activation ended as usual: while another one works in the browser or waits for its owner, only its tabs close;
+   * after the last one the browser stays a while for the owner's view (`BOT_BROWSER_IDLE_MS`, or the longer wait of work
+   * that waits for its owner), then closes.
+   */
+  private letGo(state: BotBrowserState, activation: ActivationTabs): void {
+    const live = this.anyLive(state)
+    if ((live || state.handoffs.size > 0) && state.sessionId) {
       const sessionId = state.sessionId
       const tabs = [...activation.tabs]
       activation.tabs.clear()
@@ -260,10 +325,15 @@ export class BotBrowsers implements BotBrowserHost {
           state.viewer.tabClosed(tabId)
         }
       })()
-      return
     }
-    // The last one: the browser stays a while for the owner's view, then closes.
+    if (live) return
+    state.idleUntil = this.now() + this.idleMs
     this.armIdle(state)
+  }
+
+  /** Whether an activation uses the browser now. */
+  private anyLive(state: BotBrowserState): boolean {
+    return [...state.activations.values()].some((entry) => !entry.ended)
   }
 
   async removeBot(botId: string, purge: boolean): Promise<void> {
@@ -367,7 +437,10 @@ export class BotBrowsers implements BotBrowserHost {
     const hold = await state.viewer.open(viewId, connectionId, { platform: view.platform ?? 'other', ...(view.viewId ? {} : { legacy: true }), ...(url ? { url } : {}) },
       async (context) => (await this.ensureSession(state, context, undefined)).sessionId)
     state.viewer.markViewed()
-    if (![...state.activations.values()].some((entry) => !entry.ended)) this.armIdle(state)
+    if (!this.anyLive(state)) {
+      state.idleUntil = Math.max(state.idleUntil ?? 0, this.now() + this.idleMs)
+      this.armIdle(state)
+    }
     state.viewer.startCapture()
     return { browser: this.botView(state, await state.viewer.viewAfterChange(viewId, connectionId)), ...(view.viewId ? { hold: state.viewer.holdAnswer(hold) } : {}) }
   }
@@ -398,7 +471,6 @@ export class BotBrowsers implements BotBrowserHost {
 
   async close(botId: string): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
-    state.idle?.clear()
     await this.closeSession(state)
     return this.view(botId)
   }
@@ -460,6 +532,7 @@ export class BotBrowsers implements BotBrowserHost {
     const opens = actsOrLoads(name, params)
     // Checked again in the call's turn: the owner may have taken the browser over while it waited.
     if (opens && state.viewer.held) throw ownerHolds()
+    if (activation.resumed) await this.keepOpenTabs(state, activation, context)
     if (opened) {
       const open = async (session: OpenedSession): Promise<BrowserToolOutput> => {
         let tabId: string | undefined
@@ -486,8 +559,12 @@ export class BotBrowsers implements BotBrowserHost {
       if (name === 'browser_tabs') {
         result = await this.tabs(state, activation, context, sessionId, params)
       } else {
-        // An observation without a tab looks at this activation's own tab; another's is refused.
-        if (params.tabId === undefined && activation.current) params.tabId = activation.current
+        // An observation without a tab looks at this activation's own tab; another's is refused. With none of its own it
+        // would see (or screenshot) whichever tab is in front, maybe another run's: it opens a page first.
+        if (params.tabId === undefined) {
+          if (!activation.current) throw new BrowserAutomationError({ code: 'invalid_action', message: 'You have no page open in your browser yet. Open one with browser_open first.' })
+          params.tabId = activation.current
+        }
         if (typeof params.tabId === 'string' && !activation.tabs.has(params.tabId))
           throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That tab belongs to another of your runs. Open your own with browser_open.' })
         result = await this.invoke(context, name, params)
@@ -527,6 +604,20 @@ export class BotBrowsers implements BotBrowserHost {
     return { tabs: (listed.tabs ?? []).filter((tab: BrowserTab) => activation.tabs.has(tab.id)), ...(navigation ? { navigation } : {}) }
   }
 
+  /**
+   * Work that went on after waiting for its owner keeps the tabs it left them that are still open (the owner may have
+   * closed one, or gone elsewhere in it: its next observation shows the page as it is now).
+   */
+  private async keepOpenTabs(state: BotBrowserState, activation: ActivationTabs, context: BrowserToolContext): Promise<void> {
+    activation.resumed = undefined
+    const sessionId = state.viewer.liveSession()
+    if (!sessionId) return
+    const listed = await this.invoke(context, 'browser_tabs', { sessionId, operation: 'list' })
+    const open = new Set((listed.tabs ?? []).map((tab: BrowserTab) => tab.id))
+    for (const tabId of [...activation.tabs]) if (!open.has(tabId)) activation.tabs.delete(tabId)
+    if (activation.current && !activation.tabs.has(activation.current)) activation.current = [...activation.tabs].pop()
+  }
+
   private useTab(state: BotBrowserState, activation: ActivationTabs, tabId: string): void {
     activation.tabs.add(tabId)
     activation.current = tabId
@@ -543,7 +634,8 @@ export class BotBrowsers implements BotBrowserHost {
   private refollow(state: BotBrowserState): void {
     if (state.viewer.held) return
     let followed = state.followed ? state.activations.get(state.followed) : undefined
-    if (!followed || followed.ended) {
+    // Work that waits for its owner keeps the view on its page, for them to check or take over.
+    if (!followed || (followed.ended && !state.handoffs.has(state.followed!))) {
       const next = [...state.used].reverse().find((id) => state.activations.get(id)?.ended === false)
       if (next) {
         state.followed = next
@@ -573,12 +665,18 @@ export class BotBrowsers implements BotBrowserHost {
     return result.value
   }
 
-  private async readScreenshot(state: BotBrowserState, context: BrowserToolContext, sessionId: string, artifactId: string): Promise<{ data: string; mimeType: 'image/png' }> {
+  /**
+   * A screenshot the bot took. With its files folder it is also kept for its owner (`keepToolImages`): saved under
+   * `images/<date>/` and shown under the bot's next message, and the bot is told so (`note`).
+   */
+  private async readScreenshot(state: BotBrowserState, context: BrowserToolContext, sessionId: string, artifactId: string, owner: { activationId: string; filesFolder?: string }): Promise<{ data: string; mimeType: 'image/png'; note?: string }> {
     if (!context.vision) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Screenshots need a model that can see images' })
     if (sessionId !== state.sessionId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That screenshot is not from your browser' })
     const artifact = await this.service().artifacts.read({ profileId: this.options.profileId, threadId: state.homeThreadId, sessionId }, artifactId, Math.min(context.policy.maxArtifactBytes, 16 * 1024 * 1024))
     if (artifact.ref.mediaType !== 'image/png') throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser screenshot must be PNG' })
-    return { data: Buffer.from(artifact.bytes).toString('base64'), mimeType: 'image/png' }
+    const data = Buffer.from(artifact.bytes).toString('base64')
+    const kept = owner.filesFolder ? keepToolImages({ activationId: owner.activationId, filesFolder: owner.filesFolder, source: 'browser-screenshot', images: [{ data }] }) : undefined
+    return { data, mimeType: 'image/png', ...(kept ? { note: kept } : {}) }
   }
 
   // -- the session
@@ -637,6 +735,12 @@ export class BotBrowsers implements BotBrowserHost {
   }
 
   private async closeSession(state: BotBrowserState): Promise<void> {
+    // Nothing is left to wait for: no idle wait, and no work's page kept for its owner.
+    state.idle?.clear()
+    state.idle = undefined
+    state.idleAt = undefined
+    state.idleUntil = undefined
+    state.handoffs.clear()
     const sessionId = state.sessionId
     if (!sessionId) return
     state.viewer.closed()
@@ -649,20 +753,32 @@ export class BotBrowsers implements BotBrowserHost {
     await this.ownerCall(state, (context) => this.service().sessions.close(context, sessionId))
   }
 
-  /** After the last activation, the browser closes once nobody has watched or held it for a while. */
+  /**
+   * After the last activation, the browser closes once nobody has watched or held it: at the latest of its ordinary wait
+   * (`idleUntil`) and the deadlines of the work that waits for its owner (`handoffs`), so a shorter wait never cuts a
+   * longer one short, and a wait that is over (work that went on or ended) no longer counts. While the owner watches or
+   * holds it when that time comes, each wait starts again at its own length.
+   */
   private armIdle(state: BotBrowserState): void {
+    const at = Math.max(state.idleUntil ?? 0, ...[...state.handoffs.values()].map((handoff) => handoff.deadline))
+    if (state.idle && state.idleAt === at) return
     state.idle?.clear()
+    state.idleAt = at
     state.idle = this.setTimer(() => {
       state.idle = undefined
-      if ([...state.activations.values()].some((entry) => !entry.ended)) return
+      state.idleAt = undefined
+      if (this.anyLive(state)) return
       const watched = state.viewer.watched()
       const held = state.viewer.record()?.lifecycle === 'human-controlled'
       if (watched || held) {
+        const now = this.now()
+        if (state.idleUntil !== undefined) state.idleUntil = Math.max(state.idleUntil, now + this.idleMs)
+        for (const handoff of state.handoffs.values()) handoff.deadline = Math.max(handoff.deadline, now + this.handoffIdleMs)
         this.armIdle(state)
         return
       }
       void this.closeSession(state).catch((error) => console.warn('a bot browser could not be closed', { botId: state.botId, error: error instanceof Error ? error.message : String(error) }))
-    }, this.idleMs)
+    }, Math.max(0, at - this.now()))
   }
 
   // -- scopes and records
@@ -716,7 +832,7 @@ export class BotBrowsers implements BotBrowserHost {
   private state(botId: string, homeThreadId: string): BotBrowserState {
     const known = this.bots.get(botId)
     if (known && known.homeThreadId === homeThreadId) return known
-    const state = { botId, homeThreadId, activations: new Map(), turns: new BrowserTurns(BOT_TURN_TEXT), used: [] } as Omit<BotBrowserState, 'viewer'> as BotBrowserState
+    const state = { botId, homeThreadId, activations: new Map(), handoffs: new Map(), turns: new BrowserTurns(BOT_TURN_TEXT), used: [] } as Omit<BotBrowserState, 'viewer'> as BotBrowserState
     // The owner's views of it, through the bot's own scope (`ownerCall`) and turn (`ownerInput`).
     state.viewer = new WatchedBrowser({
       profileId: this.options.profileId,

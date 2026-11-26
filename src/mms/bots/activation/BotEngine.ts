@@ -744,7 +744,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const binding = this.host.mcp?.binding?.(tool)
       return Boolean(binding && (binding.configDigest !== held.configDigest || binding.schemaDigest !== held.schemaDigest))
     },
-    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : {}), activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
+    // A held action's card carries the screenshots the work took for it, so its owner sees them before approving.
+    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : { toolImages: true as const }), activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     sentAlone: () => this.scheduledCallChecks.clear(),
     settled: (row) => { const action = this.actions.forWork(row.id); if (action?.card_json !== null) this.chat.republish(action!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args) => {
@@ -3343,7 +3344,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const homeThreadId = this.store.registry(row.botId)?.homeThreadId
     if (!homeThreadId || !this.host.browser) return undefined
     try {
-      return this.host.browser.turn({ botId: row.botId, activationId: row.id, lane: row.lane, homeThreadId, runId, signal })
+      return this.host.browser.turn({ botId: row.botId, activationId: row.id, lane: row.lane, homeThreadId, runId, signal, filesFolder: this.filesFolder(row.botId) })
     } catch (error) {
       console.warn('the bot browser could not be offered to a turn', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       return undefined
@@ -4629,11 +4630,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * Waiting work lets go of the bot's browser, so the browser closes when nothing else uses it; when it goes on, its
-   * next turn opens tabs of its own again.
+   * next turn opens tabs of its own again. Work that waits for its owner's answer (a question, an action to approve)
+   * keeps it open longer, for them to check the page or take it over.
    */
   private letGoOfBrowser(row: BotActivationRow): void {
     try {
-      this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
+      const waitingForOwner = row.endReason === 'question' || row.endReason === 'approval'
+      this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id, ...(waitingForOwner ? { waitingForOwner } : {}) })
     } catch (error) {
       console.warn('the bot browser could not let go of waiting work', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
@@ -8723,11 +8726,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const id = `q_${randomUUID()}`
       questionId = id
       this.store.insertQuestion({ id, botId: row.botId, activationId: row.id, dispatchN: n, lane: 'run', spec, createdAt: this.store.now(), ...(follow ? { follow } : {}) })
-      // Its bubble: the bot's words from its work, under the owner's message that asked for it. Its id is its place among
-      // the work's questions, so it is written once.
+      // Its bubble: the bot's words from its work, under the owner's message that asked for it, with the screenshots the
+      // work took for it. Its id is its place among the work's questions, so it is written once.
       const place = this.store.activationQuestions(row.id).length
       this.chat.post({
-        id: `bm_${row.id}_q${place}`, botId: row.botId, author: 'bot', kind: 'notice', text: spec.question, questionId: id, activationId: row.id, lane: 'run',
+        id: `bm_${row.id}_q${place}`, botId: row.botId, author: 'bot', kind: 'notice', text: spec.question, questionId: id, activationId: row.id, lane: 'run', toolImages: true,
         ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {})
       })
       return 'asked'

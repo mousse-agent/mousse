@@ -25,11 +25,12 @@ import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
-import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
+import type { BotBrowserHost, PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import { QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_END_TURN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, QUESTIONS_ENOUGH_TEXT, questionGoneText } from '../../src/shared/bots/personal/questions'
 import { capturedRows } from '../../src/mms/bots/memory/capture'
+import { keepToolImages, resetToolImages } from '../../src/mms/bots/chat/toolImages'
 import type { ChatMessage } from '../../src/shared/types'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
 
@@ -46,7 +47,10 @@ beforeEach(async () => {
   registerPersonalBotMethods(domains, () => f.bots.service)
   botId = (await createBot(f, { name: 'Pip', reply: 'Hi, I find flats.' })).botId
 })
-afterEach(() => f.close())
+afterEach(() => {
+  f.close()
+  resetToolImages()
+})
 
 const call = <T = unknown>(method: string, params: Record<string, unknown>): Promise<T> => domains.dispatch(context, method, params) as Promise<T>
 
@@ -63,6 +67,8 @@ async function tool(name: string, prepared: PreparedBotTurn, threadId: string, a
   return (tools.get(name) as MousseTool).handler(args, ctx)
 }
 
+/** A one-pixel PNG, as a screenshot hands it over. */
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
 const FLATS = { question: 'Which flat should I book a viewing for?', choices: [{ label: 'Flat A', detail: '2 bed, Hackney' }, 'Flat B'] }
 const app = (name: string): NormalisedCall => ({ kind: 'app', tool: name, args: {} })
 /** A call every bot's work may make (the starter grant's web). */
@@ -585,5 +591,43 @@ describe('where it is never offered', () => {
     expect(consult.authority.appTools.has('ask_owner')).toBe(false)
     expect(consult.authority.appTools.has('question_answer')).toBe(false)
     void asked.catch(() => undefined)
+  })
+})
+
+describe("the bot's browser", () => {
+  it('is let go of for its owner while the work waits on its question, and as usual once the work ends', async () => {
+    const ended: Array<Parameters<BotBrowserHost['activationEnded']>[0]> = []
+    f.host.browser = { turn: () => undefined, activationEnded: (input) => { ended.push(input) } }
+    const { workId, work, questionId } = await workThatAsks()
+    await endTurn(work)
+    // It waits for its owner, who may check the page or take it over: the browser stays open longer.
+    expect(ended.filter((input) => input.activationId === workId)).toEqual([{ botId, activationId: workId, waitingForOwner: true }])
+    await tap(questionId, 'Flat B')
+    await flush()
+    const resumed = await start(f, workId, mainDispatches(workId).at(-1)!.n)
+    await finish(f, resumed.payload, 'completed', { text: 'I booked a viewing of Flat B for Saturday.' })
+    expect(f.store.activation(workId)?.status).toBe('done')
+    // Done: no owner to wait for, so the ordinary wait.
+    const last = ended.filter((input) => input.activationId === workId).at(-1)
+    expect(last).toMatchObject({ botId, activationId: workId })
+    expect(last!.waitingForOwner).toBeFalsy()
+  })
+  it("shows the screenshot its work took with the question's bubble, before the owner answers, and not again in its report", async () => {
+    const { workId } = await handOff('Flat hunt', 'w1')
+    const work = await start(f, workId)
+    // The work takes a screenshot of the page (botBrowserScreenshot.test.ts: what browser_screenshot keeps), then asks.
+    expect(keepToolImages({ activationId: workId, filesFolder: work.prepared.authority.workspace!.files!, source: 'browser-screenshot', images: [{ data: PNG }] })).toContain('Your owner sees')
+    await tool('ask_owner', work.prepared, work.payload.threadId, FLATS)
+    const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
+    expect(bubble.attachments).toEqual([expect.objectContaining({ name: expect.stringMatching(/^browser-screenshot-.+\.png$/) })])
+    expect(f.bots.service.attachmentFile(botId, bubble.id, 0).name).toBe(bubble.attachments![0]!.name)
+    await endTurn(work)
+    await tap(bubble.question!.questionId, 'Flat B')
+    await flush()
+    const resumed = await start(f, workId, mainDispatches(workId).at(-1)!.n)
+    await finish(f, resumed.payload, 'completed', { text: 'I booked a viewing of Flat B for Saturday.' })
+    const report = chatOf(f, botId).at(-1)!
+    expect(report).toMatchObject({ kind: 'run_report', text: 'I booked a viewing of Flat B for Saturday.' })
+    expect(report.attachments ?? []).toEqual([])
   })
 })

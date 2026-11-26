@@ -131,6 +131,12 @@ export interface PostInput {
    * message of a dispatch also takes the cards its turn made (`show_card`), and a question's bubble its question's card.
    */
   cards?: BotCard[]
+  /**
+   * A bot's message that asks its owner while its work waits (its question's bubble, a held action's card): it takes the
+   * pictures the activation's tools handed it since its last message (`takeToolImages`), as a dispatch's message does, so
+   * the owner sees a screenshot before they answer, not under the work's later report.
+   */
+  toolImages?: true
   /** A service notice that stays in chat without its own notification. */
   quiet?: true
   /** A notice the chat shows once in a row: the same text as the chat's latest message is not posted again. */
@@ -273,8 +279,9 @@ export class BotChatProjection {
     if (input.author !== 'bot' || input.kind === 'error' || input.hidden) return { text: input.text, journal: input.text, attachments: [...files], cards: [] }
     const parts = this.replyParts
     const made = input.threadId && parts ? replyApplets(input.text, input.threadId, () => parts.published(input.threadId!)) : undefined
-    // A message of a dispatch (its thread is named) shows what that activation's tools handed it: pictures, and cards.
-    const images = input.threadId ? takeToolImages(input.activationId) : []
+    // A message of a dispatch (its thread is named) shows what that activation's tools handed it: pictures, and cards. One
+    // that asks its owner while the work waits takes its pictures too, so they show before the owner answers.
+    const images = input.threadId || input.toolImages ? takeToolImages(input.activationId) : []
     const cards = [...(input.cards ?? []), ...(input.threadId ? takeReplyCards(input.activationId) : []), ...(question?.spec.card ? [question.spec.card] : [])]
     const kept = [...files, ...images]
     // Its journal row holds the cards as text after its words, so the chat pack, search and Forget see them.
