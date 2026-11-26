@@ -150,6 +150,11 @@ export interface NetEngineDevice {
   sshParked?: NetEngineSshParked
   /** Addresses added for it by hand (routes of any owner kind); none means it is found on the local network. */
   addresses?: string[]
+  /**
+   * The pairing ticket's tailnet, internet and tunnel hints the person approved at Connect, as routes: dialled after
+   * the same network, so they show as fallbacks. Not the ones under `addresses`.
+   */
+  approvedAddresses?: string[]
   /** The class of the route its connection runs over now (`conn.up.route`), while one is up; `relay` through one. */
   route?: RouteClass | 'relay'
   /** While connected through a relay: the relay's `host:port`. */
