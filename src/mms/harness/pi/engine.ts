@@ -1533,9 +1533,8 @@ export class PiRpcEngine implements ProviderAdapter {
         missing: ['toolControl'],
         instanceId: this.options.instanceId
       })
-    // Only a local server's turn waits here (its list is read again first). Every other turn emits its ref and
-    // registers itself in the same tick as the dispatch, so a Stop sent right after it reaches the starting turn.
-    if (this.options.localModel) await this.checkLocalTurn(input, host)
+    // The turn emits its ref and registers itself in the same tick as the dispatch, so a Stop sent right after it
+    // reaches the starting turn, also while a local server's list is read again below.
     const key = randomUUID()
     const ref: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model, nativeTurnId: key }
     sink.providerRef(ref)
@@ -1548,6 +1547,22 @@ export class PiRpcEngine implements ProviderAdapter {
       if (!starting.turn && starting.thread) void this.kill(starting.thread)
     }
     input.signal.addEventListener('abort', onEarlyAbort, { once: true })
+    if (this.options.localModel) {
+      // A Stop meanwhile ends the turn aborted before anything starts or changes.
+      let refused: unknown
+      try {
+        await this.checkLocalTurn(input, host)
+      } catch (error) {
+        refused = error
+      }
+      const stopped = input.signal.aborted || starting.cancelled
+      if (refused !== undefined || stopped) {
+        input.signal.removeEventListener('abort', onEarlyAbort)
+        this.turns.delete(key)
+        if (stopped) return this.abortedResult(input, ref, startedAt)
+        throw refused
+      }
+    }
     if (definitionTurn || host.bot) {
       try {
         return await this.ephemeralTurn(key, ref, starting, startedAt, input, sink, ctl, host)

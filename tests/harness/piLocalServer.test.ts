@@ -91,6 +91,21 @@ describe('a local model server in the real Pi child', () => {
     expect([spawned.length, recorder.connections()]).toEqual([0, 0])
   }, 90_000)
 
+  it('a Stop while the server’s list is read again reaches the turn: it ends aborted and nothing starts', async () => {
+    let listed!: () => void
+    let reading!: () => void
+    const read = new Promise<void>((done) => { reading = done })
+    const refreshLocal = () => { reading(); return new Promise<void>((done) => { listed = done }) }
+    const { engine, recorder, project, spawned } = await setup({ models, apiKey: LOCAL_PLACEHOLDER_KEY, pin: (url) => ({ origin: url, keyless: true }), localModel: () => facts(), refreshLocal })
+    const turn = harness(project, { model: 'phi3:medium' })
+    const pending = engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    await read
+    await expect(engine.stopThread(turn.input.threadId)).resolves.toBe('stopped')
+    listed()
+    await expect(pending).resolves.toMatchObject({ aborted: true })
+    expect([spawned.length, recorder.connections()]).toEqual([0, 0])
+  }, 90_000)
+
   it('refuses a model the server does not list (a custom id) before anything starts', async () => {
     const { engine, recorder, project, spawned } = await setup({ models, apiKey: LOCAL_PLACEHOLDER_KEY, pin: (url) => ({ origin: url, keyless: true }), localModel: (id) => (id === 'phi3:medium' ? facts() : undefined) })
     const turn = harness(project, { model: 'my-custom-model' })
