@@ -11,8 +11,14 @@
   #same-overlay { left: 550px; top: 150px; width: 250px; height: 150px; z-index: 2 }
 </style></head>
 <body>
+  <p id="parent-state" style="position:absolute;left:10px;top:10px;margin:0">parent:idle</p>
   <iframe id="covered" title="Covered form" src="__CHILD_ORIGIN__/frame-overlap-covered.html"></iframe>
   <iframe id="cross-overlay" title="Cross-site overlay" src="__CHILD_ORIGIN__/frame-overlap-overlay.html?site=cross"></iframe>
   <iframe id="same-overlay" title="Same-site overlay" src="/frame-overlap-overlay.html?site=same"></iframe>
+  <script>
+    window.addEventListener('message', (event) => {
+      document.getElementById('parent-state').textContent += ' ' + String(event.data)
+    })
+  </script>
 </body>
 </html>

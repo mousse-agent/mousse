@@ -7,7 +7,11 @@
   <p id="state">overlay:idle</p>
   <script>
     const site = new URLSearchParams(location.search).get('site') || 'unknown'
-    document.getElementById('overlay-button').addEventListener('click', () => { document.getElementById('state').textContent = 'overlay:' + site + '-clicked' })
+    document.getElementById('overlay-button').addEventListener('click', () => {
+      const label = 'overlay:' + site + '-clicked'
+      document.getElementById('state').textContent = label
+      window.parent.postMessage(label, '*')
+    })
   </script>
 </body>
 </html>
