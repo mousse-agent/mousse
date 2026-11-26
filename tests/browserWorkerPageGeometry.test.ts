@@ -2,7 +2,8 @@
  * Where the browser worker reads and acts on a page, with Chromium scripted:
  * - a viewport screenshot of a scrolled page is the viewport, not the top of the page;
  * - an image point inside a tall element is hit-tested where it is, not at the element's middle;
- * - a page whose layout could not be read keeps its form controls and says so.
+ * - a page whose layout could not be read keeps its form controls and says so, without calling them
+ *   visible or reading out a text control whose input type it cannot see.
  */
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
@@ -112,7 +113,9 @@ describe('a page whose layout could not be read keeps its form controls', () => 
   const axNodes = [
     { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Sign in' }, backendDOMNodeId: 1 },
     { nodeId: '2', role: { value: 'textbox' }, name: { value: 'Email' }, backendDOMNodeId: 2 },
-    { nodeId: '3', role: { value: 'button' }, name: { value: 'Continue' }, backendDOMNodeId: 3 }
+    { nodeId: '3', role: { value: 'button' }, name: { value: 'Continue' }, backendDOMNodeId: 3 },
+    // An <input type=password> whose name does not say so: only its layout box gives its type.
+    { nodeId: '4', role: { value: 'textbox' }, name: { value: 'Passcode' }, value: { value: 'hunter2' }, description: { value: 'hint: hunter2' }, backendDOMNodeId: 4 }
   ]
   /** A layout snapshot with a box for each of these nodes (by backend id). */
   const snapshot = (boxes: Record<number, [number, number, number, number]>) => {
@@ -139,8 +142,26 @@ describe('a page whose layout could not be read keeps its form controls', () => 
     ['the snapshot came back with no layout boxes', () => ({ strings: [], documents: [] })]
   ])('%s: the textbox and button are kept and the reader is told', async (_case, captureSnapshot) => {
     const observed = await observe(captureSnapshot)
-    expect(controls(observed.elements)).toEqual(['textbox:Email', 'button:Continue'])
+    expect(controls(observed.elements)).toEqual(['textbox:Email', 'button:Continue', 'textbox:Passcode'])
     expect(observed.warnings).toContain('layout-snapshot-unavailable')
+  })
+
+  it.each([
+    ['the snapshot failed', () => { throw new Error('DOMSnapshot failed') }],
+    ['the snapshot came back with no layout boxes', () => ({ strings: [], documents: [] })]
+  ])('%s: a text control of unknown input type never reads out its value, and no control is called visible', async (_case, captureSnapshot) => {
+    const observed = await observe(captureSnapshot)
+    const passcode = observed.elements.find((element) => element.name === 'Passcode')
+    expect(passcode).toBeDefined()
+    expect(JSON.stringify(observed.elements)).not.toContain('hunter2')
+    for (const element of observed.elements) expect(element.states).not.toContain('visible')
+  })
+
+  it('with layout, a laid-out text control that is not a password field keeps its value and is visible', async () => {
+    const observed = await observe(() => snapshot({ 1: [0, 0, 1280, 720], 4: [40, 80, 300, 32] }))
+    const passcode = observed.elements.find((element) => element.name === 'Passcode')
+    expect(passcode?.text).toBe('hunter2')
+    expect(passcode?.states).toContain('visible')
   })
 
   it('with layout, a control that has no box is not on screen and is left out, without the warning', async () => {

@@ -14,6 +14,8 @@ const SKIP_ROLES = new Set(['none', 'presentation', 'InlineTextBox', 'generic'])
 const SECRET_TYPES = new Set(['password'])
 /** Controls kept without a layout box when the page gave no layout at all: dropping them would hide the form. */
 const INTERACTIVE_ROLES = new Set(['textbox', 'button', 'combobox', 'checkbox', 'radio', 'link', 'listbox', 'menuitem', 'tab', 'switch', 'searchbox', 'spinbutton', 'slider'])
+/** Controls a person types into: one may be a password field, which only its layout box (its input type) tells. */
+const TEXT_ENTRY_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton'])
 
 interface AxNode {
   nodeId: string
@@ -220,9 +222,14 @@ export async function collectStructuredObservation(
     const bounds = localBounds ? translateBounds(localBounds, options.viewportOffset) : undefined
     seen += 1
     if (seen <= offset) continue
-    const text = isPassword ? undefined : boundText(axString(node.value) || axString(node.description), MAX_TEXT)
+    // A text control with no layout box has no known input type: it may be a password field whatever
+    // its name says, so its value and description are never read out.
+    const typeUnknown = !box && TEXT_ENTRY_ROLES.has(role)
+    const text = isPassword || typeUnknown ? undefined : boundText(axString(node.value) || axString(node.description), MAX_TEXT)
     const states: string[] = []
-    states.push(hiddenProp ? 'hidden' : 'visible')
+    // Without any layout, nothing says a control is on screen: it is not called visible, only hidden when it is.
+    if (hiddenProp) states.push('hidden')
+    else if (box || !layoutMissing) states.push('visible')
     states.push(disabled ? 'disabled' : 'enabled')
     if (readonly) states.push('readonly')
     if (focused) states.push('focused')
