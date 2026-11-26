@@ -26,9 +26,10 @@ export interface CodeHost {
    * One pull request of the folder's repository with its reviews, comments and each check. Cached for 30
    * seconds per pull request and shared by every folder of the repository. A failure throws a
    * `PullRequestReadError` carrying the host's own message. With `lineComments: false` the line comments are not read (`comments` holds
-   * the conversation only): a watch reads them itself, a page at a time, and keeps its own cache entry.
+   * the conversation only): a watch reads them itself, a page at a time, and keeps its own cache entry. With `notBefore`
+   * (ms) only a read started at or after that time answers: no value cached, nor a read in flight, from before it.
    */
-  getPullRequestDetail(cwd: string, number: number, options?: { force?: boolean; lineComments?: boolean }): Promise<PullRequestDetail>
+  getPullRequestDetail(cwd: string, number: number, options?: { force?: boolean; lineComments?: boolean; notBefore?: number }): Promise<PullRequestDetail>
   /**
    * One pull request identified explicitly by host, `owner/repo` and number (no local folder required).
    * Shares the same per-pull-request 30-second cache as `getPullRequestDetail`.

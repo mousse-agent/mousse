@@ -13,7 +13,8 @@ import { notice, quoted, type NoticePart } from '../../mousseContext'
  * bot started (`watch_start`) ending, printing a line that matches, or reaching its time limit.
  */
 export type BotWakeEvent =
-  | { kind: 'thread'; threadId: string; title?: string }
+  /** `runId`: the run that worked when the wake was set, whose end it waits for (absent on older wakes: any run's end). */
+  | { kind: 'thread'; threadId: string; title?: string; runId?: string }
   | { kind: 'pr'; repo: string; number: number; on?: 'merged' | 'checks' | 'review'; reviewAfter?: { at: string | null; ids: string[] } }
   | { kind: 'watcher'; title: string; command: string; match?: string; minutes: number }
 
@@ -28,7 +29,7 @@ export type BotWakeFired =
   | { kind: 'ended'; reason: BotWakeEndReason }
 
 /** Why a wake that waited on an event woke without it. */
-export type BotWakeEndReason = 'expired' | 'pr_closed' | 'pr_merged' | 'thread_archived' | 'thread_deleted' | 'unreachable' | 'restart'
+export type BotWakeEndReason = 'expired' | 'expired_unread' | 'pr_closed' | 'pr_merged' | 'thread_archived' | 'thread_deleted' | 'unreachable' | 'restart'
 
 /**
  * Loop detection, the only limit on how often a bot wakes itself: since its owner last wrote, a bot sets the same wake
@@ -99,6 +100,7 @@ export function wakeEventLabel(event: BotWakeEvent): string {
 
 const END_WORDS: Record<BotWakeEndReason, string> = {
   expired: 'it didn\'t happen in time',
+  expired_unread: 'its time ran out, and the pull request couldn\'t be read then to check whether it happened',
   pr_merged: 'the pull request was merged',
   pr_closed: 'the pull request was closed without merging',
   thread_archived: 'the thread was archived',

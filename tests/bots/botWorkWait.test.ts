@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_JOURNAL_ERROR, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 import type { BotWakeEvent } from '../../src/shared/bots/personal/wakes'
@@ -675,4 +675,57 @@ it.each(['restart', 'network'] as const)('N2 keeps a note without any wait histo
   const receiving = await start(f, workId, retry.n)
   ;(receiving.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkNotes(workId)).toEqual([])
+})
+
+// A wait on a pull request past its deadline is read once more before the work goes on, wherever it falls due.
+describe('a pull request wait past its deadline is read once more before the work resumes', () => {
+  const pr = { kind: 'pr', repo: 'acme/app', number: 12 } as const
+  const waitOnPr = (workId: string) => f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Ship once merged.', event: pr, hours: 1 })
+
+  it('restart: the pull request merged before the deadline while Mousse was off, and the work resumes with the merge', async () => {
+    const setAt = f.clock.now
+    let merged = false
+    f.host.pullRequestState = async () => merged ? { state: 'merged', title: 'Release', mergedAt: new Date(setAt + 30 * 60_000).toISOString() } : { state: 'open', title: 'Release' }
+    const { workId, turn } = await work()
+    const set = await waitOnPr(workId)
+    await finish(f, turn.payload, 'completed', { text: '' })
+    f.bots.close()
+    merged = true
+    f.clock.now = setAt + 2 * 60 * 60_000
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush()
+    await f.bots.deliverDueReminders()
+    await flush()
+    expect(f.store.reminder(set.wakeId)).toMatchObject({ status: 'delivered', fired: { kind: 'pr', number: 12, state: 'merged' } })
+    await start(f, workId, 2)
+    expect(f.store.dispatch(workId, 2)?.prompt.text).not.toContain("didn't happen in time")
+    expect(f.store.dispatches(workId)).toHaveLength(2)
+  })
+
+  it('parking while the deadline read is under way: the work resumes once, with what that read showed', async () => {
+    const setAt = f.clock.now
+    let answer: ((read: { state: 'merged'; title: string; mergedAt: string }) => void) | undefined
+    f.host.pullRequestState = async () => ({ state: 'open', title: 'Release' })
+    const { workId, turn } = await work()
+    const set = await waitOnPr(workId)
+    // The deadline comes while the turn that set the wait still runs: its last read starts and waits on GitHub.
+    f.host.pullRequestState = () => new Promise((resolve) => { answer = resolve })
+    f.clock.now = setAt + 60 * 60_000 + 1_000
+    await f.bots.deliverDueReminders()
+    await flush()
+    expect(answer).toBeTypeOf('function')
+    await finish(f, turn.payload, 'completed', { text: '' })
+    expect(f.store.reminder(set.wakeId)?.status).toBe('waiting')
+    answer!({ state: 'merged', title: 'Release', mergedAt: new Date(setAt + 50 * 60_000).toISOString() })
+    await flush()
+    f.clock.now += 2 * 60_000
+    await f.bots.deliverDueReminders()
+    await flush()
+    expect(f.store.reminder(set.wakeId)).toMatchObject({ status: 'delivered', fired: { kind: 'pr', number: 12, state: 'merged' } })
+    await start(f, workId, 2)
+    await f.bots.deliverDueReminders()
+    await flush()
+    expect(f.store.dispatches(workId)).toHaveLength(2)
+  })
 })

@@ -153,7 +153,9 @@ describe('bot timers after sleep', () => {
     const ticks: Promise<void>[] = []
     try {
       for (let i = 1; i <= 10; i++) {
+        // The engine's own clock moves with the ticks: a pull request read is timed by it, not by a tick's time.
         f.clock.now += 120_000
+        vi.setSystemTime(f.clock.now)
         ticks.push(f.scheduler.tickNow())
         await flush()
         expect.soft(syncInbox).toHaveBeenCalledTimes(i)
