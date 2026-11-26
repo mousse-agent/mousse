@@ -34,7 +34,7 @@ describe('a thread\'s standing as a job', () => {
   })
 
   it.each([
-    ['the owner\'s chat message', { lane: 'chat', idempotencyKey: 'chat:r1', trigger: { kind: 'manual', input: 'x' } }, 'Fix X in Y', { askedBy: 'owner', request: 'Fix X in Y' }],
+    ['the owner\'s chat message', { lane: 'chat', idempotencyKey: 'chat:r1', trigger: { kind: 'manual', input: 'x' } }, 'Fix X in Y', { askedBy: 'owner', request: 'Do the thing' }],
     ['a schedule', { lane: 'run', idempotencyKey: 'sched:b:s:t', trigger: { kind: 'schedule', input: 'Nightly check' } }, undefined, { askedBy: 'schedule', request: 'Nightly check' }],
     ['another bot', { lane: 'chat', idempotencyKey: 'botmsg:m1', trigger: { kind: 'manual', input: 'Please look', fromBot: { botId: 'o', name: 'O' } } }, undefined, { askedBy: 'bot', request: 'Please look' }],
     ['a wake, its own', { lane: 'chat', idempotencyKey: 'wake:w1', trigger: { kind: 'manual', input: 'woke' } }, undefined, { askedBy: 'self', request: 'Do the thing' }]
@@ -42,17 +42,19 @@ describe('a thread\'s standing as a job', () => {
     expect(jobAskerOf(row as never, ownerText, 'Do the thing')).toEqual(expected)
   })
 
-  describe('what the owner asked, when their message is longer than one line holds', () => {
+  describe('what the owner asked: the part their thread was handed, or their whole message', () => {
     const chat = { lane: 'chat', idempotencyKey: 'chat:r1', trigger: { kind: 'manual', input: 'x' } } as never
     const long = `Fix the login page in Web, ${'then tidy the settings page and the docs, '.repeat(5)}and tell me.`
 
     it.each([
-      // It may ask for several things: each job names the part its thread was handed.
+      // A message may ask for several things: each job names the part its thread was handed.
       ['a long message', long, 'Fix the login redirect in Web.', 'Fix the login redirect in Web.'],
-      // Handed nothing to name: the message, cut to the line.
+      ['a short message of two things', 'Fix the login and the docs', 'Fix the login redirect in Web.', 'Fix the login redirect in Web.'],
+      ['a message of two lines', 'Fix the login in Web\nUpdate the docs', 'Update the setup docs in Docs.', 'Update the setup docs in Docs.'],
+      // Handed nothing to name: the whole message, every line of it, cut to the line.
       ['a long message, nothing handed', long, '  ', jobLine(long)],
-      // Long only in its spacing: one line holds it.
-      ['a message long only in its spacing', `Fix X in Y${' '.repeat(BOT_JOB_LINE_CHARS)}`, 'Fix the login redirect in Web.', 'Fix X in Y']
+      ['a message of two lines, nothing handed', 'Fix the login in Web\nUpdate the docs', '', 'Fix the login in Web Update the docs'],
+      ['a message long only in its spacing, nothing handed', `Fix X in Y${' '.repeat(BOT_JOB_LINE_CHARS)}`, '', 'Fix X in Y']
     ])('%s', (_name, ownerText, sent, request) => {
       expect(jobAskerOf(chat, ownerText, sent)).toEqual({ askedBy: 'owner', request })
     })
@@ -137,11 +139,11 @@ describe('the ledger in the bot engine', () => {
   afterEach(() => f.close())
 
   /** The owner asks in the chat; the turn hands the job to `threadId` as thread_create does, and ends. */
-  async function handOff(text: string, threadId: string, clientRequestId: string) {
+  async function handOff(text: string, threadId: string, clientRequestId: string, sent = 'Fix the login redirect in Web.') {
     await f.bots.service.chatSend({ botId, text, clientRequestId })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const { payload } = await start(f, activation.id)
-    const { jobId } = f.bots.openJob(botId, activation.id, { threadId, title: 'Fix the login page', project: 'Web', sent: 'Fix the login redirect in Web.' })
+    const { jobId } = f.bots.openJob(botId, activation.id, { threadId, title: 'Fix the login page', project: 'Web', sent })
     threads.set(threadId, { status: 'running', title: 'Fix the login page' })
     await finish(f, payload, 'completed', { text: 'Started a thread for it.' })
     return jobId
@@ -149,7 +151,7 @@ describe('the ledger in the bot engine', () => {
 
   it('"fix X in project Y" becomes a job; the thread\'s end is one notice turn with the capped report and link, and the row is still there days later', async () => {
     const jobId = await handOff('Fix the login page in project Web', 't1', 'm1')
-    expect(f.store.job(jobId)).toMatchObject({ threadId: 't1', project: 'Web', askedBy: 'owner', request: 'Fix the login page in project Web', state: 'running' })
+    expect(f.store.job(jobId)).toMatchObject({ threadId: 't1', project: 'Web', askedBy: 'owner', request: 'Fix the login redirect in Web.', state: 'running' })
     // Still working: nothing to say.
     f.bots.checkJobs('t1')
     await flush()
@@ -167,7 +169,7 @@ describe('the ledger in the bot engine', () => {
     const input = (turn!.trigger as { input: string }).input
     expect(input).toContain('mousse://thread/t1')
     expect(input).toContain('Who asked: your owner.')
-    expect(input).toContain('Fix the login page in project Web')
+    expect(input).toContain('Fix the login redirect in Web.')
     // One Mousse block about this thread that may end with no reply; the thread's words are quoted inside it.
     expect(input.startsWith('<mousse_notice kind="job_update" reply="if-needed" ref="t1">\n')).toBe(true)
     expect(input.endsWith('\n</mousse_notice>')).toBe(true)
@@ -199,6 +201,30 @@ describe('the ledger in the bot engine', () => {
     f.bots.threadRunEnded('t9')
     await flush()
     expect(f.store.job(jobId)).toMatchObject({ state: 'done', line: 'Fixed the login redirect.' })
+  })
+
+  it('one message of two lines handed to two threads: each job, and its notice, names the part its thread was handed', async () => {
+    await f.bots.service.chatSend({ botId, text: 'Fix the login page in Web.\nUpdate the setup docs too.', clientRequestId: 'm10' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload } = await start(f, activation.id)
+    const login = f.bots.openJob(botId, activation.id, { threadId: 't10', title: 'Fix the login page', project: 'Web', sent: 'Fix the login redirect in Web.' }).jobId
+    const docs = f.bots.openJob(botId, activation.id, { threadId: 't11', title: 'Update the docs', project: 'Docs', sent: 'Update the setup guide in Docs.' }).jobId
+    threads.set('t10', { status: 'running', title: 'Fix the login page' })
+    threads.set('t11', { status: 'running', title: 'Update the docs' })
+    await finish(f, payload, 'completed', { text: 'Started two threads.' })
+
+    expect(f.store.job(login)).toMatchObject({ askedBy: 'owner', request: 'Fix the login redirect in Web.' })
+    expect(f.store.job(docs)).toMatchObject({ askedBy: 'owner', request: 'Update the setup guide in Docs.' })
+
+    threads.set('t11', { status: 'done', title: 'Update the docs', result: 'Updated the setup guide.' })
+    f.bots.threadRunEnded('t11')
+    await flush()
+    const [turn, ...more] = noticeTurns()
+    expect(more).toEqual([])
+    const input = (turn!.trigger as { input: string }).input
+    expect(input).toContain('<quoted from="the request">\nUpdate the setup guide in Docs.\n</quoted>')
+    expect(input).not.toContain('Fix the login redirect in Web.')
+    expect(input).not.toContain('Fix the login page in Web.')
   })
 
   it('a thread waiting for a person is a notice; an answer moves it back quietly; its end is a second notice', async () => {
@@ -268,7 +294,7 @@ describe('the ledger in the bot engine', () => {
     f.bots.launchedThreadChanged(home, 't4')
     const [followUp, ...more] = f.store.openJobsOn('t4')
     expect(more).toEqual([])
-    expect(followUp).toMatchObject({ botId, askedBy: 'owner', state: 'running', request: 'More work after "Fix the login page in project Web"' })
+    expect(followUp).toMatchObject({ botId, askedBy: 'owner', state: 'running', request: 'More work after "Fix the login redirect in Web."' })
     expect(followUp!.id).not.toBe(jobId)
     // Seen again while it works: still the one follow-up.
     f.bots.launchedThreadChanged(home, 't4')
@@ -286,7 +312,7 @@ describe('the ledger in the bot engine', () => {
     // It works again: the next follow-up keeps the first request's line, never quoting it twice.
     threads.set('t4', { status: 'running', title: 'Fix the login page' })
     f.bots.launchedThreadChanged(home, 't4')
-    expect(f.store.openJobsOn('t4')).toMatchObject([{ request: 'More work after "Fix the login page in project Web"' }])
+    expect(f.store.openJobsOn('t4')).toMatchObject([{ request: 'More work after "Fix the login redirect in Web."' }])
   })
 
   it('a message the bot sends to a thread whose follow-up is open takes the follow-up over: its turn, request and asker', async () => {

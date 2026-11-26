@@ -8025,7 +8025,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = this.store.activation(from)
     if (!row || row.botId !== botId) throw new BotEngineError('bot_not_found', 'Only a bot\'s own turn hands work to a thread.')
     const replyTo = row.trigger.kind === 'work' ? row.trigger.replyTo : undefined
-    const ownerText = replyTo ? this.store.message(replyTo)?.text : row.lane === 'chat' ? this.ownerWords(botId, from).split(/\r?\n/).find((line) => line.trim()) : undefined
+    const ownerText = replyTo ? this.store.message(replyTo)?.text : row.lane === 'chat' ? this.ownerWords(botId, from) : undefined
     const { askedBy, request } = jobAskerOf(row, ownerText, input.sent)
     const job = this.store.openJob({ id: `job_${randomUUID()}`, botId, activationId: from, threadId: input.threadId, title: jobLine(input.title || 'Untitled thread', 200), request, askedBy, ...(input.project ? { project: input.project } : {}) })
     this.changed({ botId })

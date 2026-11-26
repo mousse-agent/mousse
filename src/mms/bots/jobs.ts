@@ -1,5 +1,5 @@
 import type { BotLaunchedThread } from '../../shared/bots/personal/chat'
-import { BOT_JOB_LINE_CHARS, jobLine, type BotJob, type BotJobAsker, type BotJobState, type BotThreadAsk } from '../../shared/bots/personal/jobs'
+import { jobLine, type BotJob, type BotJobAsker, type BotJobState, type BotThreadAsk } from '../../shared/bots/personal/jobs'
 import { modelFacingReplyText } from '../../shared/applets'
 import type { ChatMessage } from '../../shared/types'
 import type { BotActivationRow } from './store/BotStore'
@@ -107,16 +107,18 @@ export function jobResultOf(recorded: string | undefined, messages: readonly Cha
 /**
  * Who asked for a job handed off by turn `row`, and what they asked, one line: the owner's words (their message, or the
  * one the work answers), a schedule's or another bot's, or the bot's own (a wake, a question's default, a notice).
- * `ownerText`: the owner's message the turn answers, when it has one; `sent`: what the bot sent the thread, the request
- * when nothing else says it, or when the owner's message is longer than one line holds (it may ask for several things).
+ * `ownerText`: the owner's words the turn answers, when it has them; `sent`: what the bot sent the thread. An owner's
+ * job is named by `sent`, the part of their words this thread was handed (one message may ask for several things), and
+ * by their whole message only when the thread was handed nothing.
  */
 export function jobAskerOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey' | 'trigger'>, ownerText: string | undefined, sent: string): { askedBy: BotJobAsker; request: string } {
   const trigger = row.trigger
   const own = (text: string | undefined) => jobLine(text?.trim() ? text : sent)
   if (trigger.kind === 'schedule') return { askedBy: 'schedule', request: own(trigger.input) }
   if (trigger.kind === 'manual' && trigger.fromBot) return { askedBy: 'bot', request: own(trigger.input) }
-  // A long message may ask for several things: the part this thread was handed says which one its job is.
-  if (ownerText?.trim()) return { askedBy: 'owner', request: jobLine(ownerText.replace(/\s+/g, ' ').trim().length > BOT_JOB_LINE_CHARS && sent.trim() ? sent : ownerText) }
+  // A message may ask for several things, on several lines or in one short one: the part this thread was handed says
+  // which one its job is. Handed nothing to name, the job is the whole message, cut to the line.
+  if (ownerText?.trim()) return { askedBy: 'owner', request: jobLine(sent.trim() ? sent : ownerText) }
   if (trigger.kind === 'work') return { askedBy: trigger.replyTo ? 'owner' : 'self', request: own(trigger.title) }
   return { askedBy: row.lane === 'chat' && /^(chat|answer):/.test(row.idempotencyKey) ? 'owner' : 'self', request: own(undefined) }
 }
