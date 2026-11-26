@@ -127,10 +127,20 @@ function translateBounds(bounds: BrowserBounds, offset?: BrowserPoint): BrowserB
   return { ...bounds, x: bounds.x + (offset?.x ?? 0), y: bounds.y + (offset?.y ?? 0) }
 }
 
+/** An element `collectStructuredObservation` would offer, as its `include` sees it (bounds in the tab's viewport). */
+export interface ObservationCandidate { backendNodeId: number; frameId: string; bounds?: BrowserBounds }
+
 export async function collectStructuredObservation(
   cdp: CdpTransport,
   cdpSessionId: string,
-  options: { visibleOnly?: boolean; continuation?: string; maxElements?: number; viewportOffset?: BrowserPoint }
+  options: {
+    visibleOnly?: boolean
+    continuation?: string
+    maxElements?: number
+    viewportOffset?: BrowserPoint
+    /** Keeps only the elements it accepts (an observation narrowed to one element): no other is counted, budgeted or given a ref. */
+    include?: (node: ObservationCandidate) => boolean
+  }
 ): Promise<CollectedObservation> {
   const warnings: string[] = []
   const visibleOnly = options.visibleOnly !== false
@@ -220,6 +230,7 @@ export async function collectStructuredObservation(
     if (visibleOnly && (hiddenProp || (localBounds && !intersectsViewport(localBounds, viewport)))) continue
     if (visibleOnly && !localBounds && !['dialog', 'alert', 'heading'].includes(role) && !(layoutMissing && INTERACTIVE_ROLES.has(role))) continue
     const bounds = localBounds ? translateBounds(localBounds, options.viewportOffset) : undefined
+    if (options.include && !options.include({ backendNodeId: node.backendDOMNodeId, frameId: node.frameId || main.id, ...(bounds ? { bounds } : {}) })) continue
     seen += 1
     if (seen <= offset) continue
     // A text control with no layout box has no known input type: it may be a password field whatever

@@ -3,7 +3,8 @@
  * - a viewport screenshot of a scrolled page is the viewport, not the top of the page;
  * - an image point inside a tall element is hit-tested where it is, not at the element's middle;
  * - a page whose layout could not be read keeps its form controls and says so, without calling them
- *   visible or reading out a text control whose input type it cannot see.
+ *   visible or reading out a text control whose input type it cannot see;
+ * - an observation narrowed to part of the page spends its element budget only on that part.
  */
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
@@ -128,13 +129,13 @@ describe('a page whose layout could not be read keeps its form controls', () => 
       }]
     }
   }
-  const observe = (captureSnapshot: Handler) => collectStructuredObservation(new ScriptedCdp({
+  const observe = (captureSnapshot: Handler, options: Parameters<typeof collectStructuredObservation>[2] = {}) => collectStructuredObservation(new ScriptedCdp({
     'Page.getLayoutMetrics': () => ({ cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } }),
     'Runtime.evaluate': (params) => ({ result: { value: params.expression === 'window.devicePixelRatio' ? 1 : 'Sign in' } }),
     'Page.getFrameTree': () => ({ frameTree: { frame: { id: 'main', loaderId: 'loader', url: 'https://fixture.test/sign-in' } } }),
     'Accessibility.getFullAXTree': () => ({ nodes: axNodes }),
     'DOMSnapshot.captureSnapshot': captureSnapshot
-  }), 'tab', {})
+  }), 'tab', options)
   const controls = (elements: Array<{ role?: string; name?: string }>) => elements.filter((element) => element.role === 'textbox' || element.role === 'button').map((element) => `${element.role}:${element.name}`)
 
   it.each([
@@ -168,5 +169,15 @@ describe('a page whose layout could not be read keeps its form controls', () => 
     const observed = await observe(() => snapshot({ 1: [0, 0, 1280, 720], 2: [40, 40, 300, 32] }))
     expect(controls(observed.elements)).toEqual(['textbox:Email'])
     expect(observed.warnings).not.toContain('layout-snapshot-unavailable')
+  })
+
+  it.each([
+    // Email (2) and Passcode (4) come before or after Continue (3): left out, they never use up the one element asked for.
+    ['only the button is in scope', (node: { backendNodeId: number }) => node.backendNodeId === 3, ['button:Continue'], false],
+    ['two controls are in scope', (node: { backendNodeId: number }) => node.backendNodeId === 3 || node.backendNodeId === 4, ['button:Continue'], true]
+  ])('narrowed by include, %s: the element budget counts only what is in scope', async (_case, include, kept, truncated) => {
+    const observed = await observe(() => snapshot({ 1: [0, 0, 1280, 720], 2: [40, 40, 300, 32], 3: [40, 120, 120, 32], 4: [40, 80, 300, 32] }), { maxElements: 1, include })
+    expect(controls(observed.elements)).toEqual(kept)
+    expect(observed.truncated).toBe(truncated)
   })
 })

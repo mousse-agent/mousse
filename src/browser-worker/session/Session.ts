@@ -36,7 +36,7 @@ import { readWorkspaceLock, WorkspaceLock } from '../lifecycle/lock'
 import { isProcessAlive } from '../lifecycle/process'
 import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '../lifecycle/paths'
 import { BrowserReferenceStore, type ObservedNode, type ReferenceIdentity } from '../observation/ReferenceStore'
-import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
+import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation, type ObservationCandidate } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { framesInside, placeAttachedFrame, type FrameBounds, type FrameTreeEntry, type FrameTreeNode } from './frameTree'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
@@ -104,6 +104,12 @@ function frameUrlKey(value: string): string {
 
 function boundsOverlap(a: FrameBounds, b: FrameBounds): boolean {
   return a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y
+}
+
+/** Whether `outer` holds all of `inner` and more (half a pixel of rounding aside): a box around it, not on it. */
+function encloses(outer: FrameBounds, inner: FrameBounds): boolean {
+  return outer.x <= inner.x + 0.5 && outer.y <= inner.y + 0.5 && outer.x + outer.width >= inner.x + inner.width - 0.5
+    && outer.y + outer.height >= inner.y + inner.height - 0.5 && outer.width * outer.height > inner.width * inner.height + 1
 }
 
 /** How many frames from other sites, one inside the next, an image point is followed into. */
@@ -1152,30 +1158,44 @@ export class ManagedSession {
     }
     const requestedMax = Math.min(MAX_OBSERVATION_ELEMENTS, Math.max(1,
       Math.floor(typeof params.maxElements === 'number' ? params.maxElements : MAX_OBSERVATION_ELEMENTS)))
+    // Narrowed to one element: what belongs to it is decided before the page is read, so nothing else
+    // on the page (an element, or a frame) spends the element budget or the frame cap.
+    const scopeFrames = scope ? await this.framesWithin(tab, scope.contentFrameId ?? scope.node.frameId ?? tab.frameId) : undefined
+    // A plain element keeps what lies on it; an `<iframe>` keeps all its frame shows.
+    const scopeBox = scope && !scope.contentFrameId ? await this.scopeViewportBounds(tab, scope) : undefined
+    const scopeWarnings = scope && !scope.contentFrameId && !scopeBox ? ['scope-not-laid-out'] : []
+    const inScope = (sessionId: string) => scope && scopeFrames
+      ? (node: ObservationCandidate) => {
+        if (node.backendNodeId === scope.node.backendNodeId && sessionId === scope.sessionId) return true
+        if (!scopeFrames.has(node.frameId)) return false
+        if (scope.contentFrameId) return true
+        // What lies on it, not what it lies in: the page, and the boxes around it, are not part of it.
+        return !!scopeBox && !!node.bounds && boundsOverlap(node.bounds, scopeBox) && !encloses(node.bounds, scopeBox)
+      }
+      : undefined
     const collected = await collectStructuredObservation(this.requireChrome().cdp, tab.cdpSessionId, {
       visibleOnly: optionalBoolean(params.visibleOnly),
       continuation: optionalString(params.continuation, 64),
-      maxElements: requestedMax
+      maxElements: requestedMax,
+      include: inScope(tab.cdpSessionId)
     })
     tab.url = collected.url
     tab.title = collected.title
     tab.documentId = collected.documentId
     tab.loaderId = collected.loaderId
     tab.frameId = collected.frameId
-    // Only this tab's frames: every page attaches its own, and one tab never reads another's.
-    const attachedFrames = this.framesOf(tab)
-    const scopeFrames = scope ? await this.framesWithin(tab, scope.contentFrameId ?? scope.node.frameId ?? collected.frameId) : undefined
-    // Narrowed to frames from other sites: the page around them neither uses up nor cuts short their budget.
-    const scopeInFrames = !!scopeFrames && attachedFrames.some((frame) => scopeFrames.has(frame.frameId))
+    // Only this tab's frames: every page attaches its own, and one tab never reads another's. Narrowed
+    // to an element, only the frames inside it count toward the cap.
+    const attachedFrames = this.framesOf(tab).filter((frame) => !scopeFrames || scopeFrames.has(frame.frameId))
     const childCollections: CollectedObservation[] = []
-    let remainingElements = scopeInFrames ? requestedMax : requestedMax - collected.elements.length
+    let remainingElements = requestedMax - collected.elements.length
     let childObservationTruncated = attachedFrames.length > MAX_ATTACHED_FRAMES_PER_OBSERVATION
     // Frames read, and frames that could not be (not placed in the page, or gone meanwhile).
     let observedFrames = 0
     let skippedFrames = 0
     for (const frame of attachedFrames.slice(0, MAX_ATTACHED_FRAMES_PER_OBSERVATION)) {
-      if ((collected.truncated && !scopeInFrames) || remainingElements <= 0) {
-        childObservationTruncated ||= attachedFrames.length > 0
+      if (collected.truncated || remainingElements <= 0) {
+        childObservationTruncated = true
         break
       }
       // A frame still enabling its domains is read once they are on, not halfway.
@@ -1185,18 +1205,17 @@ export class ManagedSession {
         continue
       }
       const offset = await this.frameViewportOffset(tab, frame)
-      const inScope = !scopeFrames || scopeFrames.has(frame.frameId)
       if (!offset) {
-        if (inScope) skippedFrames += 1
+        skippedFrames += 1
         continue
       }
-      if (!inScope) continue
       try {
         const child = await collectStructuredObservation(this.requireChrome().cdp, frame.sessionId, {
           visibleOnly: optionalBoolean(params.visibleOnly),
           continuation: undefined,
           maxElements: remainingElements,
-          viewportOffset: offset
+          viewportOffset: offset,
+          include: inScope(frame.sessionId)
         })
         const previousLoader = this.frameLoaders.get(frame.sessionId)
         if (previousLoader && previousLoader !== child.loaderId) this.refs.invalidateFrame('frame_' + frame.frameId)
@@ -1219,24 +1238,8 @@ export class ManagedSession {
       }
     }
     const mergedNodes = [collected, ...childCollections]
-    let mergedElements = mergedNodes.flatMap((item) => item.elements)
-    let mergedObservedNodes = mergedNodes.flatMap((item) => item.nodes)
-    const scopeWarnings: string[] = []
-    if (scope && scopeFrames) {
-      const scopedSessions = new Set(attachedFrames.filter((frame) => scopeFrames.has(frame.frameId)).map((frame) => frame.sessionId))
-      // A plain element keeps what lies on it; an `<iframe>` keeps all its frame shows.
-      const box = scope.contentFrameId ? undefined : await this.scopeViewportBounds(tab, scope)
-      if (!scope.contentFrameId && !box) scopeWarnings.push('scope-not-laid-out')
-      const keep = mergedObservedNodes.map((node, index) => {
-        if (node.backendNodeId === scope.node.backendNodeId && (node.cdpSessionId ?? tab.cdpSessionId) === scope.sessionId) return true
-        if (!(node.frameId && scopeFrames.has(node.frameId)) && !(node.cdpSessionId && scopedSessions.has(node.cdpSessionId))) return false
-        if (scope.contentFrameId) return true
-        const bounds = mergedElements[index]?.bounds
-        return !!box && !!bounds && boundsOverlap(bounds, box)
-      })
-      mergedElements = mergedElements.filter((_, index) => keep[index]).slice(0, requestedMax)
-      mergedObservedNodes = mergedObservedNodes.filter((_, index) => keep[index]).slice(0, requestedMax)
-    }
+    const mergedElements = mergedNodes.flatMap((item) => item.elements)
+    const mergedObservedNodes = mergedNodes.flatMap((item) => item.nodes)
     const observationId = 'obs_' + randomUUID()
     const identity: ReferenceIdentity = {
       profileId: this.profileId,
@@ -1271,8 +1274,8 @@ export class ManagedSession {
       tabs: this.listTabs(),
       elements,
       ...(screenshot ? { screenshot } : {}),
-      truncated: (collected.truncated && !scopeInFrames) || childObservationTruncated,
-      ...(collected.continuation && !scopeInFrames ? { continuation: collected.continuation } : {}),
+      truncated: collected.truncated || childObservationTruncated,
+      ...(collected.continuation ? { continuation: collected.continuation } : {}),
       warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(observedFrames ? ['oopif-attached'] : []), ...(skippedFrames ? ['oopif-observation-skipped'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...scopeWarnings, ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
       provenance: 'untrusted-page'
     }
@@ -1297,7 +1300,8 @@ export class ManagedSession {
     const observation = await this.observe({ ...params, includeScreenshot: false })
     // With a ref the observation is already narrowed to that element and what it holds.
     const text = boundText(observation.elements.map((element) => [element.role, element.name, element.text].filter(Boolean).join(' ')).join('\n'), 8_000)
-    return { provenance: 'untrusted-page', text, truncated: text.length >= 8_000 }
+    // Cut short either way: the page held more than the observation read, or the text more than it returns.
+    return { provenance: 'untrusted-page', text, truncated: observation.truncated || text.length >= 8_000 }
   }
 
   async wait(params: Record<string, unknown>, signal?: AbortSignal): Promise<BrowserObservation> {
