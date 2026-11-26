@@ -23,7 +23,7 @@ afterEach(() => {
 })
 
 /** `fail` may return the error a request rejects with; `kind` is the agent that runs once installed. */
-function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown, kind: 'native' | 'legacy' = 'native') {
+function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown, kind: 'native' | 'legacy' = 'native', reply?: string) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-lifecycle-'))
   homes.push(home)
   const processes: Array<ReturnType<typeof createProcess>> = []
@@ -62,7 +62,7 @@ function fixture(blockMethod?: string, installed = false, fail?: (method: string
               sessionId: `session-${processes.length}`,
               configOptions: [{ id: 'model', type: 'select', options: [{ value: 'account-model', name: 'Account Model' }] }]
             }
-            if (method === methods.agent.session.prompt) active.onUpdate?.({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: params.prompt?.[0]?.text } })
+            if (method === methods.agent.session.prompt) active.onUpdate?.({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: reply ?? params.prompt?.[0]?.text } })
             return { stopReason: 'end_turn' }
           }),
           notify: vi.fn(async () => { finishPrompt?.(); blockMethod = undefined })
@@ -308,6 +308,31 @@ describe('Antigravity quota answers', () => {
     'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 5s.'
   ])('leaves a rate limit that clears in seconds as an ordinary failure: %s', async (text) => {
     expect(await pauseFor(new RequestError(-32603, text))).toBeUndefined()
+  })
+
+  // agy 1.5.13 also answers a spent quota as its reply, with a normal end.
+  const NOTICE = '⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 3h45m30s.'
+  const replyOutcome = async (reply: string) => {
+    const { service, input } = fixture(undefined, false, undefined, 'native', reply)
+    return service.chat(input).then((text) => ({ text }), (error: unknown) => ({ error }))
+  }
+
+  it.each([
+    ['as the whole reply', `\n${NOTICE}\n`],
+    ['after what agy wrote first', `Checking the build.\n\n${NOTICE}`]
+  ])('fails the turn and pauses the run when agy answers with its quota notice (%s)', async (_, reply) => {
+    const before = Date.now()
+    const outcome = await replyOutcome(reply)
+    expect(outcome).toHaveProperty('error')
+    const decision = decideUsageLimit({ error: (outcome as { error: unknown }).error, run: {}, lookup: () => null, cap: 3, autoResume: true, nowMs: Date.now() })
+    const pause = decision?.action === 'pause' ? decision.pause : undefined
+    expect(pause).toMatchObject({ estimated: false, provider: 'antigravity' })
+    expect(Date.parse(pause!.until) - before).toBeGreaterThanOrEqual(((3 * 60 + 45) * 60 + 30) * 1000 - 1000)
+  })
+
+  it('keeps a reply that only mentions the notice before going on', async () => {
+    const reply = `The log said "Individual quota reached." earlier.\n\nThe build passes now.`
+    expect(await replyOutcome(reply)).toEqual({ text: reply })
   })
 })
 

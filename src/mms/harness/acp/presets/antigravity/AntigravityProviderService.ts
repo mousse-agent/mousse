@@ -18,6 +18,7 @@ import { hasAvailableModelList, mergeModelOptions, modelOptions, thoughtConfigOp
 import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback, privateSignInEnv, scrubbedAntigravityEnv, type AntigravityRuntimeChoice } from '../antigravity'
 import { keepOption } from '../../permissions'
 import { AcpSessions, type AcpChatInput, type AcpProcess, type SavedAcpSession } from '../../session'
+import { quotaNotice } from '../../stopReason'
 import type { LoginSession } from '../../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../../vendorMirror'
 import { requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache, type StoredCliConfig } from '../../../cliConfig'
@@ -88,8 +89,6 @@ export interface AntigravityEntry {
   /** `<stateDir>/home`: `gemini-home` and `bot-gemini-home`. */
   home: string
 }
-/** The notice `agy` sends as its reply when the model's quota is used up (seen on agy 1.5.13). */
-const AGY_QUOTA_NOTICE = /^\s*(⚠\s*)?Individual quota reached(\s|\.|$)/i
 const NOT_INSTALLED_MESSAGE = 'Install Antigravity first, then sign in'
 const SIGN_IN_REQUIRED_MESSAGE = 'Sign in to Antigravity in Settings before chatting'
 
@@ -629,7 +628,8 @@ export class AntigravityProviderService {
     try {
       const text = await this.acp.oneShot({ cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() })
       // `agy` answers a model whose quota is used up with a notice as the reply ("⚠ Individual quota reached. …"): never an answer.
-      if (AGY_QUOTA_NOTICE.test(text)) throw harnessAppError({ code: 'rate_limited', scope: 'model', message: `Antigravity's quota for this model is used up: ${text.trim().replace(/^⚠\s*/, '')}` })
+      const notice = quotaNotice(text)
+      if (notice) throw harnessAppError({ code: 'rate_limited', scope: 'model', message: `Antigravity's quota for this model is used up: ${notice}` })
       return { text }
     } finally {
       // The ended process may hold the folder a moment longer on Windows: a leftover empty folder is harmless.

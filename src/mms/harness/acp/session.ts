@@ -35,7 +35,7 @@ import {
 import type { AcpQuirks } from './quirks'
 import { answerBotPermission, checkBotFileRequest } from './botApprovals'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
-import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopReason'
+import { acpAgentError, acpQuotaReply, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
 
 /** The title is generic on agy: its launch arguments name the role and describe the work. */
@@ -2203,6 +2203,9 @@ export class AcpSessions {
           const ended = promptStopOutcome(label, outcome)
           if (ended === 'cancelled') throw agentCancelledError(label)
           if (ended) throw ended
+          // agy ends a prompt normally whose reply is its quota notice: the turn failed, and the run pauses.
+          const quota = this.options.usageLimitProvider ? acpQuotaReply(text, this.options.usageLimitProvider) : undefined
+          if (quota) throw quota
         }
         input.signal?.throwIfAborted()
         if (steerFailure) throw steerFailure
