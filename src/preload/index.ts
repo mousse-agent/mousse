@@ -29,6 +29,7 @@ import type {
   ThreadMessagesSnapshot,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
+  OrchestratorSteerResult,
   ContextUsageSnapshot,
   FileAsset,
   EditorInfo,
@@ -388,8 +389,8 @@ const api = {
       ipcRenderer.invoke('orchestrator:pendingQuestions'),
     abort: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:abort', threadId),
-    /** `true`: the running turn takes it. `'queued'`: it could not, and is queued at the end instead. */
-    steer: (text: string, threadId?: string): Promise<boolean | 'queued'> =>
+    /** `true`: the running turn takes it. `'queued'`: queued at the end. `'uncertain'`: reply lost. `{ refused: true }`: refused before running. */
+    steer: (text: string, threadId?: string): Promise<OrchestratorSteerResult> =>
       ipcRenderer.invoke('orchestrator:steer', text, threadId),
     isTurnActive: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:isTurnActive', threadId),
