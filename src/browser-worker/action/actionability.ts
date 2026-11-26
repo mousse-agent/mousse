@@ -9,6 +9,13 @@ export interface ActionableTarget {
   backendNodeId: number
   objectId: string
   point: BrowserPoint
+  /**
+   * Where pointer input for it goes when that is not `cdpSessionId`: the tab, with `point` in the tab's
+   * viewport (an image point in a frame from another site; Chromium routes it into the frame there).
+   */
+  pointerSessionId?: string
+  /** The point in its own frame's viewport, where it was hit-tested, when `point` is in the tab's. */
+  framePoint?: BrowserPoint
   bounds: BrowserBounds
   disabled: boolean
   hidden: boolean

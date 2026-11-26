@@ -1,12 +1,75 @@
 /**
  * Frames from other sites, as the browser worker reads and acts on them:
+ * - an image point on an `<iframe>` is carried into the frame through the `<iframe>`'s box as drawn
+ *   (scaled, rotated), and a box that cannot be mapped reliably is refused;
+ * - only the attached frame an `<iframe>` shows, by its exact id, is entered: never a frame behind it;
  * - a frame from another site whose `<iframe>` sits in a same-site frame of another frame from another
  *   site is placed and scoped through the session that attached it, not its immediate parent frame;
  * - a frame that went away while it was read is skipped, while a browser that is gone fails the read.
  */
 import { describe, expect, it } from 'vitest'
+import { frameStepAt, pointInFrame } from '../src/browser-worker/action/framePoint'
 import { CdpDisconnectedError, isCdpTargetGoneError } from '../src/browser-worker/cdp/connection'
 import { framesInside, placeAttachedFrame, type FrameTreeNode } from '../src/browser-worker/session/frameTree'
+
+/** The four corners (top-left, top-right, bottom-right, bottom-left) of a box at (x, y), drawn at its size times `scale`. */
+const box = (x: number, y: number, width: number, height: number, scale = 1) =>
+  [x, y, x + width * scale, y, x + width * scale, y + height * scale, x, y + height * scale]
+
+describe('an image point is carried into a frame through its <iframe> as drawn', () => {
+  const size = { width: 300, height: 200 }
+  it.each([
+    ['an <iframe> drawn at its size', box(100, 100, 300, 200), { x: 160, y: 130 }, { x: 60, y: 30 }],
+    // 60px right of the visible left edge of a frame drawn twice its size is 30px into the frame, not 60.
+    ['an <iframe> scaled by 2', box(100, 100, 300, 200, 2), { x: 160, y: 160 }, { x: 30, y: 30 }],
+    ['an <iframe> scaled by 0.5', box(100, 100, 300, 200, 0.5), { x: 130, y: 110 }, { x: 60, y: 20 }],
+    // Turned a quarter clockwise about its top-left at (500, 100): its x axis points down, its y axis left.
+    ['an <iframe> rotated by 90°', [500, 100, 500, 400, 300, 400, 300, 100], { x: 470, y: 160 }, { x: 60, y: 30 }]
+  ])('%s', (_case, quad, point, inFrame) => {
+    const mapped = pointInFrame(quad, size, point)
+    expect(mapped.kind).toBe('inside')
+    if (mapped.kind !== 'inside') return
+    expect(mapped.point.x).toBeCloseTo(inFrame.x, 6)
+    expect(mapped.point.y).toBeCloseTo(inFrame.y, 6)
+  })
+
+  it.each([
+    ['left of it (on its border)', { x: 99, y: 150 }],
+    ['below a scaled one', { x: 200, y: 501 }],
+    ['at its right edge', { x: 700, y: 150 }]
+  ])('a point %s is outside the frame', (_case, point) => {
+    expect(pointInFrame(box(100, 100, 300, 200, 2), size, point)).toEqual({ kind: 'outside' })
+  })
+
+  it.each([
+    ['flattened to a line', [100, 100, 400, 100, 400, 100, 100, 100]],
+    ['collapsed to a point', [100, 100, 100, 100, 100, 100, 100, 100]],
+    ['in perspective (not a parallelogram)', [100, 100, 400, 120, 380, 300, 120, 280]],
+    ['with a corner missing', [100, 100, 400, 100, 400, 300]]
+  ])('an <iframe> %s cannot be mapped reliably and is refused', (_case, quad) => {
+    expect(() => pointInFrame(quad, size, { x: 150, y: 150 })).toThrow(expect.objectContaining({ code: 'invalid_geometry' }))
+  })
+
+  it('a frame that could not be measured is refused', () => {
+    expect(() => pointInFrame(box(100, 100, 300, 200), { width: 0, height: 200 }, { x: 150, y: 150 })).toThrow(expect.objectContaining({ code: 'invalid_geometry' }))
+  })
+})
+
+describe('only the attached frame an <iframe> shows is entered', () => {
+  // Two frames from another site, siblings under the page's frame "main"; the overlay is drawn over "covered".
+  const covered = { frameId: 'covered', parentFrameId: 'main', sessionId: 's-covered' }
+  const overlay = { frameId: 'overlay', parentFrameId: 'main', sessionId: 's-overlay' }
+  it.each([
+    ['the <iframe> shows an attached frame', 'overlay', [covered, overlay], new Set(['main']), { kind: 'enter', frame: overlay }],
+    // A sibling with the same parent, behind it, is never taken for it.
+    ['the <iframe> shows a frame with no attachment: its sibling behind is not entered', 'unattached', [covered], new Set(['main']), { kind: 'refuse' }],
+    ['the frame tree could not be read: no guess is made', 'unattached', [covered], undefined, { kind: 'refuse' }],
+    ['the <iframe> is a same-site overlay of this process: it is acted on itself', 'same-site', [covered], new Set(['main', 'same-site']), { kind: 'stay' }],
+    ['two attachments claim the frame: neither is entered', 'overlay', [overlay, { ...covered, frameId: 'overlay' }], new Set(['main']), { kind: 'refuse' }]
+  ])('%s', (_case, contentFrameId, attached, inProcess, step) => {
+    expect(frameStepAt(contentFrameId, attached, inProcess)).toEqual(step)
+  })
+})
 
 /**
  * The tab "main" holds a frame from another site, "outer" (session s-outer). Inside it, a frame of its

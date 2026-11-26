@@ -43,6 +43,11 @@ async function mouseClick(
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount }, { sessionId, signal })
 }
 
+/** The session pointer input for a target goes to (see `ActionableTarget.pointerSessionId`). */
+function pointerSession(target: ActionableTarget, cdpSessionId: string): string {
+  return target.pointerSessionId ?? cdpSessionId
+}
+
 async function focus(cdp: CdpTransport, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<void> {
   await cdp.send('DOM.focus', { backendNodeId }, { sessionId, signal })
 }
@@ -82,10 +87,10 @@ export async function dispatchAction(
       if (!target || 'from' in target) fail('invalid_action', 'Pointer action requires a target')
       if (target.disabled) fail('not_actionable', 'Target is disabled')
       if (action.type === 'hover') {
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.point.x, y: target.point.y }, { sessionId: cdpSessionId, signal })
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.point.x, y: target.point.y }, { sessionId: pointerSession(target, cdpSessionId), signal })
         return
       }
-      await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, mouseButton(action.button), action.type === 'double-click' ? 2 : 1, signal)
+      await mouseClick(cdp, pointerSession(target, cdpSessionId), target.point.x, target.point.y, mouseButton(action.button), action.type === 'double-click' ? 2 : 1, signal)
       return
     }
     case 'fill':
@@ -93,7 +98,7 @@ export async function dispatchAction(
       if (!target || 'from' in target) fail('invalid_action', 'Text action requires a target')
       if (target.disabled || target.readOnly) fail('not_actionable', 'Target is not editable')
       await focus(cdp, cdpSessionId, target.backendNodeId, signal)
-      await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, 'left', 1, signal)
+      await mouseClick(cdp, pointerSession(target, cdpSessionId), target.point.x, target.point.y, 'left', 1, signal)
       if (action.type === 'fill') {
         await cdp.send('Runtime.callFunctionOn', {
           objectId: target.objectId,
@@ -131,31 +136,34 @@ export async function dispatchAction(
       if (target.disabled) fail('not_actionable', 'Target is disabled')
       const current = await readControlValue(cdp, cdpSessionId, target.objectId, signal)
       if (!!current.checked !== action.checked) {
-        await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, 'left', 1, signal)
+        await mouseClick(cdp, pointerSession(target, cdpSessionId), target.point.x, target.point.y, 'left', 1, signal)
       }
       return
     }
     case 'scroll': {
-      const point = target && !('from' in target) ? target.point : undefined
-      const x = point?.x ?? 10
-      const y = point?.y ?? 10
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: action.deltaX, deltaY: action.deltaY }, { sessionId: cdpSessionId, signal })
+      const one = target && !('from' in target) ? target : undefined
+      const x = one?.point.x ?? 10
+      const y = one?.point.y ?? 10
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: action.deltaX, deltaY: action.deltaY }, { sessionId: one ? pointerSession(one, cdpSessionId) : cdpSessionId, signal })
       return
     }
     case 'drag': {
       if (!target || !('from' in target)) fail('invalid_action', 'Drag requires two targets')
       if (target.from.disabled || target.to.disabled) fail('not_actionable', 'Drag target is disabled')
+      // Both ends' points are in one viewport: the tab's (image points) or one frame's (refs), never one of each.
+      const sessionId = pointerSession(target.from, cdpSessionId)
+      if (pointerSession(target.to, cdpSessionId) !== sessionId) fail('unsupported', 'Cross-frame drag is not certified')
       const from = target.from.point
       const to = target.to.point
       const steps = Math.min(40, Math.max(4, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / 24)))
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, buttons: 0 }, { sessionId: cdpSessionId, signal })
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 }, { sessionId: cdpSessionId, signal })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, buttons: 0 }, { sessionId, signal })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 }, { sessionId, signal })
       for (let index = 1; index <= steps; index += 1) {
         if (signal?.aborted) fail('cancelled', 'Drag cancelled')
         const t = index / steps
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, button: 'left', buttons: 1 }, { sessionId: cdpSessionId, signal })
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, button: 'left', buttons: 1 }, { sessionId, signal })
       }
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1 }, { sessionId: cdpSessionId, signal })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1 }, { sessionId, signal })
       return
     }
     case 'upload':

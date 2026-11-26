@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Overlay panel</title>
+<style>body { margin: 0; font: 16px sans-serif; background: #fff } #overlay-button { position: absolute; left: 0; top: 0; width: 250px; height: 100px } #state { position: absolute; left: 0; top: 110px; margin: 0 }</style></head>
+<body>
+  <button id="overlay-button" type="button">Overlay button</button>
+  <p id="state">overlay:idle</p>
+  <script>
+    const site = new URLSearchParams(location.search).get('site') || 'unknown'
+    document.getElementById('overlay-button').addEventListener('click', () => { document.getElementById('state').textContent = 'overlay:' + site + '-clicked' })
+  </script>
+</body>
+</html>

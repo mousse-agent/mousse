@@ -348,33 +348,88 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
 })
 
 describe.skipIf(!chrome.ok)('image points in a frame from another site', () => {
-  it('fills and clicks at image points near the top of a frame taller than the viewport', async () => {
+  /** Opens a page of the cross-site fixture and observes it with a screenshot on demand. */
+  const openFrames = async (profile: string, page: string) => {
     const site = await startCrossOriginFixtureSite()
     const { broker } = await createInProcessBroker({ chromeExtraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] })
+    const close = async () => { try { await broker.close() } finally { await site.close() } }
     try {
-      const opened = await broker.call(workerRequest('profile_tall_frame', 'session.open', { url: `${site.parentOrigin}/frame-tall-parent.html` }))
+      const opened = await broker.call(workerRequest(profile, 'session.open', { url: `${site.parentOrigin}/${page}` }))
       expect(opened.ok, opened.error?.message).toBe(true)
       const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-      const withScreenshot = async () => {
-        const observed = await broker.call(workerRequest('profile_tall_frame', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true }))
+      const observe = async (includeScreenshot = true) => {
+        const observed = await broker.call(workerRequest(profile, 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot }))
         expect(observed.ok, JSON.stringify(observed.error)).toBe(true)
         return observed.result as BrowserObservation
       }
-      let observation = await withScreenshot()
+      const act = (observation: BrowserObservation, action: Record<string, unknown>, requestId: string) => broker.call(workerRequest(profile, 'act', actParams(payload.session, observation, action, requestId)))
+      return { observe, act, close }
+    } catch (error) {
+      await close()
+      throw error
+    }
+  }
+
+  it('fills and clicks at image points near the top of a frame taller than the viewport', async () => {
+    const frames = await openFrames('profile_tall_frame', 'frame-tall-parent.html')
+    try {
+      let observation = await frames.observe()
       // The frame's middle is below the viewport: the image point, not the middle, is where it is hit.
       const frame = observation.elements.find((element) => element.name === 'Tall form')
       expect(frame, observation.elements.map((element) => `${element.role}:${element.name}`).join(' | ')).toBeTruthy()
       expect(middleOf(frame!).y).toBeGreaterThan(observation.viewport.cssHeight)
-      const input = named(observation, 'Applicant name', 'textbox')
-      const filled = await broker.call(workerRequest('profile_tall_frame', 'act', actParams(payload.session, observation, { type: 'fill', target: { kind: 'image-point', point: imagePointOf(observation, middleOf(input)) }, text: 'tall-value' }, 'tall_fill')))
+      // From the fixtures, not the worker's bounds: the frame is at (200, 120); its input at (20, 20),
+      // its button at (20, 80), each 240x32.
+      const name = { x: 200 + 20 + 120, y: 120 + 20 + 16 }
+      const save = { x: 200 + 20 + 120, y: 120 + 80 + 16 }
+      const filled = await frames.act(observation, { type: 'fill', target: { kind: 'image-point', point: imagePointOf(observation, name) }, text: 'tall-value' }, 'tall_fill')
       expect(filled.ok, JSON.stringify(filled.error)).toBe(true)
-      observation = await withScreenshot()
-      const save = named(observation, 'Save applicant', 'button')
-      const clicked = await broker.call(workerRequest('profile_tall_frame', 'act', actParams(payload.session, observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, middleOf(save)) } }, 'tall_click')))
+      observation = await frames.observe()
+      const clicked = await frames.act(observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, save) } }, 'tall_click')
       expect(clicked.ok, JSON.stringify(clicked.error)).toBe(true)
       expect(JSON.stringify((clicked.result as BrowserActionResult).observation)).toContain('applicant-saved:tall-value')
     } finally {
-      try { await broker.close() } finally { await site.close() }
+      await frames.close()
+    }
+  }, 120_000)
+
+  it('clicks in a frame drawn at twice its size at the control drawn under the point', async () => {
+    const frames = await openFrames('profile_scaled_frame', 'frame-scaled-parent.html')
+    try {
+      const observation = await frames.observe()
+      // From the fixture: "Left choice" is at (20, 20) to (80, 80) of a 300x200 frame drawn twice its size
+      // at (100, 100), so its middle is at (200, 200) of the page. That point less the frame's origin,
+      // (100, 100), would be on "Right choice".
+      const clicked = await frames.act(observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, { x: 200, y: 200 }) } }, 'scaled_click')
+      expect(clicked.ok, JSON.stringify(clicked.error)).toBe(true)
+      const after = JSON.stringify((clicked.result as BrowserActionResult).observation)
+      expect(after).toContain('choice:left')
+      expect(after).not.toContain('choice:right')
+    } finally {
+      await frames.close()
+    }
+  }, 120_000)
+
+  it('a press on a frame drawn over another reaches the frame on top, never the one behind', async () => {
+    const frames = await openFrames('profile_overlap_frames', 'frame-overlap-parent.html')
+    try {
+      // From the fixture: a frame from another site covers (100, 100) to (900, 500), its button most of it.
+      // Over that button, a frame from another site at (200, 150) and one from this site at (550, 150),
+      // each 250x150 with its own button over its top 100px.
+      let observation = await frames.observe()
+      const cross = await frames.act(observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, { x: 200 + 125, y: 150 + 50 }) } }, 'overlap_cross')
+      expect(cross.ok, JSON.stringify(cross.error)).toBe(true)
+      observation = await frames.observe()
+      const same = await frames.act(observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, { x: 550 + 125, y: 150 + 50 }) } }, 'overlap_same')
+      expect(same.ok, JSON.stringify(same.error)).toBe(true)
+      const after = JSON.stringify(await frames.observe(false))
+      expect(after).toContain('overlay:cross-clicked')
+      expect(after).toContain('overlay:same-clicked')
+      // The frame behind both received no press or click.
+      expect(after).toContain('covered:idle')
+      expect(after).not.toContain('covered:touched')
+    } finally {
+      await frames.close()
     }
   }, 120_000)
 })

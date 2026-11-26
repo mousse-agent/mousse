@@ -41,6 +41,7 @@ import { captureViewportScreenshot } from '../observation/screenshot'
 import { framesInside, placeAttachedFrame, type FrameBounds, type FrameTreeEntry, type FrameTreeNode } from './frameTree'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
+import { frameStepAt, pointInFrame } from '../action/framePoint'
 import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readOpenedPageSigns, readPageSigns, readSelectedText, type DispatchedHumanInput, type NavigationOptions } from '../action/dispatch'
 import { BROWSER_PROBLEM_CODES, browserNoteForPerson, browserProblemMessage, classifyOpenedPage, hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
 import { ScopedActionJournal } from '../action/journal'
@@ -94,6 +95,11 @@ interface AttachedFrameState {
 
 /** The element an observation is narrowed to (`observe({ ref })`): an `<iframe>` brings the frame it shows. */
 interface ObserveScope { node: ObservedNode; sessionId: string; contentFrameId?: string }
+
+/** Chromium's answer to `DOM.getNodeForLocation` when nothing is at the point. */
+function isNoNodeAtLocation(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'cdpCode' in error && /no node found at given location/i.test(String((error as { message?: unknown }).message ?? ''))
+}
 
 /** A frame's URL as frame trees give it: without credentials or fragment. */
 function frameUrlKey(value: string): string {
@@ -2738,59 +2744,107 @@ export class ManagedSession {
     return mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, point)
   }
 
-  /** The element at a viewport point of one frame; a point on nothing is not actionable, not a protocol error. */
+  /** Refuses a target that is no longer what the point hits in its frame (an overlay came over it, or it moved). */
+  private async assertHitAt(sessionId: string, objectId: string, point: BrowserPoint, signal: AbortSignal | undefined): Promise<void> {
+    const hit = await this.requireChrome().cdp.send<{ result?: { value?: { ok?: boolean } } }>('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: 'function(x, y) { const hit = document.elementFromPoint(x, y); return { ok: this === hit || this.contains(hit) }; }',
+      arguments: [{ value: point.x }, { value: point.y }],
+      returnByValue: true
+    }, { sessionId, signal })
+    if (!hit.result?.value?.ok) fail('not_actionable', 'Image point is intercepted by an overlay')
+  }
+
+  /**
+   * The element at a viewport point of one frame. Chromium looks a point up in whole CSS pixels, so a
+   * half pixel (an odd screenshot pixel at a pixel ratio of 2) is rounded here, and the caller hit-tests
+   * the point itself before acting. Only Chromium's answer that nothing is there is the point's fault.
+   */
   private async nodeAtPoint(sessionId: string, point: { x: number; y: number }, signal: AbortSignal | undefined): Promise<number> {
     let located: { backendNodeId?: number }
     try {
-      located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: point.x, y: point.y, includeUserAgentShadowDOM: false }, { sessionId, signal })
+      located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: Math.round(point.x), y: Math.round(point.y), includeUserAgentShadowDOM: false }, { sessionId, signal })
     } catch (error) {
-      // Only the page's answer ("No node found at given location") is the point's fault; a closed pipe or a cancel is not.
-      if (!(error && typeof error === 'object' && 'cdpCode' in error)) throw error
-      fail('not_actionable', 'No actionable DOM target exists at the image point')
+      if (isNoNodeAtLocation(error)) fail('not_actionable', 'No actionable DOM target exists at the image point')
+      throw error
     }
     if (!located.backendNodeId) fail('not_actionable', 'No actionable DOM target exists at the image point')
     return located.backendNodeId
   }
 
   /**
-   * The element at a tab's viewport point, in the innermost frame there: an `<iframe>` of another
-   * site the point falls on is entered, with the point moved into that frame's own viewport. A
-   * frame that cannot be entered (one of the same site, or one not placed) leaves its `<iframe>`.
+   * The element at a tab's viewport point, in the innermost frame there. An `<iframe>` the point falls
+   * on is entered only when the attached frame it shows is known by its exact id, and the point is
+   * carried into that frame through the `<iframe>`'s content box (scaled or rotated as it is drawn).
+   * An `<iframe>` of the same process (a same-site overlay) is acted on itself, never seen through; one
+   * whose frame cannot be matched is refused, so input never reaches a frame behind it.
    */
   private async elementAtPoint(tab: TabState, mapped: BrowserPoint, signal: AbortSignal | undefined): Promise<{ sessionId: string; frameId: string; point: BrowserPoint; backendNodeId: number }> {
     let at = { sessionId: tab.cdpSessionId, frameId: tab.frameId, point: mapped }
     let backendNodeId = await this.nodeAtPoint(at.sessionId, at.point, signal)
-    let under: Array<{ frame: AttachedFrameState; bounds: FrameBounds }> | undefined
     const entered = new Set<string>([tab.cdpSessionId])
     for (let depth = 0; depth < MAX_IMAGE_POINT_FRAME_DEPTH; depth += 1) {
       const content = await this.contentFrameOf(at.sessionId, backendNodeId, signal)
       if (!content) break
-      under ??= await this.attachedFramesAt(tab, mapped)
-      const open = under.filter((entry) => !entered.has(entry.frame.sessionId))
-      // The frame the `<iframe>` shows, by id. Only a frame of no known process here is matched by its parent
-      // instead: an `<iframe>` of this frame's own process (an overlay of the same site) is acted on, never seen through.
-      let next = open.find((entry) => entry.frame.frameId === content)
-      if (!next && !(await this.inProcessFrameIds(at.sessionId, signal)).has(content)) next = open.find((entry) => entry.frame.parentFrameId === at.frameId)
-      if (!next) break
-      entered.add(next.frame.sessionId)
-      at = { sessionId: next.frame.sessionId, frameId: next.frame.frameId, point: { x: mapped.x - next.bounds.x, y: mapped.y - next.bounds.y } }
+      const attached = this.framesOf(tab).filter((frame) => !entered.has(frame.sessionId))
+      const step = frameStepAt(content, attached, await this.inProcessFrameIds(at.sessionId, signal))
+      if (step.kind === 'stay') break
+      if (step.kind === 'refuse') fail('not_actionable', 'The image point is on a frame from another site that could not be matched to its page; observe again, or act on it by ref')
+      const next = step.frame
+      await this.frameEnables.get(next.sessionId)?.catch(() => undefined)
+      if (!this.frames.has(next.sessionId)) fail('not_actionable', 'The frame at the image point is gone; observe again')
+      const inside = pointInFrame(await this.frameContentQuad(at.sessionId, backendNodeId, signal), await this.frameViewportSize(next, signal), at.point)
+      // On the `<iframe>`'s own border or padding: that element is what the point is on.
+      if (inside.kind === 'outside') break
+      entered.add(next.sessionId)
+      at = { sessionId: next.sessionId, frameId: next.frameId, point: inside.point }
       backendNodeId = await this.nodeAtPoint(at.sessionId, at.point, signal)
     }
     return { ...at, backendNodeId }
   }
 
-  /** The frames a session's own process holds (its frame tree lists no frame of another process). */
-  private async inProcessFrameIds(sessionId: string, signal: AbortSignal | undefined): Promise<Set<string>> {
-    const ids = new Set<string>()
+  /** The content box of an `<iframe>` element, as drawn (after transforms), in its own session's viewport. */
+  private async frameContentQuad(sessionId: string, backendNodeId: number, signal: AbortSignal | undefined): Promise<number[]> {
+    // Chromium's refusal (no box: not laid out, or gone) is the point's fault; a closed pipe or a cancel is not.
+    const model = await this.requireChrome().cdp.send<{ model?: { content?: number[] } }>('DOM.getBoxModel', { backendNodeId }, { sessionId, signal }).catch((error: unknown) => {
+      if (error && typeof error === 'object' && 'cdpCode' in error) return undefined
+      throw error
+    })
+    const quad = model?.model?.content
+    if (!quad || quad.length < 8) fail('invalid_geometry', 'The frame at the image point has no box to map the point through')
+    return quad
+  }
+
+  /** A frame's own viewport size in its CSS pixels, read in a world of its own (the page's scripts cannot change what it reads). */
+  private async frameViewportSize(frame: AttachedFrameState, signal: AbortSignal | undefined): Promise<{ width: number; height: number }> {
+    const cdp = this.requireChrome().cdp
     try {
+      const world = await cdp.send<{ executionContextId?: number }>('Page.createIsolatedWorld', { frameId: frame.frameId, worldName: 'mousse-frame-size', grantUniveralAccess: false }, { sessionId: frame.sessionId, signal })
+      if (!world.executionContextId) fail('invalid_geometry', 'The frame at the image point could not be measured')
+      const read = await cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', { contextId: world.executionContextId, expression: '[innerWidth, innerHeight]', returnByValue: true }, { sessionId: frame.sessionId, signal })
+      const value = read.result?.value
+      if (Array.isArray(value) && typeof value[0] === 'number' && typeof value[1] === 'number' && value[0] > 0 && value[1] > 0) return { width: value[0], height: value[1] }
+    } catch (error) {
+      if (!(error && typeof error === 'object' && 'cdpCode' in error)) throw error
+    }
+    fail('invalid_geometry', 'The frame at the image point could not be measured')
+  }
+
+  /** The frames a session's own process holds (its frame tree lists no frame of another process); undefined when they could not be listed. */
+  private async inProcessFrameIds(sessionId: string, signal: AbortSignal | undefined): Promise<Set<string> | undefined> {
+    try {
+      const ids = new Set<string>()
       const tree = await this.requireChrome().cdp.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree', {}, { sessionId, signal })
       const visit = (node: FrameTreeNode | undefined) => {
         if (node?.frame?.id) ids.add(node.frame.id)
         for (const child of Array.isArray(node?.childFrames) ? node.childFrames as FrameTreeNode[] : []) visit(child)
       }
       visit(tree.frameTree)
-    } catch { /* none known: the parent match stands */ }
-    return ids
+      return ids
+    } catch (error) {
+      if (!(error && typeof error === 'object' && 'cdpCode' in error)) throw error
+      return undefined
+    }
   }
 
   /** The frame an `<iframe>` (or `<frame>`) element shows, or undefined for any other element. */
@@ -2804,35 +2858,20 @@ export class ManagedSession {
     }
   }
 
-  /** A tab's attached frames from other sites whose box holds a viewport point, innermost (smallest) first. */
-  private async attachedFramesAt(tab: TabState, point: BrowserPoint): Promise<Array<{ frame: AttachedFrameState; bounds: FrameBounds }>> {
-    const out: Array<{ frame: AttachedFrameState; bounds: FrameBounds }> = []
-    for (const frame of this.framesOf(tab)) {
-      await this.frameEnables.get(frame.sessionId)?.catch(() => undefined)
-      if (!this.frames.has(frame.sessionId)) continue
-      const bounds = await this.frameViewportBounds(tab, frame)
-      if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue
-      if (point.x >= bounds.x && point.x < bounds.x + bounds.width && point.y >= bounds.y && point.y < bounds.y + bounds.height) out.push({ frame, bounds })
-    }
-    return out.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height)
-  }
-
   private async resolveOneTarget(request: BrowserActionRequest, tab: TabState, target: BrowserTarget): Promise<ActionableTarget> {
     if (target.kind === 'image-point') {
       const signal = this.inFlight?.abort.signal
-      const at = await this.elementAtPoint(tab, this.imagePointInViewport(request, tab, target.point), signal)
+      const mapped = this.imagePointInViewport(request, tab, target.point)
+      const at = await this.elementAtPoint(tab, mapped, signal)
       // Made ready and hit-tested at the point itself: a tall element's middle may be off screen.
       const prepared = await prepareActionableTarget(this.requireChrome().cdp, at.sessionId, {
         backendNodeId: at.backendNodeId, frameRef: 'frame_' + at.frameId, cdpSessionId: at.sessionId, frameId: at.frameId, fingerprint: 'image-point'
       }, signal, { point: at.point })
-      const hit = await this.requireChrome().cdp.send<{ result?: { value?: { ok?: boolean } } }>('Runtime.callFunctionOn', {
-        objectId: prepared.objectId,
-        functionDeclaration: 'function(x, y) { const hit = document.elementFromPoint(x, y); return { ok: this === hit || this.contains(hit) }; }',
-        arguments: [{ value: at.point.x }, { value: at.point.y }],
-        returnByValue: true
-      }, { sessionId: at.sessionId, signal })
-      if (!hit.result?.value?.ok) fail('not_actionable', 'Image point is intercepted by an overlay')
-      return { ...prepared, point: at.point }
+      // Checked at the point as asked, not the whole pixel it was looked up at.
+      await this.assertHitAt(at.sessionId, prepared.objectId, at.point, signal)
+      // Pointer input goes to the tab at the point the screenshot showed: Chromium carries it into the frame there.
+      if (at.sessionId === tab.cdpSessionId) return { ...prepared, point: mapped }
+      return { ...prepared, point: mapped, pointerSessionId: tab.cdpSessionId, framePoint: at.point }
     }
     if (!this.refs.hasObservation(request.observationId)) fail('stale_observation', 'Observation is not in the reference store')
     const identity: ReferenceIdentity = {
