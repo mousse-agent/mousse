@@ -22,7 +22,7 @@ import {
   type WakeThreadState
 } from '../bots/wakeSources'
 import type { ThreadWakePayload } from '../run/types'
-import { WakeDetector } from './wakeDetector'
+import { WakeDetector, type WakeCheckOnly } from './wakeDetector'
 
 /**
  * A thread agent's wake-ups (`wake`): it carries on later in its own thread without the person writing, at a time, when
@@ -136,12 +136,8 @@ export class ThreadWakes {
       waiting: () => this.record.wakes.filter((wake) => wake.event),
       threadState: (wake, threadId) => this.deps.threadState(wake.threadId, threadId),
       pullRequestState: (_wake, repo, number) => this.deps.pullRequestState(repo, number),
-      // A wake whose time ran out while an earlier pull request was read gives up, as of the moment its turn comes.
-      expire: (wake, now) => {
-        if (Date.parse(wake.dueAt) > now || !this.record.wakes.includes(wake)) return false
-        this.fire(wake, { kind: 'ended', reason: 'expired' })
-        return true
-      },
+      // A wake whose pull request was read past its deadline, and shows nothing that happened by then, gives up.
+      expire: (wake) => !this.closed && this.record.wakes.includes(wake) && this.fire(wake, { kind: 'ended', reason: 'expired' }),
       // A wake cancelled, or whose thread was stopped, while its event was read stays cancelled.
       fire: (wake, fired) => !this.closed && this.record.wakes.includes(wake) && this.fire(wake, fired),
       now: () => this.now()
@@ -268,10 +264,13 @@ export class ThreadWakes {
     this.tick()
   }
 
-  /** A thread's run ended: the wakes waiting on that thread look now, not at the next tick. */
-  threadRunEnded(threadId: string): void {
+  /**
+   * A thread's run ended (`ended`: its outcome, from the run's own terminal event), or it was archived: the wakes waiting
+   * on that thread look now, not at the next tick, and fire with that run's outcome though its next run already started.
+   */
+  threadRunEnded(threadId: string, ended?: WakeCheckOnly['ended']): void {
     if (!this.started || !this.record.wakes.some((wake) => wake.event?.kind === 'thread' && wake.event.threadId === threadId)) return
-    void this.pass({ threadId })
+    void this.pass({ threadId, ...(ended ? { ended } : {}) })
   }
 
   close(): void {
@@ -303,7 +302,7 @@ export class ThreadWakes {
    * whose time came, then those whose event happened (`WakeDetector`: a thread's end at once, pull requests read in turn,
    * each wake's time looked at again as its read comes).
    */
-  private async pass(only?: { threadId: string }): Promise<void> {
+  private async pass(only?: WakeCheckOnly): Promise<void> {
     if (this.closed) return
     try {
       for (const wake of [...this.record.wakes]) {

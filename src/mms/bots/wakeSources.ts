@@ -39,8 +39,11 @@ export interface WakePullRequestState {
   state: 'open' | 'closed' | 'merged'
   title?: string
   headSha?: string
-  checkRuns?: Array<Pick<PullRequestCheck, 'name' | 'state'>>
+  checkRuns?: Array<Pick<PullRequestCheck, 'name' | 'state' | 'completedAt'>>
   reviews?: Array<Pick<PullRequestReview, 'id' | 'state' | 'author' | 'submittedAt'>>
+  /** When it merged or closed, by the host's clock. */
+  mergedAt?: string | null
+  closedAt?: string | null
 }
 
 export interface PullRequestStateDeps {
@@ -68,7 +71,7 @@ export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: strin
     if (name.toLowerCase() !== wanted) continue
     try {
       const read = await deps.pullRequest(folder, number)
-      return { state: read.state, ...(read.title ? { title: read.title } : {}), ...(read.headSha ? { headSha: read.headSha } : {}), ...(read.checkRuns ? { checkRuns: read.checkRuns } : {}), ...(read.reviews ? { reviews: read.reviews } : {}) }
+      return { state: read.state, ...(read.title ? { title: read.title } : {}), ...(read.headSha ? { headSha: read.headSha } : {}), ...(read.checkRuns ? { checkRuns: read.checkRuns } : {}), ...(read.reviews ? { reviews: read.reviews } : {}), ...(read.mergedAt ? { mergedAt: read.mergedAt } : {}), ...(read.closedAt ? { closedAt: read.closedAt } : {}) }
     } catch (error) {
       return { problem: error instanceof Error ? error.message : String(error) }
     }
@@ -132,10 +135,22 @@ export function threadWakeOutcome(event: ThreadWakeEvent, seen: WakeThreadState 
  * wake that has no GitHub cursor.
  */
 export function pullRequestWakeOutcome(event: PullRequestWakeEvent, read: WakePullRequestState | { none: true } | { problem: string } | undefined, setAt: string): BotWakeFired | undefined {
+  return pullRequestWakeHappened(event, read, setAt)?.fired
+}
+
+/**
+ * As `pullRequestWakeOutcome`, with when it happened by the host's own clock (`at`, ms): the merge, the close, the last
+ * check to finish, the review. No `at` when the read gives no time for it (a status check, an older code host).
+ */
+export function pullRequestWakeHappened(event: PullRequestWakeEvent, read: WakePullRequestState | { none: true } | { problem: string } | undefined, setAt: string): { fired: BotWakeFired; at?: number } | undefined {
   if (!read || 'none' in read || 'problem' in read) return undefined
-  if (read.state === 'merged' && event.on && event.on !== 'merged') return { kind: 'ended', reason: 'pr_merged' }
-  if (read.state === 'merged') return { kind: 'pr', repo: event.repo, number: event.number, state: 'merged', ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
-  if (read.state === 'closed') return { kind: 'ended', reason: 'pr_closed' }
+  const timed = (fired: BotWakeFired, iso: string | null | undefined) => {
+    const at = iso ? Date.parse(iso) : Number.NaN
+    return Number.isFinite(at) ? { fired, at } : { fired }
+  }
+  if (read.state === 'merged' && event.on && event.on !== 'merged') return timed({ kind: 'ended', reason: 'pr_merged' }, read.mergedAt)
+  if (read.state === 'merged') return timed({ kind: 'pr', repo: event.repo, number: event.number, state: 'merged', ...(read.title ? { title: read.title.slice(0, 120) } : {}) }, read.mergedAt)
+  if (read.state === 'closed') return timed({ kind: 'ended', reason: 'pr_closed' }, read.closedAt)
   const pr = { kind: 'pr' as const, repo: event.repo, number: event.number, ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
   if (event.on === 'checks') {
     const checks = read.checkRuns
@@ -143,7 +158,10 @@ export function pullRequestWakeOutcome(event: PullRequestWakeEvent, read: WakePu
     if (!read.headSha || !checks?.length || checks.some((check) => !['passing', 'failing', 'skipped', 'waiting'].includes(check.state))) return undefined
     const failedNames = checks.filter((check) => check.state === 'failing').map((check) => check.name)
     const waitingNames = checks.filter((check) => check.state === 'waiting').map((check) => check.name)
-    return { ...pr, state: 'checks', headSha: read.headSha.slice(0, 7), waiting: waitingNames.length, waitingNames: wakeCheckNames(waitingNames), passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames: wakeCheckNames(failedNames) }
+    // They finished when the last of them did; one with no time leaves it unknown.
+    const ends = checks.map((check) => check.completedAt ? Date.parse(check.completedAt) : Number.NaN)
+    const last = ends.every(Number.isFinite) ? new Date(Math.max(...ends)).toISOString() : undefined
+    return timed({ ...pr, state: 'checks', headSha: read.headSha.slice(0, 7), waiting: waitingNames.length, waitingNames: wakeCheckNames(waitingNames), passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames: wakeCheckNames(failedNames) }, last)
   }
   if (event.on === 'review') {
     const review = read.reviews?.filter((review) => {
@@ -157,7 +175,7 @@ export function pullRequestWakeOutcome(event: PullRequestWakeEvent, read: WakePu
       .sort((a, b) => Date.parse(a.submittedAt!) - Date.parse(b.submittedAt!))
       .find((review) => ['approved', 'changes_requested', 'commented'].includes(review.state))
     if (review && (review.state === 'approved' || review.state === 'changes_requested' || review.state === 'commented'))
-      return { ...pr, state: 'review', reviewState: review.state, reviewer: review.author }
+      return timed({ ...pr, state: 'review', reviewState: review.state, reviewer: review.author }, review.submittedAt)
   }
   return undefined
 }
