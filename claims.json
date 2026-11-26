@@ -130,24 +130,6 @@
       "expiresAt": "2026-11-26T10:22:51.331Z"
     },
     {
-      "task": "mousse/mousse-net-session-wedge-investigation",
-      "session": "Animatrix-0f51d4",
-      "machine": "Animatrix",
-      "branch": "mousse/mousse-net-session-wedge-investigation",
-      "paths": [
-        "src/mms/netEngine/helper/connections.ts",
-        "src/mms/netEngine/helper/appChannel.ts",
-        "src/mms/netEngine/session/host.ts",
-        "src/mms/netEngine/session/client.ts",
-        "src/mms/net/NetService.ts",
-        "src/mms/netEngine/NetEngineService.ts",
-        "src/mms/bridge/routed/ThreadRouter.ts",
-        "src/mms/protocol/handlers.ts"
-      ],
-      "claimedAt": "2026-11-26T08:59:08.913Z",
-      "expiresAt": "2026-11-26T11:45:36.753Z"
-    },
-    {
       "task": "net-helper-key-files",
       "session": "Avarnics-Mac-mini.local-b65610",
       "machine": "Avarnics-Mac-mini.local",
