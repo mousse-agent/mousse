@@ -7,6 +7,7 @@ import { DeviceSection } from '../src/renderer/components/sideCard/DeviceSection
 import {
   activeWorkspaceChoice,
   buildDeviceMenu,
+  buildRunOnOptions,
   canPickComputer,
   connectedRemoteDevices,
   hasDeviceChoices,
@@ -25,11 +26,10 @@ import {
   localProjectIdOf,
   newThreadWorktree,
   localWorkspaceFor,
-  projectToAddThere,
   workspaceOnOtherComputer,
-  workspaceOnThisComputer,
-  workspaceWithAddedProject
+  workspaceOnThisComputer
 } from '../src/renderer/lib/newThread'
+import { addTargets, computersWithProject, draftLocalProject, runOnWithProject } from '../src/renderer/lib/addToMachine'
 import { workspaceOnDevice } from '../src/renderer/lib/remoteComputers'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import type { Thread } from '../src/shared/types'
@@ -116,18 +116,29 @@ describe('picking where a new chat runs', () => {
     expect(workspaceOnDevice({ worktreeEnabled: false }, listed, node)).toEqual({ projectId: undefined, worktreeEnabled: false, node })
   })
 
-  it('offers to add the project to a computer that lacks it, and the draft takes it once it is there', () => {
-    const away = workspaceOnDevice({ projectId: 'b', worktreeEnabled: true }, listed, node)
-    expect(projectToAddThere(away, listed)).toMatchObject({ id: 'b', name: 'lib' })
-    // A computer that has it, or a draft with no project here, has nothing to add.
-    expect(projectToAddThere(workspaceOnDevice({ projectId: 'a', worktreeEnabled: true }, listed, node), listed)).toBeUndefined()
-    expect(projectToAddThere(workspaceOnDevice({ worktreeEnabled: false }, listed, node), listed)).toBeUndefined()
-    expect(workspaceWithAddedProject(away, node, 'node-1:lib')).toEqual({ ...away, projectId: 'node-1:lib' })
-    // Moved to another computer, or picked a project, while the clone ran: the draft stays as it is.
-    const moved = workspaceOnDevice(away, listed, other)
-    expect(workspaceWithAddedProject(moved, node, 'node-1:lib')).toBe(moved)
-    const picked = { ...away, projectId: 'node-1:remote-x' }
-    expect(workspaceWithAddedProject(picked, node, 'node-1:lib')).toBe(picked)
+  it('with a project, offers only the computers that have it, and the others to add it to', () => {
+    const third = 'node-3' as Device['node']
+    const devices = [
+      device({ node, name: 'Studio' }),
+      device({ node: other, name: 'Laptop' }),
+      device({ node: third, name: 'Mac mini', state: 'closed' }),
+      device({ node: 'node-4' as Device['node'], name: 'Phone', kind: 'phone' })
+    ]
+    // The draft's project here, wherever the draft runs.
+    expect(draftLocalProject({ projectId: 'a', worktreeEnabled: false }, listed)).toMatchObject({ id: 'a' })
+    expect(draftLocalProject({ projectId: 'node-1:remote-a', worktreeEnabled: false, node }, listed)).toMatchObject({ id: 'a' })
+    expect(draftLocalProject({ worktreeEnabled: false, node, localProjectId: 'b' }, listed)).toMatchObject({ id: 'b' })
+    expect(draftLocalProject({ worktreeEnabled: false }, listed)).toBeUndefined()
+    // Project a is on Studio only: Run on lists this computer and Studio, and keeps a computer already picked.
+    const withA = computersWithProject(listed, 'a')
+    expect([...withA]).toEqual([node])
+    expect(runOnWithProject(buildRunOnOptions({ localName: 'PC', devices }), withA).map((option) => option.name)).toEqual(['PC', 'Studio'])
+    expect(runOnWithProject(buildRunOnOptions({ localName: 'PC', devices, node: other }), withA).map((option) => option.name)).toEqual(['PC', 'Studio', 'Laptop'])
+    // The rest can take it, the connected ones first; an offline one is named and cannot be picked; phones never.
+    expect(addTargets(devices, withA)).toEqual([
+      { node: other, name: 'Laptop', online: true },
+      { node: third, name: 'Mac mini', online: false, reason: 'Mac mini is offline' }
+    ])
   })
 
   it('restores the project the draft had here when this computer is picked again', () => {

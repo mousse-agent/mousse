@@ -144,24 +144,6 @@ export function workspaceOnOtherComputer(
 }
 
 /**
- * The project of this computer that a draft for another computer had here, while that computer has no project for it:
- * the composer offers to add it there rather than starting without one.
- */
-export function projectToAddThere<P extends Pick<Project, 'id' | 'node'>>(workspace: ComposerWorkspace, projects: readonly P[]): P | undefined {
-  if (!workspace.node || workspace.projectId || !workspace.localProjectId) return undefined
-  return projects.find((project) => !project.node && project.id === workspace.localProjectId)
-}
-
-/**
- * The draft once the project is on that computer (`projectId` is its id there). A draft that has since moved to another
- * computer, or picked a project, stays as it is.
- */
-export function workspaceWithAddedProject(workspace: ComposerWorkspace, node: NodeId, projectId: string): ComposerWorkspace {
-  if (workspace.node !== node || workspace.projectId) return workspace
-  return { ...workspace, projectId }
-}
-
-/**
  * The draft with Private turned on or off. A private thread runs on this computer only, so turning it on
  * brings a draft that named another computer back here.
  */

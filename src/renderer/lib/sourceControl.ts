@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { create } from 'zustand'
 import type {
   SourceControlMethod,
@@ -8,6 +9,7 @@ import type {
   SourceRepositoryList
 } from '../../shared/sourceControl'
 import type { Project } from '../../shared/types'
+import { remoteReason } from './remoteComputers'
 
 /** The computer a call goes to: another one by its node, or this one (`THIS_COMPUTER`). */
 export const THIS_COMPUTER = ''
@@ -116,3 +118,43 @@ export function refreshGitHubRepositories(options: { force?: boolean; computer?:
   refreshing.set(computer, work)
   return work
 }
+
+/**
+ * A computer's GitHub connection for a dialog that needs it there: read when the computer changes, followed every
+ * second while a Connect runs (its one-time code shows where that Connect started), with Connect and Cancel. A failed
+ * call leaves its reason in `error`; refusals come in that computer's words.
+ */
+export function useComputerGitHub(computer: string | null, computerName: string): {
+  github: SourceControlProviderStatus | null
+  error?: string
+  connect: () => Promise<void>
+  cancel: () => Promise<void>
+} {
+  const key = computer ?? THIS_COMPUTER
+  const { github, error } = useComputerSourceControl(key)
+  const operationId = computer ? github?.operation?.id : undefined
+  useEffect(() => {
+    if (computer === null) return
+    void sourceControlClient.status(false, key).then(
+      (status) => noteGitHub(status.providers.find((provider) => provider.id === 'github'), key),
+      (failure: unknown) => update(key, { error: remoteReason(failure, computerName) })
+    )
+  }, [computer, key, computerName])
+  useEffect(() => {
+    if (!operationId) return
+    const timer = setInterval(() => {
+      void sourceControlClient.status(false, key).then((status) => noteGitHub(status.providers.find((provider) => provider.id === 'github'), key), () => undefined)
+    }, 1_000)
+    return () => clearInterval(timer)
+  }, [operationId, key])
+  const act = (call: () => Promise<SourceControlProviderStatus>) => async () => {
+    update(key, { error: undefined })
+    try {
+      noteGitHub(await call(), key)
+    } catch (failure) {
+      update(key, { error: remoteReason(failure, computerName) })
+    }
+  }
+  return { github, ...(error ? { error } : {}), connect: act(() => sourceControlClient.connect('github', key)), cancel: act(() => sourceControlClient.cancel('github', key)) }
+}
+

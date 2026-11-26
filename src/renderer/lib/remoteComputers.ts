@@ -23,6 +23,13 @@ export async function openRemoteProject(node: NodeId, path: string): Promise<Ope
 }
 
 /** Plain words for a failed request to another computer. */
+/** Plain words for a refusal from another computer about its folders or GitHub: its own reason when it gave one. */
+export function remoteReason(error: unknown, deviceName: string): string {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown }
+  if ((code === 'forbidden' || code === 'project_refused' || code === 'not_found') && typeof message === 'string' && message) return message
+  return remoteErrorMessage(error, deviceName)
+}
+
 export function remoteErrorMessage(error: unknown, deviceName: string): string {
   const code = (error as { code?: unknown } | null)?.code
   const message = (error as { message?: unknown } | null)?.message
