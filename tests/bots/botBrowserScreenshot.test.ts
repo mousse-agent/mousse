@@ -3,15 +3,16 @@
  * picture is saved under `images/<date>/`, waits for the activation's next message (`takeToolImages`), and the bot is
  * told where it is; the model still gets the picture alone. Without a files folder nothing is saved or kept.
  *
- * A run with no page of its own takes no screenshot at all (it would picture whichever tab is in front, maybe another
- * run's).
+ * What can keep a screenshot from its owner, and the bot is told so instead of a promise: its images folder is a link
+ * out of its files folder; the message already carries as many pictures as it shows. A run with no page of its own takes
+ * no screenshot at all (it would picture whichever tab is in front, maybe another run's).
  */
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BotBrowsers, type BotBrowserService } from '../../src/mms/bots/browser/BotBrowsers'
-import { resetToolImages, takeToolImages } from '../../src/mms/bots/chat/toolImages'
+import { MAX_IMAGES_PER_MESSAGE, resetToolImages, takeToolImages } from '../../src/mms/bots/chat/toolImages'
 import { dispatchBrowserTool } from '../../src/mms/orchestrator/browser/dispatch'
 import type { BrowserSessionRecord } from '../../src/shared/browser/types'
 
@@ -112,6 +113,37 @@ describe("a bot's browser screenshot", () => {
     expect(lines.at(-1)).toContain(saved[0]!.path)
     expect(lines.slice(0, -1).join('\n')).toBe(plain.text)
     expect(takeToolImages('act-plain')).toEqual([])
+  })
+
+  it('is not kept through a link out of the files folder, and the bot is told its owner does not see it', async () => {
+    const files = filesFolder()
+    const outside = join(files, '..', 'outside')
+    mkdirSync(outside)
+    mkdirSync(files)
+    try {
+      symlinkSync(outside, join(files, 'images'), process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      return // No way to make a link here: nothing to check.
+    }
+    const result = await screenshot('act-link', files)
+    expect(result.isError, result.text).toBe(false)
+    expect(result.image?.data).toBe(PNG.toString('base64'))
+    expect(result.text).not.toContain('Your owner sees')
+    expect(result.text).toContain('Not saved or shown to your owner')
+    expect(readdirSync(outside, { recursive: true })).toEqual([])
+    expect(takeToolImages('act-link')).toEqual([])
+  })
+
+  it('past the pictures one message shows, is not kept, and the bot is told so', async () => {
+    const files = filesFolder()
+    const run = browser().turn('act-many', files)
+    await run.open()
+    for (let n = 0; n < MAX_IMAGES_PER_MESSAGE; n += 1) expect((await run.screenshot()).text).toContain('Your owner sees this picture')
+    const past = await run.screenshot()
+    expect(past.isError, past.text).toBe(false)
+    expect(past.text).not.toContain('Your owner sees')
+    expect(past.text).toContain('Not saved or shown to your owner')
+    expect(takeToolImages('act-many')).toHaveLength(MAX_IMAGES_PER_MESSAGE)
   })
 
   it("of a run with no page of its own is refused, never another run's tab", async () => {
