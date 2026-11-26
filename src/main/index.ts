@@ -488,6 +488,7 @@ function startGuiApp(): void {
       // optional: a failure here must not stop Mousse from opening.
       try {
         desktopUpdater ??= startDesktopUpdates({
+          home: homeDir,
           // The installer replaces Mousse.exe, which also hosts the background service.
           prepareInstall: () => installUnlessQuitting(() => prepareUpdateInstall({
             controller: guiMms,

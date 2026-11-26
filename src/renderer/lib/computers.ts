@@ -166,6 +166,54 @@ function start(): () => void {
   }
 }
 
+let following = false
+
+/** How long after the window opens the computers already connected are read, when the window never goes idle first. */
+export const COMPUTERS_FIRST_READ_MS = 10_000
+
+/**
+ * Reads the computers again when one connects or drops, or the window gains focus while there are some, at most once per
+ * `COMPUTERS_REFRESH_MS` (a later change waits for the end of that time). The computers already connected when the
+ * window opened are read once, when it is idle after its first paint, so opening the app waits on nothing; there is no
+ * timer after that. A profile switch drops the other profile's list and reads this one's. The update button follows the
+ * computers behind this one with it. Safe to call more than once.
+ */
+export function followComputerChanges(): void {
+  if (following || typeof window === 'undefined' || !window.mousse) return
+  following = true
+  let last = 0
+  let waiting: ReturnType<typeof setTimeout> | undefined
+  const refresh = () => {
+    if (waiting) return
+    const wait = last + COMPUTERS_REFRESH_MS - Date.now()
+    const read = () => {
+      waiting = undefined
+      last = Date.now()
+      void refreshComputers()
+    }
+    if (wait <= 0) read()
+    else waiting = setTimeout(read, wait)
+  }
+  if (typeof window.requestIdleCallback === 'function')
+    window.requestIdleCallback(refresh, { timeout: COMPUTERS_FIRST_READ_MS })
+  else setTimeout(refresh, COMPUTERS_FIRST_READ_MS)
+  // Focus reads again only once other computers are known: networking's own changes found them.
+  window.addEventListener?.('focus', () => {
+    if (useComputersStore.getState().devices.some((device) => !device.self)) refresh()
+  })
+  window.mousse.net?.onUpdated?.(refresh)
+  window.mousse.netEngine?.onChanged?.((change) => {
+    if (!change.profileId || change.profileId === useAppStore.getState().profileId) refresh()
+  })
+  // The list belongs to one profile: the other one's is never shown under this one's name.
+  useAppStore.subscribe((state, previous) => {
+    if (state.profileId === previous.profileId) return
+    useComputersStore.setState(NO_COMPUTERS)
+    last = 0
+    refresh()
+  })
+}
+
 /**
  * The user's other computers, kept current while any view that uses them is mounted. A view with nothing
  * from another computer to show passes `enabled: false`, so a window of one computer never polls.

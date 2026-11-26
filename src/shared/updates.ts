@@ -61,3 +61,28 @@ const NIGHTLY_VERSION = /^\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/
 export function channelForVersion(version: string): UpdateChannel {
   return NIGHTLY_VERSION.test(version) ? 'nightly' : 'stable'
 }
+
+/**
+ * Whether a computer's Mousse can install an update by itself, as it tells its other computers (`net.info`'s
+ * `update`). Absent from a computer from before it: nothing is assumed about one that does not say.
+ */
+export interface SelfUpdateReport {
+  /** The channel its updates follow. */
+  channel: UpdateChannel
+  /** Its desktop app installs updates itself. */
+  self: boolean
+  /** Why it can't, in plain words; only when `self` is false. */
+  reason?: string
+}
+
+const REASON_MAX_CHARS = 200
+
+/** Reads a report from another computer or a file; anything off reads as no report. */
+export function parseSelfUpdateReport(value: unknown): SelfUpdateReport | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const row = value as Record<string, unknown>
+  if ((row.channel !== 'stable' && row.channel !== 'nightly') || typeof row.self !== 'boolean') return undefined
+  const reason =
+    !row.self && typeof row.reason === 'string' ? row.reason.replace(/\s+/g, ' ').trim().slice(0, REASON_MAX_CHARS) : ''
+  return { channel: row.channel, self: row.self, ...(reason ? { reason } : {}) }
+}

@@ -165,9 +165,9 @@ import {
 } from './transports/phoneWebRtc'
 import { lookup } from 'node:dns/promises'
 import { NET_PROTO_MINOR, WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
-import { isOlderVersion } from '../../shared/net/version'
 import { mousseVersion } from '../appVersion'
-import { PEER_PRESENCE_SCHEMA, PeerPresence, parsePeerInfo, type PeerLink } from './presence'
+import type { SelfUpdateReport } from '../../shared/updates'
+import { ensurePresenceTable, PeerPresence, parsePeerInfo, versionStanding, type PeerLink } from './presence'
 import type { TransportConfiguration } from './transports/registry'
 import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
@@ -472,6 +472,8 @@ export class NetService {
     private readonly options: {
       profileDir: string
       clock?: Clock
+      /** Whether this computer's Mousse updates itself, as `net.info` tells other computers. */
+      selfUpdate?(): SelfUpdateReport
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
@@ -559,7 +561,7 @@ export class NetService {
           'CREATE TABLE IF NOT EXISTS net_service_config(singleton INTEGER PRIMARY KEY CHECK(singleton=1),value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS net_peer_routes(node TEXT PRIMARY KEY,signed TEXT NOT NULL)'
         )
       )
-      db.transaction(() => db.database.exec(PEER_PRESENCE_SCHEMA))
+      ensurePresenceTable(db)
       const row = db.database
         .prepare('SELECT value FROM net_service_config WHERE singleton=1')
         .get()
@@ -797,7 +799,7 @@ export class NetService {
             throw new NetError('bad_request')
           return params
         },
-        handle: async () => ({
+        handle: async (_params, context) => ({
           v: 1,
           version: mousseVersion(),
           platform: process.platform,
@@ -812,7 +814,10 @@ export class NetService {
           // of reach for a bot it makes). Absent: an older computer.
           bots: remoteBotVersions(),
           // `bridge.access.mine` is here, so a refusal of it is a refusal, not an older build.
-          access: 1
+          access: 1,
+          // Its channel and whether it updates itself, so another computer can say how to update it. Absent: an
+          // older computer, which is never assumed either way, and a caller this computer blocks.
+          ...(this.options.selfUpdate && !policy.isBlocked(context.caller.node) ? { update: this.options.selfUpdate() } : {})
         })
       })
       // What this computer lets the caller do here, for the caller's Settings, Devices. No family, so a blocked caller
@@ -4880,7 +4885,9 @@ export class NetService {
         version: current,
         platform: process.platform,
         arch: process.arch,
+        ...(this.options.selfUpdate ? { update: this.options.selfUpdate() } : {}),
         olderThanThis: false,
+        newerThanThis: false,
         routes: []
       }
     let row: ReturnType<PeerPresence['get']>
@@ -4897,6 +4904,7 @@ export class NetService {
         // Not authenticated yet.
       }
     }
+    const standing = versionStanding(row && { ...row, legacy: row.legacy && this.canRead() }, current)
     const link = open ? (this.sessionLinks.get(open) ?? row?.link) : undefined,
       error = open ? undefined : this.supervisors.get(node)?.lastError(),
       lastSeenAt = open ? this.clock.now() : row?.lastSeenAt
@@ -4916,12 +4924,12 @@ export class NetService {
       routes: this.routes?.health(node) ?? [],
       ...(error ? { error } : {}),
       ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+      ...(row?.update ? { update: row.update } : {}),
       // A build with no version has nothing to compare with, so it never calls a peer old. A
       // "too old to answer" verdict only counts for a device this one is allowed to ask.
-      olderThanThis:
-        current !== '0.0.0' &&
-        !!row &&
-        ((row.legacy && this.canRead()) || isOlderVersion(row.version, current))
+      olderThanThis: standing === 'behind',
+      newerThanThis: standing === 'newer',
+      ...(standing === 'channel' ? { otherChannel: true } : {})
     }
   }
   /** Notes an open session with one of the user's own devices and asks it for its version. */

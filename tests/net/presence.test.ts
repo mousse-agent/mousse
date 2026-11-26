@@ -4,8 +4,16 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { NetService } from '../../src/mms/net/NetService'
 import { SyncSupervisor } from '../../src/mms/net/sync/supervisor'
-import { parsePeerInfo } from '../../src/mms/net/presence'
-import { NetError } from '../../src/shared/net'
+import {
+  ENGINE_PRESENCE_TABLE,
+  ensurePresenceTable,
+  parsePeerInfo,
+  PeerPresence,
+  versionStanding
+} from '../../src/mms/net/presence'
+import { NetDatabase } from '../../src/mms/net/store/database'
+import { NetError, type NodeId } from '../../src/shared/net'
+import type { SelfUpdateReport } from '../../src/shared/updates'
 import { FakeClock } from './harness/FakeClock'
 
 const cleanups: Array<() => Promise<void> | void> = []
@@ -32,10 +40,15 @@ interface Row {
   error?: string
   lastSeenAt?: number
   olderThanThis: boolean
+  newerThanThis?: boolean
+  update?: SelfUpdateReport
 }
 
-function service(path = mkdtempSync(join(tmpdir(), 'net-presence-'))): { net: NetService; path: string } {
-  const net = new NetService({ profileDir: path })
+function service(
+  path = mkdtempSync(join(tmpdir(), 'net-presence-')),
+  selfUpdate?: () => SelfUpdateReport
+): { net: NetService; path: string } {
+  const net = new NetService({ profileDir: path, ...(selfUpdate ? { selfUpdate } : {}) })
   cleanups.push(
     () => rmSync(path, { recursive: true, force: true }),
     () => net.shutdown()
@@ -50,9 +63,10 @@ const rowFor = async (net: NetService, node: string): Promise<Row> =>
 /** An authority listening on loopback and a follower enrolled through it. */
 async function pair(
   patchAuthority?: (rpc: { registry: Map<string, { handle: unknown }> }) => void,
-  caps?: string[]
+  caps?: string[],
+  authorityUpdates?: () => SelfUpdateReport
 ) {
-  const a = service(),
+  const a = service(undefined, authorityUpdates),
     b = service()
   await a.net.request('net.init', { name: 'authority', listen: true, port: 0 })
   await a.net.request('net.protect', { passphrase: 'test-authority-protection' })
@@ -125,18 +139,91 @@ it('compares the version a peer reports with this device', async () => {
   }
   const older = await pair(report('0.1.1'))
   await vi.waitFor(async () => expect((await rowFor(older.b.net, older.authority)).version).toBe('0.1.1'))
-  expect(await rowFor(older.b.net, older.authority)).toMatchObject({ platform: 'linux', olderThanThis: true })
+  expect(await rowFor(older.b.net, older.authority)).toMatchObject({
+    platform: 'linux',
+    olderThanThis: true,
+    newerThanThis: false
+  })
+  // It said nothing of updating itself, and nothing is assumed.
+  expect((await rowFor(older.b.net, older.authority)).update).toBeUndefined()
 
   const nightly = await pair(report('0.1.3-nightly.20261022.17'))
   await vi.waitFor(async () =>
     expect((await rowFor(nightly.b.net, nightly.authority)).version).toBe('0.1.3-nightly.20261022.17')
   )
-  expect((await rowFor(nightly.b.net, nightly.authority)).olderThanThis).toBe(true)
+  // Another channel: neither is simply behind.
+  expect(await rowFor(nightly.b.net, nightly.authority)).toMatchObject({ olderThanThis: false, newerThanThis: false, otherChannel: true })
 
   const newer = await pair(report('0.2.0'))
   await vi.waitFor(async () => expect((await rowFor(newer.b.net, newer.authority)).version).toBe('0.2.0'))
-  expect((await rowFor(newer.b.net, newer.authority)).olderThanThis).toBe(false)
+  expect(await rowFor(newer.b.net, newer.authority)).toMatchObject({ olderThanThis: false, newerThanThis: true })
 }, 60000)
+
+it('tells each device its channel and whether it updates itself, and keeps it after a restart', async () => {
+  const signed: SelfUpdateReport = { channel: 'nightly', self: false, reason: 'Updates on macOS need a signed build.' }
+  const { a, b, authority } = await pair(undefined, undefined, () => signed)
+  await vi.waitFor(async () => expect((await rowFor(b.net, authority)).update).toEqual(signed))
+  // Its own row says the same.
+  expect((await rowFor(a.net, authority)).update).toEqual(signed)
+  await a.net.shutdown()
+  await b.net.shutdown()
+  const resumed = service(b.path)
+  await resumed.net.start()
+  expect((await rowFor(resumed.net, authority)).update).toEqual(signed)
+}, 30000)
+
+it('adds the update column to a presence table from an older build, keeping its rows', () => {
+  const path = mkdtempSync(join(tmpdir(), 'net-presence-old-'))
+  cleanups.push(() => rmSync(path, { recursive: true, force: true }))
+  const db = new NetDatabase({ profileDir: path, clock: new FakeClock(1_000) })
+  cleanups.push(() => db.close())
+  db.database.exec(
+    "CREATE TABLE net_peer_presence(node TEXT PRIMARY KEY,version TEXT,platform TEXT,arch TEXT,legacy INTEGER NOT NULL DEFAULT 0 CHECK(legacy IN (0,1)),route TEXT,direction TEXT CHECK(direction IN ('in','out')),last_seen_at INTEGER) STRICT"
+  )
+  db.database.prepare("INSERT INTO net_peer_presence(node,version) VALUES('n1','0.1.0')").run()
+  ensurePresenceTable(db)
+  const presence = new PeerPresence(db, new FakeClock(1_000))
+  expect(presence.get('n1' as NodeId)).toMatchObject({ version: '0.1.0', legacy: false })
+  presence.info('n1' as NodeId, {
+    v: 1,
+    version: '0.1.2',
+    platform: 'linux',
+    arch: 'x64',
+    protoMinor: 0,
+    update: { channel: 'stable', self: true }
+  })
+  expect(presence.get('n1' as NodeId)?.update).toEqual({ channel: 'stable', self: true })
+  // The engine's table is its own: a pruned list never drops the other's rows.
+  ensurePresenceTable(db, ENGINE_PRESENCE_TABLE)
+  const engine = new PeerPresence(db, new FakeClock(1_000), ENGINE_PRESENCE_TABLE)
+  engine.info('e1' as NodeId, { v: 1, version: '0.1.3', platform: '', arch: '', protoMinor: 0 })
+  presence.prune(new Set())
+  expect(engine.get('e1' as NodeId)?.version).toBe('0.1.3')
+})
+
+it('calls a computer behind or newer only from versions it can read', () => {
+  const rows: Array<
+    [{ version?: string; legacy: boolean; update?: SelfUpdateReport } | undefined, string, 'behind' | 'newer' | 'channel' | undefined]
+  > = [
+    [{ version: '0.1.1', legacy: false }, '0.1.3', 'behind'],
+    [{ version: '0.1.2-nightly.20261022.17', legacy: false }, '0.1.3-nightly.20261101.2', 'behind'],
+    // Nightly and stable: another channel, whichever version is higher, by its version or by what it reports.
+    [{ version: '0.1.3-nightly.20261022.17', legacy: false }, '0.1.3', 'channel'],
+    [{ version: '0.1.1', legacy: false }, '0.1.3-nightly.20261022.17', 'channel'],
+    [{ version: '0.1.1', legacy: false, update: { channel: 'nightly', self: true } }, '0.1.3', 'channel'],
+    [{ version: '0.2.0', legacy: false }, '0.1.3', 'newer'],
+    [{ version: '0.1.3', legacy: false }, '0.1.3', undefined],
+    // A computer that said no version, or nothing at all, is never behind.
+    [{ legacy: false }, '0.1.3', undefined],
+    [undefined, '0.1.3', undefined],
+    // Too old to answer at all is behind.
+    [{ legacy: true }, '0.1.3', 'behind'],
+    // A development build compares with nothing, on either side.
+    [{ version: '0.1.1', legacy: false }, '0.0.0', undefined],
+    [{ version: '0.0.0', legacy: false }, '0.1.3', undefined]
+  ]
+  for (const [row, current, standing] of rows) expect(versionStanding(row, current), JSON.stringify([row, current])).toBe(standing)
+})
 
 it('does not read a refused read capability as an older daemon', async () => {
   // Both run 0.1.3, but the follower was invited without `read`, so the authority refuses it.
@@ -343,6 +430,16 @@ it('reads what a peer reports and ignores anything malformed', () => {
     protoMinor: 0
   })
   expect(parsePeerInfo({ version: '0.1.3' })).toMatchObject({ version: '0.1.3', platform: '', arch: '' })
+  expect(parsePeerInfo({ version: '0.1.3', update: { channel: 'nightly', self: false, reason: ' Off by\nsetting. ' } })?.update).toEqual(
+    { channel: 'nightly', self: false, reason: 'Off by setting.' }
+  )
+  // A computer that updates itself gives no reason; a malformed report is no report.
+  expect(parsePeerInfo({ version: '0.1.3', update: { channel: 'stable', self: true, reason: 'x' } })?.update).toEqual({
+    channel: 'stable',
+    self: true
+  })
+  for (const update of [{ channel: 'beta', self: true }, { channel: 'stable' }, 'yes', null])
+    expect(parsePeerInfo({ version: '0.1.3', update })).not.toHaveProperty('update')
   expect(parsePeerInfo(null)).toBeUndefined()
   expect(parsePeerInfo([])).toBeUndefined()
   expect(parsePeerInfo({ version: 7 })).toBeUndefined()

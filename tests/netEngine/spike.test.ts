@@ -36,6 +36,9 @@ import { qualifyId } from '../../src/shared/threadRef'
 import { fakeShells, type Spawned } from '../net/bridge/routed/terminalFixture'
 import { cleanupAll as cleanupV1, linked } from '../net/bridge/routed/routerFixture'
 import { fakeLink, type CrossedMessage } from './fakeLink'
+import { mousseVersion } from '../../src/mms/appVersion'
+import { NO_DESKTOP_APP_REASON } from '../../src/mms/updates/selfUpdateReport'
+import { channelForVersion } from '../../src/shared/updates'
 
 const DAY = 24 * 60 * 60_000
 const eventually = (check: () => unknown, timeout = 15_000) => vi.waitFor(check, { timeout })
@@ -205,13 +208,28 @@ describe('Bridge over an engine session, v1 off', () => {
     }
   })
 
-  it('lists the pairing in bridge.nodes', async () => {
-    const view = await dispatch('bridge.nodes', {}, window('settings', true))
-    expect(view.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ node: ownerOnCaller, name: 'Owner computer', source: 'engine', state: 'open' })
-      ])
+  it('lists the pairing in bridge.nodes, with the version and update report the owner gave when it connected', async () => {
+    const row = async () =>
+      (await dispatch('bridge.nodes', {}, window('settings', true))).nodes.find(
+        (node: { node: string }) => node.node === ownerOnCaller
+      )
+    expect(await row()).toMatchObject({ name: 'Owner computer', source: 'engine', state: 'open' })
+    await eventually(async () => expect((await row()).version).toBe(mousseVersion()))
+    expect(await row()).toMatchObject({
+      platform: process.platform,
+      arch: process.arch,
+      // No desktop app runs in this home: the owner says it can't update itself, and why.
+      update: { channel: channelForVersion(mousseVersion()), self: false, reason: NO_DESKTOP_APP_REASON },
+      olderThanThis: false,
+      newerThanThis: false
+    })
+    expect(typeof (await row()).lastSeenAt).toBe('number')
+    // A pairing that never connected said nothing, and is never called behind.
+    const second = (await dispatch('bridge.nodes', {}, window('settings', true))).nodes.find(
+      (node: { node: string }) => node.node === secondOnCaller
     )
+    expect(second).toMatchObject({ olderThanThis: false, newerThanThis: false })
+    expect(second.version).toBeUndefined()
   })
 
   it('refuses a terminal until the owner turns terminals on with bridge.policy', async () => {
