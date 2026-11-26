@@ -74,17 +74,6 @@
       "expiresAt": "2026-11-25T17:27:21.463Z"
     },
     {
-      "task": "fix/browser-automation-bugs",
-      "session": "agibook-664429",
-      "machine": "agibook",
-      "branch": "fix/browser-automation-bugs",
-      "paths": [
-        "src/browser-worker"
-      ],
-      "claimedAt": "2026-11-25T10:31:12.671Z",
-      "expiresAt": "2026-11-25T12:31:12.671Z"
-    },
-    {
       "task": "lists-attach-retention",
       "session": "Avarnics-Mac-mini.local-28e6be",
       "machine": "Avarnics-Mac-mini.local",
