@@ -397,8 +397,8 @@ const shown = (text: string): { address: string; full?: string } =>
  */
 export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
   const routes: DeviceRoute[] = []
-  // This computer looks for it on the same network whenever it dials it, one way or both.
-  if (device.direction !== 'in' && device.source !== 'ssh')
+  // This computer looks for it on the same network whenever it dials it, one way or both, added over SSH or not.
+  if (device.direction !== 'in')
     routes.push({ key: 'local', cls: 'lan', address: 'Found automatically', state: 'available' })
   for (const address of device.addresses ?? []) {
     routes.push({

@@ -466,6 +466,18 @@ describe('Settings → Devices, new networking', () => {
     expect(button('Actions for Tunnel studio.example.com')).toBeUndefined()
   })
 
+  it('lists the same network ahead of SSH on a computer added over SSH', async () => {
+    daemon({ devices: [device({ node: 'n1', direction: 'out', route: 'ssh', source: 'ssh', ssh: 'me@box.example' })] })
+    await mount()
+    await menuItems('Studio', 'out')
+    await click(button('Routes'))
+    const routes = [...host.querySelectorAll<HTMLElement>('[aria-label="Routes to Studio"] [data-route-state]')].map(
+      (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim()
+    )
+    expect(routes[0]).toMatch(/^SSH\s*me@box\.example · In use/)
+    expect(routes).toContainEqual(expect.stringMatching(/^Same network\s*Found automatically · Available/))
+  })
+
   it('says once that profiles in this account can read each other, with the reason as its tooltip', async () => {
     const d = daemon()
     await mount()
