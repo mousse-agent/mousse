@@ -2,6 +2,9 @@
  * A bot's browser_screenshot reaches its owner (no browser: a scripted browser service): with the bot's files folder the
  * picture is saved under `images/<date>/`, waits for the activation's next message (`takeToolImages`), and the bot is
  * told where it is; the model still gets the picture alone. Without a files folder nothing is saved or kept.
+ *
+ * A run with no page of its own takes no screenshot at all (it would picture whichever tab is in front, maybe another
+ * run's).
  */
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,8 +26,8 @@ afterEach(() => {
   for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true })
 })
 
-/** A browser service with one managed session whose screenshot is `PNG`. */
-function fakeService(): BotBrowserService {
+/** A browser service with one managed session whose screenshot is `PNG`; `shots` lists the tab each screenshot was asked of. */
+function fakeService(shots: Array<string | undefined> = []): BotBrowserService {
   let record: BrowserSessionRecord | undefined
   return {
     tools: {
@@ -33,8 +36,10 @@ function fakeService(): BotBrowserService {
           record = { id: 'sess_1', profileId, threadId: 'home', persistent: true, workspaceId: String(args.workspaceId), backend: 'managed-chromium', browserVersion: '1', generation: 1, lifecycle: 'agent-controlled', controlLeaseId: 'lease_1', createdAt: '', updatedAt: '' }
           return { ok: true, value: { session: record, observation: { tabId: 'tab_1', sessionId: 'sess_1' } } }
         }
-        if (name === 'browser_screenshot')
+        if (name === 'browser_screenshot') {
+          shots.push(typeof args.tabId === 'string' ? args.tabId : undefined)
           return { ok: true, value: { observation: { tabId: 'tab_1', sessionId: 'sess_1', screenshot: { artifactId: 'art_1', pixelWidth: 1, pixelHeight: 1, cssToImageScaleX: 1, cssToImageScaleY: 1 } } } }
+        }
         return { ok: true, value: { observation: { tabId: 'tab_1', sessionId: 'sess_1' } } }
       }
     },
@@ -52,21 +57,42 @@ function fakeService(): BotBrowserService {
   } as unknown as BotBrowserService
 }
 
-/** One activation's browser_screenshot, the way the bot's app tool makes it (on a model that sees images). */
-async function screenshot(activationId: string, filesFolder?: string) {
-  const service = fakeService()
+/** A bot's browser over the fake service; `turn` is one activation's, `shots` the tabs screenshots were asked of. */
+function browser() {
+  const shots: Array<string | undefined> = []
+  const service = fakeService(shots)
   const bots = new BotBrowsers({ profileId, browser: () => service, homeThread: () => 'home', setTimer: () => ({ clear: () => undefined }) })
-  const turn = bots.turn({ botId: BOT, activationId, lane: 'run', homeThreadId: 'home', runId: `run-${activationId}`, signal: new AbortController().signal, ...(filesFolder ? { filesFolder } : {}) })!
-  const binding = { ...turn.binding, vision: true }
-  const opened = await dispatchBrowserTool({ port: turn.runtime, binding, name: 'browser_open', args: { url: 'https://example.com/' } })
-  expect(opened.isError, opened.text).toBe(false)
-  return dispatchBrowserTool({ port: turn.runtime, binding, name: 'browser_screenshot', args: {} })
+  const turn = (activationId: string, filesFolder?: string) => {
+    const made = bots.turn({ botId: BOT, activationId, lane: 'run', homeThreadId: 'home', runId: `run-${activationId}`, signal: new AbortController().signal, ...(filesFolder ? { filesFolder } : {}) })!
+    // On a model that sees images, as the bot's app tool calls it.
+    const binding = { ...made.binding, vision: true }
+    return {
+      open: async () => {
+        const opened = await dispatchBrowserTool({ port: made.runtime, binding, name: 'browser_open', args: { url: 'https://example.com/' } })
+        expect(opened.isError, opened.text).toBe(false)
+      },
+      screenshot: () => dispatchBrowserTool({ port: made.runtime, binding, name: 'browser_screenshot', args: {} })
+    }
+  }
+  return { turn, shots }
+}
+
+/** One activation's browser_screenshot of the page it opened. */
+async function screenshot(activationId: string, filesFolder?: string) {
+  const run = browser().turn(activationId, filesFolder)
+  await run.open()
+  return run.screenshot()
+}
+
+const filesFolder = () => {
+  const files = join(realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-shot-'))), 'files')
+  folders.push(join(files, '..'))
+  return files
 }
 
 describe("a bot's browser screenshot", () => {
   it('with its files folder is saved there, waits for its next message, and the bot is told where; without one, none of that', async () => {
-    const files = join(realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-shot-'))), 'files')
-    folders.push(join(files, '..'))
+    const files = filesFolder()
     const kept = await screenshot('act-kept', files)
     // The control: the same screenshot with no files folder.
     const plain = await screenshot('act-plain')
@@ -86,5 +112,21 @@ describe("a bot's browser screenshot", () => {
     expect(lines.at(-1)).toContain(saved[0]!.path)
     expect(lines.slice(0, -1).join('\n')).toBe(plain.text)
     expect(takeToolImages('act-plain')).toEqual([])
+  })
+
+  it("of a run with no page of its own is refused, never another run's tab", async () => {
+    const files = filesFolder()
+    const { turn, shots } = browser()
+    const first = turn('act-first', files)
+    await first.open()
+    // A second run, with no page opened yet: its screenshot would picture the first run's tab in front.
+    const refused = await turn('act-second', files).screenshot()
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toMatch(/no page open/)
+    expect(refused.image).toBeUndefined()
+    expect(takeToolImages('act-second')).toEqual([])
+    // The control: the first run's own screenshot is of its tab.
+    expect((await first.screenshot()).isError).toBe(false)
+    expect(shots).toEqual(['tab_1'])
   })
 })

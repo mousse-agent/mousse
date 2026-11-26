@@ -559,8 +559,12 @@ export class BotBrowsers implements BotBrowserHost {
       if (name === 'browser_tabs') {
         result = await this.tabs(state, activation, context, sessionId, params)
       } else {
-        // An observation without a tab looks at this activation's own tab; another's is refused.
-        if (params.tabId === undefined && activation.current) params.tabId = activation.current
+        // An observation without a tab looks at this activation's own tab; another's is refused. With none of its own it
+        // would see (or screenshot) whichever tab is in front, maybe another run's: it opens a page first.
+        if (params.tabId === undefined) {
+          if (!activation.current) throw new BrowserAutomationError({ code: 'invalid_action', message: 'You have no page open in your browser yet. Open one with browser_open first.' })
+          params.tabId = activation.current
+        }
         if (typeof params.tabId === 'string' && !activation.tabs.has(params.tabId))
           throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That tab belongs to another of your runs. Open your own with browser_open.' })
         result = await this.invoke(context, name, params)
