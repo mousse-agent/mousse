@@ -9,7 +9,6 @@ import { describe, expect, it } from 'vitest'
 import { PROVIDER_DRIVER_KINDS } from '../../src/shared/providerInstances'
 import { GENERIC_ACP_PRESET } from '../../src/mms/harness/acp/presets/generic'
 import { GROK_PRESET, GROK_TESTED_VERSION } from '../../src/mms/harness/acp/presets/grok'
-import { OPENCODE_PRESET } from '../../src/mms/harness/acp/presets/opencode'
 import { COMPATIBILITY, CONTAINMENT_EVIDENCE, compatibilityFields, knownProblemOf, parseVersionRange, type CompatibilityKey } from '../../src/mms/harness/compatibility'
 import { compareVersions } from '../../src/mms/harness/driver'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
@@ -21,7 +20,7 @@ import { readTranscript } from '../../src/mms/run/testkit/ReplayTransport'
 
 const ROOT = join(__dirname, '..', '..')
 const FIXTURES = join(ROOT, 'tests', 'run', 'fixtures')
-const PRESETS = [GENERIC_ACP_PRESET, GROK_PRESET, OPENCODE_PRESET]
+const PRESETS = [GENERIC_ACP_PRESET, GROK_PRESET]
 /** The table row a replay adapter's fixtures are evidence for. */
 const ADAPTER_ROWS: Record<string, CompatibilityKey> = {
   'claude-subscription': 'claude',

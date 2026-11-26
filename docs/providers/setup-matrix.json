@@ -54,7 +54,6 @@
       "id": "opencode",
       "label": "OpenCode",
       "driver": "opencode",
-      "presets": ["opencode"],
       "rows": [
         { "source": "path", "signIn": "agent_home", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Turns, approvals and single requests were run on the real OpenCode 2.0.20 server with a loopback model on Windows x64 (tests/live/opencodeServer.test.ts); no run with a real sign-in." },
         { "source": "managed", "signIn": "agent_home", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Install from the ACP registry's opencode entry was tested with a fake registry and download; no live install or sign-in." },

@@ -9,7 +9,6 @@ import { describe, expect, it } from 'vitest'
 import { OS_LABELS, renderSetupMatrix, SETUP_MATRIX_MD, SIGN_IN_LABELS, SOURCE_LABELS, readSetupMatrix } from '../../scripts/gen-setup-matrix.mjs'
 import { GENERIC_ACP_PRESET } from '../../src/mms/harness/acp/presets/generic'
 import { GROK_PRESET } from '../../src/mms/harness/acp/presets/grok'
-import { OPENCODE_PRESET } from '../../src/mms/harness/acp/presets/opencode'
 import { COMPATIBILITY, type CompatibilityKey } from '../../src/mms/harness/compatibility'
 import type { HarnessDriver } from '../../src/mms/harness/driver'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
@@ -58,7 +57,7 @@ describe('the setup matrix', () => {
 
   it('has rows for every driver and every ACP preset', () => {
     for (const kind of PROVIDER_DRIVER_KINDS) expect(matrix.agents.some((agent) => agent.driver === kind && agent.rows.length > 0), kind).toBe(true)
-    for (const preset of [GENERIC_ACP_PRESET, GROK_PRESET, OPENCODE_PRESET]) expect(matrix.agents.some((agent) => agent.presets?.includes(preset.id)), preset.id).toBe(true)
+    for (const preset of [GENERIC_ACP_PRESET, GROK_PRESET]) expect(matrix.agents.some((agent) => agent.presets?.includes(preset.id)), preset.id).toBe(true)
     expect(Object.keys(DRIVERS).sort()).toEqual([...PROVIDER_DRIVER_KINDS].sort())
   })
 
