@@ -142,10 +142,11 @@ describe('the update button and the computers behind this one', () => {
     expect(computersRow()?.label).toBe('2 computers behind')
   })
 
-  it('finds the computers already connected when the window opened, after it is idle, and only the profile’s own', async () => {
+  it('finds the computers already connected when the window opened, after it is idle once the profile is bound, and only the profile’s own', async () => {
     vi.useFakeTimers()
     try {
-      useAppStore.setState({ profileId: 'work' })
+      // The window opens before its profile is bound.
+      useAppStore.setState({ profileId: 'default', profileReady: false })
       // The work profile has a computer behind; the home profile has none.
       const nodes = () => useAppStore.getState().profileId === 'work' ? [computer('b', 'Laptop', { olderThanThis: true })] : []
       const request = vi.fn(async (method: string) =>
@@ -153,8 +154,12 @@ describe('the update button and the computers behind this one', () => {
       )
       ;(window as unknown as { mousse: unknown }).mousse = { platformRequest: { request } }
       subscribeToDownloads()
+      await vi.advanceTimersByTimeAsync(COMPUTERS_FIRST_READ_MS)
+      // Nothing is read before the binding, however long it takes.
+      expect(request).not.toHaveBeenCalled()
+      useAppStore.setState({ profileId: 'work', profileReady: true })
       await vi.advanceTimersByTimeAsync(0)
-      // Nothing is read as the window opens.
+      // Nor as the bound window opens.
       expect(request).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(COMPUTERS_FIRST_READ_MS)
       expect(computersRow()?.label).toBe('1 computer behind')
