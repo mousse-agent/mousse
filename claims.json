@@ -122,6 +122,20 @@
       "expiresAt": "2026-11-25T20:09:20.891Z"
     },
     {
+      "task": "multi-instance-provider-entries",
+      "session": "Animatrix-0d359d",
+      "machine": "Animatrix",
+      "branch": "multi-instance-provider-entries",
+      "paths": [
+        "src/mms/harness/drivers/antigravity.ts",
+        "src/mms/harness/acp/presets/antigravity",
+        "src/renderer/components/providers/AddProviderDialog.tsx",
+        "src/mms/harness/gateway.ts"
+      ],
+      "claimedAt": "2026-11-26T06:14:35.082Z",
+      "expiresAt": "2026-11-26T08:14:35.082Z"
+    },
+    {
       "task": "net-helper-key-files",
       "session": "Avarnics-Mac-mini.local-b65610",
       "machine": "Avarnics-Mac-mini.local",
