@@ -66,6 +66,28 @@ function resetsInMs(text: string): number | undefined {
  */
 export function acpQuotaLimit(text: string, provider: string | undefined, cause?: unknown, nowMs: number = Date.now()): AppError | undefined {
   if (!/\bRESOURCE_EXHAUSTED\b|\b429\b/.test(text)) return undefined
+  return quotaLimit(text, provider, cause, nowMs)
+}
+
+/** The notice agy writes as its reply, or as the reply's last line, when the quota is used up (agy 1.5.13). */
+const QUOTA_NOTICE = /(?:^|\n)[^\S\n]*(?:⚠\s*)?(Individual quota reached\b[^\n]*)\s*$/i
+
+/** The quota notice that ends `reply` ("Individual quota reached. … Resets in 3h45m30s."), without its ⚠; undefined when none. */
+export function quotaNotice(reply: string): string | undefined {
+  return QUOTA_NOTICE.exec(reply)?.[1]?.trim()
+}
+
+/**
+ * A prompt agy ended normally whose reply ends with its quota notice: never an answer. A usage limit as `acpQuotaLimit`
+ * reads it; a reset only seconds away is a rate limit the next attempt may clear. Undefined for any other reply.
+ */
+export function acpQuotaReply(reply: string, provider: string | undefined, nowMs: number = Date.now()): AppError | undefined {
+  const notice = quotaNotice(reply)
+  if (!notice) return undefined
+  return quotaLimit(notice, provider, undefined, nowMs) ?? providerReportedError(notice, { status: 429, ...(provider ? { provider } : {}) })
+}
+
+function quotaLimit(text: string, provider: string | undefined, cause: unknown, nowMs: number): AppError | undefined {
   const resetIn = resetsInMs(text)
   if (resetIn === undefined && !/\bquota (?:was )?reached\b|\busage limit\b/i.test(text)) return undefined
   if (resetIn !== undefined && resetIn <= QUOTA_MIN_RESET_MS) return undefined

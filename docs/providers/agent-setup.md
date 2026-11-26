@@ -261,7 +261,8 @@ with it, see [Claude's client name](claude-native-proxy.md).
   on disk; Mousse's own settings and saved sessions for it are deleted. Adding the same name again
   creates a new id with a fresh home, because an id whose directory is still on disk is never reused.
 - A key Mousse stores itself for a bundled agent (Cursor) is not in a private home and is deleted
-  with the provider.
+  with the provider. An added Antigravity entry's home, with its Google sign-in, is deleted with it too (see
+  [Antigravity runtime](antigravity-runtime.md#more-than-one-account)).
 - To remove a kept sign-in, sign out before removing the provider, or delete the directory by hand
   afterwards. A home with no files in it, or none at all, is deleted with the provider; a home Mousse
   cannot read is left in place.

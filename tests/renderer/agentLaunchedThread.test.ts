@@ -13,6 +13,8 @@ vi.mock('../../src/renderer/services/navigationGuards', () => ({ confirmNavigati
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { chatStatusFromPhase, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { ThreadStartedByBar } from '../../src/renderer/components/ThreadStartedByBar'
+import { StartedThreadsList } from '../../src/renderer/components/sideCard/StartedThreadsSection'
+import { launchedThreadsOf } from '../../src/renderer/components/sideCard/lineageLogic'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useBotsStore } from '../../src/renderer/stores/botsStore'
 import type { BotSummary } from '../../src/shared/bots/personal/chat'
@@ -74,6 +76,48 @@ describe('above a thread an agent started', () => {
     // The same unlisted launcher, when it is a bot's chat, is that bot's line.
     act(() => useBotsStore.setState({ bots: [{ id: 'b1', name: 'Alpha', homeThreadId: 'deleted-launcher' } as BotSummary], loaded: true }))
     expect(text()).toBe('Started by Alpha')
+  })
+})
+
+describe('a thread an agent keeps out of the sidebar', () => {
+  it('says Hidden, and Show in sidebar lists it again', async () => {
+    const request = vi.fn(async (_method: string, params: { threadId: string }) => ({ thread: thread(params.threadId, 'Audit the logs', { createdByThreadId: 'launcher' }) }))
+    ;(window as unknown as { mousse: unknown }).mousse = { threads: { select }, platformRequest: { request } }
+    useAppStore.setState({ threads: [thread('launcher', 'Plan the release'), thread('launched', 'Audit the logs', { createdByThreadId: 'launcher', hidden: true })], activeThreadId: 'launched' })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(text()).toBe('Started by an agent in «Plan the release» · HiddenShow in sidebar')
+    await click([...host.querySelectorAll('button')].find((button) => button.textContent === 'Show in sidebar')!)
+    expect(request).toHaveBeenCalledWith('threads.setHidden', { threadId: 'launched', hidden: false })
+    expect(useAppStore.getState().threads.find((entry) => entry.id === 'launched')?.hidden).toBeUndefined()
+    expect(text()).toBe('Started by an agent in «Plan the release»')
+  })
+
+  it('started from another computer, it names the agent\'s thread and that computer, with nothing to open here', () => {
+    useAppStore.setState({ threads: [thread('far', 'Linux tests', { hidden: true, startedFrom: { node: 'n1', agent: { thread: 'x', title: 'Yo', mode: 'auto' } } })], activeThreadId: 'far' })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(text()).toBe('Started by an agent in «Yo» on another computer · HiddenShow in sidebar')
+    expect([...host.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['Show in sidebar'])
+  })
+})
+
+describe('the launching thread\'s side panel', () => {
+  it('lists the threads its agent started, here and on another computer, newest first, marking the hidden ones; its remote subagents stay in Nest', () => {
+    const later = '2026-11-15T11:00:00.000Z'
+    const rows = launchedThreadsOf([
+      thread('launcher', 'Plan the release'),
+      thread('mine', 'My own work'),
+      thread('l1', 'Audit the logs', { createdByThreadId: 'launcher', hidden: true }),
+      thread('l2', 'Release notes', { createdByThreadId: 'launcher', updatedAt: later }),
+      thread('n1:f1', 'Linux tests', { node: 'n1', startedFrom: { node: 'self', agent: { thread: 'launcher', title: 'Plan the release', mode: 'auto' } } }),
+      thread('old', 'Archived run', { createdByThreadId: 'launcher', archivedAt: later }),
+      thread('bot', 'Bot job', { createdByThreadId: 'launcher', startedByBot: { botId: 'b1', name: 'Alpha' } })
+    ], 'launcher')
+    expect(rows.map((row) => row.id)).toEqual(['l2', 'l1', 'n1:f1'])
+    const opened: string[] = []
+    act(() => root.render(createElement(StartedThreadsList, { threads: rows, computerOf: () => ({ name: 'Linux box', online: true }), onOpen: (id: string) => opened.push(id) })))
+    expect([...host.querySelectorAll('.lineage-row')].map((row) => row.textContent)).toEqual(['Release notes', 'Audit the logsHidden', 'Linux testsLinux box'])
+    act(() => (host.querySelectorAll('.lineage-row')[2] as HTMLElement).click())
+    expect(opened).toEqual(['n1:f1'])
   })
 })
 

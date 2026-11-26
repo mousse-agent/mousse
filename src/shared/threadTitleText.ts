@@ -1,6 +1,7 @@
 import { agentMessageWords } from './agentMessageWords'
 import { extractChatReferences } from './chatReferences'
 import { replaceAttachedFilesMarkers } from './attachedFilesMarker'
+import { findSentChips } from './inlineAttachments'
 import type { ChatMessage } from './types'
 
 /**
@@ -97,9 +98,57 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path
 }
 
+/** A name an app gives a pasted or captured image ("paste-1795680902893.png", "image.png"), which says nothing. */
+const GENERATED_IMAGE = /^(?:paste|pasted|image|clipboard|screenshot|capture)[\s\d._:-]*\.(?:png|jpe?g|gif|webp|bmp)$/i
+
 function addFile(hints: TitleHints, name: string): void {
   const base = basename(name.trim())
+  if (GENERATED_IMAGE.test(base)) {
+    hints.images++
+    return
+  }
   if (base && !hints.files.includes(base) && hints.files.length < 3) hints.files.push(base)
+}
+
+/**
+ * The words a link reads as in a title: a GitHub pull request, issue or commit by its number or short hash
+ * ("PR #1901"), as its chip shows it, and any other address by its host.
+ */
+function linkWords(address: string): string {
+  let url: URL
+  try {
+    url = new URL(address.replace(/[.,;:!?'")\]]+$/, ''))
+  } catch {
+    return ''
+  }
+  if (url.hostname.toLowerCase() === 'github.com') {
+    const [, , kind, id = ''] = url.pathname.split('/').filter(Boolean)
+    if (kind === 'pull' && /^\d+$/.test(id)) return `PR #${id}`
+    if (kind === 'issues' && /^\d+$/.test(id)) return `issue #${id}`
+    if (kind === 'commit' && /^[0-9a-f]{7,40}$/i.test(id)) return `commit ${id.slice(0, 7)}`
+  }
+  return url.host
+}
+
+/**
+ * The inline chips the composer wrote into the text (`[image 1: before.png]`, `[file: a.ts]`) as their names,
+ * or nothing for an image with a generated name. Every name also goes to the hints.
+ */
+function replaceSentChips(text: string, hints: TitleHints): string {
+  let out = ''
+  let last = 0
+  for (const chip of findSentChips(text)) {
+    out += text.slice(last, chip.index)
+    last = chip.index + chip.length
+    if (chip.kind === 'image' && GENERATED_IMAGE.test(basename(chip.name))) continue
+    if (chip.kind === 'file' || chip.kind === 'folder' || chip.kind === 'image') {
+      addFile(hints, chip.name)
+      out += basename(chip.name)
+    } else {
+      out += chip.name
+    }
+  }
+  return out + text.slice(last)
 }
 
 function addOmitted(hints: TitleHints, kind: string): void {
@@ -180,10 +229,10 @@ export function cleanTitleText(content: string, max = REQUEST_BUDGET): CleanedTi
       hints.browserElement = true
       return '\n\n'
     })
-  let text = replaceAttachedFilesMarkers(withoutElements, (entries) => {
+  let text = replaceSentChips(replaceAttachedFilesMarkers(withoutElements, (entries) => {
     for (const entry of entries) addFile(hints, entry.name)
     return '\n\n'
-  })
+  }), hints)
     .replace(/\[(?:Voice message \([^)]+\)(?:, )?)+\]/g, '\n\n')
     // Fenced code, including a fence the message never closes.
     .replace(/(^|\n)[ \t]*(```|~~~)[^\n]*\n[\s\S]*?(\n[ \t]*\2[ \t]*(?=\n|$)|$)/g, () => {
@@ -208,8 +257,9 @@ export function cleanTitleText(content: string, max = REQUEST_BUDGET): CleanedTi
   const prose = kept.join('\n')
     .replace(/`([^`\n]{1,40})`/g, '$1')
     .replace(/`[^`\n]*`/g, ' ')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\bhttps?:\/\/([^/\s?#]+)[^\s]*/gi, '$1')
+    // A link labelled with a bare number, like the chip of a pull request, reads as what it points at.
+    .replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, (_, label: string, address: string) => /^#\d+$/.test(label.trim()) && linkWords(address).endsWith(label.trim()) ? linkWords(address) : label)
+    .replace(/\bhttps?:\/\/[^\s]+/gi, (address) => linkWords(address))
     // A path becomes its file name: one with a root (C:\, /, ./, ~/) or with at least two separators, so
     // "and/or" or "TCP/IP" stay as written.
     .replace(/(?:(?:[A-Za-z]:\\|\\\\|~\/|\.{1,2}[\\/]|(?<![\w.])\/)(?:[\w.@-]+[\\/])*[\w.@-]+|[\w.@-]+(?:[\\/][\w.@-]+){2,})/g, (path) => basename(path))
@@ -273,7 +323,8 @@ export function normalizeTitle(raw: string): string | null {
   text = text
     .replace(/^(?:title|label|name)\s*:\s*/i, '')
     .replace(/^(?:[-*•]\s+|\d+[.)]\s+)/, '')
-    .replace(/[*_`#]+/g, '')
+    // A `#` before a number stays: "Review PR #1901".
+    .replace(/[*_`]+|#+(?!\d)/g, '')
     .replace(/^["'“”‘’«»]+|["'“”‘’«»]+$/g, '')
     .replace(/\p{Extended_Pictographic}️?/gu, '')
     .replace(/\s+/g, ' ')
@@ -378,7 +429,8 @@ export function buildTitlePrompt(context: TitleContext): string {
     .filter((text) => !isVagueTitleText(text))
     .slice(-2)
   const reply = context.reply ? replyGist(context.reply) : ''
-  const hints = hintLine(request.hints, context.images ?? 0)
+  // Pasted images come inline (counted by the caller) or as attached files with generated names (counted here).
+  const hints = hintLine(request.hints, Math.max(context.images ?? 0, request.hints.images))
   const build = (fields: { later: string[]; reply: string; request: string }): string => [
     'Write the sidebar title for this thread.',
     `Request: ${fields.request || '(no words, only attachments or a paste)'}`,

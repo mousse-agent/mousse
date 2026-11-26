@@ -129,6 +129,26 @@ describe('the read Mousse runs', () => {
     expect(binary).toBe(agy)
     expect(args).toEqual(['--gemini_dir', geminiHome, '--app_data_dir', 'antigravity-acp', '-p', '/usage', '--output-format', 'json'])
     expect(options.env.GEMINI_HOME).toBe(geminiHome)
+    // The first entry reads this computer's agy sign-in.
+    expect(options.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBeUndefined()
+  })
+
+  it('reads an added entry\'s limits from its own home, with the sign-in kept there', async () => {
+    const home = newHome()
+    const agy = join(home, 'agy.exe')
+    writeFileSync(agy, 'agy')
+    const stateDir = join(home, 'harness', 'antigravity_antigravity-2')
+    const run = vi.fn<AgyRunner>(async () => RECORDED)
+    const service = new AntigravityProviderService(home, home, new UserQuestionService(), new CliVersionCache(async () => '1.5.17'), {
+      entry: { instanceId: 'antigravity:antigravity-2', stateDir, home: join(stateDir, 'home') },
+      findUserAgy: () => agy,
+      runAgy: run
+    })
+    services.push(service)
+    await service.usage(signal())
+    const [, args, options] = run.mock.calls[0]!
+    expect(args.slice(0, 2)).toEqual(['--gemini_dir', join(stateDir, 'home', 'gemini-home')])
+    expect(options.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE).toBe('1')
   })
 
   it('is read only when asked, never by the background limit reads', () => {

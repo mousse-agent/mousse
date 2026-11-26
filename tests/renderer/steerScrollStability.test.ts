@@ -107,6 +107,8 @@ describe('messages steered into a running reply', () => {
     expect(groups).toHaveLength(1)
     expect(groups[0]!.textContent).toContain('Steer')
     expect([...groups[0]!.querySelectorAll('[data-steered-id]')].map((el) => (el as HTMLElement).dataset.steeredId)).toEqual(['s1', 's2', 's3'])
+    // Each is where its tick on the prompt rail lands.
+    expect([...groups[0]!.querySelectorAll('[data-prompt-id]')].map((el) => (el as HTMLElement).dataset.promptId)).toEqual(['s1', 's2', 's3'])
     // The block sits between the reply text before it and the text after it.
     const text = host.textContent ?? ''
     expect(text.indexOf('Looking at the queue')).toBeLessThan(text.indexOf('use the id'))

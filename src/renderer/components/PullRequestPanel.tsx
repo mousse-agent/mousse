@@ -6,7 +6,7 @@ import { useProjectComputerName } from '../hooks/useProjectComputerName'
 import { useTransientError } from '../hooks/useTransientError'
 import { gitScopeFor } from '../lib/activeProject'
 import { GITHUB_SIGN_IN_COMMAND } from '../lib/githubSignIn'
-import { ArrowLeft, Check, ChevronDown, ChevronRight, CircleAlert, Cloud, Copy, ExternalLink, GitBranch, GitMerge, GitPullRequest, RefreshCw, Terminal } from '../lib/icons'
+import { ArrowLeft, Check, ChevronDown, ChevronRight, CircleAlert, Cloud, Copy, ExternalLink, GitBranch, GitMerge, GitPullRequest, MessageSquare, RefreshCw, Terminal } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import {
   clearViewedPullRequest,
@@ -26,6 +26,8 @@ import { PullRequestCreateForm } from './sideCard/PullRequestCreateForm'
 import { PullRequestConfirm, pullRequestActions } from './sideCard/PullRequestConfirm'
 import {
   PANEL_LIMITS,
+  checkNeedsAttention,
+  checkSummary,
   commentCountLabel,
   commentFileLink,
   commentFileTarget,
@@ -37,7 +39,6 @@ import {
   relativeTime,
   reviewLabel,
   reviewTone,
-  shortSha,
   showFirst,
   summarizeReviewers,
   threadLineLabel,
@@ -55,6 +56,7 @@ import {
   pullRequestCheckRows,
   pullRequestRows,
   type GitAction,
+  type PullRequestCheckRow,
   type PullRequestFoundRow
 } from './sideCard/gitSectionLogic'
 import { Collapse } from './ui/Collapse'
@@ -271,40 +273,87 @@ function ReviewerView({ summary, now }: { summary: ReviewerSummary; now: number 
   )
 }
 
-function ChecksSection({ detail }: { detail: PullRequestDetail }) {
-  const rows = useMemo(() => pullRequestCheckRows(detail.checkRuns), [detail.checkRuns])
-  if (rows.length === 0) return null
+function CheckRow({ check }: { check: PullRequestCheckRow }) {
+  const title = check.workflow ? `${check.workflow} / ${check.name}` : check.name
+  const inner = (
+    <>
+      <span className="pr-panel-check-dot" aria-hidden="true" />
+      <span className="pr-panel-check-name">{check.name}</span>
+      <span className="pr-panel-check-state">{check.label}</span>
+    </>
+  )
   return (
-    <Section title="Checks" count={rows.length}>
-      <LimitedList
-        items={rows}
-        noun="checks"
-        className="pr-panel-checks"
-        label="Checks"
-        render={(check) => (
-          <li key={`${check.workflow ?? ''}\u0000${check.name}`} className="pr-panel-check" data-tone={check.tone}>
-            <span className="pr-panel-check-dot" aria-hidden="true" />
-            <span className="pr-panel-check-name" title={check.workflow ? `${check.workflow} / ${check.name}` : check.name}>{check.name}</span>
-            {check.url ? (
-              <button type="button" className="pr-panel-check-state" title="Open this check" onClick={() => openExternalUrl(check.url!)}>
-                {check.label}
-              </button>
-            ) : (
-              <span className="pr-panel-check-state">{check.label}</span>
-            )}
-          </li>
-        )}
-      />
-    </Section>
+    <li className="pr-panel-check" data-tone={check.tone}>
+      {check.url ? (
+        <button type="button" className="pr-panel-check-open" title={`Open ${title}`} onClick={() => openExternalUrl(check.url!)}>
+          {inner}
+        </button>
+      ) : (
+        <span className="pr-panel-check-open" data-static="true" title={title}>{inner}</span>
+      )}
+    </li>
   )
 }
 
-/** The panel's contents once a pull request has been read. */
-export function PullRequestPanelDetail({ detail, actions }: { detail: PullRequestDetail; actions: PanelActions }) {
+/**
+ * Checks in one line: how many failed, wait, run and passed. The ones that need a look are listed under it; the passed
+ * and skipped ones open from the line.
+ */
+function ChecksSection({ detail }: { detail: PullRequestDetail }) {
+  const rows = useMemo(() => pullRequestCheckRows(detail.checkRuns), [detail.checkRuns])
+  const [open, setOpen] = useState(false)
+  if (rows.length === 0) return null
+  const attention = rows.filter((row) => checkNeedsAttention(row.tone))
+  const quiet = rows.length - attention.length
+  const shown = open ? rows : attention
+  return (
+    <section className="pr-panel-section pr-panel-checks-section" aria-label="Checks">
+      <h3 className="pr-panel-section-title">
+        {quiet > 0 ? (
+          <button type="button" className="pr-panel-section-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
+            Checks
+            <CheckSummary rows={rows} />
+            <ChevronDown size={12} strokeWidth={2} aria-hidden="true" className="pr-panel-toggle-chevron" />
+          </button>
+        ) : (
+          <>Checks<CheckSummary rows={rows} /></>
+        )}
+      </h3>
+      {shown.length > 0 && (
+        <LimitedList
+          items={shown}
+          noun="checks"
+          className="pr-panel-checks"
+          label="Checks"
+          render={(check) => <CheckRow key={`${check.workflow ?? ''}\u0000${check.name}`} check={check} />}
+        />
+      )}
+    </section>
+  )
+}
+
+function CheckSummary({ rows }: { rows: readonly PullRequestCheckRow[] }) {
+  return (
+    <span className="pr-panel-check-summary">
+      {checkSummary(rows).map((part) => (
+        <span key={part.tone} className="pr-panel-check-count" data-tone={part.tone}>{part.text}</span>
+      ))}
+    </span>
+  )
+}
+
+/** The panel's contents once a pull request has been read. Reviews and comments are drawn once asked for. */
+export function PullRequestPanelDetail({ detail, actions, initiallyShowComments = false }: {
+  detail: PullRequestDetail
+  actions: PanelActions
+  initiallyShowComments?: boolean
+}) {
   const groups = useMemo(() => groupPullRequestComments(detail), [detail])
   const reviewers = useMemo(() => summarizeReviewers(detail.reviews, detail.comments), [detail.reviews, detail.comments])
   const description = useMemo(() => prepareCommentBody(detail.body), [detail.body])
+  const [showComments, setShowComments] = useState(initiallyShowComments)
   const empty = reviewers.length === 0 && groups.conversation.length === 0 && groups.files.length === 0
+  const remarks = detail.reviews.length + detail.comments.length
   return (
     <div className="pr-panel-body">
       {description.text && (
@@ -313,49 +362,60 @@ export function PullRequestPanelDetail({ detail, actions }: { detail: PullReques
         </Section>
       )}
       <ChecksSection detail={detail} />
-      {reviewers.length > 0 && (
-        <Section title="Reviews" count={reviewers.length}>
-          <LimitedList
-            items={reviewers}
-            noun="reviewers"
-            className="pr-panel-reviewers"
-            label="Reviews by reviewer"
-            render={(summary) => <ReviewerView key={summary.author} summary={summary} now={actions.now} />}
-          />
-        </Section>
-      )}
-      {groups.conversation.length > 0 && (
-        <Section title="Conversation" count={groups.conversation.length}>
-          <LimitedList
-            items={groups.conversation}
-            noun="comments"
-            className="pr-panel-conversation"
-            label="Conversation"
-            render={(comment) => (
-              <li key={comment.id}>
-                <CommentView comment={comment} now={actions.now} />
-              </li>
-            )}
-          />
-        </Section>
-      )}
-      {groups.files.length > 0 && (
-        <Section title="Files" count={`${groups.files.length} · ${commentCountLabel(groups.lineCommentCount, detail.commentsTruncated)}`}>
-          {detail.commentsTruncated && (
-            <p className="pr-panel-note">Only the newest line comments are shown. Open the pull request on the host for the rest.</p>
+      {empty ? (
+        <p className="pr-panel-empty">No reviews or comments yet.</p>
+      ) : !showComments ? (
+        <button type="button" className="pr-panel-load" onClick={() => setShowComments(true)}>
+          <MessageSquare size={13} strokeWidth={1.8} aria-hidden="true" />
+          Load comments
+          <span className="pr-panel-count">{remarks}</span>
+        </button>
+      ) : (
+        <>
+          {reviewers.length > 0 && (
+            <Section title="Reviews" count={reviewers.length}>
+              <LimitedList
+                items={reviewers}
+                noun="reviewers"
+                className="pr-panel-reviewers"
+                label="Reviews by reviewer"
+                render={(summary) => <ReviewerView key={summary.author} summary={summary} now={actions.now} />}
+              />
+            </Section>
           )}
-          <LimitedList
-            items={groups.files}
-            noun="files"
-            className="pr-panel-files"
-            label="Files with comments"
-            render={(group, index) => (
-              <FileGroupView key={group.path} group={group} initiallyOpen={index < PANEL_LIMITS.openFiles} actions={actions} />
-            )}
-          />
-        </Section>
+          {groups.conversation.length > 0 && (
+            <Section title="Conversation" count={groups.conversation.length}>
+              <LimitedList
+                items={groups.conversation}
+                noun="comments"
+                className="pr-panel-conversation"
+                label="Conversation"
+                render={(comment) => (
+                  <li key={comment.id}>
+                    <CommentView comment={comment} now={actions.now} />
+                  </li>
+                )}
+              />
+            </Section>
+          )}
+          {groups.files.length > 0 && (
+            <Section title="Files" count={`${groups.files.length} · ${commentCountLabel(groups.lineCommentCount, detail.commentsTruncated)}`}>
+              {detail.commentsTruncated && (
+                <p className="pr-panel-note">Only the newest line comments are shown. Open the pull request on GitHub for the rest.</p>
+              )}
+              <LimitedList
+                items={groups.files}
+                noun="files"
+                className="pr-panel-files"
+                label="Files with comments"
+                render={(group, index) => (
+                  <FileGroupView key={group.path} group={group} initiallyOpen={index < PANEL_LIMITS.openFiles} actions={actions} />
+                )}
+              />
+            </Section>
+          )}
+        </>
       )}
-      {empty && <p className="pr-panel-empty">No reviews or comments yet.</p>}
     </div>
   )
 }
@@ -364,13 +424,16 @@ function PanelHeader({
   detail,
   refreshing,
   onRefresh,
-  actions
+  actions,
+  linked
 }: {
   detail: PullRequestDetail
   refreshing: boolean
   onRefresh: () => void
   /** Merge… and the overflow menu of an open pull request. */
   actions?: ReactNode
+  /** A pull request opened from a link: its repository, and the way back to the thread's own. */
+  linked?: { repo: string; onBack: () => void } | null
 }) {
   const badge = pullRequestBadge(detail)
   const decision = detail.state === 'open'
@@ -382,33 +445,50 @@ function PanelHeader({
   return (
     <header className="pr-panel-header">
       <div className="pr-panel-title-row">
-        <GitPullRequest size={16} strokeWidth={1.8} aria-hidden="true" />
+        {linked ? (
+          <button
+            type="button"
+            className="pr-panel-icon-btn"
+            onClick={linked.onBack}
+            title="Back to this thread’s pull request"
+            aria-label="Back to this thread’s pull request"
+          >
+            <ArrowLeft size={14} strokeWidth={2} aria-hidden="true" />
+          </button>
+        ) : (
+          <GitPullRequest size={15} strokeWidth={1.8} aria-hidden="true" className="pr-panel-title-icon" />
+        )}
         <span className="pr-panel-number">#{detail.number}</span>
         <h2 className="pr-panel-title" title={detail.title}>{detail.title}</h2>
         <button
           type="button"
-          className="pr-panel-action"
+          className="pr-panel-icon-btn"
           onClick={onRefresh}
           disabled={refreshing}
           aria-busy={refreshing}
-          title="Read the pull request again"
+          title={refreshing ? 'Refreshing…' : 'Refresh'}
+          aria-label={refreshing ? 'Refreshing' : 'Refresh'}
         >
-          <RefreshCw size={13} strokeWidth={2} aria-hidden="true" {...(refreshing ? { className: 'pr-panel-spin' } : {})} />
-          {refreshing ? 'Refreshing…' : 'Refresh'}
+          <RefreshCw size={14} strokeWidth={2} aria-hidden="true" {...(refreshing ? { className: 'pr-panel-spin' } : {})} />
         </button>
-        <button type="button" className="pr-panel-action" onClick={() => openExternalUrl(detail.url)} title="Open the pull request on GitHub">
-          <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
-          Open on GitHub
+        <button
+          type="button"
+          className="pr-panel-icon-btn"
+          onClick={() => openExternalUrl(detail.url)}
+          title="Open on GitHub"
+          aria-label="Open on GitHub"
+        >
+          <ExternalLink size={14} strokeWidth={2} aria-hidden="true" />
         </button>
         {actions}
       </div>
       <div className="pr-panel-meta">
         <span className="pr-panel-badge" data-tone={badge.tone}>{badge.label}</span>
         {decision && <span className="pr-panel-badge" data-tone={decision.tone}>{decision.label}</span>}
+        {linked && <span className="pr-panel-repo" title={linked.repo}>{linked.repo}</span>}
         <span className="pr-panel-branches" title={`${detail.headRefName} into ${detail.baseRefName}`}>
           {detail.headRefName} → {detail.baseRefName}
         </span>
-        {detail.headSha && <code className="pr-panel-sha" title={detail.headSha}>{shortSha(detail.headSha)}</code>}
         {detail.author && <span className="pr-panel-time">by {detail.author}</span>}
       </div>
     </header>
@@ -499,8 +579,10 @@ export interface PullRequestPanelViewProps {
   createAction?: ReactNode
   /** The computer that reads the pull request, when it is another of the user's computers. */
   computerName?: string | null
-  /** Shown at the top of the panel across all states (e.g. "Back to thread PR" when viewing a linked PR). */
-  topBanner?: ReactNode
+  /** A pull request opened from a link: its repository, and the way back to the thread's own. */
+  linked?: { repo: string; onBack: () => void } | null
+  /** Draws reviews and comments at once instead of behind Load comments. */
+  initiallyShowComments?: boolean
 }
 
 /** What the panel draws for a state: a message, or the pull request with its checks, reviews and comments. */
@@ -515,7 +597,8 @@ export function PullRequestPanelView({
   headerBelow,
   createAction,
   computerName = null,
-  topBanner
+  linked = null,
+  initiallyShowComments = false
 }: PullRequestPanelViewProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialSelectedKey)
   const actions: PanelActions = {
@@ -528,17 +611,21 @@ export function PullRequestPanelView({
   }
   return (
     <div className="pr-panel" data-state={state.kind}>
-      {topBanner}
       {state.kind === 'ready' ? (
         <>
-          <PanelHeader detail={state.detail} refreshing={refreshing} onRefresh={onRefresh} actions={headerActions} />
+          <PanelHeader detail={state.detail} refreshing={refreshing} onRefresh={onRefresh} actions={headerActions} linked={linked} />
           {headerBelow}
           {state.staleError && (
             <p className="pr-panel-error" role="alert" title={state.staleError}>
               Could not refresh: {state.staleError}
             </p>
           )}
-          <PullRequestPanelDetail detail={state.detail} actions={actions} />
+          <PullRequestPanelDetail
+            key={state.detail.url}
+            detail={state.detail}
+            actions={actions}
+            initiallyShowComments={initiallyShowComments || initialSelectedKey !== null}
+          />
         </>
       ) : state.kind === 'loading' ? (
         <div className="pr-panel-notice"><DelayedLoader label="Loading the pull request" /></div>
@@ -753,22 +840,9 @@ export function PullRequestPanel() {
   }
   const createLock = gitActionLock(running, 'pullRequest')
 
-  const viewedBanner = viewedIdentity ? (
-    <div className="pr-panel-viewed-bar" role="region" aria-label="Viewing linked pull request">
-      <button
-        type="button"
-        className="pr-panel-action"
-        onClick={() => clearViewedPullRequest()}
-        title="Return to this thread’s pull request"
-      >
-        <ArrowLeft size={13} strokeWidth={2} aria-hidden="true" />
-        Back to thread PR
-      </button>
-      <span className="pr-panel-viewed-repo" title={`${viewedIdentity.nameWithOwner}#${viewedIdentity.number}`}>
-        {viewedIdentity.nameWithOwner} #{viewedIdentity.number}
-      </span>
-    </div>
-  ) : undefined
+  const linked = viewedIdentity
+    ? { repo: viewedIdentity.nameWithOwner, onBack: clearViewedPullRequest }
+    : null
 
   return (
     <div ref={headerRef} className="pr-panel-host">
@@ -778,7 +852,7 @@ export function PullRequestPanel() {
         onRefresh={refresh}
         onOpenFile={openFile}
         computerName={viewedIdentity ? null : computerName}
-        topBanner={viewedBanner}
+        linked={linked}
         headerActions={row?.merge && confirm === null ? <HeaderActions row={row} running={running} onAsk={ask} /> : undefined}
         headerBelow={
           <>

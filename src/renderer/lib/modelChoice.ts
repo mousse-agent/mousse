@@ -23,7 +23,10 @@ function listedLabel(selection: ModelSelectionLike, providers: readonly LlmProvi
   const listing = providers?.find((entry) => listingServes(entry, target))
   const fromListing = listing && findListedModel(listing.models, selection.model)?.label
   if (fromListing) return fromListing
-  const snapshots = Object.values(useProviderSnapshotsStore.getState().scopes).flatMap((scope) => scope.snapshots ?? [])
+  // This computer's scopes only: another computer's list (Settings → Providers of it) names its own entries.
+  const snapshots = Object.entries(useProviderSnapshotsStore.getState().scopes).flatMap(([key, scope]) =>
+    key.startsWith('computer:') ? [] : (scope.snapshots ?? [])
+  )
   // A selection that names neither (a reply's model, a binding without a provider name) takes any instance's name.
   const serving = snapshots.filter((snapshot) =>
     selection.instanceId

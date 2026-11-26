@@ -2,6 +2,7 @@ import { useSyncExternalStore, type ReactNode } from 'react'
 import type { InstanceSnapshot } from '../../shared/harness/status'
 import xaiLogo from '../assets/xai_logo.webp'
 import antgroupAsset from '../assets/provider-icons/antgroup-color.svg'
+import antigravityAsset from '../assets/provider-icons/antigravity-color.svg'
 import anthropicAsset from '../assets/provider-icons/anthropic.svg'
 import claudeAsset from '../assets/provider-icons/claude.svg'
 import awsAsset from '../assets/provider-icons/aws-color.svg'
@@ -168,6 +169,7 @@ const CLAUDE_ORANGE = '#D97757'
 
 const PROVIDER_ASSET_ICONS: Record<string, ProviderAsset> = {
   antgroup: { src: antgroupAsset },
+  antigravity: { src: antigravityAsset },
   anthropic: { src: anthropicAsset, monochrome: true, color: CLAUDE_ORANGE },
   claude: { src: claudeAsset, monochrome: true, color: CLAUDE_ORANGE },
   aws: { src: awsAsset },
@@ -431,10 +433,10 @@ export function providerIconKey(providerId: string): string {
   return resolveProviderIcon(providerId).key
 }
 
-/** The maker of a provider's own models, as a model brand id: Claude Code's models are Anthropic's. */
+/** The maker of a provider's own models, as a model brand id: Claude Code's models are Anthropic's, Antigravity's Google's. */
 export function providerMakerId(providerId: string): string {
   const id = normalizeProviderId(providerId)
-  return id === 'claude' ? 'anthropic' : id
+  return id === 'claude' ? 'anthropic' : id === 'antigravity' ? 'google' : id
 }
 
 /**
@@ -443,7 +445,7 @@ export function providerMakerId(providerId: string): string {
  * picks, so `acp:metadata-agent` is not Meta's and `acp:openai-helper` not OpenAI's.
  */
 const ACP_AGENT_BRANDS: Readonly<Record<string, string>> = {
-  'antigravity-acp': 'google',
+  'antigravity-acp': 'antigravity',
   cursor: 'cursor',
   gemini: 'google',
   'github-copilot-cli': 'copilot',
@@ -473,7 +475,7 @@ export function normalizeProviderId(providerId: string): string {
   else if (/^[a-z-]+:./.test(id)) id = id.slice(0, id.indexOf(':'))
   if (id === 'claude' || id === 'claude-subscription') return 'claude'
   if (id === 'codex' || id === 'openai-codex') return 'openai'
-  if (id === 'antigravity' || id.includes('antigravity')) return 'google'
+  if (id.includes('antigravity')) return 'antigravity'
   if (id.includes('anthropic')) return 'anthropic'
   if (id.includes('ant-ling') || id.includes('antling')) return 'antgroup'
   if (id.includes('azure')) return 'azure'

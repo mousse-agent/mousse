@@ -131,22 +131,24 @@ describe('a reply that launches subagents whose results arrive one by one', () =
     expect(view).toMatchObject({ turns: 1, indicators: ['Working · 20s'], notices: 0 })
 
     view = await show(21, all, 'completed', ['done', 'done', 'done'])
-    expect(view).toMatchObject({ turns: 1, indicators: ['Worked for 21s·2, 2 replies inside'], notices: 0 })
+    expect(view).toMatchObject({ turns: 1, indicators: ['Worked for 21s·2, 2 replies inside·3, 3 subagents inside'], notices: 0 })
     // The turn ended in view: its work is still drawn as its fold starts to close, then is gone.
     expect(view.text).toContain('One replied; two are still running.')
     await act(async () => { vi.advanceTimersByTime(500) })
     view = { ...view, text: host.textContent ?? '' }
-    // The finished turn folds its work behind its line, but the cards stay where the subagents were started.
+    // The finished turn folds its work and settled subagent cards behind its line, leaving the final answer clean.
     expect(view.text).not.toContain('One replied; two are still running.')
     expect(view.text).toContain('All three test subagents')
-    expect([...host.querySelectorAll('.subagent-card-title')].map((node) => node.textContent)).toEqual(NAMES)
-    // The line opens the rest of the work in place.
+    expect(host.querySelectorAll('.subagent-card-title')).toHaveLength(0)
+    // Opening the fold restores the work and subagent group in chronological order, with the burst group already open.
     await act(async () => { host.querySelector<HTMLButtonElement>('.turn-work-toggle')!.click() })
     view = { ...view, text: host.textContent ?? '' }
+    expect([...host.querySelectorAll('.subagent-card-title')].map((node) => node.textContent)).toEqual(NAMES)
     expect(view.text).toContain('3 done')
     expect(view.text).not.toMatch(/finished task|MODEL-ONLY RESULT/)
     // Every part of the reply is in the one turn, in order.
-    const order = ['I launched three subagents', '3 subagents', 'Test Subagent One finished.', 'All three test subagents'].map((s) => view.text.indexOf(s))
+    const answerText = host.querySelector('.turn-answer')!.textContent ?? ''
+    const order = ['I launched three subagents', '3 subagents', 'Test Subagent One finished.', 'All three test subagents'].map((s) => answerText.indexOf(s))
     expect(order.every((index) => index >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
   })
@@ -155,7 +157,7 @@ describe('a reply that launches subagents whose results arrive one by one', () =
     const all = [...launched, result(0, 8), result(1, 9), result(2, 10), reply('a2', 12, 'All done.'), user('u2', 30, 'Thanks, now summarize')]
     const view = await show(31, all, 'streaming', ['done', 'done', 'done'])
     expect(view.turns).toBe(2)
-    expect(view.indicators).toEqual(['Worked for 12s·1, 1 reply inside', 'Working · 1s'])
+    expect(view.indicators).toEqual(['Worked for 12s·1, 1 reply inside·3, 3 subagents inside', 'Working · 1s'])
   })
 
   it('keeps a result line in the turn for a subagent with no card', async () => {
@@ -177,7 +179,7 @@ describe('a saved thread split by subagent results', () => {
       user('u2', 60, 'Next'), reply('a4', 62, 'Okay.')
     ]
     const view = await show(100, saved, 'completed', ['done', 'done', 'done'])
-    expect(view).toMatchObject({ turns: 2, indicators: ['Worked for 20s·2, 2 replies inside', 'Worked for 2s'], notices: 0 })
+    expect(view).toMatchObject({ turns: 2, indicators: ['Worked for 20s·2, 2 replies inside·3, 3 subagents inside', 'Worked for 2s'], notices: 0 })
     expect(view.text).not.toMatch(/finished task|MODEL-ONLY RESULT/)
   })
 })
@@ -263,10 +265,26 @@ describe('a thread whose turns start several subagents', () => {
     return [...host.querySelectorAll('[data-turn-key]')].map((turn) => [...turn.querySelectorAll('.subagent-card-title')].map((node) => node.textContent))
   }
 
-  it('shows the card of every start in the turn that made it, finished or still working', async () => {
+  it('folds settled subagent cards behind each finished turn and keeps running ones visible', async () => {
+    // When all subagents are done, every finished turn folds its cards behind "Worked for".
+    expect(await showThread({ archive: 'done', schedule: 'done', link: 'done' })).toEqual([[], [], []])
+    const counts = [...host.querySelectorAll('.turn-work-toggle')].map((button) => button.querySelector('[title$="subagents inside"], [title="1 subagent inside"]')?.getAttribute('title'))
+    expect(counts).toEqual(['1 subagent inside', '1 subagent inside', '2 subagents inside'])
+    // Opening every fold shows each start in the turn that made it.
+    for (const toggle of host.querySelectorAll<HTMLButtonElement>('.turn-work-toggle')) {
+      await act(async () => toggle.click())
+    }
     const everyStart = [['Archive builder'], ['Archive builder'], ['Schedule builder', 'Link builder']]
-    expect(await showThread({ archive: 'done', schedule: 'done', link: 'done' })).toEqual(everyStart)
-    expect(await showThread({ archive: 'working', schedule: 'done', link: 'working' })).toEqual(everyStart)
+    expect([...host.querySelectorAll('[data-turn-key]')].map((turn) => [...turn.querySelectorAll('.subagent-card-title')].map((node) => node.textContent))).toEqual(everyStart)
+    // While Archive builder's latest task (turn 2) and Link builder (turn 3) are still working, those turns stay out
+    // while turn 1's earlier completed task stays folded.
+    expect(await showThread({ archive: 'working', schedule: 'done', link: 'working' })).toEqual([['Archive builder'], ['Archive builder'], ['Schedule builder', 'Link builder']])
+  })
+
+  it('keeps an earlier turn’s still-running subagent visible outside its fold while folding settled earlier tasks', async () => {
+    // Fresh render (folds closed): Archive builder's second task in turn 2 is still running, while turn 1's first
+    // task is settled (continued). Turn 3's Link builder is also running.
+    expect(await showThread({ archive: 'working', schedule: 'done', link: 'working' })).toEqual([[], ['Archive builder'], ['Schedule builder', 'Link builder']])
   })
 
   it('still folds the rest of a finished turn behind its line', async () => {
@@ -280,7 +298,7 @@ describe('a thread whose turns start several subagents', () => {
   const command = (id: string, seconds: number): UIMessage =>
     ({ id, role: 'assistant', createdAt: at(seconds), parts: [{ type: 'tool-Bash', toolCallId: id, state: 'output-available', input: { command: 'gh pr list' }, output: '' }] }) as unknown as UIMessage
 
-  /** A finished turn that started `titles` with `between` rows after each start; each card list as the chat shows it. */
+  /** A finished turn that started `titles` with `between` rows after each start; each card list as the chat shows it once opened. */
   async function showStarts(rows: UIMessage[], titles: string[]) {
     const subagents = titles.map((title, index) => subagent(title, [[`d-${index}`, 0]], 'done'))
     const cards = joinSubagentCards(collectSubagentCalls(rows), subagents, { loaded: true, turnActive: false })
@@ -290,6 +308,11 @@ describe('a thread whose turns start several subagents', () => {
     await act(async () => {
       root.render(createElement(SubagentCardsContext.Provider, { value: cards },
         createElement(MessageList, { messages: rows, status: chatStatusFromTurn({ phase: 'completed', turnId: 'run:9' }) })))
+    })
+    // Settled cards fold behind "Worked for" on a finished turn; open it to inspect the card layout inside.
+    expect(host.querySelectorAll('.subagent-cards')).toHaveLength(0)
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('.turn-work-toggle')!.click()
     })
     return readCards()
   }
@@ -302,7 +325,7 @@ describe('a thread whose turns start several subagents', () => {
     }))
   }
 
-  it('shows a quick burst of starts as one open card that lists them, folded to the first name when closed', async () => {
+  it('shows a quick burst of starts as one open card once Worked for opens, folded to the first name when closed', async () => {
     const titles = ['Archive builder', 'Schedule builder', 'Link builder']
     const rows = [
       user('u9', 0, 'Three changes, in parallel'),
@@ -321,7 +344,7 @@ describe('a thread whose turns start several subagents', () => {
     expect(readCards()).toEqual([{ head: 'Archive builder + 2', rows: [] }])
   })
 
-  it('gives starts far apart cards of their own', async () => {
+  it('gives starts far apart cards of their own inside Worked for', async () => {
     const titles = ['Archive builder', 'Schedule builder']
     // Tool work between the starts.
     const worked = [
@@ -334,12 +357,100 @@ describe('a thread whose turns start several subagents', () => {
     expect(await showStarts(worked, titles)).toEqual([{ head: null, rows: [titles[0]] }, { head: null, rows: [titles[1]] }])
     // Only thinking between them, but minutes apart.
     const later = [
-      user('u9', 0, 'Two changes'),
+      user('u10', 0, 'Two changes'),
       start('l1', 2, 'delegate_task', titles[0]!, 'd-0'),
       thought('l2', 100, 'Now the schedule, after reading the code.'),
       start('l3', 200, 'delegate_task', titles[1]!, 'd-1'),
       reply('l4', 210, 'Both are on it.')
     ]
     expect(await showStarts(later, titles)).toEqual([{ head: null, rows: [titles[0]] }, { head: null, rows: [titles[1]] }])
+  })
+
+  it('counts distinct subagents across continuations, folds a subagent-only turn, and counts steered parts separately', async () => {
+    // 2 parallel builders + 2 reviewers + 2 builder continuations = 6 runs of 4 distinct subagents, plus a steer with 1 more.
+    const steer: UIMessage = { id: 'st1', role: 'user', createdAt: at(1000), parts: [{ type: 'text', text: 'Run docs too' }], metadata: { steered: true } } as unknown as UIMessage
+    const rows = [
+      user('u-multi', 0, 'Ship both PRs'),
+      start('m1', 2, 'delegate_task', 'Remote builder', 'd-rem-1'),
+      start('m2', 4, 'delegate_task', 'Accounts builder', 'd-acc-1'),
+      command('m3', 1800),
+      start('m4', 1810, 'delegate_task', 'Accounts reviewer', 'd-acc-rev'),
+      command('m5', 1900),
+      start('m6', 1910, 'continue_subagent', 'Accounts builder', 'd-acc-2'),
+      command('m7', 2200),
+      start('m8', 2210, 'delegate_task', 'Remote reviewer', 'd-rem-rev'),
+      command('m9', 2400),
+      start('m10', 2410, 'continue_subagent', 'Remote builder', 'd-rem-2'),
+      reply('m11', 2900, 'Both PRs are ready.'),
+      steer,
+      start('m12', 3010, 'delegate_task', 'Docs builder', 'd-docs-1'),
+      reply('m13', 3100, 'Docs updated.')
+    ]
+    const subagents = [
+      subagent('Remote builder', [['d-rem-1', 2.1], ['d-rem-2', 2410.1]], 'done'),
+      subagent('Accounts builder', [['d-acc-1', 4.1], ['d-acc-2', 1910.1]], 'done'),
+      subagent('Accounts reviewer', [['d-acc-rev', 1810.1]], 'done'),
+      subagent('Remote reviewer', [['d-rem-rev', 2210.1]], 'done'),
+      subagent('Docs builder', [['d-docs-1', 3010.1]], 'done')
+    ]
+    const cards = joinSubagentCards(collectSubagentCalls(rows), subagents, { loaded: true, turnActive: false })
+    await act(async () => {
+      root.render(createElement(SubagentCardsContext.Provider, { value: cards },
+        createElement(MessageList, { messages: rows, status: chatStatusFromTurn({ phase: 'completed', turnId: 'run:multi' }) })))
+    })
+    // Before opening either fold: no subagent cards spill above the replies; counts reflect distinct subagents per part.
+    expect(host.querySelectorAll('.subagent-card')).toHaveLength(0)
+    const foldLines = [...host.querySelectorAll<HTMLButtonElement>('.turn-work-toggle')]
+    expect(foldLines).toHaveLength(2)
+    expect(foldLines[0]!.querySelector('[title="4 subagents inside"]')).not.toBeNull()
+    expect(foldLines[1]!.querySelector('[title="1 subagent inside"]')).not.toBeNull()
+    // Opening the first fold reveals the initial 2-subagent burst (open by default) plus the 4 sequential follow-ups.
+    await act(async () => foldLines[0]!.click())
+    expect([...host.querySelectorAll('.subagent-card-title')].map((node) => node.textContent)).toEqual([
+      'Remote builder', 'Accounts builder', 'Accounts reviewer', 'Accounts builder', 'Remote reviewer', 'Remote builder'
+    ])
+    // A subagent-only turn with no final text still gets a Worked for toggle that opens its card.
+    const onlySubagent = [user('u-only', 0, 'Run it'), start('o1', 2, 'delegate_task', 'Solo builder', 'd-solo')]
+    const soloCards = joinSubagentCards(collectSubagentCalls(onlySubagent), [subagent('Solo builder', [['d-solo', 2.1]], 'done')], { loaded: true, turnActive: false })
+    await act(async () => {
+      root.render(createElement(SubagentCardsContext.Provider, { value: soloCards },
+        createElement(MessageList, { messages: onlySubagent, status: chatStatusFromTurn({ phase: 'completed', turnId: 'run:solo' }) })))
+    })
+    expect(host.querySelectorAll('.subagent-card')).toHaveLength(0)
+    const soloToggle = host.querySelector<HTMLButtonElement>('.turn-work-toggle')!
+    expect(soloToggle.querySelector('[title="1 subagent inside"]')).not.toBeNull()
+    await act(async () => soloToggle.click())
+    expect([...host.querySelectorAll('.subagent-card-title')].map((node) => node.textContent)).toEqual(['Solo builder'])
+  })
+
+  it('keeps an uncontinued failed subagent outside Worked for, but folds one that was continued and finished', async () => {
+    const failedSubagent: SubagentSummary = {
+      ...subagent('Broken builder', [['d-fail', 2.1]], 'failed'),
+      tasks: [{ delegationId: 'd-fail', childRunId: 'run-d-fail', outcome: 'failed', unread: false, continued: false, createdAt: at(2.1), completedAt: at(5), error: 'Build crashed' }]
+    }
+    const recoveredSubagent: SubagentSummary = {
+      ...subagent('Retried builder', [['d-fail-old', 10.1], ['d-ok', 50.1]], 'done'),
+      tasks: [
+        { delegationId: 'd-fail-old', childRunId: 'run-d-fail-old', outcome: 'failed', unread: false, continued: true, createdAt: at(10.1), completedAt: at(15), error: 'Transient error' },
+        { delegationId: 'd-ok', childRunId: 'run-d-ok', outcome: 'done', unread: false, continued: false, createdAt: at(50.1), completedAt: at(55) }
+      ]
+    }
+    const rows = [
+      user('u-fail', 0, 'Build both'),
+      start('f1', 2, 'delegate_task', 'Broken builder', 'd-fail'),
+      command('f2', 8),
+      start('f3', 10, 'delegate_task', 'Retried builder', 'd-fail-old'),
+      command('f4', 45),
+      start('f5', 50, 'continue_subagent', 'Retried builder', 'd-ok'),
+      reply('f6', 60, 'Retried builder passed; Broken builder failed.')
+    ]
+    const cards = joinSubagentCards(collectSubagentCalls(rows), [failedSubagent, recoveredSubagent], { loaded: true, turnActive: false })
+    await act(async () => {
+      root.render(createElement(SubagentCardsContext.Provider, { value: cards },
+        createElement(MessageList, { messages: rows, status: chatStatusFromTurn({ phase: 'completed', turnId: 'run:fail' }) })))
+    })
+    // Only the uncontinued failed subagent stays outside the fold; the retried one folds and counts once.
+    expect([...host.querySelectorAll('.subagent-card-title')].map((node) => node.textContent)).toEqual(['Broken builder'])
+    expect(host.querySelector('.turn-work-toggle [title="1 subagent inside"]')).not.toBeNull()
   })
 })

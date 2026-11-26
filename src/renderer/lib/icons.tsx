@@ -86,6 +86,7 @@ import GitBranchIcon from '@hugeicons/core-free-icons/GitBranchIcon'
 import GitCommitHorizontalIcon from '@hugeicons/core-free-icons/GitCommitHorizontalIcon'
 import GitCompareIcon from '@hugeicons/core-free-icons/GitCompareIcon'
 import GitForkIcon from '@hugeicons/core-free-icons/GitForkIcon'
+import GithubIcon from '@hugeicons/core-free-icons/GithubIcon'
 import GitMergeIcon from '@hugeicons/core-free-icons/GitMergeIcon'
 import GitPullRequestIcon from '@hugeicons/core-free-icons/GitPullRequestIcon'
 import GitPullRequestClosedIcon from '@hugeicons/core-free-icons/GitPullRequestClosedIcon'
@@ -262,6 +263,7 @@ export const GitBranch = /* @__PURE__ */ createIcon('GitBranch', GitBranchIcon)
 export const GitCommitHorizontal = /* @__PURE__ */ createIcon('GitCommitHorizontal', GitCommitHorizontalIcon)
 export const GitCompare = /* @__PURE__ */ createIcon('GitCompare', GitCompareIcon)
 export const GitFork = /* @__PURE__ */ createIcon('GitFork', GitForkIcon)
+export const GitHub = /* @__PURE__ */ createIcon('GitHub', GithubIcon)
 export const GitMerge = /* @__PURE__ */ createIcon('GitMerge', GitMergeIcon)
 export const GitPullRequest = /* @__PURE__ */ createIcon('GitPullRequest', GitPullRequestIcon)
 export const GitPullRequestClosed = /* @__PURE__ */ createIcon('GitPullRequestClosed', GitPullRequestClosedIcon)

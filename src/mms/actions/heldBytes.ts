@@ -70,7 +70,7 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
     signal?.throwIfAborted()
     const group = deadline !== undefined && process.platform !== 'win32'
     return await new Promise<Streamed>((settle, fail) => {
-      const child = timeGitChild(() => spawnGit(gitFile(), argv, { cwd: top, env: gitEnvFor(gitEnv(top, env)), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) }))
+      const child = timeGitChild(() => spawnGit(gitFile(), argv, { cwd: top, env: gitEnvFor(gitEnv(top, env)), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], detached: group }))
       const errors: Buffer[] = []
       let failed: Error | undefined
       let stopped = false

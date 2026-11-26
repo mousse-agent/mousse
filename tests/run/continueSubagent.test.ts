@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { subagentPreamble } from '../../src/mms/run/delegation/guidance'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import { waitFor } from './phase6Fixture'
 import { useSubagentWorld, type Json } from './subagentWorld'
 
@@ -88,7 +89,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
     it('a busy subagent runs the follow-up after its current task, as queued', async () => {
       let release!: () => void
       const gate = new Promise<void>((resolve) => { release = resolve })
-      const { d, adapter, steps, out, say, start, settled } = world(async (input) => {
+      const { d, adapter, parent, steps, out, say, start, settled } = world(async (input) => {
         if (input.prompt.endsWith('Review API reviewer')) await gate
         return `done: ${input.prompt.split('\n').at(-1)}`
       })
@@ -104,6 +105,8 @@ describe('continue_subagent and the title address (issue #142)', () => {
       await settled(out.continued.childRunId)
       expect(d.engine.delegations.get(out.continued.delegationId)?.result?.text).toBe('done: Then this')
       expect(adapter.turns.filter((turn) => turn.threadId === out.first.childThreadId)).toHaveLength(2)
+      // A follow-up that waited in the queue is still stored as the parent agent's.
+      expect(d.orch.getMessages(out.first.childThreadId).filter((message) => message.role === 'user').at(-1)?.origin).toMatchObject({ kind: 'agent', threadId: parent.id })
     })
 
     it('a subagent waiting for an answer is never auto-rejected: the caller gets the question, then answers it', async () => {
@@ -356,6 +359,24 @@ describe('continue_subagent and the title address (issue #142)', () => {
       const first = adapter.turns.find((turn) => turn.threadId === out.first.childThreadId)!
       expect(first.prompt).toBe(`${subagentPreamble('Parent')}\n\nReview API reviewer`)
       expect(first.prompt).toContain('You may start your own subagents unless your instructions say not to.')
+    })
+
+    it('is stored as the parent agent\'s message with the task as its words, as are its follow-ups; a person\'s message stays theirs', async () => {
+      const { d, parent, steps, out, say, start, settled } = world()
+      steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
+      steps['again'] = async (tools) => { out.continued = await tools.continueSubagent({ subagent: 'API reviewer', prompt: 'Now check the tests' }, { toolCallId: 'c1' }) as Json }
+      await say('go')
+      await settled(out.first.childRunId)
+      await say('again')
+      await settled(out.continued.childRunId)
+      const person = await d.orch.send('Also look at the docs', false, { threadId: out.first.childThreadId, source: 'gui', clientRequestId: 'person-1' })
+      await settled(person.runId!)
+      const asked = d.orch.getMessages(out.first.childThreadId).filter((message) => message.role === 'user')
+      expect(asked.map((message) => agentMessageWords(message.content, message.origin))).toEqual(['Review API reviewer', 'Now check the tests', 'Also look at the docs'])
+      // The model still reads the guidance before the first task.
+      expect(asked[0]!.content).toBe(`${subagentPreamble('Parent')}\n\nReview API reviewer`)
+      for (const message of asked.slice(0, 2)) expect(message.origin).toMatchObject({ kind: 'agent', threadId: parent.id, title: 'Parent' })
+      expect(asked[2]!.origin).toBeUndefined()
     })
   })
 })

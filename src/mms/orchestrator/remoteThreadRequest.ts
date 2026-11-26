@@ -21,7 +21,9 @@ export function remoteThreadFingerprint(request: AgentRemoteThreadRequest): stri
     request.firstMessage ?? null,
     request.firstMessage === undefined ? null : request.mode ?? 'agent',
     // A bot's project here; absent from an agent's launch, so a key stored before it keeps its fingerprint.
-    ...(request.fromProjectId !== undefined ? [request.fromProjectId] : [])
+    ...(request.fromProjectId !== undefined ? [request.fromProjectId] : []),
+    // Asked for only when the agent gave it, so a key stored before it keeps its fingerprint.
+    ...(request.hidden !== undefined ? [{ hidden: request.hidden }] : [])
   ])
 }
 

@@ -34,7 +34,7 @@
     "dist:win:cli": "npm run typecheck && npm run dist:win:prep && electron-builder --win --config electron-builder.cli.yml --publish never",
     "dist:win:prep": "npm run clean:build-output && npm run prepare:package && npm run build && node scripts/rebuild-native.mjs && node scripts/ensure-webrtc-prebuilt.mjs && node scripts/build-sshd-helper.mjs --require && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require",
     "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
-    "dist:mac": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require && electron-builder --mac dmg --publish never",
+    "dist:mac": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require && node scripts/package-mac.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint .",
     "format:net": "prettier --write \"src/mms/net/**/*.{ts,tsx,mjs}\" \"src/mms/spaces/**/*.{ts,tsx,mjs}\" \"src/mms/bridge/**/*.{ts,tsx,mjs}\" \"src/mms/bots/space/**/*.{ts,tsx,mjs}\" \"src/shared/net/**/*.{ts,tsx,mjs}\" \"src/shared/bridge/**/*.{ts,tsx,mjs}\" \"src/shared/bots/space/**/*.{ts,tsx,mjs}\" \"src/shared/spaces/**/*.{ts,tsx,mjs}\" \"tests/net/**/*.{ts,tsx,mjs}\" \"scripts/net/**/*.{ts,tsx,mjs}\" \"scripts/net-qa/**/*.{ts,tsx,mjs}\" \"scripts/net-spikes/**/*.{ts,tsx,mjs}\" src/cli/commands/net.ts src/cli/commands/bridge.ts src/cli/commands/spaces.ts src/cli/commands/bots.ts src/cli/commands/spaceArchive.ts src/cli/electronDaemonLifetime.ts src/mms/protocol/connectionEventWriter.ts",
@@ -303,8 +303,10 @@
       ],
       "category": "public.app-category.developer-tools",
       "icon": "resources/icon.png",
-      "identity": "-",
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "extraFiles": [
         {
           "from": "resources/cli/mousse-cli",
@@ -315,11 +317,14 @@
         "NSLocalNetworkUsageDescription": "Mousse connects to your other computers on this network.",
         "NSBonjourServices": [
           "_mousse._tcp"
-        ]
+        ],
+        "NSMicrophoneUsageDescription": "Mousse uses the microphone for voice dictation.",
+        "NSCameraUsageDescription": "Mousse uses the camera to scan pairing QR codes."
       }
     },
     "dmg": {
-      "artifactName": "Mousse-${version}-${arch}.${ext}"
+      "artifactName": "Mousse-${version}-${arch}.${ext}",
+      "sign": true
     },
     "nsis": {
       "artifactName": "Mousse.Setup.${version}.${ext}",

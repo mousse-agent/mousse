@@ -100,12 +100,22 @@ export function engineTwinMethods(): BridgeMethod[] {
   return Object.keys(TWINS) as BridgeMethod[]
 }
 
+/** The refusals the other computer worded for a person ("That folder does not exist on this computer."). */
+const worded = new WeakSet<NetError>()
+
+/** A refusal whose message is the other computer's own words, which a window may show as they are. */
+export function isWordedRefusal(error: unknown): error is NetError {
+  return error instanceof NetError && worded.has(error)
+}
+
 /** A routed refusal, as the error the Hub's callers get: its code when it is a Net code, its word in the details. */
 function refusal(reply: Extract<RoutedReply, { ok: false }>): NetError {
   const code = reply.error.code
-  return new NetError(isNetErrorCode(code) ? code : 'bad_request', reply.error.message, {
+  const error = new NetError(isNetErrorCode(code) ? code : 'bad_request', reply.error.message, {
     details: { reason: code }
   })
+  if (reply.error.message.trim()) worded.add(error)
+  return error
 }
 
 /**

@@ -176,7 +176,47 @@ describe('Nest rows of a thread', () => {
     expect(useChatNavigationStore.getState().subagent).toBeNull()
   })
 
-  it('groups Antigravity mcp_mousse_delegate_task calls into an inline subagent group card and lists them in Nest', async () => {
+  it('opens a finished native subagent from Nest even when its turn is folded behind Worked for', async () => {
+    const finishedMessages: ChatMessage[] = [
+      user('u1', 0, 'Look into bots'),
+      row('done1', 2, { kind: 'subagent', agentType: 'Explore', description: 'Explore bot work and threads', status: 'done', summary: 'Found 3 files.', endedAt: at(10) } as never),
+      nestedCommand('c1', 5, 'done1'),
+      { id: 'ans1', role: 'assistant', content: 'Here is what it found.', timestamp: at(12), turnId: RUN } as ChatMessage
+    ]
+    const ui = mousseToUIMessages(finishedMessages)
+    useAppStore.setState({ activeThreadId: 't1', messages: finishedMessages })
+    await act(async () => {
+      root.render(createElement(Fragment, null,
+        createElement(SubagentCardsContext.Provider, { value: collectNativeSubagentCards(ui, false) },
+          createElement(MessageList, { messages: ui, status: chatStatusFromTurn({ phase: 'completed', turnId: RUN }) })),
+        createElement('aside', null, createElement(LineageSection, { threadId: 't1', projectId: null }))))
+    })
+    // Settled card is folded behind Worked for before the click.
+    expect(host.querySelector('[data-native-subagent="done1"]')).toBeNull()
+    expect(host.querySelector('.turn-work-toggle')?.getAttribute('aria-expanded')).toBe('false')
+
+    const finishedGroup = [...host.querySelectorAll<HTMLButtonElement>('aside button')]
+      .find((button) => button.textContent?.includes('1 finished'))!
+    await act(async () => finishedGroup.click())
+    const lineageRow = [...host.querySelectorAll<HTMLButtonElement>('aside button.lineage-row')]
+      .find((button) => button.textContent?.includes('Explore bot work and threads'))!
+    await act(async () => lineageRow.click())
+
+    const card = host.querySelector<HTMLElement>('[data-native-subagent="done1"]')
+    expect(card).not.toBeNull()
+    expect(host.querySelector('.turn-work-toggle')?.getAttribute('aria-expanded')).toBe('true')
+    await act(async () => {
+      for (let frame = 0; frame < 30 && !card!.classList.contains(LOCATED_CLASS); frame += 1) {
+        await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)))
+      }
+    })
+    expect(card!.classList.contains(LOCATED_CLASS)).toBe(true)
+    const cardButton = card!.querySelector<HTMLButtonElement>('button.subagent-card')!
+    expect(cardButton.getAttribute('aria-expanded')).toBe('true')
+    expect(document.activeElement).toBe(cardButton)
+  })
+
+  it('groups Antigravity mcp_mousse_delegate_task calls into an inline subagent group card inside Worked for and lists them in Nest', async () => {
     const assembled: ChatMessage[] = [user('u1', 0, 'Create researchers')]
     const state: TranscriptStreamState = { activeAssistantMessageId: null, activeThinkingMessageId: null, activeToolCallMessageIds: new Map() }
     const hooks: TranscriptHooks = {
@@ -219,6 +259,10 @@ describe('Nest rows of a thread', () => {
           createElement(MessageList, { messages: ui, status: chatStatusFromTurn({ phase: 'completed', turnId: RUN }) })),
         createElement('aside', null, createElement(LineageSection, { threadId: 't1', projectId: null }))))
     })
+    expect(host.querySelector('.subagent-cards.is-group')).toBeNull()
+    const toggle = host.querySelector<HTMLButtonElement>('.turn-work-toggle')!
+    expect(toggle.querySelector('[title="2 subagents inside"]')).not.toBeNull()
+    await act(async () => toggle.click())
     const group = host.querySelector('.subagent-cards.is-group')
     expect(group?.textContent).toContain('2 subagents')
     expect(group?.textContent).toContain('2 done')

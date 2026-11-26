@@ -277,6 +277,7 @@ function launch(command: string, args: string[], env?: NodeJS.ProcessEnv): Promi
   return new Promise((resolve, reject) => {
     // Never through a shell, and never a batch file: its arguments would be read by cmd.exe.
     if (process.platform === 'win32' && isBatchLauncher(command)) return reject(new Error('A batch file cannot start an editor.'))
+    // eslint-disable-next-line mousse/no-console-window -- The editor the person opens outlives Mousse. Batch launchers are refused above.
     const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true, ...(env ? { env } : {}) })
     child.once('error', reject)
     child.once('spawn', () => {

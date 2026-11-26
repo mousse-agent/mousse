@@ -173,6 +173,7 @@
     "tests/renderer/profile-footer-electron.test.ts",
     "tests/renderer/profileReady-startup-electron.test.ts",
     "tests/renderer/storage-settings-electron.test.ts",
+    "tests/renderer/thread-open-blank-electron.test.ts",
     "tests/renderer/turn-window-electron.test.ts",
     "tests/resourceLifecycleFullShell.test.ts",
     "tests/threadBrowsers.test.ts"

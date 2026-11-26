@@ -54,6 +54,25 @@ describe('modelVariants', () => {
     expect(fable?.contexts).toEqual(['1m', '300k'])
   })
 
+  it('keeps models named only by a different word in brackets as families of their own', () => {
+    const labelsOf = (models: LlmModelOption[]) => groupModelsByFamily('antigravity', models).map((family) => family.familyLabel).sort()
+    // Three models agy lists, nothing but the bracketed name tells them apart.
+    expect(labelsOf([
+      { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)' },
+      { id: 'gemini-pro-orchestrator', label: 'Orchestrator (Carbon)' },
+      { id: 'gemini-pro-orchestrator-argon', label: 'Orchestrator (Argon)' }
+    ])).toEqual(['Orchestrator (Argon)', 'Orchestrator (Carbon)', 'Orchestrator (Neon)'])
+    // A nickname beside the plain name, or levels the brackets spell out, stay one family.
+    expect(labelsOf([
+      { id: 'fable-5', label: 'Fable 5' },
+      { id: 'fable', label: 'Fable 5 (fable)' }
+    ])).toEqual(['Claude Fable 5'])
+    expect(labelsOf([
+      { id: 'gemini-3-pro-low', label: 'Gemini 3 Pro (Low)' },
+      { id: 'gemini-3-pro-high', label: 'Gemini 3 Pro (High)' }
+    ])).toEqual(['Gemini 3 Pro'])
+  })
+
   it('parses effort and speed suffixes from ids', () => {
     expect(parseModelVariant({ id: 'gpt-5.5@1m:medium', label: 'GPT-5.5 @ 1m' })).toMatchObject({
       context: '1m',

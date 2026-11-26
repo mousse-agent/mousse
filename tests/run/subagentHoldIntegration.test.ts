@@ -4,7 +4,11 @@
  * after the Reader's was read by a run of the Coordinator that committed (the hold rule itself, with
  * every trigger, is `subagentHold.test.ts`).
  */
+import { EventEmitter } from 'node:events'
+import type { ChildProcess } from 'node:child_process'
 import { describe, expect, it, vi } from 'vitest'
+import { ThreadMonitors } from '../../src/mms/monitors/ThreadMonitors'
+import { postNote } from '../../src/mms/run/mcp/appTools/threadNotes'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { childBusy } from '../../src/mms/run/delegation/hold'
 import { waitFor } from './phase6Fixture'
@@ -304,6 +308,111 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       settled.mockClear()
       w.d.orch.setProviderBackgroundWork(seen.threadId, false)
       expect(settled).not.toHaveBeenCalled()
+    })
+  })
+  /**
+   * A subagent that ends its turn while a background command it started still runs (`background_run`): the task waits
+   * for the command's end notice to wake the subagent, and publishes the answer of the turn that ends with nothing left.
+   * The monitors are wired as the profile wires them (notices through the inbox, changes to the orchestrator); only the
+   * command's process is scripted.
+   */
+  describe('background work the subagent left running', () => {
+    class FakeChild extends EventEmitter {
+      readonly stdout = Object.assign(new EventEmitter(), { setEncoding: () => undefined })
+      readonly stderr = Object.assign(new EventEmitter(), { setEncoding: () => undefined })
+      pid = 4242
+      exitCode: number | null = null
+      signalCode: NodeJS.Signals | null = null
+      exit(code: number): void {
+        this.exitCode = code
+        this.emit('close', code, null)
+      }
+    }
+
+    const scene = async () => {
+      const children: FakeChild[] = []
+      const seen: Json = {}
+      let monitors!: ThreadMonitors
+      const w = world((input) => {
+        if (input.prompt.includes('Review Solo')) {
+          seen.threadId = input.threadId
+          seen.command = monitors.startBackground({ threadId: input.threadId, description: 'verify', command: 'node scripts/verify.mjs', cwd: process.cwd() })
+          return 'Verify is running in the background; I will continue when it reports back.'
+        }
+        return 'Verify passed: 812 tests.'
+      })
+      monitors = new ThreadMonitors({
+        post: (threadId, payload, key) => { postNote(w.d.engine, key, payload, threadId) },
+        changed: (threadId) => w.d.orch.backgroundWorkChanged(threadId),
+        spawn: () => {
+          const child = new FakeChild()
+          children.push(child)
+          return child as unknown as ChildProcess
+        },
+        kill: () => undefined,
+        platform: 'linux'
+      })
+      w.d.orch.setMonitors(monitors)
+      w.steps.go = async (tools) => { w.out.solo = await w.start(tools, 'Solo') }
+      await w.say('go')
+      await w.settled(w.out.solo.childRunId)
+      const task = () => w.d.engine.delegations.get(w.out.solo.delegationId)!
+      const results = () => w.d.engine.inbox.listForThread(w.parent.id).filter((row) => row.kind === 'child_result')
+      return { ...w, monitors, children, seen, task, results }
+    }
+
+    it('no result while the command runs; its end wakes the subagent, and one notice carries the final answer', async () => {
+      const s = await scene()
+      try {
+        // The subagent's turn ended, but its command still runs: nothing is published and the parent is not told.
+        expect(s.d.engine.getRun(s.out.solo.childRunId)!.status).toBe('completed')
+        expect(s.task().status).toBe('running')
+        expect(s.results()).toEqual([])
+        expect(s.reconciler.runOnce().wakes.wakes).toEqual([])
+        // What another computer reads to follow a task sent there says the same.
+        expect(s.d.orch.backgroundWork(s.seen.threadId).busy).toBe(true)
+
+        // The command ends: its notice wakes the subagent, and that turn's answer is the result.
+        s.children[0].exit(0)
+        expect(s.task().status).toBe('running')
+        const wake = s.reconciler.runOnce().wakes.wakes[0]
+        expect(s.d.engine.getRun(wake)).toMatchObject({ threadId: s.seen.threadId, source: 'wake' })
+        await waitFor(() => s.task().status !== 'running', 'the task to publish')
+        expect(s.task()).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'Verify passed: 812 tests.', runId: wake } })
+        expect(s.results()).toHaveLength(1)
+        expect(s.d.orch.backgroundWork(s.seen.threadId).busy).toBe(false)
+      } finally {
+        s.monitors.close()
+      }
+    })
+
+    it('a command the person stops wakes nobody: the task publishes the last answer', async () => {
+      const s = await scene()
+      try {
+        expect(s.task().status).toBe('running')
+        s.monitors.stopByPerson(s.seen.threadId, s.seen.command.id)
+        expect(s.task()).toMatchObject({
+          status: 'result_available',
+          result: { runStatus: 'completed', text: 'Verify is running in the background; I will continue when it reports back.' }
+        })
+        expect(s.results()).toHaveLength(1)
+        // Its end notice still rides with the subagent's next turn; it starts none.
+        expect(s.reconciler.runOnce().wakes.wakes.filter((runId) => s.d.engine.getRun(runId)?.threadId === s.seen.threadId)).toEqual([])
+      } finally {
+        s.monitors.close()
+      }
+    })
+
+    it('the parent\'s Stop cancels the waiting task and ends the command; nothing is published', async () => {
+      const s = await scene()
+      try {
+        await s.d.orch.stopThread(s.parent.id, 'user')
+        expect(s.task().status).toBe('cancelled')
+        expect(s.monitors.has(s.seen.threadId)).toBe(false)
+        expect(s.results()).toEqual([])
+      } finally {
+        s.monitors.close()
+      }
     })
   })
 })

@@ -49,6 +49,7 @@ import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelP
 import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
 import {
   legacyProviderForInstance,
+  nextEntryName,
   piProviderIdOf,
   PROVIDER_INSTANCE_ERROR_CODES,
   type ProviderInstanceConfig
@@ -79,7 +80,7 @@ import {
 } from '../../shared/permissionMode'
 import type { BotAuthority } from '../../shared/bots/personal/authority'
 import type { BotRuntimeHold } from '../../shared/bots/personal/subagentHold'
-import { HarnessScopeStore } from './scope'
+import { HarnessScopeStore, instanceEnabled } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { runOwnerUpdate } from './ownerUpdate'
 import { compatibilityOf, fingerprintOf, knownProblemMessage, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
@@ -441,8 +442,8 @@ export interface HarnessInstances {
   /** Deletes any instance, built-in ones too; a vendor agent is not seeded again. */
   remove(instanceId: string): Promise<void>
   configure(instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot>
-  /** `null` clears a project override; the device scope takes a boolean only. */
-  setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot>
+  /** Turns the instance on or off on this computer. */
+  setEnabled(instanceId: string, enabled: boolean): Promise<InstanceSnapshot>
   install(instanceId: string): Promise<ProviderOperationStarted>
   /**
    * Deletes the files Mousse downloaded for the instance. Other entries using them (in this or
@@ -1034,7 +1035,7 @@ export class Harness implements HarnessGateway {
       setSecret: (instanceId, value) => this.setSecret(instanceId, value),
       remove: (instanceId) => this.remove(instanceId),
       configure: (instanceId, patch) => this.configure(instanceId, patch),
-      setEnabled: (instanceId, scope, enabled) => this.setEnabled(instanceId, scope, enabled),
+      setEnabled: (instanceId, enabled) => this.setEnabled(instanceId, enabled),
       install: (instanceId) => this.install(instanceId, 'install'),
       removeInstall: (instanceId, options) => this.removeInstall(instanceId, options),
       cancelInstall: async (operationId) => this.operations.get(operationId)?.cancel() ?? false,
@@ -1131,8 +1132,6 @@ export class Harness implements HarnessGateway {
     if (options.purpose === 'title' && !driver.oneShot)
       harnessFail('unsupported', `${driver.label} cannot name chats. Choose another model for chat titles, or Automatic.`, resolved.instanceId)
     if (!options.allowDisabled) {
-      if (options.scope?.kind === 'project' && !this.scopes.enabled(resolved.instanceId, true, options.scope).effective)
-        harnessFail('instance_disabled', `Provider instance "${resolved.instanceId}" is turned off for this project. Turn it on or choose another model.`, resolved.instanceId)
       if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
@@ -2408,7 +2407,7 @@ export class Harness implements HarnessGateway {
 
   isEnabledInScope(instanceId: string, scope: ProviderScope): boolean {
     const entry = this.instanceMap.list()[instanceId]
-    return Boolean(entry) && this.scopes.enabled(instanceId, entry!.enabled, scope).effective
+    return Boolean(entry) && entry!.enabled
   }
 
   /**
@@ -2459,7 +2458,7 @@ export class Harness implements HarnessGateway {
     const apis: LlmProviderOption[] = []
     const agents: LlmProviderOption[] = []
     for (const [instanceId, entry] of Object.entries(entries)) {
-      if (!this.scopes.enabled(instanceId, entry.enabled, scope).effective) continue
+      if (!entry.enabled) continue
       const record = this.listedRecord(instanceId)
       // A locked entry runs bot turns only: no picker offers it for a thread.
       if (record?.config.profile === 'locked') continue
@@ -2514,7 +2513,7 @@ export class Harness implements HarnessGateway {
     const entries = this.instanceMap.list()
     return Object.keys(entries).flatMap((instanceId): Array<{ instanceId: string; signedOut: boolean }> => {
       const record = this.recordOrUndefined(instanceId)
-      if (!record?.runtime.usage || record.stopped || !this.scopes.enabled(instanceId, entries[instanceId]!.enabled, scope).effective) return []
+      if (!record?.runtime.usage || record.stopped || !entries[instanceId]!.enabled) return []
       if (record.runtime.configured()) return [{ instanceId, signedOut: false }]
       return includeSignedOut ? [{ instanceId, signedOut: true }] : []
     })
@@ -2667,7 +2666,7 @@ export class Harness implements HarnessGateway {
       displayName: this.displayName(record),
       builtIn: record.builtIn,
       scope,
-      enabled: this.scopes.enabled(instanceId, record.entry.enabled, scope),
+      enabled: instanceEnabled(record.entry.enabled),
       install: {
         state: installing ? 'installing' : shown?.install ?? 'unknown',
         ...(operation ? { operationId: operation.started.operationId } : {}),
@@ -2951,6 +2950,16 @@ export class Harness implements HarnessGateway {
     return {}
   }
 
+  /** The name an entry shows (`displayName`), read from its stored config without building its runtime. */
+  private storedName(instanceId: string, entry: ProviderInstanceConfig): string {
+    const name = entry.config?.displayName
+    if (typeof name === 'string' && name.trim()) return name.trim()
+    const driver = this.drivers.get(entry.driver)
+    if (!driver || entry.driver === 'pi') return instanceId
+    if (isBuiltInInstance(instanceId, entry.driver)) return driver.label
+    return `${driver.label} (${instanceId.slice(instanceId.indexOf(':') + 1)})`
+  }
+
   private displayName(record: InstanceRecord): string {
     if (record.config.displayName) return record.config.displayName
     if (record.entry.driver === 'pi') {
@@ -3002,13 +3011,19 @@ export class Harness implements HarnessGateway {
       return harnessFail('unsupported', `${driver.label} on your own setup is already added. Add one Mousse manages for another account.`)
     const useOwnSetup = rule !== 'required' && ownSetup !== undefined && !hasOwnSetup && !Object.prototype.hasOwnProperty.call(entries, ownSetup)
     let instanceId = useOwnSetup ? ownSetup : ''
+    let named = patch
     if (!useOwnSetup) {
+      // A further entry the caller did not name is "<Label> 2", "<Label> 3", ... (the first name no entry has).
+      if (!patch.displayName?.trim()) {
+        const names = Object.entries(entries).map(([id, entry]) => this.storedName(id, entry))
+        named = { ...patch, displayName: nextEntryName(driver.label, names) }
+      }
       // An id whose state directory is still on disk (a removal that could not delete it) is taken.
       const taken = new Set(Object.keys(entries))
-      instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
+      instanceId = addedInstanceId(driver.kind, named.displayName ?? undefined, taken, input.slug)
       while (existsSync(instanceStateDir(this.options.profileHome, instanceId))) {
         taken.add(instanceId)
-        instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken, input.slug)
+        instanceId = addedInstanceId(driver.kind, named.displayName ?? undefined, taken, input.slug)
       }
     }
     await this.removing.get(instanceId)
@@ -3020,7 +3035,7 @@ export class Harness implements HarnessGateway {
           ...(patch.args?.length ? { args: patch.args } : {}),
           ...(patch.env && Object.keys(patch.env).length ? { env: patch.env } : {})
         }, driver)
-      : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, patch, driver)
+      : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, named, driver)
     if (internal.profile && !useOwnSetup && config.home === 'private') config.profile = internal.profile
     const entry: ProviderInstanceConfig = { driver: driver.kind, enabled: true, config }
     // An instance with a vendor mirror starts signed in, takes the launch settings its vendor file
@@ -3773,21 +3788,17 @@ export class Harness implements HarnessGateway {
     }
   }
 
-  private async setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> {
+  private async setEnabled(instanceId: string, enabled: boolean): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
-    const wasEnabled = this.scopes.enabled(instanceId, record.entry.enabled, scope).effective
-    if (scope.kind === 'device') {
-      if (enabled === null) harnessFail('unsupported', 'The device setting takes on or off.', instanceId)
-      this.instanceMap.setEntry(instanceId, { ...record.entry, enabled })
-      if (enabled) {
-        // Attempts a turn off cancelled stay cancelled; new ones wait for its stops to drain (`admitTurn`).
-        delete record.stopped
-      } else void this.stopTurns(instanceId, record, 'disabled').catch((error) => this.warnStop(record, error))
-    } else this.scopes.setEnabled(scope.projectId, instanceId, enabled)
-    this.changed(instanceId, { scope })
-    const snapshot = this.snapshot(instanceId, scope)
-    const turnedOn = snapshot.enabled.effective && !wasEnabled
-    if (turnedOn || (scope.kind === 'device' && enabled)) void this.probe(instanceId, false, { refreshModels: turnedOn })
+    const wasEnabled = record.entry.enabled
+    this.instanceMap.setEntry(instanceId, { ...record.entry, enabled })
+    if (enabled) {
+      // Attempts a turn off cancelled stay cancelled; new ones wait for its stops to drain (`admitTurn`).
+      delete record.stopped
+    } else void this.stopTurns(instanceId, record, 'disabled').catch((error) => this.warnStop(record, error))
+    this.changed(instanceId)
+    const snapshot = this.snapshot(instanceId, { kind: 'device' })
+    if (enabled) void this.probe(instanceId, false, { refreshModels: !wasEnabled })
     return snapshot
   }
 
@@ -4253,10 +4264,9 @@ export class Harness implements HarnessGateway {
 
   // -- Events -----------------------------------------------------------------------------------
 
-  private changed(instanceId: string, options: { scope?: ProviderScope } = {}): void {
+  private changed(instanceId: string): void {
     void instanceId
     this.emitSnapshots({ kind: 'device' })
-    if (options.scope?.kind === 'project') this.emitSnapshots(options.scope)
   }
 
   private emitSnapshots(scope: ProviderScope): void {

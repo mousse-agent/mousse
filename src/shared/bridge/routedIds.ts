@@ -88,6 +88,7 @@ export const ROUTED_RESULT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
   'thread.fork': { threads: ['thread.id', 'fork.id'] },
   'thread.mergeBack': { threads: ['thread.id'] },
   'projects.open': THREAD_AND_PROJECT,
+  'sourceControl.clone': THREAD_AND_PROJECT,
   'projects.rename': THREAD_AND_PROJECT,
   'projects.pin': THREAD_AND_PROJECT,
   'projects.remove': { projects: ['projects[].id'] },

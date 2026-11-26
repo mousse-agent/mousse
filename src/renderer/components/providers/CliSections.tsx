@@ -12,6 +12,7 @@ import {
   formatArgs,
   formatVersion,
   instanceConfigOf,
+  LAUNCH_HIDDEN_TITLE,
   isManagedSetup,
   parseArgs
 } from './providerView'
@@ -171,7 +172,7 @@ export function SetupRow({
     </button>
   )
   const signOut = account && auth.canSignOut && (
-    <button type="button" className="settings-btn" disabled={!idle} title={DRIVER_INFO[snapshot.driver].signOutHint} onClick={() => void run('signout', actions.signOut)}>
+    <button type="button" className="settings-btn" disabled={!idle} title={snapshot.config?.home === 'private' ? undefined : DRIVER_INFO[snapshot.driver].signOutHint} onClick={() => void run('signout', actions.signOut)}>
       <Logout size={14} />
       Sign out
     </button>
@@ -322,10 +323,12 @@ export function ExecutableRow({
   const [draft, setDraft] = useState(saved)
   useEffect(() => setDraft(saved), [saved])
   const resolved = snapshot.binary?.source === 'override' ? undefined : snapshot.binary?.path
+  // Another computer without terminal access to that one cannot choose the program it runs.
+  const locked = instanceConfigOf(snapshot)?.launchHidden === true
   const save = (binaryPath: string | null) => void run('path', () => onSave(binaryPath))
   const commit = () => {
     const next = draft.trim()
-    if (next !== saved) save(next || null)
+    if (!locked && next !== saved) save(next || null)
   }
   return (
     <SettingsRow
@@ -334,7 +337,7 @@ export function ExecutableRow({
       description={withError(busy === 'path' ? 'Checking the executable…' : saved ? undefined : 'Leave empty to use the one Mousse finds.', error)}
       control={
         <span className="settings-icon-actions">
-          {saved && (
+          {saved && !locked && (
             <button type="button" className="settings-icon-btn" title="Use the default executable" aria-label="Reset" disabled={busy !== null} onClick={() => save(null)}>
               <RotateCcw size={14} />
             </button>
@@ -355,9 +358,9 @@ export function ExecutableRow({
             <input
               className="settings-input prov-mono prov-wide"
               value={draft}
-              disabled={busy !== null}
+              disabled={busy !== null || locked}
               placeholder={resolved ?? 'Path to the executable'}
-              title={resolved}
+              title={locked ? LAUNCH_HIDDEN_TITLE : resolved}
               aria-label="Executable path"
               aria-invalid={error ? true : undefined}
               spellCheck={false}
@@ -380,9 +383,11 @@ export function ArgsRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSa
   const saved = formatArgs(config?.args ?? [])
   const [draft, setDraft] = useState(saved)
   useEffect(() => setDraft(saved), [saved])
+  // Hidden from this computer: shown as hidden, never saved from here.
+  const hidden = config?.launchHidden === true
   const commit = () => {
     const next = parseArgs(draft)
-    if (formatArgs(next) !== saved) void run('args', () => onSave(next))
+    if (!hidden && formatArgs(next) !== saved) void run('args', () => onSave(next))
   }
   return (
     <SettingsRow
@@ -392,9 +397,10 @@ export function ArgsRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSa
       control={
         <input
           className="settings-input prov-mono prov-wide"
-          value={draft}
-          disabled={!config}
-          placeholder="None"
+          value={hidden ? '' : draft}
+          disabled={!config || hidden}
+          placeholder={hidden ? 'Hidden' : 'None'}
+          title={hidden ? LAUNCH_HIDDEN_TITLE : undefined}
           aria-label="Launch arguments"
           aria-invalid={error ? true : undefined}
           spellCheck={false}
@@ -515,7 +521,10 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved])
 
+  // Values hidden from this computer: the names show, nothing is saved from here.
+  const hidden = config?.launchHidden === true
   const commit = (next: EnvDraft[]) => {
+    if (hidden) return
     const entries = draftEntries(next)
     if (JSON.stringify(entries) !== saved) void run('env', () => onSave(Object.fromEntries(entries)))
   }
@@ -533,9 +542,9 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
         <button
           type="button"
           className="settings-icon-btn primary"
-          title="Add variable"
+          title={hidden ? LAUNCH_HIDDEN_TITLE : 'Add variable'}
           aria-label="Add variable"
-          disabled={!config}
+          disabled={!config || hidden}
           onClick={() => setRows((current) => [...current, { uid: nextUid.current++, key: '', value: '' }])}
         >
           <Plus size={14} />
@@ -551,6 +560,7 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
                 value={row.key}
                 placeholder="NAME"
                 aria-label="Variable name"
+                disabled={hidden}
                 spellCheck={false}
                 onChange={(event) => update(row.uid, { key: event.target.value })}
                 onBlur={() => commit(rows)}
@@ -558,9 +568,11 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
               />
               <input
                 className="settings-input prov-mono"
-                value={row.value}
-                placeholder="value"
+                value={hidden ? '' : row.value}
+                placeholder={hidden ? 'Hidden' : 'value'}
+                title={hidden ? LAUNCH_HIDDEN_TITLE : undefined}
                 aria-label={`Value of ${row.key || 'variable'}`}
+                disabled={hidden}
                 spellCheck={false}
                 onChange={(event) => update(row.uid, { value: event.target.value })}
                 onBlur={() => commit(rows)}
@@ -570,6 +582,7 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
                 type="button"
                 className="settings-icon-btn danger"
                 aria-label={`Remove ${row.key || 'variable'}`}
+                disabled={hidden}
                 title="Remove"
                 onClick={() => {
                   const next = rows.filter((item) => item.uid !== row.uid)

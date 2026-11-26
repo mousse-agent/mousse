@@ -358,6 +358,24 @@ export class SqliteStreamStore implements StreamStore {
     })
   }
 
+  resetCopy(stream: StreamId): void {
+    this.db.transaction(() => {
+      const r = this.row(stream)
+      if (r.kind !== 'node.thread') fail('forbidden', 'Only thread display copies are reset.')
+      const gen = randomUUID()
+      this.db.charge(3)
+      this.db.database
+        .prepare("UPDATE net_generations SET state='archived' WHERE stream=?")
+        .run(stream)
+      this.db.database
+        .prepare("INSERT INTO net_generations VALUES(?,?,'active',?,0,0)")
+        .run(gen, stream, r.epoch)
+      this.db.database
+        .prepare('UPDATE net_streams SET active_generation=?,head=0,cursor=0,retained=0 WHERE id=?')
+        .run(gen, stream)
+      this.db.checkpoint('streams.resetCopy.beforeCommit')
+    })
+  }
   retireUnread(step: DropStep): number {
     checkStep(step)
     return this.db.transaction(() => {

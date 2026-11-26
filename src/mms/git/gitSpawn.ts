@@ -98,6 +98,7 @@ function spawnHere(file: string, args: readonly string[], options: GitSpawnOptio
   if (process.platform === 'win32') child = spawnWindowsHere(file, args, { ...spawnOptions, beforeStart }, signal, killSignal)
   else {
     beforeStart?.()
+    // eslint-disable-next-line mousse/no-console-window -- POSIX only: Windows takes the branch above.
     child = spawn(file, [...args], { ...spawnOptions, detached: true, signal, killSignal })
     let ending: Promise<void> | undefined
     const stop = () => ending ??= reapPosixGroup(child.pid)

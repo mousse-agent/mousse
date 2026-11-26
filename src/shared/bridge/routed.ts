@@ -77,7 +77,7 @@ export interface RoutedRow {
    * not durable, so a lost reply is answered by sending the same number again, never by a fresh request.
    */
   sequenced?: true
-  /** Only the call that names an absolute `path` (`projects.open`) may. */
+  /** Only a call that names an absolute `path` of the owner (`projects.open`, a clone's folder, browsing folders) may. */
   absolutePath?: true
   /**
    * Keys whose value may be sent ahead through `routed.stage` instead of inline (a large message, an
@@ -134,6 +134,8 @@ export const ROUTED_SEND_WINDOW_KEY = 'window'
 /** Optional behavior an older owner can omit while still providing its original answer. */
 export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'orchestrator.send': [ROUTED_SEND_WINDOW_KEY],
+  // An owner from before it shows every thread; it never had a way to hide one.
+  'threads.create': ['hidden'],
   'git.status': GIT_READ,
   'git.diff': GIT_READ,
   'git.log': GIT_READ,
@@ -142,7 +144,8 @@ export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> 
 })
 
 /**
- * On the seven rows below, set only by the calling computer's daemon for an agent's call (a remote subagent today):
+ * On the seven rows below (and on `threads.archive` from `ROUTED_AGENT_ARCHIVE_SINCE`), set only by the calling computer's
+ * daemon for an agent's call:
  * `{ thread, run, title, hops, mode }`, the sending thread and run by their ids there, its title, the count of agent
  * messages in a row this one is, and the mode the sender runs in. The owner handles a marked call as an agent's, never
  * as a person's: run source `mcp`, the narrowest mode, its own limits, an envelope it builds, and an audit row with actor
@@ -155,7 +158,10 @@ export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> 
  */
 export const ROUTED_AGENT_KEY = 'agent'
 
-/** The rows that take `agent`, and the version of each that added it. */
+/**
+ * The rows of a remote subagent's calls that take `agent`, and the version of each that added it: a computer that has them
+ * all takes a subagent's calls marked (`takesAgentMark`). `threads.archive` takes it too, apart (`ROUTED_AGENT_ARCHIVE_SINCE`).
+ */
 export const ROUTED_AGENT_METHODS: Readonly<Record<string, number>> = Object.freeze({
   'threads.create': 2,
   'threads.setModel': 3,
@@ -176,6 +182,13 @@ export const ROUTED_AGENT_METHODS: Readonly<Record<string, number>> = Object.fre
 export const ROUTED_DEADLINE_KEY = 'deadlineMinutes'
 /** The version of `orchestrator.send` that added `deadlineMinutes`. */
 export const ROUTED_DEADLINE_SINCE = 8
+
+/**
+ * The version of `threads.archive` that takes `agent`. It is not one of `ROUTED_AGENT_METHODS`: those decide whether a
+ * remote subagent's calls are marked at all (`takesAgentMark`), and a computer from before this one still takes every
+ * other marked call. A caller checks this version before an agent's archive and never sends one to an older owner.
+ */
+export const ROUTED_AGENT_ARCHIVE_SINCE = 2
 
 /** What the `agent` key carries. */
 export interface RoutedAgentMark {
@@ -546,7 +559,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- thread writes
   'threads.rename': write('thread', ['threadId', 'name'], { required: ['name'] }),
   'threads.pin': write('thread', ['threadId', 'pinned']),
-  'threads.archive': write('thread', ['threadId', 'archived']),
+  // Version 2: `agent`, an agent's archive (`ROUTED_AGENT_ARCHIVE_SINCE`): a remote subagent's thread when its stand-in is
+  // archived, and `thread_archive` of a thread there. An owner from before it is never sent one (the caller checks).
+  'threads.archive': write('thread', ['threadId', 'archived', ROUTED_AGENT_KEY], { version: 2, since: { [ROUTED_AGENT_KEY]: 2 } }),
   // Legacy: `threads.archive` under its old name. An owner keeps it for a caller that runs an older Mousse; a caller
   // sends it only to an owner that does not advertise `threads.archive` (`ROUTED_RENAMED_METHODS`).
   'threads.settle': write('thread', ['threadId', 'settled']),
@@ -690,14 +705,15 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- projects and the computer
   // A new thread records the computer that asked (`startedFrom`), as for a phone.
   // Version 2: `agent` (`ROUTED_AGENT_KEY`), accepted from another computer's daemon only, never from a phone.
+  // Version 3: `hidden`, read only with `agent`: a thread an agent starts is out of the sidebar unless it is false.
   'threads.create': write(
     'computer',
-    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', ROUTED_AGENT_KEY],
+    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', ROUTED_AGENT_KEY, 'hidden'],
     {
       via: 'backend',
       required: ['name'],
-      version: 2,
-      since: { [ROUTED_AGENT_KEY]: 2 }
+      version: 3,
+      since: { [ROUTED_AGENT_KEY]: 2, hidden: 3 }
     }
   ),
   'projects.rename': write('project', ['projectId', 'name'], { required: ['name'] }),
@@ -718,9 +734,54 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'activity.snapshot': read('computer', []),
   'chatReferences.resolve': read('computer', ['reference'], { required: ['reference'] }),
   'providers.snapshots': read('computer', ['scope']),
+
+  // ---------------------------------------------------------------- providers of the computer
+  // Settings → Providers of another computer: its entries, switches, models, installs and sign-ins, kept and run
+  // there. A key or a pasted sign-in answer travels in this call only and is saved on the owner; the caller keeps
+  // nothing of it. The caller's page reads with `providers.events` what happened to the operations it started
+  // (progress, sign-in prompts) and whether the entries changed: answered from memory, never written to disk on either
+  // computer. A provider's own settings file and moving an entry stay with a window of the computer itself. Checking an
+  // entry again keeps nothing in the ledger but starts its agent, so it needs the work grant (`METHOD_ACCESS`); what
+  // picks the program an agent runs, or removes its install, needs terminal access too (`choosesProgram`).
+  'providers.events': read('computer', ['after']),
+  'providers.catalog.addOptions': read('computer', []),
+  'providers.registry.search': read('computer', ['query']),
+  'providers.instances.recheck': read('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.add': write('computer', ['driver', 'config', 'slug', 'signIn'], { required: ['driver'] }),
+  'providers.instances.setSecret': write('computer', ['instanceId', 'value'], { required: ['instanceId', 'value'] }),
+  'providers.instances.remove': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.configure': write('computer', ['instanceId', 'patch'], { required: ['instanceId', 'patch'] }),
+  'providers.instances.setEnabled': write('computer', ['instanceId', 'enabled'], { required: ['instanceId', 'enabled'] }),
+  'providers.instances.install': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.removeInstall': write('computer', ['instanceId', 'force'], { required: ['instanceId'] }),
+  'providers.instances.cancelInstall': write('computer', ['operationId'], { required: ['operationId'] }),
+  'providers.instances.update': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.signIn': write('computer', ['instanceId', 'method'], { required: ['instanceId'] }),
+  'providers.instances.respondSignIn': write('computer', ['operationId', 'response'], { required: ['operationId', 'response'] }),
+  'providers.instances.signOut': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.allowKnownProblem': write('computer', ['instanceId', 'version'], { required: ['instanceId', 'version'] }),
+  'providers.instances.refreshModels': write('computer', ['instanceId'], { required: ['instanceId'] }),
+  'providers.instances.refreshAllModels': write('computer', []),
+  'providers.instances.setModelPrefs': write('computer', ['instanceId', 'patch'], { required: ['instanceId', 'patch'] }),
   'skills.list': read('computer', []),
   'skills.read': read('computer', ['skillId'], { required: ['skillId'] }),
   'github.status': read('computer', []),
+  // Settings → Source control of the owner, and New project's Clone on it: its GitHub account, the account's
+  // repositories, Connect (install GitHub CLI when it is missing and sign it in; the owner also needs terminal access
+  // for the caller, `OwnerRoutes`) with the one-time code relayed by `sourceControl.status`, and a clone into a folder
+  // there that becomes a project there. The owner checks the folder as it checks `projects.open`.
+  'sourceControl.status': read('computer', ['refresh'], { via: 'domain' }),
+  'sourceControl.repositories': read('computer', ['provider', 'refresh'], { via: 'domain', required: ['provider'] }),
+  'sourceControl.connect': write('computer', ['provider'], { via: 'domain', required: ['provider'] }),
+  'sourceControl.cancel': write('computer', ['provider'], { via: 'domain', required: ['provider'] }),
+  'sourceControl.clone': write('computer', ['provider', 'repository', 'path', 'branch'], {
+    via: 'domain',
+    required: ['provider', 'repository', 'path'],
+    absolutePath: true
+  }),
+  // The folders of the owner by name, to pick where a clone goes by browsing: never files, hidden folders, the Mousse
+  // data folder or folders that hold credentials (`folderBrowse.ts`).
+  'folders.browse': read('computer', ['path'], { via: 'domain', absolutePath: true }),
   'pullRequests.list': read('project', ['projectId', 'limit', 'force']),
   'pullRequests.resolve': read('project', ['projectId', 'reference'], { required: ['reference'] }),
 
@@ -1036,7 +1097,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   },
   {
     methods: ['threads.setHidden'],
-    reason: "A hidden thread is one a bot of the computer that runs it started; that bot's chat lists it, and Show in sidebar is offered there (issue #1217)."
+    reason: "Show in sidebar is offered on the computer that runs a hidden thread: in its bot's chat, or in the top bar of a thread an agent started there (issue #1217)."
   },
   {
     methods: ['threads.focus'],
@@ -1095,6 +1156,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'They use the computer’s own GitHub sign-in or take a raw folder path; they are not thread features.'
   },
   {
+    methods: ['sourceControl.signOut', 'sourceControl.projectSource'],
+    reason: 'Signing a computer out of GitHub is done from Settings → Source control on that computer; a project is added to another computer from the one that has it.'
+  },
+  {
     methods: ['skills.refresh', 'skills.openFolderIntent'],
     reason: 'They rescan or open folders on the computer they run on.'
   },
@@ -1137,9 +1202,14 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'The inbox (runs, Needs you and Tuning notes) is kept by the computer that runs the automations, and read and changed there.'
   },
   {
+    methods: ['providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.move'],
+    reason:
+      "A provider's own settings file is read and changed from a window of its computer only, and so is moving an entry, which can copy a saved key."
+  },
+  {
     prefixes: ['providers.'],
     reason:
-      'Providers, accounts and usage belong to the computer that holds the sign-ins; the picker reads providers.snapshots.'
+      'Usage, limits and speech belong to the computer that holds the sign-ins; Settings → Providers of another computer uses the providers.instances rows.'
   },
   {
     prefixes: ['net.', 'netEngine.', 'bridge.', 'profiles.', 'speech.host.'],

@@ -65,7 +65,7 @@ function runtimeContext(): Record<string, unknown> {
     runtime: `${process.version}/${process.platform}/${process.arch}/esbuild-${esbuildVersion}`,
     config: CONFIG_FILES.map((path) => [
       path,
-      existsSync(join(projectRoot, path)) ? fileDigest(join(projectRoot, path)) : null
+      existsSync(resolve(projectRoot, path)) ? fileDigest(resolve(projectRoot, path)) : null
     ])
   }
 }
@@ -293,7 +293,7 @@ async function productEntry(root: string, productName: string, source: string, r
       const recorded = JSON.parse(readFileSync(inputsPath, 'utf8')) as { inputs: Record<string, string> }
       if (!existsSync(output)) return undefined
       for (const [path, digest] of Object.entries(recorded.inputs)) {
-        if (fileDigest(join(projectRoot, path)) !== digest) return undefined
+        if (fileDigest(resolve(projectRoot, path)) !== digest) return undefined
       }
       return output
     } catch {
@@ -317,12 +317,13 @@ async function productEntry(root: string, productName: string, source: string, r
       logLevel: 'silent',
       metafile: true
     })
+    // An input on another drive (node_modules linked from one) is recorded by its absolute path, so it is resolved, not joined.
     const inputs: Record<string, string> = {}
     for (const input of Object.keys(result.metafile.inputs)) {
       const path = resolve(projectRoot, input)
       if (existsSync(path)) inputs[relative(projectRoot, path)] = fileDigest(path)
     }
-    const consistent = Object.keys(inputs).every((path) => statSync(join(projectRoot, path)).mtimeMs < started)
+    const consistent = Object.keys(inputs).every((path) => statSync(resolve(projectRoot, path)).mtimeMs < started)
     renameSync(temporary, output)
     if (consistent) writeFileSync(inputsPath, JSON.stringify({ inputs }))
     else rmSync(inputsPath, { force: true })
@@ -350,7 +351,7 @@ export async function sharedBuild(options: BuildOptions & { entryPoints: [string
       const output = join(directory, recorded.output)
       if (!existsSync(output)) return undefined
       for (const [path, digest] of Object.entries(recorded.inputs)) {
-        if (fileDigest(join(projectRoot, path)) !== digest) return undefined
+        if (fileDigest(resolve(projectRoot, path)) !== digest) return undefined
       }
       return output
     } catch {
@@ -374,7 +375,7 @@ export async function sharedBuild(options: BuildOptions & { entryPoints: [string
       inputs[relative(projectRoot, path)] = fileDigest(path)
     }
     // An input edited during compilation would certify a bundle nobody can reproduce.
-    const consistent = Object.keys(inputs).every((path) => statSync(join(projectRoot, path)).mtimeMs < started)
+    const consistent = Object.keys(inputs).every((path) => statSync(resolve(projectRoot, path)).mtimeMs < started)
     mkdirSync(dirname(output), { recursive: true })
     renameSync(temporary, output)
     for (const extra of readdirSync(directory)) {

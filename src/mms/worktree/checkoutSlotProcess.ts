@@ -212,6 +212,7 @@ export async function runInCheckoutSlot<T>(directory: string, paths: string[], w
     windowsHide: true,
     // On Windows a normal child belongs to libuv's kill-on-close Job Object. Only the slot
     // owner outlives the daemon. Git itself stays attached to the slot owner.
+    // eslint-disable-next-line mousse/no-console-window -- The slot owner outlives the daemon. It is Electron as Node, a GUI program with no console that starts plain spawns hidden.
     detached: true,
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     serialization: 'advanced'

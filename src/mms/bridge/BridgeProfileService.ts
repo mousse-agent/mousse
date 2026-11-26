@@ -35,6 +35,7 @@ import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
+import { ProviderEventRelay } from './routed/providerEvents'
 import { OwnerRoutes } from './routed/OwnerRoutes'
 import { PeerDirectory } from './peers'
 import { EditorAsks } from './routed/editorAsks'
@@ -385,8 +386,17 @@ export class BridgeProfileService {
       // The upload belongs to the staging request, so it is read through its request-bound artifact.
       readInput: (ref, context) => this.artifacts.input(ref, context, 'routed.stage')
     })
+    // Settings → Providers of this computer, worked on from another one: what its operations and changes were, kept in
+    // memory for that computer's `providers.events` reads.
+    const providerEvents = new ProviderEventRelay()
+    const offHarness = services.harness?.instances.subscribe((event) => providerEvents.event(event))
+    this.disposers.add(() => {
+      offHarness?.()
+      providerEvents.close()
+    })
     const routes = new OwnerRoutes({
       services,
+      providerEvents,
       rpc: rt.rpc,
       policy: rt.policy,
       audit: rt.audit,
@@ -541,7 +551,20 @@ export class BridgeProfileService {
     // The copies of other computers' threads and lists on disk are tidied once the Bridge has started, in the
     // background (`BridgeHub.tidyCopies`): a start never waits for it.
     const tidy = setTimeout(
-      () => void this.track(this.hub.tidyCopies().catch(() => 0)),
+      () =>
+        void this.track(
+          this.hub.tidyCopies().catch((error: unknown) => {
+            console.warn('[net] the copies of other computers could not be tidied', {
+              code:
+                error instanceof NetError
+                  ? error.code
+                  : error instanceof Error
+                    ? error.name
+                    : 'internal'
+            })
+            return 0
+          })
+        ),
       copyLimits().sweepDelayMs
     )
     tidy.unref?.()

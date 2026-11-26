@@ -5,7 +5,7 @@
  * MOUSSE_LIVE_AGY=1; MOUSSE_AGY_BINARY may name the executable (else the one on PATH or in Google's
  * install folder).
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -32,6 +32,22 @@ describe.runIf(live && binary)('Antigravity on the real agy', () => {
       const signedIn = await service.checkSignedIn(home)
       console.info(`agy ${config.version}: signed in ${signedIn}, checked in ${Date.now() - started} ms`)
       if (signedIn) expect(service.models().length).toBeGreaterThan(0)
+    } finally { service.stop() }
+  }, 60_000)
+
+  it('keeps an added entry\'s sign-in in its own home: a home never signed in reads no sign-in, whatever this computer\'s agy has', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-live-agy-'))
+    homes.push(home)
+    const stateDir = join(home, 'harness', 'antigravity_antigravity-2')
+    const entry = { instanceId: 'antigravity:antigravity-2', stateDir, home: join(stateDir, 'home') }
+    const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, { entry, findUserAgy: () => binary })
+    try {
+      // `agy` answers "Authentication required" in the home, never with the keyring's sign-in.
+      expect(await service.checkSignedIn(home)).toBe(false)
+      expect(service.isolationProblem()).toBeUndefined()
+      const logs = join(entry.home, 'gemini-home', 'antigravity-acp', 'log')
+      const text = readdirSync(logs).map((name) => readFileSync(join(logs, name), 'utf8')).join('\n')
+      expect(text).toContain('Using file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set')
     } finally { service.stop() }
   }, 60_000)
 

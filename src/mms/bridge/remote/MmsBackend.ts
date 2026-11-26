@@ -1,12 +1,8 @@
 import { realpathSync, statSync } from 'node:fs'
 import { isLocalOnlyThread } from '../../../shared/threadLineage'
 import { dirname, isAbsolute, resolve } from 'node:path'
-import { isInsidePath } from '../../files/pathGuard'
-import {
-  currentFolderEnvironment,
-  sensitiveFolderHolding,
-  type FolderRuleEnvironment
-} from '../../files/sensitiveFolders'
+import { currentFolderEnvironment, type FolderRuleEnvironment } from '../../files/sensitiveFolders'
+import { isNetworkOrDevicePath, remoteFolderProblem } from './remoteFolders'
 import { matchProjectWithEvidence, possibleProjects, type ProjectIdentity } from './projectMatch'
 import { repositoryIdentitiesFor } from './repositoryIdentity'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
@@ -109,13 +105,6 @@ const MATCH_CONCURRENCY = 4
 /** At most this many candidates are named when no single project matches. */
 const MATCH_CANDIDATES_SHOWN = 10
 
-/**
- * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
- * this computer reach out to a host the caller names, and the lookup blocks until it answers.
- */
-function isNetworkOrDevicePath(path: string): boolean {
-  return process.platform === 'win32' && /^[\\/]{2}/.test(path)
-}
 
 /** The bytes of messages a snapshot holds: 16 MiB for another computer of the user (`newestOnly`), 8 MiB for a phone. */
 function snapshotBudget(options: { newestOnly?: boolean }): number {
@@ -252,11 +241,13 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     caller?: { node: NodeId },
     started?: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
   ): Promise<{ thread: { id: string } } & Record<string, unknown>> {
-    const { startedFromProjectId, ...create } = params
+    const { startedFromProjectId, hidden, ...create } = params
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
     if (!caller) return result
-    // A thread an agent of the device started holds who started it and its mode from this same write on.
+    // A thread an agent of the device started holds who started it and its mode from this same write on. It is out of the
+    // sidebar here when the caller asks (`hidden: true`, what a newer computer sends for an agent's thread); a computer
+    // from before it sends none and the thread shows, as it always did. A person's thread from a phone never is hidden.
     const thread = this.services.threads.updateThreadMeta(
       result.thread.id,
       {
@@ -265,8 +256,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       },
       { touch: false }
     )
+    const shown = started && hidden === true ? this.services.threads.setThreadHidden(thread.id, true) : thread
     this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })
-    return { ...result, thread }
+    return { ...result, thread: shown }
   }
   /**
    * Which of this machine's projects is the same Git repository as the one described: an id, or
@@ -348,26 +340,14 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       return refuse('That folder does not exist on this computer.')
     }
     const s = this.services
-    for (const home of [s.getProfileHomeDir(), s.getHomeDir()]) {
-      let realHome = home
-      try {
-        realHome = realpathSync.native(home)
-      } catch {
-        // A home that cannot be resolved is still compared by its own path.
-      }
-      const homes = [home, realHome],
-        folders = [lexical, real]
-      // Inside the data folder, or a folder that holds it: file tools may edit anything below the
-      // project folder, so a thread there could change the keys and databases without asking.
-      if (homes.some((root) => folders.some((folder) => isInsidePath(folder, root) || isInsidePath(root, folder))))
-        return refuse('That folder is part of the Mousse data folder, or contains it.')
-    }
-    // The user's credentials and settings (SSH keys, cloud sign-ins, keychains, browser profiles), and so the home
-    // folder and everything above it: a thread there could read or change them without asking.
-    const holding = sensitiveFolderHolding([lexical, real], this.folderRules())
-    if (holding)
+    // Inside the data folder, or a folder that holds it: file tools may edit anything below the project folder, so a
+    // thread there could change the keys and databases without asking. The same for the user's credentials and
+    // settings (SSH keys, cloud sign-ins, keychains, browser profiles), and so the home folder and everything above it.
+    const problem = remoteFolderProblem([lexical, real], [s.getProfileHomeDir(), s.getHomeDir()], this.folderRules())
+    if (problem?.kind === 'data') return refuse('That folder is part of the Mousse data folder, or contains it.')
+    if (problem)
       return refuse(
-        `That folder holds ${holding}, or is inside or above a folder that does, so it cannot be opened from another computer.`
+        `That folder holds ${problem.holds}, or is inside or above a folder that does, so it cannot be opened from another computer.`
       )
     const project = s.projects.openProject(real)
     s.events.broadcast('projects:updated', s.projects.listProjects())
