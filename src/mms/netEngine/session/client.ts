@@ -518,12 +518,7 @@ class LiveSubscription {
         if (phase === 'moved' || phase === 'dropped') return
         phase = 'dropped'
         clearTimeout(timer)
-        try {
-          channel.send({ t: 'unsubscribe' })
-          channel.end()
-        } catch {
-          channel.reset('cancelled')
-        }
+        this.closeChannel(channel)
       }
       const refuse = (error: NetError): void => {
         if (phase !== 'waiting') return
@@ -558,12 +553,7 @@ class LiveSubscription {
         phase = 'moved'
         const old = this.channel
         this.channel = channel
-        try {
-          old?.send({ t: 'unsubscribe' })
-          old?.end()
-        } catch {
-          old?.reset('cancelled')
-        }
+        this.closeChannel(old)
         if (this.stopped) return drop()
         // From the head the owner gave here: what the old channel already stored is skipped as a repeat.
         this.receiver.close()
@@ -587,11 +577,35 @@ class LiveSubscription {
     this.offClosed()
     this.gone()
     this.receiver.close()
+    this.closeChannel(this.channel)
+  }
+
+  /**
+   * Ends a subscription's stream cleanly (`unsubscribe` + FIN) and resets it after a short linger if an older peer
+   * leaves its half open, so it never leaks a connection stream slot.
+   */
+  private closeChannel(channel: Channel | undefined): void {
+    if (!channel) return
+    const alreadyEnded = !channel.isOpen()
+    let peerEnded = alreadyEnded
+    const timer = alreadyEnded
+      ? undefined
+      : setTimeout(() => {
+          if (!peerEnded) channel.reset('cancelled')
+        }, engineLimits().tunnelCloseLingerMs)
+    timer?.unref?.()
+    if (!alreadyEnded) {
+      channel.onEnd(() => {
+        peerEnded = true
+        clearTimeout(timer)
+      })
+    }
     try {
-      this.channel?.send({ t: 'unsubscribe' })
-      this.channel?.end()
+      channel.send({ t: 'unsubscribe' })
+      channel.end()
     } catch {
-      this.channel?.reset('cancelled')
+      clearTimeout(timer)
+      channel.reset('cancelled')
     }
   }
 

@@ -35,8 +35,16 @@ class HelperStream implements EngineStream {
   private earlyBytes = 0
   /** Producers waiting for the helper to name the stream (or for it to end first). */
   private readonly boundWaiters: Array<() => void> = []
+  /** Whether this computer may still write on its half (false after local end/reset, peer reset, fail or drop). */
   private writable = true
+  /** Whether the peer's end (FIN or reset) has been delivered to listeners. */
   private ended = false
+  /** Whether the peer's half is known to be over (peer FIN/reset, or local reset/fail/drop). */
+  private readEnded = false
+  /** Whether `stream.open` is currently in flight to the helper. */
+  private opening = false
+  /** Whether `gone` has already been called for this stream. */
+  private released = false
   /**
    * Why this side ended the stream before the helper named it (`conn.down` or a reset): the handle that arrives
    * later is reset at once, so it never holds credit for a stream nobody reads.
@@ -49,6 +57,11 @@ class HelperStream implements EngineStream {
     private readonly gone: () => void,
     readonly role?: string
   ) {}
+
+  /** Marks that `stream.open` has been sent to the helper and holds a slot until it settles. */
+  markOpening(): void {
+    this.opening = true
+  }
 
   /** The sink the channel delivers this stream's bytes to. */
   readonly sink: HandleSink = {
@@ -64,34 +77,43 @@ class HelperStream implements EngineStream {
 
   /** The helper named the stream: what was written before goes out now. */
   bound(handle: number): void {
+    this.opening = false
     this.handle = handle
     this.earlyBytes = 0
     if (this.cancelled !== undefined) {
       this.channel.reset(handle, this.cancelled)
       this.wakeBound()
+      this.releaseIfDone()
       return
     }
     for (const write of this.early.splice(0)) this.channel.send(handle, write.bytes, write.fin)
     this.wakeBound()
+    this.releaseIfDone()
   }
   /** The stream never opened. */
   failed(reason: string): void {
+    this.opening = false
     this.writable = false
+    this.readEnded = true
     this.early.length = 0
     this.wakeBound()
     this.deliver({ kind: 'end', reason })
+    this.releaseIfDone()
   }
   /**
    * The helper ended the stream with its connection (`conn.down`): its handle is released here (its credit, its
    * queue, its producers' waits) and its reader sees the end.
    */
   dropped(reason: string): void {
+    this.opening = false
     this.writable = false
+    this.readEnded = true
     this.early.length = 0
     if (this.handle !== undefined) this.channel.release(this.handle)
     else this.cancelled = reason
     this.wakeBound()
     this.deliver({ kind: 'end', reason })
+    this.releaseIfDone()
   }
 
   write(bytes: Uint8Array): void {
@@ -121,15 +143,21 @@ class HelperStream implements EngineStream {
     this.writable = false
     if (this.handle === undefined) this.early.push({ bytes: new Uint8Array(0), fin: true })
     else this.channel.send(this.handle, new Uint8Array(0), true)
+    this.releaseIfDone()
   }
   reset(reason = 'reset'): void {
-    const wasOpen = this.writable || !this.ended
+    const wasOpen = this.writable || !this.readEnded
     this.writable = false
+    this.readEnded = true
     if (this.handle === undefined) this.cancelled = reason
-    else if (wasOpen && this.cancelled === undefined) this.channel.reset(this.handle, reason)
+    else if (wasOpen && this.cancelled === undefined) {
+      this.cancelled = reason
+      this.channel.reset(this.handle, reason)
+    }
     this.early.length = 0
     this.wakeBound()
     this.deliver({ kind: 'end', reason })
+    this.releaseIfDone()
   }
   onData(listener: (bytes: Uint8Array) => void): void {
     this.dataListeners.push(listener)
@@ -152,10 +180,53 @@ class HelperStream implements EngineStream {
       if (event.kind === 'data') for (const listener of this.dataListeners) listener(event.bytes)
       else {
         this.ended = true
-        this.writable = false
+        this.readEnded = true
+        // A peer reset ends both halves; a clean peer FIN leaves our write half open so we can send our FIN.
+        if (event.reason !== undefined) this.writable = false
         for (const listener of this.endListeners) listener(event.reason)
-        this.gone()
+        this.releaseIfDone()
       }
+    }
+  }
+  private releaseIfDone(): void {
+    if (this.released || this.opening || this.writable || !this.readEnded) return
+    this.released = true
+    this.gone()
+  }
+}
+
+/**
+ * Shared stream-slot accounting for one physical helper connection (`STREAMS_PER_CONNECTION` counts both directions
+ * together, so a both-ways connection and its reverse view share one slot pool).
+ */
+class ConnectionSlots {
+  private live = 0
+  private readonly started = new Set<HelperStream>()
+  private readonly waiting: Array<{ stream: HelperStream; start: () => void }> = []
+
+  hasRoom(): boolean {
+    return this.live < engineLimits().appStreamsPerConnection
+  }
+  admit(stream: HelperStream): void {
+    this.started.add(stream)
+    this.live += 1
+  }
+  enqueue(stream: HelperStream, start: () => void): void {
+    this.waiting.push({ stream, start })
+  }
+  release(stream: HelperStream): void {
+    if (!this.started.delete(stream)) {
+      const at = this.waiting.findIndex((entry) => entry.stream === stream)
+      if (at >= 0) this.waiting.splice(at, 1)
+      return
+    }
+    this.live = Math.max(0, this.live - 1)
+    const next = this.waiting.shift()
+    next?.start()
+  }
+  clearWaitingFor(streams: Set<HelperStream>): void {
+    for (let i = this.waiting.length - 1; i >= 0; i -= 1) {
+      if (streams.has(this.waiting[i]!.stream)) this.waiting.splice(i, 1)
     }
   }
 }
@@ -168,10 +239,9 @@ export class HelperConnection implements EngineConnection {
   /** Every stream of this connection not ended yet, to release when the connection goes down. */
   private readonly streams = new Set<HelperStream>()
   private open_ = true
-  private live = 0
-  /** This side's opens past the connection's stream cap, in order. */
-  private readonly waiting: Array<() => void> = []
   readonly id: string
+  /** Shared with the reverse direction on a both-ways connection (`conn.up {both}`). */
+  readonly slots: ConnectionSlots
   constructor(
     private readonly channel: AppChannel,
     /** The helper's number for the connection: per spawn, never reused. */
@@ -185,9 +255,11 @@ export class HelperConnection implements EngineConnection {
     /** The route it runs over (`conn.up.route`, protocol 1.1). */
     readonly route?: EngineRoute,
     /** The other way of a both-ways connection (`EngineConnection.reversed`). */
-    readonly reversed?: boolean
+    readonly reversed?: boolean,
+    slots?: ConnectionSlots
   ) {
     this.id = String(conn)
+    this.slots = slots ?? new ConnectionSlots()
   }
 
   open(label: EngineLabel, method?: string): EngineStream {
@@ -198,7 +270,8 @@ export class HelperConnection implements EngineConnection {
     this.streams.add(stream)
     const start = (): void => {
       if (!this.open_) return stream.failed('peer_offline')
-      this.live += 1
+      this.slots.admit(stream)
+      stream.markOpening()
       this.channel
         .openStream(this.conn, label, stream.cls, stream.sink)
         .then((handle) => {
@@ -207,19 +280,19 @@ export class HelperConnection implements EngineConnection {
         })
         .catch((error) => stream.failed(error instanceof NetError ? error.code : 'peer_offline'))
     }
-    if (this.live < engineLimits().appStreamsPerConnection) start()
-    else this.waiting.push(start)
+    if (this.slots.hasRoom()) start()
+    else this.slots.enqueue(stream, start)
     return stream
   }
 
   /** A stream the other side opened (`stream.incoming`), accepted, with the role of the grant it is served under. */
   incoming(handle: number, label: EngineLabel, cls: StreamClass, role?: string): void {
-    if (!this.open_ || this.live >= engineLimits().appStreamsPerConnection) {
+    if (!this.open_ || !this.slots.hasRoom()) {
       this.channel.reset(handle, 'refused')
       return
     }
-    this.live += 1
     const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream), role)
+    this.slots.admit(stream)
     this.streams.add(stream)
     this.channel.bind(handle, cls, stream.sink)
     stream.bound(handle)
@@ -243,7 +316,7 @@ export class HelperConnection implements EngineConnection {
   close(reason: string): void {
     if (!this.open_) return
     this.open_ = false
-    this.waiting.length = 0
+    this.slots.clearWaitingFor(this.streams)
     for (const listener of this.closeListeners.splice(0)) listener(reason)
   }
   /**
@@ -266,9 +339,7 @@ export class HelperConnection implements EngineConnection {
 
   private released(stream: HelperStream): void {
     this.streams.delete(stream)
-    this.live = Math.max(0, this.live - 1)
-    const next = this.waiting.shift()
-    next?.()
+    this.slots.release(stream)
   }
 }
 
@@ -446,7 +517,8 @@ export class EngineHelper {
       peer.endpoint,
       undefined,
       readRoute(event.route),
-      true
+      true,
+      this.connections.get(conn)?.slots
     )
     this.reverse.set(conn, connection)
     void this.options.attach(connection).then(

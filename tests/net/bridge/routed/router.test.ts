@@ -102,8 +102,10 @@ describe('what a window sends', () => {
     t.routing(false)
     try {
       const thread = t.thread()
-      // The name is a colon-separated id no thread of this computer has: refused locally, as before.
-      await expect(t.dispatch('threads.rename', { threadId: t.qualified(thread.id), name: 'x' })).rejects.toBeDefined()
+      // A qualified id is refused as offline rather than falling through to local stores (`ambiguous`).
+      expect(await t.refused(t.dispatch('threads.rename', { threadId: t.qualified(thread.id), name: 'x' }))).toMatchObject({
+        code: 'computer_offline'
+      })
       expect(t.owner.threads.getThread(thread.id)!.name).not.toBe('x')
       await expect(t.dispatch('threads.focus', { threadId: t.qualified(thread.id) })).resolves.toEqual({
         routed: false,

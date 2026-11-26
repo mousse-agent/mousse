@@ -971,6 +971,22 @@ export class NetService {
       throw error
     }
   }
+  /**
+   * Ensures the shared Net runtime and its composed Bridge domain are live for the network engine.
+   * After a v1 `net.disable`, v1 stays disabled (`this.disabled`), while a cleanly closed runtime and domain
+   * are replaced so the engine composes a fresh Bridge domain without requiring a daemon restart.
+   */
+  async ensureEngineRuntime(): Promise<NetRuntime> {
+    if (this.stopped) throw new NetError('cancelled')
+    if (this.disabling) await this.disabling.catch(() => {})
+    if (this.domainClosing) await this.domainClosing.catch(() => {})
+    if (this.stopped) throw new NetError('cancelled')
+    if (this.state && this.domainClosed) {
+      if (this.lastError === 'outcome_uncertain') throw new NetError('outcome_uncertain')
+      await this.closeRuntime()
+    }
+    return this.runtime()
+  }
   private saveConfig(): void {
     const { db } = this.runtime()
     // An earlier version rejects any other key in `features` as corrupt storage and then fails to load Net
