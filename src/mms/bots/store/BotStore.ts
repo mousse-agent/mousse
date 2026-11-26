@@ -1703,20 +1703,21 @@ export class BotStore {
   }
 
   /**
-   * What a runtime that reserves nothing reported a request used (Claude Code, Codex, Antigravity): one more request
-   * when `request`, and its tokens and cost, added to the activation's counters and spend. A measurement only: it
+   * What a runtime that reserves nothing reported its requests used (Claude Code, Codex, Antigravity): `requests` more
+   * model requests, and their tokens and cost, added to the activation's counters and spend. A measurement only: it
    * checks no limit and never refuses, and a runtime that counts or settles through the scopes is never mirrored here.
    */
-  recordObservedUsage(activationId: string, usage: { request: boolean; input: number; output: number; usdMicros?: number }): void {
+  recordObservedUsage(activationId: string, usage: { requests: number; input: number; output: number; usdMicros?: number }): void {
     const whole = (value: number | undefined): number => (value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
     const input = whole(usage.input)
     const output = whole(usage.output)
     const usd = whole(usage.usdMicros)
-    if (!usage.request && !input && !output && !usd) return
+    const requests = whole(usage.requests)
+    if (!requests && !input && !output && !usd) return
     this.db.transaction(() => {
       this.run(
         'UPDATE bot_counters SET requests = requests + ?, input_tokens = input_tokens + ?, output_tokens = output_tokens + ? WHERE activation_id = ?',
-        usage.request ? 1 : 0, input, output, activationId
+        requests, input, output, activationId
       )
       if (input || output || usd)
         this.run(

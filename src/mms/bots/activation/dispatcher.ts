@@ -58,7 +58,7 @@ export interface PreparedBotTurn {
    * them. Kept as a measurement in `bots.db` (`bot_turn_usage`); it never changes the turn. `costUsd`: what the runtime
    * says it cost, when it says.
    */
-  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number }): void
+  usage?(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number; requests?: number }): void
   /** The turn's runtime reported its measurements (`TurnSink.providerMetrics`): context size, window, cache and plan use. */
   metrics?(metrics: ProviderMetrics): void
   /** Skill ids the turn may list and load. */

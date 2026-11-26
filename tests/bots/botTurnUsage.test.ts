@@ -146,7 +146,7 @@ it('the real turn sink hands a bot turn its runtime\'s usage and measurements', 
     adapter.startTurn = async (input, sink, ctl, host) => {
       // As Pi's engine does before each model request: its budget charges the turn's counts.
       host.budget?.request()
-      sink.usage({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0, costUsd: 0.002 })
+      sink.usage({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0, costUsd: 0.002, requests: 1 })
       sink.providerMetrics({ totalResponseTimeMs: 10, context: { input: 120, cacheRead: 3400, cacheWrite: 0, contextWindow: 128_000 } })
       return original(input, sink, ctl, host)
     }
@@ -167,7 +167,7 @@ it('the real turn sink hands a bot turn its runtime\'s usage and measurements', 
     const sent = await engine.sendWithStart({ kind: 'send', threadId: thread.id, clientRequestId: 'usage', source: 'bot' }, runId => ({ kind: 'bot', runId, threadId: thread.id, activationId: 'chat', dispatchN: 1 }))
     if (sent.status !== 'accepted') throw new Error('run refused')
     await (orch as any).runTurnOnSession(orch.getOrCreateSession(thread.id), { content: 'Hi', mode: 'agent' }, false, true, { bot, runId: sent.runId, source: 'bot' })
-    expect(usage).toHaveBeenCalledWith({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0, costUsd: 0.002 })
+    expect(usage).toHaveBeenCalledWith({ input: 120, output: 7, cacheRead: 3400, cacheWrite: 0, costUsd: 0.002, requests: 1 })
     expect(runtimeCounters.charge).toHaveBeenCalledWith('request', undefined)
     expect(counters.charge).not.toHaveBeenCalled()
     expect(metrics).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({ cacheRead: 3400, contextWindow: 128_000 }) }))

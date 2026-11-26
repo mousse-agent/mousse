@@ -306,7 +306,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
             input: report.usage.input,
             output: report.usage.output,
             cacheRead: report.usage.cacheRead,
-            cacheWrite: report.usage.cacheWrite
+            cacheWrite: report.usage.cacheWrite,
+            ...(report.requests !== undefined ? { requests: report.requests } : {})
           })
       },
       onLineEdits: (lines) => sink.lineEdits(lines)

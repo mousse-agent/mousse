@@ -289,6 +289,34 @@ describe('CodexAdapter', () => {
     expect(result.drain).toEqual({ mousseCalls: 2, toolsSettled: false })
   })
 
+  it('one usage report names each model request of the turn; a repeated total is no new request', async () => {
+    const tokens = (total: number, last: number) => note('thread/tokenUsage/updated', {
+      threadId: T,
+      turnId: 'turn-1',
+      tokenUsage: {
+        total: { totalTokens: total, inputTokens: total, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+        last: { totalTokens: last, inputTokens: last, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+        modelContextWindow: 272000
+      }
+    })
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      // A tool round, then the answer: two responses. A rate-limit update between them sends the same total again.
+      tokens(1000, 1000),
+      tokens(1000, 1000),
+      ...message('msg-1', ['Done']),
+      tokens(2500, 1500),
+      completed('completed')
+    ])
+    const sink = recordingSink()
+    await new CodexAdapter(() => service(replay)).startTurn(input(), sink, control(), host())
+    replay.assertDone()
+    const reports = sink.calls.filter(([name]) => name === 'usage').map(([, usage]) => usage)
+    expect(reports).toEqual([{ input: 2500, output: 0, cacheRead: 0, cacheWrite: 0, requests: 2 }])
+  })
+
   it('runs a turn: text, thinking, tools, edits, usage and the thread reference', async () => {
     const replay = transport([
       ...handshake(),
@@ -354,7 +382,7 @@ describe('CodexAdapter', () => {
       'Hello',
       'Hello'
     ])
-    expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 400, output: 30, cacheRead: 800, cacheWrite: 0 })
+    expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 400, output: 30, cacheRead: 800, cacheWrite: 0, requests: 1 })
     expect(sink.calls.find(([name]) => name === 'providerMetrics')?.[1]).toMatchObject({
       totalTokensUsed: 1230,
       usage: { input: 400, output: 30, cacheRead: 800, cacheWrite: 0, reasoning: 10, totalTokens: 1230 },

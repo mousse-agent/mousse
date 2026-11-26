@@ -507,6 +507,8 @@ export interface CodexTurnUsage {
   context?: { input: number; cacheRead: number; cacheWrite: number; contextWindow?: number }
   /** The plan's usage windows of the latest rate-limit snapshot the server reported while the run was open. */
   quota?: PlanWindowUse[]
+  /** The model requests the run made: the token updates whose thread total grew. */
+  requests?: number
 }
 
 export type CodexChatInput = {
@@ -756,6 +758,8 @@ class TurnRun {
   private readonly plans = new Set<string>()
   private usageStart: TokenUsageBreakdown | undefined
   private usageEnd: { total: TokenUsageBreakdown; last: TokenUsageBreakdown; window: number | null } | undefined
+  /** Token updates whose thread total grew: one per model response (a rate-limit update repeats the total unchanged). */
+  private requests = 0
   private retries = 0
   /** The last `error` notification Codex gave up on (`willRetry: false`). */
   lastError: TurnError | undefined
@@ -984,7 +988,8 @@ class TurnRun {
       reasoning: turn.reasoningOutputTokens ?? 0,
       totalTokens: turn.totalTokens ?? 0,
       context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) },
-      ...(quotaOf(this.rateLimits) ? { quota: quotaOf(this.rateLimits)! } : {})
+      ...(quotaOf(this.rateLimits) ? { quota: quotaOf(this.rateLimits)! } : {}),
+      ...(this.requests ? { requests: this.requests } : {})
     }
   }
 
@@ -1276,6 +1281,7 @@ class TurnRun {
       const { total, last, modelContextWindow } = usage.tokenUsage
       // Baseline: the thread total before this chat's first model call.
       this.usageStart ??= usageDelta(last, total)
+      if ((total.totalTokens ?? 0) > (this.usageEnd?.total.totalTokens ?? this.usageStart.totalTokens ?? 0)) this.requests++
       this.usageEnd = { total, last, window: modelContextWindow }
       return
     }

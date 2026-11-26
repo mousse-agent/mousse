@@ -16070,7 +16070,7 @@ export class OrchestratorService extends EventEmitter {
           })
           // A bot's turn keeps what it cost with its dispatch (`bot_turn_usage`), and its activation's counts and spend
           // where its runtime records none of it itself.
-          try { opts?.bot?.usage?.({ input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}) }) }
+          try { opts?.bot?.usage?.({ input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}), ...(usage.requests !== undefined ? { requests: usage.requests } : {}) }) }
           catch (error) { logDebug('OrchestratorService', 'bot turn usage could not be recorded', error, { threadId: session.threadId }) }
         },
         providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),

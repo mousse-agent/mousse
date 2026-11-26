@@ -186,6 +186,18 @@ describe('Claude measured metrics', () => {
     expect(new ClaudeMetricsCollector().report()).toMatchObject({ usage: null })
     expect(new ClaudeMetricsCollector().report().totalTokensUsed).toBeUndefined()
   })
+  it('counts a turn\'s main requests by their message ids: one response in several blocks is one, a subagent\'s none', () => {
+    const collector = new ClaudeMetricsCollector()
+    // A tool round (its text and tool call arrive as two messages of one response), then the answer.
+    collector.observe(assistant('first', null, 2))
+    collector.observe(assistant('first', null, 4))
+    collector.observe(assistant('nested', 'parent', 9))
+    collector.observe(assistant('last'))
+    collector.observe(result({ 'claude-opus-4-7': model() }))
+    // One report for the whole turn, naming its two requests.
+    expect(collector.report().requests).toBe(2)
+    expect(new ClaudeMetricsCollector().report().requests).toBeUndefined()
+  })
 })
 
 describe('Claude native file edit accounting', () => {

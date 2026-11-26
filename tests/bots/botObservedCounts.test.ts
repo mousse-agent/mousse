@@ -61,6 +61,20 @@ describe('what a turn\'s runtime reports is counted for it, once', () => {
     expect(spent(turn.activation.id)).toEqual(ledger)
   })
 
+  it('a report counts the requests it names: Claude Code\'s turn and Codex\'s run name theirs, ACP\'s sum counts as one', async () => {
+    const turn = await chatTurn('What is on today?', 'u1')
+    // Claude Code: one report at the end of a turn that made three requests (two tool rounds, then the answer).
+    turn.prepared.usage!({ ...report, requests: 3 })
+    expect(f.store.counters(turn.activation.id).requests).toBe(3)
+    // ACP: a prompt's usage, summed over requests it does not name: at least one.
+    turn.prepared.usage!({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0 })
+    expect(f.store.counters(turn.activation.id).requests).toBe(4)
+    // Pi counted its own: a report that names requests adds none.
+    turn.prepared.runtimeCounters!.charge('request')
+    turn.prepared.usage!({ ...report, requests: 2 })
+    expect(f.store.counters(turn.activation.id).requests).toBe(5)
+  })
+
   it('every report adds up, a report with no cost adds none, and a count past the bot\'s limit raises no wall', async () => {
     f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxTurns: 1 } }))
     const turn = await chatTurn('What is on today?', 'u1')

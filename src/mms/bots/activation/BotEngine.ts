@@ -3196,7 +3196,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}),
       // A spend limit runs only where each request is reserved and settled on the activation's ledger (Pi), which
       // keeps its tokens and cost already; with none, nothing else records them.
-      mirror: () => ({ request: !runtimeCountsRequests, tokens: !spendScope })
+      mirror: () => ({ requests: !runtimeCountsRequests, tokens: !spendScope })
     })
     // Where the reply's time goes, marked from here on the bot's thread (`turnTiming`).
     if (row.lane === 'chat') turnTimingBind(row.botId, payload.threadId)

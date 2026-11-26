@@ -191,7 +191,8 @@ describe('ClaudeSubscriptionAdapter', () => {
         totalTokensUsed: 30,
         tokensPerSecond: 6,
         usage: { input: 10, output: 5, cacheRead: 10, cacheWrite: 5, totalTokens: 30, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-        context: { input: 10, cacheRead: 10, cacheWrite: 5, contextWindow: 200_000 }
+        context: { input: 10, cacheRead: 10, cacheWrite: 5, contextWindow: 200_000 },
+        requests: 2
       })
       return 'Reading the file.\n\nHello'
     })
@@ -270,7 +271,8 @@ describe('ClaudeSubscriptionAdapter', () => {
       details: [],
       activity: { toolName: 'Read' }
     })
-    expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 10, output: 5, cacheRead: 10, cacheWrite: 5 })
+    // One report for the turn's two requests (a tool round, then the answer).
+    expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 10, output: 5, cacheRead: 10, cacheWrite: 5, requests: 2 })
     // The turn's whole text is still the reply the run and the native history keep.
     expect(turnHost.committed).toEqual(['Reading the file.\n\nHello'])
     expect(client.commitConversation).toHaveBeenCalledWith('thread-1', 'history+Reading the file.\n\nHello')

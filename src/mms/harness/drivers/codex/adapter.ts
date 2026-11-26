@@ -336,7 +336,7 @@ export class CodexAdapter implements ProviderAdapter {
         ...(result.usage.quota?.length ? { quota: result.usage.quota } : {}),
         ...(result.resumeLost ? { resumeLost: true } : {})
       })
-      sink.usage(usage)
+      sink.usage({ ...usage, ...(result.usage.requests ? { requests: result.usage.requests } : {}) })
     } else sink.providerMetrics({ realModelName, totalResponseTimeMs, ...(result.resumeLost ? { resumeLost: true } : {}) })
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(result.text))
