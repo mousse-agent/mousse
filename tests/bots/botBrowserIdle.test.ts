@@ -13,7 +13,8 @@
 import { describe, expect, it } from 'vitest'
 import { BOT_BROWSER_HANDOFF_IDLE_MS, BOT_BROWSER_IDLE_MS, BotBrowsers, type BotBrowserService } from '../../src/mms/bots/browser/BotBrowsers'
 import { dispatchBrowserTool } from '../../src/mms/orchestrator/browser/dispatch'
-import type { BrowserAutomationTool, BrowserSessionRecord } from '../../src/shared/browser/types'
+import type { BrowserAutomationTool } from '../../src/shared/browser/automation'
+import type { BrowserSessionRecord } from '../../src/shared/browser/types'
 
 const profileId = '55555555-5555-4555-8555-555555555555'
 const BOT = 'bot-idleidleidle'
