@@ -512,6 +512,12 @@ export interface CodexTurnUsage {
 }
 
 export type CodexChatInput = {
+  /**
+   * What a chat that ends in an error or a Stop used before it ended (the token updates of its turns so far), once, just
+   * before it throws: those requests were made and are spent. A chat that returns carries its usage in its result
+   * (`CodexChatResult.usage`) instead, never both.
+   */
+  onUnreturnedUsage?(usage: CodexTurnUsage): void
   threadId: string
   /** Provider instance running the turn; a saved Codex thread resumes only on the same instance. */
   instanceId?: string
@@ -3871,6 +3877,13 @@ export class CodexProviderService {
       }
     } catch (error) {
       handBack()
+      // What the model used before the chat failed or was stopped is still spent: reported once, here.
+      try {
+        const spent = run?.usage()
+        if (spent) input.onUnreturnedUsage?.(spent)
+      } catch {
+        // A measurement: the chat's own error is what it throws.
+      }
       // A failed or stopped chat leaves nothing of its own running: the thread's turn and every helper
       // under it are interrupted until they are at rest (or the sweep's deadline), after the chat has
       // already been rejected. The run is released when that ends.

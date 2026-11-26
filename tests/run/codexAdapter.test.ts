@@ -2124,6 +2124,57 @@ describe('CodexAdapter', () => {
     replay.assertDone()
     expect(sink.calls.filter(([name]) => name === 'retry').map(([, attempt]) => attempt)).toEqual([1])
   })
+
+  it('a turn that fails after the model answered still reports what it used, once', async () => {
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      note('thread/tokenUsage/updated', {
+        threadId: T,
+        turnId: 'turn-1',
+        tokenUsage: {
+          total: { totalTokens: 1230, inputTokens: 1200, cachedInputTokens: 800, cacheWriteInputTokens: 0, outputTokens: 30, reasoningOutputTokens: 0 },
+          last: { totalTokens: 1230, inputTokens: 1200, cachedInputTokens: 800, cacheWriteInputTokens: 0, outputTokens: 30, reasoningOutputTokens: 0 },
+          modelContextWindow: 272000
+        }
+      }),
+      completed('failed', 'turn-1', { message: 'Upstream overloaded', codexErrorInfo: null })
+    ])
+    const sink = recordingSink()
+    await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, control(), host())).rejects.toThrow('Upstream overloaded')
+    replay.assertDone()
+    const reports = sink.calls.filter(([name]) => name === 'usage').map(([, usage]) => usage)
+    expect(reports).toEqual([{ input: 400, output: 30, cacheRead: 800, cacheWrite: 0, requests: 1 }])
+  })
+
+  it('an attempt retried after a context overflow reports what it used, and the retry its own', async () => {
+    const used = (input: number) => ({ input, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: input + 5, reasoning: 0, requests: 1 })
+    let attempts = 0
+    const client = {
+      configured: () => true,
+      commitConversation: () => {},
+      chat: async (chatInput: { onUnreturnedUsage?: (usage: ReturnType<typeof used>) => void }) => {
+        attempts += 1
+        if (attempts === 1) {
+          // The service reports a failed attempt's usage just before it throws.
+          chatInput.onUnreturnedUsage?.(used(900))
+          throw new Error('maximum context length exceeded')
+        }
+        return { text: 'ok', codexThreadId: 'codex-thread', turnId: 'turn-2', model: 'gpt-x', usage: used(300) }
+      }
+    } as unknown as CodexProviderService
+    const base = host()
+    const recovering: AdapterHost = { ...base, context: { ...base.context, recoverOverflow: () => ({ messages: [], nativeHistory: 'compacted' }) } }
+    const sink = recordingSink()
+    await new CodexAdapter(() => client).startTurn(input(), sink, control(), recovering)
+    expect(attempts).toBe(2)
+    const reports = sink.calls.filter(([name]) => name === 'usage').map(([, usage]) => usage)
+    expect(reports).toEqual([
+      { input: 900, output: 5, cacheRead: 0, cacheWrite: 0, requests: 1 },
+      { input: 300, output: 5, cacheRead: 0, cacheWrite: 0, requests: 1 }
+    ])
+  })
 })
 
 describe('a bot turn on Codex', () => {
