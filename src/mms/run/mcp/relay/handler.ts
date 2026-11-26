@@ -120,6 +120,10 @@ export class RelayHandler {
         if (this.host.registry.ceilingNow?.(threadId, credential.modeCeiling) === 'plan') throw planCeiling(name)
       }
     }
+    // Connecting takes time too, asked or not: the ceiling is read once more right before the server gets the call.
+    const beforeDispatch = () => {
+      if (this.host.registry.ceilingNow?.(threadId, credential.modeCeiling) === 'plan') throw planCeiling(name)
+    }
 
     // The call's own timeout starts here, after any approval wait.
     const ledger = this.host.toolLedger?.(active)
@@ -128,10 +132,12 @@ export class RelayHandler {
     try {
       // The call is the work of the caller's thread (`OwnedWorkBarrier` scopes): a delete of another thread neither
       // waits for it nor is refused by it, while a delete of this thread still is.
-      const result = await runInWorkScope(threadScope(threadId), () => this.host.manager.callTool(tool.providerName, args, turn.projectPath, request.signal, turn.actor, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS }))
+      const result = await runInWorkScope(threadScope(threadId), () => this.host.manager.callTool(tool.providerName, args, turn.projectPath, request.signal, turn.actor, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS, beforeDispatch }))
       outcome = capped(userMcpOutcome(result))
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
+      // Refused before the server saw it (`beforeDispatch`): the refusal, as any other.
+      if (error instanceof McpToolError) throw error
       return { text: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(0, MAX_ERROR_CHARS), isError: true }
     }
     if (ledgerId) {

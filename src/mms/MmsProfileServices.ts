@@ -805,6 +805,8 @@ export class MmsProfileServices {
       threads: {
         // Every thread the bot engine makes is the bot's: no thread list or search shows it.
         ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership, { botOwned: true }),
+        // A subagent's thread whose delegation was refused: removed while nothing has used it.
+        discardUnusedThread: (threadId, ownedBy) => this.threads.discardUnusedThread(threadId, ownedBy ? { ownedBy } : undefined),
         threadState: (threadId) => {
           const record = this.threads.lifecycleStore.get(threadId)
           if (record && record.state !== 'active') return 'trashed'

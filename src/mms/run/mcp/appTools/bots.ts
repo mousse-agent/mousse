@@ -212,10 +212,10 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'subagent_start',
-    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation). It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from work_models; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
+    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation), at most 32,768 characters: a longer one is refused whole, never cut. It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from work_models; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. There is no count of how many you start and no limit on their time; start as many as the job needs.`,
     parameters: Type.Object({
       title: Type.String({ description: 'A short name for it, unique in this work.' }),
-      brief: Type.String({ description: 'The whole task, standing on its own, and what its result should contain.' }),
+      brief: Type.String({ maxLength: 32_768, description: 'The whole task, standing on its own, and what its result should contain. At most 32,768 characters; a longer one is refused, not cut.' }),
       model: Type.Optional(Type.Object({
         instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
         model: Type.String({ description: 'The model\'s id from work_models.' }),
@@ -225,8 +225,8 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'subagent_send',
-    description: 'Send one of your subagents a message, by its title. One that has finished takes it as more work: it carries on in its own thread with what it already did, and you are told when it finishes. One still working takes it in at its next step, to correct or add to what it does.',
-    parameters: Type.Object({ subagent: Type.String({ description: 'Its title.' }), message: Type.String({ description: 'What to do next, or what changed, standing on its own.' }) })
+    description: 'Send one of your subagents a message, by its title. One that has finished takes it as more work: it carries on in its own thread with what it already did, and you are told when it finishes. One still working takes it in at its next step, to correct or add to what it does. At most 32,768 characters: a longer message is refused whole, never cut.',
+    parameters: Type.Object({ subagent: Type.String({ description: 'Its title.' }), message: Type.String({ maxLength: 32_768, description: 'What to do next, or what changed, standing on its own. At most 32,768 characters; a longer one is refused, not cut.' }) })
   },
   {
     name: 'subagent_wait',

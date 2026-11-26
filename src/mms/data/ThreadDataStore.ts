@@ -1484,14 +1484,15 @@ export class ThreadDataStore extends EventEmitter {
    * used it: its directory, standalone index entry and lifecycle registration. Refuses a thread
    * that already has messages (that is a real thread; trash it through the lifecycle coordinator).
    * An owned subagent is discarded only while its registration still names the owner its lineage
-   * says started it; anything else is refused before a file is touched.
+   * says started it, or the owner its maker names (`ownedBy`: an execution thread, which has no
+   * lineage until its first run); anything else is refused before a file is touched.
    */
-  discardUnusedThread(id: string): void {
+  discardUnusedThread(id: string, opts?: { ownedBy?: string }): void {
     const meta = this.getThread(id)
     if (!meta) return
     const threadDir = this.resolveThreadDir(meta)
     const owner = this.lifecycleStore.get(id)?.parentTaskId
-    if (owner && owner !== meta.lineage?.parentThreadId)
+    if (owner && owner !== meta.lineage?.parentThreadId && owner !== opts?.ownedBy)
       throw new Error(`Thread ${id} is owned by ${owner}; only an unused new subagent can be discarded`)
     if (this.messageCountAt(threadDir))
       throw new Error(`Thread ${id} has messages; only an unused new thread can be discarded`)

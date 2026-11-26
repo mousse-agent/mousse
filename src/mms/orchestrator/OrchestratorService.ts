@@ -16131,8 +16131,14 @@ export class OrchestratorService extends EventEmitter {
       // The runtime's own helpers are mirrored as watch-only threads as its events arrive (docs/plans/tool-api.md §2.7).
       if (engineRunId) mirroredRun = this.nativeMirrors.beginRun({ hostThreadId: session.threadId, runId: engineRunId, driver: binding.driver, instanceId: binding.instanceId, sessionEpoch: nativeSessionEpoch(binding) })
       // A bot's notes reach its turn as it works on a runtime that takes steers; on one that does not, they wait for the
-      // dispatch's end, as before.
-      if (opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only') opts.bot.steer.attached()
+      // dispatch's end, as before. Attached at the runtime's first progress, once it runs: a note taken while it was still
+      // being set up would be reported as sent, then lost if setting up failed.
+      let botSteerAttached = !(opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only')
+      const attachBotSteer = (): void => {
+        if (botSteerAttached) return
+        botSteerAttached = true
+        opts?.bot?.steer?.attached()
+      }
       const steerKeys = new WeakMap<SteerEntry, string>()
       let steerKeySeq = 0
       // An entry's identity in a hold: its queue item, or one it keeps for as long as it exists (a hand-back restores the
@@ -16290,6 +16296,7 @@ export class OrchestratorService extends EventEmitter {
         },
         progress: () => {
           providerProgress = true
+          attachBotSteer()
           this.setTurnStep(session.threadId, undefined)
           endRetries('recovered')
         },

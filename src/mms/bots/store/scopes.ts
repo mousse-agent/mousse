@@ -62,7 +62,12 @@ export class BotCounterScope implements CounterScope {
  * never settled (a process died mid-request) stays counted at its full amount.
  */
 export class BotSpendScope implements SpendScope {
-  constructor(private readonly store: BotStore, readonly activationId: string, private readonly runId?: string) {}
+  /**
+   * `ownHold`: the id of the room held for this run before it started (a subagent's, `hold`). Its requests draw on that
+   * room rather than compete with it: the hold does not count against them, and their first granted reservation takes
+   * its place, releasing it in the same transaction. Only the other runs' holds count against them.
+   */
+  constructor(private readonly store: BotStore, readonly activationId: string, private readonly runId?: string, private readonly ownHold?: string) {}
 
   /** The same ledger, with reservations recorded against `runId`. */
   forRun(runId: string): BotSpendScope {
@@ -70,7 +75,7 @@ export class BotSpendScope implements SpendScope {
   }
 
   reserve(request: SpendRequest, limits: SpendLimits): ReserveResult {
-    return this.reserveAs(`bs_${randomUUID()}`, request, limits)
+    return this.reserveAs(`bs_${randomUUID()}`, request, limits, this.ownHold)
   }
 
   /**
@@ -84,7 +89,7 @@ export class BotSpendScope implements SpendScope {
     })
   }
 
-  private reserveAs(id: string, request: SpendRequest, limits: SpendLimits): ReserveResult {
+  private reserveAs(id: string, request: SpendRequest, limits: SpendLimits, replaces?: string): ReserveResult {
     return this.store.db.transaction((): ReserveResult => {
       const row = this.store.get('SELECT * FROM bot_spend WHERE activation_id = ?', this.activationId)
       const own = this.ownLimits()
@@ -95,8 +100,8 @@ export class BotSpendScope implements SpendScope {
       }
       if (!row) return { ok: false, limit: refusalOf(effective) }
       const open = this.store.get(
-        'SELECT COALESCE(SUM(input_bound), 0) AS input, COALESCE(SUM(wire_cap), 0) AS output, COALESCE(SUM(usd_micros), 0) AS usd FROM bot_spend_reservations WHERE activation_id = ? AND settled_at IS NULL',
-        this.activationId
+        'SELECT COALESCE(SUM(input_bound), 0) AS input, COALESCE(SUM(wire_cap), 0) AS output, COALESCE(SUM(usd_micros), 0) AS usd FROM bot_spend_reservations WHERE activation_id = ? AND settled_at IS NULL AND (? IS NULL OR id <> ?)',
+        this.activationId, replaces ?? null, replaces ?? null
       )!
       // The run ledger's own rule, applied to what the activation has used and holds.
       const ledger = new RunSpend()
@@ -112,6 +117,8 @@ export class BotSpendScope implements SpendScope {
         'INSERT INTO bot_spend_reservations(id, activation_id, run_id, input_bound, wire_cap, usd_micros, cost_limited, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
         id, this.activationId, this.runId ?? null, request.inputBound, granted.cap, Math.ceil(usd * USD_MICROS), effective.maxUsd !== undefined ? 1 : 0, this.store.now()
       )
+      // The room held for this run is now this reservation's: let go of it, nothing of it spent.
+      if (replaces) this.store.run('UPDATE bot_spend_reservations SET settled_at = ? WHERE id = ? AND activation_id = ? AND settled_at IS NULL', this.store.now(), replaces, this.activationId)
       return { ok: true, id, cap: granted.cap }
     })
   }

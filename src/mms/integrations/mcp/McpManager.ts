@@ -105,6 +105,12 @@ export interface McpCallOptions {
   signIn?: false
   /** Internal held-call certainty: distinguish failure before transport dispatch. */
   trackDispatch?: true
+  /**
+   * Runs synchronously once the call's setup is done (its authorization read, its connection), right before the request
+   * is sent to the server; a throw refuses the call, and the caller gets that error as thrown. What the caller may do can
+   * change while the call connects: this is where it is read last.
+   */
+  beforeDispatch?: () => void
 }
 
 /** One enabled server's tools (`getEnabledToolsByServer`). */
@@ -581,6 +587,7 @@ export class McpManager {
       if (signal?.aborted) throw Object.assign(new Error('MCP call cancelled before dispatch.'), { category: 'cancelled' })
       expected.assertDispatchActive?.()
     }
+    options?.beforeDispatch?.()
     const timeoutMs = options?.timeoutMs ?? CALL_TOOL_TIMEOUT_MS
     connection.inFlight += 1
     try {

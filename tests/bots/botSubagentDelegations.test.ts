@@ -11,10 +11,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { BOTS_MIGRATIONS } from '../../src/mms/bots/store/BotStore'
+import { BotSpendScope } from '../../src/mms/bots/store/scopes'
 import { budgetLimitsOf, RunCounterBook } from '../../src/mms/harness/budget'
 import { RUN_MIGRATIONS } from '../../src/mms/run/db/migrations'
 import { wakeThreads } from '../../src/mms/run/delegation/wake'
-import { subagentData } from '../../src/mms/run/mcp/appTools/bots'
+import { BOT_TOOLS, subagentData } from '../../src/mms/run/mcp/appTools/bots'
 import type { BotTurnPayload } from '../../src/mms/run/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
@@ -51,7 +52,7 @@ describe('a bot\'s work subagents as delegations', () => {
     book.acquire(turn.payload.runId, budgetLimitsOf(turn.prepared.policy) ?? {}, turn.prepared.runtimeCounters ?? turn.prepared.authority.counters, { spend: turn.prepared.authority.spend! }).budget
   const request = { inputBound: 1_000, wireCap: 100, floor: 64, price: { input: 0, output: 0 } }
 
-  it('siblings started at once each hold room on the work\'s spend before any turn is dispatched; one with no room never starts, and the runtimes share the cap with the holds', async () => {
+  it('siblings started at once each hold room on the work\'s spend before any turn is dispatched; one with no room never starts, and the runtimes draw on their own holds', async () => {
     f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxInputTokens: 10_000 } }))
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!
@@ -65,12 +66,64 @@ describe('a bot\'s work subagents as delegations', () => {
     const late = turnStart(third!).payload as BotTurnPayload
     await f.bots.refresh(late)
     expect(f.bots.prepare(late)).toMatchObject({ code: 'bot_spend_exhausted' })
-    // The runtimes reserve on the scope their turn hands over, against the same cap as the holds.
+    // The runtimes reserve on the scope their turn hands over, against the same cap. Each request draws on its own run's
+    // hold and takes its place: 5,000 fits beside the sibling's hold of 4,096, then 4,900 beside that 5,000. Counting the
+    // requester's own hold as well would refuse both.
     const book = new RunCounterBook()
     const a = runtimeBudget(book, await startSubagent(f, first!))
     const b = runtimeBudget(book, await startSubagent(f, second!))
-    expect(a.reserve(request)).toMatchObject({ ok: true })
-    expect(b.reserve(request)).toMatchObject({ ok: false, limit: { kind: 'input_tokens', limit: 10_000 } })
+    expect(a.reserve({ ...request, inputBound: 5_000 })).toMatchObject({ ok: true })
+    expect(openHolds(job.id).filter((id) => id.startsWith('subagent:'))).toEqual([`subagent:${second}`])
+    expect(b.reserve({ ...request, inputBound: 4_900 })).toMatchObject({ ok: true })
+    expect(openHolds(job.id).filter((id) => id.startsWith('subagent:'))).toEqual([])
+  })
+
+  it('a lone subagent\'s first request draws on the room held for it, so it can use what is left of the cap; a sibling\'s hold still counts against it', async () => {
+    f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxInputTokens: 10_000 } }))
+    const job = await work('w1')
+    await job.prepared.authority.subagents!.start({ title: 'Prices', brief: 'Find the prices.' })
+    const [lone] = subagentRuns(f, job.id)
+    // 6,500 and its own hold of 4,096 would be over 10,000; the hold is its room, not a rival's.
+    expect(runtimeBudget(new RunCounterBook(), await startSubagent(f, lone!)).reserve({ ...request, inputBound: 6_500 })).toMatchObject({ ok: true })
+    expect(openHolds(job.id).filter((id) => id.startsWith('subagent:'))).toEqual([])
+    const other = await work('w2')
+    await other.prepared.authority.subagents!.start({ title: 'Prices', brief: 'Find the prices.' })
+    await other.prepared.authority.subagents!.start({ title: 'Reviews', brief: 'Find the reviews.' })
+    const [one] = subagentRuns(f, other.id)
+    // Beside a sibling's hold of 4,096, 5,905 is one token over.
+    expect(runtimeBudget(new RunCounterBook(), await startSubagent(f, one!)).reserve({ ...request, inputBound: 5_905 })).toMatchObject({ ok: false, limit: { kind: 'input_tokens', limit: 10_000 } })
+  })
+
+  it.each([
+    ['a restart', true],
+    ['its turn ending', false]
+  ])('a subagent\'s hold whose release fails (bots.db locked) at %s is let go by the next upkeep pass, and never charged', async (_name, restart) => {
+    const job = await work('w1')
+    await job.prepared.authority.subagents!.start({ title: 'Prices', brief: 'Find the prices.' })
+    const [childRun] = subagentRuns(f, job.id)
+    const child = await startSubagent(f, childRun!)
+    const committed = () => f.store.get('SELECT committed_input AS input, committed_output AS output, committed_usd_micros AS usd FROM bot_spend WHERE activation_id = ?', job.id)
+    const before = committed()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // Every release of the hold fails while bots.db is locked.
+    const settle = BotSpendScope.prototype.settle
+    const locked = vi.spyOn(BotSpendScope.prototype, 'settle').mockImplementation(function (this: BotSpendScope, id, outcome) {
+      if (id.startsWith('subagent:')) throw new Error('database is locked')
+      return settle.call(this, id, outcome)
+    })
+    if (restart) await f.restart({ crashed: true })
+    else {
+      f.runs.markTerminal(childRun!, 'completed', undefined, { resultText: 'Prices: 199.' })
+      f.bots.settle(child.payload, { text: 'Prices: 199.' })
+      await flush()
+    }
+    expect(openHolds(job.id)).toEqual([`subagent:${childRun}`])
+    expect(committed()).toEqual(before)
+    // bots.db is free again: the next pass lets it go, and nothing of it is charged.
+    locked.mockRestore()
+    await f.bots.maintain()
+    expect(openHolds(job.id)).toEqual([])
+    expect(committed()).toEqual(before)
   })
 
   it('a subagent with no spending limit still runs on the work\'s spend scope, and its tokens count in the work\'s', async () => {
@@ -163,9 +216,47 @@ describe('a bot\'s work subagents as delegations', () => {
     expect(taken.text).toContain('Your subagent "Prices" finished')
     steer.accepted(taken.token)
     expect(steer.peek()).toBeUndefined()
-    expect(f.store.subagentRun(job.id, child.payload.runId)).toMatchObject({ outcome: 'done', deliveredAt: expect.any(String), toldAt: expect.any(String) })
+    // Told once the turn that took it in settles, not before.
+    expect(f.store.subagentRun(job.id, child.payload.runId)).toMatchObject({ outcome: 'done', deliveredAt: expect.any(String), toldAt: null })
     expect(f.runs.inbox.listPending(job.payload.threadId)).toEqual([])
     expect(f.runs.store.listRuns(job.payload.threadId)).toHaveLength(1)
+    await finish(f, job.payload, 'completed', { text: 'Done.' })
+    expect(f.store.subagentRun(job.id, child.payload.runId)!.toldAt).toEqual(expect.any(String))
+  })
+
+  it('a crash after subagent_result returned and before the work\'s turn settled: its continuation still tells it the subagent ended', async () => {
+    const job = await work('w1')
+    const subagents = job.prepared.authority.subagents!
+    await subagents.start({ title: 'Prices', brief: 'Find the prices.' })
+    const child = await startSubagent(f, subagentRuns(f, job.id)[0]!)
+    await finish(f, child.payload, 'completed', { text: 'Prices: 199.' })
+    expect(subagents.result({ subagent: 'Prices' })).toMatchObject({ subagents: [{ subagent: 'Prices', state: 'done', result: 'Prices: 199.' }] })
+    // The reply never became part of the work's turn.
+    await f.restart({ crashed: true })
+    const next = f.store.dispatches(job.id).filter((dispatch) => dispatch.kind !== 'subagent').at(-1)!
+    expect(next.n).toBeGreaterThan(1)
+    expect((await start(f, job.id, next.n)).prepared.prompt).toContain('Your subagents "Prices" ended since you last looked')
+  })
+
+  it('subagent_result marks told only the turn whose result it carried, once the work\'s turn settles; an earlier turn it never returned stays untold', async () => {
+    const job = await work('w1')
+    const subagents = job.prepared.authority.subagents!
+    await subagents.start({ title: 'Prices', brief: 'Find the prices.' })
+    const first = await startSubagent(f, subagentRuns(f, job.id)[0]!)
+    await finish(f, first.payload, 'completed', { text: 'Prices: 199.' })
+    // Started again before the work read the first turn.
+    expect(await subagents.send({ subagent: 'Prices', message: 'Only ones under 300.' })).toMatchObject({ sent: { subagent: 'Prices' } })
+    const second = await startSubagent(f, subagentRuns(f, job.id)[1]!)
+    await finish(f, second.payload, 'completed', { text: 'Prices under 300: 199, 249.' })
+    expect(subagents.result({ subagent: 'Prices' })).toMatchObject({ subagents: [{ result: 'Prices under 300: 199, 249.' }] })
+    expect(f.store.subagentRun(job.id, second.payload.runId)!.toldAt).toBeNull()
+    // Read in this turn: not offered again at its next step. The first turn, never read, still is, once.
+    job.prepared.steer!.attached()
+    expect(job.prepared.steer!.peek()!.match(/Your subagent "Prices" finished/g)).toHaveLength(1)
+    f.runs.markTerminal(job.payload.runId, 'completed')
+    f.bots.settle(job.payload, { text: 'Here are the prices.' })
+    expect(f.store.subagentRun(job.id, second.payload.runId)!.toldAt).toEqual(expect.any(String))
+    expect(f.store.subagentRun(job.id, first.payload.runId)!.toldAt).toBeNull()
   })
 
   it('subagent_wait wakes when the result is delivered; what it read is not told again at the next step', async () => {
@@ -374,6 +465,27 @@ describe('a bot\'s work subagents as delegations', () => {
     expect(f.runs.deliverBotResults()).toEqual([])
   })
 
+  it.each([
+    ['a Stop of the work lands between its thread being made and its delegation', 'stop'],
+    ['its delegation\'s transaction throws', 'throws']
+  ])('%s: refused, and neither the thread nor its ownership row is left behind', async (_name, how) => {
+    const job = await work('w1')
+    const made = vi.spyOn(f.host.threads, 'ensureExecutionThread')
+    const discarded = vi.spyOn(f.host.threads, 'discardUnusedThread')
+    const real = f.runs.requestBotDelegation.bind(f.runs)
+    vi.spyOn(f.runs, 'requestBotDelegation').mockImplementationOnce(async (input) => {
+      if (how === 'throws') throw new Error('database is locked')
+      f.runs.markTerminal(job.payload.runId, 'interrupted', { interruptedBy: 'user' })
+      return real(input)
+    })
+    expect(await job.prepared.authority.subagents!.start({ title: 'Prices', brief: 'Find the prices.' })).toHaveProperty('refused')
+    const thread = made.mock.results[0]!.value as { id: string }
+    expect(discarded).toHaveBeenCalledWith(thread.id, job.payload.threadId)
+    expect(f.store.botThreads(botId).filter((entry) => entry.threadId === thread.id)).toEqual([])
+    expect(subagentRuns(f, job.id)).toEqual([])
+    expect(ledger(job.id)).toEqual([])
+  })
+
   it('a brief over the limit is refused whole and makes no thread; a result over the run database\'s cut is kept whole and read page by page', async () => {
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!
@@ -381,6 +493,9 @@ describe('a bot\'s work subagents as delegations', () => {
     expect(await subagents.start({ title: 'Long', brief: 'x'.repeat(32 * 1024 + 1) })).toMatchObject({ refused: expect.stringMatching(/at most 32,768.*Nothing was sent/) })
     expect(threads).not.toHaveBeenCalled()
     expect(subagentRuns(f, job.id)).toEqual([])
+    // The tools' schemas name the same limit the work is held to.
+    const limitOf = (tool: string, field: string) => (BOT_TOOLS.find((entry) => entry.name === tool)!.parameters as { properties: Record<string, { maxLength?: number }> }).properties[field]!.maxLength
+    expect([limitOf('subagent_start', 'brief'), limitOf('subagent_send', 'message')]).toEqual([32 * 1024, 32 * 1024])
     await subagents.start({ title: 'Prices', brief: 'Find the prices.' })
     expect(threads).toHaveBeenCalledTimes(1)
     const child = await startSubagent(f, subagentRuns(f, job.id)[0]!)

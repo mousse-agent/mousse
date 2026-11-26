@@ -120,7 +120,7 @@ describe('RelayHandler.call', () => {
     expect(admit).toHaveBeenCalledTimes(1)
     expect(manager.isToolCallAllowed).toHaveBeenCalledWith(say.providerName, '/p', { kind: 'main' })
     // The server's own `clientRequestId` argument reaches it; the turn token does not.
-    expect(manager.callTool).toHaveBeenCalledWith(say.providerName, { text: 'hi', clientRequestId: 'keep-me' }, '/p', expect.any(AbortSignal), { kind: 'main' }, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS })
+    expect(manager.callTool).toHaveBeenCalledWith(say.providerName, { text: 'hi', clientRequestId: 'keep-me' }, '/p', expect.any(AbortSignal), { kind: 'main' }, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS, beforeDispatch: expect.any(Function) })
     expect(ledger.start).toHaveBeenCalledWith(expect.objectContaining({ id: 'mcp:c1', name: say.name }))
     expect(ledger.commit).toHaveBeenCalledWith('l1')
     expect(askApproval).not.toHaveBeenCalled()

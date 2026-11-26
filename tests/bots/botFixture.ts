@@ -119,7 +119,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
     ...options,
     store,
     definitions: new BotDefinitionStore(store.directory, (botId) => fixture.store.registry(botId)?.revision ?? null),
-    threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }) },
+    threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }), discardUnusedThread: () => {} },
     runs: () => runs,
     launchedThreads: (creators) => fixture.launched?.(creators) ?? [],
     harness: {
