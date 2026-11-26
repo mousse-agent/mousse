@@ -256,6 +256,28 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     await broker.close()
   }, 120_000)
 
+  it('refuses an image point on a page that scrolled by itself since its screenshot, and presses nothing', async () => {
+    const { broker } = await createInProcessBroker()
+    try {
+      // The page scrolls itself 3px every 16ms; a button every 60px, which names itself in the title when pressed.
+      const opened = await broker.call(workerRequest('profile_point_autoscroll', 'session.open', { url: `${origin}/autoscroll.html` }))
+      expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+      const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+      const observed = await broker.call(workerRequest('profile_point_autoscroll', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true }))
+      expect(observed.ok, JSON.stringify(observed.error)).toBe(true)
+      const observation = observed.result as BrowserObservation
+      const clicked = await broker.call(workerRequest('profile_point_autoscroll', 'act', actParams(payload.session, observation, { type: 'click', target: { kind: 'image-point', point: imagePointOf(observation, { x: 200, y: 300 }) } }, 'autoscroll_click')))
+      expect(clicked.ok).toBe(false)
+      expect(clicked.error?.code).toBe('stale_observation')
+      expect(clicked.error?.message).toMatch(/scroll/i)
+      const after = await broker.call(workerRequest('profile_point_autoscroll', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
+      expect(after.ok, JSON.stringify(after.error)).toBe(true)
+      expect((after.result as BrowserObservation).title).not.toMatch(/pressed/)
+    } finally {
+      await broker.close()
+    }
+  }, 120_000)
+
   it('refuses an image point on an observation that has no screenshot, and says so', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_point_noshot', 'session.open', { url: `${origin}/coordinate.html` }))

@@ -36,7 +36,7 @@ import { readWorkspaceLock, WorkspaceLock } from '../lifecycle/lock'
 import { isProcessAlive } from '../lifecycle/process'
 import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '../lifecycle/paths'
 import { BrowserReferenceStore, type ObservedNode, type ReferenceIdentity } from '../observation/ReferenceStore'
-import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation, type ObservationCandidate } from '../observation/collect'
+import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, readViewportScroll, type CollectedObservation, type ObservationCandidate, type ViewportScroll } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { framesInside, placeAttachedFrame, type FrameBounds, type FrameTreeEntry, type FrameTreeNode } from './frameTree'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
@@ -106,6 +106,11 @@ function frameUrlKey(value: string): string {
   const url = sanitizeUrl(value)
   const hash = url.indexOf('#')
   return hash >= 0 ? url.slice(0, hash) : url
+}
+
+/** Whether two scroll positions are the same, to the CSS pixel. */
+function sameScroll(a: ViewportScroll, b: ViewportScroll): boolean {
+  return Math.abs(a.scrollX - b.scrollX) <= 1 && Math.abs(a.scrollY - b.scrollY) <= 1
 }
 
 function boundsOverlap(a: FrameBounds, b: FrameBounds): boolean {
@@ -236,7 +241,8 @@ export class ManagedSession {
   private readonly ops = new Set<Promise<unknown>>()
   private readonly frameEnables = new Map<string, Promise<void>>()
   private userDataDir = ''
-  private observations = new Map<string, { tabId: string; generation: number; documentId: string; viewport: BrowserObservation['viewport']; sizeSeq: number; screenshot?: BrowserObservation['screenshot'] }>()
+  /** Observations still held, by id; `captureScroll` is where the page was scrolled as its screenshot was taken (unset when it moved meanwhile). */
+  private observations = new Map<string, { tabId: string; generation: number; documentId: string; viewport: BrowserObservation['viewport']; sizeSeq: number; screenshot?: BrowserObservation['screenshot']; captureScroll?: ViewportScroll }>()
   private lastActionFingerprint = ''
   private repeatedActionCount = 0
   private downloadDir = ''
@@ -1258,14 +1264,25 @@ export class ManagedSession {
     const refs = this.refs.observe(identity, mergedObservedNodes)
     const elements: BrowserElement[] = mergedElements.map((element, index) => ({ ...element, ref: refs[index] }))
     let screenshot: BrowserObservation['screenshot']
+    let captureScroll: ViewportScroll | undefined
+    const captureWarnings: string[] = []
     if (includeScreenshot) {
+      const cdp = this.requireChrome().cdp
       const clip = params.clip && typeof params.clip === 'object' ? params.clip as { x: number; y: number; width: number; height: number } : undefined
+      // The scroll is read again as the picture is taken, not when the page was read: a page that
+      // scrolls by itself may have moved since, and the picture is of where it is now.
+      const before = await readViewportScroll(cdp, tab.cdpSessionId)
       // At the page's CSS size whatever its pixel ratio (a person's view may raise it): the model sees what it saw before.
-      const captured = await captureViewportScreenshot(this.requireChrome().cdp, tab.cdpSessionId, collected.viewport, clip, this.page.scale !== 1 ? { scale: 1 / this.page.scale } : {})
+      const captured = await captureViewportScreenshot(cdp, tab.cdpSessionId, { ...collected.viewport, ...before }, clip, this.page.scale !== 1 ? { scale: 1 / this.page.scale } : {})
+      const after = await readViewportScroll(cdp, tab.cdpSessionId)
+      // Still moving as it was taken: where its points are is not known, and image points on it are refused.
+      if (sameScroll(before, after)) captureScroll = before
+      else captureWarnings.push('viewport-moved-during-screenshot')
+      if (!sameScroll(before, collected.viewport)) captureWarnings.push('viewport-moved-during-observe')
       const written = this.artifacts.write(this.profileId, this.id, captured.bytes, 'image/png', 'png')
       screenshot = { artifactId: written.artifactId, ...captured.screenshot }
     }
-    this.observations.set(observationId, { tabId: tab.publicId, generation: this.generation, documentId: collected.documentId, viewport: collected.viewport, sizeSeq: this.sizeSeq, ...(screenshot ? { screenshot } : {}) })
+    this.observations.set(observationId, { tabId: tab.publicId, generation: this.generation, documentId: collected.documentId, viewport: collected.viewport, sizeSeq: this.sizeSeq, ...(screenshot ? { screenshot } : {}), ...(captureScroll ? { captureScroll } : {}) })
     this.touch()
     return {
       sessionId: this.id,
@@ -1282,7 +1299,7 @@ export class ManagedSession {
       ...(screenshot ? { screenshot } : {}),
       truncated: collected.truncated || childObservationTruncated,
       ...(collected.continuation ? { continuation: collected.continuation } : {}),
-      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(observedFrames ? ['oopif-attached'] : []), ...(skippedFrames ? ['oopif-observation-skipped'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...scopeWarnings, ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
+      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(observedFrames ? ['oopif-attached'] : []), ...(skippedFrames ? ['oopif-observation-skipped'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : []), ...scopeWarnings, ...captureWarnings, ...(this.loadingTabs.has(tab.cdpSessionId) ? [PAGE_STILL_LOADING] : [])])],
       provenance: 'untrusted-page'
     }
   }
@@ -1415,6 +1432,9 @@ export class ManagedSession {
       const target = await this.resolveActionTarget(request, tab)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       if (!humanLease) await this.glideCursor(request, tab, target, abort.signal)
+      if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
+      // The page may have moved while the cursor glided: an image point is acted on only where it still lands.
+      await this.recheckImagePoints(request, tab, target, abort.signal)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       this.inFlight.dispatched = true
       dispatched = true
@@ -2732,7 +2752,7 @@ export class ManagedSession {
     const target = 'target' in action ? action.target : undefined
     if (!target) return undefined
     // A wheel goes to a point, whatever lies there: no element is looked up or made ready for it.
-    if (action.type === 'scroll' && target.kind === 'image-point') return pointTarget(tab.cdpSessionId, this.imagePointInViewport(request, tab, target.point))
+    if (action.type === 'scroll' && target.kind === 'image-point') return pointTarget(tab.cdpSessionId, await this.imagePointNow(request, tab, target.point, this.inFlight?.abort.signal))
     return this.resolveOneTarget(request, tab, target)
   }
 
@@ -2742,6 +2762,40 @@ export class ManagedSession {
     if (!observation || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId || observation.sizeSeq !== this.sizeSeq) fail('stale_observation', 'Image point geometry is stale')
     if (!observation.screenshot) fail('stale_observation', 'Observation has no screenshot; take a screenshot before using image-point targeting')
     return mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, point)
+  }
+
+  /** `imagePointInViewport`, checked against where the page is scrolled now. */
+  private async imagePointNow(request: BrowserActionRequest, tab: TabState, point: BrowserPoint, signal: AbortSignal | undefined): Promise<BrowserPoint> {
+    const mapped = this.imagePointInViewport(request, tab, point)
+    await this.assertImagePointScroll(request, tab, signal)
+    return mapped
+  }
+
+  /**
+   * An image point is where the screenshot showed it only while the page is scrolled as it was when
+   * that picture was taken: a page that scrolled since (by itself, or by a wheel) refuses it.
+   */
+  private async assertImagePointScroll(request: BrowserActionRequest, tab: TabState, signal: AbortSignal | undefined): Promise<void> {
+    const captured = this.observations.get(request.observationId)?.captureScroll
+    if (!captured) fail('stale_observation', 'The page was scrolling while its screenshot was taken; take a new screenshot before using image points')
+    const now = await readViewportScroll(this.requireChrome().cdp, tab.cdpSessionId, signal)
+    if (!sameScroll(now, captured)) fail('stale_observation', 'The page scrolled since its screenshot; take a new screenshot before using image points')
+  }
+
+  /**
+   * Checks, just before input is sent (after the agent cursor's glide), that each image point still
+   * lands where it did: the page is scrolled as in the screenshot, and the element found there is
+   * still the one hit at the point.
+   */
+  private async recheckImagePoints(request: BrowserActionRequest, tab: TabState, target: ActionableTarget | { from: ActionableTarget; to: ActionableTarget } | undefined, signal: AbortSignal): Promise<void> {
+    const action = request.action
+    const pairs: Array<[BrowserTarget | undefined, ActionableTarget | undefined]> = action.type === 'drag'
+      ? [[action.from, target && 'from' in target ? target.from : undefined], [action.to, target && 'from' in target ? target.to : undefined]]
+      : [['target' in action ? action.target : undefined, target && !('from' in target) ? target : undefined]]
+    const resolved = pairs.filter(([asked, found]) => asked?.kind === 'image-point' && found).map(([, found]) => found!)
+    if (!resolved.length) return
+    await this.assertImagePointScroll(request, tab, signal)
+    for (const found of resolved) if (found.objectId) await this.assertHitAt(found.cdpSessionId, found.objectId, found.framePoint ?? found.point, signal)
   }
 
   /** Refuses a target that is no longer what the point hits in its frame (an overlay came over it, or it moved). */
@@ -2861,7 +2915,7 @@ export class ManagedSession {
   private async resolveOneTarget(request: BrowserActionRequest, tab: TabState, target: BrowserTarget): Promise<ActionableTarget> {
     if (target.kind === 'image-point') {
       const signal = this.inFlight?.abort.signal
-      const mapped = this.imagePointInViewport(request, tab, target.point)
+      const mapped = await this.imagePointNow(request, tab, target.point, signal)
       const at = await this.elementAtPoint(tab, mapped, signal)
       // Made ready and hit-tested at the point itself: a tall element's middle may be off screen.
       const prepared = await prepareActionableTarget(this.requireChrome().cdp, at.sessionId, {

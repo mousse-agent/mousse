@@ -130,6 +130,18 @@ function translateBounds(bounds: BrowserBounds, offset?: BrowserPoint): BrowserB
 /** An element `collectStructuredObservation` would offer, as its `include` sees it (bounds in the tab's viewport). */
 export interface ObservationCandidate { backendNodeId: number; frameId: string; bounds?: BrowserBounds }
 
+/** Where a page's layout viewport is scrolled, in CSS pixels. */
+export interface ViewportScroll { scrollX: number; scrollY: number }
+
+/** Where a page is scrolled now (its layout viewport, as `collectStructuredObservation` reads it). */
+export async function readViewportScroll(cdp: CdpTransport, cdpSessionId: string, signal?: AbortSignal): Promise<ViewportScroll> {
+  const metrics = await cdp.send<Record<string, unknown>>('Page.getLayoutMetrics', {}, { sessionId: cdpSessionId, signal })
+  const css = (metrics.cssLayoutViewport ?? metrics.layoutViewport) as { pageX?: number; pageY?: number } | undefined
+  const scrollX = Number(css?.pageX)
+  const scrollY = Number(css?.pageY)
+  return { scrollX: Number.isFinite(scrollX) ? scrollX : 0, scrollY: Number.isFinite(scrollY) ? scrollY : 0 }
+}
+
 export async function collectStructuredObservation(
   cdp: CdpTransport,
   cdpSessionId: string,
