@@ -1728,6 +1728,8 @@ export const MessageList = memo(function MessageList({
   followerRef.current ??= createEndFollower({
     container: () => chatContainerRef.current,
     after: () => afterTurnsRef.current,
+    // The rows wrapper ends with the last turn's row (`windowRowItems`).
+    lastRow: () => rowsRef.current?.lastElementChild ?? null,
     mode: () => followModeRef.current,
     onProgrammaticScroll: () => {
       programmaticScrollAtRef.current = performance.now();
