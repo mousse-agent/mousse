@@ -645,10 +645,13 @@ function isLastingFailure(message: string): boolean {
 /**
  * Reads shared between callers. A fresh value answers without a command; concurrent callers
  * join one read, `force` included, which only skips a fresh value. Failures are never kept.
+ * `notBefore` asks for what the host shows from that time on: a value whose read started before
+ * it is not reused, nor a read in flight that started before it.
  */
 class ReadCache<T> {
-  private readonly values = new Map<string, { at: number; ttlMs: number; result: { value: T } | { error: unknown } }>()
-  private readonly flights = new Map<string, Promise<T>>()
+  /** `from`: when the read that gave the value started. */
+  private readonly values = new Map<string, { at: number; from: number; ttlMs: number; result: { value: T } | { error: unknown } }>()
+  private readonly flights = new Map<string, { promise: Promise<T>; from: number }>()
 
   constructor(private readonly ttlMs: number, private readonly clock: () => number) {}
 
@@ -667,38 +670,43 @@ class ReadCache<T> {
       cacheError?: (error: unknown) => boolean
       /** A stored "nothing there" answer: a forced read never reuses one, since what it asks for may exist by now. Joining a read in flight is unchanged. */
       negative?: (value: T) => boolean
+      /** Only a read started at or after this time (by the cache's clock) answers. */
+      notBefore?: number
     } = {}
   ): Promise<T> {
+    const before = (from: number) => options.notBefore !== undefined && from < options.notBefore
     const hit = this.values.get(key)
     const staleNegative = options.force === true && hit !== undefined && 'value' in hit.result && options.negative?.(hit.result.value) === true
-    if (hit && !staleNegative) {
+    if (hit && !staleNegative && !before(hit.from)) {
       const age = this.clock() - hit.at
       if (age < (options.force ? Math.min(hit.ttlMs, FORCE_MIN_AGE_MS) : hit.ttlMs)) {
         return 'error' in hit.result ? Promise.reject(hit.result.error) : Promise.resolve(hit.result.value)
       }
     }
     const joined = this.flights.get(key)
-    if (joined) return joined
+    if (joined && !before(joined.from)) return joined.promise
+    const from = this.clock()
+    // A read that was invalidated, or overtaken by a later one, while it ran describes the state before it.
+    const current = () => this.flights.get(key)?.promise === started
     const started: Promise<T> = load().then(
       (value) => {
-        // A read that was invalidated while it ran describes the state before the change.
-        if (this.flights.get(key) === started) {
+        if (current()) {
           this.flights.delete(key)
           if (!options.cacheable || options.cacheable(value)) {
-            remember(this.values, key, { at: this.clock(), ttlMs: options.shortLived?.(value) ? NEGATIVE_TTL_MS : this.ttlMs, result: { value } })
+            remember(this.values, key, { at: this.clock(), from, ttlMs: options.shortLived?.(value) ? NEGATIVE_TTL_MS : this.ttlMs, result: { value } })
           }
         }
         return value
       },
       (error: unknown) => {
-        if (this.flights.get(key) === started) {
+        if (current()) {
           this.flights.delete(key)
-          if (options.cacheError?.(error)) remember(this.values, key, { at: this.clock(), ttlMs: NEGATIVE_TTL_MS, result: { error } })
+          if (options.cacheError?.(error)) remember(this.values, key, { at: this.clock(), from, ttlMs: NEGATIVE_TTL_MS, result: { error } })
         }
         throw error
       }
     )
-    this.flights.set(key, started)
+    this.flights.set(key, { promise: started, from })
     return started
   }
 
@@ -816,8 +824,9 @@ export class GitHubCodeHost implements CodeHost {
    * One pull request with its reviews, comments and checks. The line comments are read newest first, at most
    * five pages of 100, so a busy pull request shows its latest ones; every read of them is projected and capped
    * by gh itself. Shared by every folder of the repository for 30 seconds; `force` only skips a value younger than that.
+   * `notBefore`: only a read started at or after that time answers (a wake's last read at its deadline).
    */
-  async getPullRequestDetail(cwd: string, number: number, options: { force?: boolean; lineComments?: boolean } = {}): Promise<PullRequestDetail> {
+  async getPullRequestDetail(cwd: string, number: number, options: { force?: boolean; lineComments?: boolean; notBefore?: number } = {}): Promise<PullRequestDetail> {
     if (!Number.isSafeInteger(number) || number < 1) throw new PullRequestReadError('Unsupported pull request number.', 'error')
     const probe = await this.probeGh()
     if (!probe.ok) throw new PullRequestReadError(probe.message, probe.reason)
@@ -837,7 +846,7 @@ export class GitHubCodeHost implements CodeHost {
         throw error instanceof PullRequestReadError ? error : await this.detailFailure(cwd, identity, number, error)
       }),
       // A failure that asking again would only repeat is kept briefly, so a signed-out or limited host is not hammered.
-      { force: options.force, cacheError: (error) => error instanceof PullRequestReadError && (error.kind === 'unauthenticated' || error.kind === 'not-github' || error.kind === 'rate-limited') }
+      { force: options.force, notBefore: options.notBefore, cacheError: (error) => error instanceof PullRequestReadError && (error.kind === 'unauthenticated' || error.kind === 'not-github' || error.kind === 'rate-limited') }
     )
   }
 

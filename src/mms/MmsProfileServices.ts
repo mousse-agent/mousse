@@ -826,7 +826,7 @@ export class MmsProfileServices {
       runs: () => this.runEngine,
       // What a bot's wakes wait on: one of the owner's threads it may see, and a pull request of one of their projects.
       wakeThread: (from, threadId, runId) => wakeThreadState(this.wakeThreadDeps((caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id))), from, threadId, runId),
-      pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
+      pullRequestState: (repo, number, fresh) => this.wakePullRequestState(repo, number, fresh),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works. Of
       // those done, only the ones not archived and updated in the last six hours ("Recent").
       launchedThreads: (creators) => launchedThreadsIn({
@@ -1072,7 +1072,7 @@ export class MmsProfileServices {
         if (this.orchestrator.mcpToolHost().botRole?.(id)) return false
         return !(this.threads.getThread(id)?.localOnly && !this.threads.getThread(caller)?.localOnly)
       }), from, threadId, runId),
-      pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
+      pullRequestState: (repo, number, fresh) => this.wakePullRequestState(repo, number, fresh),
       personLastWroteAt: (threadId) => [...this.orchestrator.visibleMessagesWithoutLoading(threadId)].reverse().find((message) => !message.hidden && isPersonMessage(message))?.timestamp,
       threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
     })
@@ -1789,7 +1789,10 @@ export class MmsProfileServices {
         const run = this.runEngine.listRuns(id, { limit: 1 })[0]
         return run ? { status: run.status, endedAt: run.completedAt } : undefined
       },
-      currentRun: (id) => (this.runEngine.getActiveRun(id) ?? this.runEngine.store.getPausedRun(id) ?? this.runEngine.store.listQueuedRuns(id)[0])?.runId,
+      // A turn still saving a run that already ended holds that run, not the message queued behind it (which may be
+      // taken back): a wake set then waits for the run it saw end.
+      currentRun: (id) => (this.runEngine.getActiveRun(id) ?? this.runEngine.store.getPausedRun(id))?.runId
+        ?? this.orchestrator.activeTurnRunId(id) ?? this.runEngine.store.listQueuedRuns(id)[0]?.runId,
       run: (id, runId) => {
         const run = this.runEngine.store.getRun(runId)
         return run && run.threadId === id ? { status: run.status, endedAt: run.completedAt, ended: TERMINAL_RUN_STATUSES.has(run.status) } : undefined
@@ -1797,13 +1800,16 @@ export class MmsProfileServices {
     }
   }
 
-  /** A pull request a wake waits on, read through the first of the person's projects whose repository it is. */
-  private wakePullRequestState(repo: string, number: number): ReturnType<typeof pullRequestStateOf> {
+  /**
+   * A pull request a wake waits on, read through the first of the person's projects whose repository it is. `fresh`: a
+   * wake's read from its deadline on, which takes no cached value or read in flight from before the deadline.
+   */
+  private wakePullRequestState(repo: string, number: number, fresh?: { notBefore: number }): ReturnType<typeof pullRequestStateOf> {
     return pullRequestStateOf({
       folders: () => this.projects.listProjects().map((project) => project.path),
       repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
-      pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
-    }, repo, number)
+      pullRequest: (folder, n, read) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false, ...(read ? { notBefore: read.notBefore } : {}) })
+    }, repo, number, fresh)
   }
 
   /** Why a thread is not idle for storage cleanup, or undefined. Looks only at what is already loaded. */

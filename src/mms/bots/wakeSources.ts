@@ -21,7 +21,10 @@ export interface WakeThreadDeps {
   working(threadId: string): boolean
   /** The thread's newest run. */
   lastRun(threadId: string): { status: string; endedAt?: string | null } | undefined
-  /** The run the thread works on now (live, paused, or the first waiting its turn); undefined when none. */
+  /**
+   * The run the thread works on now (live, paused, the one its turn still saves though it ended, or the first waiting
+   * its turn); undefined when none.
+   */
   currentRun?(threadId: string): string | undefined
   /** One run of the thread, and whether it has ended; undefined when it is unknown. */
   run?(threadId: string, runId: string): { status: string; endedAt?: string | null; ended: boolean } | undefined
@@ -66,15 +69,15 @@ export interface PullRequestStateDeps {
   folders(): string[]
   /** "owner/name" of a folder's repository (its code host's identity); throws when it has none. */
   repository(folder: string): Promise<string>
-  /** A pull request of the folder's repository: its state and title. */
-  pullRequest(folder: string, number: number): Promise<WakePullRequestState>
+  /** A pull request of the folder's repository: its state and title; with `notBefore`, as read from then on. */
+  pullRequest(folder: string, number: number, fresh?: { notBefore: number }): Promise<WakePullRequestState>
 }
 
 /**
  * A pull request's state, read through the first of the owner's projects whose repository is `repo` (compared without
  * case, as GitHub names them). `none` when no project is that repository; `problem` when the read failed.
  */
-export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: string, number: number): Promise<WakePullRequestState | { none: true } | { problem: string }> {
+export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: string, number: number, fresh?: { notBefore: number }): Promise<WakePullRequestState | { none: true } | { problem: string }> {
   const wanted = repo.trim().toLowerCase()
   for (const folder of deps.folders()) {
     let name: string
@@ -85,7 +88,7 @@ export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: strin
     }
     if (name.toLowerCase() !== wanted) continue
     try {
-      const read = await deps.pullRequest(folder, number)
+      const read = await deps.pullRequest(folder, number, fresh)
       return { state: read.state, ...(read.title ? { title: read.title } : {}), ...(read.headSha ? { headSha: read.headSha } : {}), ...(read.checkRuns ? { checkRuns: read.checkRuns } : {}), ...(read.reviews ? { reviews: read.reviews } : {}), ...(read.mergedAt ? { mergedAt: read.mergedAt } : {}), ...(read.closedAt ? { closedAt: read.closedAt } : {}) }
     } catch (error) {
       return { problem: error instanceof Error ? error.message : String(error) }

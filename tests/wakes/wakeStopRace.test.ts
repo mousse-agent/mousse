@@ -8,9 +8,10 @@
  * request is still being read; a slow read spans a later wake's deadline (the merge before it, or after it, or with no
  * time), or the next tick; a tick passes a stale time; checks overlap; the store fails to fire one wake, or fails after
  * firing it; the poll closes mid-read. At the deadline: the pull request merged after the last read and before the
- * deadline, with no read under way (it fires), or the last read fails (it gives up, saying so); one read shows a review
- * before the deadline and a merge after it (the review fires). A read that never answers frees the wakes behind it. A
- * thread's run ended before the wake waiting on it was stored (it fires at the next check).
+ * deadline, with no read under way (it fires), or the last read fails (it gives up, saying so, even when its store
+ * fails to take that the first time); one read shows a review before the deadline and a merge after it (the review
+ * fires). At a restart, wakes past their deadlines are read one at a time. A read that never answers frees the wakes
+ * behind it. A thread's run ended before the wake waiting on it was stored (it fires at the next check).
  */
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -44,6 +45,8 @@ let threadState: WakeThreadState
 /** How the thread both kinds of wake wait on stands, for a wake on run `runId`: `threadState` unless a test says. */
 let seeThread: (runId?: string) => WakeThreadState
 let posts: Array<{ threadId: string; payload: ThreadWakePayload; key: string }>
+/** How many of the next posts to a thread's inbox fail. */
+let failPosts: number
 let threadWakes: ThreadWakes
 /** The thread wake-ups' armed timer: the daemon's tick. */
 let tick: (() => void) | undefined
@@ -54,14 +57,26 @@ beforeEach(async () => {
   threadState = { state: 'running', title: 'Port the parser' }
   seeThread = () => threadState
   posts = []
+  failPosts = 0
   f = botFixture()
   f.host.pullRequestState = (repo, number) => prRead(repo, number)
   f.host.wakeThread = (_from, _threadId, runId) => seeThread(runId)
   await f.bots.reconcileOnStartup()
   botId = (await createBot(f, { name: 'Pip', reply: 'Hello.' })).botId
-  threadWakes = new ThreadWakes({
+  threadWakes = newThreadWakes()
+})
+
+/** The thread wake-ups kept in `thread-wakes.json` in `dir`, as the daemon starts them. */
+function newThreadWakes(): ThreadWakes {
+  return new ThreadWakes({
     file: join(dir, 'thread-wakes.json'),
-    post: (threadId, payload, key) => { posts.push({ threadId, payload, key }) },
+    post: (threadId, payload, key) => {
+      if (failPosts > 0) {
+        failPosts -= 1
+        throw new Error('the inbox could not be written')
+      }
+      posts.push({ threadId, payload, key })
+    },
     threadState: (_from, _threadId, runId) => seeThread(runId),
     pullRequestState: (repo, number) => prRead(repo, number),
     personLastWroteAt: () => undefined,
@@ -73,7 +88,7 @@ beforeEach(async () => {
     },
     clearTimer: () => { tick = undefined }
   })
-})
+}
 
 afterEach(() => {
   threadWakes.close()
@@ -299,7 +314,7 @@ describe('a slow pull request read holds nothing else up', () => {
     expect(count[12]).toBe(2)
   })
 
-  it('overlapping checks: one that ends never frees a wake a later check is reading, so it is never read twice at once', async () => {
+  it('overlapping checks: a later check\'s reads wait their turn, one that ends never frees a wake a later check holds, and none is read twice at once', async () => {
     await botWakes([
       { brief: 'Ship once merged.', event: { kind: 'pr', repo: 'acme/app', number: 12 } },
       { brief: 'Ship the hotfix once merged.', event: { kind: 'pr', repo: 'acme/app', number: 13 } }
@@ -323,14 +338,16 @@ describe('a slow pull request read holds nothing else up', () => {
     f.clock.now += 3 * 60_000
     const a = f.bots.checkWakeEvents(new Date(f.clock.now))
     await settle()
-    // Check B, three minutes on: #12 is due again and its read is held; #13 is still A's.
+    // Check B, three minutes on: #12 is due again, and its read waits behind A's; #13 is still A's.
     f.clock.now += 3 * 60_000
     const b = f.bots.checkWakeEvents(new Date(f.clock.now))
     await settle()
-    expect(count).toEqual({ 12: 2, 13: 1 })
-    // A ends; B still reads #12.
+    expect(count).toEqual({ 12: 1, 13: 1 })
+    // A ends; B reads #12 now, and its read is held.
     first.resolve({ state: 'open', title: 'Hotfix' })
     await a
+    await settle()
+    expect(count).toEqual({ 12: 2, 13: 1 })
     f.clock.now += 3 * 60_000
     const c = f.bots.checkWakeEvents(new Date(f.clock.now))
     await settle()
@@ -456,6 +473,36 @@ describe('at its deadline a wake on a pull request is read once more', () => {
     expect(posts[0]!.payload.text).toContain('couldn\'t be read')
   })
 
+  it('a thread\'s wake: its last read fails and its inbox can\'t be written then: the next tick still says the pull request couldn\'t be read', async () => {
+    const { setAt, set } = await threadWakeReadAtFive()
+    const count = reads({ 13: async () => ({ problem: 'gh: network unreachable' }) })
+    failPosts = 1
+    f.clock.now = setAt + 6 * 60_000
+    tick!()
+    await settle()
+    expect(posts).toEqual([])
+    f.clock.now += 30_000
+    tick!()
+    await settle()
+    expect(count[13]).toBe(1)
+    expect(posts.map((post) => [post.key, post.payload.label])).toEqual([[`thread-wake:${set.wakeId}`, wakeFiredLabel({ kind: 'ended', reason: 'expired_unread' })]])
+  })
+
+  it('a bot\'s wake: its last read fails and bots.db refuses the write then: the next pass still says the pull request couldn\'t be read', async () => {
+    const setAt = f.clock.now
+    const [short] = await botWakes([{ brief: 'Ship the hotfix once merged.', event: { kind: 'pr', repo: 'acme/app', number: 13 }, hours: 0.1 }])
+    reads({ 13: async () => ({ problem: 'gh: network unreachable' }) })
+    vi.spyOn(f.store, 'fireWake').mockImplementationOnce(() => { throw new Error('database is locked') })
+    f.clock.now = setAt + 6 * 60_000
+    await f.bots.deliverDueReminders(new Date(f.clock.now))
+    await settle()
+    expect(f.store.reminder(short!.wakeId)).toMatchObject({ status: 'waiting', fired: null })
+    f.clock.now += 2 * 60_000
+    await f.bots.deliverDueReminders(new Date(f.clock.now))
+    await flush()
+    expect(f.store.reminder(short!.wakeId)).toMatchObject({ status: 'delivered', fired: { kind: 'ended', reason: 'expired_unread' } })
+  })
+
   it('a bot\'s wake: the pull request merged after its last read and before the deadline, and no read is under way: it fires as merged', async () => {
     const setAt = f.clock.now
     const [short] = await botWakes([{ brief: 'Ship the hotfix once merged.', event: { kind: 'pr', repo: 'acme/app', number: 13 }, hours: 0.1 }])
@@ -489,6 +536,39 @@ describe('at its deadline a wake on a pull request is read once more', () => {
     read.resolve({ state: 'merged', title: 'Hotfix', mergedAt: new Date(setAt + 6.5 * 60_000).toISOString(), reviews: [{ id: 'rv1', state: 'approved', author: 'kim', submittedAt: new Date(setAt + 5.5 * 60_000).toISOString() }] })
     await settle()
     expect(posts.map((post) => [post.key, post.payload.label])).toEqual([[`thread-wake:${set.wakeId}`, wakeFiredLabel({ kind: 'pr', repo: 'acme/app', number: 13, state: 'review', reviewState: 'approved', reviewer: 'kim' })]])
+  })
+})
+
+describe('wakes on pull requests past their deadlines at a restart', () => {
+  it('are read one at a time, each once, and each gives up', async () => {
+    threadWakes.start()
+    const setAt = f.clock.now
+    for (const [thread, number] of [['t1', 12], ['t2', 13], ['t3', 14]] as const) {
+      await threadWakes.add(thread, { brief: 'Ship it once merged.', event: { kind: 'pr', repo: 'acme/app', number }, hours: 0.1 })
+    }
+    threadWakes.close()
+    f.clock.now = setAt + 60 * 60_000
+    const answers: Array<() => void> = []
+    let live = 0
+    let most = 0
+    const held = () => {
+      live += 1
+      most = Math.max(most, live)
+      return new Promise<PrRead>((resolve) => { answers.push(() => { live -= 1; resolve({ state: 'open', title: 'Ship it' }) }) })
+    }
+    const count = reads({ 12: held, 13: held, 14: held })
+    // Starting looks at once.
+    threadWakes = newThreadWakes()
+    threadWakes.start()
+    for (let i = 0; i < 3; i++) {
+      await settle()
+      expect(live).toBe(1)
+      answers[i]!()
+    }
+    await settle()
+    expect(most).toBe(1)
+    expect(count).toEqual({ 12: 1, 13: 1, 14: 1 })
+    expect(posts.map((post) => post.payload.label)).toEqual(Array(3).fill(wakeFiredLabel({ kind: 'ended', reason: 'expired' })))
   })
 })
 
