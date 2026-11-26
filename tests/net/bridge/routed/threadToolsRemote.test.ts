@@ -550,6 +550,26 @@ describe('thread_list, thread_search and any thread of an allowed computer (issu
     })])
   }, 120_000)
 
+  // A computer there leaves out system rows with no text (tool markers): a span of them is no reason to stop reading back.
+  it('reads the last turn back to its prompt across spans of system rows with no text, the newest messages among them', async () => {
+    const { tool } = await launcher()
+    const theirs = t.owner.threads.createThread(`Markers ${++seq}`, undefined, undefined, { started: true } as never)
+    const at = new Date().toISOString()
+    const markers = (count: number) => Array.from({ length: count }, () => ({ role: 'system', content: '' }))
+    // The prompt and a step, 130 markers (an empty span), the answer, then 125 markers: the newest 120 hold no row.
+    const transcript = [{ role: 'user', content: 'Port the whole parser' }, { role: 'assistant', content: 'Step 0' }, ...markers(130), { role: 'assistant', content: 'Ported.' }, ...markers(125)]
+      .map((message, index) => ({ id: `m${index}`, timestamp: at, ...message }))
+    t.owner.threads.saveThreadData(theirs.id, { ...t.owner.threads.loadThreadData(theirs.id), messages: transcript as never })
+
+    const recent = await tool('thread_read', { threadId: t.qualified(theirs.id), view: 'recent', turns: 1 })
+    expect(recent.isError, recent.text.slice(0, 300)).toBeUndefined()
+    expect(recent.body).toMatchObject({ total: 258 })
+    expect(recent.body.turns).toEqual([expect.objectContaining({
+      prompt: expect.objectContaining({ index: 0, text: 'Port the whole parser' }),
+      answer: expect.objectContaining({ index: 132, text: 'Ported.' })
+    })])
+  }, 120_000)
+
   it('with the default reach (threads they started), a send to a person\'s thread is refused by that computer, once, and says where it is changed', async () => {
     standInForTurns()
     const { tool } = await launcher()

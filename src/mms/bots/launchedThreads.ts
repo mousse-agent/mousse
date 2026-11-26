@@ -7,7 +7,7 @@ import { listPendingQueue } from '../queue/ThreadMessageQueue'
 import type { ChatMessage, PendingUserQuestions, QueuedMessage, ThreadLineage } from '../../shared/types'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { BotThreadAsk } from '../../shared/bots/personal/jobs'
-import type { JobThreadView } from './jobs'
+import { jobResultOf, type JobThreadView } from './jobs'
 
 /** What the launched-thread lookup reads of a thread: its title, project, times and the thread that started it. */
 export interface LaunchedThreadMeta {
@@ -220,19 +220,6 @@ export function launchedThreadsIn(profile: {
   })
 }
 
-/**
- * The reply a thread's turn ended on: its last message to or from the person, when that is the agent's text; undefined
- * when the turn ended without one (the person's message is the last).
- */
-export function lastReplyOf(messages: readonly ChatMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!
-    if (message.role === 'user') return undefined
-    if (message.role === 'assistant' && typeof message.content === 'string' && message.content.trim()) return message.content
-  }
-  return undefined
-}
-
 /** A request the thread waits on, as its job view lists it: an approval without the "Always" option, which is the owner's. */
 function threadAsk(pending: PendingUserQuestions): BotThreadAsk {
   const entry = withoutStandingRules(pending)
@@ -250,7 +237,10 @@ function threadAsk(pending: PendingUserQuestions): BotThreadAsk {
  */
 export function jobThreadIn(profile: Parameters<typeof launchedThreadsIn>[0] & {
   trashed?(threadId: string): boolean
-  result?(threadId: string, runId: string): string | undefined
+  /** What a run kept as its result (`readRunResultText`), when it kept one. */
+  recorded?(threadId: string, runId: string): string | undefined
+  /** The thread's transcript, for the reply its last run ended on (`jobResultOf`). */
+  messages?(threadId: string): readonly ChatMessage[]
   /** The thread's own requests it waits on (not its subagents'): `UserQuestionService.listPendingForThread`. */
   pending?(threadId: string): ReadonlyArray<PendingUserQuestions & { threadId: string }>
 }, threadId: string): JobThreadView {
@@ -266,7 +256,8 @@ export function jobThreadIn(profile: Parameters<typeof launchedThreadsIn>[0] & {
   if (!listed) return { status: 'idle', ...(title ? { title } : {}) }
   const ended = listed.status === 'done' || listed.status === 'failed' || listed.status === 'stopped'
   const run = ended ? profile.engine.store.listRuns(threadId, { limit: 1 })[0] : undefined
-  const result = run ? profile.result?.(threadId, run.runId) : undefined
+  // The reply that run ended on, by its id, never a progress message or an earlier turn's reply (`jobResultOf`).
+  const result = run ? jobResultOf(profile.recorded?.(threadId, run.runId), profile.messages?.(threadId) ?? [], run.runId) : undefined
   const asks = listed.status === 'needs_input' ? profile.pending?.(threadId).map(threadAsk) : undefined
   return { status: listed.status, ...(title ? { title } : {}), ...(result?.trim() ? { result } : {}), ...(asks?.length ? { asks } : {}) }
 }
