@@ -28,6 +28,11 @@ export interface BotChipCall {
   input: unknown
   /** An app tool's result, when it returned (outcome chips). */
   result?: unknown
+  /**
+   * The provider's own storage, as its gate decided from real paths (`NormalisedCall.own`): Claude Code reading back a
+   * large tool result it saved under its home. Its plumbing, not the bot's work, so it shows and settles to no chip.
+   */
+  own?: true
 }
 
 /** What a call does, for its words and how it rolls up. */
@@ -99,16 +104,6 @@ function folderName(tool: string, path: string, ctx: BotChipContext): string | u
   return parts(folder).pop() ?? folder
 }
 
-/**
- * Claude Code saves a tool's large output to `<its home>/projects/<folder>/<session>/tool-results/<name>.txt` and reads
- * it back: its own plumbing, not files the bot works on, so it shows no chip.
- */
-function isToolResultSpill(path: string): boolean {
-  const segments = parts(path)
-  const at = segments.lastIndexOf('tool-results')
-  return at >= 3 && at >= segments.length - 2 && segments[at - 3] === 'projects'
-}
-
 function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classified | null {
   const writes = WRITE_TOOLS.has(tool)
   const path = pathOf(input)
@@ -119,7 +114,6 @@ function classifyFile(tool: string, input: unknown, ctx: BotChipContext): Classi
     if (writes) return { kind: 'save', icon: 'edit', live: 'saving a file', ...(parts(path).length > parts(ctx.filesFolder!).length ? { detail: parts(path).pop() } : {}) }
     return { kind: 'read', icon: 'read', live: 'reading files', detail: 'saved files' }
   }
-  if (isToolResultSpill(path)) return null
   const detail = folderName(tool, path, ctx)
   return writes
     ? { kind: 'change', icon: 'edit', live: 'changing files', ...(detail ? { detail } : {}) }
@@ -501,6 +495,7 @@ export function rollUpChips(calls: readonly BotChipCall[], ctx: BotChipContext =
   const order: Array<{ key: string; chip?: BotChip }> = []
   const groups = new Map<string, { kind: ChipKind; icon: BotChipIcon; classified: Classified[]; calls: BotChipCall[] }>()
   for (const call of calls) {
+    if (call.own) continue
     const classified = classify(call.tool, call.input, ctx)
     if (!classified || QUIET_KINDS.has(classified.kind)) continue
     if (OUTCOME_KINDS.has(classified.kind)) {
