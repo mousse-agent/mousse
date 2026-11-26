@@ -96,7 +96,7 @@ function scriptedAgent(script: AgentScript) {
   return { ...agentApp, calls, cancels }
 }
 
-function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean; formElicitation?: boolean; backgroundWork?: boolean; continuationSettleMs?: number; continuationQuietMs?: number; wakeGraceMs?: number } = {}) {
+function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { closeSessions?: boolean; cancelDeadlineMs?: number; promptSilenceMs?: number; clientFs?: boolean; formElicitation?: boolean; backgroundWork?: boolean; continuationSettleMs?: number; continuationQuietMs?: number; wakeGraceMs?: number; idleCloseMs?: number } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   let models: LlmModelOption[] = []
   const questions = new UserQuestionService()
@@ -113,6 +113,7 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
     ...(options.continuationSettleMs !== undefined ? { continuationSettleMs: options.continuationSettleMs } : {}),
     ...(options.continuationQuietMs !== undefined ? { continuationQuietMs: options.continuationQuietMs } : {}),
     ...(options.wakeGraceMs !== undefined ? { wakeGraceMs: options.wakeGraceMs } : {}),
+    ...(options.idleCloseMs !== undefined ? { idleCloseMs: options.idleCloseMs } : {}),
     store: {
       saved: (threadId) => saved.get(threadId),
       setSaved: (threadId, value) => (value ? saved.set(threadId, value) : saved.delete(threadId)),
@@ -1991,5 +1992,91 @@ describe('ACP thought_level reasoning options', () => {
       { configId: 'model', value: 'gemini-4-neon' },
       { configId: 'thought_level', value: 'low' }
     ])
+  })
+})
+
+describe('an idle thread’s agent process', () => {
+  const IDLE_MS = 80
+
+  /**
+   * An agent that can reopen its saved session (`session/load`). `prompt` runs each prompt; the default answers at once.
+   * The rest of the calls are recorded, per process.
+   */
+  function loadingAgent(prompt?: (text: string, client: { notify: (method: string, params: unknown) => Promise<void> }) => Promise<void>) {
+    const calls: string[] = []
+    const agent = inProcessAgent((app: AgentApp) => {
+      app
+        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: true }, authMethods: [] }))
+        .onRequest(methods.agent.session.new, () => { calls.push('session/new'); return { sessionId: 'native-1', ...DEFAULT_SESSION } as never })
+        .onRequest(methods.agent.session.load, (c) => { calls.push(`session/load ${c.params.sessionId}`); return DEFAULT_SESSION as never })
+        .onRequest(methods.agent.session.prompt, async (c) => {
+          const text = (c.params.prompt[0] as { text: string }).text
+          calls.push(`session/prompt ${text}`)
+          await prompt?.(text, c.client as never)
+          return { stopReason: 'end_turn' as const }
+        })
+    })
+    return { ...agent, calls }
+  }
+
+  const turn = (sessions: AcpSessions, prompt: string, history?: string) =>
+    sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', permissionMode: 'full', prompt, onText: vi.fn(), ...(history !== undefined ? { history } : {}) })
+
+  it('closes once it has been idle, and the next turn reopens the same session on a new process', async () => {
+    const agent = loadingAgent()
+    const { sessions, saved } = core(agent.connect, { idleCloseMs: IDLE_MS })
+
+    await turn(sessions, 'first')
+    sessions.commitConversation('t', 'h1')
+    expect(agent.connections[0].killed).toBe(false)
+
+    await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+    expect(saved.get('t')?.sessionId).toBe('native-1')
+
+    await turn(sessions, 'second', 'h1')
+    expect(agent.connections).toHaveLength(2)
+    expect(agent.calls).toEqual(['session/new', 'session/prompt first', 'session/load native-1', 'session/prompt second'])
+  })
+
+  it('a turn started before the idle window ends keeps the process, and the window counts from that turn’s end', async () => {
+    let release!: () => void
+    const agent = loadingAgent(async (text) => { if (text === 'long') await new Promise<void>((resolve) => { release = resolve }) })
+    const { sessions } = core(agent.connect, { idleCloseMs: IDLE_MS })
+
+    await turn(sessions, 'first')
+    sessions.commitConversation('t', 'h1')
+    const running = turn(sessions, 'long', 'h1')
+    await vi.waitFor(() => expect(agent.calls).toContain('session/prompt long'))
+    await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 3))
+    expect(agent.connections[0].killed).toBe(false)
+
+    release()
+    await running
+    expect(agent.connections).toHaveLength(1)
+    await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
+  })
+
+  it('stays open while background work runs, and closes an idle window after that work ends', async () => {
+    let client!: { notify: (method: string, params: unknown) => Promise<void> }
+    const agent = loadingAgent(async (_text, agentClient) => {
+      client = agentClient
+      await agentClient.notify(methods.client.session.update, {
+        sessionId: 'native-1',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'cmd-1', name: 'run_command', title: 'Run verify', status: 'in_progress', rawInput: { CommandLine: 'node scripts/verify.mjs', WaitMsBeforeAsync: 500 } }
+      })
+    })
+    const { sessions } = core(agent.connect, { idleCloseMs: IDLE_MS, backgroundWork: true, wakeGraceMs: 20 })
+    const background: boolean[] = []
+    sessions.setLiveHost({ backgroundWork: (_threadId, active) => background.push(active) })
+
+    await turn(sessions, 'run verify')
+    expect(background).toEqual([true])
+    await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 3))
+    expect(agent.connections[0].killed).toBe(false)
+
+    await client.notify(methods.client.session.update, { sessionId: 'native-1', update: { sessionUpdate: 'tool_call_update', toolCallId: 'cmd-1', status: 'completed' } })
+    await vi.waitFor(() => expect(background).toEqual([true, false]))
+    expect(agent.connections[0].killed).toBe(false)
+    await vi.waitFor(() => expect(agent.connections[0].killed).toBe(true))
   })
 })

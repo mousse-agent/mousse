@@ -12,6 +12,7 @@ import { harnessAppError } from '../../../shared/harness/types'
 import { compareVersions } from '../../../shared/net/version'
 import type { ContinuationInfo, LiveProcessHost } from '../driver'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
+import { idleCloseFromEnv } from '../idleCloseFromEnv'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
 import { ACP_TERMINAL_METHODS, closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
@@ -181,13 +182,19 @@ export const CONTINUATION_QUIET_MS = 10_000
 export const WAKE_GRACE_MS = 30_000
 /** Safety cap so a forgotten or silent background task cannot hold Waiting forever. */
 export const MAX_BACKGROUND_MS = 60 * 60_000
+/**
+ * How long a thread's agent process with no turn, background work or reactive continuation is kept before it is
+ * closed. Its saved session stays, so the next turn starts a new process and reopens it. `MOUSSE_ACP_IDLE_CLOSE_MS` sets it.
+ */
+export const ACP_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_ACP_IDLE_CLOSE_MS', 15 * 60_000)
 
 /** Out-of-turn session updates that indicate a reactive continuation turn has started. */
 const CONTINUATION_START_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'plan'])
 
 /**
  * The ACP session lifecycle shared by every ACP agent: one agent process per thread, kept between
- * turns while its saved session still matches the committed history; `session/new`, or the saved
+ * turns while its saved session still matches the committed history, and closed after
+ * {@link ACP_IDLE_CLOSE_MS} idle (the saved session stays for the next turn); `session/new`, or the saved
  * session reopened (resume, or load behind the load gate); the prompt loop with steer as
  * cancel-and-restart (or a second prompt into the running one, `steersNatively`); stop through the turn's signal or a native cancel.
  */
@@ -264,6 +271,8 @@ export interface AcpProcess extends AcpConnection {
   wakeGraceTimer?: ReturnType<typeof setTimeout>
   /** Safety cap timer so background work never holds Waiting indefinitely. */
   backgroundCapTimer?: ReturnType<typeof setTimeout>
+  /** Closes the process kept for its thread once it has been idle for `ACP_IDLE_CLOSE_MS`. */
+  idleCloseTimer?: ReturnType<typeof setTimeout>
   /** Last value reported to `liveHost.backgroundWork(threadId, active)`. */
   reportedBackground?: boolean
   /** In-flight reactive continuation started by the agent between turns. */
@@ -663,6 +672,8 @@ export interface AcpSessionsOptions {
   wakeGraceMs?: number
   /** Test seam: max duration a background task holds Waiting (`MAX_BACKGROUND_MS`). */
   maxBackgroundMs?: number
+  /** Test seam: how long an idle thread's process is kept before it is closed (`ACP_IDLE_CLOSE_MS`). */
+  idleCloseMs?: number
   /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
@@ -822,6 +833,7 @@ export class AcpSessions {
           process.backgroundCapTimer = undefined
           if (!this.turning.has(process) && (!process.continuation || process.continuation.settled || process.continuation.discarded)) {
             this.clearBackgroundState(process)
+            this.armIdleClose(process)
           }
         }, capMs)
         process.backgroundCapTimer.unref?.()
@@ -835,6 +847,38 @@ export class AcpSessions {
     try {
       this.liveHost?.backgroundWork?.(threadId, active)
     } catch { /* host notification is best effort */ }
+    // The idle countdown starts again from the end of the background work.
+    if (!active && !this.turning.has(process)) this.armIdleClose(process)
+  }
+
+  /** No turn, background work or live reactive continuation on the process. */
+  private isIdle(process: AcpProcess): boolean {
+    return !this.turning.has(process) && !this.hasBackgroundWork(process) && !(process.continuation && !process.continuation.discarded)
+  }
+
+  private disarmIdleClose(process: AcpProcess): void {
+    if (process.idleCloseTimer) { clearTimeout(process.idleCloseTimer); process.idleCloseTimer = undefined }
+  }
+
+  /**
+   * (Re)starts the countdown after which the process kept for its thread closes, unless it is busy then, when the
+   * countdown starts over. The saved session is kept (as `closeIdle`), so the thread's next turn reopens it.
+   */
+  private armIdleClose(process: AcpProcess): void {
+    this.disarmIdleClose(process)
+    const threadId = process.threadId
+    if (this.stopped || !threadId || this.sessions.get(threadId) !== process || process.connection.signal.aborted) return
+    process.idleCloseTimer = setTimeout(() => {
+      process.idleCloseTimer = undefined
+      if (this.sessions.get(threadId) !== process) return
+      if (!this.isIdle(process)) {
+        this.armIdleClose(process)
+        return
+      }
+      this.close(process)
+      this.sessions.delete(threadId)
+    }, this.options.idleCloseMs ?? ACP_IDLE_CLOSE_MS)
+    process.idleCloseTimer.unref?.()
   }
 
   private clearBackgroundState(process: AcpProcess): void {
@@ -1639,6 +1683,7 @@ export class AcpSessions {
       next.botMcp = input.botAuthority ? input.mcp : undefined
       next.botToolName = input.botAuthority ? (id) => openTools.get(id)?.name : undefined
       next.botRefusals = undefined
+      this.disarmIdleClose(next)
       this.turning.add(next)
       current = next
     }
@@ -2408,6 +2453,7 @@ export class AcpSessions {
       this.turning.delete(current)
       // A bot's native command or helper may outlive its tool call. End the process tree with the turn.
       if (input.botAuthority) this.close(current)
+      else this.armIdleClose(current)
     }
   }
 
@@ -2542,7 +2588,8 @@ export class AcpSessions {
   /** Idle agent processes close now; a busy one (or one with background work) is replaced on that thread's next turn. */
   closeIdle(): void {
     for (const [threadId, active] of this.sessions) {
-      if (this.turning.has(active) || this.hasBackgroundWork(active) || (active.continuation && !active.continuation.discarded)) continue
+      if (!this.isIdle(active)) continue
+      this.disarmIdleClose(active)
       this.close(active)
       this.sessions.delete(threadId)
     }
@@ -2550,6 +2597,7 @@ export class AcpSessions {
 
   closeAll(): void {
     for (const active of this.processes) {
+      this.disarmIdleClose(active)
       this.clearBackgroundState(active)
       this.failContinuation(active, new Error(`${this.options.label} provider closed`))
       closeAcpConnection(active)
