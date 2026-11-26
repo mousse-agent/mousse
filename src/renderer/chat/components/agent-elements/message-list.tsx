@@ -994,7 +994,11 @@ function reuseTurns(previous: Turn[], next: Turn[]): Turn[] {
   return reused === next.length && next.length === previous.length ? previous : merged;
 }
 
-type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string };
+/**
+ * A tick on the prompt rail: a turn's prompt, or a message steered into its reply (`steer`, with the prompt of its
+ * turn as `turnId`). A steered message has no reply of its own, so its `responsePreview` is empty.
+ */
+type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string; steer?: boolean; turnId?: string };
 
 /**
  * What the overlay needs from a windowed list, where most prompts are not in
@@ -1002,7 +1006,8 @@ type PromptMarker = { id: string; offset: number; preview: string; responsePrevi
  */
 export type PromptMarkerLayout = {
   offsetOf: (id: string) => number | undefined;
-  scrollTo: (id: string) => void;
+  /** Settles once the row has landed; with `false` when another jump took over first. */
+  scrollTo: (id: string) => Promise<unknown> | void;
   subscribe: (listener: () => void) => () => void;
 };
 
@@ -1011,7 +1016,7 @@ export type PromptMarkerLayout = {
 const PROMPT_RAIL_WIDTH = 40;
 const PROMPT_RAIL_EDGE = 12;
 const PROMPT_RAIL_GAP = 8;
-/** The rail shows once the thread has this many prompts to move between, however short the thread is. */
+/** The rail shows once the thread has this many messages to move between (prompts and steers), however short the thread is. */
 const PROMPT_RAIL_MIN_PROMPTS = 2;
 
 /**
@@ -1051,6 +1056,23 @@ function markerPreview(turn: Turn): { preview: string; responsePreview: string }
     markerPreviews.set(turn, cached);
   }
   return cached;
+}
+
+/** A steered message's tick tooltip text, kept per message object. */
+const steerPreviews = new WeakMap<UIMessage, string>();
+
+function steerPreview(message: UIMessage): string {
+  let cached = steerPreviews.get(message);
+  if (cached === undefined) {
+    cached = cappedWords(markdownPreviewText(getTextFromParts(message.parts ?? [], "\n")), 10);
+    steerPreviews.set(message, cached);
+  }
+  return cached;
+}
+
+/** The messages steered into a turn's reply, in the order sent. */
+function steeredMessagesOf(turn: Turn): UIMessage[] {
+  return turn.assistantMsgs.flatMap((message) => readSteerGroup(message) ?? []);
 }
 
 /**
@@ -1103,11 +1125,13 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   );
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
-  // The prompts the ticks stand for. A streamed delta leaves it unchanged, so it does not place the ticks again.
+  // The messages the ticks stand for. A streamed delta leaves it unchanged, so it does not place the ticks again.
   const promptKey = useMemo(
     () =>
       turns
-        .map((turn) => (turn.userMsg && !isResultNotice(turn.userMsg) ? turn.userMsg.id : ""))
+        .map((turn) =>
+          [turn.userMsg && !isResultNotice(turn.userMsg) ? turn.userMsg.id : "", ...steeredMessagesOf(turn).map((message) => message.id)].join(" "),
+        )
         .join("\n"),
     [turns],
   );
@@ -1155,26 +1179,38 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           : (id: string) => id.replace(/["\\]/g, "\\$&");
       const next: PromptMarker[] = [];
       const containerRect = container.getBoundingClientRect();
+      // Rect-based so nested `relative` wrappers / transforms can't skew it.
+      const measured = (id: string) => {
+        const target = content.querySelector(`[data-prompt-id="${escapeId(id)}"]`);
+        return target instanceof HTMLElement
+          ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
+          : undefined;
+      };
+      const previous = (id: string) => markerPositionsRef.current.find((marker) => marker.id === id)?.offset;
       for (const turn of turnsRef.current) {
         const userMsg = turn.userMsg;
-        // A message that delivers subagent results is not a prompt the user wrote.
-        if (!userMsg || isResultNotice(userMsg)) continue;
-        const target: Element | null = layout
-          ? null
-          : content.querySelector(`[data-prompt-id="${escapeId(userMsg.id)}"]`);
-        // Rect-based so nested `relative` wrappers / transforms can't skew it.
-        const y = layout
-          ? layout.offsetOf(userMsg.id) ?? Infinity
-          : target instanceof HTMLElement
-            ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
-            : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
-        const { preview, responsePreview } = markerPreview(turn);
-        next.push({
-          id: userMsg.id,
-          offset: y,
-          preview: preview || "Your prompt",
-          responsePreview: responsePreview || "No response yet",
-        });
+        // A message that delivers subagent results is not a prompt the user wrote; messages steered into its reply are.
+        if (userMsg && !isResultNotice(userMsg)) {
+          const { preview, responsePreview } = markerPreview(turn);
+          next.push({
+            id: userMsg.id,
+            offset: (layout ? layout.offsetOf(userMsg.id) : measured(userMsg.id) ?? previous(userMsg.id)) ?? Infinity,
+            preview: preview || "Your prompt",
+            responsePreview: responsePreview || "No response yet",
+          });
+        }
+        for (const steered of steeredMessagesOf(turn)) {
+          // A steered message sits inside its turn's row: a windowed list knows only where that row starts.
+          const y = measured(steered.id) ?? (layout ? (userMsg ? layout.offsetOf(userMsg.id) : undefined) : previous(steered.id));
+          next.push({
+            id: steered.id,
+            offset: y ?? Infinity,
+            preview: steerPreview(steered) || "Your message",
+            responsePreview: "",
+            steer: true,
+            turnId: userMsg?.id,
+          });
+        }
       }
       markerPositionsRef.current = next;
       markerOffsetsRef.current = next.map((marker) => marker.offset);
@@ -1193,7 +1229,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
             (m, i) =>
               m.id === next[i]!.id &&
               m.preview === next[i]!.preview &&
-              m.responsePreview === next[i]!.responsePreview,
+              m.responsePreview === next[i]!.responsePreview &&
+              m.turnId === next[i]!.turnId,
           )
         ) {
           return prev;
@@ -1308,12 +1345,26 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       const targetTop = Math.max(0, y - 16);
       const start = container.scrollTop;
       const distance = targetTop - start;
+      const steer = markerPositionsRef.current.find((marker) => marker.id === id && marker.steer);
       // A prompt that is not mounted, or is far away, lands instantly and is
       // corrected against the real DOM; gliding across rows that are still
       // being measured would aim at an estimate.
       if (layout && (!(el instanceof HTMLElement) || !shouldGlide(distance, container.clientHeight))) {
         cancelScroll();
-        layout.scrollTo(id);
+        if (!steer) {
+          layout.scrollTo(id);
+          return;
+        }
+        // A steered message sits inside its turn's row: land the row, then the message in it.
+        if (!steer.turnId) return;
+        void Promise.resolve(layout.scrollTo(steer.turnId)).then((settled) => {
+          // `false`: another jump took over before the row landed.
+          if (settled === false) return;
+          const landed = content.querySelector(`[data-prompt-id="${escapeId}"]`);
+          if (!(landed instanceof HTMLElement)) return;
+          markProgrammatic();
+          container.scrollTop = Math.max(0, landed.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 16);
+        });
         return;
       }
       if (Math.abs(distance) < 4) {
@@ -1341,8 +1392,9 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           scrollAnimRef.current = requestAnimationFrame(step);
         } else {
           scrollAnimRef.current = 0;
-          // Rows measured on the way may have moved the target.
-          layout?.scrollTo(id);
+          // Rows measured on the way may have moved the target (a steered message's row is its turn's,
+          // so landing that row would move off the message).
+          if (!steer) layout?.scrollTo(id);
         }
       };
       scrollAnimRef.current = requestAnimationFrame(step);
@@ -1362,6 +1414,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   if (markers.length === 0 || railLeft === null) return null;
   const previewMarker = markers.find((marker) => marker.id === previewId);
   const highlightedIndex = markers.findIndex((marker) => marker.id === previewId);
+  let promptNumber = 0;
 
   return (
     <div
@@ -1383,11 +1436,15 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       <div className="chat-prompt-column">
       {onFind && <FindRailButton onOpen={onFind} />}
       <nav className="chat-prompt-ticks" aria-label="Conversation turns">
-      {markers.map((marker, index) => (
+      {markers.map((marker, index) => {
+        // Prompts count among themselves; a steered message's tick is shorter, as it is part of its prompt's turn.
+        if (!marker.steer) promptNumber += 1;
+        const width = highlightedIndex < 0 ? 12 : Math.max(12, 36 - Math.abs(index - highlightedIndex) * 8);
+        return (
         <button
           key={marker.id}
           type="button"
-          aria-label={`Jump to prompt ${index + 1}: ${marker.preview}`}
+          aria-label={marker.steer ? `Jump to steered message: ${marker.preview}` : `Jump to prompt ${promptNumber}: ${marker.preview}`}
           aria-current={marker.id === activeId ? "location" : undefined}
           data-visible={visiblePromptIds.has(marker.id) ? "true" : undefined}
           data-prompt-marker-id={marker.id}
@@ -1399,15 +1456,17 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           }}
           className="chat-prompt-tick"
         >
-          <span style={{ width: `${highlightedIndex < 0 ? 12 : Math.max(12, 36 - Math.abs(index - highlightedIndex) * 8)}px` }} />
+          <span style={{ width: `${marker.steer ? Math.round((width * 2) / 3) : width}px` }} />
         </button>
-      ))}
+        );
+      })}
       </nav>
       </div>
       {previewMarker && (
         <div className="chat-prompt-preview" aria-hidden="true">
           <strong>{previewMarker.preview}</strong>
-          <p>{previewMarker.responsePreview}</p>
+          {/* A steered message has no reply of its own: its card is the message alone. */}
+          {previewMarker.responsePreview && <p>{previewMarker.responsePreview}</p>}
         </div>
       )}
     </div>
@@ -2071,7 +2130,7 @@ export const MessageList = memo(function MessageList({
                 turnKeyAliasRef.current.get(id) ?? id,
               ),
             scrollTo: (id: string) =>
-              void virtualizationRef.current?.scrollToKey(
+              virtualizationRef.current?.scrollToKey(
                 turnKeyAliasRef.current.get(id) ?? id,
                 { align: "start", offset: 16 },
               ),
