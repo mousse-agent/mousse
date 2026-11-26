@@ -8967,7 +8967,7 @@ export class OrchestratorService extends EventEmitter {
     // Its thread there expires with this thread's root (issue #685).
     this.trackRemoteExpiry(accepted.childThreadId, computer.node)
     if (accepted.replayed) return { ...value, replayed: true, note: 'Started. Mousse sends you the result when it finishes; end your turn.' }
-    this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt)
+    this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt, this.parentOrigin(parentThreadId, parentRunId))
     const launched = await remote.launch(accepted.delegationId)
     if (launched.ok === false) {
       // Nothing runs there: the task ends here without a notice, and its title is free again.
@@ -9328,7 +9328,7 @@ export class OrchestratorService extends EventEmitter {
     if (!delegation) throw new Error('The follow-up was not recorded as a task')
     if (base?.node) this.trackRemoteExpiry(target.childThreadId, base.node)
     if (accepted.replayed) return this.followUpValue(delegation, target.title, { replayed: true })
-    this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt)
+    this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt, this.parentOrigin(parentThreadId, parentRunId))
     const launched = await remote!.launch(accepted.delegationId)
     if (launched.ok === false) {
       await engine.cancelDelegation(accepted.delegationId).catch(() => [])
@@ -9378,14 +9378,37 @@ export class OrchestratorService extends EventEmitter {
     await this.stopThread(threadId, 'time_limit', { runId, clientRequestId: `time-limit:${runId}`, byAgent: true })
   }
 
-  /** A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a model. */
-  private recordRemoteSubagentMessage(threadId: string, role: 'user' | 'assistant', content: string): void {
+  /** The parent thread as the sender of its subagent's task (`AgentOrigin`), with its title now. */
+  private parentOrigin(parentThreadId: string, parentRunId: string, body?: AgentOrigin['body']): AgentOrigin {
+    const title = this.titleOf(parentThreadId)?.trim().slice(0, AGENT_TITLE_MAX_CHARS)
+    return { kind: 'agent', threadId: parentThreadId, runId: parentRunId, ...(body ? { body } : {}), ...(title ? { title } : {}) }
+  }
+
+  /**
+   * The origin a subagent's task is stored with: its parent thread, so the chat shows the task as that agent's words
+   * ("Agent · <parent>", which opens the parent) and never as a message a person typed. Only for a turn its delegation
+   * started (`source` 'delegation': the first task, or a follow-up the parent sent, queued or not); a person's own message
+   * on a subagent's thread stays theirs. The words shown are the task, without the guidance Mousse puts before a first
+   * task; the model still reads the whole text.
+   */
+  private delegatedOrigin(source: string | undefined, runId: string | undefined, content: string): AgentOrigin | undefined {
+    if (source !== 'delegation' || !runId) return undefined
+    const delegation = this.runEngine?.delegations.getByChildRun(runId)
+    if (!delegation) return undefined
+    return this.parentOrigin(delegation.parentThreadId, delegation.parentRunId, { head: content.length - withoutSubagentPreamble(content).length, tail: 0 })
+  }
+
+  /**
+   * A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a
+   * model. What it was asked is stored as its parent agent's (`origin`), never as something a person typed.
+   */
+  private recordRemoteSubagentMessage(threadId: string, role: 'user' | 'assistant', content: string, origin?: AgentOrigin): void {
     const text = content.trim()
     if (!text || (this.threadStore && !this.threadStore.getThread(threadId))) return
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) return
     this.sessionAls.run(session, () => {
-      const msg: ChatMessage = { id: uuidv4(), role, content: text, timestamp: new Date().toISOString() }
+      const msg: ChatMessage = { id: uuidv4(), role, content: text, timestamp: new Date().toISOString(), ...(role === 'user' && origin ? { origin } : {}) }
       this.messages.push(msg)
       this.emitMessageAdded(msg)
       this.persist(true)
@@ -15385,7 +15408,7 @@ export class OrchestratorService extends EventEmitter {
             turnPermission,
             opts?.schedule,
             approvalNote,
-            opts?.agent,
+            opts?.agent ?? this.delegatedOrigin(opts?.source, opts?.runId, userContent),
             opts?.backgroundNotice,
             this.runEngine ? opts?.runId : undefined,
             opts?.settleNotice
