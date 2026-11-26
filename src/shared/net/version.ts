@@ -26,6 +26,9 @@ export function parseVersion(value: unknown): ParsedVersion | undefined {
   }
 }
 
+/** A build from a checkout, with no release version; never compared with a release. */
+export const isDevBuild = (version: string): boolean => /^0\.0\.0(?:$|[-+])/.test(version)
+
 const NUMERIC = /^\d+$/
 
 function comparePrerelease(a: string[], b: string[]): -1 | 0 | 1 {

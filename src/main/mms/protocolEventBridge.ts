@@ -219,6 +219,11 @@ export function bridgeProtocolEvent(
         const profileId = (event.data as { profileId?: unknown }).profileId
         broadcast('netEngine:changed', { profileId: typeof profileId === 'string' ? profileId : undefined })
       }
+      // Update everywhere of a profile changed: windows read its rollout again.
+      if (kind === 'update-rollout') {
+        const profileId = (event.data as { profileId?: unknown }).profileId
+        broadcast('updates:rollout-changed', { profileId: typeof profileId === 'string' ? profileId : undefined })
+      }
       return true
     }
     case 'net.updated': {

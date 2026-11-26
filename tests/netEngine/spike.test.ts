@@ -30,6 +30,7 @@ import type { DomainConnectionContext } from '../../src/mms/protocol/domainRegis
 import { dispatchMethod } from '../../src/mms/protocol/handlers'
 import { routedNetMethod } from '../../src/shared/bridge/routed'
 import { newId, type NodeId, type RpcId, type StoredRecord, type StreamDescriptor } from '../../src/shared/net'
+import { NetError } from '../../src/shared/net/errors'
 import { NET_LOCAL_CAPABILITY } from '../../src/shared/net/local'
 import { PROJECT_SHELL_AGENT_ID } from '../../src/shared/types'
 import { qualifyId } from '../../src/shared/threadRef'
@@ -41,6 +42,7 @@ import { remoteUpdatesFor } from '../../src/mms/updates/remoteUpdates'
 import { accessPreset } from '../../src/shared/net/accessPresets'
 import { NO_DESKTOP_APP_REASON, selfUpdateReportPath } from '../../src/mms/updates/selfUpdateReport'
 import { channelForVersion } from '../../src/shared/updates'
+import { bridgeProtocolEvent } from '../../src/main/mms/protocolEventBridge'
 
 const DAY = 24 * 60 * 60_000
 const eventually = (check: () => unknown, timeout = 15_000) => vi.waitFor(check, { timeout })
@@ -601,6 +603,117 @@ describe('Bridge over an engine session, v1 off', () => {
     expect(await ask({ step: 'status', job: prepared.job })).toMatchObject({ phase: 'failed', error: 'forbidden' })
     expect(hub.begin('owner-app', prepared.job)).toMatchObject({ go: false, wait: false, job: { error: 'forbidden' } })
   })
+
+  it('updates every computer from one click, keeps the rollout across a restart of the service, and verifies each version there', async () => {
+    const version = process.env.MOUSSE_VERSION
+    const poll = process.env.MOUSSE_NET_UPDATE_POLL_MS
+    const reconnect = process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS
+    const recheck = process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS
+    process.env.MOUSSE_VERSION = '0.1.5'
+    process.env.MOUSSE_NET_UPDATE_POLL_MS = '50'
+    process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS = '300'
+    process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS = '50'
+    const target = '0.1.9'
+    // The owner's desktop app: updates itself, downloads at once and installs when its countdown ends, then runs the
+    // new version.
+    writeFileSync(selfUpdateReportPath(ownerHome), JSON.stringify({ channel: 'stable', self: true }))
+    const hub = remoteUpdatesFor(ownerHome)
+    hub.attach('owner-app')
+    const services = await caller.getProfileServices(caller.profileId)
+    // The network between the two: the reply to Install is lost (the install still runs there), and while the owner
+    // restarts it answers nothing at all.
+    const engine = services.netEngine as unknown as { updateThere: (params: any) => Promise<unknown> }
+    const reach = engine.updateThere
+    let silent = false
+    let lostInstalls = 0
+    engine.updateThere = async (params) => {
+      if (silent) throw new NetError('deadline_exceeded')
+      const answer = await reach.call(engine, params)
+      if (params.step === 'install') {
+        lostInstalls++
+        throw new NetError('deadline_exceeded')
+      }
+      return answer
+    }
+    let installs = 0
+    let savedAtRestart: any
+    const app = setInterval(() => {
+      const job = hub.current()
+      if (job?.phase === 'preparing') hub.progress('owner-app', job.id, { phase: 'ready' })
+      if ((job?.phase === 'countdown' || job?.phase === 'waiting') && hub.begin('owner-app', job.id).go === true) {
+        installs++
+        // This computer's service stops as the owner installs: the rollout is mid-way, kept only in the database.
+        services.updateRollouts().stop()
+        ;(services as unknown as { updateRolloutsInstance?: unknown }).updateRolloutsInstance = undefined
+        savedAtRestart = services.net.updateRolloutStore().read()
+        silent = true
+        process.env.MOUSSE_VERSION = target
+      }
+    }, 20)
+    cleanups.push(() => {
+      clearInterval(app)
+      engine.updateThere = reach
+      hub.detach('owner-app')
+      if (reconnect === undefined) delete process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS
+      else process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECONNECT_MS = reconnect
+      if (recheck === undefined) delete process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS
+      else process.env.MOUSSE_NET_UPDATE_ROLLOUT_RECHECK_MS = recheck
+      if (version === undefined) delete process.env.MOUSSE_VERSION
+      else process.env.MOUSSE_VERSION = version
+      if (poll === undefined) delete process.env.MOUSSE_NET_UPDATE_POLL_MS
+      else process.env.MOUSSE_NET_UPDATE_POLL_MS = poll
+    })
+    await ownerLocal('bridge.policy', { node: callerOnOwner, ...accessPreset('full').fields }).catch((error) => {
+      if (error?.details?.reason !== 'role_pending') throw error
+    })
+    const settings = window('settings', true)
+    // What the owner runs now, asked again (as the list does when it opens).
+    await dispatch('net.update.there', { node: ownerOnCaller, step: 'refresh' }, settings)
+    const rows = (answer: any) => Object.fromEntries(answer.rollout.rows.map((row: any) => [row.node, row]))
+
+    // Cancelled before confirming: the owner's download stops, over the engine.
+    const first = await dispatch('updates.rollout.start', { version: target }, settings)
+    const firstJob = rows(first)[ownerOnCaller].job
+    expect(hub.current()).toMatchObject({ id: firstJob })
+    await dispatch('updates.rollout.cancel', {}, settings)
+    expect(hub.current()).toBeNull()
+    expect((await dispatch('updates.rollout.get', {}, settings)).rollout).toBeNull()
+
+    // This computer's app is not running here, so it is left to update by hand; the owner is updated from here.
+    const plan = await dispatch('updates.rollout.get', { version: target }, settings)
+    expect(Object.fromEntries(plan.plan.map((row: any) => [row.node, row.via]))).toEqual({ self: 'manual', [ownerOnCaller]: 'request' })
+    const started = await dispatch('updates.rollout.start', { version: target }, settings)
+    await eventually(async () => expect(rows(await dispatch('updates.rollout.get', {}, settings))[ownerOnCaller].phase).toBe('ready'))
+    await dispatch('updates.rollout.confirm', { turns: { [ownerOnCaller]: 0 } }, settings)
+    await eventually(() => expect(installs).toBe(1), 30_000)
+    expect(savedAtRestart).toMatchObject({ id: started.rollout.id, rows: [{ node: 'self', phase: 'manual' }, { node: ownerOnCaller, phase: 'installing' }] })
+    expect(['installing', 'verifying']).toContain(savedAtRestart.step)
+    // Install's reply never came, yet the row went on to installing rather than failed.
+    expect(lostInstalls).toBe(1)
+
+    // The next service finds it in the profile's database when a window reads it. The owner says nothing past the
+    // reconnect deadline: "Couldn't verify", never failed.
+    await eventually(async () => {
+      const read = await dispatch('updates.rollout.get', {}, settings)
+      expect(read.rollout).toMatchObject({ id: started.rollout.id, step: 'done' })
+      expect(rows(read)[ownerOnCaller]).toMatchObject({ phase: 'unverified' })
+    }, 30_000)
+    // The owner answers again with the new version: reading the results corrects the row.
+    silent = false
+    await eventually(async () => {
+      const read = await dispatch('updates.rollout.get', {}, settings)
+      expect(read.rollout).toMatchObject({ id: started.rollout.id, step: 'done' })
+      expect(rows(read)[ownerOnCaller]).toMatchObject({ phase: 'updated' })
+    }, 30_000)
+    await dispatch('updates.rollout.dismiss', {}, settings)
+    expect((await dispatch('updates.rollout.get', {}, settings)).rollout).toBeNull()
+
+    // Each change reached the windows of this profile, which read the rollout again.
+    const notice = events.find((event) => event.type === 'ui.notify' && event.data?.kind === 'update-rollout')
+    const sent: unknown[] = []
+    bridgeProtocolEvent(notice as never, (channel, data) => sent.push([channel, data]), { getActiveThreadId: () => null } as never)
+    expect(sent).toEqual([['updates:rollout-changed', { profileId: caller.profileId }]])
+  }, 90_000)
 })
 
 describe('a profile that joined another computer’s v1 network', () => {

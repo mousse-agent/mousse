@@ -16,7 +16,9 @@ import {
   type DownloadsSummary
 } from '../../stores/downloadsStore'
 import { updateActions, useUpdateStore } from '../../stores/updateStore'
-import { InstallConfirm, ReleaseNotes } from '../updates/InstallConfirm'
+import { offersEverywhere, type RolloutRow } from '../../../shared/updateRollout'
+import { canRetryRow, everywhereLabel, readRollout, rolloutActions, rowName, rowStatus, rowTone, useRolloutStore } from '../../lib/updateRollout'
+import { InstallConfirm, ReleaseNotes, RolloutConfirm } from '../updates/InstallConfirm'
 import { formatVersion, iconIdOf } from '../providers/providerView'
 import '../../styles/downloads.css'
 
@@ -66,8 +68,12 @@ export function DownloadsIndicator({ variant }: { variant: DownloadsIndicatorVar
   useEffect(() => subscribeToDownloads(), [])
   const entries = useDownloadsStore((s) => s.entries)
   const version = useUpdateStore((s) => s.availableVersion)
+  // The version Update everywhere brings every computer to: the one offered here, or this computer's own.
+  const target = useUpdateStore((s) => s.availableVersion ?? s.currentVersion)
+  const plan = useRolloutStore((s) => (s.planFor === target ? s.plan : undefined))
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [everywhere, setEverywhere] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const summary = summarizeDownloads(entries)
 
@@ -75,8 +81,11 @@ export function DownloadsIndicator({ variant }: { variant: DownloadsIndicatorVar
     setOpen(next)
     downloadsActions.setPinned(next)
   }
-  // Only other computers are behind: the button goes straight to Settings → Devices.
-  const onlyComputers = entries.length > 0 && entries.every((entry) => entry.kind === 'computers')
+  // Only other computers are behind and none can be updated from here: the button goes straight to Settings → Devices.
+  const onlyComputers =
+    entries.length > 0 &&
+    entries.every((entry) => entry.kind === 'computers' && !entry.computers?.some((computer) => computer.requests)) &&
+    !offersEverywhere(plan)
   const press = (): void => {
     if (onlyComputers && !open) openSettingsSection('connections')
     else toggle(!open)
@@ -128,6 +137,7 @@ export function DownloadsIndicator({ variant }: { variant: DownloadsIndicatorVar
           anchorRef={buttonRef}
           placement={rail ? 'right-end' : 'above-start'}
           entries={entries}
+          target={target}
           onClose={(refocus) => {
             toggle(false)
             if (refocus) buttonRef.current?.focus()
@@ -136,23 +146,36 @@ export function DownloadsIndicator({ variant }: { variant: DownloadsIndicatorVar
             toggle(false)
             setConfirming(true)
           }}
+          onEverywhere={() => {
+            toggle(false)
+            setEverywhere(true)
+          }}
         />
       )}
       <InstallConfirm open={confirming} version={version ?? ''} onClose={() => setConfirming(false)} />
+      <RolloutConfirm open={everywhere} version={target} onClose={() => setEverywhere(false)} />
     </>
   )
 }
 
-function DownloadsPopover({ anchorRef, placement, entries, onClose, onInstall }: {
+function DownloadsPopover({ anchorRef, placement, entries, target, onClose, onInstall, onEverywhere }: {
   anchorRef: RefObject<HTMLButtonElement | null>
   placement: FloatingPlacement
   entries: DownloadEntry[]
+  target: string
   onClose: (refocus: boolean) => void
   onInstall: () => void
+  onEverywhere: () => void
 }) {
   const contentRef = useRef<HTMLDivElement>(null)
   const [notesOpen, setNotesOpen] = useState(false)
-  const style = useFloatingPosition({ open: true, anchorRef, contentRef, placement, deps: [entries.length, notesOpen] })
+  const plan = useRolloutStore((s) => (s.planFor === target ? s.plan : undefined))
+  const style = useFloatingPosition({ open: true, anchorRef, contentRef, placement, deps: [entries.length, notesOpen, plan?.length] })
+  // Which computers Update everywhere would reach, asked when the list opens with other computers in it.
+  const others = entries.some((entry) => entry.kind === 'computers' || entry.kind === 'rollout')
+  useEffect(() => {
+    if (others && target) void readRollout(target)
+  }, [others, target])
 
   useEffect(() => {
     const dismiss = (event: PointerEvent): void => {
@@ -178,6 +201,8 @@ function DownloadsPopover({ anchorRef, placement, entries, onClose, onInstall }:
       <div ref={contentRef} className="downloads-popover" role="dialog" aria-label="Downloads" style={style}>
         <DownloadsList
           entries={entries}
+          plan={plan}
+          onEverywhere={onEverywhere}
           notesOpen={notesOpen}
           onToggleNotes={() => setNotesOpen((value) => !value)}
           onInstall={onInstall}
@@ -192,25 +217,40 @@ function DownloadsPopover({ anchorRef, placement, entries, onClose, onInstall }:
 }
 
 /** The popover's rows: one per download, the update first. */
-export function DownloadsList({ entries, notesOpen, onToggleNotes, onInstall, onOpen }: {
+export function DownloadsList({ entries, plan, notesOpen, onToggleNotes, onInstall, onOpen, onEverywhere }: {
   entries: readonly DownloadEntry[]
+  /** The computers Update everywhere would update, when read. */
+  plan?: readonly RolloutRow[]
   notesOpen: boolean
   onToggleNotes: () => void
   onInstall: () => void
   /** Opens the Settings section an entry belongs to (`speech` for a model, `connections` for computers). */
   onOpen: (section: 'speech' | 'connections') => void
+  onEverywhere?: () => void
 }) {
   if (entries.length === 0) return <p className="downloads-empty">No downloads</p>
   // "Update all": the app's download (its restart stays separate) and every agent Mousse can update.
   const updates = updatableAgents(entries).length + (entries.some((entry) => entry.kind === 'update' && entry.phase === 'available') ? 1 : 0)
+  // Update everywhere, offered while no rollout shows: "This computer only" keeps this computer's own step beside it.
+  const everywhere = onEverywhere && !entries.some((entry) => entry.kind === 'rollout') && offersEverywhere(plan) ? plan! : undefined
+  const own = entries.find((entry) => entry.kind === 'update')
+  const ownStep = own?.phase === 'available' ? () => void updateActions.download() : own?.phase === 'ready' && !own.error ? onInstall : undefined
   return (
     <>
       <ul className="downloads-list">
         {entries.map((entry) => entry.kind === 'computers'
           ? <ComputersRow key={entry.id} entry={entry} onOpen={() => onOpen('connections')} />
-          : <DownloadRow key={entry.id} entry={entry} notesOpen={notesOpen} onToggleNotes={onToggleNotes} onInstall={onInstall} onOpen={onOpen} />
+          : entry.kind === 'rollout'
+            ? <RolloutRows key={entry.id} entry={entry} />
+            : <DownloadRow key={entry.id} entry={entry} notesOpen={notesOpen} onToggleNotes={onToggleNotes} onInstall={onInstall} onOpen={onOpen} stepInFooter={Boolean(everywhere)} />
         )}
       </ul>
+      {everywhere && (
+        <div className="downloads-footer stacked">
+          <button type="button" className="downloads-btn primary" onClick={onEverywhere}>{everywhereLabel(everywhere)}</button>
+          {ownStep && <button type="button" className="downloads-btn" onClick={ownStep}>This computer only</button>}
+        </div>
+      )}
       {updates > 1 && (
         <div className="downloads-footer">
           {updatableAgents(entries).length > 0 && <span className="downloads-footer-note">Agents update for new runs</span>}
@@ -221,8 +261,8 @@ export function DownloadsList({ entries, notesOpen, onToggleNotes, onInstall, on
   )
 }
 
-const KIND_ICON: Record<DownloadKind, LucideIcon> = { update: ArrowUp, 'dictation-model': Mic, 'voice-model': VolumeHigh, agent: Download, computers: Laptop }
-const KIND_LABEL: Record<DownloadKind, string> = { update: 'App update', 'dictation-model': 'Dictation model', 'voice-model': 'Read-aloud voice', agent: 'Coding agent', computers: 'Your other computers' }
+const KIND_ICON: Record<DownloadKind, LucideIcon> = { update: ArrowUp, 'dictation-model': Mic, 'voice-model': VolumeHigh, agent: Download, computers: Laptop, rollout: Laptop }
+const KIND_LABEL: Record<DownloadKind, string> = { update: 'App update', 'dictation-model': 'Dictation model', 'voice-model': 'Read-aloud voice', agent: 'Coding agent', computers: 'Your other computers', rollout: 'Update everywhere' }
 
 /** "57 of 136 MB", in KB below a megabyte. */
 export function formatDownloadBytes(received: number, total: number): string {
@@ -298,12 +338,14 @@ function CommandLine({ command }: { command: string }) {
   )
 }
 
-function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen }: {
+function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen, stepInFooter = false }: {
   entry: DownloadEntry
   notesOpen: boolean
   onToggleNotes: () => void
   onInstall: () => void
   onOpen: (section: 'speech' | 'connections') => void
+  /** The update's download or restart is the footer's "This computer only". */
+  stepInFooter?: boolean
 }) {
   const update = entry.kind === 'update'
   const notApplied = useUpdateStore((s) => Boolean(update && s.notAppliedVersion && s.notAppliedVersion === s.availableVersion))
@@ -350,7 +392,9 @@ function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen }: {
         </button>
       )
     }
-    if (entry.phase === 'available') {
+    if (stepInFooter && (entry.phase === 'available' || (entry.phase === 'ready' && !entry.error))) {
+      // One control for this step: the footer's.
+    } else if (entry.phase === 'available') {
       actions.push(<IconAction key="download" label="Download update" accent onClick={() => void updateActions.download()}><Download size={14} /></IconAction>)
     } else if (entry.phase === 'failed') {
       actions.push(<IconAction key="retry" label="Try again" onClick={() => downloadsActions.retry(entry)}><RotateCcw size={14} /></IconAction>)
@@ -409,6 +453,49 @@ function ComputersRow({ entry, onOpen }: { entry: DownloadEntry; onOpen: () => v
           <IconAction label="Dismiss" onClick={() => downloadsActions.dismiss(entry.id)}><X size={14} /></IconAction>
         </span>
       </div>
+    </li>
+  )
+}
+
+/** Update everywhere under way or finished: one compact row per computer, with retry on a failed one, until dismissed. */
+function RolloutRows({ entry }: { entry: DownloadEntry }) {
+  const rollout = entry.rollout!
+  const error = useRolloutStore((s) => s.error)
+  const active = entry.phase === 'downloading' || entry.phase === 'installing'
+  // Cancel stops the computers that have not started installing; nothing can be cancelled once this one restarts.
+  const cancellable = rollout.step === 'preparing' || rollout.step === 'installing'
+  return (
+    <li className="downloads-row-item">
+      <div className="downloads-row" data-phase={entry.phase}>
+        <span className="downloads-row-glyph">
+          {active ? <Loader2 size={15} strokeWidth={1.8} className="spin" aria-hidden="true" />
+            : entry.phase === 'failed' ? <CircleAlert size={15} strokeWidth={1.8} className="downloads-bad" aria-hidden="true" />
+              : <Check size={15} strokeWidth={2.2} className="downloads-ok" aria-hidden="true" />}
+        </span>
+        <span className="downloads-row-text" title={`Update everywhere to ${formatVersion(rollout.version)}`}>
+          <span className="downloads-row-name">{entry.label}</span>
+          <span className={`downloads-row-detail${error ? ' downloads-bad' : ''}`} title={error}>{error ?? formatVersion(rollout.version)}</span>
+        </span>
+        <span className="downloads-row-actions">
+          {cancellable && <IconAction label="Cancel" onClick={() => void rolloutActions.cancel()}><X size={14} /></IconAction>}
+          {!active && <IconAction label="Dismiss" onClick={() => downloadsActions.dismiss(entry.id)}><X size={14} /></IconAction>}
+        </span>
+      </div>
+      <ul className="downloads-rollout" aria-label="Computers">
+        {rollout.rows.map((row) => {
+          const tone = rowTone(row)
+          const detail = [row.from ? `${formatVersion(row.from)} → ${formatVersion(rollout.version)}` : undefined, row.error].filter(Boolean).join(' · ')
+          return (
+            <li key={row.node} className="downloads-rollout-row" data-tone={tone} title={detail || undefined}>
+              <span className="downloads-rollout-name">{rowName(row)}</span>
+              <span className="downloads-rollout-status">{rowStatus(row)}</span>
+              {canRetryRow(row) && rollout.confirmedAt
+                ? <IconAction label={`Try ${rowName(row)} again`} onClick={() => void rolloutActions.retry(row.node)}><RotateCcw size={13} /></IconAction>
+                : <span className="downloads-rollout-spacer" aria-hidden="true" />}
+            </li>
+          )
+        })}
+      </ul>
     </li>
   )
 }

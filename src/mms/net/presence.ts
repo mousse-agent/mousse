@@ -1,5 +1,5 @@
 import type { NodeId } from '../../shared/net'
-import { compareVersions } from '../../shared/net/version'
+import { compareVersions, isDevBuild } from '../../shared/net/version'
 import { channelForVersion, parseSelfUpdateReport, type SelfUpdateReport } from '../../shared/updates'
 import type { NetDatabase } from './store/database'
 import type { Clock } from './contracts'
@@ -56,9 +56,6 @@ export function ensurePresenceTable(db: NetDatabase, table: PresenceTable = PEER
     if (!columns.some((row) => row.name === 'updater')) db.database.exec(`ALTER TABLE ${table} ADD COLUMN updater TEXT`)
   })
 }
-
-/** A build from a checkout, with no release version; never compared with a release. */
-const isDevBuild = (version: string): boolean => /^0\.0\.0(?:$|[-+])/.test(version)
 
 /**
  * Where a computer's version stands against this one's: `behind`, `newer`, `channel` when the two follow different

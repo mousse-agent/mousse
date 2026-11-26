@@ -307,6 +307,41 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
   color: var(--ui-faint);
 }
 
+/* Update everywhere above "This computer only": both fit the list's width at any count. */
+.downloads-footer.stacked { flex-direction: column; align-items: stretch; gap: 4px; }
+
+/* The one primary action of the list: Update everywhere. */
+.downloads-btn.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+.downloads-btn.primary:hover { background: var(--accent); filter: brightness(1.06); }
+
+/* Update everywhere's computers, under its row. */
+.downloads-rollout {
+  display: flex;
+  flex-direction: column;
+  margin: -4px 0 4px 38px;
+  padding: 0;
+  list-style: none;
+}
+.downloads-rollout-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 28px;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding-right: 4px;
+  font-size: 12px;
+}
+.downloads-rollout-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.downloads-rollout-status { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.downloads-rollout-row[data-tone='ok'] .downloads-rollout-status { color: var(--success); }
+.downloads-rollout-row[data-tone='bad'] .downloads-rollout-status { color: var(--danger); }
+.downloads-rollout-row[data-tone='warn'] .downloads-rollout-status { color: var(--warning); }
+.downloads-rollout-row[data-tone='muted'] { opacity: 0.6; }
+
 html[data-theme='high-contrast'] .downloads-icon-btn.accent { color: var(--text-primary); }
 
 @media (prefers-reduced-motion: reduce) {

@@ -186,6 +186,8 @@ export class RemoteUpdateAgent {
   }
 
   private show(job: RemoteUpdateJob): void {
+    // This computer's own part of Update everywhere: the person who asked is here, and said so in its confirmation.
+    if (job.local) return
     this.shown = job.id
     this.opts.toast({ job: job.id, from: job.from, installAt: job.installAt ?? this.now(), ...(job.phase === 'waiting' ? { waiting: true } : {}) })
   }

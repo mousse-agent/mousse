@@ -76,7 +76,8 @@ import type {
   NetLinkPasted,
   NetLocalMethod,
   NetStartOverCheck,
-  NetStatus
+  NetStatus,
+  SshUpdateResult
 } from '../../shared/net/local'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { routedVersions } from '../../shared/bridge/routed'
@@ -110,6 +111,7 @@ import {
   type ConnectionEvent,
   type ConnectionState
 } from './store/connections'
+import { SqliteUpdateRollout } from './store/updateRollout'
 import { SqliteLanMemory, lanAddress } from './store/lanMemory'
 import { SqliteBridgeAudit } from './store/audit'
 import { SqliteRemoteLists } from './store/remoteLists'
@@ -167,7 +169,7 @@ import { lookup } from 'node:dns/promises'
 import { NET_PROTO_MINOR, WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
 import { mousseVersion } from '../appVersion'
 import type { SelfUpdateReport } from '../../shared/updates'
-import { ensurePresenceTable, PeerPresence, parsePeerInfo, versionStanding, type PeerLink } from './presence'
+import { ensurePresenceTable, PeerPresence, parsePeerInfo, versionStanding, type PeerInfo, type PeerLink } from './presence'
 import { isReleaseVersion, UPDATE_NET_METHODS, type UpdateNetMethod } from '../../shared/remoteUpdates'
 import type { RemoteUpdates } from '../updates/remoteUpdates'
 import { askUpdate, validateUpdateThere, type UpdateThereParams } from '../updates/askUpdate'
@@ -3160,10 +3162,13 @@ export class NetService {
     const node = params.node as NodeId
     if (node === rt.identity.self()?.node) throw new NetError('bad_request')
     const session = this.session(node)
-    if (params.step === 'refresh') {
-      await this.readPeerInfo(session, node)
+    if (params.step === 'refresh' || params.step === 'version') {
+      const info = await this.readPeerInfo(session, node)
       this.emit()
-      return { ok: true }
+      if (params.step === 'refresh') return { ok: true }
+      // What it answered just now, never what was kept from before: no answer is an error.
+      if (!info) throw new NetError('peer_offline')
+      return { version: info.version, ...(info.update ? { update: info.update } : {}) }
     }
     return askUpdate((method, body, options) => session.rpc(method, body, options), params)
   }
@@ -4665,6 +4670,18 @@ export class NetService {
         throw new NetError('bad_request')
     }
   }
+  /** Update everywhere: updates a machine this computer installed over SSH to exactly `version`. */
+  sshUpdateTo(id: string, version: string): Promise<SshUpdateResult> {
+    this.requireEnrolled()
+    return this.track(this.bootstrap().update(id, version))
+  }
+  /** Where Update everywhere keeps its rollout: this profile's Net database. */
+  updateRolloutStore(): { read(): unknown; write(value: unknown): void } {
+    return {
+      read: () => new SqliteUpdateRollout(this.runtime().db).read(),
+      write: (value) => new SqliteUpdateRollout(this.runtime().db).write(value)
+    }
+  }
   private editorSsh(): EditorSshConfig | undefined {
     if (!this.options.editorSsh) return undefined
     return (this.editorSshConfig ??= new EditorSshConfig(this.options.editorSsh))
@@ -5058,12 +5075,14 @@ export class NetService {
       return false
     }
   }
-  private async readPeerInfo(session: Pick<NetSyncSession, 'rpc'>, node: NodeId): Promise<void> {
+  /** Asks `node` what it runs and keeps the answer; returns it, or undefined when there was none. */
+  private async readPeerInfo(session: Pick<NetSyncSession, 'rpc'>, node: NodeId): Promise<PeerInfo | undefined> {
     try {
       const info = parsePeerInfo(
         await session.rpc('net.info', {}, { id: newId('rpc'), deadlineMs: 10_000 })
       )
       if (info) this.presences().info(node, info)
+      return info
     } catch (error) {
       // Unknown method: an older daemon. Any other failure (a closed session, a timeout) leaves
       // what was known before. A phone reached over the relay answers the same way, but it
@@ -5081,6 +5100,7 @@ export class NetService {
           // The service is shutting down.
         }
       }
+      return undefined
     }
   }
   /** One timer for every session: keeps "last seen" within a minute while a device is connected. */
