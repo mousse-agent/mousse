@@ -53,13 +53,19 @@ export function jobStep(job: Pick<BotJob, 'state'>, next: BotJobState | undefine
 /** A line that only lays the answer out: a heading, a rule, or a code fence. */
 const LAYOUT_LINE = /^(?:#{1,6}(?:\s|$)|([-*_=])(?:\s*\1){2,}$|```|~~~)/
 
+/** A heading's own words, without its marks; empty for a line that is no heading. */
+function headingWords(line: string): string {
+  return /^#{1,6}(?:\s|$)/.test(line) ? line.replace(/^#{1,6}/, '').replace(/\s#+$/, '').trim() : ''
+}
+
 /**
  * The one-line result of a thread's answer: its first line that says something, past blank lines and layout (a
- * heading, a rule, a code fence); a heading's own words when the answer has nothing else.
+ * heading, a rule, a code fence); a heading's own words when the answer has nothing else. None when it is layout only
+ * (rules, empty fences, bare heading marks): a ledger line is never a delimiter.
  */
 export function resultLine(result: string | undefined): string | undefined {
   const lines = (result ?? '').split(/\r?\n/).map((text) => text.trim()).filter(Boolean)
-  const line = lines.find((text) => !LAYOUT_LINE.test(text)) ?? lines.map((text) => text.replace(/^#{1,6}\s*/, '').trim()).find(Boolean)
+  const line = lines.find((text) => !LAYOUT_LINE.test(text)) ?? lines.map(headingWords).find((words) => words && !LAYOUT_LINE.test(words))
   return line ? jobLine(line) : undefined
 }
 

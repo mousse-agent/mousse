@@ -111,6 +111,14 @@ describe('a job\'s answer and its one line', () => {
     ['an issue number', '#1873 is merged.', '#1873 is merged.'],
     ['a bold line', '**Fixed** the redirect.', '**Fixed** the redirect.'],
     ['a list item', '- Fixed the redirect.', '- Fixed the redirect.'],
+    ['only headings, closed', '## Done ##', 'Done'],
+    // Layout and nothing else: no line, never a delimiter for one.
+    ['only a rule', '---', undefined],
+    ['only rules', '***\n\n___\n===', undefined],
+    ['only an empty code fence', '```\n```', undefined],
+    ['only an empty fence with a language', '~~~ts\n~~~', undefined],
+    ['only bare heading marks', '#\n##', undefined],
+    ['a heading that is a rule', '## ---', undefined],
     ['nothing', '\n  \n', undefined],
     ['no answer', undefined, undefined]
   ])('the line: %s', (_name, result, line) => {
