@@ -100,9 +100,11 @@ describe('checkPolicy', () => {
 })
 
 describe('purposes', () => {
-  it('allows only the interactive purposes on an uncontrolled instance', () => {
+  it('allows only the interactive purposes and titles on an uncontrolled instance', () => {
     for (const purpose of INTERACTIVE_PURPOSES) expect(purposeAllowed(caps('uncontrolled'), purpose)).toBe(true)
-    for (const purpose of ['delegate_task', 'definition', 'workflow', 'title', 'bot_reply', 'schedule'])
+    // A title is a one-shot: its runtime runs it with no tools.
+    expect(purposeAllowed(caps('uncontrolled'), 'title')).toBe(true)
+    for (const purpose of ['delegate_task', 'definition', 'workflow', 'bot_reply', 'schedule'])
       expect(purposeAllowed(caps('uncontrolled'), purpose), purpose).toBe(false)
     expect(purposeAllowed(caps('approval_only'), 'delegate_task')).toBe(true)
   })
@@ -153,7 +155,7 @@ describe('the gateway on an uncontrolled instance', () => {
     return { harness, adapter, notices, spec }
   }
 
-  it('resolves for the composer and refuses delegation, definitions, workflows and titles', () => {
+  it('resolves for the composer and refuses delegation, definitions, workflows and scheduled jobs', () => {
     const { harness } = fixture()
     expect(harness.resolve({ instanceId: 'codex', model: 'm' }, { kind: 'device' }, 'composer').caps.toolControl).toBe('uncontrolled')
     for (const purpose of ['delegate_task', 'definition', 'workflow', 'schedule'] as const)

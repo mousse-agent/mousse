@@ -375,8 +375,9 @@ export interface ResolvedTurnSelection {
 
 /**
  * Who is resolving. The same rules apply to all, except that an instance whose runtime approves
- * tools itself (`toolControl: 'uncontrolled'`) resolves only for the interactive purposes
- * (`INTERACTIVE_PURPOSES` in `policy.ts`); any other purpose, including one added later, is refused.
+ * tools itself (`toolControl: 'uncontrolled'`) resolves only for the interactive purposes and the
+ * one-shot ones (`INTERACTIVE_PURPOSES`, `ONE_SHOT_PURPOSES` in `policy.ts`); any other purpose,
+ * including one added later, is refused.
  */
 export type ResolvePurpose =
   | 'composer'

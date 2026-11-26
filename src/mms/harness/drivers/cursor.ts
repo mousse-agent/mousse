@@ -1,13 +1,14 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import type { HarnessCaps } from '../../../shared/harness/types'
+import { harnessAppError, type HarnessCaps } from '../../../shared/harness/types'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption } from '../../../shared/settings'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { LoginSession } from '../../providers/LoginSession'
 import { CURSOR_CAPABILITIES, CursorAdapter, type CursorTurnClient } from './cursor/adapter'
 import { CursorHostCallError, CursorHostClient, defaultCursorHostScript, spawnCursorHost, type CursorHostTransport } from '../cursor/hostClient'
+import { runCursorOneShot } from '../cursor/oneShot'
 import { CURSOR_DEFAULT_MODEL, CursorSessions, type SavedCursorAgent } from '../cursor/session'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type LiveProcessHost } from '../driver'
 import type { CursorModel } from '../hosts/cursorProtocol'
@@ -20,7 +21,7 @@ import { InstanceVault } from '../vault'
  * `<stateDir>/cursor-store`, so nothing reads `~/.cursor/sdk` or an ambient `CURSOR_API_KEY`.
  *
  * Cursor approves its tools itself (Auto-review), so the instance is `uncontrolled`: interactive
- * turns only, with a one-time notice per thread.
+ * turns only, with a one-time notice per thread, and one-shots, which offer the model no tool.
  */
 
 export const CURSOR_LABEL = 'Cursor'
@@ -137,6 +138,8 @@ export function cursorDriver(options: CursorDriverOptions = {}): HarnessDriver {
     caps: () => CURSOR_CAPS,
     versionArgs: () => null,
     updateCommand: () => undefined,
+    // Chat titles, pull request drafts and commit messages: one request offered no tool (`runCursorOneShot`).
+    oneShot: true,
     create: (context) => createCursorRuntime(context, options)
   }
 }
@@ -162,11 +165,12 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
   let loginGeneration = 0
 
   const hostScript = options.hostScript ?? (options.connect ? undefined : defaultCursorHostScript())
-  const host = new CursorHostClient(() => {
+  const connectHost = (): CursorHostTransport => {
     if (options.connect) return options.connect(context)
     if (!hostScript) throw new Error(`${label} cannot start: this build of Mousse has no Cursor host.`)
     return spawnCursorHost(context.env, hostScript, options.hostEnv)
-  })
+  }
+  const host = new CursorHostClient(connectHost)
 
   const secret = (name: string): string | undefined => {
     try {
@@ -395,6 +399,45 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
       save()
     },
     adoptApiKey: (apiKey) => saveApiKey(apiKey),
+    /**
+     * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message, on a
+     * host of its own in a new empty folder with a store of its own, all ended and removed afterwards (`runCursorOneShot`).
+     */
+    oneShot: async (spec, signal) => {
+      signal.throwIfAborted()
+      const apiKey = state.refused ? undefined : effective()?.key
+      if (!apiKey) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.` })
+      const root = join(context.stateDir, 'one-shot', randomUUID())
+      const cwd = join(root, 'work')
+      mkdirSync(cwd, { recursive: true, mode: 0o700 })
+      const own = new CursorHostClient(connectHost)
+      try {
+        const text = await runCursorOneShot({
+          host: own,
+          apiKey,
+          cwd,
+          storeDir: join(root, 'store'),
+          model: spec.model,
+          system: spec.system,
+          prompt: spec.prompt,
+          signal,
+          onActivity: () => spec.onActivity(),
+          label,
+          markSignedOut: () => {
+            if (state.refused) return
+            state.refused = true
+            save()
+            context.changed()
+          },
+          signInRequiredMessage: `Sign in to ${label} in Settings → Providers.`
+        })
+        return { text }
+      } finally {
+        own.stop()
+        // The ended host may hold the folder a moment longer on Windows: a leftover folder is harmless.
+        try { rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* kept */ }
+      }
+    },
     forgetConversation: (threadId) => sessions.forgetConversation(threadId),
     terminate: (ref) => sessions.terminate(ref.sessionId),
     setLiveHost: (next) => {

@@ -15,7 +15,7 @@ export { titleEffortFor }
  * the index is rebuilt when the snapshots change, and read synchronously at each naming.
  *
  * Best first means: the provider by the catalog's `namingProviders` (Claude, then Codex, then Antigravity, then Pi's
- * providers), then the model's tier (`small` first: Haiku, gpt-6-luna, gemini-3.8-flash), then a subscription before an
+ * providers, then the other agents), then the model's tier (`small` first: Haiku, gpt-6-luna, gemini-3.8-flash), then a subscription before an
  * API key, a current model before an older one, the newest release, and the order the agent lists them.
  */
 

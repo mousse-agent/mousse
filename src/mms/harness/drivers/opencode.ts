@@ -158,6 +158,24 @@ export function opencodeUpdateCommand(owner: InstallOwner, pkg?: string): string
   }
 }
 
+/**
+ * A one-shot's variables (a chat title, a pull request draft, a commit message): OpenCode's inline config
+ * (`OPENCODE_CONFIG_CONTENT`, merged over the user's config files) with every permission denied, so the request
+ * runs no tool, MCP tools included. An inline config the user already sets is kept, with its permissions replaced.
+ */
+export function opencodeOneShotEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  let inline: Record<string, unknown> = {}
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'OPENCODE_CONFIG_CONTENT')
+  try {
+    const parsed = key ? JSON.parse(env[key] ?? '') as unknown : undefined
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) inline = parsed as Record<string, unknown>
+  } catch {
+    // Not JSON: OpenCode could not read it either.
+  }
+  const { permissions: _permissions, ...rest } = inline
+  return { OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...rest, permission: { '*': 'deny' } }) }
+}
+
 export interface OpencodeDriverOptions {
   /** Managed installs; without them (and `registry`) Mousse cannot install OpenCode. */
   agents?: AgentInstalls
@@ -200,6 +218,8 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
       return facts && OPENCODE_PRESET.capsFromFacts ? OPENCODE_PRESET.capsFromFacts(caps, facts) : caps
     },
     updateCommand: opencodeUpdateCommand,
+    // Chat titles, pull request drafts and commit messages: one prompt with every tool denied (`opencodeOneShotEnv`).
+    oneShot: true,
     create: (context) => createOpencodeRuntime(context, options)
   }
 }
@@ -276,7 +296,11 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
       return { resolved: found.resolved, ...(found.launch ? { launch: found.launch } : {}), ...(found.root && agents ? { track: () => agents.track(found.root!) } : {}) }
     },
     // Only Mousse's own copy is kept from updating itself; the user's own OpenCode runs as they set it up.
-    env: (env) => (program()?.managed ? withUserEnv(env, { ...OPENCODE_MANAGED_ENV }) : env),
+    // A one-shot's process also denies every tool (`opencodeOneShotEnv`).
+    env: (env, purpose) => {
+      const own = program()?.managed ? withUserEnv(env, { ...OPENCODE_MANAGED_ENV }) : env
+      return purpose === 'one_shot' ? withUserEnv(own, opencodeOneShotEnv(own)) : own
+    },
     checkInstall: ({ signal, reuse }) => checkManaged(signal, reuse),
     // OpenCode's sign-in is this computer's, shared with the user's terminal: Mousse never signs it out.
     agentLogout: () => false

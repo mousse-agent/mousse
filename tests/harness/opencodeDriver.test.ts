@@ -8,7 +8,7 @@
  * `opencode acp` does is not observed here.
  */
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
@@ -657,5 +657,37 @@ describe('a managed OpenCode', () => {
       expect(fake.connections.slice(opened).filter((connection) => connection.request.purpose === 'sign_in')).toEqual([])
       harness.stop()
     })
+  })
+})
+
+describe('OpenCode one-shots', () => {
+  const inline = (env: NodeJS.ProcessEnv) => JSON.parse(variableOf(env, 'OPENCODE_CONFIG_CONTENT') ?? 'null') as Record<string, unknown> | null
+  const titleSpec = { model: 'default', system: 'You name chats.', prompt: 'fix the login bug', onActivity: () => {} }
+
+  it('is declared, so OpenCode is offered for chat titles', () => {
+    expect(opencodeDriver().oneShot).toBe(true)
+  })
+
+  it('starts its process with every permission denied; other launches run as the user set OpenCode up', async () => {
+    const { runtime, home, root } = userSetup()
+    fakeOpencode(join(home, '.opencode', 'bin'))
+    await runtime.handshake!(new AbortController().signal).catch(() => undefined)
+    await runtime.oneShot!(titleSpec, new AbortController().signal).catch(() => undefined)
+    expect(spawned.map((entry) => entry.purpose)).toEqual(['acp-handshake', 'acp-one_shot'])
+    expect(inline(spawned[0]!.env)).toBeNull()
+    expect(inline(spawned[1]!.env)).toEqual({ permission: { '*': 'deny' } })
+    // The one-shot's own folder is gone afterwards.
+    expect(existsSync(join(root, 'state', 'one-shot')) ? readdirSync(join(root, 'state', 'one-shot')) : []).toEqual([])
+  })
+
+  it.each([
+    ['an inline config of the user’s', '{"model":"anthropic/claude"}', { model: 'anthropic/claude', permission: { '*': 'deny' } }],
+    ['an inline config that allows tools', '{"permission":{"bash":"allow"},"permissions":[{"action":"*","effect":"allow"}]}', { permission: { '*': 'deny' } }],
+    ['an inline config that is not JSON', 'not json', { permission: { '*': 'deny' } }]
+  ])('keeps %s except its permissions', async (_name, content, expected) => {
+    const { runtime, home } = userSetup({ base: { OPENCODE_CONFIG_CONTENT: content } })
+    fakeOpencode(join(home, '.opencode', 'bin'))
+    await runtime.oneShot!(titleSpec, new AbortController().signal).catch(() => undefined)
+    expect(inline(spawned.at(-1)!.env)).toEqual(expected)
   })
 })

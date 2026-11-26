@@ -52,15 +52,21 @@ export function spendLimitLevel(caps: Partial<Pick<HarnessCaps, 'spendLimits'>>)
 }
 
 /**
- * Purposes a person drives turn by turn. Only these may resolve an `uncontrolled` instance: every
- * other purpose (delegation, definitions, workflows, scheduled jobs, titles, and any purpose added
- * later) runs without a person watching each tool.
+ * Purposes a person drives turn by turn. Only these, and the one-shot purposes, may resolve an
+ * `uncontrolled` instance: every other purpose (delegation, definitions, workflows, scheduled jobs,
+ * and any purpose added later) runs without a person watching each tool.
  */
 export const INTERACTIVE_PURPOSES: ReadonlySet<string> = new Set(['composer', 'default', 'turn', 'cli_model'])
 
+/**
+ * Purposes served only by a one-shot (`HarnessGateway.oneShot`): a single request that its runtime
+ * runs with no tools, refusing any it is still offered, so who approves tools does not matter.
+ */
+export const ONE_SHOT_PURPOSES: ReadonlySet<string> = new Set(['title'])
+
 /** Whether a purpose may run on an instance with these caps. */
 export function purposeAllowed(caps: Partial<Pick<HarnessCaps, 'toolControl'>>, purpose: string): boolean {
-  return toolControlLevel(caps) !== 'uncontrolled' || INTERACTIVE_PURPOSES.has(purpose)
+  return toolControlLevel(caps) !== 'uncontrolled' || INTERACTIVE_PURPOSES.has(purpose) || ONE_SHOT_PURPOSES.has(purpose)
 }
 
 /**

@@ -1,10 +1,10 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { methods } from '@agentclientprotocol/sdk'
-import { RESERVED_AGENT_IDS, type HarnessCaps, type HarnessDriverKind, type RuntimeFacts } from '../../../shared/harness/types'
+import { harnessAppError, RESERVED_AGENT_IDS, type HarnessCaps, type HarnessDriverKind, type RuntimeFacts } from '../../../shared/harness/types'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption } from '../../../shared/settings'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -186,6 +186,8 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
       return facts && preset.capsFromFacts ? preset.capsFromFacts(caps, facts) : caps
     },
     updateCommand: () => undefined,
+    // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`AcpSessions.oneShot`).
+    oneShot: true,
     create: (context) => createAcpRuntime(context, preset, options, ptyRuns)
   }
 }
@@ -645,6 +647,22 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
       delete state.auth
       state.sessions = {}
       save()
+    },
+    /**
+     * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. Its
+     * own agent process and session in a new empty folder under the entry's state, removed afterwards (`AcpSessions.oneShot`).
+     */
+    oneShot: async (spec, signal) => {
+      signal.throwIfAborted()
+      if (state.signedOut) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.` })
+      const cwd = join(context.stateDir, 'one-shot', randomUUID())
+      mkdirSync(cwd, { recursive: true, mode: 0o700 })
+      try {
+        return { text: await sessions.oneShot({ cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() }) }
+      } finally {
+        // The ended process may hold the folder a moment longer on Windows: a leftover empty folder is harmless.
+        try { rmSync(cwd, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* kept */ }
+      }
     },
     forgetConversation: (threadId) => sessions.forgetConversation(threadId),
     terminate: (ref) => sessions.terminate(ref.sessionId),

@@ -1114,7 +1114,8 @@ export class AcpSessions {
         scope,
         awaiting: () => active?.turnToolAwaiting,
         promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params),
-        onOutsideTurn: stopIdle
+        // A one-shot's question is refused like its tools: it ends the request.
+        onOutsideTurn: () => (active?.refuseTools ? active.refuseTools('a question') : stopIdle())
       }) : {})
     }
     const connection = this.options.connect({
@@ -2339,8 +2340,6 @@ export class AcpSessions {
   async oneShot(input: { cwd: string; model: string; system: string; prompt: string; signal: AbortSignal; onActivity(): void }): Promise<string> {
     const { label, quirks } = this.options
     input.signal.throwIfAborted()
-    // xAI's tagged prompts end on a notice this request does not wait for.
-    if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
     await this.options.beforeLaunch?.('one_shot')
     input.signal.throwIfAborted()
     const active = this.launch('one_shot')
@@ -2378,11 +2377,23 @@ export class AcpSessions {
         if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') text += event.content.text ?? ''
       }
       const prompt = [input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
-      const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
+      // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first (as in `chat`).
+      const promptId = quirks.xaiExtensions ? randomUUID() : undefined
+      const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }], ...(promptId ? { _meta: { promptId } } : {}) })
+      const completion = promptId ? this.completionOf(active, promptId) : undefined
+      if (completion) reply.catch(() => undefined)
+      let outcome: unknown
+      try {
+        outcome = await (completion ? Promise.race([reply, completion.done]) : reply)
+      } finally {
+        completion?.dispose()
+      }
       // What the agent wrote just before it answered is still on its way (see `chat`).
       await new Promise<void>((resolve) => setImmediate(resolve))
       if (refused) throw refused
       input.signal.throwIfAborted()
+      const failure = completion ? xaiStopFailure(label, outcome) : undefined
+      if (failure) throw failure
       const ended = promptStopOutcome(label, outcome)
       if (ended === 'cancelled') throw agentCancelledError(label)
       if (ended) throw ended

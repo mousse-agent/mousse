@@ -4,10 +4,10 @@
  * translation, the instance's key and the SDK's retries off on every call, no ambient key, and the
  * guards that keep one SDK failure from taking the host down (or end the turns when it does).
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { CursorHostClient, spawnCursorHost } from '../../src/mms/harness/cursor/hostClient'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
@@ -114,6 +114,21 @@ describe('the Cursor host process', () => {
     })
     // Sends inherit the agent's key and retries setting; they pass the model and mode, and no custom tools.
     expect(calls().find((call) => call.call === 'send')).toMatchObject({ text: 'hello', model: { id: 'gpt-5' }, mode: 'agent', keys: ['mode', 'model', 'onDelta'] })
+  })
+
+  it('runs a one-shot through a host of its own: the SDK is offered no tool and none of the user’s settings, and the host ends', async () => {
+    const { runtime, calls, stateDir } = setup()
+    await runtime.adoptApiKey!('user-key')
+    const onActivity = vi.fn()
+    expect(await runtime.oneShot!({ model: 'gpt-5', system: 'You name chats.', prompt: 'fix the login bug', onActivity }, new AbortController().signal)).toEqual({ text: 'ok' })
+    const create = calls().find((call) => call.call === 'create') as { options: { tools?: unknown; local: { settingSources: unknown; storeDir: string; enableAgentRetries: unknown } } }
+    expect(create.options.tools).toEqual([])
+    expect(create.options.local).toMatchObject({ settingSources: [], enableAgentRetries: false })
+    expect(create.options.local.storeDir.startsWith(join(stateDir, 'one-shot'))).toBe(true)
+    expect(calls().find((call) => call.call === 'send')).toMatchObject({ text: 'You name chats.\n\nfix the login bug' })
+    expect(onActivity).toHaveBeenCalled()
+    // The host it ran on is gone with its folder; a thread's host never started.
+    await expect.poll(() => existsSync(join(stateDir, 'one-shot')) ? readdirSync(join(stateDir, 'one-shot')) : []).toEqual([])
   })
 
   it.each(['revoked', 'expired'])('signs the entry out when a run fails with an auth code the SDK reduced to a RunError (%s)', async (prompt) => {

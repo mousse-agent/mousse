@@ -34,6 +34,7 @@ function described(options) {
     apiKey: options.apiKey ?? null,
     model: options.model,
     mode: options.mode,
+    ...('tools' in options ? { tools: options.tools } : {}),
     local: local && {
       store: local.store && local.store.kind,
       storeDir: local.store && local.store.dir,

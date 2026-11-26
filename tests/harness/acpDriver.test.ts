@@ -1,6 +1,6 @@
 /**
  * The generic `acp` driver behind the gateway (agent CLIs plan §3): a Custom command is added and
- * checked with an `initialize`-only handshake, runs only for interactive purposes, and a sign-in
+ * checked with an `initialize`-only handshake, runs only for interactive purposes and titles, and a sign-in
  * changed from outside between two turns forgets the thread's native session.
  */
 import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
@@ -12,6 +12,7 @@ import type { AcpConnection } from '../../src/mms/harness/acp/connection'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import { instanceStateDir } from '../../src/mms/harness/instances'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { describeStatus } from '../../src/shared/harness/status'
@@ -168,6 +169,29 @@ describe('the generic ACP driver', () => {
     await expect(harness.startTurn(spec(binding)).result).resolves.toMatchObject({ text: 'hello' })
     expect(calls.filter((call) => call.startsWith('prompt'))).toHaveLength(1)
     expect(notices).toEqual(['Fake agent approves tools itself.'])
+  })
+
+  it('names chats: listed for titles, and a title runs on a process of its own in an empty folder removed afterwards', async () => {
+    const { home, harness, calls, sessionCwds, agent } = fixture([], { updates: [say('Login bug')] })
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const listed = (await harness.llmProviders({ kind: 'device' })).find((provider) => provider.instanceId === 'acp:fake-agent')
+    expect(listed?.oneShot).toBe(true)
+    const answer = await harness.oneShot({ selection: { instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, purpose: 'title', system: 'You name chats.', prompt: 'fix the login bug', maxChars: 80 })
+    expect(answer).toEqual({ text: 'Login bug' })
+    const oneShot = agent.connections.find(({ request }) => request.purpose === 'one_shot')!
+    expect(oneShot.killed).toBe(true)
+    expect(calls.filter((call) => call.startsWith('prompt'))).toHaveLength(1)
+    const cwd = sessionCwds.at(-1)!
+    expect(relative(join(instanceStateDir(home, 'acp:fake-agent'), 'one-shot'), cwd).startsWith('..')).toBe(false)
+    expect(existsSync(cwd)).toBe(false)
+  })
+
+  it('ends a title request as refused when the agent reports a tool call', async () => {
+    const { harness, agent } = fixture([], { updates: [{ sessionUpdate: 'tool_call', toolCallId: 'x', title: 'Run command', status: 'pending' }, say('Login bug')] })
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    await expect(harness.oneShot({ selection: { instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, purpose: 'title', system: 'You name chats.', prompt: 'fix the login bug', maxChars: 80 }))
+      .rejects.toMatchObject({ code: 'policy_unenforceable' })
+    expect(agent.connections.find(({ request }) => request.purpose === 'one_shot')?.killed).toBe(true)
   })
 
   it('shows the agent’s thoughts as they come, one row before each tool call and one after, then its reply', async () => {

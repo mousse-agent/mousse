@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { harnessAppError } from '../../../shared/harness/types'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LoginSession } from '../../providers/LoginSession'
@@ -102,6 +103,8 @@ export function grokDriver(options: GrokDriverOptions = {}): HarnessDriver {
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     versionArgs: () => ['--version'],
     caps: () => GROK_CAPS,
+    // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`AcpSessions.oneShot`).
+    oneShot: true,
     updateCommand: (owner: InstallOwner) => (owner === 'standalone' ? 'grok update' : owner === 'npm' ? 'npm install -g @xai-official/grok@latest' : undefined),
     create: (context) => createGrokRuntime(context, options)
   }
@@ -367,6 +370,13 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
     identity: async () => {
       const found = credential()
       return found.kind === 'api_key' || found.kind === 'account' ? found.subject : undefined
+    },
+    // One prompt in a session of its own, ended by its reply or its `prompt_complete` (`AcpSessions.oneShot`).
+    oneShot: async (spec, signal) => {
+      const found = credential()
+      if (found.kind === 'none' || (found.kind === 'account' && found.state === 'expired'))
+        throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.` })
+      return base.oneShot!(spec, signal)
     },
     signIn,
     signOut: async () => {

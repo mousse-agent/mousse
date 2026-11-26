@@ -5,11 +5,11 @@
  * turn once as interrupted, and the uncontrolled-tools rules.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
+import { CursorHostCallError, CursorHostClient, type CursorHostTransport } from '../../src/mms/harness/cursor/hostClient'
 import { CursorSessions, cursorToolActivity, cursorToolName, type SavedCursorAgent } from '../../src/mms/harness/cursor/session'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
@@ -841,5 +841,77 @@ describe("Cursor rows keep the agent's words", () => {
       { kind: 'text', content: '\n\n    next' },
       { kind: 'text', content: '    more' }
     ])
+  })
+})
+
+/**
+ * Cursor one-shots (a chat title, a draft): a host of its own, a new agent offered no tool and none of the user's
+ * settings layers, in an empty folder with a store of its own, one request, and the host ended afterwards. The host is
+ * scripted (`FakeCursorHost`); that the SDK offers no tool for `tools: []` is its documented behaviour (1.0.35).
+ */
+describe('Cursor one-shots', () => {
+  function oneShotSetup(run: (host: FakeCursorHost, runId: string) => void) {
+    const fake = new FakeCursorHost({
+      create: () => ({ agentId: 'one-shot-agent' }),
+      send: (_params, host) => {
+        setTimeout(() => run(host, 'r1'), 0)
+        return { runId: 'r1' }
+      }
+    })
+    const killed: CursorHostTransport[] = []
+    const connect = () => {
+      const transport = fake.connect()
+      const kill = transport.kill
+      transport.kill = () => { killed.push(transport); kill() }
+      return transport
+    }
+    const s = setup(connect)
+    const title = (signal?: AbortSignal) => s.harness.oneShot({ selection: { instanceId: INSTANCE, llmProvider: '', model: 'default' }, purpose: 'title', system: 'You name chats.', prompt: 'fix the login bug', maxChars: 80, ...(signal ? { signal } : {}) })
+    const oneShotDir = join(instanceStateDir(s.home, INSTANCE), 'one-shot')
+    return { ...s, fake, killed, title, oneShotDir }
+  }
+
+  it('lists Cursor for titles, and runs a title on a host of its own with no tools and none of the user’s settings', async () => {
+    const s = oneShotSetup((host, runId) => {
+      host.emit({ event: 'delta', runId, update: { type: 'text-delta', text: 'Login bug' } })
+      host.emit({ event: 'run_end', runId, status: 'finished' })
+    })
+    const listed = (await s.harness.llmProviders({ kind: 'device' })).find((provider) => provider.instanceId === INSTANCE)
+    expect(listed?.oneShot).toBe(true)
+    expect(await s.title()).toEqual({ text: 'Login bug' })
+    const [created] = s.fake.calls('create')
+    expect(created).toMatchObject({ apiKey: 'replay-key', noTools: true, settingSources: [], model: { id: 'default' } })
+    expect(created).not.toHaveProperty('mcpServers')
+    expect(s.fake.calls('send')).toEqual([{ agentId: 'one-shot-agent', text: 'You name chats.\n\nfix the login bug' }])
+    // Its host ended, its folder and store are gone, and no thread's agent was saved.
+    expect(s.killed).toEqual([s.fake.transports.at(-1)])
+    expect(existsSync(s.oneShotDir) ? readdirSync(s.oneShotDir) : []).toEqual([])
+    expect(existsSync(join(instanceStateDir(s.home, INSTANCE), 'cursor.json'))).toBe(false)
+  })
+
+  it('a tool call Cursor still reports ends the request as refused, and ends the host', async () => {
+    const s = oneShotSetup((host, runId) => {
+      host.emit({ event: 'delta', runId, update: { type: 'tool-call-started', callId: 'c1', toolCall: { type: 'shell', args: { command: 'ls' } } } })
+    })
+    await expect(s.title()).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    expect(s.killed).toContain(s.fake.transports.at(-1))
+  })
+
+  it('Stop ends a request Cursor never finishes, with its host', async () => {
+    const s = oneShotSetup(() => {})
+    const stop = new AbortController()
+    const pending = s.title(stop.signal)
+    await vi.waitFor(() => expect(s.fake.calls('send')).toHaveLength(1))
+    stop.abort()
+    await expect(pending).rejects.toBeDefined()
+    expect(s.killed).toContain(s.fake.transports.at(-1))
+  })
+
+  it('a key Cursor refuses signs the entry out', async () => {
+    const fake = new FakeCursorHost({ create: () => { throw hostFailure('Unauthenticated', { auth: true }) } })
+    const s = setup(fake.connect)
+    await expect(s.harness.oneShot({ selection: { instanceId: INSTANCE, llmProvider: '', model: 'default' }, purpose: 'title', system: 'You name chats.', prompt: 'hi', maxChars: 80 }))
+      .rejects.toMatchObject({ code: 'signed_out' })
+    expect(JSON.parse(readFileSync(join(instanceStateDir(s.home, INSTANCE), 'cursor.json'), 'utf8'))).toMatchObject({ refused: true })
   })
 })

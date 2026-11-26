@@ -397,3 +397,51 @@ describe('Grok sessions', () => {
     })
   })
 })
+
+/**
+ * Grok one-shots (a chat title, a draft): the prompt is tagged and ends at its reply or its `prompt_complete`, whichever
+ * is first, as turns do. The agent is a hand-authored in-process ACP stand-in; it proves Mousse's side only.
+ */
+describe('Grok one-shots', () => {
+  const oneShot = (sessions: AcpSessions, signal = new AbortController().signal) =>
+    sessions.oneShot({ cwd: process.cwd(), model: 'default', system: 'You name chats.', prompt: 'fix the login bug', signal, onActivity: vi.fn() })
+
+  it('answers at prompt_complete when the reply never comes, and ends the process', async () => {
+    const agent = grokAgent(async (c) => {
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'Login bug'))
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, stopReason: 'end_turn' })
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    expect(await oneShot(sessions)).toBe('Login bug')
+    expect(agent.calls.find((call) => call.method === 'session/prompt')?.params).toMatchObject({ _meta: { promptId: expect.any(String) } })
+    expect(agent.connections[0]!.request.purpose).toBe('one_shot')
+    expect(agent.connections[0]!.killed).toBe(true)
+  })
+
+  it('an error the completion reports is a failure, not an empty title', async () => {
+    const agent = grokAgent(async (c) => {
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, error: { message: 'Rate limit reached', status: 429 } })
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    await expect(oneShot(sessions)).rejects.toThrow(/Rate limit reached/)
+  })
+
+  it('refuses a question Grok asks: nobody is asked, and the request ends', async () => {
+    const agent = grokAgent(async (c) => {
+      // The connection closes as the question is refused: its answer may never arrive.
+      await c.client.request('_x.ai/ask_user_question', {
+        method: 'x.ai/ask_user_question',
+        params: { sessionId: c.params.sessionId, toolCallId: 'q1', questions: [{ question: 'Which title?', multiSelect: null, options: [{ label: 'A' }] }] }
+      }).catch(() => undefined)
+      return new Promise(() => {})
+    })
+    const questions = new UserQuestionService()
+    const asked = vi.spyOn(questions, 'requestAnswers')
+    const { sessions } = core(agent.connect, questions)
+    await expect(oneShot(sessions)).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    expect(asked).not.toHaveBeenCalled()
+    expect(agent.connections[0]!.killed).toBe(true)
+  })
+})

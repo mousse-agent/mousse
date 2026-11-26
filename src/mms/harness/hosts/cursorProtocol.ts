@@ -27,6 +27,8 @@ export interface CursorAgentSetup extends CursorLocal {
   settingSources: string[]
   /** Cursor's Auto-review classifier gates the agent's tool calls. */
   autoReview: boolean
+  /** A one-shot: the model is offered no tool at all (the SDK's `tools: []`, which also turns MCP off). */
+  noTools?: true
 }
 
 export interface CursorHostMethods {

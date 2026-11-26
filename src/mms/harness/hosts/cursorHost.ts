@@ -252,6 +252,8 @@ function main(): void {
     ...(setup.model ? { model: setup.model } : {}),
     ...(setup.mode ? { mode: setup.mode } : {}),
     ...(setup.mcpServers ? { mcpServers: setup.mcpServers } : {}),
+    // No built-in tool and no MCP: the model can only answer with text.
+    ...(setup.noTools ? { tools: [] } : {}),
     local: {
       cwd: setup.cwd,
       store: store(setup.storeDir),

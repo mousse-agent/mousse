@@ -91,8 +91,8 @@ It ranks every enabled, signed-in model that can run a single request, from what
 (no check is started to rank them):
 
 1. **Provider**, by the first `namingProviders` entry that matches it: a Pi provider by `pi:<provider
-   id>`, then the driver kind (`claude`, `codex`, `antigravity`, `pi`), then `*`. A provider no entry
-   matches comes last.
+   id>`, then the driver kind (`claude`, `codex`, `antigravity`, `pi`), then `*` (Cursor, Grok,
+   OpenCode and other ACP agents in the bundled list). A provider no entry matches comes last.
 2. **Tier**: `small`, then `standard`, then `frontier`, then unknown.
 3. A subscription before an API key.
 4. A current model before an `older` one, then the newest `released`, then the order the agent lists.
