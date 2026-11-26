@@ -14,6 +14,20 @@
       "expiresAt": "2026-11-25T20:34:18.437Z"
     },
     {
+      "task": "antigravity-one-shot-launch",
+      "session": "Animatrix-9874f6",
+      "machine": "Animatrix",
+      "branch": "mousse/harden-antigravity-oneshot-launch",
+      "paths": [
+        "src/mms/harness/acp/session.ts",
+        "src/mms/harness/acp/connection.ts",
+        "src/mms/harness/acp/presets/antigravity.ts",
+        "src/mms/harness/acp/presets/antigravity"
+      ],
+      "claimedAt": "2026-11-26T14:33:14.859Z",
+      "expiresAt": "2026-11-26T16:33:14.859Z"
+    },
+    {
       "task": "background-jobs-shared",
       "session": "Animatrix-955f26",
       "machine": "Animatrix",
