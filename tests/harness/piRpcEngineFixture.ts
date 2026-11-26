@@ -61,6 +61,8 @@ export interface SetupOptions {
   pin?: (url: string) => { origin: string; keyless: boolean; extraBody?: Record<string, unknown> }
   /** A local server's model facts (`PiRpcEngineOptions.localModel`). */
   localModel?: PiRpcEngineOptions['localModel']
+  /** A local server's list read before its turns (`PiRpcEngineOptions.refreshLocal`). */
+  refreshLocal?: PiRpcEngineOptions['refreshLocal']
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -96,6 +98,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     }),
     apiKey: () => options.apiKey ?? 'fake-mock-key',
     ...(options.localModel ? { localModel: options.localModel } : {}),
+    ...(options.refreshLocal ? { refreshLocal: options.refreshLocal } : {}),
     onCommand: (type) => commands.push(type),
     onSpawn: (pid) => void spawned.push(pid),
     readyDeadlineMs: 15_000,
