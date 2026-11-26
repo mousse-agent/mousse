@@ -107,7 +107,7 @@ import { botTaskItems } from './botTasks'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowId, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
-import { message as mousseMessage, notice as mousseNotice } from '../../../shared/mousseContext'
+import { message as mousseMessage, notice as mousseNotice, quoted } from '../../../shared/mousseContext'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotSwitchedOff } from '../instructions'
@@ -3333,7 +3333,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(pack ? [pack] : []),
       ...(request ? [`What you were asked:\n${request}`] : []),
       ...(added.length ? [`What the owner added since:\n${added.map((text) => `- ${text}`).join('\n')}`] : []),
-      ...(passed.length ? [`${OWN_NOTES_HEADING}\n${passed.map((text) => `- ${text}`).join('\n')}`] : [])
+      ...(passed.length ? [ownNotesText(passed)] : [])
     ].join('\n\n')
   }
 
@@ -6131,7 +6131,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { ...delivery, text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, ...(actionCaused ? { actionCaused: actionContinuation(actionCaused, current.trigger.kind === 'schedule') } : {}), waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
+        prompt: { ...delivery, text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, ...(actionCaused ? { actionCaused: actionContinuation(actionCaused, current.trigger.kind === 'schedule') } : {}), waited, answerCaused: current.status === 'waiting_grant' && answers.length > 0, workEvents, answers, ...(notes ? { notes: notes.text, ...(notes.fromOwner === false ? { botNotesOnly: true as const } : {}) } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
@@ -6179,7 +6179,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; actionCaused?: string; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; windowEnd?: true; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string; unanswered?: boolean }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; workEvents?: WorkContinuationEvent[]; actionCaused?: string; restart?: boolean; reload?: boolean; ownerText?: string; waited?: boolean; answerCaused?: boolean; network?: boolean; notes?: string; botNotesOnly?: true; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; windowEnd?: true; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; askAgain?: string[]; questionAnswered?: boolean; answered?: string; unanswered?: boolean }, neverRan?: string): string {
     // A chat turn whose reply was the runtime's placeholder: nothing reached the owner, so it answers them now.
     if (input.unanswered && row.lane === 'chat') {
       const draft = this.chatDraft(row)
@@ -6226,8 +6226,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           : input.moreRoom ? 'You have more room now; what you had so far was already sent to the owner.'
           : input.usageReset ? 'A usage limit stopped you while you were working; it has reset now.'
           : input.network ? 'The internet connection dropped while you were working; it is back now.'
-            : input.afterReport ? 'The owner added something while you worked; what you had so far was already sent to them.'
-              : input.notes ? 'The owner added something while you worked.' : input.waited ? 'Your wait is over.' : orderedAnswers ? 'The owner answered your request.' : 'The owner asked you to continue.'
+            // Notes the bot's own chat passed on, none of them the owner's: never credited to the owner.
+            : input.afterReport ? (input.botNotesOnly ? 'A note was added to this work while you worked; what you had so far was already sent to the owner.' : 'The owner added something while you worked; what you had so far was already sent to them.')
+              : input.notes ? (input.botNotesOnly ? 'A note was added to this work while you worked.' : 'The owner added something while you worked.') : input.waited ? 'Your wait is over.' : orderedAnswers ? 'The owner answered your request.' : 'The owner asked you to continue.'
     // Work's question answered while it waited for something else (more room, say): the answer comes with why it goes on.
     const lead = [
       reason,
@@ -6262,7 +6263,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         : `${input.answered && !orderedQuestion ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.${input.waited ? ' Your wait is over.' : ''}`
       const notes = updates ? `\n\n${updates}` : ''
       const sent = input.afterReport ? ' What you had so far was already sent to them.' : ''
-      return `[Mousse] ${allowedLine}${sent}${interrupted}${notes}\n\nDo now what you skipped without it${notes ? ', and take the owner\'s notes into account' : ''}. Your last message is your updated report: lead with what changed, in plain words.`
+      return `[Mousse] ${allowedLine}${sent}${interrupted}${notes}\n\nDo now what you skipped without it${notes ? `, and take ${input.botNotesOnly ? 'the notes' : 'the owner\'s notes'} into account` : ''}. Your last message is your updated report: lead with what changed, in plain words.`
     }
     // The owner's notes to a run: they change the work, so the run reports again on all of it.
     if (updates) return `[Mousse] ${lead}${interrupted}\n\n${updates}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}${input.afterReport ? 'Update your work for it. Your last message is your updated report: lead with what changed, in plain words.' : `Take it into account as you continue. ${BOT_RUN_REPORT_LINE}`}`
@@ -9040,7 +9041,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * after a restart, any note: what the process before knew is gone), or a note carried in a started
    * dispatch without confirmed output, says it may be a repeat.
    */
-  private workNotes(row: BotActivationRow, restart = false, redeliver = false): { text: string; ids: number[]; events?: Array<{ at: string; text: string }> } | undefined {
+  private workNotes(row: BotActivationRow, restart = false, redeliver = false): { text: string; ids: number[]; events?: Array<{ at: string; text: string }>; fromOwner?: boolean } | undefined {
     // A note a live turn took and has not read yet is that turn's until it reads it or hands it back.
     const taken = new Set([...(this.live.get(row.id)?.steering.values() ?? [])].flatMap((entry) => entry.ids))
     const notes = (redeliver ? this.store.unreadWorkNotes(row.id) : this.store.pendingWorkNotes(row.id)).filter((note) => !taken.has(note.id))
@@ -9055,20 +9056,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.notOffered(row.id, ids)
     // The owner's messages to a chat turn, whole and in order: each may run to several lines.
     if (row.lane === 'chat') return { text: `The owner also wrote:\n\n${marked.join('\n\n')}${repeats ? `\n\n${CHAT_NOTE_REPEAT_LINE}` : ''}`, ids }
-    const lines = marked.map((note) => `- ${note}`)
-    // The owner's notes, then what the bot's own chat passed on from a turn the owner did not start: never credited to them.
+    // The owner's notes, then what the bot's own chat passed on from a turn the owner did not start: never credited to
+    // them, and quoted as data whatever tags its text holds (`ownNotesText`).
     const own = notes.map((note) => botAuthoredNote(note.fromMessage))
-    const heading = (index: number): string => own[index] ? OWN_NOTES_HEADING : 'The owner added while you worked:'
-    const ownerLines = lines.filter((_, index) => !own[index])
-    const ownLines = lines.filter((_, index) => own[index])
-    const sections = [
-      ...(ownerLines.length ? [`The owner added while you worked:\n${ownerLines.join('\n')}`] : []),
-      ...(ownLines.length ? [`${OWN_NOTES_HEADING}\n${ownLines.join('\n')}`] : [])
-    ]
+    const section = (texts: readonly string[], fromBot: boolean): string => fromBot ? ownNotesText(texts) : `The owner added while you worked:\n${texts.map((text) => `- ${text}`).join('\n')}`
+    const ownerTexts = marked.filter((_, index) => !own[index])
+    const ownTexts = marked.filter((_, index) => own[index])
+    const sections = [...(ownerTexts.length ? [section(ownerTexts, false)] : []), ...(ownTexts.length ? [section(ownTexts, true)] : [])]
     return {
       text: `${sections.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
-      events: notes.map((note, index) => ({ at: note.at, text: `${heading(index)}\n${lines[index]}${repeated[index] ? `\n${NOTE_REPEAT_LINE}` : ''}` })),
-      ids
+      events: notes.map((note, index) => ({ at: note.at, text: `${section([marked[index]!], own[index]!)}${repeated[index] ? `\n${NOTE_REPEAT_LINE}` : ''}` })),
+      ids,
+      fromOwner: own.some((fromBot) => !fromBot)
     }
   }
 
@@ -11027,6 +11026,15 @@ const OWN_NOTES_HEADING = 'Your own chat passed on while you worked (an update o
 const OWN_NOTE_LINE = 'This update came from your own chat while you worked, not from the owner: they did not send it. Take it into account from here on. If it changes what you found so far, update it. When you report, never say the owner sent or told you this.'
 
 /**
+ * Notes the bot's own chat passed on to work (`botAuthoredNote`), on every path they reach it: mid-turn, with its next
+ * dispatch, and again after a compaction. Their text may relay a thread's report or other outside words, so it is
+ * quoted (`quoted`, every Mousse tag in it broken) and never reads as Mousse's or the owner's instructions.
+ */
+export function ownNotesText(notes: readonly string[]): string {
+  return mousseNotice({ kind: 'work_note' }, [OWN_NOTES_HEADING, quoted('bot chat', notes.map((note) => `- ${note}`).join('\n')), OWN_NOTE_LINE])
+}
+
+/**
  * The owner's notes as they reach running work in the middle of its turn: framed as the owner's addition to the job,
  * never as a new task, and with what its report must lead with. A note the bot's own chat passed on (`fromOwner:
  * false`) is framed as Mousse's notice of its own update instead, so the report never credits the owner with it.
@@ -11035,7 +11043,7 @@ export function noteSteerText(notes: readonly WorkNoteText[]): string {
   const { owner, own } = splitNotes(notes)
   return [
     ...(owner.length ? [`${mousseMessage({ from: 'owner', reply: 'required' }, owner.map((note) => `- ${note}`).join('\n'))}\n\nThe owner added this to your job while you work. Take it into account from here on. If it changes what you found so far, update it. When you report, lead with what changed because of it, in plain words.`] : []),
-    ...(own.length ? [mousseNotice({ kind: 'work_note' }, [own.map((note) => `- ${note}`).join('\n'), OWN_NOTE_LINE])] : [])
+    ...(own.length ? [ownNotesText(own)] : [])
   ].join('\n\n')
 }
 
