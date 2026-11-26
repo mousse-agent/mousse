@@ -9,7 +9,7 @@ import { filterNarrows, filterSuggestions, LOCAL_COMPUTER_ID, orderOptions, thre
 const at = '2026-11-18T10:00:00.000Z'
 const thread = (over: Partial<Thread> = {}): Thread => ({ id: 't', name: 'Fix steer after the answer', createdAt: at, updatedAt: at, projectId: 'p1', ...over } as Thread)
 const alpha = { startedByBot: { botId: 'b1', name: 'Alpha (old name)' } }
-const filter = (over: Partial<ThreadFilter> = {}): ThreadFilter => ({ query: '', show: 'mine', projectId: null, botId: null, computerId: null, archived: false, ...over })
+const filter = (over: Partial<ThreadFilter> = {}): ThreadFilter => ({ query: '', show: 'mine', projectId: null, botId: null, computerIds: [], archived: false, ...over })
 const context = {
   // p1 and p1-mac are one project on two computers.
   groupOf: (id: string) => (id === 'p1-mac' ? 'p1' : id),
@@ -33,11 +33,15 @@ describe('which threads the filter keeps', () => {
     ['a project: its thread on another computer', { projectId: 'p1-mac' }, { projectId: 'p1' }, true],
     ['a project: another project\'s thread', { projectId: 'p2' }, { projectId: 'p1' }, false],
     ['a project: a thread of no project', { projectId: undefined }, { projectId: 'p1' }, false],
-    ['a computer: this computer keeps a local thread', {}, { computerId: LOCAL_COMPUTER_ID }, true],
-    ['a computer: this computer leaves out a remote thread', { node: 'mac' }, { computerId: LOCAL_COMPUTER_ID }, false],
-    ['a computer: a remote computer keeps its own thread', { node: 'mac' }, { computerId: 'mac' }, true],
-    ['a computer: a remote computer leaves out a local thread', {}, { computerId: 'mac' }, false],
-    ['a computer: a remote computer leaves out another remote computer\'s thread', { node: 'linux' }, { computerId: 'mac' }, false],
+    ['a computer: this computer keeps a local thread', {}, { computerIds: [LOCAL_COMPUTER_ID] }, true],
+    ['a computer: this computer leaves out a remote thread', { node: 'mac' }, { computerIds: [LOCAL_COMPUTER_ID] }, false],
+    ['a computer: a remote computer keeps its own thread', { node: 'mac' }, { computerIds: ['mac'] }, true],
+    ['a computer: a remote computer leaves out a local thread', {}, { computerIds: ['mac'] }, false],
+    ['a computer: a remote computer leaves out another remote computer\'s thread', { node: 'linux' }, { computerIds: ['mac'] }, false],
+    ['multiple computers: keeps a local thread when local is among selected', {}, { computerIds: [LOCAL_COMPUTER_ID, 'mac'] }, true],
+    ['multiple computers: keeps a selected remote thread', { node: 'mac' }, { computerIds: [LOCAL_COMPUTER_ID, 'mac'] }, true],
+    ['multiple computers: leaves out an unselected remote thread', { node: 'linux' }, { computerIds: [LOCAL_COMPUTER_ID, 'mac'] }, false],
+    ['multiple computers: empty list keeps every computer', { node: 'linux' }, { computerIds: [] }, true],
     ['typed: words of the title, any case and order', {}, { query: 'ANSWER steer' }, true],
     ['typed: the project\'s name', {}, { query: 'mous' }, true],
     ['typed: the bot\'s name now', alpha, { query: 'alpha' }, true],
@@ -50,10 +54,10 @@ describe('which threads the filter keeps', () => {
     expect(threadInFilter(thread(over), filter(set), context)).toBe(kept)
   })
 
-  it('treats a chosen computer as narrowing the list', () => {
+  it('treats any chosen computers as narrowing the list', () => {
     expect(filterNarrows(filter())).toBe(false)
-    expect(filterNarrows(filter({ computerId: 'mac' }))).toBe(true)
-    expect(filterNarrows(filter({ computerId: LOCAL_COMPUTER_ID }))).toBe(true)
+    expect(filterNarrows(filter({ computerIds: ['mac'] }))).toBe(true)
+    expect(filterNarrows(filter({ computerIds: [LOCAL_COMPUTER_ID, 'mac'] }))).toBe(true)
   })
 })
 
@@ -94,6 +98,8 @@ describe('what typing suggests', () => {
 
   it('nothing for an empty field, and not what is already filtered on', () => {
     expect(filterSuggestions(' ', filter(), projects, bots, computers)).toEqual([])
-    expect(filterSuggestions('mo', filter({ projectId: 'p1', botId: 'b1', computerId: 'mini' }), projects, bots, computers).map((item) => item.id)).toEqual(['p3', 'p4'])
+    expect(filterSuggestions('mo', filter({ projectId: 'p1', botId: 'b1', computerIds: ['mini'] }), projects, bots, computers).map((item) => item.id)).toEqual(['p3', 'p4'])
+    // Another matching computer stays suggested while one is already selected.
+    expect(filterSuggestions('mac', filter({ computerIds: ['mac'] }), projects, bots, computers).map((item) => item.id)).toEqual(['mini'])
   })
 })

@@ -16,7 +16,10 @@ interface ThreadFilterState extends ThreadFilter {
   setShow(show: ThreadShow): void
   setProject(projectId: string | null): void
   setBot(botId: string | null): void
-  setComputer(computerId: string | null): void
+  toggleComputer(computerId: string): void
+  addComputer(computerId: string): void
+  removeComputer(computerId: string): void
+  clearComputers(): void
   setArchived(archived: boolean): void
   setProjectHidden(projectId: string, hidden: boolean): void
   clearHiddenProjects(): void
@@ -24,7 +27,7 @@ interface ThreadFilterState extends ThreadFilter {
   showBot(botId: string): void
 }
 
-const DEFAULTS: ThreadFilter = { query: '', show: 'mine', projectId: null, botId: null, computerId: null, archived: false }
+const DEFAULTS: ThreadFilter = { query: '', show: 'mine', projectId: null, botId: null, computerIds: [], archived: false }
 const SHOWS: readonly ThreadShow[] = ['mine', 'bots', 'all']
 
 const storageKey = (profileId: string) => `mousse-profile-${profileId}-thread-filter`
@@ -67,13 +70,24 @@ export const useThreadFilterStore = create<ThreadFilterState>((set, get) => {
     setShow: (show) => saving({ show }),
     setProject: (projectId) => set({ projectId }),
     setBot: (botId) => set({ botId }),
-    setComputer: (computerId) => set({ computerId }),
+    toggleComputer: (computerId) => set((state) => ({
+      computerIds: state.computerIds.includes(computerId)
+        ? state.computerIds.filter((id) => id !== computerId)
+        : [...state.computerIds, computerId]
+    })),
+    addComputer: (computerId) => set((state) => (
+      state.computerIds.includes(computerId) ? state : { computerIds: [...state.computerIds, computerId] }
+    )),
+    removeComputer: (computerId) => set((state) => ({
+      computerIds: state.computerIds.filter((id) => id !== computerId)
+    })),
+    clearComputers: () => set({ computerIds: [] }),
     setArchived: (archived) => set({ archived }),
     setProjectHidden: (projectId, hidden) => {
       const rest = get().hiddenProjects.filter((id) => id !== projectId)
       saving({ hiddenProjects: hidden ? [...rest, projectId] : rest })
     },
     clearHiddenProjects: () => saving({ hiddenProjects: [] }),
-    showBot: (botId) => set({ botId, query: '', projectId: null, computerId: null, archived: false })
+    showBot: (botId) => set({ botId, query: '', projectId: null, computerIds: [], archived: false })
   }
 })

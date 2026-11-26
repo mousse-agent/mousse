@@ -7,7 +7,7 @@ import type { Thread } from '../../shared/types'
  *   owner's bots started, hidden or not), or All.
  * - `botId`: only the threads that bot started, hidden or not, whatever `show` says.
  * - `projectId`: only the threads of that project group (`groupProjects`).
- * - `computerId`: only the threads running on that computer (`LOCAL_COMPUTER_ID` for this computer, or a node id).
+ * - `computerIds`: only the threads running on those computers (`LOCAL_COMPUTER_ID` for this computer, or node ids); empty keeps all.
  * - `archived`: the list holds archived threads instead of the others.
  * - `query`: each word must be in the thread's title, its project's name, its bot's name or its computer's name; or what
  *   is typed, as a whole, is in one of the thread's messages (`ThreadFilterContext.messageMatches`).
@@ -22,7 +22,7 @@ export interface ThreadFilter {
   show: ThreadShow
   projectId: string | null
   botId: string | null
-  computerId: string | null
+  computerIds: string[]
   archived: boolean
 }
 
@@ -57,12 +57,9 @@ export function threadInFilter(thread: Thread, filter: ThreadFilter, context: Th
     return false
   }
   if (filter.projectId !== null && (!thread.projectId || context.groupOf(thread.projectId) !== filter.projectId)) return false
-  if (filter.computerId !== null) {
-    if (filter.computerId === LOCAL_COMPUTER_ID) {
-      if (thread.node) return false
-    } else if (thread.node !== filter.computerId) {
-      return false
-    }
+  if (filter.computerIds.length > 0) {
+    const computer = thread.node ?? LOCAL_COMPUTER_ID
+    if (!filter.computerIds.includes(computer)) return false
   }
   const words = queryWords(filter.query)
   if (!words.length) return true
@@ -77,7 +74,7 @@ export function threadInFilter(thread: Thread, filter: ThreadFilter, context: Th
 
 /** Whether anything narrows the list beyond the default (My threads, nothing typed). */
 export function filterNarrows(filter: ThreadFilter): boolean {
-  return filter.show !== 'mine' || filter.botId !== null || filter.projectId !== null || filter.computerId !== null || filter.archived || queryWords(filter.query).length > 0
+  return filter.show !== 'mine' || filter.botId !== null || filter.projectId !== null || filter.computerIds.length > 0 || filter.archived || queryWords(filter.query).length > 0
 }
 
 export interface FilterOption {
@@ -129,14 +126,14 @@ export function filterSuggestions(
   computers: readonly FilterOption[] = []
 ): FilterSuggestion[] {
   if (!query.trim()) return []
-  const pick = (kind: FilterSuggestion['kind'], options: readonly FilterOption[], current: string | null) =>
-    orderOptions(options.filter((option) => option.id !== current), query).rest
+  const pick = (kind: FilterSuggestion['kind'], options: readonly FilterOption[], selected: ReadonlySet<string>) =>
+    orderOptions(options.filter((option) => !selected.has(option.id)), query).rest
       .slice(0, SUGGESTIONS_PER_KIND)
       .map((option): FilterSuggestion => ({ kind, id: option.id, name: option.name }))
   return [
-    ...pick('project', projects, filter.projectId),
-    ...pick('bot', bots, filter.botId),
-    ...pick('computer', computers, filter.computerId)
+    ...pick('project', projects, new Set(filter.projectId ? [filter.projectId] : [])),
+    ...pick('bot', bots, new Set(filter.botId ? [filter.botId] : [])),
+    ...pick('computer', computers, new Set(filter.computerIds))
   ]
 }
 

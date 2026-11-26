@@ -93,6 +93,8 @@ const click = (element: Element | null | undefined) => act(() => { (element as H
 const openMenu = () => click(host.querySelector('button[aria-label="Filter threads"]'))
 const item = (label: string) => [...document.querySelectorAll<HTMLElement>('[role^="menuitem"]')].find((entry) => entry.textContent?.includes(label))
 const ticked = (label: string) => item(label)?.getAttribute('aria-checked')
+const subItem = (label: string) => [...document.querySelectorAll<HTMLElement>('[data-submenu] [role^="menuitem"]')].find((entry) => entry.textContent?.includes(label))
+const subTicked = (label: string) => subItem(label)?.getAttribute('aria-checked')
 
 describe('the sidebar filter', () => {
   it('typing narrows by title, project or bot; a suggested project becomes a chip below the field', () => {
@@ -190,7 +192,7 @@ describe('the sidebar filter', () => {
 
   it('a bot\'s See all opens the Threads tab on its threads; Archived opened there keeps the filter', async () => {
     show('projects')
-    useThreadFilterStore.getState().setComputer('mac')
+    useThreadFilterStore.getState().toggleComputer('mac')
     await act(async () => { await showBotThreads('b1') })
     expect(useAppStore.getState().threadsSidebarView).toBe('threads')
     expect(chips()).toEqual(['alpha'])
@@ -205,57 +207,99 @@ describe('the sidebar filter', () => {
     expect(document.querySelector('[data-sub="computer"]')).toBeNull()
   })
 
-  it('Computer › filters threads by computer, narrows typing suggestions and Projects view, and clears from its chip', () => {
+  it('Computer › toggles multiple computers like checkboxes, keeps the list open to pick more, and clears individually or all at once', () => {
     useComputersStore.setState({
       loaded: true,
       routed: true,
-      byNode: { mac: { node: 'mac', name: "Avarnic's Mac mini", online: true } },
+      byNode: {
+        mac: { node: 'mac', name: "Avarnic's Mac mini", online: true },
+        linux: { node: 'linux', name: 'Work Linux', online: true }
+      },
       devices: []
     })
     const remoteProjects: Project[] = [
       ...projects,
-      { id: 'mac:p1', name: 'mousse', path: '/Users/avarnic/mousse', createdAt: at, order: 2, node: 'mac', sameAs: 'p1' }
+      { id: 'mac:p1', name: 'mousse', path: '/Users/avarnic/mousse', createdAt: at, order: 2, node: 'mac', sameAs: 'p1' },
+      { id: 'linux:p3', name: 'infra', path: '/srv/infra', createdAt: at, order: 3, node: 'linux' }
     ]
     const mixedThreads = [
       ...threads,
       thread('r1', 'Sidebar screenshot taker', { projectId: 'mac:p1', node: 'mac' }),
-      thread('r2', 'Old Mac check', { projectId: 'mac:p1', node: 'mac', archivedAt: at })
+      thread('r2', 'Old Mac check', { projectId: 'mac:p1', node: 'mac', archivedAt: at }),
+      thread('r3', 'Deploy worker', { projectId: 'linux:p3', node: 'linux' })
     ]
     show('threads', mixedThreads, remoteProjects)
-    expect(listed().sort()).toEqual(['r1', 't1', 't2'])
+    expect(listed().sort()).toEqual(['r1', 'r3', 't1', 't2'])
 
     openMenu()
     click(document.querySelector('[data-sub="computer"]'))
     const search = document.querySelector<HTMLInputElement>('input[aria-label="Search computers"]')!
     expect(document.activeElement).toBe(search)
-    click(item("Avarnic's Mac mini"))
-    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(subTicked('All computers')).toBe('true')
+    expect(subItem("Avarnic's Mac mini")?.getAttribute('role')).toBe('menuitemcheckbox')
+    expect(subTicked("Avarnic's Mac mini")).toBe('false')
+
+    // Click one computer: selects it and keeps the submenu open so another can be ticked.
+    click(subItem("Avarnic's Mac mini"))
+    expect(document.querySelector('[role="menu"]')).not.toBeNull()
+    expect(subTicked("Avarnic's Mac mini")).toBe('true')
+    expect(subTicked('All computers')).toBe('false')
     expect(chips()).toEqual(["Avarnic's Mac mini"])
     expect(listed()).toEqual(['r1'])
     expect(host.querySelector('.threads-sidebar-archived-count')?.textContent).toBe('1')
 
-    // Switch to Projects view while filtered to the Mac mini: only the matching project stays listed.
-    act(() => useAppStore.setState({ threadsSidebarView: 'projects', sidebarMode: 'projects' }))
-    expect([...panel().querySelectorAll('.threads-sidebar-project-name')].map((name) => name.textContent)).toEqual(['mousse'])
-    expect(listed()).toEqual(['r1'])
+    // Click a second computer in the same open list: both stay checked and threads from both show.
+    click(subItem('This computer'))
+    expect(subTicked("Avarnic's Mac mini")).toBe('true')
+    expect(subTicked('This computer')).toBe('true')
+    expect(subTicked('Work Linux')).toBe('false')
+    expect(document.querySelector('[data-sub="computer"] .thread-filter-menu-value')?.textContent).toBe('2 selected')
+    expect(chips()).toEqual(["Avarnic's Mac mini", 'This computer'])
+    expect(listed().sort()).toEqual(['r1', 't1', 't2'])
 
-    // Pick This computer from the menu: only local threads remain.
-    openMenu()
-    click(document.querySelector('[data-sub="computer"]'))
-    click(item('This computer'))
+    // Click the first computer again: unselects it while keeping the second.
+    click(subItem("Avarnic's Mac mini"))
+    expect(subTicked("Avarnic's Mac mini")).toBe('false')
+    expect(subTicked('This computer')).toBe('true')
     expect(chips()).toEqual(['This computer'])
     expect(listed().sort()).toEqual(['t1', 't2'])
 
-    // Clear the chip and pick the Mac mini from typing suggestions instead.
-    click(host.querySelector('button[aria-label="Clear computer filter: This computer"]'))
+    // Click the last selected computer again: unselects it and returns to All computers.
+    click(subItem('This computer'))
+    expect(subTicked('This computer')).toBe('false')
+    expect(subTicked('All computers')).toBe('true')
     expect(chips()).toEqual([])
-    act(() => useAppStore.setState({ threadsSidebarView: 'threads', sidebarMode: 'threads' }))
-    type('mac mini')
-    expect(listed()).toEqual(['r1'])
-    expect([...host.querySelectorAll('[role="option"]')].map((option) => option.textContent)).toEqual(["Computer:Avarnic's Mac mini↵"])
-    key(field(), 'Enter')
-    expect(field().value).toBe('')
+    expect(listed().sort()).toEqual(['r1', 'r3', 't1', 't2'])
+
+    // Select two computers, then check Projects view keeps projects of both selected computers.
+    click(subItem("Avarnic's Mac mini"))
+    click(subItem('Work Linux'))
+    key(document.querySelector('[data-submenu]')!, 'Escape')
+    key(document.querySelector('.thread-filter-menu')!, 'Escape')
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    act(() => useAppStore.setState({ threadsSidebarView: 'projects', sidebarMode: 'projects' }))
+    expect([...panel().querySelectorAll('.threads-sidebar-project-name')].map((name) => name.textContent).sort()).toEqual(['infra', 'mousse'])
+    expect(listed().sort()).toEqual(['r1', 'r3'])
+
+    // Clearing one chip removes only that computer; typing adds another without replacing the remaining one.
+    click(host.querySelector('button[aria-label="Clear computer filter: Work Linux"]'))
     expect(chips()).toEqual(["Avarnic's Mac mini"])
     expect(listed()).toEqual(['r1'])
+
+    act(() => useAppStore.setState({ threadsSidebarView: 'threads', sidebarMode: 'threads' }))
+    type('work linux')
+    expect([...host.querySelectorAll('[role="option"]')].map((option) => option.textContent)).toEqual(['Computer:Work Linux↵'])
+    key(field(), 'Enter')
+    expect(field().value).toBe('')
+    expect(chips()).toEqual(["Avarnic's Mac mini", 'Work Linux'])
+    expect(listed().sort()).toEqual(['r1', 'r3'])
+
+    // All computers in the submenu clears every selected computer at once.
+    openMenu()
+    click(document.querySelector('[data-sub="computer"]'))
+    click(subItem('All computers'))
+    expect(subTicked('All computers')).toBe('true')
+    expect(chips()).toEqual([])
+    expect(listed().sort()).toEqual(['r1', 'r3', 't1', 't2'])
   })
 })

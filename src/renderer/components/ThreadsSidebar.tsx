@@ -537,18 +537,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const filterShow = useThreadFilterStore((s) => s.show)
   const filterProjectId = useThreadFilterStore((s) => s.projectId)
   const filterBotId = useThreadFilterStore((s) => s.botId)
-  const filterComputerId = useThreadFilterStore((s) => s.computerId)
+  const filterComputerIds = useThreadFilterStore((s) => s.computerIds)
   const hiddenProjectIds = useThreadFilterStore((s) => s.hiddenProjects)
   const filter = useMemo<ThreadFilter>(
-    () => ({ query: filterQuery, show: filterShow, projectId: filterProjectId, botId: filterBotId, computerId: filterComputerId, archived: filterArchived }),
-    [filterQuery, filterShow, filterProjectId, filterBotId, filterComputerId, filterArchived]
+    () => ({ query: filterQuery, show: filterShow, projectId: filterProjectId, botId: filterBotId, computerIds: filterComputerIds, archived: filterArchived }),
+    [filterQuery, filterShow, filterProjectId, filterBotId, filterComputerIds, filterArchived]
   )
   const filtering = filterNarrows(filter)
   const bots = useBotsStore((s) => s.bots)
   const hasRemoteProjects = projects.some((project) => project.node)
   const hasRemoteThreads = threads.some((thread) => thread.node)
   const { byNode: computers, devices } = useComputers(
-    hasRemoteProjects || hasRemoteThreads || (filterComputerId !== null && filterComputerId !== LOCAL_COMPUTER_ID)
+    hasRemoteProjects || hasRemoteThreads || filterComputerIds.some((id) => id !== LOCAL_COMPUTER_ID)
   )
   const hasOtherComputers = hasRemoteProjects || hasRemoteThreads || Object.keys(computers).length > 0
   // What is typed also finds the threads whose messages hold it.
@@ -657,8 +657,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     for (const thread of listedThreads) if (thread.node && !agentThreadIds.has(thread.id)) nodes.add(thread.node)
     for (const project of projects) if (project.node) nodes.add(project.node)
     for (const node of Object.keys(computers)) nodes.add(node)
-    if (filterComputerId && filterComputerId !== LOCAL_COMPUTER_ID) nodes.add(filterComputerId)
-    if (nodes.size === 0 && filterComputerId === null) return []
+    for (const id of filterComputerIds) if (id !== LOCAL_COMPUTER_ID) nodes.add(id)
+    if (nodes.size === 0 && filterComputerIds.length === 0) return []
     const lastUsed = lastUsedBy(threads, (thread) => thread.node ?? LOCAL_COMPUTER_ID)
     return [
       { id: LOCAL_COMPUTER_ID, name: 'This computer', local: true, lastUsed: lastUsed.get(LOCAL_COMPUTER_ID) },
@@ -668,7 +668,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         lastUsed: lastUsed.get(node)
       }))
     ]
-  }, [listedThreads, agentThreadIds, projects, computers, filterComputerId, threads])
+  }, [listedThreads, agentThreadIds, projects, computers, filterComputerIds, threads])
   const nameOfComputer = (node: string): string => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME
   const localArchivedCount = archivedThreads.filter((thread) => !thread.node).length
   // With projects of several computers, a project's tooltip names this one too.
@@ -823,7 +823,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const projectThreadsOf = (groupId: string) => treeThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
   // The filter leaves out the projects unticked in its menu and, while it narrows to some threads, the projects with none
   // of them; those it keeps show open.
-  const treeNarrowed = filter.show === 'bots' || filter.botId !== null || filter.projectId !== null || filter.computerId !== null || filter.archived || queryWords(filter.query).length > 0
+  const treeNarrowed = filter.show === 'bots' || filter.botId !== null || filter.projectId !== null || filter.computerIds.length > 0 || filter.archived || queryWords(filter.query).length > 0
   const hiddenProjectSet = new Set(hiddenProjectIds)
   const shownGroups = projectGroups.filter((group) => !hiddenProjectSet.has(group.id) &&
     (filter.projectId === null || group.id === filter.projectId) &&
