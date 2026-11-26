@@ -19,6 +19,7 @@ import type { LocalTtsModelId, LocalTtsModelStatus, NativeSpeechResult, Provider
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
+import { REMOTE_UPDATE_IPC, type RemoteUpdateToast } from '../shared/remoteUpdates'
 import type { SubagentSummary, SubagentsUpdatedEvent } from '../shared/subagents'
 import type { ThreadBackgroundWork } from '../shared/backgroundWork'
 import type {
@@ -1605,7 +1606,15 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, state: UpdateState) => cb(state)
       ipcRenderer.on(UPDATE_IPC.state, handler)
       return () => ipcRenderer.removeListener(UPDATE_IPC.state, handler)
-    }
+    },
+    /** Another computer is updating this one: its countdown (null when none). */
+    remoteToast: (): Promise<RemoteUpdateToast | null> => ipcRenderer.invoke(REMOTE_UPDATE_IPC.get),
+    onRemoteToast: (cb: (toast: RemoteUpdateToast | null) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, toast: RemoteUpdateToast | null) => cb(toast)
+      ipcRenderer.on(REMOTE_UPDATE_IPC.toast, handler)
+      return () => ipcRenderer.removeListener(REMOTE_UPDATE_IPC.toast, handler)
+    },
+    cancelRemote: (job: string): Promise<void> => ipcRenderer.invoke(REMOTE_UPDATE_IPC.cancel, job)
   },
   mousseId: {
     /** Runtime service origin from `MOUSSE_ID_ORIGIN`; empty when unset. */

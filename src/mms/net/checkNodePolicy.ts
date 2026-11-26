@@ -1,6 +1,7 @@
 import type { NodeId } from '../../shared/net'
 import { NetError } from '../../shared/net/errors'
 import { methodAccess, needsWork } from '../../shared/net/accessClasses'
+import { accessPresetOf } from '../../shared/net/accessPresets'
 import type { RpcMethod } from './contracts'
 import type { NodePolicy } from './store/nodePolicy'
 
@@ -25,6 +26,13 @@ export function checkNodePolicy(
       undefined,
       method.family === 'routed' ? { details: { reason: 'blocked' } } : undefined
     )
+  // Installing an update stops every turn and the service here: only a device the owner gave Full control, and has not
+  // blocked, may ask, see a request's status or cancel it. Read on every call, so a change applies at once.
+  if (methodAccess(method.method) === 'update') {
+    if (policy.isBlocked(node)) throw new NetError('forbidden', undefined, { details: { reason: 'blocked' } })
+    if (accessPresetOf(policy.get(node)) !== 'full')
+      throw new NetError('forbidden', undefined, { details: { reason: 'full_control_needed' } })
+  }
   if (method.family === 'routed') {
     // The owner's switch is read on every call, so turning it off is also a kill switch.
     if (config.workOnThreads === false)

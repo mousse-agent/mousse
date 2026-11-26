@@ -1,8 +1,11 @@
 import { app, BrowserWindow, ipcMain, nativeImage } from 'electron'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { channelForVersion, UPDATE_IPC, type UpdateChannel, type UpdateState } from '../../shared/updates'
+import { REMOTE_UPDATE_IPC, remoteUpdateLimits, type RemoteUpdateToast } from '../../shared/remoteUpdates'
+import { takeInstallFolderLock } from './installFolderLock'
+import { RemoteUpdateAgent, type AgentService } from './remoteUpdateAgent'
 import { getAppIconPath } from '../appIcon'
 import { installAppImage, startAfterExit } from './appImageInstall'
 import { DesktopUpdater, type UpdaterBackend } from './DesktopUpdater'
@@ -158,6 +161,17 @@ export function startDesktopUpdates(hooks: {
     prepareInstall: hooks.prepareInstall,
     recoverInstall: hooks.recoverInstall,
     ...(hooks.onInstallStarted ? { onInstallStarted: hooks.onInstallStarted } : {}),
+    // One update at a time per install folder, across every home sharing it. A development build's executable is the
+    // shared Electron runtime: only an installed build locks its folder.
+    ...(app.isPackaged
+      ? {
+          lock: (purpose: 'download' | 'install') =>
+            takeInstallFolderLock(
+              { folder: dirname(process.execPath), directory: app.getPath('temp'), staleMs: remoteUpdateLimits().lockStaleMs },
+              purpose
+            )
+        }
+      : {}),
     onState: (state) => {
       broadcast(state)
       report?.(state)
@@ -179,4 +193,46 @@ export function startDesktopUpdates(hooks: {
   updater.start()
   report?.(updater.getState())
   return updater
+}
+
+/**
+ * Why this app does not take update requests from the user's other computers, or undefined when it does: only an
+ * installed build that updates itself from the release feed takes them (never a development feed).
+ */
+export function remoteUpdatesRefusal(updater: Pick<DesktopUpdater, 'getState'>, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const state = updater.getState()
+  if (state.phase === 'disabled') return state.disabledReason ?? 'Updates are off.'
+  if (!app.isPackaged || env.MOUSSE_UPDATE_FEED_URL) return 'Only an installed build takes update requests.'
+  return undefined
+}
+
+/**
+ * Takes update requests from the user's other computers while the service is connected, and shows their countdown
+ * in every window (`REMOTE_UPDATE_IPC`). Returns null when this app does not take them.
+ */
+export function startRemoteUpdateAgent(
+  service: AgentService & { connectionState: string },
+  updater: DesktopUpdater
+): RemoteUpdateAgent | null {
+  if (remoteUpdatesRefusal(updater)) return null
+  let current: RemoteUpdateToast | null = null
+  const agent = new RemoteUpdateAgent({
+    service,
+    updater,
+    toast: (toast) => {
+      current = toast
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed()) window.webContents.send(REMOTE_UPDATE_IPC.toast, toast)
+      }
+    }
+  })
+  ipcMain.removeHandler(REMOTE_UPDATE_IPC.get)
+  ipcMain.handle(REMOTE_UPDATE_IPC.get, () => current)
+  ipcMain.removeHandler(REMOTE_UPDATE_IPC.cancel)
+  ipcMain.handle(REMOTE_UPDATE_IPC.cancel, (_event, job: unknown) => {
+    if (typeof job === 'string' && job === current?.job) return agent.cancel(job)
+    return undefined
+  })
+  agent.start(service.connectionState === 'ready')
+  return agent
 }

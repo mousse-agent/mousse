@@ -168,6 +168,9 @@ import { NET_PROTO_MINOR, WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
 import { mousseVersion } from '../appVersion'
 import type { SelfUpdateReport } from '../../shared/updates'
 import { ensurePresenceTable, PeerPresence, parsePeerInfo, versionStanding, type PeerLink } from './presence'
+import { isReleaseVersion, UPDATE_NET_METHODS, type UpdateNetMethod } from '../../shared/remoteUpdates'
+import type { RemoteUpdates } from '../updates/remoteUpdates'
+import { askUpdate, validateUpdateThere, type UpdateThereParams } from '../updates/askUpdate'
 import type { TransportConfiguration } from './transports/registry'
 import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
@@ -474,6 +477,8 @@ export class NetService {
       clock?: Clock
       /** Whether this computer's Mousse updates itself, as `net.info` tells other computers. */
       selfUpdate?(): SelfUpdateReport
+      /** Update requests from the user's other computers (`update.*`), shared by every profile of the service. */
+      remoteUpdates?: RemoteUpdates
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
@@ -817,9 +822,10 @@ export class NetService {
           access: 1,
           // Its channel and whether it updates itself, so another computer can say how to update it. Absent: an
           // older computer, which is never assumed either way, and a caller this computer blocks.
-          ...(this.options.selfUpdate && !policy.isBlocked(context.caller.node) ? { update: this.options.selfUpdate() } : {})
+          ...(this.options.selfUpdate && !policy.isBlocked(context.caller.node) ? { update: this.selfUpdateNow() } : {})
         })
       })
+      this.registerUpdateMethods(rpc)
       // What this computer lets the caller do here, for the caller's Settings, Devices. No family, so a blocked caller
       // is told it is blocked; one not connected here is refused above, like every call that is not control traffic.
       rpc.register({
@@ -1143,6 +1149,7 @@ export class NetService {
     // which adds the engine's pairings; this stays for in-process callers of the v1 view.
     if (method === 'bridge.nodes') return this.nodesView()
     if (method === 'bridge.access.there') return this.track(this.accessThere(params.node as NodeId))
+    if (method === 'net.update.there') return this.track(this.updateThere(validateUpdateThere(params)))
     if (method === 'net.editor.probe') return this.track(this.editorProbe(params.node as NodeId))
     if (method.startsWith('net.ssh.')) return this.track(this.sshRequest(method, params))
     if (method.startsWith('net.plus.') && !this.hosted) throw this.plusUnavailable()
@@ -3147,6 +3154,19 @@ export class NetService {
       agentReach: policy.agentReach
     }
   }
+  /** `net.update.there` for a device of the old networking: its version asked again, or one step of updating it. */
+  private async updateThere(params: UpdateThereParams): Promise<unknown> {
+    const rt = this.requireEnrolled()
+    const node = params.node as NodeId
+    if (node === rt.identity.self()?.node) throw new NetError('bad_request')
+    const session = this.session(node)
+    if (params.step === 'refresh') {
+      await this.readPeerInfo(session, node)
+      this.emit()
+      return { ok: true }
+    }
+    return askUpdate((method, body, options) => session.rpc(method, body, options), params)
+  }
   /** `bridge.access.there`: `bridge.access.mine` asked of `node`, with a refusal or an older build as a result. */
   private async accessThere(node: NodeId): Promise<BridgeAccessThere> {
     const rt = this.requireEnrolled()
@@ -4649,6 +4669,56 @@ export class NetService {
     if (!this.options.editorSsh) return undefined
     return (this.editorSshConfig ??= new EditorSshConfig(this.options.editorSsh))
   }
+  /** This computer's update report, saying it takes update requests while its app is registered for them. */
+  private selfUpdateNow(): SelfUpdateReport {
+    const report = this.options.selfUpdate!()
+    return report.self && this.options.remoteUpdates?.accepts() ? { ...report, requests: true } : report
+  }
+  /**
+   * `update.*`: another of the user's computers updates this one (#476). Each call is held to Full control here and
+   * no block (`checkNodePolicy`), on both networks; the request keeps the caller and asks again before installing.
+   */
+  private registerUpdateMethods(rpc: DurableRpcDispatcher): void {
+    const updates = this.options.remoteUpdates
+    if (!updates) return
+    const named = (node: NodeId): string =>
+      this.liveComputers().find((computer) => computer.node === node)?.name || 'another computer'
+    for (const method of UPDATE_NET_METHODS)
+      rpc.register({
+        method,
+        // A computer's grant: a phone never reaches it.
+        capability: 'write',
+        requires: ['settings'],
+        mutating: method !== 'update.status',
+        ...(method === 'update.status' ? { ephemeral: true } : {}),
+        validate: (params) => validateUpdateParams(method, params),
+        handle: async (params, context) => {
+          const p = params as { job?: string; version?: string; rollout?: string; runningTurns?: number }
+          const caller = context.caller
+          switch (method) {
+            case 'update.prepare':
+              return updates.prepare(
+                {
+                  node: caller.node,
+                  name: named(caller.node),
+                  stillAllowed: () => {
+                    rpc.authorizedMethod('update.install', caller)
+                    return true
+                  }
+                },
+                p.version!,
+                p.rollout
+              )
+            case 'update.status':
+              return updates.status(caller.node, p.job!)
+            case 'update.install':
+              return updates.install(caller.node, p.job!, p.runningTurns!)
+            case 'update.cancel':
+              return updates.cancel(caller.node, p.job!)
+          }
+        }
+      })
+  }
   /** The other computers of this user, for the aliases an editor opens. Phones have no folders to open. */
   private liveComputers(): LiveComputer[] {
     // The engine's pairings have aliases too. With v1 off, or not enrolled there, they are the only computers.
@@ -4901,7 +4971,7 @@ export class NetService {
         version: current,
         platform: process.platform,
         arch: process.arch,
-        ...(this.options.selfUpdate ? { update: this.options.selfUpdate() } : {}),
+        ...(this.options.selfUpdate ? { update: this.selfUpdateNow() } : {}),
         olderThanThis: false,
         newerThanThis: false,
         routes: []
@@ -4988,7 +5058,7 @@ export class NetService {
       return false
     }
   }
-  private async readPeerInfo(session: NetSyncSession, node: NodeId): Promise<void> {
+  private async readPeerInfo(session: Pick<NetSyncSession, 'rpc'>, node: NodeId): Promise<void> {
     try {
       const info = parsePeerInfo(
         await session.rpc('net.info', {}, { id: newId('rpc'), deadlineMs: 10_000 })
@@ -5182,4 +5252,25 @@ export class NetService {
     )
     return drain
   }
+}
+
+const UPDATE_JOB = /^[0-9A-Za-z-]{1,64}$/
+
+/** `update.*` parameters: exactly the fields each takes, each of its type. */
+function validateUpdateParams(method: UpdateNetMethod, params: unknown): unknown {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) throw new NetError('bad_request')
+  const p = params as Record<string, unknown>
+  const keys =
+    method === 'update.prepare' ? ['version', 'rollout'] : method === 'update.install' ? ['job', 'runningTurns'] : ['job']
+  if (Object.keys(p).some((key) => !keys.includes(key))) throw new NetError('bad_request')
+  if (method === 'update.prepare') {
+    if (!isReleaseVersion(p.version)) throw new NetError('bad_request')
+    if (p.rollout !== undefined && (typeof p.rollout !== 'string' || !UPDATE_JOB.test(p.rollout)))
+      throw new NetError('bad_request')
+    return p
+  }
+  if (typeof p.job !== 'string' || !UPDATE_JOB.test(p.job)) throw new NetError('bad_request')
+  if (method === 'update.install' && (!Number.isSafeInteger(p.runningTurns) || (p.runningTurns as number) < 0))
+    throw new NetError('bad_request')
+  return p
 }
