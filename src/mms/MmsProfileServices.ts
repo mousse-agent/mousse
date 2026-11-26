@@ -1984,9 +1984,11 @@ export class MmsProfileServices {
    * Archives a thread whose expiry passed, as the sidebar's Archive does (what it runs stops), then removes the expiry
    * so it is not expired any more: it can be unarchived and used again. Archived first, so a crash in between archives
    * it again on the next pass. Its subagents on other computers are told the expiry is gone, so they are kept there.
+   * Nobody waits on the expiry sweep, so it still waits for the Stop: one expired thread at a time, and the expiry
+   * goes only once what it ran has ended.
    */
   private async archiveExpiredThread(threadId: string): Promise<void> {
-    if (!this.threads.getThread(threadId)?.archivedAt) await this.orchestrator.archiveThread(threadId, true)
+    if (!this.threads.getThread(threadId)?.archivedAt) await this.orchestrator.archiveThread(threadId, true, { waitForStop: true })
     this.threads.updateThreadMeta(threadId, { expiresAt: undefined, expiryStopsRun: undefined }, { touch: false })
     this.orchestrator.threadExpiryChanged(threadId)
     this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })

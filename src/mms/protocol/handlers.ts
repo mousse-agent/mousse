@@ -2589,7 +2589,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ? asOptionalBoolean(p.archived, 'archived') === true
         : asOptionalBoolean(p.settled, 'settled') === true
       // Archiving a thread (the sidebar's Archive) is a Stop: what it still runs ends with it (`archiveThread`, which a
-      // bot's `thread_archive` uses too).
+      // bot's `thread_archive` uses too). The answer and the list go out once it is marked archived; the Stop ends after.
       const thread = await ctx.mms.orchestrator.archiveThread(threadId, archived)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })

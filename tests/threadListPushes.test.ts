@@ -85,6 +85,37 @@ describe('windows hear of list changes once, as pushes', () => {
     expect(archived[0].find((entry) => entry.id === thread.id)?.archivedAt).toBeTruthy()
   })
 
+  it('answers an archive and sends its list while a slow Stop of the thread is still ending, and the Stop runs to its end (#1901)', async () => {
+    const thread = (await window.request<{ thread: Thread }>('threads.create', { name: 'On a slow drive', started: true })).thread
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The Stop's own work runs; its end is held, as a provider or a turn setup on a slow drive holds it.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    let stopEnded = false
+    const stopThread = mms.orchestrator.stopThread.bind(mms.orchestrator)
+    const stop = vi.spyOn(mms.orchestrator, 'stopThread').mockImplementation(async (...args) => {
+      const outcome = await stopThread(...args)
+      await held
+      stopEnded = true
+      return outcome
+    })
+    try {
+      const answered = window.request<{ thread: Thread }>('threads.archive', { threadId: thread.id, archived: true })
+      const first = await Promise.race([answered.then(() => 'answered'), new Promise((resolve) => setTimeout(() => resolve('held'), 2_000))])
+      expect(first).toBe('answered')
+      expect((await answered).thread.archivedAt).toBeTruthy()
+      expect(stop).toHaveBeenCalledWith(thread.id, 'archived')
+      expect(stopEnded).toBe(false)
+      await vi.waitFor(() => expect(seen.filter((event) => event.type === 'threads.updated').some((event) =>
+        (event.data as { threads: Thread[] }).threads.find((entry) => entry.id === thread.id)?.archivedAt)).toBe(true))
+      expect(stopEnded).toBe(false)
+    } finally {
+      release()
+    }
+    await vi.waitFor(() => expect(stopEnded).toBe(true))
+    expect(mms.threads.getThread(thread.id)?.archivedAt).toBeTruthy()
+  })
+
   it('still tells windows about a thread made without a request (an agent, the CLI, a schedule)', async () => {
     const lists = await listsAfter(seen, async () => { mms.threads.createThread('Made by an agent', undefined, undefined, { started: true }) })
     expect(lists).toHaveLength(1)

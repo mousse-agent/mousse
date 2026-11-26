@@ -92,16 +92,16 @@ describe('thread runtimes are released', () => {
     expect(runtimes.get(id)).toBeDefined()
   })
 
-  it('archiving a thread drops its runtime at once', async () => {
+  it('archiving a thread drops its runtime once its Stop ends', async () => {
     const id = finishedThread('Archived')
     await orch.archiveThread(id, true)
-    expect(runtimes.get(id)).toBeUndefined()
+    await vi.waitFor(() => expect(runtimes.get(id)).toBeUndefined())
   })
 
   it('an archived thread still loaded keeps its runtime until its session is released, then the sweep drops it', async () => {
     const id = finishedThread('Archived while loaded')
     orch.getOrCreateSession(id)
-    await orch.archiveThread(id, true)
+    await orch.archiveThread(id, true, { waitForStop: true })
     expect(runtimes.get(id)).toBeDefined()
     // Once the session is gone, an archived thread's runtime does not wait for the idle time again.
     clock += 11 * MINUTE
