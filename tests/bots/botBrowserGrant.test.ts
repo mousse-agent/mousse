@@ -4,7 +4,7 @@
  * one ask whatever browser tool it names; other Mousse tools that reach other threads stay refused.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { compileBotThread } from '../../src/mms/bots/grants/compile'
@@ -107,7 +107,7 @@ describe('a bot asking for and using the browser', () => {
     expect(first.prepared.browser).toBeUndefined()
     expect(first.prepared.authority.appTools.has('browser_act')).toBe(false)
     // The bot asks for the tool it saw named: it is the browser as a whole.
-    expect(first.prepared.authority.escalate!({ permission: { tool: 'browser_act' }, reason: 'To click through the page.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(first.prepared.authority.escalate!({ permission: { tool: 'browser_act' }, reason: 'To click through the page.' })).toBe(botAskedText('use the browser', BOT_ASK_DEFERRED_TEXT))
     await finish(f, first.payload, 'completed', { text: 'I\'ve asked to use the browser.' })
     const reply = chatOf(f, botId).at(-1)!
     expect(reply.ask).toMatchObject({ status: 'open', title: 'use the browser' })

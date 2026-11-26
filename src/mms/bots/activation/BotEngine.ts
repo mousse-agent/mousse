@@ -434,8 +434,17 @@ function waitsForTools(permission: BotAskRequest): boolean {
 export const MAX_RUN_ASKS = 5
 /** New asks a bot's runs may write in a day. */
 export const MAX_BOT_ASKS_PER_DAY = 10
-/** What `escalate` returns in a chat turn: the cards show together under the turn's message. */
-export const BOT_ASK_DEFERRED_TEXT = 'Asked; the owner will answer after this message. Finish your message now.'
+/** What `escalate` returns in a chat turn, after the card's title (`botAskedText`): the cards show together under the turn's message. */
+export const BOT_ASK_DEFERRED_TEXT = 'The owner will answer after this message. Finish your message now.'
+/** What `escalate` returns in a run, after the card's title (`botAskedText`): the run carries on. */
+export const BOT_ASK_RAISED_TEXT = 'Carry on without it and say in your report what you skipped.'
+/**
+ * What `escalate` says once a card waits for the owner: the card's exact title as stored, the name the bot tells its
+ * owner it asked for (its instructions say so), then `then`.
+ */
+export function botAskedText(title: string, then: string): string {
+  return `Asked the owner — the card says "${title}". ${then}`
+}
 /** The stuck error after the journal could not be written (bot-context.md §4). */
 export const BOT_JOURNAL_ERROR: BotError = { text: 'I can\'t save my work. Free some disk space.', action: { kind: 'retry', label: 'Try again' } }
 /** Failed runs in a row that pause a bot's schedules. */
@@ -4161,7 +4170,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.refused(row.id, asked)
           const refused = this.raiseAsk(row, input.mainN, 'escalate', asked, reason, request.toolCallId)
           if (!('refused' in refused)) return checkMessage(refused as BotCheckDenied)
-          return refused.refused.askId ? 'Asked the owner. Carry on without it and say in your report what you skipped.' : refused.refused.text
+          if (!refused.refused.askId) return refused.refused.text
+          const card = this.store.escalation(refused.refused.askId)
+          return card ? botAskedText(this.cardTitle(row, card), BOT_ASK_RAISED_TEXT) : BOT_ASK_REFUSED_TEXT
         }
         return this.deferWall(row.id, { dispatchN: input.mainN, permission: asked, reason, ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}) })
       },
@@ -4924,6 +4935,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return askText(permission, budget ? { budget } : {})
   }
 
+  /** The title an ask's card shows: as stored, or, on a row of an older build that kept none, as its card reads it. */
+  private cardTitle(row: BotActivationRow, ask: BotEscalationRow): string {
+    return ask.title ?? this.askCardText(row, ask.permission).title
+  }
+
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
   private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
     const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
@@ -4986,14 +5002,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * waits for the owner once its text is complete (`advance`).
    */
   private deferWall(activationId: string, input: { dispatchN: number; permission: BotAskRequest; reason: string; toolCallId?: string }): string {
-    let result: 'asked' | 'too_many' | 'ended'
+    let result: { asked: string } | 'too_many' | 'ended'
     try {
       result = this.store.db.transaction(() => {
         const row = this.store.activation(activationId)
         if (!row || row.status !== 'running') return 'ended'
         if (this.store.countEscalations(activationId) >= MAX_BOT_WALLS) return 'too_many'
-        this.openWall(row, { ...input, kind: 'escalate' })
-        return 'asked'
+        return { asked: this.cardTitle(row, this.openWall(row, { ...input, kind: 'escalate' })) }
       })
     } catch (error) {
       const row = this.store.activation(activationId)
@@ -5005,7 +5020,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (result === 'too_many') return 'You have asked enough for this message. Finish it now.'
     const row = this.store.activation(activationId)
     this.changed({ ...(row ? { botId: row.botId } : {}), activationId })
-    return BOT_ASK_DEFERRED_TEXT
+    return botAskedText(result.asked, BOT_ASK_DEFERRED_TEXT)
   }
 
   /**

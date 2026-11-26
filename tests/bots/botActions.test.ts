@@ -23,7 +23,7 @@ import { botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { createBotJournal } from '../../src/mms/bots/memory/capture'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BotEngine, botAskedText } from '../../src/mms/bots/activation/BotEngine'
 import { RelayHandler } from '../../src/mms/run/mcp/relay/handler'
 import { ToolRegistry, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools/registry'
 import { AppToolTurns } from '../../src/mms/run/mcp/appTools/turns'
@@ -4034,7 +4034,7 @@ async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolN
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const chat = await start(f, row.id)
   const request = { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: toolName }
-  chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
+  const asked = chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
   await finish(f, chat.payload, 'completed', { text: 'Allow this automation?' })
   const ask = f.store.openAsks(t.botId).find(a => 'ask' in a.permission && a.permission.ask === 'let_alone')!
   expect(ask).toBeDefined()
@@ -4043,7 +4043,7 @@ async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolN
   expect(card).toMatchObject({ kind: 'permission', details: { items: expect.arrayContaining([expect.stringContaining('one@example.test')]) } })
   expect(f.bots.service.askKind(t.botId, ask.id)).toBe('export_memory')
   if (answer !== 'pending') await f.bots.service.answer(t.botId, ask.id, answer)
-  return { ...t, request, consent: ask, consentActivation: row.id }
+  return { ...t, request, consent: ask, consentActivation: row.id, asked }
 }
 async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args) {
   f.clock.now += 60_000
@@ -4053,6 +4053,14 @@ async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args)
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: `Mail__${t.request.tool}`, args, toolCallId: 'alone-next', signal: new AbortController().signal })
   return { id, turn, result, action: f.bots.actions.forWork(id)! }
 }
+it('E1 escalate answers with the exact title of the MCP card it made, the one the owner sees', async () => {
+  const t = await aloneAsk('pending')
+  const title = f.bots.chat.card(t.consent).title
+  // The card's title is made from this server and tool, not a fixed name.
+  expect(title).toContain('Mail')
+  expect(t.consent.title).toBe(title)
+  expect(t.asked).toBe(botAskedText(title, BOT_ASK_DEFERRED_TEXT))
+})
 it('E1 Allow lets only the same schedule destination run on the action ledger without a card', async () => {
   const t = await aloneAsk()
   expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))).not.toHaveProperty('enabled')
