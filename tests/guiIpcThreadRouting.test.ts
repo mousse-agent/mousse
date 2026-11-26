@@ -39,6 +39,7 @@ import type { TurnState } from '../src/shared/types'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { ThreadsSidebar } from '../src/renderer/components/ThreadsSidebar'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
+import { ThreadRouter } from '../src/mms/bridge/routed/ThreadRouter'
 import { phase6Daemon, piAdapter, PI } from './run/phase6Fixture'
 
 const NODE = 'nod_0123456789abcdefghjkmnpqrs'
@@ -716,5 +717,78 @@ describe('Settings → Providers of another computer', () => {
       await expect(invoke('providers:remote', NODE, method, { instanceId: 'claude' })).rejects.toThrow()
     await expect(invoke('providers:remote', '', 'providers.instances.setEnabled', { instanceId: 'claude', enabled: true })).rejects.toThrow()
     expect(calls).toEqual([])
+  })
+})
+
+describe('steering a thread on another computer', () => {
+  it('routes a registered GUI steer through ThreadRouter to the owner as a person', async () => {
+    const SELF_NODE = 'nod_9876543210abcdefghjkmnpqrs'
+    const ownerSteer = vi.fn(() => ({ steered: true, queued: false }))
+    const ownerUnarchive = vi.fn(async () => undefined)
+    const peerCall = vi.fn(async (_node: string, method: string, params: Record<string, unknown>) =>
+      dispatchMethod({
+        mms: {
+          orchestrator: { steerThreadOrEnqueueExternal: ownerSteer, unarchiveForPerson: ownerUnarchive },
+          threads: { getThread: () => undefined }
+        },
+        globalSequence: () => 0,
+        connection: {
+          id: `bridge:${SELF_NODE}`,
+          clientType: 'bridge',
+          capabilities: new Set(),
+          bridgeCaller: { node: SELF_NODE, user: 'usr_1' }
+        }
+      } as unknown as HandlerContext, method, params)
+    )
+    const router = new ThreadRouter({
+      services: {} as never,
+      net: { runtime: () => ({ identity: { self: () => ({ node: SELF_NODE }) } }) } as never,
+      peers: { client: () => ({} as never), computers: () => [], online: () => true, name: () => 'Mac mini' },
+      enabled: () => true,
+      hub: {} as never,
+      signal: new AbortController().signal,
+      client: { call: peerCall } as never
+    })
+    request.mockImplementationOnce(async (method, params) => {
+      calls.push({ method, params })
+      const routed = await router.dispatch({
+        mms: {} as never,
+        globalSequence: () => 0,
+        connection: { id: 'gui-1', clientType: 'gui', capabilities: new Set() }
+      } as unknown as HandlerContext, method, params)
+      return routed?.result
+    })
+
+    await expect(invoke('orchestrator:steer', 'Check the Mac side too', REMOTE)).resolves.toBe(true)
+    expect(peerCall).toHaveBeenCalledWith(NODE, 'orchestrator.steer', { threadId: 'thread-1', text: 'Check the Mac side too' }, expect.any(Object))
+    expect(ownerSteer).toHaveBeenCalledWith('thread-1', 'Check the Mac side too', expect.objectContaining({
+      source: 'gui',
+      sentFrom: { node: SELF_NODE }
+    }))
+  })
+
+  it('distinguishes definite steer refusals from uncertain transport failures across IPC', async () => {
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('computer_offline', 'Mac mini is offline.') })
+    await expect(invoke('orchestrator:steer', 'Check again', REMOTE)).resolves.toEqual({
+      refused: true,
+      code: 'computer_offline',
+      message: 'Mac mini is offline.'
+    })
+
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('invalid_params', 'Bad steer payload.') })
+    await expect(invoke('orchestrator:steer', 'Check again', REMOTE)).resolves.toEqual({
+      refused: true,
+      code: 'invalid_params',
+      message: 'Bad steer payload.'
+    })
+
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('outcome_uncertain', 'Mac mini did not confirm this.') })
+    await expect(invoke('orchestrator:steer', 'Check again', REMOTE)).resolves.toBe('uncertain')
+
+    request.mockImplementationOnce(async () => { throw new Error('Request timeout: orchestrator.steer') })
+    await expect(invoke('orchestrator:steer', 'Check again', REMOTE)).resolves.toBe('uncertain')
+
+    request.mockImplementationOnce(async () => { throw new Error('Connection closed') })
+    await expect(invoke('orchestrator:steer', 'Check again', REMOTE)).resolves.toBe('uncertain')
   })
 })

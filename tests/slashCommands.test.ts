@@ -85,12 +85,17 @@ describe('runSlashCommand', () => {
     expect(created.newThread).toHaveBeenLastCalledWith(undefined)
   })
 
-  it('/steer steers, keeps an empty one, and sends the text when no turn takes it', async () => {
+  it('/steer steers, keeps an empty one, sends when no turn takes it, and reports refusals or unconfirmed outcomes', async () => {
     const e = env({ turnActive: true })
     expect(await runSlashCommand('/steer use the other file', e)).toEqual({ kind: 'done' })
     expect(e.steer).toHaveBeenCalledWith('use the other file')
     expect(await runSlashCommand('/steer', e)).toEqual({ kind: 'keep' })
     expect(await runSlashCommand('/steer later', env({ steer: vi.fn(async () => false) }))).toEqual({ kind: 'send', text: 'later' })
+    expect(await runSlashCommand('/steer nope', env({ steer: vi.fn(async () => ({ refused: true as const, code: 'computer_offline', message: 'Mac mini is offline.' })) }))).toEqual({
+      kind: 'refused',
+      message: 'Mac mini is offline.'
+    })
+    expect(await runSlashCommand('/steer maybe', env({ steer: vi.fn(async () => 'uncertain' as const) }))).toMatchObject({ kind: 'refused' })
   })
 
   it('/clear starts a fresh session on the thread', async () => {

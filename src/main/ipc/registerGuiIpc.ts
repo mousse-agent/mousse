@@ -169,6 +169,7 @@ import type {
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
+  OrchestratorSteerResult,
   PermissionMode,
   ScheduledJobPatch,
   ScheduledSettingsUpdate,
@@ -2048,17 +2049,23 @@ export function registerGuiIpc(
     return res.ok
   })
 
-  registerHandler('orchestrator:steer', async (_e, text: string, threadId?: string) => {
+  registerHandler('orchestrator:steer', async (_e, text: string, threadId?: string): Promise<OrchestratorSteerResult> => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false
-    const res = await guiMms.request<{ ok: boolean; steered?: boolean; queued?: boolean }>('orchestrator.steer', {
-      threadId: id,
-      text: String(text ?? ''),
-      source: 'gui-steer'
-    })
-    // Queued instead (the running turn could not take it): said apart, so the composer does not call it steered.
-    if (res.ok && res.steered === false && res.queued) return 'queued'
-    return res.ok
+    try {
+      const res = await guiMms.request<{ ok: boolean; steered?: boolean; queued?: boolean }>('orchestrator.steer', {
+        threadId: id,
+        text: String(text ?? '')
+      })
+      // Queued instead (the running turn could not take it): said apart, so the composer does not call it steered.
+      if (res.ok && res.steered === false && res.queued) return 'queued'
+      return res.ok
+    } catch (err) {
+      noteUncertainOutcome(err)
+      const error = guiChatRequestError(err)
+      if (error.code === 'outcome_uncertain' || error.code === 'workspace_connection_lost') return 'uncertain'
+      return { refused: true, code: error.code, message: error.message }
+    }
   })
 
   registerHandler('orchestrator:steerNow', async (_e, request: { threadId: string; runId: string; holdGeneration: number; itemIds: string[]; clientRequestId: string }) => {

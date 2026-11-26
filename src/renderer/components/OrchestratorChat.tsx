@@ -17,6 +17,7 @@ import type {
   ChatMessage,
   ChatMode,
   ContextUsageSnapshot,
+  OrchestratorSteerResult,
   Project,
   QueuedMessage,
   SendExpectation,
@@ -1667,7 +1668,7 @@ export function OrchestratorChat() {
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
       // It shows in the reply at once, as sent, until the copy the service writes there arrives.
       const steerRow = steerThread && steerThread === queue.threadId ? queue.beginComposerSteer(trimmed) : null
-      let steered: boolean | 'queued' | 'uncertain'
+      let steered: OrchestratorSteerResult
       try {
         steered = await window.mousse.orchestrator.steer(trimmed, steerThread ?? undefined)
       } catch {
@@ -1678,6 +1679,13 @@ export function OrchestratorChat() {
       // Not taken yet: it stays in the reply while it is queued and sent now below (a timer takes it out if no send follows).
       if (steerRow) queue.endComposerSteer(steerRow, steered === true || steered === false)
       if (steerRow && steered === false) steerShown = steerRow
+      if (steered && typeof steered === 'object' && steered.refused) {
+        if (stillVisible()) {
+          setSendError(steered.message || STEER_NOT_ARRIVED)
+          setInput((current) => unsentText(current, trimmed))
+        }
+        return
+      }
       if (steered === 'uncertain') {
         setSendError(STEER_UNCONFIRMED)
         if (steerThread) {
