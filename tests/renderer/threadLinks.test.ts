@@ -58,7 +58,8 @@ beforeEach(() => {
   installPreload(fake, { threads: { select } })
   setBotsClient(fake.client)
   select.mockClear()
-  useAppStore.setState({ threads: [thread('t-fix', 'Fix the login page'), thread('t-docs', 'Write the docs')] })
+  // A bound window: before its profile is bound nothing reads the computers.
+  useAppStore.setState({ profileReady: true, threads: [thread('t-fix', 'Fix the login page'), thread('t-docs', 'Write the docs')] })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)

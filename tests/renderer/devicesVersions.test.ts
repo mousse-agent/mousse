@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 const { useUpdateStore } = await import('../../src/renderer/stores/updateStore')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { NO_COMPUTERS, useComputersStore } = await import('../../src/renderer/lib/computers')
 
 const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false, bots: true, agentReach: 'launched', work: true }
 const row = (node: string, name: string, extra: Record<string, unknown>) => ({
@@ -56,6 +58,8 @@ beforeEach(() => {
   request.mockClear()
   answers = {}
   useUpdateStore.setState({ currentVersion: '0.9.2' })
+  // Settings shows only once the window's profile is bound; before that nothing reads the computers.
+  useAppStore.setState({ profileReady: true })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -67,6 +71,8 @@ beforeEach(() => {
 })
 afterEach(() => {
   act(() => root.unmount())
+  // Each case starts with no computers listed, as a fresh window does.
+  useComputersStore.setState(NO_COMPUTERS)
   document.body.innerHTML = ''
   vi.useRealTimers()
 })
