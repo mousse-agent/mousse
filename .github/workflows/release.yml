@@ -55,6 +55,7 @@ jobs:
     uses: ./.github/workflows/package.yml
     with:
       version: ${{ needs.resolve.outputs.version }}
+    secrets: inherit
 
   draft:
     name: Draft the release
