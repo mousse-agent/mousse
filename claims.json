@@ -77,6 +77,17 @@
       "expiresAt": "2026-11-26T08:07:35.810Z"
     },
     {
+      "task": "fix-remote-composer-steer",
+      "session": "Animatrix-fad69d",
+      "machine": "Animatrix",
+      "branch": "fix-remote-composer-steer",
+      "paths": [
+        "src/main/ipc/registerGuiIpc.ts"
+      ],
+      "claimedAt": "2026-11-26T08:45:41.744Z",
+      "expiresAt": "2026-11-26T10:45:41.744Z"
+    },
+    {
       "task": "fix-windows-update-install-path",
       "session": "Animatrix-ccfd0b",
       "machine": "Animatrix",
