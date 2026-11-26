@@ -160,7 +160,7 @@ describe("Settings → Providers of another computer", () => {
 
   it("changes what an agent runs with there only while that computer lets this one use its terminal", async () => {
     const configured = vi.spyOn(owner().instances, 'configure').mockResolvedValue(snapshot('claude'))
-    const added = vi.spyOn(owner().instances, 'add').mockResolvedValue({ snapshot: snapshot('acp:x') } as never)
+    const added = vi.spyOn(owner().instances, 'addInstance').mockResolvedValue({ snapshot: snapshot('acp:x') } as never)
     // Its name, telemetry and the like need no more than working there.
     await t.dispatch('providers.instances.configure', { node: t.node, instanceId: 'claude', patch: { displayName: 'Work' } })
     expect(configured).toHaveBeenCalledTimes(1)
@@ -181,6 +181,96 @@ describe("Settings → Providers of another computer", () => {
     try {
       await t.dispatch('providers.instances.configure', { node: t.node, instanceId: 'claude', patch: { binaryPath: '/bin/sh' } })
       expect(configured).toHaveBeenLastCalledWith('claude', { binaryPath: '/bin/sh' })
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
+    }
+  }, 60_000)
+
+  it('chooses or installs the program an agent runs there only while that computer lets this one use its terminal', async () => {
+    const configured = vi.spyOn(owner().instances, 'configure').mockResolvedValue(snapshot('acp:reg'))
+    const added = vi.spyOn(owner().instances, 'addInstance').mockResolvedValue({ snapshot: snapshot('acp:reg') } as never)
+    const operation = (instanceId: string) => ({ operationId: `op-${randomUUID()}`, instanceId, kind: 'install' as const })
+    const installed = vi.spyOn(owner().instances, 'install').mockImplementation(async (instanceId) => operation(instanceId))
+    const updated = vi.spyOn(owner().instances, 'update').mockImplementation(async (instanceId) => operation(instanceId))
+    // The owner's entries: an ACP registry agent, one with a program of its own, and Claude Code as found.
+    const stored: Record<string, Record<string, unknown>> = {
+      'acp:reg': { source: { kind: 'registry', agentId: 'some-agent', version: '1.0.0', distribution: 'binary' } },
+      'claude:own': { binaryPath: '/opt/tools/claude' },
+      claude: {}
+    }
+    const realGet = t.owner.providerInstances.get.bind(t.owner.providerInstances)
+    vi.spyOn(t.owner.providerInstances, 'get').mockImplementation((id) => (id in stored ? { driver: 'acp', enabled: true, config: stored[id] } : realGet(id)))
+    const source = { kind: 'registry', agentId: 'some-agent', version: '1.0.0', distribution: 'binary' }
+    const choices = [
+      ['providers.instances.add', { driver: 'acp', config: { displayName: 'Some agent', source } }],
+      ['providers.instances.configure', { instanceId: 'acp:reg', patch: { source } }],
+      ['providers.instances.configure', { instanceId: 'codex', patch: { setup: 'managed' } }],
+      ['providers.instances.configure', { instanceId: 'claude', patch: { useOlderSettings: true } }],
+      ['providers.instances.install', { instanceId: 'acp:reg' }],
+      ['providers.instances.update', { instanceId: 'acp:reg' }],
+      ['providers.instances.install', { instanceId: 'claude:own' }]
+    ] as const
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
+    for (const [method, params] of choices) {
+      const refused = await t.refused(t.dispatch(method, { node: t.node, ...params }))
+      expect(refused.message, method).toMatch(/terminal/)
+    }
+    expect(added).not.toHaveBeenCalled()
+    expect(configured).not.toHaveBeenCalled()
+    expect(installed).not.toHaveBeenCalled()
+    expect(updated).not.toHaveBeenCalled()
+    // An agent Mousse finds or installs itself is not this computer's choice of program.
+    await t.dispatch('providers.instances.install', { node: t.node, instanceId: 'claude' })
+    expect(installed).toHaveBeenCalledWith('claude')
+
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: true })
+    try {
+      for (const [method, params] of choices) await t.dispatch(method, { node: t.node, ...params })
+      expect(added).toHaveBeenCalledTimes(1)
+      expect(configured).toHaveBeenCalledTimes(3)
+      expect(installed).toHaveBeenCalledWith('acp:reg')
+      expect(installed).toHaveBeenCalledWith('claude:own')
+      expect(updated).toHaveBeenCalledWith('acp:reg')
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
+    }
+  }, 60_000)
+
+  it('never gives a computer without terminal access the values of launch variables or arguments, in any reply', async () => {
+    const secret = `sk-env-${randomUUID()}`
+    const token = `tok-${randomUUID()}`
+    const configured = (instanceId: string) =>
+      ({ ...snapshot(instanceId), config: { home: 'default', args: ['--token', token], env: { OPENAI_API_KEY: secret, LOG_LEVEL: 'debug' } } }) as unknown as InstanceSnapshot
+    vi.spyOn(owner().instances, 'snapshots').mockResolvedValue([configured('claude')])
+    vi.spyOn(owner().instances, 'configure').mockResolvedValue(configured('claude'))
+    vi.spyOn(owner().instances, 'setEnabled').mockResolvedValue(configured('claude'))
+    vi.spyOn(owner().instances, 'recheck').mockResolvedValue(configured('claude'))
+    vi.spyOn(owner().instances, 'addInstance').mockResolvedValue({ snapshot: configured('claude:new') } as never)
+    vi.spyOn(owner().instances, 'refreshAllModels').mockResolvedValue([{ instanceId: 'claude', outcome: 'refreshed', snapshot: configured('claude') }] as never)
+    const eventsBefore = t.events.length
+    const replies = [
+      await t.dispatch('providers.snapshots', { node: t.node, scope: { kind: 'device' } }),
+      await t.dispatch('providers.instances.configure', { node: t.node, instanceId: 'claude', patch: { displayName: 'Work' } }),
+      await t.dispatch('providers.instances.setEnabled', { node: t.node, instanceId: 'claude', enabled: true }),
+      await t.dispatch('providers.instances.recheck', { node: t.node, instanceId: 'claude' }),
+      await t.dispatch('providers.instances.add', { node: t.node, driver: 'claude', config: { displayName: 'New' } }),
+      await t.dispatch('providers.instances.refreshAllModels', { node: t.node })
+    ]
+    // A change there reaches this computer as a notice only.
+    ownerEmits({ type: 'snapshots', data: { scope: { kind: 'device' }, snapshots: [configured('claude')] } })
+    await vi.waitFor(() => expect(t.events.slice(eventsBefore).some((event) => event.type === 'providers.remote')).toBe(true), { timeout: 15_000 })
+    const seen = JSON.stringify([replies, t.events.slice(eventsBefore)])
+    expect(seen).not.toContain(secret)
+    expect(seen).not.toContain(token)
+    // The names stay, so the page can say which variables are set.
+    expect(replies[0].snapshots[0].config).toMatchObject({ env: { OPENAI_API_KEY: '', LOG_LEVEL: '' }, args: [], launchHidden: true })
+
+    // With terminal access there, the values are as shown on that computer.
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: true })
+    try {
+      const open = await t.dispatch('providers.snapshots', { node: t.node, scope: { kind: 'device' } })
+      expect(open.snapshots[0].config.env.OPENAI_API_KEY).toBe(secret)
+      expect(open.snapshots[0].config.launchHidden).toBeUndefined()
     } finally {
       await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
     }

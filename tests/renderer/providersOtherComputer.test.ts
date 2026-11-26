@@ -7,6 +7,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProvidersSettings } from '../../src/renderer/components/providers/ProvidersSettings'
+import { ArgsRow, EnvRow, ExecutableRow } from '../../src/renderer/components/providers/CliSections'
 import { NO_COMPUTERS, useComputersStore } from '../../src/renderer/lib/computers'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
 import type { RemoteProviderEvent } from '../../src/shared/harness/types'
@@ -175,5 +176,45 @@ describe('Settings → Providers of another computer', () => {
     const line = [...document.body.querySelectorAll('.prov-error')].map((element) => element.textContent).join('\n')
     expect(line).toContain('Mac mini does not let this computer work on it.')
     expect(line).not.toMatch(/\n/)
+  })
+})
+
+describe('launch settings another computer hides from this one', () => {
+  it('shows the variable names with their values hidden, and saves nothing from here', async () => {
+    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+    const entry = snapshot({
+      instanceId: 'claude:work',
+      binary: { path: '/opt/claude', version: '2.1.0', source: 'override', owner: 'npm' },
+      config: { home: 'default', binaryPath: '/opt/claude', args: [], env: { OPENAI_API_KEY: '', LOG_LEVEL: '' }, launchHidden: true }
+    } as never)
+    const saved = vi.fn(async () => {})
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    act(() =>
+      root.render(
+        createElement('div', null,
+          createElement(EnvRow, { snapshot: entry, onSave: saved }),
+          createElement(ArgsRow, { snapshot: entry, onSave: saved }),
+          createElement(ExecutableRow, { snapshot: entry, label: 'Claude Code', onSave: saved })
+        )
+      )
+    )
+    const names = [...host.querySelectorAll<HTMLInputElement>('input[aria-label="Variable name"]')].map((input) => input.value)
+    expect(names).toEqual(['OPENAI_API_KEY', 'LOG_LEVEL'])
+    const values = [...host.querySelectorAll<HTMLInputElement>('input[aria-label^="Value of"]')]
+    expect(values.map((input) => [input.value, input.placeholder, input.disabled])).toEqual([['', 'Hidden', true], ['', 'Hidden', true]])
+    const args = host.querySelector<HTMLInputElement>('input[aria-label="Launch arguments"]')!
+    expect([args.placeholder, args.disabled]).toEqual(['Hidden', true])
+    expect(host.querySelector<HTMLInputElement>('input[aria-label="Executable path"]')!.disabled).toBe(true)
+    expect(host.querySelector<HTMLButtonElement>('button[aria-label="Add variable"]')!.disabled).toBe(true)
+    // Leaving a field never writes the hidden (empty) values back.
+    await act(async () => {
+      for (const input of host.querySelectorAll('input')) input.dispatchEvent(new FocusEvent('blur', { bubbles: false }))
+      for (const input of host.querySelectorAll('input')) input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+    })
+    expect(saved).not.toHaveBeenCalled()
+    act(() => root.unmount())
+    host.remove()
   })
 })

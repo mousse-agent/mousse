@@ -222,6 +222,8 @@ export interface InstanceConfigView {
   binaryPath?: string
   args: string[]
   env: Record<string, string>
+  /** Another computer that hides its launch arguments and variable values from this one (no terminal access there). */
+  launchHidden?: true
   movedTo?: string
 }
 
@@ -242,9 +244,13 @@ export function instanceConfigOf(snapshot: InstanceSnapshot): InstanceConfigView
     ...(typeof raw.binaryPath === 'string' && raw.binaryPath ? { binaryPath: raw.binaryPath } : {}),
     args: Array.isArray(raw.args) ? raw.args.filter((arg): arg is string => typeof arg === 'string') : [],
     env,
+    ...(raw.launchHidden === true ? { launchHidden: true as const } : {}),
     ...(typeof raw.movedTo === 'string' && raw.movedTo ? { movedTo: raw.movedTo } : {})
   }
 }
+
+/** The tooltip of launch settings another computer hides from this one. */
+export const LAUNCH_HIDDEN_TITLE = 'Hidden: needs terminal access to that computer'
 
 /** The executable override: from the config when reported, else from an override binary. */
 export function binaryOverrideOf(snapshot: InstanceSnapshot): string | undefined {

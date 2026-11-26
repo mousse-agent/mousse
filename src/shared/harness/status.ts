@@ -89,6 +89,11 @@ export interface InstanceConfigView {
   binaryPath?: string
   args: string[]
   env: Record<string, string>
+  /**
+   * Set for another computer without terminal access to this one: `args` is left out and `env` keeps only the
+   * variables' names (empty values). Neither can be changed from there.
+   */
+  launchHidden?: true
   loginMethod?: string
   /** The entry this one moved to; it is off, and its threads continue there. */
   movedTo?: string

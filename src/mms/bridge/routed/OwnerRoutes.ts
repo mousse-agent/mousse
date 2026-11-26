@@ -35,7 +35,7 @@ import {
 } from '../../../shared/bridge/routed'
 import { WORKFLOW_RUN_CAPABILITY } from '../../../shared/workflowRunPlatform'
 import { isProjectShellAgentId } from '../../../shared/types'
-import { setsLaunchSettings, type ProviderEventRelay } from './providerEvents'
+import { choosesProgram, withHiddenLaunchSettings, type ProviderEventRelay } from './providerEvents'
 import {
   AppError,
   errorDiagnostic,
@@ -615,11 +615,12 @@ export class OwnerRoutes {
       await this.assertOwned(method, row, params)
       if (method.startsWith('providers.')) {
         this.options.providerEvents?.admit(node, method, params)
-        // An agent's program, arguments and variables decide what runs here: as much as a terminal, so the same switch.
-        if (setsLaunchSettings(method, params) && !this.options.policy.get(node).terminal)
+        // Which program an agent is, and what it runs with, decide what runs here: as much as a terminal, so the same switch.
+        const entry = (instanceId: string) => this.options.services.providerInstances?.get(instanceId)?.config
+        if (choosesProgram(method, params, entry) && !this.options.policy.get(node).terminal)
           throw new DomainRpcError(
             'forbidden',
-            "Changing an agent's program, arguments or variables there needs terminal access to that computer."
+            "Choosing or installing the program an agent runs there needs terminal access to that computer."
           )
       }
       // Terminals: a device types into, resizes and stops only the ones it opened, takes a slot before it starts one,
@@ -643,7 +644,12 @@ export class OwnerRoutes {
         const sent = typeof params.data === 'string' ? Buffer.byteLength(params.data) : 0
         result = await verdict.apply(sent, () => this.dispatch(method, row, params, context, head))
       } else result = marked ? await this.remoteAgent.run(method, params, marked) : await this.dispatch(method, row, params, context, head, slot)
-      if (method.startsWith('providers.')) this.options.providerEvents?.called(node, method, result)
+      if (method.startsWith('providers.')) {
+        this.options.providerEvents?.called(node, method, result)
+        // Launch arguments and variable values often hold keys: a computer that may not use a terminal here reads only
+        // the variables' names.
+        if (!this.options.policy.get(node).terminal) result = withHiddenLaunchSettings(result)
+      }
       // A thread a bot started names that bot only to a computer that reaches it ("Started by a bot" otherwise).
       if (!row.sequenced) result = withHiddenBots(result, this.options.services.botReach?.hiddenFor(node))
       // A caller that runs an older Mousse reads a thread's archive time only as `settledAt`.

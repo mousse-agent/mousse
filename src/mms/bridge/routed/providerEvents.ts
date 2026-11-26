@@ -26,17 +26,46 @@ const NAMES_OPERATION = new Set(['providers.instances.cancelInstall', 'providers
 
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
 
-/** The settings of an entry that name what runs there: its program, its arguments and its variables. */
-const LAUNCH_SETTINGS = ['binaryPath', 'args', 'env'] as const
+/**
+ * The settings of an entry that decide which program runs there and how: its program, arguments and variables, an
+ * ACP registry agent to download, Codex's own download or the user's CLI, and the older launch settings to take back.
+ */
+const PROGRAM_SETTINGS = ['binaryPath', 'args', 'env', 'source', 'setup', 'useOlderSettings'] as const
+
+/** The routed calls that download and start the program an entry names. */
+const INSTALLS = new Set(['providers.instances.install', 'providers.instances.update'])
 
 /**
- * Whether a routed call sets what an agent runs with (`add` with a `config`, `configure` with a `patch`, naming its
- * program, arguments or variables). That runs a command of the caller's choosing on the owner, so it needs the same
- * permission as a terminal there.
+ * Whether a routed call decides which program runs on the owner: an `add` or `configure` that sets one of the
+ * program settings, or an install or update of an entry whose program is an ACP registry agent or a path of its own.
+ * Each runs a program of the caller's choosing there, so it needs the same permission as a terminal there.
+ * `entry` is the stored settings of the entry the call names.
  */
-export function setsLaunchSettings(method: string, params: Record<string, unknown>): boolean {
+export function choosesProgram(method: string, params: Record<string, unknown>, entry: (instanceId: string) => Record<string, unknown> | undefined): boolean {
   const settings = method === 'providers.instances.add' ? params.config : method === 'providers.instances.configure' ? params.patch : undefined
-  return isRecord(settings) && LAUNCH_SETTINGS.some((key) => settings[key] !== undefined)
+  if (isRecord(settings) && PROGRAM_SETTINGS.some((key) => settings[key] !== undefined)) return true
+  if (!INSTALLS.has(method) || typeof params.instanceId !== 'string') return false
+  const stored = entry(params.instanceId)
+  return isRecord(stored?.source) || typeof stored?.binaryPath === 'string'
+}
+
+/**
+ * A routed providers reply for a computer without terminal access here: an entry's launch arguments and the values
+ * of its variables are left out (they often hold keys and tokens), the variables' names stay, and `launchHidden`
+ * says so. Every snapshot in the reply is covered, wherever it sits (`snapshot`, `snapshots`, `results[].snapshot`).
+ */
+export function withHiddenLaunchSettings(value: unknown, depth = 0): unknown {
+  if (depth > 6) return value
+  if (Array.isArray(value)) return value.map((item) => withHiddenLaunchSettings(item, depth + 1))
+  if (!isRecord(value)) return value
+  const out: Record<string, unknown> = {}
+  for (const [key, inner] of Object.entries(value)) {
+    if (key === 'config' && isRecord(inner) && ('env' in inner || 'args' in inner)) {
+      const env = isRecord(inner.env) ? Object.fromEntries(Object.keys(inner.env).map((name) => [name, ''])) : {}
+      out[key] = { ...inner, args: [], env, launchHidden: true }
+    } else out[key] = withHiddenLaunchSettings(inner, depth + 1)
+  }
+  return out
 }
 
 interface Timers {
