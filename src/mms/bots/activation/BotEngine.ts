@@ -1440,9 +1440,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * may use now, so higher ones apply at its next dispatch. What it used and holds reserved stays (`setLimits` writes
    * only the limits).
    */
-  private raiseLimits(botId: string, grant: Pick<BotGrantRow, 'digest' | 'manifest'>): void {
+  private raiseLimits(botId: string, grant: Pick<BotGrantRow, 'digest' | 'manifest'>, only?: string): void {
     for (const row of this.store.listActivations(botId)) {
-      if (ENDED_ACTIVATION_STATUSES.has(row.status) || row.grantDigest !== grant.digest) continue
+      if (ENDED_ACTIVATION_STATUSES.has(row.status) || row.grantDigest !== grant.digest || (only !== undefined && row.id !== only)) continue
       const definition = this.host.definitions.revision(row.botId, row.revision)
       if (definition) this.store.setLimits(row.id, limitsOf(this.effectiveManifest(row, definition.permissions, grant.manifest)))
     }
@@ -1532,10 +1532,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Whether a chat turn that has just stopped at its cards may wait there. Under the grant it ran with, it may. A turn
-   * runs on when About narrows the grant (`narrowGrant`), so it can reach its cards under another: it waits only when that
-   * one gives all its own did, as a widening does (`holdsWithin`, as `approve` compares them), and then moves onto it, so
-   * the answer continues it there. Otherwise its cards were asked under more than the bot has now, and it ends.
+   * Whether a turn that has just stopped at its cards may wait there. Every move to `waiting_grant` asks this inside its
+   * own transaction: an immediate wall (`wallInTransaction`) and a chat turn's cards once its reply is complete (`advance`).
+   * Under the grant it ran with, it may. A turn runs on when About narrows the grant (`narrowGrant`), so it can reach its
+   * cards under another: it waits only when that one gives all its own did, as a widening does (`holdsWithin`, as
+   * `approve` compares them), and then only it moves onto it (its siblings on the old grant stay), so the answer
+   * continues it there. Otherwise its cards were asked under more than the bot has now: false, and the caller ends it
+   * after the commit (`endUnderGrant`, `only` it). A restart between the two ends it then (`reconcileActivation`).
    */
   private waitsUnderActiveGrant(row: BotActivationRow): boolean {
     const grant = this.store.activeGrant(row.botId)
@@ -1550,8 +1553,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (!own || !revision || !this.holdsWithin(row.botId, own.manifest, grant.manifest)) return false
     this.store.db.transaction(() => {
-      this.store.regrant(row.botId, row.grantDigest, grant.digest, revision)
-      this.raiseLimits(row.botId, grant)
+      this.store.regrant(row.botId, row.grantDigest, grant.digest, revision, row.id)
+      this.raiseLimits(row.botId, grant, row.id)
     })
     return true
   }
@@ -4716,6 +4719,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const status = this.store.activation(activationId)?.status
       return status === 'waiting_grant' ? { kind: 'waiting' } : status === 'paused' ? { kind: 'paused' } : { kind: 'ended' }
     }
+    if (!raised.waits) {
+      // Asked under more than the bot has now: the dispatch ends, and the turn with it, its card withdrawn and its chat free.
+      this.live.get(activationId)?.controller.abort(new BotWallAbort())
+      const row = this.store.activation(activationId)
+      if (row) this.endUnderGrant(row.botId, 'grant_replaced', undefined, { only: activationId })
+      return { kind: 'ended' }
+    }
     this.afterWall(activationId, raised)
     // Outside a turn (before it started) no reply follows: the card is posted now.
     if (!this.live.has(activationId)) this.announceWall(raised.escalation)
@@ -5148,12 +5158,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.escalation(escalation.id)!
   }
 
-  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'none' } {
+  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow; waits: boolean } | { kind: 'none' } {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return { kind: 'none' }
     const escalation = this.openWall(row, input)
     this.store.moveActivation(activationId, [row.status], 'waiting_grant', { endReason: 'wall' })
-    return { kind: 'wall', escalation }
+    // A turn that ran on after About narrowed the grant waits here only under a grant that gives all its own did.
+    return { kind: 'wall', escalation, waits: this.waitsUnderActiveGrant(this.store.activation(activationId)!) }
   }
 
   private afterWall(activationId: string, raised: { kind: 'wall'; escalation: BotEscalationRow }): void {
@@ -5624,19 +5635,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const permission = manifest && grantedPermissions(withFullTrust(manifest)).find((item) => permissionId(item) === id)
     if (!grant || !permission) throw new BotEngineError('permission_not_found', 'This bot does not have that permission.')
     if (enabled === !off) return
+    const names = (manifest: BotManifest) => grantedPermissions(manifest).some((item) => permissionId(item) === id)
+    // One only "Allow everything" gives (the grant does not name it) is switched as a default is (`setDefault`): the
+    // switch-off is kept beside the grant, which the runtime reads (`lessSwitchedOff`), and nothing else changes. The
+    // revision and the draft keep naming it if they did, so switching it on gives back exactly what the bot had.
+    const implicit = !enabled && !names(grant.manifest)
     this.store.db.transaction(() => {
       if (enabled) {
         this.store.forgetDisabledPermission(botId, id)
         // One only "Allow everything" gave (the grant it was switched off under does not name it): forgetting the switch-off
         // is all, so it never becomes an entry of the grant that would outlast Allow everything.
-        if (grantedPermissions(off!.manifest).some((item) => permissionId(item) === id)) this.allowForBot(botId, permission, undefined, off!.manifest)
+        if (names(off!.manifest)) this.allowForBot(botId, permission, undefined, off!.manifest)
       } else {
         // The grant as it is, Allow everything not expanded: the row still names a permission only Allow everything gave
         // (`switchedOffPermission` expands it), and switching it on can tell it from one the grant names.
         this.store.keepDisabledPermission(botId, id, grant.manifest)
-        this.narrowGrant(botId, (held) => withoutPermission(held, permission), true)
+        if (!implicit) this.narrowGrant(botId, (held) => withoutPermission(held, permission), true)
+        // A held call of what was switched off is withdrawn with it, as when a grant narrows (`approve` does it there).
+        else this.actions.withdrawChanged(botId)
       }
     })
+    // Its chat's warm process was started with what it is offered: the next chat turn starts afresh.
+    if (implicit) this.releaseChatProcess(botId)
     if (!enabled) {
       const switches = this.permissionSwitches.get(botId) ?? new Map<string, number>()
       switches.set(id, (switches.get(id) ?? 0) + 1)
@@ -5656,8 +5676,26 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       if (which === 'threads') this.withdrawThreadMessages(botId)
     }
-    this.store.db.transaction(() => this.chat.post({ id: `bm_permission_${randomUUID()}`, botId, author: 'bot', kind: 'notice', text: stopped ? `I stopped: "${title}" was switched off for now.` : `I ${enabled ? 'can' : "can't"} ${title}${enabled ? ' again' : ' for now'}.` }))
+    // Switched on, it says it can again only when it does: one only Allow everything gave, switched on after Allow
+    // everything was turned off, is not given back.
+    const text = stopped ? `I stopped: "${title}" was switched off for now.`
+      : !enabled ? `I can't ${title} for now.`
+        : this.botGets(botId, id) ? `I can ${title} again.` : `I still can't ${title}. It needs Allow everything, or your OK when I ask.`
+    this.store.db.transaction(() => this.chat.post({ id: `bm_permission_${randomUUID()}`, botId, author: 'bot', kind: 'notice', text }))
     this.changed({ botId })
+  }
+
+  /** Whether the bot gets the permission `id` now: its revision inside the active grant, less what is switched off. */
+  private botGets(botId: string, id: string): boolean {
+    const grant = this.store.activeGrant(botId)
+    if (!grant) return false
+    let published: BotDefinition
+    try {
+      published = this.published(botId)
+    } catch {
+      return false
+    }
+    return grantedPermissions(this.revisionGives(botId, published.permissions, grant.manifest)).some((item) => permissionId(item) === id)
   }
 
   /**
@@ -5893,6 +5931,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.cutReplies.delete(row.id)
       let heldDraft = false
       let noted = false
+      let waits = true
       const next = this.recorded(row, () => {
         // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread.
         noted = retryUnanswered || (!reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0))
@@ -5907,6 +5946,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (openWalls.length) {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
+          // The grant changed while this turn was still finishing (`narrowGrant` lets a running turn go on, under the
+          // grant it started with): it waits at its cards only under a grant that gives all its own did.
+          waits = this.waitsUnderActiveGrant(this.store.activation(row.id)!)
         } else if (this.actions.pendingInTurn(row.id, main.n) && this.askedIn.get(row.id) === main.n) {
           if (!this.park(row, 'approval', ['running'], this.approvalPending(row.id) ? 'approval' : 'approval_answered')) return undefined
         } else if (this.store.workWait(row.id)?.status === 'waiting') {
@@ -5961,9 +6003,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return
       }
       if (next.status === 'waiting_grant') {
-        // The grant changed while this turn was still finishing (`narrowGrant` lets a running turn go on, under the grant
-        // it started with): it waits at its cards only under a grant that gives all its own did.
-        if (!this.waitsUnderActiveGrant(next)) return this.endUnderGrant(row.botId, 'grant_replaced', undefined, { only: row.id })
+        // Asked under more than the bot has now (decided as it moved to its cards): its cards are withdrawn, and it ends.
+        if (!waits) return this.endUnderGrant(row.botId, 'grant_replaced', undefined, { only: row.id })
         this.changed({ botId: row.botId, activationId: row.id })
         try { for (const wall of openWalls) this.events.emit('escalation', this.escalationSummary(wall)) } catch { /* listeners never undo it */ }
         return
@@ -8137,6 +8178,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // Row 3: an open escalation keeps the activation waiting, whatever its run's state; never continued here.
     if (row.status === 'waiting_grant') {
+      // Mousse stopped after the turn reached its cards under a grant no longer in place, before it was ended (or before
+      // a narrowing ended it): decided now as when it reached them, so no stale card holds the chat.
+      if (!this.waitsUnderActiveGrant(row)) {
+        this.endUnderGrant(row.botId, this.store.activeGrant(row.botId) ? 'grant_replaced' : 'grant_revoked', undefined, { only: row.id })
+        return
+      }
       const open = this.store.escalations({ activationId: row.id, status: 'open' }).filter((ask) => ask.mode === 'wall').at(-1)
       if (open) {
         // Asks never expire; only an older build's escalation carries a time.

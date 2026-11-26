@@ -2174,12 +2174,15 @@ export class BotStore {
     this.run('UPDATE bot_counters SET limits_json = ? WHERE activation_id = ?', JSON.stringify(limits), activationId)
   }
 
-  /** Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"). */
-  regrant(botId: string, fromDigest: string, toDigest: string, revision: string): void {
+  /**
+   * Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"); with `only`, just
+   * that activation, and the others on the old grant stay where they are.
+   */
+  regrant(botId: string, fromDigest: string, toDigest: string, revision: string, only?: string): void {
     // Their dispatches that have not started move too: `prepare` checks the dispatch's digest.
     this.run(`UPDATE bot_dispatches SET policy_digest = ? WHERE policy_digest = ? AND started_at IS NULL AND activation_id IN
-      (SELECT id FROM bot_activations WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled'))`, toDigest, fromDigest, botId, fromDigest)
-    this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
+      (SELECT id FROM bot_activations WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled') AND (? IS NULL OR id = ?))`, toDigest, fromDigest, botId, fromDigest, only ?? null, only ?? null)
+    this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled') AND (? IS NULL OR id = ?)", toDigest, revision, botId, fromDigest, only ?? null, only ?? null)
     this.changedLaunch(botId)
   }
 
