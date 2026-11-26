@@ -95,6 +95,18 @@
       ],
       "claimedAt": "2026-11-25T18:29:30.139Z",
       "expiresAt": "2026-11-25T20:29:30.139Z"
+    },
+    {
+      "task": "steer-poll-no-queue-file",
+      "session": "Avarnics-Mac-mini.local-b17aa1",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "steer-poll-no-queue-file",
+      "paths": [
+        "src/mms/queue/durableQueue.ts",
+        "tests/durableQueueRead.test.ts"
+      ],
+      "claimedAt": "2026-11-26T05:48:37.437Z",
+      "expiresAt": "2026-11-26T07:48:37.437Z"
     }
   ]
 }
