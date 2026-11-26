@@ -3190,7 +3190,7 @@ export class OrchestratorService extends EventEmitter {
         runId: childRunId,
         threadId: childThreadId,
         // A plan-ceiling child plans only (SPEC §15.1). The subagent is told where its result goes, then its task.
-        input: { content: `${subagentPreamble(this.titleOf(request.parentThreadId))}\n\n${prompt}`, mode: request.modeCeiling === 'plan' ? 'plan' : 'agent' },
+        input: { content: `${subagentPreamble(this.titleOf(request.parentThreadId), request.parentThreadId)}\n\n${prompt}`, mode: request.modeCeiling === 'plan' ? 'plan' : 'agent' },
         reuseLastUser: false,
         displayUserMessage: true,
         source: 'delegation',
@@ -5445,7 +5445,7 @@ export class OrchestratorService extends EventEmitter {
   private async sendToThreadAsAgent(
     threadId: string,
     input: { content: string; mode: 'agent' | 'plan' },
-    options: { clientRequestId: string; actor: AgentActor; bot?: { botId: string; name: string }; forceQueue?: boolean; refuseWhilePaused?: boolean }
+    options: { clientRequestId: string; actor: AgentActor; bot?: { botId: string; name: string }; forceQueue?: boolean; refuseWhilePaused?: boolean; hidePreamble?: boolean }
   ): Promise<AgentSendResult> {
     const engine = this.requireRunEngine()
     // A bot's thread sends only as the owner's bot, with "use your threads" held by the turn that sends (or, for a thread
@@ -5457,7 +5457,7 @@ export class OrchestratorService extends EventEmitter {
     if (turnBot?.limit && isStricter(turnBot.limit, this.storedPermissionMode(threadId)))
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
     const sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)
-    const letter = bot ? this.botLetter(sender, bot, input.content) : this.agentLetter(sender, input.content)
+    const letter = bot ? this.botLetter(sender, bot, input.content) : this.agentLetter(sender, input.content, true, options.hidePreamble)
     this.assertQueueOpen(threadId)
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
@@ -5561,14 +5561,17 @@ export class OrchestratorService extends EventEmitter {
   /**
    * An agent's words as the thread stores them: labelled with the sender (`agentMessage`) unless `labelled` is false (an
    * agent's note on its own thread), and the sender with where the words sit in that text and its title now, for the
-   * origin the message is stored with.
+   * origin the message is stored with. With `hidePreamble`, a subagent's guidance at the start of the words
+   * (`withoutSubagentPreamble`) is left out of where they sit, so the chat shows only the task.
    */
-  private agentLetter(sender: AgentActor, content: string, labelled = true): { content: string; sender: AgentSender } {
+  private agentLetter(sender: AgentActor, content: string, labelled = true, hidePreamble = false): { content: string; sender: AgentSender } {
     // A sender on another computer has no thread here: its title came with the call, and the label names its computer.
     const name = sender.remote ? sender.remote.title : this.titleOf(sender.threadId)
     const title = name?.trim().slice(0, AGENT_TITLE_MAX_CHARS)
     const envelope = labelled ? agentMessage(sender.threadId, name, content, sender.remote ? { computer: sender.remote.computer } : undefined) : { text: content, head: 0, tail: 0 }
-    return { content: envelope.text, sender: { ...sender, body: { head: envelope.head, tail: envelope.tail }, ...(title ? { title } : {}) } }
+    const words = envelope.text.slice(envelope.head, envelope.text.length - envelope.tail)
+    const head = envelope.head + (hidePreamble ? words.length - withoutSubagentPreamble(words).length : 0)
+    return { content: envelope.text, sender: { ...sender, body: { head, tail: envelope.tail }, ...(title ? { title } : {}) } }
   }
 
   /**
@@ -6612,17 +6615,19 @@ export class OrchestratorService extends EventEmitter {
    * the path `thread_send` takes on this computer, with the sender carried in the actor (`AgentActor.remote`) instead of
    * looked up here. Its run's source is `mcp`, its text is labelled by this computer and never read for `/skill` or
    * workflow commands, it runs no wider than the actor's mode (and the thread's own), and it is refused while a question or
-   * approval waits. The run and a queued item record the calling computer (`sentFrom`).
+   * approval waits. The run and a queued item record the calling computer (`sentFrom`). From the agent that started the
+   * thread (`fromLauncher`), the guidance a remote subagent's first task starts with (`remoteSubagentPreamble`) is left
+   * out of what the chat shows, as on one computer (`delegatedOrigin`); the model still reads it.
    */
   async sendForRemoteAgent(
     threadId: string,
     input: { content: string; mode: 'agent' | 'plan' },
-    options: { clientRequestId: string; actor: AgentActor; forceQueue?: boolean; refuseWhilePaused?: boolean; runningMinutes?: number }
+    options: { clientRequestId: string; actor: AgentActor; fromLauncher?: boolean; forceQueue?: boolean; refuseWhilePaused?: boolean; runningMinutes?: number }
   ): Promise<AgentSendResult & { deadlineMinutes?: number }> {
     if (!options.actor.remote) throw new Error('sendForRemoteAgent needs an agent on another computer.')
     this.assertNotBotThread(threadId)
-    const { runningMinutes, ...sendOptions } = options
-    const sent = await this.sendToThreadAsAgent(threadId, input, sendOptions)
+    const { runningMinutes, fromLauncher, ...sendOptions } = options
+    const sent = await this.sendToThreadAsAgent(threadId, input, { ...sendOptions, ...(fromLauncher ? { hidePreamble: true } : {}) })
     // A limit binds the run the send started (a retry finds the same run and keeps what it used). A queued message has
     // no run yet: the answer then carries no limit, and the agent's computer keeps stopping it by its own clock.
     if (runningMinutes === undefined || sent.queued || !sent.runId || !this.runTimeLimits) return sent
@@ -9080,6 +9085,8 @@ export class OrchestratorService extends EventEmitter {
     // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
     const remoteModel = input.model?.trim() ? agentModelId(input.model.trim(), input.effort) : undefined
     const title = input.title?.trim() || undefined
+    // That computer names the parent thread by this computer's node and its id here, for the subagent to read it.
+    const selfNode = this.remoteComputers?.self?.()
     let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
     try {
       accepted = await engine.requestDelegation({
@@ -9098,7 +9105,7 @@ export class OrchestratorService extends EventEmitter {
         accessLevel: policy.accessLevel,
         remote: {
           node: computer.node,
-          prompt: `${remoteSubagentPreamble(this.titleOf(parentThreadId))}\n\n${input.prompt}`,
+          prompt: `${remoteSubagentPreamble(this.titleOf(parentThreadId), selfNode ? qualifyId(selfNode, parentThreadId) : undefined)}\n\n${input.prompt}`,
           permissionMode,
           // A read-only task, or one under a plan ceiling, plans and reads there: it never edits.
           chatMode: input.readOnly || policy.modeCeiling === 'plan' ? 'plan' : 'agent',

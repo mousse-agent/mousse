@@ -32,29 +32,38 @@ export function mcpDelegationInstructions(): string[] {
   ]
 }
 
-/** What a subagent is told, in addition to its task: where its result goes. `parentTitle` is absent when the parent has no title. */
-export function subagentGuidanceLines(parentTitle?: string): string[] {
+/** Where a subagent reads its parent: the parent thread's id as the subagent's computer names it. */
+const parentReadLine = (parentRef: string): string => `If your brief is unclear, read your parent thread (thread_read ${parentRef}).`
+
+/**
+ * What a subagent is told, in addition to its task: where its result goes, and (`parentRef`, its parent thread's id)
+ * where to read more. `parentTitle` is absent when the parent has no title.
+ */
+export function subagentGuidanceLines(parentTitle?: string, parentRef?: string): string[] {
   return [
     `You are a subagent${parentTitle ? ` of "${parentTitle}"` : ''}. Your final message is your result: keep it self-contained and bounded.`,
     'ask_user questions reach your parent and the user.',
-    'You may start your own subagents unless your instructions say not to.'
+    'You may start your own subagents unless your instructions say not to.',
+    ...(parentRef ? [parentReadLine(parentRef)] : [])
   ]
 }
 
 /** The first prompt of a subagent: its guidance, then the task. */
-export function subagentPreamble(parentTitle?: string): string {
-  return subagentGuidanceLines(parentTitle).join(' ')
+export function subagentPreamble(parentTitle?: string, parentRef?: string): string {
+  return subagentGuidanceLines(parentTitle, parentRef).join(' ')
 }
 
 /**
  * The first prompt of a remote subagent (issue #469): it runs as an ordinary thread on another computer,
  * so it is told where its result goes and that a person there, not its parent, answers its questions.
+ * `parentRef` is the parent thread as that computer names it (`<this computer's node>:<id>`).
  */
-export function remoteSubagentPreamble(parentTitle?: string): string {
+export function remoteSubagentPreamble(parentTitle?: string, parentRef?: string): string {
   return [
     `You are a subagent${parentTitle ? ` of "${parentTitle}"` : ''}, started by an agent on another of the user's computers. Your final message is your result: keep it self-contained and bounded.`,
     'Questions you ask are answered on this computer, by the user, not by the agent that started you.',
-    'Commit your work to this thread\'s branch when you change code, so it can be fetched from here.'
+    'Commit your work to this thread\'s branch when you change code, so it can be fetched from here.',
+    ...(parentRef ? [parentReadLine(parentRef)] : [])
   ].join(' ')
 }
 

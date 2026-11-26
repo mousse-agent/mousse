@@ -241,7 +241,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     caller?: { node: NodeId },
     started?: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
   ): Promise<{ thread: { id: string } } & Record<string, unknown>> {
-    const { startedFromProjectId, hidden, ...create } = params
+    // `subagent` is read only from an agent's call, which brings it in `started`; a person's is left out.
+    const { startedFromProjectId, hidden, subagent: _subagent, ...create } = params
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
     if (!caller) return result

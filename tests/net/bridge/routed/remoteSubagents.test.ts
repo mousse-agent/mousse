@@ -71,7 +71,7 @@ describe('remote subagents over Bridge (issue #469)', () => {
       const far = t.owner.threads.getThread(launched.remoteThreadId)!
       // Both computers know the agent mark, so the owner took every call as an agent's (issue #1160): the thread records
       // the agent that started it, and the task runs as an agent's message, from this computer.
-      expect(far).toMatchObject({ name: 'Remote tester', startedFrom: { node: t.callerNode, agent: { thread: parentThread.id, title: 'Parent', mode: 'accept_edits' } } })
+      expect(far).toMatchObject({ name: 'Remote tester', startedFrom: { node: t.callerNode, agent: { thread: parentThread.id, title: 'Parent', mode: 'accept_edits', subagent: true } } })
       // A subagent is reached through its parent: on the computer it runs on it stays out of the sidebar.
       expect(far.hidden).toBe(true)
       expect(far.permissionMode).toBe('accept_edits')
@@ -158,7 +158,11 @@ describe('remote subagents over Bridge (issue #469)', () => {
   }, 120_000)
 
   // Issue #1160: no fixed cap. The owner's limit for this computer is the only one past the parent's run.
-  it('a task whose first create went to a computer from before hidden sends none on its retry after that computer is updated', async () => {
+  // A computer from before hidden (version 2) takes neither key; one from before subagent (version 3) takes only hidden.
+  it.each([
+    { before: 'hidden', version: 2, dropped: ['hidden', 'subagent'] as const },
+    { before: 'subagent', version: 3, dropped: ['subagent'] as const }
+  ])('a task whose first create went to a computer from before $before sends none on its retry after that computer is updated', async ({ before, version, dropped }) => {
     const service = serviceOf(t.caller)
     service.pause()
     vi.spyOn(t.owner.orchestrator, 'send').mockImplementation(async (_input, _reuse, opts) => {
@@ -166,13 +170,13 @@ describe('remote subagents over Bridge (issue #469)', () => {
       if (sent.status !== 'accepted') throw new Error('not accepted')
       return { message: '', actions: [], runId: sent.runId, sequence: sent.sequence, accepted: true } as never
     })
-    // That computer runs the version of threads.create before hidden: the client sends the create without it.
+    // That computer runs the version of threads.create before the key: the client sends the create without it.
     const client = t.client()
     const realVersions = client.versions.bind(client)
     let older = true
     vi.spyOn(client, 'versions').mockImplementation(async (node, session) => {
       const versions = await realVersions(node, session)
-      return older ? { ...versions, 'threads.create': 2 } : versions
+      return older ? { ...versions, 'threads.create': version } : versions
     })
     // The create goes through there, but its reply is lost; then that computer is updated.
     const port = portOf(t.caller)!
@@ -188,15 +192,15 @@ describe('remote subagents over Bridge (issue #469)', () => {
       return result
     })
     try {
-      const parentThread = t.caller.threads.createThread('Older parent')
-      const parent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: parentThread.id, clientRequestId: 'older-parent-send', source: 'gui' })
+      const parentThread = t.caller.threads.createThread(`Older parent ${before}`)
+      const parent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: parentThread.id, clientRequestId: `older-parent-send-${before}`, source: 'gui' })
       if (parent.status !== 'accepted') throw new Error('parent not accepted')
       t.caller.runEngine.markStarting(parent.runId)
       t.caller.runEngine.markRunning(parent.runId)
       const accepted = await t.caller.runEngine.requestDelegation({
         parentThreadId: parentThread.id,
         parentRunId: parent.runId,
-        clientRequestId: 'delegation:remote-older',
+        clientRequestId: `delegation:remote-older-${before}`,
         prompt: 'Check it there',
         workspace: 'shared',
         role: 'research',
@@ -208,8 +212,9 @@ describe('remote subagents over Bridge (issue #469)', () => {
       const first = await service.launch(accepted.delegationId)
       expect(first.ok).not.toBe(true)
       expect(made()).toHaveLength(1)
-      // What the first attempt put on the wire is stored: no hidden.
-      expect(t.caller.runEngine.remoteSubagents.get(accepted.delegationId)!.hidden).toBeNull()
+      // What the first attempt put on the wire is stored: none of the keys that computer did not take.
+      const stored = t.caller.runEngine.remoteSubagents.get(accepted.delegationId)!
+      for (const key of dropped) expect(stored[key]).toBeNull()
       // The retry, now to the updated computer, repeats that create: the same thread, never a key conflict.
       const again = await service.launch(accepted.delegationId)
       expect(again, JSON.stringify(again)).toMatchObject({ ok: true })
@@ -217,7 +222,10 @@ describe('remote subagents over Bridge (issue #469)', () => {
       expect(made()).toHaveLength(1)
       expect(again.remoteThreadId).toBe(made()[0]!.id)
       expect(sent.length).toBeGreaterThanOrEqual(2)
-      for (const params of sent) expect(params).not.toHaveProperty('hidden')
+      for (const params of sent) for (const key of dropped) expect(params).not.toHaveProperty(key)
+      // The thread there is started by the agent; without subagent it is not recorded as its subagent.
+      expect(made()[0]!.startedFrom?.agent).not.toHaveProperty('subagent')
+      if (version === 3) expect(made()[0]!.hidden).toBe(true)
     } finally {
       vi.restoreAllMocks()
     }

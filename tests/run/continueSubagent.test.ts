@@ -75,7 +75,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
       // The same thread, so the same native session: no second thread, and the follow-up runs as its next turn.
       expect(d.engine.delegations.listChildThreads(parent.id)).toHaveLength(1)
       const childTurns = adapter.turns.filter((turn) => turn.threadId === out.first.childThreadId)
-      expect(childTurns.map((turn) => turn.prompt)).toEqual([`${subagentPreamble('Parent')}\n\nReview API reviewer`, 'Now check the tests'])
+      expect(childTurns.map((turn) => turn.prompt)).toEqual([`${subagentPreamble('Parent', parent.id)}\n\nReview API reviewer`, 'Now check the tests'])
       // Own delegation row, run and result; workspace and role come from the subagent's first task.
       const tasks = d.engine.delegations.listForChildThread(out.first.childThreadId)
       expect(tasks.map((task) => task.status)).toEqual(['result_available', 'result_available'])
@@ -352,13 +352,15 @@ describe('continue_subagent and the title address (issue #142)', () => {
 
   describe('the subagent\'s first prompt', () => {
     it('tells it whose it is, where its result goes and that it may start subagents, then gives its task', async () => {
-      const { adapter, steps, out, say, start, settled } = world()
+      const { adapter, parent, steps, out, say, start, settled } = world()
       steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
       await say('go')
       await settled(out.first.childRunId)
       const first = adapter.turns.find((turn) => turn.threadId === out.first.childThreadId)!
-      expect(first.prompt).toBe(`${subagentPreamble('Parent')}\n\nReview API reviewer`)
+      expect(first.prompt).toBe(`${subagentPreamble('Parent', parent.id)}\n\nReview API reviewer`)
       expect(first.prompt).toContain('You may start your own subagents unless your instructions say not to.')
+      // Its parent by id, so it can read the parent thread (thread_read) when its brief is unclear.
+      expect(first.prompt).toContain(`thread_read ${parent.id}`)
     })
 
     it('is stored as the parent agent\'s message with the task as its words, as are its follow-ups; a person\'s message stays theirs', async () => {
@@ -374,7 +376,7 @@ describe('continue_subagent and the title address (issue #142)', () => {
       const asked = d.orch.getMessages(out.first.childThreadId).filter((message) => message.role === 'user')
       expect(asked.map((message) => agentMessageWords(message.content, message.origin))).toEqual(['Review API reviewer', 'Now check the tests', 'Also look at the docs'])
       // The model still reads the guidance before the first task.
-      expect(asked[0]!.content).toBe(`${subagentPreamble('Parent')}\n\nReview API reviewer`)
+      expect(asked[0]!.content).toBe(`${subagentPreamble('Parent', parent.id)}\n\nReview API reviewer`)
       for (const message of asked.slice(0, 2)) expect(message.origin).toMatchObject({ kind: 'agent', threadId: parent.id, title: 'Parent' })
       expect(asked[2]!.origin).toBeUndefined()
     })

@@ -13,6 +13,7 @@ import { normalizeQueuedMessages } from '../../../../src/mms/queue/ThreadMessage
 import { validateRemoteParams } from '../../../../src/mms/bridge/remote/dto'
 import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX } from '../../../../src/mms/run/mcp/appTools/agentMessage'
 import { agentMessageWords } from '../../../../src/shared/agentMessageWords'
+import { remoteSubagentPreamble } from '../../../../src/mms/run/delegation/guidance'
 import { registerNetMethods } from '../../../../src/mms/net/registerMethods'
 import { DomainHandlerRegistry } from '../../../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../../../src/mms/protocol/handlers'
@@ -107,6 +108,35 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     expect(asked.thread.hidden).toBe(true)
     const independent = await call('threads.create', { name: 'Independent', hidden: false, agent: mark() })
     expect(t.owner.threads.getThread(independent.thread.id)!.hidden).toBeUndefined()
+  }, 120_000)
+
+  it('records the thread as the agent\'s subagent only when its create says so, and never from a person\'s create', async () => {
+    const subagent = await call('threads.create', { name: 'Subagent', hidden: true, subagent: true, agent: mark() })
+    expect(t.owner.threads.getThread(subagent.thread.id)!.startedFrom?.agent).toMatchObject({ thread: 'sender-thread', subagent: true })
+    // `thread_create` there, or a computer from before `subagent`: started by that agent, not its subagent.
+    const own = await launched('Own thread')
+    expect(t.owner.threads.getThread(own)!.startedFrom?.agent).not.toHaveProperty('subagent')
+    const person = await call('threads.create', { name: 'By a person', subagent: true })
+    expect(t.owner.threads.getThread(person.thread.id)!.startedFrom).toEqual({ node: t.callerNode })
+    expect(await refusal(call('threads.create', { name: 'Bad', subagent: 'yes', agent: mark() }))).toBe('invalid_params')
+  }, 120_000)
+
+  it('leaves the guidance before a subagent\'s task out of the chat when the agent that started the thread sends it', async () => {
+    standInForTurns()
+    const id = await launched()
+    const task = `${remoteSubagentPreamble('Planner', `${t.callerNode}:sender-thread`)}\n\nRun the tests`
+    await call('orchestrator.send', { threadId: id, content: task, mode: 'agent', clientRequestId: 'preamble-1', agent: mark() })
+    await vi.waitFor(() => expect(startTurn).toHaveBeenCalledTimes(1))
+    const first = startTurn.mock.calls.at(-1)![0] as Loose
+    // The model reads the guidance with the parent's id; the chat shows the task.
+    expect(String(first.input.content)).toContain(`thread_read ${t.callerNode}:sender-thread`)
+    expect(agentMessageWords(String(first.input.content), first.agent)).toBe('Run the tests')
+    // Another agent of that computer did not start the thread: its words show as it wrote them.
+    const other = await launched('Other')
+    await call('orchestrator.send', { threadId: other, content: task, mode: 'agent', clientRequestId: 'preamble-2', agent: mark({ thread: 'another-thread' }) })
+    await vi.waitFor(() => expect(startTurn).toHaveBeenCalledTimes(2))
+    const second = startTurn.mock.calls.at(-1)![0] as Loose
+    expect(agentMessageWords(String(second.input.content), second.agent)).toBe(task)
   }, 120_000)
 
   it('runs a message as an agent\'s: source mcp, its sender stored as from, a narrowed mode, the computer recorded', async () => {

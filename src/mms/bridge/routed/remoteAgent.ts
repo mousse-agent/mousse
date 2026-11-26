@@ -66,7 +66,7 @@ export function parseRoutedAgentMark(value: unknown): RoutedAgentMark & { mode: 
 
 /** The keys a marked call may carry besides the target and the mark; anything else a person's call takes is refused. */
 const MARKED_KEYS: Readonly<Record<string, readonly string[]>> = {
-  'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', 'hidden'],
+  'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', 'hidden', 'subagent'],
   'threads.setModel': ['threadId', 'model', 'ifRevision'],
   'threads.setPermissionMode': ['threadId', 'mode', 'ifRevision'],
   'orchestrator.send': ['threadId', 'content', 'mode', 'clientRequestId', 'requestId', 'refuseWhilePaused', 'forceQueue', ROUTED_DEADLINE_KEY],
@@ -144,6 +144,8 @@ export class RemoteAgentCalls {
         const sent = await services.orchestrator.sendForRemoteAgent(threadId, { content, mode: params.mode === 'plan' ? 'plan' : 'agent' }, {
           clientRequestId: key,
           actor,
+          // The agent that started the thread sends its tasks: the guidance before a subagent's task stays out of the chat.
+          ...(launchedBySender ? { fromLauncher: true } : {}),
           ...(method === 'queue.enqueue' || params.forceQueue === true ? { forceQueue: true } : {}),
           ...(params.refuseWhilePaused === true ? { refuseWhilePaused: true } : {}),
           // The running time the run may use here: this computer counts it and stops the run (`RunTimeLimits`).
@@ -198,13 +200,16 @@ export class RemoteAgentCalls {
   /**
    * A thread an agent on the device starts: held at once, with the thread, to the sender's mode narrowed to the device
    * limit, and marked as started by that agent (`startedFrom.agent`), so a launch cut off after this call has already
-   * left a thread no wider than its launcher. `createdByThreadId` stays unset (the sender is not a thread here).
+   * left a thread no wider than its launcher. `createdByThreadId` stays unset (the sender is not a thread here). With
+   * `subagent: true` the thread is recorded as the sender's subagent (`ThreadStartedFrom.agent.subagent`).
    */
   private async create(params: Record<string, unknown>, call: RemoteAgentCall, mode: PermissionMode, reach: AgentReach): Promise<unknown> {
     if (reach === 'none')
       throw new DomainRpcError('agent_reach', 'This computer does not let agents on that computer work here.', { reach })
+    if (params.subagent !== undefined && typeof params.subagent !== 'boolean') throw new DomainRpcError('invalid_params', 'subagent must be true or false.')
     const title = cleanRemoteSenderTitle(call.mark.title)
-    return call.createThread(params, { agent: { thread: call.mark.thread, title, mode }, permissionMode: mode })
+    const { subagent, ...create } = params
+    return call.createThread(create, { agent: { thread: call.mark.thread, title, mode, ...(subagent === true ? { subagent: true as const } : {}) }, permissionMode: mode })
   }
 
   private assertReach(thread: Thread, node: NodeId, reach: AgentReach): void {

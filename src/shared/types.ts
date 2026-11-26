@@ -1584,8 +1584,12 @@ export interface ThreadStartedFrom {
    * thread there (its id on that device, never rewritten), its title then, and the mode the thread was held to when it
    * was made. A marked `threads.setPermissionMode` never goes above that mode. `createdByThreadId` stays unset: a foreign
    * id there would be rewritten to a thread of this computer that does not exist.
+   *
+   * `subagent` is set when that agent started the thread as its subagent (`delegate_task` with `computer`), not as a
+   * thread of its own (`thread_create`): only such a thread shows below the agent's thread in the title bar's path. A
+   * computer from before it sends none.
    */
-  agent?: { thread: string; title: string; mode: PermissionMode }
+  agent?: { thread: string; title: string; mode: PermissionMode; subagent?: true }
 }
 
 /** The computer a thread's latest routed message came from. */
