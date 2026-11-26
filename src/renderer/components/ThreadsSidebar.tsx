@@ -17,6 +17,7 @@ import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttent
 import { needsMeThreads, useSupervisedWaits } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
+import { useSidebarShowMoreStore } from '../lib/sidebarShowMore'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { workspaceModeFor, type SidebarTab } from '../stores/sidebarTabAgreement'
@@ -409,7 +410,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // being opened (or a project just added) appears at once.
   const toggledProjectRef = useRef<string | null>(null)
 
-  const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
+  // Show more survives the sidebar closing and the hover peek (a separate mount).
+  const expandedProjectThreadLists = useSidebarShowMoreStore((s) => s.groups)
+  const setExpandedProjectThreadLists = useSidebarShowMoreStore((s) => s.setGroups)
 
   const [archivedExpanded, setArchivedExpanded] = useState(false)
   // The archived threads waiting on a delete confirmation, and how that delete is going.
