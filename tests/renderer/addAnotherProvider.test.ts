@@ -8,13 +8,15 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AddProviderDialog, type AddProviderHandlers } from '../../src/renderer/components/providers/AddProviderDialog'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
+import type { ProviderOperationEvent } from '../../src/shared/harness/types'
+import { applyOperationEvent } from '../../src/renderer/lib/providerSnapshots'
 import { snapshot } from '../providerSnapshotFixture'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 let container: HTMLDivElement
 let root: Root
-const install = vi.fn(async () => ({ operationId: 'install', instanceId: 'x', kind: 'install' }))
+const install = vi.fn(async (_instanceId: string): Promise<{ operationId: string; instanceId: string; kind: 'install' }> => ({ operationId: 'install', instanceId: 'x', kind: 'install' }))
 beforeEach(() => {
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -78,13 +80,22 @@ describe('adding another account of an agent', () => {
     expect(handlers.signIn).toHaveBeenCalledExactlyOnceWith('codex:added', 'ChatGPT subscription 2')
   })
 
-  it('installs first, and leaves the sign-in for later, when the agent is not on this computer yet', async () => {
+  it.each([
+    ['completed', { phase: 'completed' }, true],
+    ['failed', { phase: 'failed', error: { code: 'protocol', message: 'Download failed' } }, false],
+    ['cancelled', { phase: 'cancelled' }, false]
+  ] as const)('when the agent is not on this computer yet, installs first and opens the sign-in only once the install %s', async (_name, end, signsIn) => {
     const missing = { ...antigravity, install: { state: 'not_installed' as const, canInstall: true }, binary: undefined }
+    const started = { operationId: `install-${_name}`, instanceId: 'antigravity:added', kind: 'install' as const }
+    install.mockResolvedValueOnce(started)
     const { handlers } = open([snapshot(), missing])
     await click(choice('Antigravity 2'))
     await click(button('Add'))
     expect(install).toHaveBeenCalledWith('antigravity:added')
     expect(handlers.signIn).not.toHaveBeenCalled()
+    await act(async () => { applyOperationEvent({ ...started, ...end } as ProviderOperationEvent) })
+    if (signsIn) expect(handlers.signIn).toHaveBeenCalledExactlyOnceWith('antigravity:added', 'Antigravity 2')
+    else expect(handlers.signIn).not.toHaveBeenCalled()
   })
 
   it('keeps the first entry of an agent on the usual steps', async () => {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import type { CliProviderConfig, CliProviderConfigPatch, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../../../shared/settings'
@@ -12,7 +12,8 @@ import { harnessAppError } from '../../../../../shared/harness/types'
 import { compareVersions, type LiveProcessHost, type OneShotSpec, type RuntimeUsage } from '../../../driver'
 import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
 import { isAuthRequired } from '../../auth'
-import type { AcpConnectionFactory } from '../../connection'
+import { initializeAgent } from '../../capabilities'
+import { closeAcpConnection, type AcpConnectionFactory } from '../../connection'
 import { hasAvailableModelList, mergeModelOptions, modelOptions, thoughtConfigOption } from '../../models'
 import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback, privateSignInEnv, scrubbedAntigravityEnv, type AntigravityRuntimeChoice } from '../antigravity'
 import { keepOption } from '../../permissions'
@@ -95,6 +96,11 @@ const SIGN_IN_REQUIRED_MESSAGE = 'Sign in to Antigravity in Settings before chat
 export interface AntigravityServiceOptions {
   /** An entry added after the first, with a home of its own; absent for the first entry (the profile's). */
   entry?: AntigravityEntry
+  /**
+   * Test seam: opens agent connections on the agent folders under `geminiRoot` (the ACP process boundary). Used for
+   * the check of an entry's sign-in in a scratch home (`signInOutsideHome`), and for everything when `connect` is unset.
+   */
+  connectIn?: (geminiRoot: string) => AcpConnectionFactory
   /** Test seam: opens agent connections instead of starting the agent (the ACP process boundary). */
   connect?: AcpConnectionFactory
   /**
@@ -191,14 +197,7 @@ export class AntigravityProviderService {
       // Advertise ACP form elicitation so `agy` routes `ask_question` through Mousse's question widget instead of dumping markdown choices in chat.
       formElicitation: true,
       clientCapabilities: () => ({ elicitation: { form: {} } }),
-      connect: options.connect ?? antigravityConnectionFactory({
-        profileDir: this.profileDir,
-        profileHome,
-        ...(options.entry ? { privateHome: options.entry.home } : {}),
-        runtime: () => this.runtime(),
-        args: () => storedCliArgs(this.launchSettings()),
-        env: (base) => withUserEnv(base, storedCliEnv(this.launchSettings()))
-      }),
+      connect: options.connect ?? this.connectionsIn(options.entry?.home),
       store: {
         // A session opened on the other runtime is not resumed: the thread hands its history over instead.
         saved: (threadId) => this.sessionsRuntime() === this.runtimeKind() ? this.settings.sessions?.[threadId] : undefined,
@@ -237,6 +236,20 @@ export class AntigravityProviderService {
       } else if (event.type === 'finished' && this.installing) {
         // This service's own install reports once its settings have changed (see `install`).
       } else this.notifyChanged()
+    })
+  }
+
+  /** Agent processes on the folders under `privateHome` (an entry's own home, or a scratch home); the profile's without it. */
+  private connectionsIn(privateHome: string | undefined): AcpConnectionFactory {
+    if (privateHome && this.options.connectIn) return this.options.connectIn(privateHome)
+    if (!privateHome && this.options.connectIn) return this.options.connectIn(this.profileDir)
+    return antigravityConnectionFactory({
+      profileDir: this.profileDir,
+      profileHome: this.profileHome,
+      ...(privateHome ? { privateHome } : {}),
+      runtime: () => this.runtime(),
+      args: () => storedCliArgs(this.launchSettings()),
+      env: (base) => withUserEnv(base, storedCliEnv(this.launchSettings()))
     })
   }
 
@@ -436,7 +449,7 @@ export class AntigravityProviderService {
       })().catch(() => undefined)
       await this.acp.initialize(process)
       let newSession = native ? await this.openSignedIn(process, cwd) : undefined
-      if (newSession && this.sharesSignIn()) {
+      if (newSession && await this.sharesSignIn(cwd)) {
         this.isolationError = SHARED_SIGN_IN_MESSAGE
         throw new Error(SHARED_SIGN_IN_MESSAGE)
       }
@@ -498,11 +511,34 @@ export class AntigravityProviderService {
   }
 
   /**
-   * An entry's own home that never kept a sign-in opened a session: the sign-in came from outside the home (the
-   * computer's keyring, for an `agy` that ignores `AGY_FILE_TOKEN_ENV`), so it is refused, never recorded.
+   * An entry's own home opened a session before Mousse recorded a sign-in there. Either the sign-in is in the home (a
+   * sign-in `agy` saved before Mousse could record it: it was interrupted, or listing the models failed), or it came
+   * from outside every home (the computer's keyring, for an `agy` that ignores `AGY_FILE_TOKEN_ENV`). A scratch home
+   * with nothing in it tells them apart: when it opens a session too, the sign-in is not the entry's and is refused.
    */
-  private sharesSignIn(): boolean {
-    return Boolean(this.options.entry && !this.settings.homeSignIn)
+  private async sharesSignIn(cwd: string): Promise<boolean> {
+    if (!this.options.entry || this.settings.homeSignIn) return false
+    return this.signInOutsideHome(cwd)
+  }
+
+  /** Whether `agy` opens a session in a new, empty home: then its sign-in is kept outside every home. */
+  private async signInOutsideHome(cwd: string): Promise<boolean> {
+    const scratch = join(this.profileDir, 'sign-in-check', randomUUID())
+    mkdirSync(scratch, { recursive: true, mode: 0o700 })
+    const active = this.connectionsIn(scratch)({ purpose: 'models', handlers: { requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }) } })
+    try {
+      await initializeAgent(active.connection, { clientFs: false, label: ANTIGRAVITY_LABEL, strictProtocol: true })
+      try {
+        await active.connection.agent.request(methods.agent.session.new, { cwd, mcpServers: [] })
+        return true
+      } catch (error) {
+        if (isAuthRequired(error)) return false
+        throw error
+      }
+    } finally {
+      closeAcpConnection(active)
+      await removeAgentHome(scratch).catch(() => undefined)
+    }
   }
 
   /** Why the entry cannot be signed in to an account of its own, when a check found that. */
@@ -534,7 +570,7 @@ export class AntigravityProviderService {
       try {
         await this.acp.initialize(active)
         const opened = await this.openSignedIn(active, cwd)
-        if (opened && this.sharesSignIn()) {
+        if (opened && await this.sharesSignIn(cwd)) {
           this.isolationError = SHARED_SIGN_IN_MESSAGE
           this.notifyChanged()
           return false
@@ -726,17 +762,7 @@ export class AntigravityProviderService {
    * processes were closed. The links to the user's skills are removed first, so the delete never follows them.
    */
   private async deleteAgentFolders(): Promise<void> {
-    for (const folder of ['gemini-home', 'bot-gemini-home']) {
-      const dir = join(this.geminiRoot, folder)
-      for (const part of SKILL_LINKS) {
-        const link = join(dir, ...part)
-        try {
-          if (lstatSync(link).isSymbolicLink()) unlinkSync(link)
-        } catch { /* no link there */ }
-      }
-      // A closing agent may hold its files a moment longer on Windows.
-      await rm(dir, { recursive: true, force: true, maxRetries: 25, retryDelay: 200 })
-    }
+    await removeAgentHome(this.geminiRoot, ['gemini-home', 'bot-gemini-home'])
   }
 
   /**
@@ -989,4 +1015,29 @@ export class AntigravityProviderService {
     for (const session of this.loginSessions) session.abort.abort()
     this.acp.stop()
   }
+}
+
+/**
+ * Deletes the agent folders `folders` of a home Mousse owns (every one when absent: the home itself). The links to the
+ * user's skills are unlinked first, but only where the folder holding the link really is inside the home: a folder
+ * that is itself a link (`gemini-home/config` to the user's own config folder) leads outside, and nothing there is
+ * touched. The delete then removes links as entries, never following them.
+ */
+async function removeAgentHome(home: string, folders?: readonly string[]): Promise<void> {
+  let realHome: string
+  try { realHome = realpathSync(home) } catch { return }
+  for (const folder of folders ?? ['gemini-home', 'bot-gemini-home']) {
+    const dir = join(home, folder)
+    for (const part of SKILL_LINKS) {
+      const link = join(dir, ...part)
+      try {
+        const parent = relative(realHome, realpathSync(join(dir, ...part.slice(0, -1))))
+        if (parent.startsWith('..') || isAbsolute(parent)) continue
+        if (lstatSync(link).isSymbolicLink()) unlinkSync(link)
+      } catch { /* no link there */ }
+    }
+    // A closing agent may hold its files a moment longer on Windows.
+    if (folders) await rm(dir, { recursive: true, force: true, maxRetries: 25, retryDelay: 200 })
+  }
+  if (!folders) await rm(home, { recursive: true, force: true, maxRetries: 25, retryDelay: 200 })
 }

@@ -6,7 +6,7 @@
  * The agent is a hand-authored ACP fake per home, so this proves Mousse's side only. What the real `agy` does with
  * `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` (the sign-in stays in the home) is checked by `tests/live/antigravityAgy.test.ts`.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
@@ -72,10 +72,14 @@ function fakeAgy(home: string): string {
   return agy
 }
 
-function entryService(home: string, entry: AntigravityEntry | undefined, agent: Agent): AntigravityProviderService {
+/**
+ * `agent` answers in the entry's own folders; `outside` in the empty scratch home Mousse checks a sign-in against
+ * (signed out unless the sign-in is kept outside every home, as a keyring is).
+ */
+function entryService(home: string, entry: AntigravityEntry | undefined, agent: Agent, outside: Agent = { signedIn: false, requests: [] }): AntigravityProviderService {
   const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, {
     ...(entry ? { entry } : {}),
-    connect: connectTo(agent),
+    connectIn: (root) => connectTo(entry && root !== entry.home ? outside : agent),
     findUserAgy: () => fakeAgy(home)
   })
   services.push(service)
@@ -185,7 +189,7 @@ describe('the sign-in of an entry with a home of its own', () => {
     const home = newHome()
     // A keyring sign-in: every home opens a session without signing in.
     const keyring: Agent = { signedIn: true, requests: [] }
-    const service = entryService(home, entryIn(home), keyring)
+    const service = entryService(home, entryIn(home), keyring, keyring)
     expect(await service.checkSignedIn(home)).toBe(false)
     expect(service.isolationProblem()).toBe(SHARED_SIGN_IN_MESSAGE)
     expect(await service.login(new LoginSession('one'), home)).toMatchObject({ success: false, error: SHARED_SIGN_IN_MESSAGE })
@@ -194,6 +198,24 @@ describe('the sign-in of an entry with a home of its own', () => {
     // The first entry, on this computer's sign-in, takes it as before.
     const first = entryService(newHome(), undefined, keyring)
     expect(await first.checkSignedIn()).toBe(true)
+  })
+
+  it('takes a sign-in agy saved in the home before Mousse could record it, and tells it from a keyring\'s', async () => {
+    const home = newHome()
+    const entry = entryIn(home)
+    // Interrupted: agy saved the sign-in in the entry's home, but Mousse never recorded it (no `homeSignIn`).
+    const saved: Agent = { signedIn: true, requests: [] }
+    const service = entryService(home, entry, saved)
+    expect(await service.checkSignedIn(home)).toBe(true)
+    expect(service.isolationProblem()).toBeUndefined()
+    expect(JSON.parse(readFileSync(join(entry.stateDir, 'settings.json'), 'utf8'))).toMatchObject({ nativeSignedIn: true, homeSignIn: true })
+    // Sign in again after it: the session opens and is recorded, with no Google flow.
+    rmSync(join(entry.stateDir, 'settings.json'))
+    const again = entryService(home, entry, saved)
+    expect(await again.login(new LoginSession('two'), home)).toMatchObject({ success: true })
+    expect(saved.requests).not.toContain(methods.agent.authenticate)
+    // The scratch home was removed after the check.
+    expect(existsSync(join(entry.stateDir, 'sign-in-check')) ? readdirSync(join(entry.stateDir, 'sign-in-check')) : []).toEqual([])
   })
 
   it('reads its own sign-in again once it signed in there', async () => {
@@ -227,6 +249,16 @@ describe('the sign-in of an entry with a home of its own', () => {
     expect(readFileSync(join(skills, 'SKILL.md'), 'utf8')).toBe('mine')
     expect(service.signedIn()).toBe(false)
     expect(JSON.parse(readFileSync(join(entry.stateDir, 'settings.json'), 'utf8')).homeSignIn).toBeUndefined()
+    // A folder of the home that links outside it (to the user's own config folder) is never followed.
+    const userConfig = join(home, 'user-config')
+    mkdirSync(userConfig, { recursive: true })
+    symlinkSync(skills, join(userConfig, 'skills'), process.platform === 'win32' ? 'junction' : 'dir')
+    mkdirSync(join(entry.home, 'gemini-home'), { recursive: true })
+    symlinkSync(userConfig, join(entry.home, 'gemini-home', 'config'), process.platform === 'win32' ? 'junction' : 'dir')
+    await service.logout()
+    expect(existsSync(join(entry.home, 'gemini-home'))).toBe(false)
+    expect(lstatSync(join(userConfig, 'skills')).isSymbolicLink()).toBe(true)
+    expect(readFileSync(join(userConfig, 'skills', 'SKILL.md'), 'utf8')).toBe('mine')
     // The first entry still signs agy out on this computer.
     const firstAgent: Agent = { signedIn: true, requests: [] }
     await entryService(newHome(), undefined, firstAgent).logout()

@@ -4,7 +4,7 @@ import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { AddOptionMethod, HarnessDriverKind, InstanceConfigPatch, ProviderAddOption, RegistryAgentView } from '../../../shared/harness/types'
 import { Check } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
-import { llmProviderOf } from '../../lib/providerSnapshots'
+import { llmProviderOf, operationOutcome } from '../../lib/providerSnapshots'
 import { Modal } from '../ui/Modal'
 import { WizardSteps } from '../ui/WizardSteps'
 import { Segmented, SettingsGroup, SettingsRow } from '../settings/SettingsRow'
@@ -271,9 +271,11 @@ export function AddProviderDialog({
         ...(binaryPath ? { binaryPath } : {})
       })
       const missing = known?.install.state === 'not_installed'
-      if (missing && known?.install.canInstall) await instances.install(instanceId)
+      const install = missing && known?.install.canInstall ? await instances.install(instanceId) : undefined
       finish(instanceId)
       if (!missing) handlers.signIn(instanceId, name)
+      // Not on this computer yet: the sign-in opens once that install completes, never after a failed or cancelled one.
+      else if (install) void operationOutcome(install).then((outcome) => { if (outcome.phase === 'completed') handlers.signIn(instanceId, name) })
     })
 
   const signInStep = apiMethod !== undefined && CONNECT_KIND[apiMethod] === 'subscription'
