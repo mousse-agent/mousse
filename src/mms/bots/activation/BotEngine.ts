@@ -7167,6 +7167,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const fresh = this.subagentNamed(row.id, request.subagent)
     if (!fresh) return { refused: this.unknownSubagent(row.id, request.subagent) }
     if (this.subagentRunning(fresh)) return this.noteSubagent(fresh, message)
+    // `subagent_result` reads a subagent's last turn: more work before the work read what the last one returned would
+    // leave that result where nothing reads it, and its notice pointing at the next one's.
+    if (this.subagentResultUnread(row.id, fresh)) return { refused: `Read what "${fresh.spec.title}" returned first (subagent_result): more work replaces that result.` }
     const recheck = this.subagentCapped(row.id)
     if (recheck) return { refused: recheck }
     const lacks = held.hold.withheld.map((power) => BOT_HELD_POWER_TEXT[power])
@@ -7763,6 +7766,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (view.state !== 'running' && last) live?.subagentsRead.add(last.delegation.childRunId)
       return view
     })
+  }
+
+  /**
+   * Whether the subagent's last turn returned a result its work has neither read in this turn (`subagentsRead`) nor been
+   * told of (`told_at`). A bots.db that can't be read counts as read: the follow-up is not refused for it.
+   */
+  private subagentResultUnread(activationId: string, record: SubagentRecord): boolean {
+    const last = record.turns.at(-1)
+    if (!last || this.subagentEnd(last)?.state !== 'done') return false
+    const childRunId = last.delegation.childRunId
+    if (this.live.get(activationId)?.subagentsRead.has(childRunId)) return false
+    try {
+      return !this.store.subagentRunByRun(childRunId)?.toldAt
+    } catch {
+      return false
+    }
   }
 
   /** `BotStore.untoldSubagentRuns`; none when bots.db can't be read (the next step tries again). */

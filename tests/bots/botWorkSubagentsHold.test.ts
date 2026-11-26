@@ -229,6 +229,9 @@ describe('a subagent on another entry is never held less tightly than its work',
     await finish(f, (await startSubagent(f, subagentNs(job.id)[0])).payload, 'completed', { text: 'Done.' })
     await subagents.start({ title: 'Notes', brief: 'Take notes.' })
     await finish(f, (await startSubagent(f, subagentNs(job.id)[1])).payload, 'completed', { text: 'Done.' })
+    // Read, so more work for them is not refused for an unread result.
+    subagents.result({ subagent: 'Reviews' })
+    subagents.result({ subagent: 'Notes' })
     const until = new Date(f.clock.now + 60 * 60_000).toISOString()
     f.limited.set(SECOND.instanceId, until)
     expect(await subagents.send({ subagent: 'Reviews', message: 'More.' })).toMatchObject({ refused: expect.stringMatching(/Second Model on Second Claude is at its usage limit.*Nothing was started/) })

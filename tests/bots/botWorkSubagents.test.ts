@@ -225,7 +225,8 @@ describe('a bot\'s work and its subagents', () => {
       await finish(f, (await startSubagent(f, last)).payload, 'completed', { text: 'Done.' })
     }
     expect(subagentNs(job.id)).toHaveLength(12)
-    // A follow-up is no new subagent: it carries on in its own thread.
+    // A follow-up is no new subagent: it carries on in its own thread (once its work read what it returned).
+    subagents.result({ subagent: 'Part 1' })
     expect(await subagents.send({ subagent: 'Part 1', message: 'And the warranty?' })).toMatchObject({ sent: { subagent: 'Part 1', state: 'running' } })
     const followUp = await startSubagent(f, subagentNs(job.id).at(-1)!)
     expect(followUp.prepared.history).toBe('thread')

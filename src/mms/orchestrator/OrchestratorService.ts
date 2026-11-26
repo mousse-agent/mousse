@@ -16194,8 +16194,9 @@ export class OrchestratorService extends EventEmitter {
       // The runtime's own helpers are mirrored as watch-only threads as its events arrive (docs/plans/tool-api.md §2.7).
       if (engineRunId) mirroredRun = this.nativeMirrors.beginRun({ hostThreadId: session.threadId, runId: engineRunId, driver: binding.driver, instanceId: binding.instanceId, sessionEpoch: nativeSessionEpoch(binding) })
       // A bot's notes reach its turn as it works on a runtime that takes steers; on one that does not, they wait for the
-      // dispatch's end, as before. Attached at the runtime's first progress, once it runs: a note taken while it was still
-      // being set up would be reported as sent, then lost if setting up failed.
+      // dispatch's end, as before. Attached once the turn is set up and its runtime is called (not at its first output:
+      // a runtime that says nothing until its reply takes steers all along). A note taken while it was still being set up
+      // would be reported as sent, then lost if setting up failed.
       let botSteerAttached = !(opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only')
       const attachBotSteer = (): void => {
         if (botSteerAttached) return
@@ -16616,7 +16617,8 @@ export class OrchestratorService extends EventEmitter {
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       let result: Awaited<ReturnType<HarnessGateway['startTurn']>['result']>
-      // The provider is called: the turn's start is logged here.
+      // The provider is called: the turn's start is logged here, and a bot's notes reach it from now on.
+      attachBotSteer()
       turnBoundaryStarted(session.threadId, 'harness')
       turnTimingMark(session.threadId, 'harness')
       const firstRequestAt = Date.now()

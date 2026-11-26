@@ -225,7 +225,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'subagent_send',
-    description: 'Send one of your subagents a message, by its title. One that has finished takes it as more work: it carries on in its own thread with what it already did, and you are told when it finishes. One still working takes it in at its next step, to correct or add to what it does. At most 32,768 characters: a longer message is refused whole, never cut.',
+    description: 'Send one of your subagents a message, by its title. One that has finished takes it as more work: it carries on in its own thread with what it already did, and you are told when it finishes. Read what it returned first (subagent_result): more work replaces that result. One still working takes it in at its next step, to correct or add to what it does. At most 32,768 characters: a longer message is refused whole, never cut.',
     parameters: Type.Object({ subagent: Type.String({ description: 'Its title.' }), message: Type.String({ maxLength: 32_768, description: 'What to do next, or what changed, standing on its own. At most 32,768 characters; a longer one is refused, not cut.' }) })
   },
   {

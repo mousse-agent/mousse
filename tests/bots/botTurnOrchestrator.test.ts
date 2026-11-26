@@ -1,8 +1,8 @@
 /**
  * The orchestrator's hops of a bot turn, through the real `runTurnOnSession` and turn sink: `PreparedBotTurn.beforeBind`
  * is read right before the turn binds (a refusal binds and starts nothing; otherwise the policy it compiled then is the
- * one bound), and a bot's steer is attached only once its runtime runs (its first progress), so a note is never taken
- * by a turn whose setup then fails.
+ * one bound), and a bot's steer is attached once its runtime is called, not before (a note is never taken by a turn
+ * whose setup then fails) and not only at its first output (a runtime silent until its reply takes notes all along).
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -71,19 +71,31 @@ describe('a bot turn through the orchestrator', () => {
     return { turn, steer, startTurn, bindTurn }
   }
 
+  it('a bot\'s steer — its turn\'s setup is refused before its runtime is called: never attached, so a note sent meanwhile is refused, not taken and lost', async () => {
+    const { turn, steer, startTurn } = await botTurn((_sink, original) => original(), { beforeBind: () => ({ refused: 'Its grant was narrowed.', code: 'bot_grant_revoked' }) })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await turn
+    expect(startTurn).not.toHaveBeenCalled()
+    expect(steer.attached).not.toHaveBeenCalled()
+  })
+
   it.each([
-    ['its runtime fails before it runs: never attached, so a note sent meanwhile is refused, not taken and lost', false],
-    ['its runtime runs: attached at its first progress, once', true]
-  ])('a bot\'s steer — %s', async (_name, runs) => {
+    ['says nothing until its reply: attached already as it is called, before any output', false],
+    ['reports progress as it works: attached once', true]
+  ])('a bot\'s steer — its runtime %s', async (_name, talks) => {
+    let attachedWhenCalled: number | undefined
     const { turn, steer, startTurn } = await botTurn(async (sink, original) => {
-      if (!runs) throw new Error('the runtime could not start')
-      sink.progress()
-      sink.progress()
+      attachedWhenCalled = steer.attached.mock.calls.length
+      if (talks) {
+        sink.progress()
+        sink.progress()
+      }
       return original()
     })
-    await turn.catch(() => undefined)
+    await turn
     expect(startTurn).toHaveBeenCalledTimes(1)
-    expect(steer.attached).toHaveBeenCalledTimes(runs ? 1 : 0)
+    expect(attachedWhenCalled).toBe(1)
+    expect(steer.attached).toHaveBeenCalledTimes(1)
   })
 
   it('beforeBind refusing: the turn fails with its code, and nothing binds or starts', async () => {

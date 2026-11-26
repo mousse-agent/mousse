@@ -238,25 +238,26 @@ describe('a bot\'s work subagents as delegations', () => {
     expect((await start(f, job.id, next.n)).prepared.prompt).toContain('Your subagents "Prices" ended since you last looked')
   })
 
-  it('subagent_result marks told only the turn whose result it carried, once the work\'s turn settles; an earlier turn it never returned stays untold', async () => {
+  it('more work for a subagent before its work read what it returned is refused (nothing would read that result); subagent_result marks told only the turn whose result it carried, once the work\'s turn settles', async () => {
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!
     await subagents.start({ title: 'Prices', brief: 'Find the prices.' })
     const first = await startSubagent(f, subagentRuns(f, job.id)[0]!)
     await finish(f, first.payload, 'completed', { text: 'Prices: 199.' })
-    // Started again before the work read the first turn.
+    expect(await subagents.send({ subagent: 'Prices', message: 'Only ones under 300.' })).toMatchObject({ refused: expect.stringContaining('Read what "Prices" returned first') })
+    expect(subagentRuns(f, job.id)).toHaveLength(1)
+    expect(subagents.result({ subagent: 'Prices' })).toMatchObject({ subagents: [{ result: 'Prices: 199.' }] })
     expect(await subagents.send({ subagent: 'Prices', message: 'Only ones under 300.' })).toMatchObject({ sent: { subagent: 'Prices' } })
     const second = await startSubagent(f, subagentRuns(f, job.id)[1]!)
     await finish(f, second.payload, 'completed', { text: 'Prices under 300: 199, 249.' })
-    expect(subagents.result({ subagent: 'Prices' })).toMatchObject({ subagents: [{ result: 'Prices under 300: 199, 249.' }] })
-    expect(f.store.subagentRun(job.id, second.payload.runId)!.toldAt).toBeNull()
-    // Read in this turn: not offered again at its next step. The first turn, never read, still is, once.
+    expect(f.store.subagentRun(job.id, first.payload.runId)!.toldAt).toBeNull()
+    // The first, read in this turn, is not offered again at its next step; the second, never read, is, once.
     job.prepared.steer!.attached()
     expect(job.prepared.steer!.peek()!.match(/Your subagent "Prices" finished/g)).toHaveLength(1)
     f.runs.markTerminal(job.payload.runId, 'completed')
     f.bots.settle(job.payload, { text: 'Here are the prices.' })
-    expect(f.store.subagentRun(job.id, second.payload.runId)!.toldAt).toEqual(expect.any(String))
-    expect(f.store.subagentRun(job.id, first.payload.runId)!.toldAt).toBeNull()
+    expect(f.store.subagentRun(job.id, first.payload.runId)!.toldAt).toEqual(expect.any(String))
+    expect(f.store.subagentRun(job.id, second.payload.runId)!.toldAt).toBeNull()
   })
 
   it('subagent_wait wakes when the result is delivered; what it read is not told again at the next step', async () => {
