@@ -105,6 +105,7 @@ import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/car
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
 import { nudgeSlot, actionNudgeId, type ActionNudgeFollowUp } from './questionFollowUps'
 import { botTaskItems } from './botTasks'
+import type { BackgroundJobService } from '../../background/BackgroundJobService'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowId, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
@@ -223,6 +224,8 @@ export interface BotEngineHost {
   pullRequestState?(repo: string, number: number, fresh?: { notBefore: number }): Promise<WakePullRequestState | { none: true } | { problem: string }>
   /** Starts a watcher's command (tests); default `child_process.spawn`. */
   spawnWatcher?: (command: string, options: SpawnOptions) => ChildProcess
+  /** The profile's background jobs, shared with threads' monitors; absent: the engine keeps its own. */
+  backgroundJobs?: BackgroundJobService
   harness: {
     checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
     /** Reads the instance's policy facts again (`HarnessGateway.refreshPolicyFacts`). */
@@ -973,6 +976,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     this.watchers = new BotWatchers({
       onEnd: (spec, end, tail) => this.watcherEnded(spec, end, tail),
+      ...(host.backgroundJobs ? { jobs: host.backgroundJobs } : {}),
       ...(host.spawnWatcher ? { spawn: host.spawnWatcher } : {}),
       now: () => this.now(),
       ...(host.setTimer ? { setTimer: host.setTimer } : {})

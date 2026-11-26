@@ -1,14 +1,22 @@
-import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
-import { killProcessTree } from '../execution/processTree'
-import { trackChildProcess } from '../diagnostics/liveCounts'
-import { countLineBreaks } from '../terminals/terminalText'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
+import {
+  BackgroundJobService,
+  ENDED_JOB_KEEP_MS,
+  JOB_OUTPUT_CHARS,
+  MAX_ENDED_JOBS_PER_OWNER,
+  MAX_MATCH_CHARS,
+  matchProblem,
+  type JobEnd,
+  type JobInfo
+} from '../background/BackgroundJobService'
 
 /**
  * A bot's background watchers (`watch_start`): a command that runs on its own, beside the bot, until it exits, prints a
  * line that matches, or reaches its time limit; then it wakes the bot in its chat with what happened (`BotEngine` keeps
- * each one as a wake on a `watcher` event, so the wake's limits hold). Here: the processes only. They live in this
- * process: a restart ends them (the engine tells the bot). Each runs in a shell, in its own process group where there is
- * one, and is ended with its whole tree.
+ * each one as a wake on a `watcher` event, so the wake's limits hold). Here: the bot's view of its processes, which run
+ * in the shared `BackgroundJobService` beside threads' background commands, in exactly the environment the engine gives
+ * (`WatcherSpec.env`). A bot's command is always detached: it never holds the bot's chat, and its end comes back as a
+ * wake. They live in this process: a restart ends them (the engine tells the bot).
  */
 
 /** How long a watcher runs unless the bot says otherwise, and the most it may. */
@@ -16,17 +24,12 @@ export const DEFAULT_WATCHER_MINUTES = 60
 export const MAX_WATCHER_MINUTES = 6 * 60
 /** Most characters of the command and the match. */
 export const MAX_WATCHER_COMMAND_CHARS = 2_000
-export const MAX_WATCHER_MATCH_CHARS = 200
-/** Output kept for the wake: its last characters, and only this much of a line is matched or kept. */
-const TAIL_CHARS = 4_000
+export const MAX_WATCHER_MATCH_CHARS = MAX_MATCH_CHARS
 /** All of a command's output the bot can read (`watch_list` with its id): its last characters. */
-export const WATCHER_OUTPUT_CHARS = 256_000
+export const WATCHER_OUTPUT_CHARS = JOB_OUTPUT_CHARS
 /** A command that ended stays readable this long, the last few of each bot. */
-export const ENDED_WATCHER_KEEP_MS = 6 * 60 * 60 * 1000
-export const MAX_ENDED_WATCHERS_PER_BOT = 5
-const LINE_CHARS = 500
-/** How long a stopped command has to end before its tree is killed outright. */
-const KILL_GRACE_MS = 3_000
+export const ENDED_WATCHER_KEEP_MS = ENDED_JOB_KEEP_MS
+export const MAX_ENDED_WATCHERS_PER_BOT = MAX_ENDED_JOBS_PER_OWNER
 
 /** How a watcher ended. `stopped`: by the bot, the owner, or the bot going (no wake follows). */
 export type WatcherEnd =
@@ -46,6 +49,7 @@ export interface WatcherSpec {
   match?: string
   limitMs: number
   cwd: string
+  /** Its whole environment (`lockedEnv`): nothing else is taken from Mousse's own. */
   env: NodeJS.ProcessEnv
 }
 
@@ -74,268 +78,153 @@ export interface WatcherOutput {
   droppedLines: number
 }
 
-interface Ended {
-  spec: WatcherSpec
-  startedAt: number
-  endedAt: number
-  end: WatcherEnd
-  output: string
-  droppedLines: number
-}
-
-interface Running {
-  spec: WatcherSpec
-  child: ChildProcess
-  startedAt: number
-  tail: string
-  /** Up to `WATCHER_OUTPUT_CHARS` of its output, and how many lines came before that. */
-  output: string
-  droppedLines: number
-  partial: string
-  lastLine?: string
-  pattern?: RegExp
-  timer: { clear(): void }
-  ended: boolean
-}
-
 export interface BotWatchersDeps {
   /** Called once per watcher, when it ends for any reason, with the end of its output. */
   onEnd(spec: WatcherSpec, end: WatcherEnd, tail: string): void
+  /** The shared background jobs; tests and a lone engine get their own. */
+  jobs?: BackgroundJobService
   spawn?: (command: string, options: SpawnOptions) => ChildProcess
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => { clear(): void }
-  /** Ends a process tree (tests); default `killProcessTree`. */
+  /** Signals a command's tree (tests); default its process group on macOS and Linux, its tree on Windows. */
   kill?: (pid: number, signal: NodeJS.Signals) => void
   platform?: NodeJS.Platform
 }
 
-/**
- * Why a pattern can't be a watcher's match, or undefined when it can: it must compile, be short, and have no nested or
- * repeated quantifier on a group and no back-reference, so a line of output can never make it run for long.
- */
-export function watcherMatchProblem(pattern: string): string | undefined {
-  if (pattern.length > MAX_WATCHER_MATCH_CHARS) return `Keep match to ${MAX_WATCHER_MATCH_CHARS} characters.`
-  try {
-    new RegExp(pattern)
-  } catch (error) {
-    return `match is not a regular expression: ${error instanceof Error ? error.message : String(error)}`
+/** Why a pattern can't be a watcher's match, or undefined when it can (`matchProblem`). */
+export const watcherMatchProblem = matchProblem
+
+/** A job's end as a watcher's: a bot's command has no socket and streams nothing, so it never closes or is chatty. */
+function watcherEnd(end: JobEnd): WatcherEnd {
+  switch (end.reason) {
+    case 'exit': return { kind: 'exit', code: end.code, ...(end.signal ? { signal: end.signal } : {}) }
+    case 'match': return { kind: 'match', line: end.line }
+    case 'timeout': return { kind: 'time_limit' }
+    case 'failed': return { kind: 'failed', message: end.message }
+    case 'closed': return { kind: 'failed', message: `closed with code ${end.code}` }
+    case 'chatty': return { kind: 'failed', message: end.limit }
+    default: return { kind: 'stopped' }
   }
-  if (/\\[1-9]|\\k</.test(pattern)) return 'match may not use back-references.'
-  // A group that holds a quantifier and is itself quantified: "(a+)+", "(.*x)*", "(\d{2,})+".
-  if (/\((?:[^()\\]|\\.)*(?:[+*]|\{\d+,?\d*\})(?:[^()\\]|\\.)*\)(?:[+*]|\{\d+,?\d*\})/.test(pattern)) return 'match may not repeat a group that repeats itself, such as (a+)+.'
-  return undefined
 }
 
 export class BotWatchers {
-  private readonly running = new Map<string, Running>()
-  /** Commands that ended (stopped ones included), oldest first. */
-  private ended: Ended[] = []
+  private readonly jobs: BackgroundJobService
+  /** Each running watcher's spec, as the engine gave it. */
+  private readonly specs = new Map<string, WatcherSpec>()
 
-  constructor(private readonly deps: BotWatchersDeps) {}
-
-  private now(): number {
-    return this.deps.now?.() ?? Date.now()
+  constructor(private readonly deps: BotWatchersDeps) {
+    this.jobs = deps.jobs ?? new BackgroundJobService({
+      ...(deps.spawn ? { spawn: deps.spawn } : {}),
+      ...(deps.kill ? { kill: deps.kill } : {}),
+      ...(deps.platform ? { platform: deps.platform } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
+      ...(deps.setTimer ? { setTimer: deps.setTimer } : {})
+    })
   }
 
   has(id: string): boolean {
-    return this.running.has(id)
+    return this.specs.has(id) && this.jobs.has(id)
   }
 
   /** How many run now, of every bot. */
   get size(): number {
-    return this.running.size
+    return this.own().length
+  }
+
+  private own(botId?: string): JobInfo[] {
+    return this.jobs.list(botId ? { kind: 'bot', botId } : 'bot').filter((job) => this.specs.has(job.id))
   }
 
   /** The watchers running now, of one bot or all, oldest first. */
   list(botId?: string): WatcherView[] {
-    return [...this.running.values()]
-      .filter((entry) => !botId || entry.spec.botId === botId)
-      .sort((a, b) => a.startedAt - b.startedAt)
-      .map((entry) => ({
-        id: entry.spec.id,
-        botId: entry.spec.botId,
-        title: entry.spec.title,
-        command: entry.spec.command,
-        ...(entry.spec.match ? { match: entry.spec.match } : {}),
-        startedAt: new Date(entry.startedAt).toISOString(),
-        until: new Date(entry.startedAt + entry.spec.limitMs).toISOString(),
-        ...(entry.lastLine ? { lastLine: entry.lastLine } : {})
-      }))
+    return this.own(botId).map((job) => {
+      const spec = this.specs.get(job.id)!
+      return {
+        id: spec.id,
+        botId: spec.botId,
+        title: spec.title,
+        command: spec.command,
+        ...(spec.match ? { match: spec.match } : {}),
+        startedAt: new Date(job.startedAt).toISOString(),
+        until: new Date(job.startedAt + job.limitMs).toISOString(),
+        ...(job.latest ? { lastLine: job.latest.line } : {})
+      }
+    })
   }
 
   /** The watchers running now with their process, folder and the end of their output: the running list (`RunningRegistry`). */
   processes(): Array<{ id: string; botId: string; title: string; command: string; pid?: number; cwd: string; startedAt: number; output: string }> {
-    return [...this.running.values()].map((entry) => ({
-      id: entry.spec.id,
-      botId: entry.spec.botId,
-      title: entry.spec.title,
-      command: entry.spec.command,
-      ...(entry.child.pid !== undefined ? { pid: entry.child.pid } : {}),
-      cwd: entry.spec.cwd,
-      startedAt: entry.startedAt,
-      output: entry.tail
-    }))
+    return this.own().map((job) => {
+      const spec = this.specs.get(job.id)!
+      return { id: spec.id, botId: spec.botId, title: spec.title, command: spec.command, ...(job.pid !== undefined ? { pid: job.pid } : {}), cwd: spec.cwd, startedAt: job.startedAt, output: job.tail }
+    })
   }
 
-  /** Starts `spec`'s command. Throws when it can't start (the shell is missing); then `onEnd` is never called. */
+  /** Starts `spec`'s command, detached. Throws when it can't start (the shell is missing); then `onEnd` is never called. */
   start(spec: WatcherSpec): void {
-    if (this.running.has(spec.id)) return
-    const windows = (this.deps.platform ?? process.platform) === 'win32'
-    const child = (this.deps.spawn ?? nodeSpawn)(spec.command, {
-      cwd: spec.cwd,
-      env: spec.env,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      // Its own process group, so Stop ends everything it started.
-      detached: !windows
-    })
-    if (child.pid !== undefined) trackChildProcess(child, 'bot_watcher')
-    const entry: Running = {
-      spec,
-      child,
-      startedAt: this.now(),
-      tail: '',
-      output: '',
-      droppedLines: 0,
-      partial: '',
-      ...(spec.match ? { pattern: new RegExp(spec.match) } : {}),
-      timer: (this.deps.setTimer ?? defaultTimer)(() => this.end(spec.id, { kind: 'time_limit' }), spec.limitMs),
-      ended: false
+    if (this.jobs.has(spec.id)) return
+    this.specs.set(spec.id, spec)
+    try {
+      this.jobs.start({
+        id: spec.id,
+        owner: { kind: 'bot', botId: spec.botId },
+        kind: 'watcher',
+        label: spec.title,
+        command: spec.command,
+        cwd: spec.cwd,
+        env: spec.env,
+        ...(spec.match ? { match: spec.match } : {}),
+        limitMs: spec.limitMs,
+        // Its end waits for its output to close, so a result a child prints late still reaches the wake, and a daemon it
+        // started with its output elsewhere keeps running after it exits.
+        leftBehind: 'kept',
+        // Never `holdsOwner`: the bot's chat has one slot, and a command must not keep it.
+        sink: { end: (_job, end, final) => this.ended(spec, watcherEnd(end), final.tail) }
+      })
+    } catch (error) {
+      this.specs.delete(spec.id)
+      throw error
     }
-    this.running.set(spec.id, entry)
-    const read = (chunk: Buffer | string) => this.received(entry, typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
-    child.stdout?.on('data', read)
-    child.stderr?.on('data', read)
-    child.once('error', (error) => this.end(spec.id, { kind: 'failed', message: error.message }))
-    child.once('close', (code, signal) => {
-      // A last line with no newline still counts.
-      if (entry.partial) this.line(entry, entry.partial)
-      entry.partial = ''
-      this.end(spec.id, { kind: 'exit', code, ...(signal ? { signal } : {}) })
-    })
+  }
+
+  private ended(spec: WatcherSpec, end: WatcherEnd, tail: string): void {
+    this.specs.delete(spec.id)
+    try {
+      this.deps.onEnd(spec, end, tail)
+    } catch (error) {
+      console.warn("a bot watcher's end could not be handled", { watcherId: spec.id, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** Stops a watcher; no wake follows. False when it was not running. */
   stop(id: string): boolean {
-    if (!this.running.has(id)) return false
-    this.end(id, { kind: 'stopped' })
-    return true
+    const spec = this.specs.get(id)
+    return Boolean(spec && this.jobs.stop({ kind: 'bot', botId: spec.botId }, id))
   }
 
   /** Stops every watcher of a bot, and forgets the output of its ended ones; their ids. */
   stopBot(botId: string): string[] {
-    const ids = [...this.running.values()].filter((entry) => entry.spec.botId === botId).map((entry) => entry.spec.id)
-    for (const id of ids) this.stop(id)
-    this.ended = this.ended.filter((entry) => entry.spec.botId !== botId)
-    return ids
+    return this.jobs.stopOwner({ kind: 'bot', botId }, { forget: true })
   }
 
   /** All of one of the bot's commands' kept output, while it runs and for a while after it ended; undefined when gone. */
   output(botId: string, id: string): WatcherOutput | undefined {
-    this.pruneEnded()
-    const running = this.running.get(id)
-    if (running) {
-      if (running.spec.botId !== botId) return undefined
-      return { id, title: running.spec.title, command: running.spec.command, startedAt: new Date(running.startedAt).toISOString(), output: running.output, droppedLines: running.droppedLines }
-    }
-    const ended = this.ended.find((entry) => entry.spec.id === id && entry.spec.botId === botId)
-    if (!ended) return undefined
+    const kept = this.jobs.output({ kind: 'bot', botId }, id)
+    if (!kept || kept.info.kind !== 'watcher') return undefined
     return {
       id,
-      title: ended.spec.title,
-      command: ended.spec.command,
-      startedAt: new Date(ended.startedAt).toISOString(),
-      end: ended.end,
-      endedAt: new Date(ended.endedAt).toISOString(),
-      output: ended.output,
-      droppedLines: ended.droppedLines
-    }
-  }
-
-  private pruneEnded(): void {
-    const now = this.now()
-    this.ended = this.ended.filter((entry) => now - entry.endedAt < ENDED_WATCHER_KEEP_MS)
-    const perBot = new Map<string, number>()
-    for (let index = this.ended.length - 1; index >= 0; index--) {
-      const botId = this.ended[index].spec.botId
-      const count = (perBot.get(botId) ?? 0) + 1
-      perBot.set(botId, count)
-      if (count > MAX_ENDED_WATCHERS_PER_BOT) this.ended.splice(index, 1)
+      title: kept.info.label,
+      command: kept.info.command ?? '',
+      startedAt: new Date(kept.info.startedAt).toISOString(),
+      ...(kept.end ? { end: watcherEnd(kept.end), endedAt: new Date(kept.endedAt!).toISOString() } : {}),
+      output: kept.output,
+      droppedLines: kept.droppedLines
     }
   }
 
   /** Mousse is closing: every watcher stops, and none wakes its bot (the next start tells it). */
   close(): void {
-    for (const entry of [...this.running.values()]) {
-      entry.ended = true
-      entry.timer.clear()
-      this.running.delete(entry.spec.id)
-      this.kill(entry)
-    }
-    this.ended = []
+    this.specs.clear()
+    this.jobs.closeWhere((owner) => owner.kind === 'bot')
   }
-
-  private received(entry: Running, text: string): void {
-    if (entry.ended) return
-    entry.tail = (entry.tail + text).slice(-TAIL_CHARS)
-    const all = entry.output + text
-    if (all.length > WATCHER_OUTPUT_CHARS) {
-      entry.droppedLines += countLineBreaks(all.slice(0, all.length - WATCHER_OUTPUT_CHARS))
-      entry.output = all.slice(-WATCHER_OUTPUT_CHARS)
-    } else entry.output = all
-    const lines = (entry.partial + text).split(/\r?\n/)
-    entry.partial = (lines.pop() ?? '').slice(-LINE_CHARS * 4)
-    for (const line of lines) {
-      this.line(entry, line)
-      if (entry.ended) return
-    }
-  }
-
-  private line(entry: Running, raw: string): void {
-    const line = raw.slice(0, LINE_CHARS)
-    if (line.trim()) entry.lastLine = line.trim().slice(0, 200)
-    if (entry.pattern?.test(line)) this.end(entry.spec.id, { kind: 'match', line })
-  }
-
-  private end(id: string, end: WatcherEnd): void {
-    const entry = this.running.get(id)
-    if (!entry || entry.ended) return
-    entry.ended = true
-    entry.timer.clear()
-    this.running.delete(id)
-    this.ended.push({ spec: entry.spec, startedAt: entry.startedAt, endedAt: this.now(), end, output: entry.output, droppedLines: entry.droppedLines })
-    this.pruneEnded()
-    // A command that ended by itself has nothing left to kill.
-    if (end.kind !== 'exit') this.kill(entry)
-    try {
-      this.deps.onEnd(entry.spec, end, entry.tail)
-    } catch (error) {
-      console.warn('a bot watcher\'s end could not be handled', { watcherId: id, error: error instanceof Error ? error.message : String(error) })
-    }
-  }
-
-  private kill(entry: Running): void {
-    const pid = entry.child.pid
-    if (pid === undefined) return
-    const kill = this.deps.kill ?? killProcessTree
-    try {
-      kill(pid, 'SIGTERM')
-    } catch {
-      // Gone already.
-    }
-    if (entry.child.exitCode !== null) return
-    const timer = setTimeout(() => {
-      if (entry.child.exitCode === null) {
-        try { kill(pid, 'SIGKILL') } catch { /* gone */ }
-      }
-    }, KILL_GRACE_MS)
-    timer.unref?.()
-  }
-}
-
-function defaultTimer(fn: () => void, ms: number): { clear(): void } {
-  const timer = setTimeout(fn, ms)
-  timer.unref?.()
-  return { clear: () => clearTimeout(timer) }
 }

@@ -106,6 +106,7 @@ import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
 import { RunningRegistry } from './running/RunningRegistry'
 import { ThreadMonitors, withShellPath } from './monitors/ThreadMonitors'
+import { BackgroundJobService } from './background/BackgroundJobService'
 import { ThreadWakes } from './wakes/ThreadWakes'
 import { sharedShellPath } from './harness/shellPath'
 import { postNote } from './run/mcp/appTools/threadNotes'
@@ -794,8 +795,12 @@ export class MmsProfileServices {
     this.platform.onDispose(() => botBrowsers.dispose())
     // Looked up now, so a bot's Runs on has this computer's name when it is first opened.
     computerNameIfKnown()
+    // What threads' agents and bots leave running in the background: one service, each caller's own environment.
+    const backgroundJobs = new BackgroundJobService()
+    this.backgroundJobs = backgroundJobs
     const opened = openPersonalBots({
       profileHome: homeDir,
+      backgroundJobs,
       threads: {
         // Every thread the bot engine makes is the bot's: no thread list or search shows it.
         ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership, { botOwned: true }),
@@ -1052,6 +1057,8 @@ export class MmsProfileServices {
     let shellPath: readonly string[] = []
     void sharedShellPath().then((result) => { shellPath = result.entries }, () => undefined)
     const monitors = new ThreadMonitors({
+      jobs: backgroundJobs,
+      // A thread's scripts run with the environment its agent's own commands get: this daemon's, plus the shell PATH.
       env: () => withShellPath(process.env, shellPath),
       post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
       working: (threadId, active) => this.threadRuntimes?.setPendingMonitors(threadId, active),
@@ -2265,6 +2272,8 @@ export class MmsProfileServices {
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
   /** Threads' monitors, background commands and `keep_working` holds. */
   readonly monitors: ThreadMonitors
+  /** The processes behind those and behind bots' background commands. */
+  readonly backgroundJobs: BackgroundJobService
   readonly threadWakes: ThreadWakes
   automationDrafts!: AutomationDrafts
 
