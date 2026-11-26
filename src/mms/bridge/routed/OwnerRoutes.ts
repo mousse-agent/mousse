@@ -620,7 +620,7 @@ export class OwnerRoutes {
         if (choosesProgram(method, params, entry) && !this.options.policy.get(node).terminal)
           throw new DomainRpcError(
             'forbidden',
-            "Choosing or installing the program an agent runs there needs terminal access to that computer."
+            "Choosing, installing or removing the program an agent runs there needs terminal access to that computer."
           )
       }
       // Terminals: a device types into, resizes and stops only the ones it opened, takes a slot before it starts one,

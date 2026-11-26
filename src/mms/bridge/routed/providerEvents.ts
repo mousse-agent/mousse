@@ -28,22 +28,32 @@ const FINISHED = new Set(['completed', 'failed', 'cancelled'])
 
 /**
  * The settings of an entry that decide which program runs there and how: its program, arguments and variables, an
- * ACP registry agent to download, Codex's own download or the user's CLI, and the older launch settings to take back.
+ * ACP registry agent to download, and the older launch settings to take back. The rest (name, telemetry, sign-in
+ * method, prompt cache, a model API's provider) never picks a program.
  */
-const PROGRAM_SETTINGS = ['binaryPath', 'args', 'env', 'source', 'setup', 'useOlderSettings'] as const
+const PROGRAM_SETTINGS = ['binaryPath', 'args', 'env', 'source', 'useOlderSettings'] as const
+/**
+ * Settings whose one value hands the entry to the program the user has on the PATH there instead of the copy Mousse
+ * installs itself: the user's own home, and Codex's "use my Codex CLI". Their other value (a home of Mousse's, Codex
+ * downloaded by Mousse) is what adding a further entry asks for, and runs nothing of the caller's choosing.
+ */
+const USERS_PROGRAM: Readonly<Record<string, unknown>> = { home: 'default', setup: 'existing' }
 
 /** The routed calls that download and start the program an entry names. */
 const INSTALLS = new Set(['providers.instances.install', 'providers.instances.update'])
 
 /**
  * Whether a routed call decides which program runs on the owner: an `add` or `configure` that sets one of the
- * program settings, or an install or update of an entry whose program is an ACP registry agent or a path of its own.
+ * program settings, an install or update of an entry whose program is an ACP registry agent or a path of its own, or
+ * removing an install (the entry then runs whatever program of that name is on the PATH there).
  * Each runs a program of the caller's choosing there, so it needs the same permission as a terminal there.
  * `entry` is the stored settings of the entry the call names.
  */
 export function choosesProgram(method: string, params: Record<string, unknown>, entry: (instanceId: string) => Record<string, unknown> | undefined): boolean {
+  if (method === 'providers.instances.removeInstall') return true
   const settings = method === 'providers.instances.add' ? params.config : method === 'providers.instances.configure' ? params.patch : undefined
   if (isRecord(settings) && PROGRAM_SETTINGS.some((key) => settings[key] !== undefined)) return true
+  if (isRecord(settings) && Object.entries(USERS_PROGRAM).some(([key, value]) => settings[key] === value)) return true
   if (!INSTALLS.has(method) || typeof params.instanceId !== 'string') return false
   const stored = entry(params.instanceId)
   return isRecord(stored?.source) || typeof stored?.binaryPath === 'string'
@@ -82,6 +92,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
 type LoggedEntry = ProviderEventEntry & { at: number }
+/** A computer's entries, numbered; `handed` is the last number a read answered with as its cursor. */
+interface EventLog { seq: number; handed: number; entries: LoggedEntry[] }
 
 /**
  * The owner's side of Settings → Providers of another computer. The page there works through routed `providers.*`
@@ -103,7 +115,7 @@ export class ProviderEventRelay {
   /** Events of operations no computer has claimed yet: the call that started one may return after its first events. */
   private readonly early = new Map<string, { at: number; events: unknown[] }>()
   /** What each computer has not read yet, numbered. */
-  private readonly logs = new Map<NodeId, { seq: number; entries: LoggedEntry[] }>()
+  private readonly logs = new Map<NodeId, EventLog>()
 
   constructor(options: ProviderEventRelayOptions = {}) {
     this.timers = options.timers ?? realTimers
@@ -150,8 +162,9 @@ export class ProviderEventRelay {
         this.followers.delete(node)
         continue
       }
-      // One notice stands for every change until it is read.
-      if (!this.logOf(node).entries.some((entry) => entry.kind === 'changed')) this.append(node, { kind: 'changed' })
+      // One notice stands for every change until a read takes it; one a read has moved past stands for none.
+      const log = this.logOf(node)
+      if (!log.entries.some((entry) => entry.kind === 'changed' && entry.seq > log.handed)) this.append(node, { kind: 'changed' })
     }
   }
 
@@ -162,6 +175,7 @@ export class ProviderEventRelay {
   read(node: NodeId, after: unknown): ProviderEventsReply {
     const log = this.logOf(node)
     this.prune(log)
+    log.handed = log.seq
     if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) return { cursor: log.seq, events: [] }
     log.entries = log.entries.filter((entry) => entry.seq > after)
     const events: ProviderEventEntry[] = log.entries.map(({ at: _at, ...entry }) => entry as ProviderEventEntry)
@@ -181,10 +195,10 @@ export class ProviderEventRelay {
     this.logs.clear()
   }
 
-  private logOf(node: NodeId): { seq: number; entries: LoggedEntry[] } {
+  private logOf(node: NodeId): EventLog {
     let log = this.logs.get(node)
     if (!log) {
-      log = { seq: 0, entries: [] }
+      log = { seq: 0, handed: 0, entries: [] }
       this.logs.set(node, log)
     }
     return log

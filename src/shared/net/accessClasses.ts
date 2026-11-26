@@ -316,11 +316,12 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'scheduled.pause': 'work',
     'scheduled.resume': 'work',
     'scheduled.delete': 'work',
-    // Settings → Providers of this computer, from another one: reading it is a view; changing it is work.
+    // Settings → Providers of this computer, from another one: reading it is a view; changing it is work. Checking an
+    // entry again starts its agent and may reset what is known of it, so it is work too.
     'providers.events': 'view',
     'providers.catalog.addOptions': 'view',
     'providers.registry.search': 'view',
-    'providers.instances.recheck': 'view',
+    'providers.instances.recheck': 'work',
     'providers.instances.add': 'work',
     'providers.instances.setSecret': 'work',
     'providers.instances.remove': 'work',

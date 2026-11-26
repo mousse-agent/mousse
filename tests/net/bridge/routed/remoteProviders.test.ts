@@ -106,11 +106,15 @@ describe("Settings → Providers of another computer", () => {
   it("keeps a computer whose changes the owner turned off to reading the other computer's providers", async () => {
     vi.spyOn(owner().instances, 'snapshots').mockResolvedValue([snapshot('claude')])
     const saved = vi.spyOn(owner().instances, 'setSecret').mockResolvedValue(snapshot('pi:openai'))
+    // Checking an entry again starts its agent there: a change, not a read.
+    const rechecked = vi.spyOn(owner().instances, 'recheck').mockResolvedValue(snapshot('claude'))
     await t.owner.net.request('bridge.policy', { node: t.callerNode, work: false })
     try {
       expect((await t.dispatch('providers.snapshots', { node: t.node, scope: { kind: 'device' } })).snapshots).toHaveLength(1)
       await t.refused(t.dispatch('providers.instances.setSecret', { node: t.node, instanceId: 'pi:openai', value: 'sk-never-sent' }))
+      await t.refused(t.dispatch('providers.instances.recheck', { node: t.node, instanceId: 'claude' }))
       expect(saved).not.toHaveBeenCalled()
+      expect(rechecked).not.toHaveBeenCalled()
     } finally {
       await t.owner.net.request('bridge.policy', { node: t.callerNode, work: true })
     }
@@ -207,6 +211,7 @@ describe("Settings → Providers of another computer", () => {
     const operation = (instanceId: string) => ({ operationId: `op-${randomUUID()}`, instanceId, kind: 'install' as const })
     const installed = vi.spyOn(owner().instances, 'install').mockImplementation(async (instanceId) => operation(instanceId))
     const updated = vi.spyOn(owner().instances, 'update').mockImplementation(async (instanceId) => operation(instanceId))
+    const uninstalled = vi.spyOn(owner().instances, 'removeInstall').mockResolvedValue({ removed: true } as never)
     // The owner's entries: an ACP registry agent, one with a program of its own, and Claude Code as found.
     const stored: Record<string, Record<string, unknown>> = {
       'acp:reg': { source: { kind: 'registry', agentId: 'some-agent', version: '1.0.0', distribution: 'binary' } },
@@ -219,11 +224,15 @@ describe("Settings → Providers of another computer", () => {
     const choices = [
       ['providers.instances.add', { driver: 'acp', config: { displayName: 'Some agent', source } }],
       ['providers.instances.configure', { instanceId: 'acp:reg', patch: { source } }],
-      ['providers.instances.configure', { instanceId: 'codex', patch: { setup: 'managed' } }],
+      ['providers.instances.add', { driver: 'codex', config: { displayName: 'Codex 2', setup: 'existing' } }],
       ['providers.instances.configure', { instanceId: 'claude', patch: { useOlderSettings: true } }],
+      // The user's own home runs the agent on the PATH there, not the copy Mousse installed.
+      ['providers.instances.configure', { instanceId: 'grok', patch: { home: 'default' } }],
       ['providers.instances.install', { instanceId: 'acp:reg' }],
       ['providers.instances.update', { instanceId: 'acp:reg' }],
-      ['providers.instances.install', { instanceId: 'claude:own' }]
+      ['providers.instances.install', { instanceId: 'claude:own' }],
+      // Without its downloaded copy, the entry runs whatever program of that name is on the PATH there.
+      ['providers.instances.removeInstall', { instanceId: 'opencode' }]
     ] as const
     await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
     for (const [method, params] of choices) {
@@ -234,18 +243,25 @@ describe("Settings → Providers of another computer", () => {
     expect(configured).not.toHaveBeenCalled()
     expect(installed).not.toHaveBeenCalled()
     expect(updated).not.toHaveBeenCalled()
-    // An agent Mousse finds or installs itself is not this computer's choice of program.
+    expect(uninstalled).not.toHaveBeenCalled()
+    // An agent Mousse finds or installs itself is not this computer's choice of program, and neither is a further entry
+    // in a home of Mousse's or with Codex downloaded by Mousse (what "add another" asks for).
     await t.dispatch('providers.instances.install', { node: t.node, instanceId: 'claude' })
     expect(installed).toHaveBeenCalledWith('claude')
+    await t.dispatch('providers.instances.add', { node: t.node, driver: 'claude', config: { displayName: 'Claude Code 2', home: 'private' } })
+    await t.dispatch('providers.instances.add', { node: t.node, driver: 'codex', config: { displayName: 'Codex 2', setup: 'managed' } })
+    expect(added).toHaveBeenCalledTimes(2)
+    added.mockClear()
 
     await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: true })
     try {
       for (const [method, params] of choices) await t.dispatch(method, { node: t.node, ...params })
-      expect(added).toHaveBeenCalledTimes(1)
+      expect(added).toHaveBeenCalledTimes(2)
       expect(configured).toHaveBeenCalledTimes(3)
       expect(installed).toHaveBeenCalledWith('acp:reg')
       expect(installed).toHaveBeenCalledWith('claude:own')
       expect(updated).toHaveBeenCalledWith('acp:reg')
+      expect(uninstalled).toHaveBeenCalledWith('opencode', { force: false })
     } finally {
       await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
     }
