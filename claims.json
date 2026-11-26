@@ -110,6 +110,20 @@
       ],
       "claimedAt": "2026-11-25T18:29:30.139Z",
       "expiresAt": "2026-11-25T20:29:30.139Z"
+    },
+    {
+      "task": "sidebar-computer-multi-filter",
+      "session": "agibook-9e3994",
+      "machine": "agibook",
+      "branch": "sidebar-computer-multi-filter",
+      "paths": [
+        "src/renderer/lib/threadFilter.ts",
+        "src/renderer/stores/threadFilterStore.ts",
+        "src/renderer/components/sidebar/ThreadFilterBar.tsx",
+        "src/renderer/components/ThreadsSidebar.tsx"
+      ],
+      "claimedAt": "2026-11-26T05:33:41.469Z",
+      "expiresAt": "2026-11-26T07:33:41.469Z"
     }
   ]
 }
