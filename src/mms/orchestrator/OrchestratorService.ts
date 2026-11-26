@@ -5747,8 +5747,9 @@ export class OrchestratorService extends EventEmitter {
       createdByThreadId: intent.createdByThreadId,
       // The bot that started it, by its name then: the thread says so after the bot is renamed or deleted.
       ...(intent.bot ? { startedByBot: intent.bot } : {}),
-      // A bot's thread starts out of the owner's sidebar, its chat lists it; a bot that asks shows it there from the start.
-      ...(intent.bot && intent.request.hidden !== false ? { hidden: true } : {}),
+      // An agent's thread starts out of the person's sidebar: a bot's chat lists it, and so does the side panel of the
+      // thread that launched it. One the agent starts as independent (hidden: false) shows there from the start.
+      ...(intent.request.hidden !== false ? { hidden: true } : {}),
       localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
@@ -5929,6 +5930,8 @@ export class OrchestratorService extends EventEmitter {
         title,
         remoteProjectId: project.projectId,
         worktree: input.workspace === 'new_worktree',
+        // A bot's thread sends none, as before, and shows there; an agent's is hidden unless it asked otherwise.
+        hidden: bot ? null : input.hidden !== false,
         instanceId: input.instanceId ?? null,
         // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
         model: input.model ? agentModelId(input.model, input.effort) : null,
@@ -6335,18 +6338,23 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `thread_hide`: the owner's bot hides a thread it started from the owner's sidebar, or shows it there again
-   * (`Thread.hidden`), only from its chat in a chat turn its owner's message started (`botSenderOf`). Only a thread this
-   * bot started (`Thread.startedByBot`), since its chat is where the owner finds a hidden one. Nothing stops or changes in
-   * the thread. The change is recorded as an `agent.action` of the thread.
+   * `thread_hide`: an agent hides a thread it started from the person's sidebar, or shows it there again
+   * (`Thread.hidden`). The owner's bot does so only from its chat in a chat turn its owner's message started
+   * (`botSenderOf`), and only for a thread this bot started (`Thread.startedByBot`), since its chat lists it. Any other
+   * agent only for a thread its own thread launched (`Thread.createdByThreadId`), which that thread's side panel lists.
+   * Nothing stops or changes in the thread. The change is recorded as an `agent.action` of the thread.
    */
   private setThreadHiddenAsAgent(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean } {
     const engine = this.requireRunEngine()
-    const bot = this.botSenderOf(options.actor, 'thread_hide')
-    if (!bot) throw new McpToolError('mousse_scope_denied', 'Only a bot\'s chat hides threads this way.')
     const thread = this.threadStore?.getThread(threadId)
-    if (!thread || thread.startedByBot?.botId !== bot.botId)
-      throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
+    // A bot's thread that may not make the call is refused here; any other thread is no bot's.
+    const bot = this.botSenderOf(options.actor, 'thread_hide')
+    if (bot) {
+      if (!thread || thread.startedByBot?.botId !== bot.botId)
+        throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
+    } else if (!thread || thread.startedByBot || thread.createdByThreadId !== options.actor.threadId) {
+      throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started with thread_create.`)
+    }
     if (Boolean(thread.hidden) === hidden) return { hidden, changed: false }
     this.threadStore!.setThreadHidden(threadId, hidden)
     engine.store.appendEvent({

@@ -134,6 +134,8 @@ export const ROUTED_SEND_WINDOW_KEY = 'window'
 /** Optional behavior an older owner can omit while still providing its original answer. */
 export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'orchestrator.send': [ROUTED_SEND_WINDOW_KEY],
+  // An owner from before it shows every thread; it never had a way to hide one.
+  'threads.create': ['hidden'],
   'git.status': GIT_READ,
   'git.diff': GIT_READ,
   'git.log': GIT_READ,
@@ -690,14 +692,15 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- projects and the computer
   // A new thread records the computer that asked (`startedFrom`), as for a phone.
   // Version 2: `agent` (`ROUTED_AGENT_KEY`), accepted from another computer's daemon only, never from a phone.
+  // Version 3: `hidden`, read only with `agent`: a thread an agent starts is out of the sidebar unless it is false.
   'threads.create': write(
     'computer',
-    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', ROUTED_AGENT_KEY],
+    ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId', ROUTED_AGENT_KEY, 'hidden'],
     {
       via: 'backend',
       required: ['name'],
-      version: 2,
-      since: { [ROUTED_AGENT_KEY]: 2 }
+      version: 3,
+      since: { [ROUTED_AGENT_KEY]: 2, hidden: 3 }
     }
   ),
   'projects.rename': write('project', ['projectId', 'name'], { required: ['name'] }),
@@ -1036,7 +1039,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   },
   {
     methods: ['threads.setHidden'],
-    reason: "A hidden thread is one a bot of the computer that runs it started; that bot's chat lists it, and Show in sidebar is offered there (issue #1217)."
+    reason: "Show in sidebar is offered on the computer that runs a hidden thread: in its bot's chat, or in the top bar of a thread an agent started there (issue #1217)."
   },
   {
     methods: ['threads.focus'],

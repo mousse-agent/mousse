@@ -167,6 +167,8 @@ export function threadRow(
   if (isRecord(raw.startedFrom))
     row.startedFrom = raw.startedFrom as unknown as Thread['startedFrom']
   if (isRecord(raw.sentFrom)) row.sentFrom = raw.sentFrom as unknown as Thread['sentFrom']
+  // An agent's thread kept out of the sidebar there stays out of it here; All, search and its launcher's side panel list it.
+  if (raw.hidden === true) row.hidden = true
   // Its first message is bound by the window that sends it, as on the computer that runs it.
   if (raw.firstSendPending === true) row.firstSendPending = true
   if (context.notShared) row.notShared = true

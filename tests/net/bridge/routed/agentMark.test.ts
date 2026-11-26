@@ -98,6 +98,17 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     expect(audit.recent(5, t.callerNode).find((row) => row.method === 'threads.create' && row.actor === 'agent')).toBeDefined()
   }, 120_000)
 
+  it('keeps an agent\'s thread out of the sidebar only when the create asks: a computer from before hidden sends none and it shows', async () => {
+    // A computer that runs an older Mousse sends a marked create with no hidden: the thread shows here, as it did then.
+    const older = await launched('From an older computer')
+    expect(t.owner.threads.getThread(older)!.hidden).toBeUndefined()
+    const asked = await call('threads.create', { name: 'Hidden', hidden: true, agent: mark() })
+    expect(t.owner.threads.getThread(asked.thread.id)!.hidden).toBe(true)
+    expect(asked.thread.hidden).toBe(true)
+    const independent = await call('threads.create', { name: 'Independent', hidden: false, agent: mark() })
+    expect(t.owner.threads.getThread(independent.thread.id)!.hidden).toBeUndefined()
+  }, 120_000)
+
   it('runs a message as an agent\'s: source mcp, its sender stored as from, a narrowed mode, the computer recorded', async () => {
     standInForTurns()
     const id = await launched()

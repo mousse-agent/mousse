@@ -3,8 +3,8 @@ import type { Thread } from '../../shared/types'
 /**
  * The sidebar's thread filter (`ThreadFilterBar`): which threads its Projects and Threads tabs list.
  *
- * - `show`: My threads (the threads listed today: not kept out by a bot, `Thread.hidden`), Bot threads (those one of the
- *   owner's bots started, hidden or not), or All.
+ * - `show`: My threads (not kept out of the sidebar by the agent or bot that started them, `Thread.hidden`), Bot threads
+ *   (those one of the owner's bots started, hidden or not), or All (hidden threads too).
  * - `botId`: only the threads that bot started, hidden or not, whatever `show` says.
  * - `projectId`: only the threads of that project group (`groupProjects`).
  * - `computerIds`: only the threads running on those computers (`LOCAL_COMPUTER_ID` for this computer, or node ids); empty keeps all.
@@ -51,7 +51,7 @@ export function threadInFilter(thread: Thread, filter: ThreadFilter, context: Th
   if (filter.botId !== null) {
     if (bot?.botId !== filter.botId) return false
   } else if (filter.show === 'mine') {
-    // Today's list: a thread a bot keeps out of the sidebar is not listed, unless it is archived.
+    // A thread an agent or a bot keeps out of the sidebar is not listed, unless it is archived.
     if (thread.hidden && !thread.archivedAt) return false
   } else if (filter.show === 'bots' && !bot) {
     return false

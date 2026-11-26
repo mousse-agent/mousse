@@ -427,8 +427,8 @@ function isPerson(connection: HandlerContext['connection']): boolean {
 }
 
 /**
- * A person who writes in a thread one of their bots keeps out of the sidebar (`Thread.hidden`) is following it now, so it
- * shows there again. Only a person's message from a window: an agent's or a bot's (thread_send, which reaches the
+ * A person who writes in a thread an agent or one of their bots keeps out of the sidebar (`Thread.hidden`) is following
+ * it now, so it shows there again. Only a person's message from a window: an agent's or a bot's (thread_send, which reaches the
  * orchestrator without a window's connection) leaves it hidden.
  */
 function showWrittenThread(ctx: HandlerContext, threadId: string): void {
@@ -2564,15 +2564,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.setHidden': {
-      // Show in sidebar, and hiding again: a thread one of the owner's bots started (`Thread.hidden`). The bot's chat lists
-      // it either way, so only such a thread can be hidden.
+      // Show in sidebar, and hiding again: a thread an agent started (`Thread.hidden`): one of the owner's bots (its chat
+      // lists it), an agent here (the side panel of the thread that launched it lists it) or an agent on another computer.
+      // A thread the person started themselves is never hidden: nothing else would list it.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'hidden'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const hidden = asOptionalBoolean(p.hidden, 'hidden') === true
       const current = ctx.mms.threads.getThread(threadId)
       if (!current) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      if (hidden && !current.startedByBot) throw new DomainRpcError('invalid_params', 'Only a thread a bot started can be hidden: its bot\'s chat lists it.', { threadId })
+      if (hidden && !current.startedByBot && !current.createdByThreadId && !current.startedFrom?.agent)
+        throw new DomainRpcError('invalid_params', 'Only a thread an agent or a bot started can be hidden.', { threadId })
       const thread = ctx.mms.threads.setThreadHidden(threadId, hidden)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
