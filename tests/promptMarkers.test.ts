@@ -27,6 +27,7 @@ it('tracks every visible mounted prompt, recycles safely, and expands only aroun
       initial: Tick[]; hovered: Tick[]; settled: Tick[]; scrolled: Tick[]; virtualized: Tick[]; recycled: Tick[]; focused: Tick[];
       focusedAfterLeave: boolean; click: { count: number; scrollTop: number; transition: string };
       cachedClick: { count: number; scrollTop: number };
+      steer: { label: string; nextLabel: string; card: string[]; ticks: Tick[]; scrollTop: number };
       bounded: { rail: number; viewport: number; scrollHeight: number; textLeft: number; railRight: number }; rendererErrors: string[];
     }
     expect(result.rendererErrors).toEqual([])
@@ -44,6 +45,14 @@ it('tracks every visible mounted prompt, recycles safely, and expands only aroun
     expect(result.focusedAfterLeave).toBe(true)
     expect(result.click).toEqual({ count: 1, scrollTop: 224, transition: '0s' })
     expect(result.cachedClick).toEqual({ count: 2, scrollTop: 224 })
+    // A steered message has its own tick, shorter than a prompt's; its card is the message with no reply, and the
+    // prompts after it keep their numbers. Its tick lands on it.
+    expect(result.steer.ticks.map(tick => tick.id)).toEqual(['one', 'steer-a', 'two'])
+    expect(result.steer.ticks.find(tick => tick.id === 'steer-a')!.width).toBeLessThan(result.steer.ticks.find(tick => tick.id === 'one')!.width)
+    expect(result.steer.card).toEqual(['STRONG:Prompt steer-a'])
+    expect(result.steer.label).toBe('Jump to steered message: Prompt steer-a')
+    expect(result.steer.nextLabel).toBe('Jump to prompt 2: Prompt two')
+    expect(result.steer.scrollTop).toBe(64)
     expect(result.bounded.rail).toBeLessThan(result.bounded.viewport)
     expect(result.bounded.scrollHeight).toBeGreaterThan(result.bounded.rail)
     // The rail sits beside the transcript's text, never under it.

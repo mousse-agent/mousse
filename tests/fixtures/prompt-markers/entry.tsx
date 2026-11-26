@@ -13,7 +13,8 @@ function Fixture() {
   const contentRef = useRef<HTMLDivElement>(null)
   const animationRef = useRef(0)
   update = (next, absent) => { setIds(next); setMissing(absent) }
-  const messages: UIMessage[] = ids.map(id => ({ id, role: 'user', parts: [{ type: 'text', text: `Prompt ${id}` }] }))
+  // An id starting "steer-" is a message steered into the reply of the prompt before it.
+  const messages: UIMessage[] = ids.map(id => ({ id, role: 'user', parts: [{ type: 'text', text: `Prompt ${id}` }], ...(id.startsWith('steer-') ? { metadata: { steered: true } } : {}) }))
   return <div className="an-message-list-wrap" style={{ position: 'relative', width: 420, height: 320 }}>
     <div ref={containerRef} id="viewport" className="an-message-list" style={{ width: 300, height: 150, overflowY: 'auto' }}>
       {/* The transcript column (px-6) leaves a gutter wide enough for the rail beside its text. */}
