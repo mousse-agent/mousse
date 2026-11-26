@@ -90,10 +90,13 @@ interface ConnectState {
   /** The one line that says what went wrong, or what the next action does. */
   message: string | null
   needsKey: boolean
+  /** Plain http to another machine is being asked about: the action reads Connect anyway. */
   consent: boolean
+  /** Plain http to this address was agreed to: every later attempt (with its key, after a 401) sends that again. */
+  cleartextAgreed: boolean
 }
 
-const IDLE: ConnectState = { busy: false, message: null, needsKey: false, consent: false }
+const IDLE: ConnectState = { busy: false, message: null, needsKey: false, consent: false, cleartextAgreed: false }
 
 /** One connect attempt and what its answer asks of the row next. */
 function useConnect(connect: (input: LocalConnectInput) => Promise<LocalConnectResult>, onConnected: (providerId: string) => Promise<void>) {
@@ -112,7 +115,8 @@ function useConnect(connect: (input: LocalConnectInput) => Promise<LocalConnectR
         // The first 401 opens the key field; a key that was refused says so.
         message: result.problem === 'needs_key' && !input.apiKey ? null : result.message,
         needsKey: current.needsKey || result.problem === 'needs_key',
-        consent: result.problem === 'cleartext_consent'
+        consent: result.problem === 'cleartext_consent',
+        cleartextAgreed: current.cleartextAgreed || input.allowCleartext === true
       }))
     } catch (error) {
       setState((current) => ({ ...current, busy: false, message: errorText(error) }))
@@ -162,7 +166,7 @@ function DetectedRow({
   const keyShown = state.needsKey
   const submit = () => {
     if (disabled || state.busy) return
-    void run({ address, ...(key.trim() ? { apiKey: key.trim() } : {}), ...(state.consent ? { allowCleartext: true } : {}) })
+    void run({ address, ...(key.trim() ? { apiKey: key.trim() } : {}), ...(state.consent || state.cleartextAgreed ? { allowCleartext: true } : {}) })
   }
   const detail =
     row.state === 'running' ? `${row.count ?? 0} model${row.count === 1 ? '' : 's'}` : row.state === 'not_running' ? 'Not running' : row.state === 'connected' ? 'Connected' : undefined
@@ -235,7 +239,7 @@ function DetectedRow({
             type="button"
             className="settings-btn"
             disabled={disabled || state.busy || (keyShown && !key.trim())}
-            onClick={() => (action === 'Enter key' ? setState({ ...IDLE, needsKey: true }) : submit())}
+            onClick={() => (action === 'Enter key' ? setState((current) => ({ ...current, message: null, needsKey: true })) : submit())}
           >
             {state.busy ? 'Connecting…' : action}
           </button>
@@ -262,7 +266,7 @@ function AddressRow({
   const entered = address.trim()
   const submit = () => {
     if (disabled || state.busy || !entered || (state.needsKey && !key.trim())) return
-    void run({ address: entered, ...(key.trim() ? { apiKey: key.trim() } : {}), ...(state.consent ? { allowCleartext: true } : {}) })
+    void run({ address: entered, ...(key.trim() ? { apiKey: key.trim() } : {}), ...(state.consent || state.cleartextAgreed ? { allowCleartext: true } : {}) })
   }
   if (!open) {
     return (

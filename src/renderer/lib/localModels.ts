@@ -3,9 +3,9 @@ import { piProviderIdOf } from '../../shared/providerInstances'
 import { applySnapshot } from './providerSnapshots'
 import { providersApi } from './providersComputer'
 
-/** An entry on a local model server (`pi:local-<slug>`): its models carry what Mousse knows of them. */
-export function isLocalEntry(snapshot: Pick<InstanceSnapshot, 'driver' | 'models'>): boolean {
-  return snapshot.driver === 'pi' && snapshot.models.entries.some((model) => model.local !== undefined)
+/** An entry on a local model server: its provider id is `local-<slug>` (`pi:local-ollama`), whatever it lists now. */
+export function isLocalEntry(snapshot: Pick<InstanceSnapshot, 'driver' | 'instanceId'>): boolean {
+  return snapshot.driver === 'pi' && piProviderIdOf(snapshot.instanceId)?.startsWith('local-') === true
 }
 
 /** The local server's provider id (`local-ollama`) of an entry, for `providers.local.*`. */

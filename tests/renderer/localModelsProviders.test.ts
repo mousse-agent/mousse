@@ -45,6 +45,14 @@ const ollamaEntry = (): InstanceSnapshot =>
     }
   })
 
+/** A server that answered with no models yet (nothing pulled, or nothing loaded): still a local entry. */
+const emptyEntry = (): InstanceSnapshot =>
+  snapshot({ instanceId: 'pi:local-box-lan-8000', driver: 'pi', displayName: 'box.lan', builtIn: false, auth: { state: 'signed_in' }, models: { entries: [], source: 'live' } })
+
+/** A model API on the same driver: not a local server, so never read again by the page opening. */
+const apiEntry = (): InstanceSnapshot =>
+  snapshot({ instanceId: 'pi:openrouter', driver: 'pi', displayName: 'OpenRouter', builtIn: false, auth: { state: 'signed_in' }, models: { entries: [], source: 'live' } })
+
 const ROWS: LocalServerRow[] = [
   { kind: 'ollama', label: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', state: 'running', count: 6 },
   { kind: 'lmstudio', label: 'LM Studio', state: 'not_running' },
@@ -102,7 +110,7 @@ describe('Settings → Providers: local model servers', () => {
   beforeEach(async () => {
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
     resetLocalRefreshes()
-    entries = [snapshot(), ollamaEntry()]
+    entries = [snapshot(), ollamaEntry(), emptyEntry(), apiEntry()]
     instances = {
       add: vi.fn(async (input: { config?: { provider?: string } }) =>
         snapshot({ instanceId: `pi:${input.config!.provider!}`, driver: 'pi', displayName: input.config!.provider!, builtIn: false })),
@@ -146,7 +154,8 @@ describe('Settings → Providers: local model servers', () => {
   })
 
   it('opening the page reads the local entries’ lists again, and nothing looks for servers until Local models opens', async () => {
-    expect(instances.refreshModels).toHaveBeenCalledExactlyOnceWith('pi:local-ollama')
+    // A local server listing no models yet is read again too: loading one there shows it here.
+    expect(instances.refreshModels.mock.calls.map(([instanceId]) => instanceId).sort()).toEqual(['pi:local-box-lan-8000', 'pi:local-ollama'])
     expect(local.detect).not.toHaveBeenCalled()
     await openLocalModels()
     expect(local.detect).toHaveBeenCalledTimes(1)
@@ -211,6 +220,23 @@ describe('Settings → Providers: local model servers', () => {
     expect(instances.add).toHaveBeenCalledTimes(1)
   })
 
+  it('plain http agreed to stays agreed through the key a 401 then asks for', async () => {
+    local.connect
+      .mockResolvedValueOnce({ ok: false, problem: 'cleartext_consent', message: 'Prompts go over the network unencrypted.' })
+      .mockResolvedValueOnce({ ok: false, problem: 'needs_key', message: 'This server needs its key.' })
+    await openLocalModels()
+    await click(button('Enter server address'))
+    await type('Server address', 'http://192.168.1.20:8000')
+    await click(rowButton('Server address', 'Connect'))
+    await click(rowButton('Server address', 'Connect anyway'))
+    expect(local.connect).toHaveBeenLastCalledWith({ address: 'http://192.168.1.20:8000', allowCleartext: true })
+    // One click with the key connects: no second Connect anyway.
+    await type('Server key', 'secret')
+    await click(rowButton('Server address', 'Connect'))
+    expect(local.connect).toHaveBeenLastCalledWith({ address: 'http://192.168.1.20:8000', apiKey: 'secret', allowCleartext: true })
+    expect(instances.add).toHaveBeenCalledWith({ driver: 'pi', config: { provider: 'local-server' } })
+  })
+
   it('a problem stays on its row as one line, and nothing is added', async () => {
     local.connect.mockResolvedValueOnce({ ok: false, problem: 'unreachable', message: 'Nothing answers at box.lan:9999.' })
     await openLocalModels()
@@ -220,6 +246,13 @@ describe('Settings → Providers: local model servers', () => {
     expect(row('Server address')?.textContent).toContain('Nothing answers at box.lan:9999.')
     expect(instances.add).not.toHaveBeenCalled()
     expect(dialogOpen()).toBe(true)
+  })
+
+  it('a local server listing no models still shows its Server row, not an API key', async () => {
+    await click(document.body.querySelector('button[aria-label="Select box.lan"]'))
+    const setup = [...document.body.querySelectorAll('.settings-item')].find((item) => item.textContent?.startsWith('Server'))
+    expect(setup?.textContent).toBe('ServerConnected')
+    expect(text()).not.toContain('API key')
   })
 
   describe('a local entry’s models', () => {
