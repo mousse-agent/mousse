@@ -144,7 +144,8 @@ export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> 
 })
 
 /**
- * On the seven rows below, set only by the calling computer's daemon for an agent's call (a remote subagent today):
+ * On the seven rows below (and on `threads.archive` from `ROUTED_AGENT_ARCHIVE_SINCE`), set only by the calling computer's
+ * daemon for an agent's call:
  * `{ thread, run, title, hops, mode }`, the sending thread and run by their ids there, its title, the count of agent
  * messages in a row this one is, and the mode the sender runs in. The owner handles a marked call as an agent's, never
  * as a person's: run source `mcp`, the narrowest mode, its own limits, an envelope it builds, and an audit row with actor
@@ -157,7 +158,10 @@ export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> 
  */
 export const ROUTED_AGENT_KEY = 'agent'
 
-/** The rows that take `agent`, and the version of each that added it. */
+/**
+ * The rows of a remote subagent's calls that take `agent`, and the version of each that added it: a computer that has them
+ * all takes a subagent's calls marked (`takesAgentMark`). `threads.archive` takes it too, apart (`ROUTED_AGENT_ARCHIVE_SINCE`).
+ */
 export const ROUTED_AGENT_METHODS: Readonly<Record<string, number>> = Object.freeze({
   'threads.create': 2,
   'threads.setModel': 3,
@@ -178,6 +182,13 @@ export const ROUTED_AGENT_METHODS: Readonly<Record<string, number>> = Object.fre
 export const ROUTED_DEADLINE_KEY = 'deadlineMinutes'
 /** The version of `orchestrator.send` that added `deadlineMinutes`. */
 export const ROUTED_DEADLINE_SINCE = 8
+
+/**
+ * The version of `threads.archive` that takes `agent`. It is not one of `ROUTED_AGENT_METHODS`: those decide whether a
+ * remote subagent's calls are marked at all (`takesAgentMark`), and a computer from before this one still takes every
+ * other marked call. A caller checks this version before an agent's archive and never sends one to an older owner.
+ */
+export const ROUTED_AGENT_ARCHIVE_SINCE = 2
 
 /** What the `agent` key carries. */
 export interface RoutedAgentMark {
@@ -548,7 +559,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ---------------------------------------------------------------- thread writes
   'threads.rename': write('thread', ['threadId', 'name'], { required: ['name'] }),
   'threads.pin': write('thread', ['threadId', 'pinned']),
-  'threads.archive': write('thread', ['threadId', 'archived']),
+  // Version 2: `agent`, an agent's archive (`ROUTED_AGENT_ARCHIVE_SINCE`): a remote subagent's thread when its stand-in is
+  // archived, and `thread_archive` of a thread there. An owner from before it is never sent one (the caller checks).
+  'threads.archive': write('thread', ['threadId', 'archived', ROUTED_AGENT_KEY], { version: 2, since: { [ROUTED_AGENT_KEY]: 2 } }),
   // Legacy: `threads.archive` under its old name. An owner keeps it for a caller that runs an older Mousse; a caller
   // sends it only to an owner that does not advertise `threads.archive` (`ROUTED_RENAMED_METHODS`).
   'threads.settle': write('thread', ['threadId', 'settled']),

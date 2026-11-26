@@ -16,6 +16,12 @@
  * - the working count of thread_create's cap: a run going there, a thread idle there, a computer that cannot be asked;
  * - reachability: offline (tried twice, named), a qualified id of a thread nobody here launched, approval_respond;
  * - a subagent there: named by its id here with that computer's id, and by the id there the delegation tools give.
+ * - archiving (`thread_archive`, the app's Archive): an agent's archive and unarchive of a subagent's stand-in (there
+ *   first, here once that computer took it; one archived here before), its thread there still working, that computer
+ *   offline or its answer lost, that computer older than the marked archive (stand-in and qualified id); a thread there
+ *   by its qualified id (launched, a person's with the default reach, still working); a person's Archive of the
+ *   stand-in while its task runs there, with that computer offline (sent once it answers), with it older; a parent's
+ *   archive, which does not reach its subagent's thread there.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -724,6 +730,241 @@ describe('a subagent on another computer, named the way its parent knows it', ()
     const status = await tool('task_status', { delegationId: started.body.delegationId })
     expect(status.body).toMatchObject({ computer: { name: nameOf(), threadId: there } })
     expect((await tool('thread_read', { threadId: there, view: 'summary' })).body).toMatchObject({ threadId: there })
+  }, 120_000)
+})
+
+describe('archiving a subagent that runs on another computer, and a thread there by its qualified id', () => {
+  const service = (): RemoteSubagents => (t.caller.orchestrator as unknown as { remoteSubagents: RemoteSubagents }).remoteSubagents
+  const archivedThere = (farThreadId: string): boolean => Boolean(t.owner.threads.getThread(farThreadId)?.archivedAt)
+
+  /** A launcher whose turn a person started: thread_archive needs one. */
+  async function personLauncher() {
+    const made = await launcher()
+    const real = (t.caller.orchestrator as unknown as Loose).runHoldsPerson.bind(t.caller.orchestrator)
+    vi.spyOn(t.caller.orchestrator as unknown as Loose, 'runHoldsPerson').mockImplementation(((caller: Loose) => caller.runId === made.runId || real(caller)) as never)
+    return made
+  }
+
+  /** A subagent its parent started on the owner: its stand-in here, its task's run here, and its thread there. */
+  async function farSubagent(tool: Awaited<ReturnType<typeof launcher>>['tool']) {
+    vi.spyOn(t.caller.orchestrator as unknown as { effectsEnabled(): boolean }, 'effectsEnabled').mockReturnValue(true)
+    service().pause()
+    const started = await tool('delegate_task', { title: `Far worker ${++seq}`, prompt: 'Work there', workspace: 'isolated', computer: nameOf(), clientRequestId: `far-${seq}` })
+    if (started.isError) throw new Error(JSON.stringify(started.body))
+    const launched = await service().launch(started.body.delegationId)
+    if (launched.ok !== true) throw new Error(JSON.stringify(launched))
+    const childThreadId = started.body.childThreadId as string
+    const task = t.caller.runEngine.remoteSubagents.listForChildThread(childThreadId)[0]!
+    return { childThreadId, childRunId: task.childRunId, far: launched.remoteThreadId, farRunId: launched.remoteRunId }
+  }
+
+  /** The task ends here and the passes take its Stop there, as they do once its run there is over. */
+  async function finish(sub: Awaited<ReturnType<typeof farSubagent>>): Promise<void> {
+    await t.caller.runEngine.settleRemoteRun(sub.childRunId, 'completed', undefined, 'Done.')
+    await service().pass()
+    await vi.waitFor(async () => {
+      await service().pass()
+      expect(t.caller.runEngine.remoteSubagents.listForChildThread(sub.childThreadId).every((task) => task.state === 'done')).toBe(true)
+      expect(t.owner.runEngine.getActiveRun(sub.far)).toBeFalsy()
+    }, { timeout: 20_000 })
+  }
+
+  const archivedHere = (threadId: string): boolean => Boolean(t.caller.threads.getThread(threadId)?.archivedAt)
+  const archiveCalls = (calls: { mock: { calls: unknown[][] } }): unknown[][] => calls.mock.calls.filter(([, method]) => method === 'threads.archive')
+  /** That computer as one from before the marked archive. */
+  function olderPeer(): void {
+    const client = t.client()
+    const real = client.versions.bind(client)
+    vi.spyOn(client, 'versions').mockImplementation(async (node, session) => ({ ...(await real(node, session)), 'threads.archive': 1 }))
+  }
+
+  it('thread_archive of a stand-in archives its thread there first, as the agent\'s, and here only once that computer took it; archived: false brings both back', async () => {
+    standInForTurns()
+    const { tool } = await personLauncher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const port = portOf()
+    const real = port.call.bind(port)
+    const hereWhenSent: boolean[] = []
+    const calls = vi.spyOn(port, 'call').mockImplementation(((node: string, method: string, params: Record<string, unknown>, options?: Loose) => {
+      if (method === 'threads.archive') hereWhenSent.push(archivedHere(sub.childThreadId))
+      return real(node, method, params, options as never)
+    }) as never)
+    const archived = await tool('thread_archive', { threadId: sub.childThreadId })
+    expect(archived.isError, archived.text).toBeUndefined()
+    expect(archived.body).toMatchObject({ threadId: sub.childThreadId, archived: true, changed: true, computer: nameOf(), remoteThreadId: qualifyId(t.node, sub.far), changedThere: true })
+    expect(archivedHere(sub.childThreadId)).toBe(true)
+    expect(archivedThere(sub.far)).toBe(true)
+    const sent = archiveCalls(calls)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]![2]).toMatchObject({ threadId: sub.far, archived: true, agent: expect.objectContaining({ title: expect.any(String) }) })
+    expect(sent[0]![3]).toMatchObject({ idem: expect.stringContaining('thread_archive:') })
+    expect(hereWhenSent).toEqual([false])
+
+    const back = await tool('thread_archive', { threadId: sub.childThreadId, archived: false })
+    expect(back.body).toMatchObject({ archived: false, changed: true, changedThere: true })
+    expect(archivedHere(sub.childThreadId)).toBe(false)
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(hereWhenSent).toEqual([false, true])
+  }, 120_000)
+
+  it('a stand-in archived here before while its thread there stayed open: thread_archive archives it there', async () => {
+    standInForTurns()
+    const { tool } = await personLauncher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    t.caller.threads.setThreadArchived(sub.childThreadId, true)
+    expect(archivedThere(sub.far)).toBe(false)
+    const again = await tool('thread_archive', { threadId: sub.childThreadId })
+    expect(again.isError, again.text).toBeUndefined()
+    expect(again.body).toMatchObject({ archived: true, changed: false, changedThere: true })
+    expect(archivedThere(sub.far)).toBe(true)
+  }, 120_000)
+
+  it('thread_archive of a stand-in whose thread there still works is refused, and nothing changes here', async () => {
+    standInForTurns()
+    const { tool } = await personLauncher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    // A person there works in it now.
+    await personRun(sub.far)
+    const refused = await tool('thread_archive', { threadId: sub.childThreadId })
+    expect(refused).toMatchObject({ isError: true, body: { code: 'thread_running' } })
+    expect(archivedHere(sub.childThreadId)).toBe(false)
+    expect(archivedThere(sub.far)).toBe(false)
+  }, 120_000)
+
+  it('thread_archive of a stand-in with that computer offline, or its answer lost, changes nothing and says so', async () => {
+    standInForTurns()
+    const { tool } = await personLauncher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const port = portOf()
+    const versions = vi.spyOn(port, 'versions').mockRejectedValue(new DomainRpcError('computer_offline', 'The other computer is offline.'))
+    const offline = await tool('thread_archive', { threadId: sub.childThreadId })
+    expect(offline).toMatchObject({ isError: true, body: { code: 'computer_offline', computer: nameOf() } })
+    expect(archivedHere(sub.childThreadId)).toBe(false)
+    versions.mockRestore()
+
+    vi.spyOn(port, 'call').mockRejectedValue(new DomainRpcError('computer_offline', 'The other computer is offline.'))
+    const lost = await tool('thread_archive', { threadId: sub.childThreadId })
+    expect(lost.body).toMatchObject({ ok: false, status: 'uncertain', computer: nameOf() })
+    expect(archivedHere(sub.childThreadId)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toBeNull()
+  }, 120_000)
+
+  it('a computer from before the marked archive: thread_archive of a stand-in or a qualified id is refused as outdated, with no change on either side', async () => {
+    standInForTurns()
+    const { tool, launch } = await personLauncher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const launched = await launch()
+    olderPeer()
+    const calls = vi.spyOn(portOf(), 'call')
+    for (const [threadId, far] of [[sub.childThreadId, sub.far], [launched.id, launched.far]] as const) {
+      const out = await tool('thread_archive', { threadId })
+      expect(out, threadId).toMatchObject({ isError: true, body: { code: 'computer_outdated', computer: nameOf() } })
+      expect(out.text).toContain('Update Mousse')
+      expect(archivedThere(far)).toBe(false)
+    }
+    expect(archivedHere(sub.childThreadId)).toBe(false)
+    // Never sent as a person's plain archive instead.
+    expect(archiveCalls(calls)).toHaveLength(0)
+  }, 120_000)
+
+  it('thread_archive with a qualified id: a launched thread there is archived and unarchived; a person\'s is outside the default reach; one still working is refused', async () => {
+    standInForTurns()
+    const { tool, launch } = await personLauncher()
+    const launched = await launch()
+    const archived = await tool('thread_archive', { threadId: launched.id })
+    expect(archived.isError, archived.text).toBeUndefined()
+    expect(archived.body).toMatchObject({ threadId: launched.id, computer: nameOf(), archived: true, changed: true })
+    expect(archivedThere(launched.far)).toBe(true)
+    expect(t.owner.orchestrator.getMessages(launched.far).some((message) => String(message.content).includes('Archived by an agent in'))).toBe(true)
+    expect((await tool('thread_archive', { threadId: launched.id, archived: false })).body).toMatchObject({ archived: false, changed: true })
+    expect(archivedThere(launched.far)).toBe(false)
+
+    const theirs = t.owner.threads.createThread(`Person ${++seq}`, undefined, undefined, { started: true } as never)
+    const refused = await tool('thread_archive', { threadId: t.qualified(theirs.id) })
+    expect(refused).toMatchObject({ isError: true, body: { code: 'outside_agent_reach', reach: 'launched' } })
+    expect(archivedThere(theirs.id)).toBe(false)
+
+    const busy = await launch('Build it.')
+    running(busy.runId!)
+    const working = await tool('thread_archive', { threadId: busy.id })
+    expect(working).toMatchObject({ isError: true, body: { code: 'thread_running' } })
+    expect(archivedThere(busy.far)).toBe(false)
+  }, 120_000)
+
+  it('a person\'s Archive of the stand-in, while its task runs there, stops it there and archives its thread there; Unarchive brings it back', async () => {
+    standInForTurns()
+    const { tool } = await launcher()
+    const sub = await farSubagent(tool)
+    running(sub.farRunId)
+    await t.caller.orchestrator.archiveThread(sub.childThreadId, true)
+    await vi.waitFor(async () => {
+      await service().pass()
+      expect(archivedThere(sub.far)).toBe(true)
+    }, { timeout: 20_000 })
+    expect(isTerminal(sub.farRunId)).toBe(true)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ archived: true, state: 'sent' })
+
+    await t.caller.orchestrator.archiveThread(sub.childThreadId, false)
+    await service().pass()
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ archived: false, state: 'sent' })
+  }, 120_000)
+
+  it('a person\'s Archive of the stand-in with that computer offline: archived here at once, and archived there once it answers', async () => {
+    standInForTurns()
+    const { tool } = await launcher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    const port = portOf()
+    const versions = vi.spyOn(port, 'versions').mockRejectedValue(new DomainRpcError('computer_offline', 'The other computer is offline.'))
+    const calls = vi.spyOn(port, 'call').mockRejectedValue(new DomainRpcError('computer_offline', 'The other computer is offline.'))
+    await t.caller.orchestrator.archiveThread(sub.childThreadId, true)
+    await service().pass()
+    expect(archivedHere(sub.childThreadId)).toBe(true)
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ state: 'pending', lastError: expect.stringContaining('offline') })
+
+    versions.mockRestore()
+    calls.mockRestore()
+    const sent = vi.spyOn(port, 'call')
+    await service().pass()
+    expect(archivedThere(sub.far)).toBe(true)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ state: 'sent' })
+    // As an agent's archive, under the key of this change.
+    expect(archiveCalls(sent)[0]![2]).toHaveProperty('agent')
+    expect(archiveCalls(sent)[0]![3]).toMatchObject({ idem: `remote-archive:${sub.childThreadId}:1` })
+  }, 120_000)
+
+  it('a person\'s Archive of the stand-in, that computer older than the marked archive: archived here, its thread there left open and never sent unmarked', async () => {
+    standInForTurns()
+    const { tool } = await launcher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    olderPeer()
+    const calls = vi.spyOn(portOf(), 'call')
+    await t.caller.orchestrator.archiveThread(sub.childThreadId, true)
+    await service().pass()
+    await service().pass()
+    expect(archivedHere(sub.childThreadId)).toBe(true)
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toMatchObject({ state: 'left_open', lastError: expect.stringContaining('Update Mousse') })
+    expect(archiveCalls(calls)).toHaveLength(0)
+  }, 120_000)
+
+  it('archiving a parent only stops its subagent there: its thread there stays open', async () => {
+    standInForTurns()
+    const { thread, tool } = await launcher()
+    const sub = await farSubagent(tool)
+    await finish(sub)
+    await t.caller.orchestrator.archiveThread(thread.id, true)
+    await service().pass()
+    expect(archivedThere(sub.far)).toBe(false)
+    expect(t.caller.runEngine.remoteArchive.get(sub.childThreadId)).toBeNull()
   }, 120_000)
 })
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   ROUTED_AGENT_KEY,
+  ROUTED_AGENT_ARCHIVE_SINCE,
   ROUTED_AGENT_METHODS,
   ROUTED_DROPPABLE_KEYS,
   ROUTED_FORBIDDEN_KEYS,
@@ -280,14 +281,16 @@ describe('the routed method table', () => {
       if (!row.stageable) expect(row.keys, method).not.toContain(ROUTED_STAGED_KEY)
   })
 
-  it('marks an agent\'s call on exactly seven rows, from a version an older owner refuses, never dropped', () => {
+  it('marks an agent\'s call on the seven rows of a remote subagent\'s calls and on threads.archive, from a version an older owner refuses, never dropped', () => {
     const marked = Object.entries(ROUTED_METHODS).filter(([, row]) => row.keys.includes(ROUTED_AGENT_KEY)).map(([method]) => method)
-    expect(marked.sort()).toEqual(Object.keys(ROUTED_AGENT_METHODS).sort())
+    // `threads.archive` takes the mark apart from the seven: an owner without it still takes a subagent's marked calls.
+    expect(marked.filter((method) => method !== 'threads.archive').sort()).toEqual(Object.keys(ROUTED_AGENT_METHODS).sort())
     expect(marked.sort()).toEqual([
       'orchestrator.abort',
       'orchestrator.send',
       'orchestrator.steer',
       'queue.enqueue',
+      'threads.archive',
       'threads.create',
       'threads.setModel',
       'threads.setPermissionMode'
@@ -298,7 +301,7 @@ describe('the routed method table', () => {
       // to send it there (`RoutedClient.unsupportedKey`) instead of delivering an agent's call as a person's.
       const since = row.since?.[ROUTED_AGENT_KEY]
       expect(since, method).toBeGreaterThan(1)
-      expect(ROUTED_AGENT_METHODS[method], method).toBe(since)
+      expect(ROUTED_AGENT_METHODS[method] ?? (method === 'threads.archive' ? ROUTED_AGENT_ARCHIVE_SINCE : undefined), method).toBe(since)
       expect(routedKeysAt(row, since! - 1), method).not.toContain(ROUTED_AGENT_KEY)
       expect(ROUTED_DROPPABLE_KEYS[method] ?? [], method).not.toContain(ROUTED_AGENT_KEY)
     }

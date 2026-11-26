@@ -6047,7 +6047,8 @@ export class OrchestratorService extends EventEmitter {
       },
       send: (target, input, options) => service.send(target, input, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_send') }),
       steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_steer') }),
-      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_interrupt') })
+      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_interrupt') }),
+      archive: (target, archived, options) => service.archive(target, archived, { idem: options.idem, mark: this.remoteAgentMark(options.actor, false, 'thread_archive') })
     }
   }
 
@@ -6193,11 +6194,15 @@ export class OrchestratorService extends EventEmitter {
    * come here. Archiving is a Stop: what the thread still runs ends with it, and its pull request watch ends as archived
    * (`thread-archived`). Nothing is deleted. It answers once the thread and its side chats are marked archived and their
    * Stops have begun (no new turn or message can start in between); the Stops end in the background, which can take
-   * long on a slow drive (#1901). `waitForStop` waits for them too.
+   * long on a slow drive (#1901). `waitForStop` waits for them too. The stand-in of a subagent that runs on another
+   * computer has its thread there archived or unarchived with it, now or once that computer answers (`wantRemoteArchive`);
+   * `there: 'done'` is an agent's archive that computer already took. A thread above it does not reach it: archiving a
+   * parent only stops its subagents.
    */
-  async archiveThread(threadId: string, archived: boolean, options: { waitForStop?: boolean } = {}): Promise<Thread> {
+  async archiveThread(threadId: string, archived: boolean, options: { waitForStop?: boolean; there?: 'done' } = {}): Promise<Thread> {
     if (!this.threadStore) throw new Error('Thread store is not ready.')
     const thread = this.threadStore.setThreadArchived(threadId, archived)
+    if (options.there !== 'done') this.wantRemoteArchive(threadId, archived)
     if (archived) {
       const stopped = this.endArchivedThreadWork(threadId)
       if (options.waitForStop) await stopped
@@ -6236,6 +6241,23 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The app's Archive (or Unarchive) of a remote subagent's stand-in: its thread there is wanted so too, kept in
+   * `remote_archive` and sent by `RemoteSubagents` after any Stop of its tasks, now or once that computer answers. Never
+   * throws: the archive here stands whatever becomes of it there.
+   */
+  private wantRemoteArchive(threadId: string, archived: boolean): void {
+    const engine = this.runEngine
+    const runsOn = this.threadStore?.getThread(threadId)?.runsOn
+    const there = runsOn?.ref ? parseQualifiedId(runsOn.ref) : undefined
+    if (!engine || !runsOn || !there || there.node !== runsOn.node) return
+    try {
+      if (engine.remoteArchive.want({ childThreadId: threadId, node: runsOn.node, remoteThreadId: there.id, archived })) this.remoteSubagents?.kick()
+    } catch (error) {
+      console.warn('a remote subagent\'s thread could not be marked to archive there', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
    * A person who writes in an archived thread wants it back: it is unarchived through the app's own Unarchive
    * (`archiveThread`) before their message or steer runs: from a window, their phone or the CLI. A thread whose expiry
    * passed stays archived; its send is refused. Agents and bots never come here (`thread_archived`).
@@ -6265,18 +6287,77 @@ export class OrchestratorService extends EventEmitter {
       botThread = true
     }
     if (!thread || botThread) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available to you.`)
-    if (Boolean(thread.archivedAt) === archived) return { status: 'accepted', archived, changed: false }
-    if (archived) {
+    // A subagent that runs on another computer: its thread there first, also when this stand-in already is so here.
+    const remote = this.remoteStandInTarget(thread)
+    if (!remote && Boolean(thread.archivedAt) === archived) return { status: 'accepted', archived, changed: false }
+    if (archived && !thread.archivedAt) {
       const subtree = [threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])]
       if (subtree.some((id) => engine.getActiveRun(id) || engine.store.getPausedRun(id))) return { status: 'rejected', reason: 'thread_running' }
     }
-    await this.archiveThread(threadId, archived)
+    let there: { threadId: string; computer: string; changed: boolean; gone?: true } | undefined
+    if (remote) {
+      if (!this.remoteThreads) throw new RemoteThreadRefusal('remote_unavailable', `This subagent runs on ${remote.computer}, and Mousse is not connected to your other computers (Settings → Devices), so nothing was changed.`, remote.computer)
+      // One key per request: a retry of this call (the link lost the answer) reaches the first one there.
+      const idem = `thread_archive:${options.actor.threadId}:${options.actor.toolCallId ?? options.actor.runId}:${threadId}:${archived ? 1 : 0}`
+      try {
+        const result = await this.remoteThreads.archive(remote, archived, { idem, own: true, mark: this.remoteAgentMark(options.actor, false, 'thread_archive') })
+        // Not known there: nothing changes here.
+        if (result.status === 'uncertain') return result
+        there = { threadId: remote.threadId, computer: remote.computer, changed: result.changed }
+      } catch (error) {
+        // Deleted there: nothing is left to change there, and the stand-in follows the request.
+        if (!(error instanceof RemoteThreadRefusal) || error.code !== 'remote_thread_gone') throw error
+        there = { threadId: remote.threadId, computer: remote.computer, changed: false, gone: true }
+      }
+      // A person's Archive still on its way there is superseded by what that computer just took.
+      engine.remoteArchive.acknowledged({ childThreadId: threadId, node: remote.node, remoteThreadId: remote.remoteThreadId, archived })
+    }
+    if (Boolean(this.threadStore?.getThread(threadId)?.archivedAt) === archived) return { status: 'accepted', archived, changed: false, ...(there ? { there } : {}) }
+    await this.archiveThread(threadId, archived, remote ? { there: 'done' } : {})
     engine.store.appendEvent({
       threadId,
       runId: null,
       type: 'agent.action',
       payload: { action: archived ? 'archived_thread' : 'unarchived_thread', actorThreadId: options.actor.threadId, actorRunId: options.actor.runId, toolCallId: options.actor.toolCallId }
     })
+    return { status: 'accepted', archived, changed: true, ...(there ? { there } : {}) }
+  }
+
+  /** The thread on another computer of a remote subagent's stand-in, once that computer has made it. */
+  private remoteStandInTarget(thread: Thread): { node: string; computer: string; remoteThreadId: string; threadId: string } | undefined {
+    const runsOn = thread.runsOn
+    const there = runsOn?.ref ? parseQualifiedId(runsOn.ref) : undefined
+    if (!runsOn || !there || there.node !== runsOn.node) return undefined
+    return { node: runsOn.node, computer: this.remoteSubagents?.computerName(runsOn.node) ?? runsOn.computerName, remoteThreadId: there.id, threadId: runsOn.ref! }
+  }
+
+  /**
+   * An agent on another computer archives (`archived`) or unarchives a thread here (a marked `threads.archive`, its reach
+   * checked by `RemoteAgentCalls`): as an agent's archive here, it never ends work, so a thread with a run working or
+   * paused, there or in a subagent below it, is refused. `archive` is the app's own Archive; the change is recorded as an
+   * `agent.action` of the thread, naming that computer.
+   */
+  async archiveForRemoteAgent(threadId: string, archived: boolean, options: { actor: AgentActor; archive: () => Promise<unknown> }): Promise<{ status: 'accepted'; archived: boolean; changed: boolean } | { status: 'rejected'; reason: 'thread_running' }> {
+    const engine = this.requireRunEngine()
+    const thread = this.threadStore?.getThread(threadId)
+    if (!thread) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available.`)
+    if (Boolean(thread.archivedAt) === archived) return { status: 'accepted', archived, changed: false }
+    if (archived) {
+      const subtree = [threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])]
+      if (subtree.some((id) => engine.getActiveRun(id) || engine.store.getPausedRun(id))) return { status: 'rejected', reason: 'thread_running' }
+    }
+    await options.archive()
+    const { actor } = options
+    const action = archived ? 'archived_thread' : 'unarchived_thread'
+    engine.store.appendEvent({
+      threadId,
+      runId: null,
+      type: 'agent.action',
+      payload: { action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId, ...(actor.remote ? { actorNode: actor.remote.node, actorTitle: actor.remote.title } : {}) }
+    })
+    // The sender is named by its title and computer: its thread id is that computer's.
+    const by = actor.remote ? `an agent in «${actor.remote.title || 'a thread'}» on ${actor.remote.computer}` : `an agent in thread ${actor.threadId}`
+    this.sessionAls.run(this.getOrCreateSession(threadId), () => this.addSystemMessage(`${archived ? 'Archived' : 'Unarchived'} by ${by}.`))
     return { status: 'accepted', archived, changed: true }
   }
 
