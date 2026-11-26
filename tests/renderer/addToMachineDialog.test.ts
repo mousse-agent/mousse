@@ -123,3 +123,19 @@ it("shows that computer's refusal and changes nothing; Close does nothing else",
   expect(onClose).toHaveBeenCalledTimes(1)
   expect(onAdded).not.toHaveBeenCalled()
 })
+
+it("says when that computer's GitHub could not be checked, instead of checking forever", async () => {
+  const usual = platform.getMockImplementation()!
+  platform.mockImplementation(async (method: string) => {
+    if (method === 'sourceControl.projectSource') return { repository: 'acme/web-app', branch: 'main' }
+    throw Object.assign(new Error('Mac mini is offline.'), { code: 'peer_offline' })
+  })
+  try {
+    await show()
+    expect(dialog().textContent).toContain('Could not check')
+    expect(dialog().textContent).not.toContain('Checking…')
+    expect(dialog().querySelector('[role="alert"]')).not.toBeNull()
+  } finally {
+    platform.mockImplementation(usual)
+  }
+})

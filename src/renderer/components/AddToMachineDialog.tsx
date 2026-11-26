@@ -98,6 +98,8 @@ export function AddToMachineDialog({ project, projects, devices, withProject, no
     <Modal
       open
       title={`Add ${project.name} to another computer`}
+      // Settings' tokens and controls (spacing, rows, buttons), here and in the footer.
+      className="settings-scope"
       onClose={onClose}
       closeDisabled={busy !== null}
       footer={
@@ -166,7 +168,7 @@ export function AddToMachineDialog({ project, projects, devices, withProject, no
                 >
                   <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void browse(folder ?? undefined)}>Browse</button>
                 </Row>
-                <Row title="GitHub" description={<GitHubState github={github} computer={name} />}>
+                <Row title="GitHub" description={<GitHubState github={github} computer={name} failed={Boolean(githubError)} />}>
                   {github?.operation
                     ? !github.operation.stopping && <button type="button" className="settings-btn" onClick={() => void cancel()}>Cancel</button>
                     : github && !connected && (github.state !== 'missing' || github.install?.automatic) && (
@@ -213,8 +215,9 @@ function TargetLabel({ target }: { target: AddTarget }) {
   )
 }
 
-function GitHubState({ github, computer }: { github: ReturnType<typeof useComputerGitHub>['github']; computer: string }) {
-  if (!github) return <span className="add-machine-muted">Checking…</span>
+function GitHubState({ github, computer, failed }: { github: ReturnType<typeof useComputerGitHub>['github']; computer: string; failed: boolean }) {
+  // Not read, and the read failed: why is in the error line below.
+  if (!github) return failed ? <span className="settings-status-warn">Could not check</span> : <span className="add-machine-muted">Checking…</span>
   const operation = github.operation
   if (operation) {
     if (operation.stopping) return <span>Finishing the install, then stopping…</span>
@@ -248,6 +251,7 @@ function FolderBrowser({ computer, state, onOpen, onUse, onBack }: {
       </div>
       <div className="add-machine-browser-list scrollbar-ultra-thin" role="list">
         {!view && !state.error && <div className="add-machine-muted add-machine-browser-row"><Spinner size={13} /></div>}
+        {!view && state.error && <div className="add-machine-muted add-machine-browser-row">Could not read its folders</div>}
         {view?.parent && (
           <button type="button" role="listitem" className="add-machine-browser-row" onClick={() => onOpen(view.parent!)}>
             <ArrowUp size={14} aria-hidden="true" />..
