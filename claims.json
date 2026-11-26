@@ -201,6 +201,21 @@
       "expiresAt": "2026-11-25T20:29:30.139Z"
     },
     {
+      "task": "remote-provisional-titles-and-own-drafts",
+      "session": "Avarnics-Mac-mini.local-ae51d2",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "remote-provisional-titles-and-own-drafts",
+      "paths": [
+        "src/mms/bridge/remote/MmsListsSource.ts",
+        "src/shared/threadTitle.ts",
+        "src/renderer/lib/threadActions.ts",
+        "src/renderer/stores/appStore.ts",
+        "src/renderer/components/ThreadsSidebar.tsx"
+      ],
+      "claimedAt": "2026-11-26T09:12:48.179Z",
+      "expiresAt": "2026-11-26T11:12:48.179Z"
+    },
+    {
       "task": "remote-subagent-result-notice",
       "session": "Avarnics-Mac-mini.local-1565f6",
       "machine": "Avarnics-Mac-mini.local",
