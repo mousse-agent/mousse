@@ -86,12 +86,11 @@ export function ThreadFilterBar({ view, projects, bots, computers = EMPTY_COMPUT
   useEffect(() => setActive(0), [filter.query])
   const projectOption = projects.find((option) => option.id === filter.projectId)
   const botOption = bots.find((option) => option.id === filter.botId)
-  const computerOption = computers.find((option) => option.id === filter.computerId)
 
   const pick = (suggestion: FilterSuggestion) => {
     if (suggestion.kind === 'project') filter.setProject(suggestion.id)
     else if (suggestion.kind === 'bot') filter.setBot(suggestion.id)
-    else filter.setComputer(suggestion.id)
+    else filter.addComputer(suggestion.id)
     filter.setQuery('')
     fieldRef.current?.focus()
   }
@@ -121,10 +120,16 @@ export function ThreadFilterBar({ view, projects, bots, computers = EMPTY_COMPUT
       key: 'project', icon: projectOption ? <ProjectMark option={projectOption} size={13} /> : <Folder size={13} aria-hidden="true" />,
       label: projectOption?.name ?? 'Project', title: 'Project', clear: () => filter.setProject(null)
     }] : []),
-    ...(filter.computerId !== null ? [{
-      key: 'computer', icon: computerOption ? <ComputerMark option={computerOption} size={13} /> : <Server size={13} aria-hidden="true" />,
-      label: computerOption?.name ?? 'Computer', title: 'Computer', clear: () => filter.setComputer(null)
-    }] : []),
+    ...filter.computerIds.map((id) => {
+      const option = computers.find((entry) => entry.id === id)
+      return {
+        key: `computer:${id}`,
+        icon: option ? <ComputerMark option={option} size={13} /> : <Server size={13} aria-hidden="true" />,
+        label: option?.name ?? 'Computer',
+        title: 'Computer',
+        clear: () => filter.removeComputer(id)
+      }
+    }),
     ...(filter.show !== 'mine' && filter.botId === null ? [{
       key: 'show', icon: <Bot size={13} aria-hidden="true" />, label: filter.show === 'all' ? 'All threads' : SHOW_LABELS[filter.show], title: 'Show', clear: () => filter.setShow('mine')
     }] : []),
@@ -133,7 +138,7 @@ export function ThreadFilterBar({ view, projects, bots, computers = EMPTY_COMPUT
       key: 'hidden', icon: <EyeOff size={13} aria-hidden="true" />, label: `${hiddenCount} hidden`, title: 'Hidden projects', clear: filter.clearHiddenProjects
     }] : [])
   ]
-  const menuSet = filter.show !== 'mine' || filter.archived || filter.projectId !== null || filter.botId !== null || filter.computerId !== null || hiddenCount > 0
+  const menuSet = filter.show !== 'mine' || filter.archived || filter.projectId !== null || filter.botId !== null || filter.computerIds.length > 0 || hiddenCount > 0
 
   return (
     <div className="thread-filter">
@@ -231,7 +236,6 @@ export function ThreadFilterBar({ view, projects, bots, computers = EMPTY_COMPUT
           computers={computers}
           projectOption={projectOption}
           botOption={botOption}
-          computerOption={computerOption}
           onClose={(refocus) => {
             setMenuOpen(false)
             if (refocus) buttonRef.current?.focus()
@@ -244,7 +248,7 @@ export function ThreadFilterBar({ view, projects, bots, computers = EMPTY_COMPUT
 
 type SubKind = 'project' | 'bot' | 'computer'
 
-function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption, botOption, computerOption, onClose }: {
+function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption, botOption, onClose }: {
   view: 'projects' | 'threads'
   anchorRef: React.RefObject<HTMLButtonElement | null>
   projects: readonly ProjectOption[]
@@ -252,7 +256,6 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
   computers: readonly ComputerOption[]
   projectOption?: ProjectOption
   botOption?: BotOption
-  computerOption?: ComputerOption
   onClose(refocus: boolean): void
 }) {
   const filter = useThreadFilterStore()
@@ -285,7 +288,8 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
     anyLabel: string
     searchLabel: string
     options: readonly FilterOption[]
-    selected: string | null
+    selected: readonly string[]
+    multiple?: boolean
     mark(option: FilterOption): ReactNode
     pick(id: string | null): void
   }> = {
@@ -293,7 +297,7 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
       anyLabel: 'All projects',
       searchLabel: 'Search projects',
       options: projects,
-      selected: filter.projectId,
+      selected: filter.projectId !== null ? [filter.projectId] : [],
       mark: (option) => <ProjectMark option={option as ProjectOption} />,
       pick: (id) => filter.setProject(id)
     },
@@ -301,7 +305,7 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
       anyLabel: 'Any bot',
       searchLabel: 'Search bots',
       options: bots,
-      selected: filter.botId,
+      selected: filter.botId !== null ? [filter.botId] : [],
       mark: (option) => <BotMark option={option as BotOption} />,
       pick: (id) => filter.setBot(id)
     },
@@ -309,11 +313,20 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
       anyLabel: 'All computers',
       searchLabel: 'Search computers',
       options: computers,
-      selected: filter.computerId,
+      selected: filter.computerIds,
+      multiple: true,
       mark: (option) => <ComputerMark option={option as ComputerOption} />,
-      pick: (id) => filter.setComputer(id)
+      pick: (id) => {
+        if (id === null) filter.clearComputers()
+        else filter.toggleComputer(id)
+      }
     }
   }
+  const computerValue = filter.computerIds.length === 0
+    ? 'All'
+    : filter.computerIds.length === 1
+      ? (computers.find((option) => option.id === filter.computerIds[0])?.name ?? 'Computer')
+      : `${filter.computerIds.length} selected`
   const subTrigger = (kind: SubKind, label: string, value: string) => {
     const config = subConfig[kind]
     return (
@@ -345,10 +358,11 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
             searchLabel={config.searchLabel}
             options={config.options}
             selected={config.selected}
+            multiple={config.multiple}
             mark={config.mark}
             onPick={(id) => {
               config.pick(id)
-              onClose(true)
+              if (!config.multiple) onClose(true)
             }}
             onBack={closeSub}
           />
@@ -414,7 +428,7 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
           </>
         ) : subTrigger('project', 'Project', projectOption?.name ?? 'All')}
         {subTrigger('bot', 'Bot', botOption?.name ?? 'Any')}
-        {computers.length > 0 && subTrigger('computer', 'Computer', computerOption?.name ?? 'All')}
+        {computers.length > 0 && subTrigger('computer', 'Computer', computerValue)}
         <div className="threads-context-menu-separator thread-filter-menu-separator" role="separator" />
         <button
           type="button"
@@ -435,12 +449,13 @@ function FilterMenu({ view, anchorRef, projects, bots, computers, projectOption,
  * "Project ›", "Bot ›" and "Computer ›": a search line, then "Recent" (the few used last) and the rest by name; it
  * scrolls. Arrows move from the search line into the list and back; Escape or the left arrow go back to the menu.
  */
-function FilterSubList({ label, anyLabel, searchLabel, options, selected, mark, onPick, onBack }: {
+function FilterSubList({ label, anyLabel, searchLabel, options, selected, multiple = false, mark, onPick, onBack }: {
   label: string
   anyLabel: string
   searchLabel: string
   options: readonly FilterOption[]
-  selected: string | null
+  selected: readonly string[]
+  multiple?: boolean
   mark(option: FilterOption): ReactNode
   onPick(id: string | null): void
   onBack(): void
@@ -450,6 +465,8 @@ function FilterSubList({ label, anyLabel, searchLabel, options, selected, mark, 
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const { recent, rest } = useMemo(() => orderOptions(options, search), [options, search])
+  const selectedSet = useMemo(() => new Set(selected), [selected])
+  const itemRole = multiple ? 'menuitemcheckbox' : 'menuitemradio'
 
   useLayoutEffect(() => {
     const list = listRef.current
@@ -457,20 +474,23 @@ function FilterSubList({ label, anyLabel, searchLabel, options, selected, mark, 
     inputRef.current?.focus()
   }, [])
 
-  const item = (option: FilterOption) => (
-    <button
-      key={option.id}
-      type="button"
-      role="menuitemradio"
-      aria-checked={selected === option.id}
-      className="threads-context-menu-item thread-filter-menu-item"
-      onClick={() => onPick(option.id)}
-    >
-      <span className="thread-filter-check" aria-hidden="true">{selected === option.id && <Check size={14} strokeWidth={2.2} />}</span>
-      {mark(option)}
-      <span className="thread-filter-option-name">{option.name}</span>
-    </button>
-  )
+  const item = (option: FilterOption) => {
+    const checked = selectedSet.has(option.id)
+    return (
+      <button
+        key={option.id}
+        type="button"
+        role={itemRole}
+        aria-checked={checked}
+        className="threads-context-menu-item thread-filter-menu-item"
+        onClick={() => onPick(option.id)}
+      >
+        <span className="thread-filter-check" aria-hidden="true">{checked && <Check size={14} strokeWidth={2.2} />}</span>
+        {mark(option)}
+        <span className="thread-filter-option-name">{option.name}</span>
+      </button>
+    )
+  }
 
   return (
     <div
@@ -526,12 +546,12 @@ function FilterSubList({ label, anyLabel, searchLabel, options, selected, mark, 
       <div className="thread-filter-sublist-items">
         <button
           type="button"
-          role="menuitemradio"
-          aria-checked={selected === null}
+          role={itemRole}
+          aria-checked={selectedSet.size === 0}
           className="threads-context-menu-item thread-filter-menu-item"
           onClick={() => onPick(null)}
         >
-          <span className="thread-filter-check" aria-hidden="true">{selected === null && <Check size={14} strokeWidth={2.2} />}</span>
+          <span className="thread-filter-check" aria-hidden="true">{selectedSet.size === 0 && <Check size={14} strokeWidth={2.2} />}</span>
           <span>{anyLabel}</span>
         </button>
         {recent.length > 0 && <div className="thread-filter-menu-label" role="presentation">Recent</div>}
