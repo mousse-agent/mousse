@@ -1,30 +1,33 @@
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import type { HarnessCaps, RuntimeFacts } from '../../../shared/harness/types'
+import { harnessAppError, type HarnessCaps } from '../../../shared/harness/types'
 import type { InstallOwner } from '../../../shared/harness/status'
-import { cliLaunch, withUserEnv, type CliLaunch } from '../cliConfig'
-import type { AcpConnection, AcpLaunchRequest } from '../acp/connection'
-import type { AcpLaunch } from '../acp/preset'
-import { OPENCODE_CAPS, OPENCODE_LABEL, OPENCODE_PRESET } from '../acp/presets/opencode'
+import type { LlmModelOption } from '../../../shared/settings'
+import { atomicWriteJsonSync } from '../../data/AtomicFs'
+import type { ProviderCapabilities } from '../adapter'
+import { cliLaunch } from '../cliConfig'
 import { compatibilityFields } from '../compatibility'
 import type { AgentInstalls, InstalledAgent, RegistrySource } from '../agents/install'
 import { DIST_DIR } from '../agents/receipt'
 import type { AcpRegistry } from '../agents/registry'
-import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver, type ManagedInstall } from '../driver'
+import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type ManagedInstall } from '../driver'
 import { cliNames, resolveCommand } from '../env'
 import { LATEST_TTL_MS } from '../latest'
-import { ptyAvailable, type PtySpawn } from '../pty'
-import { createAcpRuntime } from './acp'
+import { OpencodeServer, type OpencodeLaunch, type StartedServer } from '../opencode/server'
+import { OpencodeSessions, type SavedOpencodeSession } from '../opencode/sessions'
+import { AcpAdapter, type AcpTurnClient } from './acp/adapter'
 
 /**
- * OpenCode over ACP (`opencode acp`, the OpenCode preset of the ACP core). It runs an executable
- * the user sets, else the copy Mousse installed from the ACP registry's `opencode` entry, else the
- * `opencode` on PATH (OpenCode's installer folders included, `opencodeStandalonePaths`).
+ * OpenCode on its own server API (`opencode serve`, `../opencode/`). It runs an executable the user sets, else the copy
+ * Mousse installed from the ACP registry's `opencode` entry, else the `opencode` on PATH (OpenCode's installer folders
+ * included, `opencodeStandalonePaths`). One server per entry starts on first use and closes after idling.
  *
- * OpenCode keeps its sign-ins in this computer's XDG folders (`~/.local/share/opencode/auth.json`)
- * and has no home variable, so every entry shares them: there is one entry, on the user's own
- * OpenCode setup, and a sign-out in Mousse never signs OpenCode itself out.
+ * OpenCode keeps its sign-ins in this computer's own data folder and has no home variable, so every entry shares them:
+ * there is one entry, on the user's own OpenCode setup, and a sign-out in Mousse never signs OpenCode itself out.
  */
+
+export const OPENCODE_LABEL = 'OpenCode'
 
 /** The ACP registry entry a managed copy is installed from, and its folder under `agents/`. */
 export const OPENCODE_AGENT_ID = 'opencode'
@@ -165,11 +168,52 @@ export interface OpencodeDriverOptions {
   registry?: Pick<AcpRegistry, 'agent' | 'cached'>
   /** Test seam: the clock of the registry's update check. */
   now?: () => number
-  /** Test seam: opens agent connections instead of starting OpenCode. */
-  connect?: (context: DriverContext, request: AcpLaunchRequest) => AcpConnection
-  /** Test seam: the pseudo-terminal for `terminal` sign-in methods. */
-  pty?: { available: () => boolean; spawn?: PtySpawn }
+  /** Test seam: starts a server instead of spawning `opencode serve`. */
+  startServer?: (launch: OpencodeLaunch, signal: AbortSignal) => Promise<StartedServer>
+  /** Test seam: how long an unused server stays up. */
+  serverIdleMs?: number
+  /** Test seam: how long a stop waits for OpenCode to confirm. */
+  interruptWaitMs?: number
 }
+
+/**
+ * OpenCode's turns run on its own server API, where each session carries the permission rules of the thread's mode and
+ * every ask reaches Mousse before the tool runs (`opencode/rules.ts`): Ask and Auto-accept edits hold, and so do the
+ * unattended uses (delegation, workflows, schedules). Steers wait for the turn to end.
+ */
+export const OPENCODE_CAPS: HarnessCaps = Object.freeze({
+  steer: 'queue_only',
+  steerBoundary: 'none',
+  steerSettleMs: null,
+  interrupt: true,
+  rollback: 'none',
+  fork: 'portable',
+  events: 'rich',
+  containment: 'weak',
+  historyInjection: 'prompt',
+  mcp: true,
+  childPolicy: 'isolated_only',
+  planMode: false,
+  contextUsage: 'none',
+  toolControl: 'approval_only',
+  autoPermissionMode: false,
+  budgets: 'unsupported',
+  spendLimits: 'unsupported'
+})
+
+const OPENCODE_CAPABILITIES: ProviderCapabilities = Object.freeze({
+  steer: OPENCODE_CAPS.steer,
+  steerBoundary: OPENCODE_CAPS.steerBoundary,
+  steerSettleMs: OPENCODE_CAPS.steerSettleMs,
+  interrupt: OPENCODE_CAPS.interrupt,
+  rollback: OPENCODE_CAPS.rollback,
+  fork: OPENCODE_CAPS.fork,
+  events: OPENCODE_CAPS.events,
+  containment: OPENCODE_CAPS.containment,
+  historyInjection: OPENCODE_CAPS.historyInjection,
+  mcp: OPENCODE_CAPS.mcp,
+  childPolicy: OPENCODE_CAPS.childPolicy
+})
 
 export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriver {
   return {
@@ -180,39 +224,101 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
     latestVersion: { kind: 'npm', package: OPENCODE_NPM_PACKAGE },
     // npm and Homebrew each have two OpenCodes: a copy follows the one it came from.
     packageOf: opencodePackageOf,
-    // One sign-in per computer (OpenCode's XDG folders): a second entry would share it.
+    // One sign-in per computer (OpenCode's own data folder): a second entry would share it.
     multiInstance: false,
     privateHome: false,
     canInstall: true,
     customModels: false,
+    // Chat titles, branch names, pull request drafts and commit messages: a session that denies every tool.
+    oneShot: true,
     methodLabel: 'OpenCode’s own sign-in',
     // OpenCode's sign-in is this computer's, whichever executable runs: never Mousse's own.
     sharedSignIn: true,
-    // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
+    // OpenCode's events do not name the MCP server a call went to: the bearer is kept only after a turn whose tool
+    // calls all completed.
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
-    // The agent's own `session/request_permission` flow decides (when it asks at all).
+    // OpenCode asks about the relay's tools through its own permission flow, which Mousse answers.
     relay: { approvals: 'runtime' },
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     versionArgs: () => ['--version'],
-    caps: (_config, _version, facts?: RuntimeFacts): HarnessCaps => {
-      const caps = { ...OPENCODE_CAPS }
-      return facts && OPENCODE_PRESET.capsFromFacts ? OPENCODE_PRESET.capsFromFacts(caps, facts) : caps
-    },
+    caps: () => ({ ...OPENCODE_CAPS }),
     updateCommand: opencodeUpdateCommand,
     create: (context) => createOpencodeRuntime(context, options)
   }
 }
 
+/** What the runtime keeps for an entry (`<stateDir>/opencode.json`). */
+interface OpencodeState {
+  sessions?: Record<string, SavedOpencodeSession>
+  models?: LlmModelOption[]
+  modelsRefreshedAt?: string
+  /** What the last check of OpenCode's providers found. */
+  connected?: { providers: string[]; checkedAt: string }
+  /** The ACP state of this entry (`acp.json`) was read in once: its saved sessions are OpenCode sessions. */
+  importedAcp?: boolean
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * The sessions an entry saved while it ran OpenCode over ACP (`acp.json`): OpenCode's ACP session ids are its own
+ * session ids, and the history fingerprint is the same, so a thread resumes its session on the server.
+ */
+export function sessionsFromAcpState(raw: unknown): Record<string, SavedOpencodeSession> {
+  const sessions = isRecord(raw) && isRecord(raw.sessions) ? raw.sessions : {}
+  const out: Record<string, SavedOpencodeSession> = {}
+  for (const [threadId, value] of Object.entries(sessions)) {
+    if (!isRecord(value) || typeof value.sessionId !== 'string' || typeof value.cwd !== 'string') continue
+    out[threadId] = {
+      sessionId: value.sessionId,
+      cwd: value.cwd,
+      ...(typeof value.historyKey === 'string' ? { historyKey: value.historyKey } : {}),
+      ...(typeof value.instanceId === 'string' ? { instanceId: value.instanceId } : {}),
+      ...(typeof value.instructionsHash === 'string' ? { instructionsHash: value.instructionsHash } : {})
+    }
+  }
+  return out
+}
+
 function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOptions): DriverRuntime {
   const label = context.config.displayName ?? OPENCODE_LABEL
   const { agents, registry } = options
-  const ptyRuns = () => (options.pty ? options.pty.available() : ptyAvailable())
+  const statePath = join(context.stateDir, 'opencode.json')
+  let state: OpencodeState = {}
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown
+    if (isRecord(parsed)) state = parsed as OpencodeState
+  } catch {
+    // No state yet.
+  }
+  const save = () => {
+    mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
+    atomicWriteJsonSync(statePath, state, { mode: 0o600 })
+  }
+  if (!state.importedAcp) {
+    try {
+      const acp = JSON.parse(readFileSync(join(context.stateDir, 'acp.json'), 'utf8')) as unknown
+      state.sessions = { ...sessionsFromAcpState(acp), ...(state.sessions ?? {}) }
+      state.importedAcp = true
+      save()
+    } catch {
+      // Nothing saved over ACP.
+    }
+  }
 
+  /** The registry id this entry's managed copy was installed under (an entry moved from the ACP list may use the alias). */
+  const registryId = (): string => {
+    const own = (context.config as { registryAgentId?: unknown }).registryAgentId
+    return typeof own === 'string' && agents?.reference(own, context.instanceId) ? own : OPENCODE_AGENT_ID
+  }
   /** The source of the version this entry installed (it may predate the registry's current one). */
   const ownSource = (): RegistrySource | undefined => {
-    const ref = agents?.reference(OPENCODE_AGENT_ID, context.instanceId)
-    return ref && agents ? agents.packageSource({ agentId: OPENCODE_AGENT_ID, version: ref.version }) : undefined
+    const agentId = registryId()
+    const ref = agents?.reference(agentId, context.instanceId)
+    return ref && agents ? agents.packageSource({ agentId, version: ref.version }) : undefined
   }
   /** The managed copy this entry installed, when it is on disk. Another entry's copy is never picked up. */
   const installedNow = (): InstalledAgent | undefined => {
@@ -225,28 +331,24 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
   let registryCheckedAt: number | undefined
 
   /**
-   * The executable: the entry's own, else the managed copy, else the one on PATH. The managed copy
-   * starts as its install record says (the registry's `acp` and variables), with the entry's own
-   * arguments and variables after; the others start as the preset says.
+   * The executable: the entry's own, else the managed copy, else the one on PATH. A managed copy starts as its install
+   * record says, without the record's own arguments (`acp`): the server is `serve`.
    */
-  const program = (): { resolved: CliLaunch; launch?: AcpLaunch; managed: boolean; root?: string } | undefined => {
+  const program = (): { command: string; args: string[]; path: string; env: Record<string, string>; managed: boolean; root?: string } | undefined => {
     if (context.config.binaryPath) {
       const resolved = resolveCommand(context.config.binaryPath, context.env)
-      return resolved ? { resolved, managed: false } : undefined
+      return resolved ? { command: resolved.command, args: resolved.args, path: resolved.path, env: {}, managed: false } : undefined
     }
     const installed = installedNow()
     if (installed && agents) {
       const agent = agents.launch(installed, context.env)
-      return {
-        resolved: { path: agent.path, command: agent.command, args: agent.args },
-        launch: { command: agent.command, args: [...(context.config.args ?? [])], env: { ...agent.env, ...(context.config.env ?? {}) } },
-        managed: true,
-        root: installed.root
-      }
+      const own = installed.receipt.launch.args.length
+      const args = own && agent.args.length >= own ? agent.args.slice(0, agent.args.length - own) : agent.args
+      return { command: agent.command, args, path: agent.path, env: { ...agent.env }, managed: true, root: installed.root }
     }
     const found = context.findBinary()
     const resolved = found ? cliLaunch(found) : undefined
-    return resolved ? { resolved, managed: false } : undefined
+    return resolved ? { command: resolved.command, args: resolved.args, path: resolved.path, env: {}, managed: false } : undefined
   }
 
   const checkManaged = async (signal?: AbortSignal, reuse = false): Promise<void> => {
@@ -265,22 +367,102 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
     verified = { hash: installed.hash, atMs: Date.now() }
   }
 
-  const base = createAcpRuntime(context, OPENCODE_PRESET, {
-    ...(options.connect ? { connect: options.connect } : {}),
-    ...(options.pty ? { pty: options.pty } : {})
-  }, ptyRuns, {
-    driver: 'opencode',
-    program: () => {
+  const serverDir = join(context.stateDir, 'server')
+  const server = new OpencodeServer({
+    label,
+    env: () => context.env,
+    launch: () => {
       const found = program()
-      if (!found) return undefined
-      return { resolved: found.resolved, ...(found.launch ? { launch: found.launch } : {}), ...(found.root && agents ? { track: () => agents.track(found.root!) } : {}) }
+      if (!found) throw harnessAppError({ code: 'not_installed', message: `${label} is not installed. Install it in Settings → Providers, or set its executable.` })
+      if (found.managed && (!verified || Date.now() - verified.atMs > 60_000)) throw new Error(`Mousse did not check the files of ${label} before starting it.`)
+      mkdirSync(serverDir, { recursive: true, mode: 0o700 })
+      return {
+        command: found.command,
+        args: [...found.args, ...(context.config.args ?? [])],
+        // Only Mousse's own copy is kept from updating itself; the user's own OpenCode runs as they set it up.
+        env: { ...found.env, ...(context.config.env ?? {}), ...(found.managed ? OPENCODE_MANAGED_ENV : {}) },
+        cwd: serverDir,
+        ...(found.root && agents ? { track: () => agents.track(found.root!) } : {})
+      }
     },
-    // Only Mousse's own copy is kept from updating itself; the user's own OpenCode runs as they set it up.
-    env: (env) => (program()?.managed ? withUserEnv(env, { ...OPENCODE_MANAGED_ENV }) : env),
-    checkInstall: ({ signal, reuse }) => checkManaged(signal, reuse),
-    // OpenCode's sign-in is this computer's, shared with the user's terminal: Mousse never signs it out.
-    agentLogout: () => false
+    ...(options.startServer ? { start: options.startServer } : {}),
+    ...(options.serverIdleMs !== undefined ? { idleMs: options.serverIdleMs } : {}),
+    onEvent: (event) => sessions.dispatch(event),
+    onExit: () => sessions.serverEnded()
   })
+
+  /** The server's client, after the managed copy's files were checked. */
+  const started = async (signal?: AbortSignal) => {
+    if (!server.running()) await checkManaged(signal, true)
+    return server.client(signal)
+  }
+
+  const sessions: OpencodeSessions = new OpencodeSessions({
+    label,
+    defaultInstanceId: context.instanceId,
+    server: { running: () => server.running(), hold: () => server.hold(), client: (signal?: AbortSignal) => started(signal) },
+    ...(options.interruptWaitMs !== undefined ? { interruptWaitMs: options.interruptWaitMs } : {}),
+    scratch: () => {
+      const path = join(context.stateDir, 'one-shot', randomUUID())
+      mkdirSync(path, { recursive: true, mode: 0o700 })
+      // A server that held the folder a moment longer leaves an empty one behind: harmless.
+      return { path, remove: () => { try { rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* kept */ } } }
+    },
+    store: {
+      saved: (threadId) => state.sessions?.[threadId],
+      setSaved: (threadId, saved) => {
+        if (saved) state.sessions = { ...state.sessions, [threadId]: saved }
+        else if (state.sessions) {
+          const { [threadId]: _dropped, ...rest } = state.sessions
+          state.sessions = rest
+        }
+        save()
+      },
+      models: () => state.models ?? [],
+      setModels: (models) => {
+        state.models = models
+        state.modelsRefreshedAt = new Date().toISOString()
+        save()
+      }
+    }
+  })
+
+  /** Which of OpenCode's providers have a connection (a sign-in or a key), read from the server. */
+  const readConnections = async (signal?: AbortSignal): Promise<string[]> => {
+    const client = await started(signal)
+    const data = await client.data('GET', '/api/integration', { signal: signal ?? AbortSignal.timeout(15_000) })
+    const providers = (Array.isArray(data) ? data : []).filter(isRecord)
+      .filter((integration) => Array.isArray(integration.connections) && integration.connections.length > 0)
+      .map((integration) => String(integration.id ?? integration.name ?? ''))
+      .filter(Boolean)
+    state.connected = { providers, checkedAt: new Date().toISOString() }
+    save()
+    return providers
+  }
+
+  const reading = (): AuthReading => {
+    if (context.signedOut()) return { state: 'signed_out', methodLabel: 'OpenCode’s own sign-in', message: `Signed out of ${label} in Mousse.`, signInCommand: 'opencode auth login', canSignIn: true }
+    if (!state.connected) return { state: 'unknown', methodLabel: 'OpenCode’s own sign-in', message: 'Check again to see which providers OpenCode can use.', signInCommand: 'opencode auth login' }
+    if (!state.connected.providers.length)
+      return { state: 'not_required', methodLabel: 'OpenCode’s free models', message: 'Only OpenCode’s free models. Add providers with `opencode auth login`.', signInCommand: 'opencode auth login' }
+    return { state: 'signed_in', methodLabel: state.connected.providers.slice(0, 3).join(' · ') }
+  }
+
+  const standaloneWorkspace = (threadId: string): string => {
+    const directory = join(context.stateDir, 'workspaces', createHash('sha256').update(threadId).digest('hex'))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
+  }
+
+  const client: AcpTurnClient = {
+    chat: (input) => sessions.chat(input),
+    commitConversation: (threadId, history) => sessions.commitConversation(threadId, history),
+    commitInterrupted: (threadId, history) => sessions.commitInterrupted(threadId, history),
+    standaloneWorkspace,
+    configured: () => runtime.configured(),
+    interrupt: (sessionId) => sessions.interrupt(sessionId)
+  }
+  const adapter = new AcpAdapter(() => client, { driver: 'opencode', label, capabilities: OPENCODE_CAPABILITIES })
 
   const managed = (): ManagedInstall | undefined => {
     const installed = installedNow()
@@ -298,11 +480,52 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
   }
 
   const runtime: DriverRuntime = {
-    ...base,
-    // A broken managed copy stops only itself: `checkManaged` reads the copy only while it is what runs,
-    // so an entry with its own executable never finds it broken.
-    configured: () => !managed()?.broken && base.configured(),
+    adapter,
+    oneShot: async (spec, signal) => {
+      if (context.signedOut()) throw harnessAppError({ code: 'signed_out', message: `Sign in to ${label} in Settings → Providers.` })
+      return { text: await sessions.oneShot({ model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() }) }
+    },
+    // A broken managed copy stops only itself.
+    configured: () => !managed()?.broken && Boolean(program()),
     llmProvider: () => (runtime.configured() ? { id: context.instanceId, label, models: runtime.models() } : undefined),
+    models: () => state.models ?? [],
+    modelsRefreshedAt: () => (state.models?.length ? state.modelsRefreshedAt : undefined),
+    refreshModels: async (cwd) => {
+      await sessions.refreshModels(await started(), cwd)
+      context.changed()
+    },
+    // Recheck asks the server which providers are connected; the periodic checks read what was found.
+    auth: async ({ force, signal }) => {
+      if (force && !context.signedOut() && program()) await readConnections(signal).catch(() => undefined)
+      return reading()
+    },
+    signIn: async (session) => {
+      try {
+        await readConnections(session.abort.signal)
+        return { success: true, sessionId: session.sessionId }
+      } catch (error) {
+        return { success: false, sessionId: session.sessionId, error: session.abort.signal.aborted ? 'Login cancelled' : error instanceof Error ? error.message : String(error) }
+      }
+    },
+    // OpenCode's sign-in is this computer's, shared with the user's terminal: Mousse never signs it out.
+    // The gateway keeps the flag (`signedOutInMousse`); the server ends so nothing runs on.
+    signOut: async () => {
+      server.stop()
+    },
+    handshake: async (signal) => {
+      await readConnections(signal)
+      await sessions.refreshModels(await started(signal))
+    },
+    launchChanged: () => server.stop(),
+    credentialsChanged: async () => server.stop(),
+    forgetConversation: (threadId) => {
+      sessions.forgetConversation(threadId)
+      void sessions.detachMcp(threadId).catch(() => undefined)
+    },
+    terminate: (ref) => {
+      void sessions.interrupt(ref.sessionId).catch(() => undefined)
+    },
+    stop: () => server.stopped(),
     ...(agents && registry ? {
       install: async (onProgress) => {
         onProgress({ message: `Checking the ACP registry for ${label}…` })
@@ -316,6 +539,7 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
           onProgress
         })
         filesChanged = undefined
+        server.stop()
       },
       managedLatestVersion: () => registry.cached().find((agent) => agent.id === OPENCODE_AGENT_ID)?.version,
       refreshManagedLatest: async () => {
@@ -345,7 +569,7 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
           filesChanged = undefined
           verified = undefined
           // Nothing keeps running from the deleted files; the next chat starts whatever is found now.
-          base.closeSessions()
+          server.stop()
         }
         return result
       },

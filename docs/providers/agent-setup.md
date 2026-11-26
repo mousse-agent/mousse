@@ -84,19 +84,36 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 
 ## OpenCode
 
-OpenCode runs `opencode acp`, with the entry's own arguments after `acp`. Mousse runs the executable
-set on the entry, else the copy Mousse installed, else the `opencode` on PATH or in an installer
-folder (`$OPENCODE_INSTALL_DIR`, `$XDG_BIN_DIR`, `~/bin`, `~/.opencode/bin`).
+OpenCode runs on its own server API: one `opencode serve` per entry, on loopback with a password of
+its own, started on first use and closed after ten idle minutes. It ends with Mousse, a crash
+included (`--stdio`). The entry's own arguments come before `serve`. Mousse runs the executable set
+on the entry, else the copy Mousse installed, else the `opencode` on PATH or in an installer folder
+(`$OPENCODE_INSTALL_DIR`, `$XDG_BIN_DIR`, `~/bin`, `~/.opencode/bin`). OpenCode 2 is required;
+OpenCode 1 has no server API.
 
+- **Permission modes.** Each thread has an OpenCode session whose permission rules follow the
+  thread's mode. Session rules outrank the user's agent and top-level rules. Full access allows
+  everything. Auto-accept edits allows file changes and asks about the rest. Ask asks about
+  everything. An ask becomes a Mousse approval answered once, never "always". A failure while
+  asking counts as a reject. Outside Full access, OpenCode's shell, its own subagents and Code Mode
+  are not offered: OpenCode asks about a shell line only when it finds a command in it, so a line of
+  redirections alone would change files unasked. A turn that must ask is refused before its prompt
+  when OpenCode loads a plugin of the user's (its permission hook can allow what the rules ask
+  about) or holds a saved "always" grant for the project.
+- **Single requests** (titles, branch names, pull request drafts, commit messages, a bot's name and
+  digest): a session in an empty scratch folder whose one rule denies every tool, so the model is
+  offered none; one prompt, its text, then the session is deleted. OpenCode's own free models refuse a
+  request with no tools, so for those only, reads are allowed. A retry OpenCode schedules ends the
+  request: one model request each.
 - **One entry.** OpenCode keeps its sign-ins and settings in this computer's folders
-  (`~/.config/opencode`, `~/.local/share/opencode/auth.json`) and has no home variable, so a second
-  entry would share them. Its sign-in follows the methods OpenCode offers over ACP. Sign-out forgets
-  Mousse's record only, also for Mousse's own copy; it never signs OpenCode itself out, and signing
-  in again only clears Mousse's flag.
+  (`~/.config/opencode`, `~/.local/share/opencode`) and has no home variable, so a second entry
+  would share them. Sign in with `opencode auth login`; Mousse reads which providers are connected.
+  Sign-out forgets Mousse's record only, also for Mousse's own copy; it never signs OpenCode itself
+  out, and signing in again only clears Mousse's flag.
 - **Managed copies.** Mousse installs the release the ACP registry's `opencode` entry names, checked
   against the registry's SHA-256 and recorded like a registry agent; every launch checks its files
-  first. It starts as its install record says (the registry's `acp` and variables), with the entry's
-  own arguments and variables after, and with `OPENCODE_DISABLE_AUTOUPDATE=1`, so it never replaces
+  first. It starts from its install record (the registry's variables, without its `acp` arguments),
+  with the entry's own arguments and variables after, and with `OPENCODE_DISABLE_AUTOUPDATE=1`, so it never replaces
   its own files. An executable set on the entry runs instead, even when the managed copy's files
   changed. The user's own `opencode` runs as the user set it up.
 - **Updates.** The user's own `opencode` is compared with where its owner updates it from, and

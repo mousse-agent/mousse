@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "revision": 5,
-  "namingProviders": ["claude", "codex", "antigravity", "pi:anthropic", "pi:openai", "pi:google", "pi", "*"],
+  "revision": 6,
+  "namingProviders": ["claude", "codex", "antigravity", "pi:anthropic", "pi:openai", "pi:google", "pi", "opencode", "*"],
   "models": [
     { "id": "claude-fable-5-2", "name": "Claude Fable 5.2", "short": "Fable 5.2", "maker": "anthropic", "family": "fable", "tier": "frontier", "released": "2026-11-09", "efforts": ["low", "medium", "high", "xhigh", "max"], "routes": { "claude": { "id": "claude-fable-5-2" }, "anthropic": { "id": "claude-fable-5-2" } } },
     { "id": "claude-opus-5-5", "name": "Claude Opus 5.5", "short": "Opus 5.5", "maker": "anthropic", "family": "opus", "tier": "frontier", "released": "2026-09-22", "efforts": ["low", "medium", "high", "xhigh", "max"], "routes": { "claude": { "id": "claude-opus-5-5" }, "anthropic": { "id": "claude-opus-5-5" } } },

@@ -1,19 +1,18 @@
 /**
  * OpenCode as its own agent entry: Mousse finds the user's `opencode` on PATH or in OpenCode's
- * installer folders and starts it as `opencode acp`; or installs the ACP registry's `opencode`
- * release itself (SHA-256 checked), starts it as its install record says with its updater off, and
- * refuses it once a file changes. Its update follows the owner (the registry for Mousse's own copy),
- * and its sign-in is the computer's, never Mousse's. OpenCode processes are recorded, never started
- * (`spawnHarness` is mocked), and ACP sign-in runs against an in-process agent: what the real
- * `opencode acp` does is not observed here.
+ * installer folders and starts its server (`opencode serve`); or installs the ACP registry's
+ * `opencode` release itself (SHA-256 checked), starts it from its install record with its updater
+ * off, and refuses it once a file changes. Its update follows the owner (the registry for Mousse's
+ * own copy), and its sign-in is the computer's, never Mousse's. OpenCode processes are recorded,
+ * never started (`spawnHarness` is mocked), and the sign-in check runs against a hand-authored
+ * server (`fakeOpencodeServer.ts`): what the real server does is checked in
+ * `tests/live/opencodeServer.test.ts`.
  */
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AcpConnection, AcpLaunchRequest } from '../../src/mms/harness/acp/connection'
 import { AgentInstalls, resetAgentInstallState } from '../../src/mms/harness/agents/install'
 import { DIST_DIR } from '../../src/mms/harness/agents/receipt'
 import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
@@ -27,17 +26,18 @@ import { LATEST_TTL_MS, LatestVersionCache, type LatestVersionSource } from '../
 import { probeVersion, updateAffordance } from '../../src/mms/harness/status'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { LoginSession } from '../../src/mms/providers/LoginSession'
-import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
+import type { OpencodeLaunch, StartedServer } from '../../src/mms/harness/opencode/server'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import type { InstallOwner } from '../../src/shared/harness/status'
 import { tarGzOf } from './archiveFixtures'
+import { fakeOpencodeServer, type FakeOpencode } from './fakeOpencodeServer'
 
 const spawned = vi.hoisted(() => [] as Array<{ purpose: string; command: string; args: string[]; env: NodeJS.ProcessEnv }>)
 vi.mock('../../src/mms/harness/spawn', async (original) => ({
   ...(await original<typeof import('../../src/mms/harness/spawn')>()),
   // Records the launch and stops it there: no OpenCode runs in these tests.
-  spawnHarness: (env: { env: NodeJS.ProcessEnv }, purpose: string, command: string, args: string[]) => {
-    spawned.push({ purpose, command, args, env: env.env })
+  spawnHarness: (env: { env: NodeJS.ProcessEnv }, purpose: string, command: string, args: string[], options?: { extraEnv?: NodeJS.ProcessEnv }) => {
+    spawned.push({ purpose, command, args, env: { ...env.env, ...options?.extraEnv } })
     throw new Error('not started in tests')
   }
 }))
@@ -69,6 +69,8 @@ function fakeOpencode(directory: string): string {
 
 const variableOf = (env: NodeJS.ProcessEnv, name: string) => Object.entries(env).find(([key]) => key.toUpperCase() === name)?.[1]
 const autoupdateOf = (env: NodeJS.ProcessEnv) => variableOf(env, 'OPENCODE_DISABLE_AUTOUPDATE')
+/** What every server Mousse starts is told after the entry's own arguments: loopback, a free port, ended with its pipe. */
+const SERVE = ['serve', '--stdio', '--hostname', '127.0.0.1', '--port', '0']
 
 interface SetupOptions {
   base?: NodeJS.ProcessEnv
@@ -77,7 +79,7 @@ interface SetupOptions {
   env?: Record<string, string>
   agents?: AgentInstalls
   registry?: Pick<Registry, 'agent' | 'cached'>
-  connect?: (context: DriverContext, request: AcpLaunchRequest) => AcpConnection
+  startServer?: (launch: OpencodeLaunch, signal: AbortSignal) => Promise<StartedServer>
   /** The clock of the registry's update check. */
   now?: () => number
   /** Reuse another setup's folders (its HOME and the entry's state). */
@@ -100,9 +102,8 @@ function userSetup(options: SetupOptions = {}) {
   const driver: HarnessDriver = opencodeDriver({
     ...(options.agents ? { agents: options.agents } : {}),
     ...(options.registry ? { registry: options.registry } : {}),
-    ...(options.connect ? { connect: options.connect } : {}),
-    ...(options.now ? { now: options.now } : {}),
-    pty: { available: () => false }
+    ...(options.startServer ? { startServer: options.startServer } : {}),
+    ...(options.now ? { now: options.now } : {})
   })
   const stateDir = join(root, 'state')
   const ctx: DriverContext = {
@@ -120,7 +121,9 @@ function userSetup(options: SetupOptions = {}) {
     questions: new UserQuestionService(),
     // As the gateway finds it: PATH, then the driver's installer folders.
     findBinary: () => findOnPath(driver.binaryNames, { env: env.env, searchPath: env.driverSearchPath ?? [] }),
-    changed: () => {}
+    changed: () => {},
+    signedOut: () => false,
+    saveLaunch: async () => {}
   }
   const runtime = driver.create(ctx)
   runtimes.push(runtime)
@@ -145,17 +148,17 @@ describe('finding the user’s opencode', () => {
     expect(installOwner('C:\\Users\\u\\.opencode\\bin\\opencode.exe', 'path')).toBe('standalone')
   })
 
-  it('finds an installer copy in ~/.opencode/bin that is not on PATH, and starts it as `opencode acp`', async () => {
+  it('finds an installer copy in ~/.opencode/bin that is not on PATH, and starts its server', async () => {
     const { runtime, home, root } = userSetup({ args: ['--print-logs'] })
     const program = fakeOpencode(join(home, '.opencode', 'bin'))
     expect(runtime.configured()).toBe(true)
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
     await runtime.refreshModels!(root).catch(() => undefined)
-    expect(spawned.map((entry) => entry.purpose)).toEqual(['acp-handshake', 'acp-models'])
+    expect(spawned.map((entry) => entry.purpose)).toEqual(['opencode-serve', 'opencode-serve'])
     for (const entry of spawned) {
       expect(entry.command).toBe(program)
-      // The entry's own arguments follow `acp`.
-      expect(entry.args).toEqual(['acp', '--print-logs'])
+      // The entry's own arguments come before `serve`.
+      expect(entry.args).toEqual(['--print-logs', ...SERVE])
       // The user's own OpenCode updates itself as they set it up.
       expect(autoupdateOf(entry.env)).toBeUndefined()
     }
@@ -166,7 +169,7 @@ describe('finding the user’s opencode', () => {
     const program = fakeOpencode(custom)
     const { runtime } = userSetup({ base: { OPENCODE_INSTALL_DIR: custom } })
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
-    expect(spawned[0]).toMatchObject({ command: program, args: ['acp'] })
+    expect(spawned[0]).toMatchObject({ command: program, args: SERVE })
   })
 
   it('is not configured when there is no opencode anywhere', async () => {
@@ -181,7 +184,7 @@ describe('finding the user’s opencode', () => {
     const { runtime, home } = userSetup({ binaryPath: own })
     fakeOpencode(join(home, '.opencode', 'bin'))
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
-    expect(spawned[0]).toMatchObject({ command: own, args: ['acp'] })
+    expect(spawned[0]).toMatchObject({ command: own, args: SERVE })
   })
 })
 
@@ -306,57 +309,32 @@ describe('the update of the user’s own opencode', () => {
     expect(latestSourceFor(opencodeDriver(), binary)).toEqual(source)
     const update = updateAffordance(opencodeDriver(), binary, { state: 'untested' }, '2.4.1')
     if (command) expect(update).toMatchObject({ kind: 'advisory', command, latestVersion: '2.4.1' })
-    else expect(update).toEqual({ kind: 'notice', latestVersion: '2.4.1' })
+    // 2.4.1 is past the OpenCode Mousse was tested with (`COMPATIBILITY.opencode`), which the notice says.
+    else expect(update).toEqual({ kind: 'notice', latestVersion: '2.4.1', untested: true })
   })
 })
 
 describe('OpenCode’s sign-in', () => {
-  /** An OpenCode over ACP that signs in with one `agent` method and counts what it is asked. */
-  function agent() {
-    const counts = { authenticate: 0, logout: 0 }
-    const fake = inProcessAgent((app) => {
-      app
-        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [{ id: 'opencode-login', name: 'Log in to OpenCode' }] as never }))
-        .onRequest(methods.agent.authenticate, () => {
-          counts.authenticate += 1
-          return {}
-        })
-        .onRequest(methods.agent.logout, () => {
-          counts.logout += 1
-          return {}
-        })
-        .onRequest(methods.agent.session.new, () => ({ sessionId: 'verify' }))
-    })
-    return { counts, connect: (_context: DriverContext, request: AcpLaunchRequest) => fake.connect(request), connections: fake.connections }
+  function withServer(fake: FakeOpencode) {
+    const setup = userSetup({ startServer: (launch, signal) => fake.start(launch, signal) })
+    fakeOpencode(join(setup.home, '.opencode', 'bin'))
+    return setup
   }
 
-  async function signedIn(options: { args?: string[]; env?: Record<string, string> } = {}) {
-    const fake = agent()
-    const first = userSetup({ connect: fake.connect, ...options })
-    fakeOpencode(join(first.home, '.opencode', 'bin'))
-    expect(await first.runtime.signIn!(new LoginSession('op'), process.cwd())).toMatchObject({ success: true })
-    expect((await first.runtime.auth({ force: false })).state).toBe('signed_in')
-    return { fake, first }
-  }
-
-  it('a sign-in counts for the entry’s arguments and variables: changing either asks again', async () => {
-    const { fake, first } = await signedIn({ args: ['--print-logs'], env: { OPENCODE_CONFIG: '/a.json' } })
-    const same = userSetup({ connect: fake.connect, root: first.root, args: ['--print-logs'], env: { OPENCODE_CONFIG: '/a.json' } })
-    expect((await same.runtime.auth({ force: false })).state).toBe('signed_in')
-    const otherEnv = userSetup({ connect: fake.connect, root: first.root, args: ['--print-logs'], env: { OPENCODE_CONFIG: '/b.json' } })
-    expect((await otherEnv.runtime.auth({ force: false })).state).not.toBe('signed_in')
-    const otherArgs = userSetup({ connect: fake.connect, root: first.root, env: { OPENCODE_CONFIG: '/a.json' } })
-    expect((await otherArgs.runtime.auth({ force: false })).state).not.toBe('signed_in')
+  it('signing in reads which providers OpenCode is connected to; with none, only its free models run', async () => {
+    const fake = await fakeOpencodeServer()
+    try {
+      const { runtime } = withServer(fake)
+      expect(await runtime.signIn!(new LoginSession('op'), process.cwd())).toMatchObject({ success: true })
+      expect(await runtime.auth({ force: false })).toMatchObject({ state: 'signed_in', methodLabel: 'anthropic' })
+      fake.integrations = [{ id: 'anthropic', connections: [] }]
+      expect(await runtime.auth({ force: true })).toMatchObject({ state: 'not_required' })
+      await runtime.stop()
+    } finally {
+      await fake.close()
+    }
   })
 
-  it('sign-out never asks OpenCode to sign out: its sign-in is the computer’s', async () => {
-    const { fake, first } = await signedIn()
-    const opened = fake.connections.length
-    await first.runtime.signOut!()
-    expect(fake.counts.logout).toBe(0)
-    expect(fake.connections.length).toBe(opened)
-    expect((await first.runtime.auth({ force: false })).state).not.toBe('signed_in')
-  })
 })
 
 type Registry = { current: RegistryAgent; agent: (id: string) => Promise<RegistryAgent | undefined>; cached: () => RegistryAgent[]; asked: number }
@@ -425,18 +403,19 @@ describe('a managed OpenCode', () => {
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
     expect(spawned).toHaveLength(1)
     expect(spawned[0]!.command).toBe(managed!.path)
-    expect(spawned[0]!.args).toEqual(['acp'])
+    // Not the registry's `acp`: Mousse starts the server.
+    expect(spawned[0]!.args).toEqual(SERVE)
     expect(autoupdateOf(spawned[0]!.env)).toBe('1')
   })
 
-  it('starts as its install record says, the entry’s arguments and variables after, and the updater off whatever the entry sets', async () => {
+  it('starts from its install record with the record’s variables, the entry’s arguments and variables after, never the record’s `acp` arguments, and the updater off whatever the entry sets', async () => {
     const shared = installation(entry('2.4.1', { args: ['acp', '--from-registry'], env: { OPENCODE_FROM_REGISTRY: '1', OPENCODE_SHARED: 'registry' } }))
     const { runtime } = userSetup({ agents: shared.agents, registry: shared.registry, args: ['--print-logs'], env: { OPENCODE_SHARED: 'entry', OPENCODE_DISABLE_AUTOUPDATE: '0' } })
     await runtime.install!(() => {})
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
     const [launch] = spawned
-    // `acp` once, the registry's flags kept, the entry's own after.
-    expect(launch!.args).toEqual(['acp', '--from-registry', '--print-logs'])
+    // The registry's arguments start `opencode acp`; the server takes the entry's own.
+    expect(launch!.args).toEqual(['--print-logs', ...SERVE])
     expect(variableOf(launch!.env, 'OPENCODE_FROM_REGISTRY')).toBe('1')
     expect(variableOf(launch!.env, 'OPENCODE_SHARED')).toBe('entry')
     expect(autoupdateOf(launch!.env)).toBe('1')
@@ -480,7 +459,7 @@ describe('a managed OpenCode', () => {
     // A start checks no managed files either: the user's executable starts.
     await runtime.handshake!(new AbortController().signal).catch(() => undefined)
     expect(spawned).toHaveLength(1)
-    expect(spawned[0]).toMatchObject({ command: own, args: ['acp'] })
+    expect(spawned[0]).toMatchObject({ command: own, args: SERVE })
     expect(autoupdateOf(spawned[0]!.env)).toBeUndefined()
     // The check reads the executable, not the broken copy.
     // (Node stands in for the user's executable, so the version check has something to run.)
@@ -533,7 +512,7 @@ describe('a managed OpenCode', () => {
     expect(existsSync(path)).toBe(false)
     expect(first.runtime.managed!()).toBeUndefined()
     await first.runtime.handshake!(new AbortController().signal).catch(() => undefined)
-    expect(spawned.at(-1)).toMatchObject({ command: own, args: ['acp'] })
+    expect(spawned.at(-1)).toMatchObject({ command: own, args: SERVE })
 
     const second = userSetup({ agents: shared.agents, registry: shared.registry })
     await second.runtime.install!(() => {})
@@ -597,14 +576,12 @@ describe('a managed OpenCode', () => {
         npmAsked.push(url)
         return Response.json({ version: npmVersion })
       }) as unknown as typeof fetch
-      const fake = inProcessAgent((app) => {
-        app.onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
-      })
+      const fake = await fakeOpencodeServer()
       const profileHome = tempDir('mousse-opencode-gateway-')
       let stored: unknown = { [ID]: { driver: 'opencode', enabled: true } }
       const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
       const harness = testHarness({
-        drivers: [opencodeDriver({ agents: shared.agents, registry: shared.registry, connect: (_context, request) => fake.connect(request), pty: { available: () => false }, now: () => clock.now })],
+        drivers: [opencodeDriver({ agents: shared.agents, registry: shared.registry, startServer: (launch, signal) => fake.start(launch, signal), now: () => clock.now })],
         instances,
         profileHome,
         latest: new LatestVersionCache(profileHome, { fetchImpl })
@@ -615,7 +592,7 @@ describe('a managed OpenCode', () => {
     }
 
     it('updates a managed copy to the registry’s release, never to a newer npm one, and asks only the registry', async () => {
-      const { harness, shared, clock, npmAsked, snapshot } = await providers('2.5.0')
+      const { harness, shared, clock, npmAsked, snapshot, fake } = await providers('2.5.0')
       expect((await snapshot()).update).toBeUndefined()
       expect(npmAsked).toEqual([])
       // Opening the page asked the registry already.
@@ -636,7 +613,8 @@ describe('a managed OpenCode', () => {
       const offered = (event: HarnessGatewayEvent) =>
         event.type === 'snapshots' && event.data.snapshots.some((entry) => entry.instanceId === ID && entry.update?.latestVersion === '2.4.2')
       await waitFor(() => events.some(offered))
-      expect((await snapshot()).update).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '2.4.2' })
+      // Past the tested OpenCode, which the offer says.
+      expect((await snapshot()).update).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '2.4.2', untested: true })
 
       await harness.instances.update(ID)
       await waitFor(async () => (await snapshot()).binary?.version === '2.4.2')
@@ -644,18 +622,19 @@ describe('a managed OpenCode', () => {
       expect(npmAsked).toEqual([])
       unsubscribe()
       harness.stop()
+      await fake.close()
     })
 
     it('sign-out leaves the computer’s OpenCode sign-in alone, and signing in again only clears Mousse’s flag', async () => {
       const { harness, fake, snapshot } = await providers('2.4.1')
       const signedOut = await harness.instances.signOut(ID)
       expect(signedOut.auth).toMatchObject({ state: 'signed_out', message: expect.stringMatching(/OpenCode sign-in on this computer is unchanged/) })
-      const opened = fake.connections.length
       await harness.instances.signIn(ID)
       await waitFor(async () => (await snapshot()).auth.state !== 'signed_out')
-      // No ACP sign-in ran: no agent was started for it.
-      expect(fake.connections.slice(opened).filter((connection) => connection.request.purpose === 'sign_in')).toEqual([])
+      // OpenCode was only read: nothing was signed out or in there.
+      expect(fake.calls.filter((call) => call.method !== 'GET')).toEqual([])
       harness.stop()
+      await fake.close()
     })
   })
 })

@@ -89,8 +89,15 @@ export const COMPATIBILITY: Readonly<Record<CompatibilityKey, CompatibilityRow>>
     tested: { min: '1.0.70', max: '1.0.70' },
     evidence: [{ version: '1.0.70', kind: 'smoke', ref: '#226' }]
   },
-  // No version of OpenCode has been run against Mousse yet: no tested range, so none is judged.
-  opencode: { evidence: [] },
+  // OpenCode runs on its server API (`opencode serve`), which OpenCode 1 does not have.
+  opencode: {
+    tested: { min: '2.0.20', max: '2.0.20' },
+    knownBroken: [{ range: '0.0.0 - 1.999.999', reason: 'OpenCode 1 has no server API for Mousse to run it on. Update to OpenCode 2.', fixedIn: '2.0.0' }],
+    evidence: [
+      { version: '2.0.20', kind: 'fixture', ref: 'tests/harness/fakeOpencodeServer.ts' },
+      { version: '2.0.20', kind: 'smoke', ref: '#1934' }
+    ]
+  },
   'acp:opencode': { evidence: [] }
 } satisfies Record<CompatibilityKey, CompatibilityRow>)
 

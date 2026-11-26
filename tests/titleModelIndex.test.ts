@@ -36,6 +36,7 @@ const MODELS: Record<string, InstanceModel[]> = {
   'pi:anthropic': [model('claude-haiku-5-5', { capabilities: { efforts: ['low', 'high'], images: false, thinkingOff: true } })],
   'pi:openai': [model('gpt-6-luna')],
   'pi:groq': [model('llama-fast')],
+  'opencode:opencode': [model('opencode/big-pickle')],
   'acp:other': [model('other-model')]
 }
 
@@ -51,9 +52,10 @@ function rank(snapshots: InstanceSnapshot[], options: { models?: Record<string, 
 const ids = (candidates: Array<{ instanceId: string; model: string }>) => candidates.map((candidate) => `${candidate.instanceId}/${candidate.model}`)
 
 describe('ranking', () => {
-  it('Claude, then Codex, then Antigravity, then Pi by provider, then any other agent; small models first within each', () => {
+  it('Claude, then Codex, then Antigravity, then Pi by provider, then OpenCode, then any other agent; small models first within each', () => {
     const ranked = rank([
       snapshot({ instanceId: 'acp:other', driver: 'acp' as InstanceSnapshot['driver'] }),
+      snapshot({ instanceId: 'opencode:opencode', driver: 'opencode' as InstanceSnapshot['driver'] }),
       piSnapshot('pi:groq'),
       piSnapshot('pi:openai'),
       piSnapshot('pi:anthropic'),
@@ -68,6 +70,7 @@ describe('ranking', () => {
       'pi:anthropic/claude-haiku-5-5',
       'pi:openai/gpt-6-luna',
       'pi:groq/llama-fast',
+      'opencode:opencode/opencode/big-pickle',
       'acp:other/other-model'
     ])
   })

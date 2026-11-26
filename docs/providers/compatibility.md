@@ -8,8 +8,8 @@ Each row has:
 
 - `tested`: the versions Mousse was tested with. A version below it is "too old"; a newer one is
   reported on the provider's card and never blocked. The generic ACP preset has none: it runs any
-  agent. OpenCode (`opencode`, `acp:opencode`) has none yet either: no version has been run against
-  Mousse, so none is judged until a smoke run adds the range and its evidence.
+  agent. The ACP preset `acp:opencode` has none either. The `opencode` driver is tested with
+  OpenCode 2.0.20 on its server API, and OpenCode 1, which has no server API, is known broken.
 - `knownBroken`: versions that do not work with Mousse, each with a `range` (`2.1.5`, or
   `2.1.5 - 2.1.9`, both ends included), a `reason` the card shows, and `fixedIn` when a later
   version works again.
