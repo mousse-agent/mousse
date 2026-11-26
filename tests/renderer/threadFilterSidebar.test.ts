@@ -190,6 +190,26 @@ describe('the sidebar filter', () => {
     expect(groups()).toEqual(['mousse', 'smiletrack', 'No project'])
   })
 
+  it('in the Projects tab more than five projects move into Projects ›, a list of checkboxes that stays open', () => {
+    const many: Project[] = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ ...projects[0], id, name: `proj-${id}` }))
+    show('projects', [], many)
+    openMenu()
+    expect(item('proj-a')).toBeUndefined()
+    const trigger = () => document.querySelector('[data-sub="shown"]')
+    expect(trigger()?.textContent).toContain('All')
+    click(trigger())
+    expect(subTicked('All projects')).toBe('true')
+    expect(subItem('proj-b')?.getAttribute('role')).toBe('menuitemcheckbox')
+    click(subItem('proj-b'))
+    expect(subTicked('proj-b')).toBe('false')
+    expect(subTicked('All projects')).toBe('false')
+    expect(chips()).toEqual(['1 hidden'])
+    expect(trigger()?.textContent).toContain('5 of 6')
+    click(subItem('All projects'))
+    expect(chips()).toEqual([])
+    expect(subTicked('proj-b')).toBe('true')
+  })
+
   it('a bot\'s See all opens the Threads tab on its threads; Archived opened there keeps the filter', async () => {
     show('projects')
     useThreadFilterStore.getState().toggleComputer('mac')
