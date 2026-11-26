@@ -32,6 +32,9 @@ export const OPENCODE_LABEL = 'OpenCode'
 /** The ACP registry entry a managed copy is installed from, and its folder under `agents/`. */
 export const OPENCODE_AGENT_ID = 'opencode'
 
+/** The ACP registry's ids of OpenCode: its own and the legacy alias of the same release. */
+const OPENCODE_REGISTRY_IDS: ReadonlySet<string> = new Set([OPENCODE_AGENT_ID, 'opencode-v2'])
+
 /** Set on every process of a managed copy: OpenCode must not replace files Mousse checks against its receipt. */
 export const OPENCODE_MANAGED_ENV: Readonly<Record<string, string>> = Object.freeze({ OPENCODE_DISABLE_AUTOUPDATE: '1' })
 
@@ -240,7 +243,12 @@ export function opencodeDriver(options: OpencodeDriverOptions = {}): HarnessDriv
     userMcp: 'native',
     // OpenCode asks about the relay's tools through its own permission flow, which Mousse answers.
     relay: { approvals: 'runtime' },
-    decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
+    decodeConfig: (raw) => {
+      const config = decodeInstanceConfig(raw, { privateHome: false })
+      // Kept for an entry moved from the ACP list: its managed copy is found under the id it was installed with.
+      if (typeof raw?.registryAgentId === 'string' && OPENCODE_REGISTRY_IDS.has(raw.registryAgentId)) config.registryAgentId = raw.registryAgentId
+      return config
+    },
     versionArgs: () => ['--version'],
     caps: () => ({ ...OPENCODE_CAPS }),
     updateCommand: opencodeUpdateCommand,
@@ -309,10 +317,14 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
     }
   }
 
-  /** The registry id this entry's managed copy was installed under (an entry moved from the ACP list may use the alias). */
+  /**
+   * The registry id this entry's managed copy was installed under: `opencode`, or the alias an entry moved from the ACP
+   * list was installed with, until it installs again.
+   */
   const registryId = (): string => {
-    const own = (context.config as { registryAgentId?: unknown }).registryAgentId
-    return typeof own === 'string' && agents?.reference(own, context.instanceId) ? own : OPENCODE_AGENT_ID
+    if (agents?.reference(OPENCODE_AGENT_ID, context.instanceId)) return OPENCODE_AGENT_ID
+    const alias = context.config.registryAgentId
+    return alias && agents?.reference(alias, context.instanceId) ? alias : OPENCODE_AGENT_ID
   }
   /** The source of the version this entry installed (it may predate the registry's current one). */
   const ownSource = (): RegistrySource | undefined => {
@@ -531,6 +543,8 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
         onProgress({ message: `Checking the ACP registry for ${label}…` })
         const agent = await registry.agent(OPENCODE_AGENT_ID)
         if (!agent) throw new Error(`The ACP registry no longer lists ${label}.`)
+        // A copy installed under the registry's alias is let go once the entry has its own.
+        const aliased = registryId() !== OPENCODE_AGENT_ID ? ownSource() : undefined
         await agents.install({
           instanceId: context.instanceId,
           source: agents.packageSource({ agentId: OPENCODE_AGENT_ID, version: agent.version }),
@@ -538,6 +552,7 @@ function createOpencodeRuntime(context: DriverContext, options: OpencodeDriverOp
           label,
           onProgress
         })
+        if (aliased) await agents.release(context.instanceId, aliased).catch(() => undefined)
         filesChanged = undefined
         server.stop()
       },

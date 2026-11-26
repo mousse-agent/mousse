@@ -97,8 +97,7 @@ export const COMPATIBILITY: Readonly<Record<CompatibilityKey, CompatibilityRow>>
       { version: '2.0.20', kind: 'fixture', ref: 'tests/harness/fakeOpencodeServer.ts' },
       { version: '2.0.20', kind: 'smoke', ref: '#1934' }
     ]
-  },
-  'acp:opencode': { evidence: [] }
+  }
 } satisfies Record<CompatibilityKey, CompatibilityRow>)
 
 /** What a driver or preset takes from its row: its tested range and known-broken versions. */

@@ -86,6 +86,34 @@ describe('instance seeding', () => {
   })
 })
 
+describe('OpenCode added as an ACP agent', () => {
+  const registry = (agentId: string) => ({ driver: 'acp', enabled: false, config: { displayName: 'OpenCode', source: { kind: 'registry', agentId, version: '2.0.20', distribution: 'binary' }, telemetry: 'off', signedOutInMousse: true } })
+
+  it('moves to the OpenCode provider on read, keeping its id, name, switches, arguments after `acp` and variables', () => {
+    const local = { driver: 'acp', enabled: true, config: { source: { kind: 'local', command: 'C:\\Tools\\opencode.exe', args: ['acp', '--print-logs'], env: { OPENCODE_CONFIG: '/a.json' } } } }
+    const plain = { driver: 'acp', enabled: true, config: { binaryPath: '/usr/local/bin/opencode', args: ['acp'] } }
+    const { instances, upgraded } = seedProviderInstances({ 'acp:opencode': registry('opencode'), 'acp:oc2': registry('opencode-v2'), 'acp:local': local, 'acp:plain': plain }, [], 1)
+    expect(instances['acp:opencode']).toEqual({ driver: 'opencode', enabled: false, config: { displayName: 'OpenCode', telemetry: 'off', signedOutInMousse: true, registryAgentId: 'opencode' } })
+    expect(instances['acp:oc2']).toMatchObject({ driver: 'opencode', config: { registryAgentId: 'opencode-v2' } })
+    expect(instances['acp:local']).toEqual({ driver: 'opencode', enabled: true, config: { binaryPath: 'C:\\Tools\\opencode.exe', args: ['--print-logs'], env: { OPENCODE_CONFIG: '/a.json' } } })
+    expect(instances['acp:plain']).toEqual({ driver: 'opencode', enabled: true, config: { binaryPath: '/usr/local/bin/opencode', args: [] } })
+    expect(upgraded.sort()).toEqual(['acp:local', 'acp:oc2', 'acp:opencode', 'acp:plain'])
+    // Read again, nothing moves twice.
+    expect(seedProviderInstances(instances, [], 1).upgraded).toEqual([])
+  })
+
+  it('leaves every other ACP agent alone, an `opencode` that does not run `acp` included', () => {
+    const others = {
+      'acp:goose': { driver: 'acp', enabled: true, config: { source: { kind: 'registry', agentId: 'goose', version: '1', distribution: 'binary' } } },
+      'acp:fork': { driver: 'acp', enabled: true, config: { source: { kind: 'local', command: '/bin/opencode-fork', args: ['acp'] } } },
+      'acp:serve': { driver: 'acp', enabled: true, config: { source: { kind: 'local', command: '/bin/opencode', args: ['serve'] } } }
+    }
+    const { instances, upgraded } = seedProviderInstances(others, [], 1)
+    expect(instances).toEqual(others)
+    expect(upgraded).toEqual([])
+  })
+})
+
 describe('seed versions', () => {
   // A hypothetical future change: version 2 seeds `claude` with a config.
   const change = { before: 2, id: 'claude', seed: { driver: 'claude' as const, enabled: true }, next: { driver: 'claude' as const, enabled: true, config: { v: 2 } } }

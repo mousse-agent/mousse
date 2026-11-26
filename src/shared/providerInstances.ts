@@ -256,7 +256,63 @@ export function seedProviderInstances(
       seed(id, { ...entry, ...(config ? { config } : {}) })
     }
   for (const providerId of credentialedPiProviders) if (providerId) seed(piInstanceId(providerId), { driver: 'pi', enabled: true })
+  for (const [id, entry] of Object.entries(instances)) {
+    const moved = opencodeEntryFromAcp(entry)
+    if (!moved) continue
+    instances[id] = moved
+    upgraded.push(id)
+  }
   return { instances, added, upgraded, seedVersion: Math.max(version, current) }
+}
+
+/** The ACP registry's ids of OpenCode: its own and the legacy alias of the same release. */
+const OPENCODE_REGISTRY_IDS: ReadonlySet<string> = new Set(['opencode', 'opencode-v2'])
+
+/** An `opencode` executable, by file name: `opencode`, `opencode.exe`, `opencode.cmd`. */
+function isOpencodeCommand(command: unknown): command is string {
+  if (typeof command !== 'string') return false
+  const name = command.split(/[\\/]/).pop() ?? ''
+  return /^opencode(?:\.exe|\.cmd)?$/i.test(name)
+}
+
+/**
+ * An OpenCode added as an ACP agent (from the registry, or as a command running `opencode acp`), as an entry of the
+ * OpenCode provider with the same name, executable, arguments, variables and switches. Undefined for any other entry.
+ * The id stays, so its threads, its install and its saved native sessions stay with it. The registry `source` goes:
+ * the OpenCode provider finds the install by the entry's id, and starts its own command (`serve`) from it.
+ */
+export function opencodeEntryFromAcp(entry: unknown): ProviderInstanceConfig | undefined {
+  if (!isProviderInstanceConfig(entry) || entry.driver !== 'acp') return undefined
+  const config = entry.config ?? {}
+  const source = config.source
+  const { source: _source, ...rest } = config
+  if (source && typeof source === 'object' && !Array.isArray(source)) {
+    const record = source as Record<string, unknown>
+    if (record.kind === 'registry' && typeof record.agentId === 'string' && OPENCODE_REGISTRY_IDS.has(record.agentId))
+      return { ...entry, driver: 'opencode', config: { ...rest, registryAgentId: record.agentId } }
+    if (record.kind === 'local' && isOpencodeCommand(record.command) && Array.isArray(record.args) && record.args[0] === 'acp') {
+      const env = record.env && typeof record.env === 'object' && !Array.isArray(record.env) ? record.env as Record<string, unknown> : {}
+      return {
+        ...entry,
+        driver: 'opencode',
+        config: {
+          ...rest,
+          binaryPath: record.command,
+          args: record.args.slice(1).filter((arg): arg is string => typeof arg === 'string'),
+          ...(Object.keys(env).length ? { env: { ...env, ...(isRecordValue(rest.env) ? rest.env : {}) } } : {})
+        }
+      }
+    }
+    return undefined
+  }
+  // An entry with no source runs its `binaryPath` with its `args`.
+  if (isOpencodeCommand(config.binaryPath) && Array.isArray(config.args) && config.args[0] === 'acp')
+    return { ...entry, driver: 'opencode', config: { ...rest, args: config.args.slice(1).filter((arg): arg is string => typeof arg === 'string') } }
+  return undefined
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 /**
