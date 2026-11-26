@@ -61,7 +61,7 @@
         "src/mms/bots/botExecutionPort.ts"
       ],
       "claimedAt": "2026-11-26T06:11:22.348Z",
-      "expiresAt": "2026-11-26T11:53:16.905Z"
+      "expiresAt": "2026-11-26T15:05:32.827Z"
     },
     {
       "task": "fix-remote-composer-steer",
