@@ -10,6 +10,14 @@ export function isNetworkOrDevicePath(path: string, platform: NodeJS.Platform = 
   return platform === 'win32' && /^[\\/]{2}/.test(path)
 }
 
+/**
+ * A path with a hidden folder in it (`~/.private-project`, `C:\$Recycle.Bin\x`): folder browsing for another computer
+ * does not list these, so they cannot be opened or cloned into by naming them either.
+ */
+export function hasHiddenSegment(path: string): boolean {
+  return path.split(/[\\/]+/).some((segment) => segment.startsWith('.') || segment.startsWith('$'))
+}
+
 /** Why another computer may not make `folders` (spellings of one folder: as given, and its real path) a project. */
 export type RemoteFolderProblem =
   /** Inside the Mousse data folder, or a folder that holds it (a user's home folder does). */

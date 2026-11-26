@@ -27,6 +27,31 @@ function requirePerson(context: HandlerContext, what: string): UserAction {
   throw new DomainRpcError('forbidden', `${what} from Settings → Source control in a Mousse window.`)
 }
 
+/** Who started each account's Connect in progress: a window here (`here`), or another computer by its node. */
+const starters = new WeakMap<GitHubAccount, { operationId: string; caller: string }>()
+
+/** The caller as `starters` names it; anything that is neither a window here nor another computer is `other`. */
+function callerOf(context: HandlerContext): string {
+  const connection = context.connection
+  if (connection?.clientType === 'gui') return 'here'
+  if (connection?.clientType === 'bridge' && connection.bridgeCaller) return `node:${connection.bridgeCaller.node}`
+  return 'other'
+}
+
+/**
+ * A status as this caller may see it. The one-time code signs this computer in to whichever GitHub account enters it,
+ * so only a window here and the computer that started the Connect get it (and its address); others see the phase.
+ */
+function forCaller(account: GitHubAccount, context: HandlerContext, status: SourceControlProviderStatus): SourceControlProviderStatus {
+  const operation = status.operation
+  if (!operation?.code && !operation?.url) return status
+  const caller = callerOf(context)
+  const starter = starters.get(account)
+  if (caller === 'here' || (starter?.operationId === operation.id && starter.caller === caller)) return status
+  const { code: _code, url: _url, ...shown } = operation
+  return { ...status, operation: shown }
+}
+
 const absolutePath = (value: unknown, what: string): string => {
   if (typeof value !== 'string' || !value || value.length > 4096) throw new DomainRpcError('invalid_params', `${what} is required`)
   return value
@@ -39,7 +64,9 @@ const absolutePath = (value: unknown, what: string): string => {
  * The account is the computer's, shared by every profile.
  */
 export function registerSourceControlMethods(domains: DomainHandlerRegistry, github: () => GitHubAccount): void {
-  const all = async (refresh: boolean): Promise<SourceControlStatus> => ({ providers: [await github().status(refresh)] })
+  const all = async (context: HandlerContext, refresh: boolean): Promise<SourceControlStatus> => ({
+    providers: [forCaller(github(), context, await github().status(refresh))]
+  })
   domains.register({
     method: 'sourceControl.status',
     scope: 'profile',
@@ -47,14 +74,19 @@ export function registerSourceControlMethods(domains: DomainHandlerRegistry, git
       const raw = domainObject(params ?? {}, ['profileId', 'refresh'])
       return { refresh: raw.refresh === true }
     },
-    handle: async (_context, params): Promise<SourceControlStatus> => await all(params.refresh)
+    handle: async (context, params): Promise<SourceControlStatus> => await all(context, params.refresh)
   })
   domains.register({
     method: 'sourceControl.connect',
     scope: 'profile',
     validate: (params) => ({ provider: provider(domainObject(params ?? {}, ['profileId', 'provider']).provider) }),
     handle: async (context: HandlerContext): Promise<SourceControlProviderStatus> => {
-      return await github().connect(requirePerson(context, 'Connect GitHub'))
+      const account = github()
+      const status = await account.connect(requirePerson(context, 'Connect GitHub'))
+      // The caller that started this Connect sees its one-time code; one that joins it later does not.
+      const operationId = status.operation?.id
+      if (operationId && starters.get(account)?.operationId !== operationId) starters.set(account, { operationId, caller: callerOf(context) })
+      return forCaller(account, context, status)
     }
   })
   domains.register({
@@ -63,7 +95,7 @@ export function registerSourceControlMethods(domains: DomainHandlerRegistry, git
     validate: (params) => ({ provider: provider(domainObject(params ?? {}, ['profileId', 'provider']).provider) }),
     handle: async (context: HandlerContext): Promise<SourceControlProviderStatus> => {
       requirePerson(context, 'Cancel connecting GitHub')
-      return await github().cancel()
+      return forCaller(github(), context, await github().cancel())
     }
   })
   domains.register({

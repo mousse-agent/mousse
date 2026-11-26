@@ -482,15 +482,17 @@ function NewProjectPanel() {
 
 /** GitHub connecting on another computer: where it is, the one-time code once that computer has it, and Cancel. */
 function ConnectingThere({ operation, computer, onCancel }: { operation: NonNullable<SourceControlProviderStatus['operation']>; computer: string; onCancel: () => void }) {
+  // The code shows only where the Connect started; elsewhere it is a sign-in that is waiting.
+  const title = operation.stopping ? 'Finishing the install, then stopping…' : operation.phase === 'code' && !operation.code ? 'Waiting for the sign-in there…' : PHASE_TEXT[operation.phase]
   return (
     <div className="new-project-connect" role="status">
       <div className="new-project-busy">
         <span className="new-project-row-icon">{operation.phase === 'code' ? <GitHub size={15} strokeWidth={2} /> : <Spinner size={15} />}</span>
         <span className="palette-result-text">
-          <span className="thread-search-result-title">{PHASE_TEXT[operation.phase]}</span>
+          <span className="thread-search-result-title">{title}</span>
           <span className="thread-search-result-meta">{`GitHub on ${computer}`}</span>
         </span>
-        <button type="button" className="new-project-change" onClick={onCancel}>Cancel</button>
+        {!operation.stopping && <button type="button" className="new-project-change" onClick={onCancel}>Cancel</button>}
       </div>
       {operation.phase === 'code' && operation.code && <GitHubCode code={operation.code} url={operation.url} className="new-project-code" />}
     </div>

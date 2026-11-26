@@ -5,7 +5,7 @@ import type { UserAction } from '../git/gitPolicy'
 import type { ExecutableRunner } from '../git/ghRunner'
 import { execRunner } from '../git/ghRunner'
 import { DomainRpcError } from '../protocol/domainRegistry'
-import { isNetworkOrDevicePath, remoteFolderProblem } from '../bridge/remote/remoteFolders'
+import { hasHiddenSegment, isNetworkOrDevicePath, remoteFolderProblem } from '../bridge/remote/remoteFolders'
 import type { FolderRuleEnvironment } from '../files/sensitiveFolders'
 import type { Project } from '../../shared/types'
 
@@ -55,6 +55,8 @@ export async function cloneHere(
   }
   if (isNetworkOrDevicePath(realParent)) throw refuse('Network and device paths cannot be used from another computer.')
   const destination = join(realParent, basename(lexical))
+  // A hidden folder is not offered when browsing, so naming one does not clone into it either.
+  if (hasHiddenSegment(lexical) || hasHiddenSegment(destination)) throw refuse('Hidden folders cannot be used from another computer.')
   const problem = remoteFolderProblem([lexical, destination], services.homes, services.rules)
   if (problem?.kind === 'data') throw refuse('That folder is part of the Mousse data folder, or contains it.')
   if (problem) throw refuse(`That folder holds ${problem.holds}, or is inside or above a folder that does, so another computer cannot use it.`)

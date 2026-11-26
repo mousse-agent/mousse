@@ -1,7 +1,7 @@
 import { readdir, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { DomainRpcError } from '../protocol/domainRegistry'
-import { isNetworkOrDevicePath } from '../bridge/remote/remoteFolders'
+import { hasHiddenSegment, isNetworkOrDevicePath } from '../bridge/remote/remoteFolders'
 import { isInsidePath } from './pathGuard'
 import { currentFolderEnvironment, sensitiveFolderContaining, type FolderRuleEnvironment } from './sensitiveFolders'
 import { listFilesPlaces, type FilesPlaces } from './drives'
@@ -48,6 +48,10 @@ export async function browseFolders(path: string | undefined, options: FolderBro
     }
   }
   if (path.includes('\0') || !isAbsolute(path) || isNetworkOrDevicePath(path)) throw new DomainRpcError('invalid_params', 'path must be a full local folder path')
+  // Hidden folders are not listed, so naming one does not open it either; checked before the disk is read, so the
+  // answer does not say whether it exists.
+  const refused = () => new DomainRpcError('forbidden', 'That folder cannot be browsed from another computer.')
+  if (hasHiddenSegment(resolve(path))) throw refused()
   let real: string
   try {
     real = await realpath(resolve(path))
@@ -57,7 +61,7 @@ export async function browseFolders(path: string | undefined, options: FolderBro
   }
   const hidden = (folder: string) =>
     options.homes.some((home) => isInsidePath(folder, home)) || sensitiveFolderContaining(folder, rules) !== undefined
-  if (isNetworkOrDevicePath(real) || hidden(real)) throw new DomainRpcError('forbidden', 'That folder cannot be browsed from another computer.')
+  if (isNetworkOrDevicePath(real) || hasHiddenSegment(real) || hidden(real)) throw refused()
   const entries = await readdir(real, { withFileTypes: true })
   const folders: BrowsedFolder[] = []
   let truncated = false
