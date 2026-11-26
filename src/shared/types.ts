@@ -1171,6 +1171,17 @@ export interface OrchestratorResponse {
   accepted?: boolean
 }
 
+/**
+ * Outcome of a composer steer (`orchestrator:steer`): `true` joined the running turn, `'queued'` waits at the end,
+ * `false` means no turn took it, `'uncertain'` means the reply was lost so it may have arrived, and `{ refused: true }`
+ * was refused before it ran.
+ */
+export type OrchestratorSteerResult =
+  | boolean
+  | 'queued'
+  | 'uncertain'
+  | { refused: true; code?: string; message: string }
+
 /** Intent of a durable thread message queue entry. */
 export type QueuedMessageIntent = 'normal' | 'steer'
 
