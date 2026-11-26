@@ -67,9 +67,34 @@ it('reads each change to the queue, and an unchanged queue without taking the lo
     expect(contents(readDurableQueue(store, threadId)), row.case).toEqual(expected)
     const before = locks()
     expect(contents(readDurableQueue(store, threadId)), `${row.case}, read again`).toEqual(expected)
-    // A missing file has no identity to compare, so its read still takes the lock, as before.
-    expect(locks() - before, row.case).toBe(row.case === 'the file is removed' ? 1 : 0)
+    expect(locks() - before, row.case).toBe(0)
   }
+})
+
+it('reads a thread that never had a queue file as empty, taking the lock once, and sees the file when it appears', () => {
+  const threadId = store.createThread('No queue yet').id
+  const file = join(store.getThreadDir(threadId), 'queue.json')
+  rmSync(file, { force: true })
+  const before = locks()
+  // A running turn's steer poll, ten times a second.
+  for (let poll = 0; poll < 10; poll++) expect(readDurableQueue(store, threadId)).toEqual([])
+  expect(locks() - before).toBe(1)
+  writeFileSync(file, written(threadId, [], 'first queued'))
+  expect(contents(readDurableQueue(store, threadId))).toEqual(['first queued'])
+})
+
+it('does not keep a queue written between the check and the locked read as the missing file', async () => {
+  const actual = await vi.importActual<typeof import('../src/mms/queue/ThreadExecutionLease')>('../src/mms/queue/ThreadExecutionLease')
+  const threadId = store.createThread('Raced').id
+  const file = join(store.getThreadDir(threadId), 'queue.json')
+  rmSync(file, { force: true })
+  vi.mocked(lease.withQueueMutationLock).mockImplementationOnce((dir, fn) => {
+    writeFileSync(file, written(threadId, [], 'raced'))
+    return actual.withQueueMutationLock(dir, fn)
+  })
+  expect(contents(readDurableQueue(store, threadId))).toEqual(['raced'])
+  unlinkSync(file)
+  expect(readDurableQueue(store, threadId)).toEqual([])
 })
 
 it('gives each reader its own copy', () => {
